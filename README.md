@@ -140,3 +140,4 @@ minute** before platform overhead, versus Bland's $0.11–0.14 list. Exact COGS 
 - Specs are the source of truth. Change a spec, then add or adjust tasks in the affected `plan/phase-NN.md`.
 - Keep task IDs stable. New tasks inserted by agents use suffixes (`P07-T04a`) or `P<NN>-FIX-<n>`.
 - `scripts/check_spec_refs.py` (built in phase 00) verifies every spec reference in plans and prompts resolves.
+# AIVoice
