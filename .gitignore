@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.so
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
@@ -11,6 +12,7 @@ coverage.xml
 htmlcov/
 *.egg-info/
 .hypothesis/
+.tox/
 
 # Node
 node_modules/
@@ -20,23 +22,67 @@ dist/
 build/
 *.tsbuildinfo
 coverage/
+.nyc_output/
 playwright-report/
 test-results/
+.turbo/
+.vercel/
+.pnpm-store/
+
+# MkDocs build output (apps/docs)
+site/
+
+# Terraform (infra/terraform) — .terraform.lock.hcl is committed
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Helm (infra/helm) — packaged charts and vendored dependencies
+*.tgz
+infra/helm/**/charts/
+
+# Fetched ML assets. models/MANIFEST.json is committed, the binaries are not;
+# scripts/fetch_models.sh downloads and checksum-verifies them.
+# assets/audio/ IS committed (generated deterministically by scripts/generate_audio_assets.py).
+/models/*.onnx
 
 # Environment
 .env
 .env.*
 !.env.example
 
+# Credentials. Vendor secrets are envelope-encrypted and never live in the tree
+# (specs/28-security.md); these patterns stop an accidental `git add -A`.
+*.pem
+*.key
+*.p12
+*.pfx
+
 # Local runtime
 .sim/
-logs/
-.DS_Store
+/logs/
 
 # Ralph runtime (keep the agent journal, drop locks, events, diagnostics, history)
 .ralph/*
 !.ralph/agent/
 .ralph/agent/*.lock
 
+# Agent worktrees and scratch space
+.agents/
+
 # Assembled per phase by scripts/ralph/run_phase.sh (MASTER_PROMPT.md + prompts/phase-NN.md)
 PROMPT.md
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+._*
+.AppleDouble
+Thumbs.db
