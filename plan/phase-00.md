@@ -2,7 +2,7 @@
 
 Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec refs · Depends on · Deliverables · Acceptance.
 
-- [ ] P00-T01 Root workspace and toolchain configuration
+- [x] P00-T01 Root workspace and toolchain configuration — lint/typecheck/fmt/test/test-ts exit 0 (22 passed, 100% cov on scripts/check_toolchain.py); uv sync --frozen + pnpm install --frozen-lockfile ok; all 16 specs/02 §3 targets present; placeholders pending P00-T03
   - Spec refs: specs/02-repo-layout-and-conventions.md (Repository root, Toolchain versions, Makefile targets, Python conventions)
   - Depends on: none
   - Deliverables: `pyproject.toml` (uv workspace members for all apps/packages/sdks, `[dependency-groups] dev`, ruff, mypy strict, pytest, coverage config), `Makefile`, `.gitignore`, `.editorconfig`, `package.json`, `pnpm-workspace.yaml`, `.nvmrc` (22), `.python-version` (3.12)

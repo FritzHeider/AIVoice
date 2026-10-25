@@ -1,0 +1,83 @@
+[project]
+name = "voiceagents-workspace"
+version = "0.0.0"
+description = "VoiceAgents uv workspace root (dev tooling only)"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest>=9.1",
+  "pytest-asyncio>=1.4",
+  "pytest-cov>=7.1",
+  "pytest-xdist>=3.8",
+  "pytest-timeout>=2.4",
+  "respx>=0.23",
+  "hypothesis>=6.170",
+  "freezegun>=1.5",
+  "testcontainers[postgres,redis,clickhouse,minio]>=4.15",
+  "mypy>=2.4",
+  "ruff>=0.17",
+  "types-python-dateutil>=2.9.0.20261021",
+  "asgi-lifespan>=2.1",
+  "syrupy>=6.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
+exclude = ["apps/dashboard", "apps/widget", "apps/docs"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["scripts", "packages/*/src", "apps/*/src", "sdks/python/src", "sdks/cli/src"]
+# Markdown is excluded so `ruff format` never rewrites code samples in specs/, prompts/, plan/.
+extend-exclude = ["node_modules", ".venv", "dist", "build", ".next", "*.md"]
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W", "I", "N", "UP", "B", "A", "C4", "DTZ", "T20", "RET", "SIM", "TID", "ARG", "PTH", "ERA", "PL",
+  "TRY", "RUF", "ASYNC", "S",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "PLR2004", "ARG001"]
+"scripts/**" = ["T20", "S603", "S607"]
+"apps/*/src/*/api/**" = ["PLR0913"]
+"apps/*/src/*/routers/**" = ["PLR0913"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+explicit_package_bases = true
+mypy_path = "scripts"
+files = ["scripts"]
+exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
+testpaths = ["scripts/tests", "packages", "apps", "sdks"]
+pythonpath = ["scripts"]
+timeout = 60
+markers = [
+  "integration: needs docker/testcontainers",
+  "e2e: simulator end-to-end",
+  "live: real vendors, LIVE_TESTS=1",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["scripts", "packages", "apps", "sdks"]
+omit = ["*/tests/*", "scripts/ralph/*", "*/node_modules/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]

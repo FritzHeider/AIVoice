@@ -6,7 +6,7 @@
 #   scripts/ralph/run_all.sh 00 20         # runs phases sequentially, stops at the first phase that does not complete
 #
 # Flow per iteration (hat mode):
-#   task.start ─► Planner ─plan.ready─► Builder ─build.done─► Reviewer ─review.approved─► Planner (next task)
+#   work.start ─► Planner ─plan.ready─► Builder ─build.done─► Reviewer ─review.approved─► Planner (next task)
 #                    ▲                     │  ▲                   │
 #                    └────build.blocked────┘  └──review.rejected──┘
 #   When every task in plan/phase-NN.md is ticked and the phase exit gate passes, the Planner prints LOOP_COMPLETE.
@@ -18,7 +18,7 @@ cli:
 event_loop:
   prompt_file: PROMPT.md
   completion_promise: LOOP_COMPLETE
-  starting_event: task.start
+  starting_event: work.start
   max_iterations: 150
   max_runtime_seconds: 43200        # 12 h per phase run
   idle_timeout_secs: 1800
@@ -59,7 +59,7 @@ hats:
   planner:
     name: "📋 Planner"
     description: "Selects the next task for the current phase, prepares a precise implementation plan, and decides phase completion."
-    triggers: ["task.start", "review.approved", "build.blocked"]
+    triggers: ["work.start", "review.approved", "build.blocked"]
     publishes: ["plan.ready"]
     default_publishes: "plan.ready"
     instructions: |

@@ -1,0 +1,42 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+.hypothesis/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local runtime
+.sim/
+logs/
+.DS_Store
+
+# Ralph runtime (keep the agent journal, drop locks, events, diagnostics, history)
+.ralph/*
+!.ralph/agent/
+.ralph/agent/*.lock
+
+# Assembled per phase by scripts/ralph/run_phase.sh (MASTER_PROMPT.md + prompts/phase-NN.md)
+PROMPT.md

@@ -8,6 +8,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Purpose | Command |
 |---|---|
 | Install everything | `make setup` |
+| Toolchain preflight | `uv run --no-project --python 3.12 python scripts/check_toolchain.py` |
 | Start infra + simulators | `make up` (apps too: `make up PROFILE=apps`) |
 | Stop | `make down` |
 | Migrate DB | `make migrate` |
@@ -49,3 +50,16 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
 ## Learned during the build
 
 (append dated bullets here: `- 2026-11-02 (P03-T05): <learning>`)
+- 2026-10-25 (P00-T01): pnpm comes from corepack (`corepack enable`, or the Makefile `PNPM` fallback `corepack pnpm`).
+  Without the root `package.json` `packageManager` pin corepack fetches the latest major (12.x) — never remove the pin.
+- 2026-10-25 (P00-T01): mypy `files` + `mypy_path` in root `pyproject.toml` list only existing dirs (currently `scripts`);
+  every new package/app must append its `src` (and `tests`) there or mypy will not check it.
+- 2026-10-25 (P00-T01): pytest runs with `--import-mode=importlib`; modules in `scripts/` are importable in tests via
+  `pythonpath = ["scripts"]` (e.g. `import check_toolchain`).
+- 2026-10-25 (P00-T01): ruff ≥ 0.17 formats Python code blocks inside Markdown; root config excludes `*.md` so
+  `make fmt` never rewrites spec samples. Do not remove that exclude.
+- 2026-10-25 (P00-T01): Ralph backpressure rejects `build.done` (turns it into `build.blocked`) unless the payload TEXT contains
+  `tests: pass`, `lint: pass`, `typecheck: pass`, `audit: pass`, `coverage: pass`, `duplication: pass`, `complexity: <number>`
+  (`specs: pass` optional). It substring-matches a plain string: emit without `--json` (JSON keys never match). Get them
+  for real: audit = `uvx pip-audit` on `uv export` + `corepack pnpm audit`; complexity = `uvx radon cc -s -a`;
+  duplication = `npx --yes jscpd@4`.

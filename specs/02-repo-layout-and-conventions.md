@@ -141,6 +141,12 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `make check` | `lint typecheck placeholders test test-ts` + `scripts/check_openapi_drift.py` + `scripts/check_spec_refs.py` |
 | `make load` | `scripts/load/run.sh` (1 000 concurrent simulated calls) |
 
+> Decision (2026-10-25): Make invokes pnpm as `$(PNPM) -r --if-present run <script>` (`PNPM` falls back to
+> `corepack pnpm` when pnpm is not on PATH; root `package.json` pins `packageManager: pnpm@9.15.9`) so recursive runs
+> succeed while workspace packages are still being added. `scripts/check_toolchain.py` is the `make setup` preflight for
+> the §2 versions (Docker/Compose are warnings only, since they are needed for `make up`, not setup). Root ruff config
+> excludes `*.md` so `ruff format` never rewrites code samples in specs, prompts, or plans.
+
 ## 4. Python conventions
 
 - `ruff` config: line length 110, target `py312`, rules `E,F,W,I,N,UP,B,A,C4,DTZ,T20,RET,SIM,TID,ARG,PTH,ERA,PL,TRY,RUF,ASYNC,S`
