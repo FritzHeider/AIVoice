@@ -1,177 +1,252 @@
 
-## Plan P00-T01 — Root workspace and toolchain configuration
+## Plan P00-T02 — `.env.example` and settings contract (Planner, 2026-10-25)
+Spec: specs/02 §6 (table at lines ~184-289, 110+ rows). Goal: `.env.example` mirrors every variable with its dev value
++ a comment; a test parses the spec table and fails on any drift in either direction (names AND literal dev values).
 
-Context (2026-10-25, Planner): repo contains only specs/, prompts/, plan/, scripts/ralph/*.sh, README/AGENTS/MASTER_PROMPT/ralph.yml.
-No Python or TS code exists yet. Host: uv 0.12.17, python3.12 (homebrew), node v22.23.4 (nvm), **pnpm NOT on PATH**, corepack 0.36
-present (without `packageManager` it fetches pnpm 12 — so `packageManager` pin is mandatory). Latest pnpm 9.x = 9.15.9.
-
-### Files to create
-1. `/Users/drop/AIVOICE/.python-version` → `3.12`
-2. `/Users/drop/AIVOICE/.nvmrc` → `22`
-3. `/Users/drop/AIVOICE/.editorconfig` → root=true; `[*]` utf-8, lf, insert_final_newline, trim_trailing_whitespace,
-   indent_style=space, indent_size=2; `[*.py]` indent_size=4; `[Makefile]` indent_style=tab; `[*.md]` trim_trailing_whitespace=false.
-4. `/Users/drop/AIVOICE/.gitignore` → Python (`.venv/`, `__pycache__/`, `*.py[cod]`, `.mypy_cache/`, `.ruff_cache/`,
-   `.pytest_cache/`, `.coverage`, `.coverage.*`, `coverage.xml`, `htmlcov/`, `*.egg-info/`, `.hypothesis/`), Node (`node_modules/`,
-   `.next/`, `out/`, `dist/`, `build/`, `*.tsbuildinfo`, `coverage/`, `playwright-report/`, `test-results/`), env
-   (`.env`, `.env.*` + `!.env.example`), local runtime (`.sim/`, `logs/`, `.DS_Store`), Ralph runtime:
-   `.ralph/*` then `!.ralph/agent/` then `.ralph/agent/*.lock` (keeps scratchpad/decisions/memories/tasks, drops locks,
-   events, diagnostics, history). `models/*.onnx` is NOT ignored here (T10 decides; manifest committed).
-5. `/Users/drop/AIVOICE/pyproject.toml` (uv workspace root, dev tools only):
-   - `[project] name="voiceagents-workspace" version="0.0.0" requires-python=">=3.12,<3.13" dependencies=[]`
-     + `[tool.uv] package = false` (virtual root; avoids uv "no requires-python" warnings with dependency-groups).
-   - `[tool.uv.workspace] members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]`,
-     `exclude = ["apps/dashboard", "apps/widget", "apps/docs"]` (Node/MkDocs dirs must never be uv members).
-   - `[dependency-groups] dev = [...]` exactly specs/02 §2: pytest, pytest-asyncio, pytest-cov, pytest-xdist, pytest-timeout,
-     respx, hypothesis, freezegun, "testcontainers[postgres,redis,clickhouse,minio]", mypy, ruff, types-python-dateutil,
-     asgi-lifespan, syrupy. Use lower bounds only (`>=` current versions); uv.lock pins exactly.
-   - `[tool.ruff]` line-length=110, target-version="py312", `extend-exclude = ["node_modules", ".venv", "dist", "build", ".next"]`.
-     `[tool.ruff.lint] select = ["E","F","W","I","N","UP","B","A","C4","DTZ","T20","RET","SIM","TID","ARG","PTH","ERA","PL","TRY","RUF","ASYNC","S"]`.
-     `[tool.ruff.lint.per-file-ignores]`: `"**/tests/**" = ["S101","PLR2004","ARG001"]`, `"scripts/**" = ["T20","S603","S607"]`,
-     `"apps/*/src/*/api/**" = ["PLR0913"]` and `"apps/*/src/*/routers/**" = ["PLR0913"]` (FastAPI endpoint exemption per §4).
-     `[tool.ruff.lint.isort] known-first-party = ["va_*"]` is not valid glob → omit; rely on src detection:
-     `[tool.ruff] src = ["scripts", "packages/*/src", "apps/*/src", "sdks/python/src", "sdks/cli/src"]`.
-   - `[tool.mypy] python_version="3.12" strict=true warn_unreachable=true explicit_package_bases=true
-     mypy_path="scripts" files=["scripts"] exclude=['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']`.
-     (Later tasks append `packages/*/src`, `apps/*/src` to `mypy_path`/`files` as they create them; note this in AGENTS.md.)
-   - `[tool.pytest.ini_options] asyncio_mode="auto" asyncio_default_fixture_loop_scope="function"
-     addopts=["--import-mode=importlib","--strict-markers","--strict-config"] testpaths=["scripts/tests","packages","apps","sdks"]
-     pythonpath=["scripts"] timeout=60 markers=["integration: needs docker/testcontainers","e2e: simulator end-to-end","live: real vendors, LIVE_TESTS=1"]
-     filterwarnings=["error"]` — verify missing testpaths entries don't error; if pytest complains, list only existing ones and note it.
-   - `[tool.coverage.run] branch=true source=["scripts","packages","apps","sdks"] omit=["*/tests/*","scripts/ralph/*","*/node_modules/*"]`
-     `[tool.coverage.report] show_missing=true skip_covered=false exclude_also=["if TYPE_CHECKING:","if __name__ == .__main__.:"]`.
-     If non-existent source dirs produce coverage warnings that `filterwarnings=error` or CI treat as failures, trim to existing dirs.
-6. `/Users/drop/AIVOICE/scripts/check_toolchain.py` — real preflight for specs/02 §2 (gives mypy/pytest/coverage real
-   code on an otherwise empty tree; `make setup` runs it first). Public API:
+### Files
+1. `/Users/drop/AIVOICE/scripts/env_contract.py` (pure functions, no I/O except `main`; typed for mypy --strict):
    ```python
-   Runner = Callable[[Sequence[str]], str | None]   # returns stdout+stderr text, None if binary missing
-   @dataclass(frozen=True) class Requirement: name: str; command: tuple[str, ...]; minimum: tuple[int, ...]; below: tuple[int, ...] | None; required: bool = True
-   @dataclass(frozen=True) class CheckResult: name: str; ok: bool; found: str | None; message: str
-   REQUIREMENTS: tuple[Requirement, ...]  # python (sys.version_info, not subprocess) >=3.12,<3.13; uv >=0.5; node >=22,<23;
-                                          # pnpm >=9,<10 (command: ("corepack","pnpm","--version") fallback when "pnpm" missing);
-                                          # docker >=27 (required=False: needed for `make up`, not setup); docker compose >=2 (required=False)
-   def parse_version(text: str) -> tuple[int, ...] | None  # first r"v?(\d+)\.(\d+)(?:\.(\d+))?" match
-   def evaluate(req: Requirement, output: str | None) -> CheckResult
-   def subprocess_runner(cmd: Sequence[str]) -> str | None  # subprocess.run(list(cmd), capture_output=True, text=True, timeout=15, check=False); FileNotFoundError/TimeoutExpired -> None
-   def run_checks(runner: Runner = subprocess_runner, python_version: tuple[int, int, int] = sys.version_info[:3]) -> list[CheckResult]
-   def main(argv: Sequence[str] | None = None) -> int  # prints "ok   uv 0.12.17" / "FAIL node: found 20.1.0, need >=22,<23"; optional failures print "warn"; exit 1 iff a required check fails
+   SPEC_PATH = Path("specs/02-repo-layout-and-conventions.md"); ENV_EXAMPLE_PATH = Path(".env.example")
+   class ValueRule(StrEnum): LITERAL="literal"; EMPTY="empty"; HEX64="hex64"
+   @dataclass(frozen=True) class SpecVar: name: str; rule: ValueRule; literal: str | None; template: bool = False
+   @dataclass(frozen=True) class EnvEntry: name: str; value: str; line: int; commented: bool  # commented=True only for "# NAME=value" template examples
+   def extract_section(spec_text: str, heading_prefix: str = "## 6.") -> str   # text from heading to next "## "; ValueError if absent
+   def parse_spec_table(spec_text: str) -> list[SpecVar]
+   def classify_dev_value(cell: str) -> tuple[ValueRule, str | None]
+   def parse_env_example(text: str) -> list[EnvEntry]          # raises ValueError("line N: ...") on malformed assignment
+   def check(spec_text: str, env_text: str) -> list[str]       # human-readable problems, [] when in parity
+   def main(argv: Sequence[str] | None = None) -> int          # prints problems; exit 1 if any (argparse --spec/--env overrides)
    ```
-   pnpm logic: try `("pnpm","--version")`; if None, try `("corepack","pnpm","--version")` (corepack honors package.json `packageManager`).
-7. `/Users/drop/AIVOICE/scripts/tests/test_check_toolchain.py` (pytest, no subprocess — inject fake runner):
-   - `test_parse_version_variants` parametrized: "uv 0.12.17 (Homebrew 2026-09-18 aarch64-apple-darwin)"→(0,12,17); "v22.23.4"→(22,23,4);
-     "9.15.9"→(9,15,9); "Docker version 27.3.1, build ce12230"→(27,3,1); "Docker Compose version v2.29.7"→(2,29,7); "garbage"→None.
-   - `test_evaluate_ok_and_bounds`: node 22.x ok; 23.0.0 fails (upper bound); 20.x fails (lower bound) with message containing ">=22".
-   - `test_missing_binary_required_fails` / `test_missing_binary_optional_warns` (docker missing → ok=True? No: ok=False but main exit stays 0).
-   - `test_pnpm_falls_back_to_corepack`: runner returns None for ("pnpm",...) and "9.15.9" for ("corepack","pnpm","--version") → ok.
-   - `test_python_version_check` with python_version=(3,11,9) fails, (3,12,7) ok.
-   - `test_main_exit_codes` (monkeypatch module runner/version or pass via run_checks) + `capsys` asserts output lines.
-   Coverage of check_toolchain.py must be ≥ 85 % (aim ~100 %).
-8. `/Users/drop/AIVOICE/package.json`: `{"name":"voiceagents","private":true,"packageManager":"pnpm@9.15.9",
-   "engines":{"node":">=22 <23","pnpm":">=9 <10"},"scripts":{"format":"pnpm -r --if-present run format","lint":"pnpm -r --if-present run lint",
-   "typecheck":"pnpm -r --if-present run typecheck","test":"pnpm -r --if-present run test","build":"pnpm -r --if-present run build"}}`
-9. `/Users/drop/AIVOICE/pnpm-workspace.yaml`: `packages: ["apps/dashboard", "apps/widget", "sdks/typescript"]`.
-10. `pnpm-lock.yaml` and `uv.lock` generated by `corepack pnpm install` / `uv sync --all-packages` and committed.
-11. `/Users/drop/AIVOICE/Makefile` — `.PHONY` for all; `SHELL := /bin/bash`, `.SHELLFLAGS := -eu -o pipefail -c`;
-    `PNPM ?= $(shell command -v pnpm >/dev/null 2>&1 && echo pnpm || echo corepack pnpm)`; `PROFILE ?=`; `.DEFAULT_GOAL := help`
-    with a `help` target (grep `## ` comments). Every target from specs/02 §3, commands verbatim except `pnpm`→`$(PNPM)` and
-    `pnpm -r X` → `$(PNPM) -r --if-present run X` (so an empty pnpm workspace passes):
-    - `setup`: `uv run --no-project python scripts/check_toolchain.py` (or `python3.12 scripts/check_toolchain.py` before venv exists — pick
-      whichever works pre-sync; `uv run --no-project --python 3.12` is preferred), `uv sync --all-packages`, `$(PNPM) install`,
-      `scripts/fetch_models.sh`, `uv run python scripts/generate_audio_assets.py`.
-    - `up`: `docker compose up -d --wait $(if $(PROFILE),--profile $(PROFILE),)` (+ `scripts/dev_up.sh` once T09 exists — for now call
-      docker compose directly; T09 swaps to dev_up.sh); `down`: `docker compose --profile apps down`.
-    - `migrate`, `seed`, `fmt`, `lint`, `typecheck`, `test`, `test-ts`, `e2e`, `e2e-ui` (`$(PNPM) --filter dashboard exec playwright test`),
-      `openapi` (`uv run python scripts/export_openapi.py` — script created in T11), `placeholders`, `load` (`scripts/load/run.sh`),
-      `check: lint typecheck placeholders test test-ts` then `uv run python scripts/check_openapi_drift.py` and
-      `uv run python scripts/check_spec_refs.py`.
-    Targets whose scripts arrive in later tasks (placeholders T03, spec-refs/openapi-drift T04, openapi T11, fetch_models/audio T10,
-    migrate P01, seed later, load P20) reference the real final paths and fail loudly until then — they are NOT stubbed or guarded.
+   Table parsing: rows between `| Variable |` header and end of section; skip separator `|---|`. Split cells on `|`
+   (no cell in §6 contains an escaped pipe — verify; if one does, split on ` | ` respecting backticks).
+   - Name cell: all backticked tokens `` `([A-Z][A-Z0-9_<>]*)` ``. Multi-name row (`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`)
+     pairs with dev cell split on ` / ` (`minio` / `minio12345`). Names containing `<` (`LOG_LEVEL_<COMPONENT>`) → template=True.
+   - classify_dev_value(cell), checked in this order:
+     a. cell lower starts with "empty" → EMPTY (covers "empty", "empty (host-only cookie)")
+     b. contains "hex chars" (`64 random hex chars`, `64 hex chars`) → HEX64
+     c. starts with a backtick literal → LITERAL = first backticked token (`localhost:8100` (tunnel…) → `localhost:8100`;
+        `true` (forced…) → `true`; `console` in local… → `console`; `http://localhost:9100/v2` (sim) → that URL)
+     d. anything else ("sim public key printed by `make up`", "created by …bootstrap", "created by bootstrap", "hostname",
+        "generated at startup", "unset") → EMPTY (runtime-provided; the comment in .env.example says where it comes from).
+        Note (d) must be checked before (c) only in the sense that (c) requires the cell to START with a backtick —
+        "sim public key printed by `make up`" does not, so it lands in (d). Unit-test every distinct phrasing.
+   - parse_env_example: blank lines skipped; `# NAME=value` where NAME matches a template pattern → commented entry;
+     other `#` lines are comments; `NAME=value` with NAME `[A-Z][A-Z0-9_]*`; value: strip one pair of matching
+     surrounding `"` or `'`; no inline comments supported (a `#` inside an unquoted value is kept literally — never needed).
+     Anything else → ValueError.
+   - check() problems (each a distinct message, sorted for stable output):
+     `missing in .env.example: NAME`, `not in spec: NAME`, `duplicate: NAME (lines a, b)`,
+     `value mismatch: NAME expected 'x' got 'y'`, `expected empty: NAME got 'y'`, `expected 64 hex chars: NAME`,
+     `no comment above: NAME` (the line directly above each assignment must be a `#` comment line),
+     `duplicate hex value shared by: A, B` (HEX64 secrets must be pairwise distinct),
+     template rows: `.env.example` must contain a commented example `# LOG_LEVEL_<something>=...` whose name matches
+     the template with `<COMPONENT>` → `[A-Z0-9_]+` → else `missing template example: LOG_LEVEL_<COMPONENT>`.
+2. `/Users/drop/AIVOICE/.env.example` — every §6 variable in spec order, grouped with section comment headers
+   (Core, Database, Redis/ClickHouse, Temporal, S3, Public hosts, Secrets & KMS, Telnyx, ElevenLabs, LLM, Stripe,
+   Email/SSO, Observability, Media, Platform policy, COGS, Simulators, Live smoke tests, Rotation, Dashboard, Clock, CI).
+   Each assignment preceded by a one-line comment derived from the spec Meaning/Used-by columns (e.g.
+   `# api, worker, media: KMS provider - local (AES-256-GCM master key from env) or aws`). Specific values:
+   - `EMAIL_FROM="VoiceAgents <no-reply@voiceagents.local>"` (quoted: spaces + angle brackets; dotenv + compose both strip).
+   - HEX64 (`SECRET_KEY`, `STREAM_TOKEN_SECRET`, `LOCAL_MASTER_KEY`, `API_KEY_PEPPER`): generate four distinct values with
+     `python -c 'import secrets; print(secrets.token_hex(32))'`; comment says "local dev only - generate a fresh value
+     for every shared environment". These are dev-only throwaways (spec mandates a dev value), never used outside local/test.
+   - Runtime-provided (empty): `TELNYX_PUBLIC_KEY` (comment: read from `.sim/telnyx_public_key` written at sim startup),
+     `TELNYX_CALL_CONTROL_APP_ID` / `TELNYX_MESSAGING_PROFILE_ID` / `TELNYX_OUTBOUND_VOICE_PROFILE_ID` (scripts/telnyx_bootstrap.py),
+     `POD_ID` (defaults to hostname), `PLATFORM_POOL_ORG_ID` (scripts/seed_dev.py), `SIM_ED25519_PRIVATE_KEY` (generated at sim startup).
+   - Template: `# LOG_LEVEL_VA_MEDIA=DEBUG` under a comment explaining `LOG_LEVEL_<COMPONENT>`.
+   - Avoid the words the placeholder gate will ban (TODO/TBD/placeholder/example.com/your-api-key) in comments; the file
+     is outside the gate's scan roots anyway, but keep it clean. No `$` characters (compose interpolation).
+3. `/Users/drop/AIVOICE/scripts/tests/test_env_example.py`:
+   - `test_env_example_matches_spec`: `check(real spec, real .env.example) == []` (paths resolved from repo root via
+     `Path(__file__).resolve().parents[2]`).
+   - `test_spec_table_parsed_completely`: parsed var count == number of `| \`` rows in §6 (+1 for the S3 two-name row);
+     includes `VA_ENV`, `SLACK_ALERTS_WEBHOOK`, both S3 key names, template `LOG_LEVEL_<COMPONENT>`.
+   - `test_classify_dev_value` parametrized over every distinct phrasing listed above.
+   - `test_parse_env_example_quotes_comments_and_errors`: quoted value stripped; commented template parsed; malformed line → ValueError with line number.
+   - Drift tests with crafted fixtures (small synthetic spec section + env text): `test_var_added_to_spec_only_fails`,
+     `test_var_added_to_env_only_fails`, `test_value_mismatch_fails`, `test_empty_rule_fails_on_value`,
+     `test_hex_rule_fails_on_bad_and_duplicate_values`, `test_missing_comment_fails`, `test_duplicate_assignment_fails`,
+     `test_missing_template_example_fails`, `test_missing_section_raises`.
+   - `test_main_exit_codes` with tmp_path files + capsys: 0 + no output on parity; 1 + problem lines on drift.
+   Coverage of env_contract.py ≥ 95 %.
 
-### Spec decision to record (same commit)
-Append to specs/02 §3 a note: `> Decision (2026-10-25): Make invokes pnpm as "$(PNPM) -r --if-present run <script>" (PNPM falls back to
-"corepack pnpm" when pnpm is not on PATH; package.json pins packageManager pnpm@9.15.9) so recursive runs succeed while workspace
-packages are still being added. scripts/check_toolchain.py is the `make setup` preflight for the §2 versions.`
+### Spec decision (same commit, append under specs/02 §6 table)
+`> Decision (2026-10-25): .env.example lists every variable above in table order with a comment line before each.
+Values: the literal dev value; "empty"/runtime-provided rows (bootstrap/seed/sim-generated, hostname) are left empty and
+resolved at runtime; "64 (random) hex chars" rows hold distinct local-only random values; LOG_LEVEL_<COMPONENT> appears
+only as a commented example. scripts/env_contract.py + scripts/tests/test_env_example.py enforce parity (run by make test).`
 
-### AGENTS.md updates
-- Commands table: `Toolchain preflight | uv run --no-project python scripts/check_toolchain.py`.
-- Learned: "pnpm is provided via corepack (`corepack enable` or Makefile `PNPM` fallback); without package.json `packageManager`, corepack
-  fetches the latest major (12.x) — never remove the pin." / "mypy `files` + `mypy_path` in root pyproject list only existing dirs; every
-  new package/app must append its `src` (and tests) there." / "pytest uses --import-mode=importlib; scripts are importable via pythonpath=scripts."
+### AGENTS.md
+Commands row: `Check .env.example parity | uv run python scripts/env_contract.py`. Learned bullet: adding an env var
+means editing specs/02 §6 AND .env.example (comment line above) or `make test` fails.
 
-### Gates to run (Builder)
-`uv sync --all-packages` (exit 0), `corepack pnpm install` (exit 0, lockfile written), `make lint`, `make typecheck`, `make fmt`,
-`make test` (scripts/tests passes, coverage ≥85 %), `make test-ts` (no packages → exit 0), `make help` lists every §3 target.
-**Expected and acceptable for P00-T01**: `make placeholders`, `make check`, `make openapi`, `make setup` (fetch_models step) fail with
-"No such file" because their scripts are deliverables of T03/T04/T10/T11. Reviewer: verify these fail only for that reason.
-Also verify `make -n <target>` for every target in specs/02 §3 prints the expected command (target existence acceptance).
+### Gates
+make fmt, make lint, make typecheck, make test (coverage ≥85 %), make test-ts; `uv run python scripts/env_contract.py` exit 0.
+make placeholders still n/a (P00-T03). Evidence extras per AGENTS.md (pip-audit, radon on env_contract.py, jscpd);
+emit build.done as plain-text tokens.
 
 ### Risks
-- uv may reject glob members matching nothing or a `[project]` root with `package=false` + workspace — if so, drop `[project]` and use a
-  pure virtual root, document in AGENTS.md.
-- pytest `--strict-config` + nonexistent testpaths, `filterwarnings=error` with coverage "no data" warnings — trim config, not tests.
-- ruff `S` on subprocess in scripts — covered by per-file ignore S603/S607; `PLR2004` magic numbers in check_toolchain: use named constants.
-- `git add -A` by Reviewer: ensure .gitignore excludes `.ralph` runtime files, `logs/`, `.venv`, `node_modules` before committing.
+- Spec cells with odd formatting (e.g. `COGS_TELNYX_OUTBOUND_PER_MIN_MICROS` meaning cell contains parentheses/backticks) —
+  only name and dev cells are parsed; meaning cell ignored.
+- Table may contain a pipe inside backticks in some cell — verify with a quick scan; parser must not mis-split.
+- ruff S105/S106 may flag hard-coded "secret"-named strings in tests; use fixtures that don't trip them or `# noqa: S105` with reason.
 
-## Build P00-T01 (Builder, 2026-10-25)
-Implemented per plan. Deviations / findings:
-- ruff 0.17 formats Python code fences inside `*.md` → first `make fmt` rewrote 15 spec files. Reverted with
-  `git checkout -- specs` and added `"*.md"` to `[tool.ruff] extend-exclude` (recorded in specs/02 §3 Decision + AGENTS.md).
-- `subprocess_runner` returns None on non-zero exit too (not only FileNotFoundError/Timeout), so a broken binary counts as missing.
-- `Requirement` gained `fallback_command` (pnpm → `corepack pnpm --version`); `main()` accepts injectable runner/python_version.
-- `make up` puts `--profile` before `up` (a global compose flag): `docker compose [--profile X] up -d --wait`.
-- Host has docker 29.8.1 / compose 5.5.0: they pass `>=27` / `>=2` (no upper bound, optional checks).
-Gates (logs/p00t01-*.log): fmt=0 lint=0 typecheck=0 test=0 (22 passed, 100% cov) test-ts=0 (no TS projects yet).
-placeholders=2 → expected: `scripts/check_no_placeholders.py` doesn't exist yet (P00-T03). `make -n` succeeds for all 16 §3 targets.
-uv sync --all-packages ok; corepack pnpm install ok (pnpm-lock.yaml written); preflight prints all ok.
+---
 
-## Plan P00-T01 — re-plan after build.blocked (Planner, 2026-10-25)
-Blocker analysis: NOT a code/spec blocker. The Ralph runtime rejected the Builder's `build.done` because the payload lacked
-the backpressure evidence keys it requires: `tests`, `lint`, `typecheck`, `audit`, `coverage`, `complexity`, `duplication`
-(`performance`, `specs` optional). The implementation from "## Build P00-T01" stays as-is (no task split needed).
+## Phase 01 Planner note (2026-10-25)
+Phase-01 loop started while phase 00 had only P00-T01 ticked (the P00-T02 plan above was never built). Every P01 task
+depends transitively on P00-T05/P00-T08, so I inserted prerequisite tasks P01-T00a (=P00-T05), P01-T00b (=P00-T08),
+P01-T00c (=P00-T03, the placeholders gate) at the top of plan/phase-01.md. Reviewer: when approving P01-T00a, tick BOTH
+`P01-T00a` in plan/phase-01.md and `P00-T05` in plan/phase-00.md. The P00-T02 plan above is NOT for this loop.
 
-Builder action for this activation (no redesign; keep all existing files):
-1. Re-run gates fresh, writing logs to `logs/p00t01-*.log`: `make fmt`, `make lint`, `make typecheck`, `make test`, `make test-ts`.
-   `make placeholders` still fails only because scripts/check_no_placeholders.py is a P00-T03 deliverable — report it as
-   `"placeholders":"n/a (gate script lands in P00-T03)"`, do not fake a pass.
-2. Produce the extra evidence for real:
-   - audit: `uv export --frozen --all-packages --no-hashes --format requirements-txt > logs/p00t01-req.txt && uvx pip-audit -r logs/p00t01-req.txt --strict`
-     and `corepack pnpm audit` (empty workspace → no deps). If pip-audit finds a vuln in a dev tool, bump the lower bound in pyproject, `uv lock`, re-run.
-     If the network is unavailable, report `audit: pass (offline: lockfile-only, ...)` only if truly verified otherwise; never claim unverified.
-   - complexity: `uvx radon cc -s -a scripts/check_toolchain.py` → report average grade/score, e.g. `"complexity":"A (2.1 avg, radon cc)"`.
-     Anything worse than B on a function → refactor.
-   - duplication: `npx --yes jscpd@4 --min-lines 5 --reporters console scripts Makefile pyproject.toml` (or `uvx pylint --disable=all --enable=duplicate-code scripts`) → `"duplication":"pass (0 clones)"`.
-   - coverage: from `make test` (was 100 % on check_toolchain.py; threshold 85 %).
-3. Emit with ALL required keys, e.g.:
-   ralph emit "build.done" --json '{"task":"P00-T01","tests":"pass (22 passed)","lint":"pass","typecheck":"pass","audit":"pass (...)","coverage":"pass (100%)","complexity":"A (...)","duplication":"pass (0 clones)","placeholders":"n/a (P00-T03)","specs":"pass"}'
-Future Builders: always include these keys in build.done (recorded in AGENTS.md Learned + memory).
+## Plan P01-T00a — execute P00-T05: `va_common` core (settings, clock, ids, json, errors, money)
+Spec: specs/02 §4 (Time, IDs, Money, Errors, Settings), §6 (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, VA_CLOCK);
+specs/31 §3 (codes), §4 (AppError fields, CODES parity test); specs/01 §4 (Settings via pydantic-settings);
+specs/24 (round_half_up in integer micros with Decimal).
 
-## Build P00-T01 — evidence re-run (Builder, 2026-10-25)
-No code changes. Fresh gates (logs/p00t01-*.log): fmt=0 lint=0 typecheck=0 test=0 (22 passed, 100% cov on check_toolchain.py)
-test-ts=0 (no TS projects). placeholders=2 only because scripts/check_no_placeholders.py is a P00-T03 deliverable.
-audit: uvx pip-audit -r (uv export) --strict → "No known vulnerabilities found"; corepack pnpm audit → none.
-complexity: radon cc avg A (3.4); worst main B(7), evaluate B(6). duplication: jscpd 0 clones.
+### Package scaffold (new workspace member; `packages/*` already in uv workspace members)
+- `packages/va_common/pyproject.toml`: name `va-common`, version `0.1.0`, requires-python `>=3.12,<3.13`,
+  build-backend hatchling (`[tool.hatch.build.targets.wheel] packages = ["src/va_common"]`), dependencies:
+  `pydantic>=2.9`, `pydantic-settings>=2.6`, `orjson>=3.10`, `uuid-utils>=0.9`. (No other deps — infra helpers come in P01-T00b.)
+- `packages/va_common/src/va_common/__init__.py` (docstring only + `__all__: list[str] = []`), `py.typed` (empty).
+- `packages/va_common/tests/__init__.py` must NOT exist (importlib mode); add `tests/conftest.py` only if needed.
+- Root `pyproject.toml`: `[tool.mypy] files = ["scripts", "packages/va_common/src", "packages/va_common/tests"]`,
+  `mypy_path = "scripts:packages/va_common/src"`. Run `uv lock` and commit uv.lock.
+  Also add `"va-common"` to the root `dev` dependency group with `[tool.uv.sources] va-common = { workspace = true }`
+  so plain `uv run pytest` / `uv run mypy` always have it installed; verify with `uv sync && uv run python -c "import va_common"`.
 
-## Plan P00-T01 — re-plan after 2nd build.blocked (Planner, 2026-10-25)
-Root cause (from .ralph/diagnostics log + ralph binary strings): the 2nd build.done WAS rejected with
-`backpressure checks failed tests=false lint=false typecheck=false audit=false coverage=false duplication=false`
-even though every key was present. Ralph's backpressure parser does plain substring matching on the payload TEXT
-for tokens `tests: pass`, `lint: pass`, `typecheck: pass`, `audit: pass`, `coverage: pass`, `duplication: pass`,
-`complexity: <number>`, optional `specs: pass` / `performance:`. A `--json` object payload serializes as
-`"tests":"pass ..."` (no `: ` + space form) so nothing matches. Implementation is unchanged and correct.
+### Modules (all fully typed, mypy --strict clean)
+1. `va_common/time.py`
+   ```python
+   def utcnow() -> datetime                       # datetime.now(UTC)
+   def ensure_utc(dt: datetime) -> datetime       # ValueError on naive; converts aware to UTC
+   class Clock(Protocol):
+       def now(self) -> datetime: ...             # aware UTC
+       def monotonic(self) -> float: ...
+   class SystemClock:                             # now() -> utcnow(); monotonic() -> time.monotonic()
+   class FrozenClock:
+       def __init__(self, start: datetime, monotonic_start: float = 0.0) -> None   # ValueError if naive
+       def now(self) -> datetime; def monotonic(self) -> float
+       def advance(self, delta: timedelta | float) -> None   # float = seconds; negative -> ValueError
+       def set(self, when: datetime) -> None                 # moves now(); monotonic advances by forward delta only; backwards -> ValueError
+   ```
+   `Clock` is `@runtime_checkable`. No clock factory yet (VA_CLOCK wiring belongs to va_voice/media later).
+2. `va_common/ids.py`
+   ```python
+   PUBLIC_PREFIXES: Final = {"tool": "TL-", "knowledge_base": "KB-", "prompt": "PT-"}
+   PublicKind = Literal["tool", "knowledge_base", "prompt"]
+   def new_id() -> uuid.UUID                      # uuid.UUID(str(uuid_utils.uuid7())) -> stdlib UUID, version 7
+   def to_public(kind: PublicKind, value: uuid.UUID) -> str      # "TL-<canonical lowercase uuid>"
+   def from_public(kind: PublicKind, value: str) -> uuid.UUID    # strict: exact prefix (case-sensitive), canonical
+       # 36-char hyphenated uuid (accept upper-case hex, normalise); raise AppError("INVALID_INPUT", f"Invalid {label} id: {value!r}", field=None)
+   def parse_uuid(value: str) -> uuid.UUID        # bare uuid, same strictness, AppError INVALID_INPUT
+   ```
+   Import order: ids imports errors (no cycle; errors imports nothing from va_common).
+3. `va_common/json.py` (always absolute imports inside the package)
+   ```python
+   def dumps(obj: object, *, sort_keys: bool = False, indent: bool = False) -> bytes
+       # orjson.dumps with OPT_PASSTHROUGH_DATETIME (+ OPT_SORT_KEYS / OPT_INDENT_2) and a `default` hook:
+       #   datetime -> ensure_utc(dt) then isoformat with "+00:00" -> "Z" (naive -> TypeError("naive datetime not allowed"))
+       #   Decimal -> str; pydantic BaseModel -> model_dump(mode="json"); set/frozenset -> sorted list; else TypeError
+       # UUID uses orjson native canonical string.
+   def dumps_str(obj: object, *, sort_keys: bool = False, indent: bool = False) -> str
+   def loads(data: bytes | bytearray | memoryview | str) -> Any   # orjson.loads; malformed raises orjson.JSONDecodeError (a ValueError)
+   ```
+4. `va_common/errors.py`
+   ```python
+   CODES: Final[Mapping[str, int]] = MappingProxyType({...})   # every row of specs/31 §3 in table order
+   # KB_ERROR's HTTP column is "400/500": map to 400 (default) and document via Decision note; AppError accepts an explicit
+   # http_status override so KB processing failures can raise 500.
+   class AppError(Exception):
+       def __init__(self, code: str, message: str, http_status: int | None = None, details: Mapping[str, object] | None = None, *, field: str | None = None) -> None
+           # unknown code -> ValueError(f"unknown error code {code!r}"); http_status defaults to CODES[code];
+           # explicit http_status must be 400-599 else ValueError. Stores .code .message .http_status .field .details (dict copy, {} default)
+       def to_item(self) -> dict[str, object]     # {"error": code, "message": message, + "field" if set, + "details" if non-empty}
+       def __str__ -> f"{code}: {message}"; __repr__ includes http_status
+   def not_found(resource: str = "Resource") -> AppError    # AppError("NOT_FOUND", f"{resource} not found")
+   def internal_error() -> AppError                          # ("INTERNAL_ERROR", "Internal server error")
+   ```
+   Signature order follows specs/02 §4 `AppError(code, message, http_status, details)` with `field` keyword-only (specs/31 §4 lists it).
+5. `va_common/money.py`
+   ```python
+   MICROS_PER_DOLLAR: Final = 1_000_000
+   def dollars_to_micros(value: Decimal | int | str) -> int   # Decimal(str) exact; round_half_up to integer micros;
+       # floats REJECTED with TypeError (never floats); NaN/Inf -> ValueError; bool -> TypeError
+   def micros_to_dollars_str(micros: int) -> str              # exact, 6 decimals: 1_500_000 -> "1.500000", -1 -> "-0.000001"
+   def micros_to_dollars(micros: int) -> Decimal              # Decimal quantized to 6 places (API "decimal numbers rounded to 6 places")
+   def round_half_up_micros(quantity: Decimal | int, unit_price_micros: Decimal | int) -> int   # specs/24 rounding: Decimal product, ROUND_HALF_UP to int
+   ```
+6. `va_common/settings.py`
+   ```python
+   Environment = Literal["local", "test", "staging", "production"]
+   class BaseServiceSettings(BaseSettings):
+       model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True, case_sensitive=False)
+       va_env: Environment = "local"           # field names == lower-cased env names, no aliases
+       log_level: Literal["DEBUG","INFO","WARNING","ERROR","CRITICAL"] = "INFO"   # validator upper-cases input
+       log_transcripts: bool = False
+       otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+       sentry_dsn: str = ""
+       @model_validator(mode="before") on the raw input: if va_env (case-insensitive key) == "production", set log_transcripts False
+       @property is_production -> bool
+   ```
+   Only the "all"-scoped vars from §6 live in the base (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, OTEL_EXPORTER_OTLP_ENDPOINT,
+   SENTRY_DSN). Service-specific vars belong to each service's `Settings` subclass in later tasks. Defaults equal the
+   §6 dev values EXCEPT log_transcripts default False (safe default; .env sets true locally) — note in Decision.
+   Tests must isolate env: `monkeypatch.delenv` + `_env_file=None`.
 
-Builder action (no code changes):
-1. Re-run fresh: make fmt, make lint, make typecheck, make test, make test-ts; audit (uvx pip-audit on uv export --strict,
-   corepack pnpm audit); uvx radon cc -s -a scripts/check_toolchain.py; jscpd duplication. Logs to logs/p00t01-*.log.
-2. Emit a PLAIN STRING payload (NOT --json), exact token form, e.g.:
-   ralph emit "build.done" "P00-T01 tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, complexity: 3.4, duplication: pass, specs: pass (22 passed, 100% cov; radon avg A; jscpd 0 clones; make placeholders n/a until P00-T03 creates scripts/check_no_placeholders.py)"
-   Only include a token as `pass` if that gate actually passed in this activation.
+### Tests (packages/va_common/tests/)
+- `test_errors.py`: `test_codes_match_spec_table` — reads `specs/31-error-catalog.md` (path via
+  `Path(__file__).resolve().parents[3] / "specs/31-error-catalog.md"`), extracts the §3 section (from `## 3. Error codes`
+  to next `## `, so §3a detail codes are excluded), parses rows `| \`CODE\` | HTTP |`, HTTP "400/500" → 400 (first
+  value); asserts `dict(CODES) == parsed` (both directions, exact). Plus: unknown code raises ValueError; default status;
+  override status; invalid override ValueError; to_item with/without field/details; details copied (mutating input
+  doesn't change error); str/repr; not_found/internal_error helpers; CODES immutable (TypeError on assignment).
+- `test_ids.py`: new_id is version 7, monotonic ordering of 1000 consecutive ids (uuid7 sorts by time); hypothesis
+  `@given(st.uuids(), st.sampled_from(kinds))` round-trip `from_public(kind, to_public(kind, u)) == u`; upper-case hex
+  accepted; wrong prefix / missing prefix / lowercase prefix "tl-" / garbage / braces / urn form / no hyphens → AppError
+  with code INVALID_INPUT and http_status 400; parse_uuid same.
+- `test_money.py`: hypothesis round-trip `dollars_to_micros(micros_to_dollars_str(m)) == m` for ints in ±10^15;
+  `dollars_to_micros("0.0000005") == 1` (half-up), `"0.0000004" -> 0`, `"-0.0000005" -> -1` (ROUND_HALF_UP is away from
+  zero in Decimal — assert that exact behaviour and document), int input `3 -> 3_000_000`; float → TypeError; bool →
+  TypeError; "NaN"/"Infinity" → ValueError; invalid string → ValueError; micros_to_dollars Decimal exponent -6;
+  round_half_up_micros(Decimal("1.5"), 3) == 5 (4.5 → 5), (Decimal("2"), Decimal("0.25")) == 1? (0.5 → 1).
+- `test_time.py`: utcnow tz is UTC; ensure_utc naive → ValueError, +02:00 aware → converted; FrozenClock now/advance
+  (timedelta and float), negative advance ValueError, set forward/backward, monotonic advances in lockstep; naive start
+  ValueError; SystemClock now is aware and within freezegun frozen time (`freeze_time("2026-01-01")`), monotonic non-decreasing;
+  `isinstance(SystemClock(), Clock)` requires `@runtime_checkable` on Clock — add it.
+- `test_json.py`: dumps of dict with UUID, aware datetime (Z suffix), Decimal ("1.10" kept as string), pydantic model,
+  set → sorted list; naive datetime → TypeError; unsupported type (object()) → TypeError; sort_keys option; indent option;
+  dumps_str returns str; loads accepts bytes/str/memoryview; malformed → ValueError (orjson.JSONDecodeError).
+- `test_settings.py`: defaults with clean env (`_env_file=None`); env overrides (VA_ENV=staging, LOG_LEVEL=debug →
+  "DEBUG"); invalid VA_ENV → ValidationError; LOG_TRANSCRIPTS=true honoured in local, forced False in production;
+  settings frozen (assignment raises ValidationError); subclass adding a field reads its env var (proves extensibility);
+  `.env` file loading via tmp_path + `_env_file=tmp/.env`.
+Coverage target: 100 % lines/branches on va_common (small pure modules).
 
-## Build P00-T01 — evidence re-run #3 (Builder, 2026-10-25)
-No code changes. Fresh: fmt=0 lint=0 typecheck=0 test=0 (22 passed, 100% cov) test-ts=0. placeholders=2 only because
-scripts/check_no_placeholders.py is a P00-T03 deliverable. pip-audit --strict + pnpm audit: no known vulns.
-radon avg A (3.4). jscpd 0 clones. Emitting build.done as plain-text token payload.
+### Spec decisions (append in the same commit)
+- specs/31 after §4: `> Decision (2026-10-25): KB_ERROR's "400/500" maps to 400 in CODES (the parity test reads the
+  first status); KB processing failures raise AppError("KB_ERROR", ..., http_status=500) via the explicit override.`
+- specs/02 §4 after Settings bullet: `> Decision (2026-10-25): BaseServiceSettings holds only the variables §6 marks
+  "all" (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, OTEL_EXPORTER_OTLP_ENDPOINT, SENTRY_DSN); services add the rest in their own
+  Settings subclass. LOG_TRANSCRIPTS defaults to false in code (the .env dev value is true) and is forced false when
+  VA_ENV=production. Money: dollars_to_micros rejects floats; rounding is Decimal ROUND_HALF_UP (away from zero for
+  negatives).`
 
-## Review P00-T01 (Reviewer, 2026-10-25) — APPROVED
-Re-ran: lint=0 typecheck=0 fmt=0 test=0 (22 passed, 100% cov) test-ts=0; placeholders=2 only because
-scripts/check_no_placeholders.py lands in P00-T03 (expected per plan). uv sync --frozen and pnpm install --frozen-lockfile ok.
-Diff matches specs/02 §2 (dev group, versions) and §3 (all targets; pnpm deviation recorded as Decision). Tests assert real behaviour.
-Reviewer change: added PROMPT.md (generated by run_phase.sh) to .gitignore.
+### AGENTS.md
+- Learned bullet (P01-T00a): how va_common gets installed for `uv run` (workspace source + dev group, or --all-packages),
+  and "every new package must be added to root mypy `files` and `mypy_path`" already exists — extend with the exact pattern.
+- Conventions: `va_common.ids.to_public("tool", id)`; `va_common.errors.AppError(code, message, http_status=None, details=None, field=)`.
+
+### Gates (Builder)
+`make fmt lint typecheck test` (+ `test-ts`, no TS change). `make placeholders` will fail because
+scripts/check_no_placeholders.py does not exist until P01-T00c — report that honestly (same as P00-T01 evidence) and
+instead grep the new files for TODO|FIXME|XXX|TBD|HACK|NotImplementedError|placeholder → must be empty.
+Backpressure extras (see AGENTS.md): audit via `uv export --no-hashes --all-packages > logs/p01t00a-req.txt && uvx pip-audit -r logs/p01t00a-req.txt`
++ `corepack pnpm audit`; complexity via `uvx radon cc -s -a packages/va_common/src`; duplication via `npx --yes jscpd@4 packages/va_common`.
+Commit: `feat(common): add va_common core settings, clock, ids, json, errors, money` with footer `Task: P01-T00a` (and `Task: P00-T05` line).
+
+### Risks
+- `filterwarnings = ["error"]`: pydantic-settings may warn about missing `.env` — passing `_env_file=None` in tests avoids it.
+- hypothesis + pytest-xdist: fine; keep examples ≤ 200 (default) for speed.
+- `va_common/json.py` shadowing: inside the package always use absolute imports; stdlib `json` is not needed.
+- uuid_utils.uuid7() returns `uuid_utils.UUID`, not stdlib — convert via `uuid.UUID(bytes=u.bytes)`.
