@@ -1,0 +1,132 @@
+# Ralph Orchestrator configuration for the VoiceAgents platform build.
+# Docs: https://mikeyobrien.github.io/ralph-orchestrator/guide/configuration/
+#
+# Usage (one phase at a time):
+#   scripts/ralph/run_phase.sh 05          # assembles PROMPT.md = MASTER_PROMPT.md + prompts/phase-05.md, then runs Ralph
+#   scripts/ralph/run_all.sh 00 20         # runs phases sequentially, stops at the first phase that does not complete
+#
+# Flow per iteration (hat mode):
+#   task.start ─► Planner ─plan.ready─► Builder ─build.done─► Reviewer ─review.approved─► Planner (next task)
+#                    ▲                     │  ▲                   │
+#                    └────build.blocked────┘  └──review.rejected──┘
+#   When every task in plan/phase-NN.md is ticked and the phase exit gate passes, the Planner prints LOOP_COMPLETE.
+
+cli:
+  backend: claude
+  prompt_mode: arg
+
+event_loop:
+  prompt_file: PROMPT.md
+  completion_promise: LOOP_COMPLETE
+  starting_event: task.start
+  max_iterations: 150
+  max_runtime_seconds: 43200        # 12 h per phase run
+  idle_timeout_secs: 1800
+  checkpoint_interval: 5
+
+core:
+  specs_dir: specs/
+  scratchpad:
+    enabled: true
+    path: .ralph/agent/scratchpad.md
+  guardrails:
+    - "Read MASTER_PROMPT.md rules before acting. Specs in specs/ are law; never contradict them silently."
+    - "Never write placeholders: no TODO, FIXME, XXX, TBD, NotImplementedError, pass/... stub bodies, mock data in production paths, or truncated files."
+    - "Work on exactly ONE unchecked task from the current phase plan per Builder activation."
+    - "Never call real Telnyx, ElevenLabs, Telnyx Inference, or Stripe from tests; use packages/va_sim simulators. Live calls only when LIVE_TESTS=1."
+    - "Every tenant-scoped query filters by org_id and runs inside va_db tenant_session (RLS)."
+    - "Run the gates (make check; plus make e2e when the task touches a call/SMS/widget flow) and include their real results as evidence. Never claim a gate passed without running it."
+    - "If a spec is ambiguous, decide, implement, and record the decision in the spec with '> Decision (YYYY-MM-DD):' in the same commit."
+    - "Keep AGENTS.md current with any new command, convention, or gotcha you discover."
+    - "Commit after each approved task using Conventional Commits with footer 'Task: <ID>'."
+
+memories:
+  enabled: true
+  inject: auto
+  budget: 3000
+
+tasks:
+  enabled: true
+
+features:
+  parallel: false
+  auto_merge: false
+  preflight:
+    enabled: true
+    strict: false
+
+hats:
+  planner:
+    name: "📋 Planner"
+    description: "Selects the next task for the current phase, prepares a precise implementation plan, and decides phase completion."
+    triggers: ["task.start", "review.approved", "build.blocked"]
+    publishes: ["plan.ready"]
+    default_publishes: "plan.ready"
+    instructions: |
+      You are the Planner for the current phase named in PROMPT.md.
+      1. Open the phase checklist plan/phase-NN.md (NN is in PROMPT.md). Find the first task whose checkbox is "- [ ]"
+         and whose "Depends on" tasks are all ticked. If the previous event was build.blocked, read the blocker note in
+         the scratchpad and either (a) split the task into smaller sub-tasks inserted directly below it in the plan
+         file (IDs like P05-T07a, P05-T07b) with their own acceptance criteria, or (b) resolve the blocker by adding a
+         prerequisite task. Never skip a task.
+      2. If every task in the phase is ticked: run the phase exit gate listed at the bottom of plan/phase-NN.md
+         (always includes `make check`; from phase 05 also `make e2e`). If it passes, update README.md "Build status"
+         table row for this phase to "complete" with the date, commit, and print exactly LOOP_COMPLETE on its own line.
+         If it fails, append a new task "P<NN>-FIX-<n>: make exit gate pass — <failing output summary>" to the plan and
+         continue with step 3 for that task.
+      3. For the selected task, read every spec section it references (specs/*.md) and the relevant existing code.
+         Write an implementation plan into the scratchpad under a heading "## Plan <TASK-ID>": files to create/modify
+         (full paths), public interfaces with signatures, data/DB changes, tests to write (names + what they assert),
+         gates to run, and risks. Keep it concrete enough that the Builder needs no further design.
+      4. Emit: ralph emit "plan.ready" "<TASK-ID>: <one-line summary>"
+
+  builder:
+    name: "🔨 Builder"
+    description: "Implements exactly one planned task completely, with tests, and proves it with gate evidence."
+    triggers: ["plan.ready", "review.rejected"]
+    publishes: ["build.done", "build.blocked"]
+    default_publishes: "build.done"
+    instructions: |
+      You are the Builder. Implement exactly the task in the latest "## Plan <TASK-ID>" scratchpad section.
+      If triggered by review.rejected, first read the Reviewer's findings in the scratchpad under
+      "## Review <TASK-ID>" and fix every finding.
+      Rules:
+      - Write complete files. No placeholders, stubs, TODOs, or "rest unchanged". Follow specs exactly.
+      - Write tests first or alongside. Tests must fail without your change and pass with it.
+      - Run, in order, and capture real exit codes/summary lines:
+          make fmt
+          make lint
+          make typecheck
+          make placeholders
+          make test            (or a narrower pytest selection first, then the full suite before emitting)
+          make test-ts         (only if TypeScript changed)
+          make e2e             (if the task touches a call, SMS, widget, batch, or post-call flow; from phase 05)
+      - If a gate fails, fix and re-run. If after 3 genuine attempts you cannot make progress because of a missing
+        prerequisite or a spec contradiction, write "## Blocker <TASK-ID>" in the scratchpad (what, why, proposal) and
+        emit: ralph emit "build.blocked" "<TASK-ID>: <reason>"
+      - When all gates pass, emit build.done with evidence JSON, e.g.:
+          ralph emit "build.done" --json '{"task":"P05-T03","tests":"pass (412 passed)","lint":"pass","typecheck":"pass","placeholders":"pass","coverage":"pass (88%)","e2e":"pass (outbound_basic, barge_in)","files":["packages/va_voice/src/va_voice/vad.py"]}'
+      - Record durable learnings with: ralph tools memory add "<learning>" -t pattern|decision|fix|context --tags <area>
+
+  reviewer:
+    name: "🔍 Reviewer"
+    description: "Independently verifies the Builder's work against the spec and gates; approves or rejects with actionable findings."
+    triggers: ["build.done"]
+    publishes: ["review.approved", "review.rejected"]
+    default_publishes: "review.rejected"
+    instructions: |
+      You are the Reviewer. Assume nothing; verify.
+      1. Re-run: make lint, make typecheck, make placeholders, make test (and make test-ts / make e2e if the evidence
+         claims them). Any failure → reject.
+      2. Read the diff (git diff HEAD, plus untracked files). Check against the referenced spec sections line by line:
+         every field, default, validation rule, error code (specs/31-error-catalog.md), event type
+         (specs/19-events-and-webhooks.md), table/column (specs/03-data-model.md), and env var (specs/02 §6).
+      3. Check for: placeholder or stub code, swallowed exceptions, missing org_id scoping, secrets in code or logs,
+         blocking I/O in async code, missing tests for error paths, tests that assert nothing meaningful, flaky sleeps
+         (use fake clocks/events), and dead code.
+      4. If rejected: write "## Review <TASK-ID>" in the scratchpad with a numbered list of concrete findings
+         (file:line, what is wrong, what the spec requires), then: ralph emit "review.rejected" "<TASK-ID>: <n> findings"
+      5. If approved: tick the task in plan/phase-NN.md as "- [x] <ID> <title> — <evidence summary>", update AGENTS.md
+         if needed, then commit:
+           git add -A && git commit -m "<type>(<scope>): <summary>" -m "Task: <TASK-ID>"
+         and emit: ralph emit "review.approved" "<TASK-ID> approved"

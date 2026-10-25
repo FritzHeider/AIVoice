@@ -1,0 +1,502 @@
+# 04 — Authentication, Tenancy, RBAC, API Keys, Sessions, SSO, Audit
+
+Package ownership: `va_common.auth` (hashing, token primitives), `va_db` (repositories), `va_api.auth` (middleware,
+dependencies, routers). Tables: `orgs`, `users`, `memberships`, `invitations`, `sessions`, `email_tokens`, `api_keys`,
+`sso_connections`, `audit_logs`, `idempotency_keys` (`03-data-model.md` §3).
+
+## 1. Principals
+
+| Principal | How authenticated | Scope of access |
+|---|---|---|
+| API key | `Authorization` header (§2) | One org (the key's `org_id`); limited by `scopes` |
+| Dashboard user | Session cookie `va_session` + CSRF header (§4) | Orgs where the user has a membership; acts in `sessions.active_org_id`; limited by role (§3) |
+| Widget visitor | Widget public key + Origin check (`22-web-widget.md`) | One widget; conversation endpoints only |
+| Telnyx | Ed25519 signature (`06-telephony-telnyx.md`) | Edge webhook endpoints only |
+| Stripe | `Stripe-Signature` (`24-billing-and-limits.md`) | `/v1/billing/stripe/webhook` only |
+| Platform admin | Dashboard session where `users.is_platform_admin=true` and MFA passed | `/internal/admin/*` (system-scope repos) |
+| Internal service | mTLS inside cluster is not used; services talk via Postgres/Redis/Temporal only — no service-to-service HTTP auth surface exists except `api` → none | n/a |
+
+The resolved principal is a `RequestContext` dataclass:
+
+```python
+@dataclass(frozen=True)
+class RequestContext:
+    request_id: str
+    org_id: UUID
+    principal_type: Literal["api_key", "user", "widget", "platform_admin"]
+    principal_id: UUID                 # api_keys.id | users.id | widgets.id
+    role: Role | None                  # users only
+    scopes: frozenset[str]             # api keys: key scopes; users: scopes derived from role (§3.3)
+    environment: Literal["live", "test"]
+    plan_id: str
+    ip: str | None
+    user_agent: str | None
+    acting_parent_org_id: UUID | None  # set when a parent-org user/key acts on a sub-account (§8.3)
+```
+
+Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `app.org_id` for RLS.
+
+## 2. API keys
+
+### 2.1 Format
+
+- Plaintext: `va_live_` or `va_test_` followed by 32 characters from base62 (`[0-9A-Za-z]`) generated with
+  `secrets.choice` (≈190 bits). Example shape: `va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e`.
+- `prefix`: first 12 characters of the plaintext (`va_live_3kQ9`); unique; displayed in UI and logs.
+- `secret_hash`: `sha256(API_KEY_PEPPER || plaintext)` hex, where `API_KEY_PEPPER` is a 32-byte secret env var
+  (added to `02` §6, see shared-contract additions). Comparison with `hmac.compare_digest`.
+- Plaintext is returned exactly once at creation. It is never logged, stored, or retrievable.
+- `environment=test` keys: calls are routed to the simulator stack only when `VA_ENV in (local,test)`; in staging and
+  production, test keys may create/read configuration resources but `POST /v1/calls`, `/v2/batches/create`,
+  `/v1/sms/send`, `/numbers/purchase` return `FORBIDDEN` with message "Test keys cannot place live calls, send SMS, or purchase numbers."
+
+### 2.2 Middleware `va_api.auth.api_key_auth`
+
+1. Read `Authorization`. Accept `Bearer <key>` (case-insensitive scheme) or the bare key. Ignore `x-api-key`.
+2. If the value starts with `va_live_` or `va_test_` and has length 40: look up by `prefix` (Redis cache
+   `apikey:{prefix}` → JSON `{id, org_id, secret_hash, scopes, environment, revoked, expires_at}` TTL 60 s; on miss
+   load from DB via system scope repo `ApiKeyLookupRepo`). Compare hash. Reject if revoked, expired, or org status
+   `closed`. Org `suspended` → `ORG_SUSPENDED` for writes, reads allowed.
+3. If no header but a `va_session` cookie exists → session auth (§4).
+4. Update `last_used_at` at most once per 60 s per key (Redis `SET apikey:{id}:touched NX EX 60` gate, then async
+   DB update).
+5. Revocation invalidates the Redis cache entry immediately (`DEL apikey:{prefix}`).
+6. Failures return `AUTH_FAILURE` (401) with message "Invalid API key." Timing: always perform one hash even when
+   prefix not found (hash a dummy) to avoid prefix enumeration timing leaks.
+
+### 2.3 Scopes (complete list)
+
+| Scope | Grants |
+|---|---|
+| `*` | All scopes below |
+| `calls:read` | GET calls, transcripts, recordings, events, active calls, analysis results |
+| `calls:write` | Send/stop/analyze calls, transcript tokens, live control (transfer, say, takeover) |
+| `batches:read` | GET batches, logs |
+| `batches:write` | Create/stop batches |
+| `pathways:read` | GET pathways, versions, folders, unit tests, test runs |
+| `pathways:write` | Create/update/delete/publish/promote pathways, folders, unit tests, run tests/simulations, test chat |
+| `personas:read` / `personas:write` | Personas and versions |
+| `agents:read` / `agents:write` | Agents, versions, env pins, experiments |
+| `tools:read` / `tools:write` | Custom tools, tool test-run |
+| `knowledge:read` / `knowledge:write` | Knowledge bases, documents, KB chat/search |
+| `voices:read` / `voices:write` | Voice catalog, clone, settings, ratings, samples |
+| `numbers:read` / `numbers:write` | Phone numbers, inbound config, purchase/release, pools, BYO Telnyx accounts (`/v1/accounts*`) |
+| `sms:read` / `sms:write` | SMS conversations, send, webhook config, 10DLC |
+| `widgets:read` / `widgets:write` | Widgets, threads, live-agent messages |
+| `memory:read` / `memory:write` | Contacts, memories, memory changes, reset |
+| `analysis:read` / `analysis:write` | Dispositions, citation schemas, eval setups, eval runs |
+| `compliance:read` / `compliance:write` | DNC entries, guard rail templates |
+| `webhooks:read` / `webhooks:write` | Webhook endpoints, deliveries, replay, signing secret (rotate requires owner/admin when via session) |
+| `billing:read` | Balance, usage, invoices, plans |
+| `billing:write` | Top-up, auto-recharge, plan change, credit transfer to sub-accounts |
+| `org:read` | `/v1/org`, members list, audit logs |
+| `org:write` | Org settings, members, invitations, sub-accounts (`/v1/orgs/create`) |
+| `api_keys:write` | Create/revoke API keys (keys can never create keys with scopes they do not hold) |
+| `prompts:read` / `prompts:write` | Prompt library |
+| `analytics:read` | `/v1/analytics/*` |
+| `mcp` | Access `/v1/mcp` (each MCP tool additionally checks the scope of the underlying operation) |
+
+### 2.4 Endpoint → scope mapping principle
+
+- Every router declares `dependencies=[Depends(require_scope("<resource>:<read|write>"))]`; `GET`/`HEAD` map to
+  `:read`, all other methods to `:write`, unless the endpoint overrides (e.g. `POST /v1/knowledge/{id}/chat` is
+  `knowledge:read`; `POST /v1/calls/{id}/analyze` is `calls:write`; test-chat endpoints are `pathways:write`).
+- A test (`apps/api/tests/test_scope_coverage.py`) iterates `app.routes` and asserts every route under `/v1`, `/v2`,
+  `/numbers` has exactly one `require_scope` dependency or is in the explicit public allowlist:
+  `GET /v1/health`, `GET /openapi.json`, `GET /widget/v1/widget.js`, `/internal/auth/*` (session-flow endpoints),
+  `POST /v1/agent-onboarding/*`, `/v1/billing/stripe/webhook`, `/v1/widget/public/*` (widget visitor auth).
+
+## 3. RBAC
+
+### 3.1 Roles
+
+`owner` (full control incl. deletion of org and billing), `admin` (everything except org deletion and ownership
+transfer), `developer` (build and run agents; no billing writes, no member management), `analyst` (read everything
+operational, run analyses, export), `billing` (billing and usage only plus read org), `viewer` (read-only, no
+recordings/transcript PII unless org setting `viewers_can_see_pii=true`).
+
+### 3.2 Matrix (R = read, W = write/create/update/delete, X = execute/operate, — = denied)
+
+| Resource / action | owner | admin | developer | analyst | billing | viewer |
+|---|---|---|---|---|---|---|
+| Calls: list/view details & transcripts | R | R | R | R | — | R* |
+| Calls: recordings download | R | R | R | R | — | R* |
+| Calls: send / stop / live control / takeover | X | X | X | — | — | — |
+| Calls: analyze (post-hoc) | X | X | X | X | — | — |
+| Batches | W | W | W | R | — | R |
+| Pathways / folders | W | W | W | R | — | R |
+| Pathways: publish / promote production | X | X | X | — | — | — |
+| Pathway tests / simulations | X | X | X | X | — | — |
+| Personas | W | W | W | R | — | R |
+| Agents / versions / env pins | W | W | W | R | — | R |
+| Experiments start/stop | X | X | X | — | — | — |
+| Tools (incl. secret headers view = masked always) | W | W | W | R | — | R |
+| Knowledge bases | W | W | W | R | — | R |
+| Voices: catalog / ratings | W | W | W | R | — | R |
+| Voices: clone / delete clone | W | W | W | — | — | — |
+| Phone numbers: view / inbound config | W | W | W | R | — | R |
+| Phone numbers: purchase / release | X | X | — | — | — | — |
+| BYO Telnyx accounts | W | W | — | — | — | — |
+| Number pools | W | W | W | R | — | R |
+| SMS conversations: view | R | R | R | R | — | R* |
+| SMS: send / takeover | X | X | X | — | — | — |
+| 10DLC brand/campaign registration | W | W | — | — | — | — |
+| Widgets | W | W | W | R | — | R |
+| Memory / contacts | W | W | W | R | — | R* |
+| Memory reset / erasure | X | X | — | — | — | — |
+| Dispositions / citation schemas / eval setups | W | W | W | W | — | R |
+| DNC list | W | W | W | R | — | R |
+| Guard rail configuration (org defaults) | W | W | W | R | — | R |
+| Webhook endpoints / deliveries / replay | W | W | W | R | — | R |
+| Webhook signing secret view last4 / rotate | W | W | — | — | — | — |
+| Analytics | R | R | R | R | R | R |
+| Prompts library | W | W | W | R | — | R |
+| Billing: balance / usage / invoices | R | R | R | R | R | — |
+| Billing: top-up / auto-recharge / payment method | W | W | — | — | W | — |
+| Billing: plan change | W | — | — | — | W | — |
+| Credit transfer to sub-account | X | X | — | — | X | — |
+| API keys: list (prefix only) | R | R | R | — | — | — |
+| API keys: create / revoke | W | W | W(own) | — | — | — |
+| Members: list | R | R | R | R | R | R |
+| Members: invite / change role / remove | W | W | — | — | — | — |
+| Assign `owner` role / transfer ownership | X | — | — | — | — | — |
+| Org settings (general) | W | W | — | — | — | R |
+| Org settings (compliance, retention, hipaa_mode, pii_redaction, mfa_required) | W | W | — | — | — | — |
+| SSO connection | W | W | — | — | — | — |
+| Sub-accounts: create / list / switch into | W | W | — | — | — | — |
+| Audit logs | R | R | — | — | — | — |
+| Delete org | X | — | — | — | — | — |
+
+`R*` = transcript text, recordings and memory facts are shown with PII masked (`va_compliance.redaction.mask_text`)
+unless `OrgSettings.viewers_can_see_pii` is true. `W(own)` = developers may create keys with scopes ⊆ developer
+scopes and revoke keys they created.
+
+### 3.3 Role → scope derivation (for session principals)
+
+`va_api.auth.rbac.ROLE_SCOPES: dict[Role, frozenset[str]]` encodes the matrix as scopes so the same
+`require_scope` dependency works for sessions. Actions that are finer than read/write (publish, purchase, rotate,
+plan change, member management, ownership) use `require_permission("<permission>")` with permission names:
+`pathways.publish`, `numbers.purchase`, `numbers.release`, `telnyx_accounts.manage`, `tendlc.manage`,
+`members.manage`, `org.owner_transfer`, `org.delete`, `org.compliance`, `sso.manage`, `subaccounts.manage`,
+`billing.plan_change`, `billing.payment`, `billing.credit_transfer`, `webhooks.secret`, `memory.erase`,
+`audit.read`, `voices.clone`, `experiments.operate`, `calls.operate`. API keys with `*` hold all permissions
+except `org.delete`, `org.owner_transfer`, `sso.manage` (session-only). A test renders this matrix from code and
+compares it to the table in §3.2 (parsed from this markdown file).
+
+## 4. Dashboard authentication
+
+### 4.1 Endpoints (`/internal/auth/*`, envelope format)
+
+| Method | Path | Body | Behaviour |
+|---|---|---|---|
+| POST | `/internal/auth/signup` | `{email, password, name, org_name}` | Creates user (unverified), org (`plan_id='start'`, slug from org_name + 4 random chars), membership `owner`, sends verification email; returns `{data:{user, org}}`, sets session (MFA not required until verified) |
+| POST | `/internal/auth/verify-email` | `{token}` | Marks verified; 24 h token |
+| POST | `/internal/auth/resend-verification` | `{}` | Max 3 per hour per user |
+| POST | `/internal/auth/login` | `{email, password}` | Returns `{data:{mfa_required: bool, user}}`; on SSO-enforced domain returns `SSO_REQUIRED` with `details.sso_url` |
+| POST | `/internal/auth/mfa/verify` | `{code}` or `{recovery_code}` | Sets `sessions.mfa_passed=true` |
+| POST | `/internal/auth/logout` | `{}` | Revokes session |
+| POST | `/internal/auth/logout-all` | `{}` | Revokes all sessions of user |
+| POST | `/internal/auth/password/forgot` | `{email}` | Always 200; sends reset link if user exists; 1 h token |
+| POST | `/internal/auth/password/reset` | `{token, password}` | Sets password, revokes all sessions |
+| POST | `/internal/auth/password/change` | `{current_password, new_password}` | Requires recent auth (< 10 min since login or MFA) |
+| POST | `/internal/auth/mfa/setup` | `{}` | Returns `{secret_base32, otpauth_uri, qr_svg}`; secret stored encrypted but `mfa_enabled=false` |
+| POST | `/internal/auth/mfa/enable` | `{code}` | Verifies code, enables, returns 10 recovery codes (shown once) |
+| POST | `/internal/auth/mfa/disable` | `{code}` | Disallowed if org `mfa_required` |
+| GET | `/internal/auth/session` | — | Current user, memberships (org id/name/role/plan), active org, csrf token |
+| POST | `/internal/auth/switch-org` | `{org_id}` | Requires membership (or parent-org admin for sub-accounts, §8.3) |
+| GET | `/internal/auth/sso/start?email=` | — | Redirects to IdP (OIDC authorization code + PKCE) |
+| GET | `/internal/auth/sso/callback` | IdP params | Completes login (§5) |
+| POST | `/internal/auth/invitations/accept` | `{token, name?, password?}` | Creates user if needed, adds membership |
+| GET | `/internal/auth/invitations/{token}` | — | Invitation details (org name, role, email) |
+
+Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CREDENTIALS` (401),
+`INVALID_MFA_CODE` (401), `PASSWORD_TOO_WEAK` (400), `TOKEN_EXPIRED` (400), `REAUTH_REQUIRED` (401)
+(see shared-contract additions).
+
+### 4.2 Passwords
+
+- argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,
+  `salt_len=16`. Rehash on login when parameters change (`check_needs_rehash`).
+- Policy: length 12–128; reject if in the bundled top-100 000 breached-password list (`va_common/auth/data/common_passwords.txt.gz`,
+  generated by `scripts/build_password_list.py` from the SecLists `10-million-password-list-top-100000.txt` file
+  downloaded at build time and committed gzipped); reject if contains the email local-part.
+- Login throttling: per email 10 failures / 15 min → 15 min lock (`AUTH_LOCKED` 429); per IP 50 failures / 15 min.
+  Redis keys `auth:fail:email:{sha256(email)}`, `auth:fail:ip:{ip}`.
+
+### 4.3 Sessions
+
+- Cookie `va_session`: 32 random bytes base64url; `HttpOnly; Secure` (not Secure in `local`); `SameSite=Lax`;
+  `Path=/`; domain = dashboard/api parent domain from `SESSION_COOKIE_DOMAIN`.
+- DB stores `sha256(token)`. Sliding expiry 14 days: each authenticated request extends `expires_at` to now + 14 d
+  if more than 1 h has passed since the last extension. Absolute max lifetime 90 days.
+- Session cache `sess:{token_hash}` (TTL 5 min) holds `{user_id, active_org_id, mfa_passed, expires_at}`.
+- Org with `mfa_required=true`: session without `mfa_passed` gets `MFA_REQUIRED` on every endpoint except
+  `/internal/auth/session`, `/internal/auth/mfa/*`, `/internal/auth/logout`.
+
+### 4.4 CSRF
+
+Double-submit: on session creation and on `GET /internal/auth/session`, the API sets cookie `va_csrf` (random 32
+bytes, not HttpOnly, SameSite=Lax) and returns the same value in the body. Every non-GET request authenticated by
+session must send header `X-CSRF-Token` equal to the cookie, compared constant-time; otherwise `FORBIDDEN` with message
+"CSRF token missing or invalid." API-key requests are exempt. Additionally `Origin`/`Referer` must match
+`DASHBOARD_BASE_URL` for session-authenticated writes.
+
+### 4.5 TOTP MFA
+
+`pyotp.TOTP(secret, digits=6, interval=30)`, valid window ±1 step; replay protection: last accepted counter stored
+in Redis `mfa:last:{user_id}` (TTL 90 s). Recovery codes: 10 codes of format `xxxx-xxxx-xxxx` (base32 lowercase),
+stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code removed.
+
+## 5. OIDC SSO (enterprise, `OIDC_ENABLED=true`)
+
+1. Admin configures `sso_connections` (issuer, client_id, client_secret, allowed_domains, default_role, enforce) via
+   `PUT /v1/org/sso` (envelope). We validate by fetching `{issuer}/.well-known/openid-configuration`.
+2. Login: user enters email on dashboard → `GET /internal/auth/sso/start?email=` → domain lookup across
+   `sso_connections.allowed_domains` (system scope) → authlib `AsyncOAuth2Client` authorization-code flow with PKCE
+   (S256), `scope="openid email profile"`, `state` and `nonce` stored in Redis `sso:state:{state}` (TTL 10 min).
+3. Callback validates state, exchanges code, validates ID token (signature via JWKS, `iss`, `aud`, `exp`, `nonce`),
+   requires `email_verified=true` (or IdP lacking the claim treated as verified only when `allowed_domains` matches).
+4. JIT provisioning: if no user with that email → create user (no password, `email_verified_at=now()`), membership
+   with `default_role`. Existing user without membership → membership with `default_role`. Existing membership keeps
+   its role.
+5. Session created with `mfa_passed=true` (IdP is trusted for MFA).
+6. `enforce=true`: password login for emails in `allowed_domains` returns `SSO_REQUIRED`; API keys still work.
+
+## 6. Invitations and members
+
+- `POST /v1/org/members/invitations` `{email, role}` → invitation (7-day expiry, token 32 bytes base64url hashed);
+  email with link `{DASHBOARD_BASE_URL}/invite/{token}`. Only owners can invite owners.
+- `GET /v1/org/members` → `{data:[{user_id, email, name, role, mfa_enabled, last_login_at, joined_at}]}`.
+- `PATCH /v1/org/members/{user_id}` `{role}`; `DELETE /v1/org/members/{user_id}`. Constraint: an org always has ≥ 1
+  owner (`CONFLICT` "An organization must have at least one owner.").
+- `GET /v1/org/members/invitations`, `DELETE /v1/org/members/invitations/{id}`.
+- `POST /v1/org/transfer-ownership` `{user_id}` (owner, requires reauth).
+
+## 7. OrgSettings model
+
+`orgs.settings` jsonb is validated by `va_domain.org.OrgSettings` (Pydantic, `extra="forbid"`). All fields have
+defaults; `PATCH /v1/org` merges.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `timezone` | IANA tz string | `America/Los_Angeles` | Default `timezone` for calls and calling windows |
+| `default_language` | string | `en` | Default call `language` (`08-stt-elevenlabs.md` language map) |
+| `default_voice` | string (voice name or uuid) | `Karen` (platform catalog alias seeded) | Default `voice` |
+| `default_from_number` | E.164 \| null | null | Default caller ID when `from` absent |
+| `default_max_duration_min` | int 1–240 | 30 | |
+| `default_record` | bool | false | |
+| `default_webhook` | url \| null | null | Applied when call omits `webhook` |
+| `default_webhook_events` | string[] | `[]` | |
+| `default_voice_id` | uuid \| null | null | Default voice by id (takes precedence over `default_voice` when set) |
+| `default_country` | ISO-3166 alpha-2 | `US` | Region used to parse non-E.164 numbers |
+| `call_defaults` | object (partial SendCallRequest, `05-calls-api.md`) | `{}` | Org-wide Send Call defaults applied below agent/persona defaults and above platform defaults |
+| `dial_timeout_s` | int 5–120 | 45 | Telnyx `timeout_secs` |
+| `transfer_caller_id_mode` | `agent_number` \| `original_caller` | `agent_number` | Caller ID presented to transfer targets |
+| `transfer_failed_message` | string ≤ 500 | `"I'm sorry, I wasn't able to connect you. Is there anything else I can help with?"` | Spoken when a transfer leg fails |
+| `max_duration_message` | string ≤ 500 | `"I'm sorry, we've reached the time limit for this call. Goodbye."` | Spoken before `max_duration` hangup |
+| `no_input_goodbye` | string ≤ 500 | `"I haven't heard anything, so I'll end the call now. Goodbye."` | Spoken after repeated no-input timeouts |
+| `pathway_version_fallback` | bool | true | Missing numeric pathway version falls back to production instead of `PATHWAY_VERSION_NOT_FOUND` |
+| `voice_overrides` | map voice_id(uuid) → VoiceSettings `{stability, similarity_boost, style, use_speaker_boost, speed}` | `{}` | Org-level per-voice setting overrides |
+| `calling_hours` | `{start: "HH:MM", end: "HH:MM", days: int[] (0=Mon)}` | `{start:"08:00", end:"21:00", days:[0,1,2,3,4,5,6]}` | Evaluated in callee local timezone (`23-guardrails-and-compliance.md`) |
+| `default_guard_rails` | GuardRail[] | `[]` | Applied to every call unless call overrides (`23`) |
+| `ai_disclosure_required` | bool | false | Forces `tcpa:ai_disclosure` guard rail |
+| `recording_disclosure_required` | bool | true | Forces `tcpa:recording_disclosure` when `record=true` |
+| `honor_opt_out` | bool | true | Opt-out phrases write DNC (`23`) |
+| `allow_insecure_webhooks` | bool | false | Permit `http://` webhook URLs in production |
+| `webhook_format` | `bland` \| `envelope` | `bland` | Default format for per-call webhooks |
+| `hipaa_mode` | bool | false | Disables vendor logging (`enable_logging=false` to ElevenLabs where permitted), forces PII redaction in logs/analytics, forces recording encryption with org data key, disables transcript inclusion in emails, requires BAA flag `baa_signed_at` |
+| `baa_signed_at` | datetime \| null | null | Set by platform admin |
+| `pii_redaction` | `off` \| `transcripts` \| `transcripts_and_recordings` | `off` | Post-call redaction (`28-security.md` §7) |
+| `pii_redaction_entities` | string[] | `["pii","phi","pci"]` | Scribe entity categories to redact |
+| `viewers_can_see_pii` | bool | false | |
+| `mfa_required` | bool | false | |
+| `session_max_age_days` | int 1–90 | 14 | Overrides sliding expiry window |
+| `ip_allowlist` | CIDR[] | `[]` | If non-empty, API keys and sessions only accepted from these ranges |
+| `llm` | `{base_url?: url, api_key_ref?: str, dialogue_model?: str, router_model?: str, analysis_model?: str, fallback_model?: str, temperature_default?: float}` | `{}` | Per-org LLM override (`10-llm-gateway.md`); `api_key_ref` names an encrypted secret stored via `PUT /v1/org/secrets/{name}` |
+| `international_enabled` | bool | false | Also requires plan/kyc (`24`) |
+| `allowed_countries` | ISO-3166 alpha-2[] | `["US","CA"]` | Destinations allowed when international enabled |
+| `blocked_prefixes` | string[] | `[]` | Extra E.164 prefixes blocked (toll fraud, `28` §9) |
+| `amd_default` | `off` \| `premium` | `premium` | Default AMD mode |
+| `background_track_default` | `none` \| `office` \| `cafe` \| `restaurant` \| `phone_static` | `phone_static` | |
+| `noise_cancellation_default` | bool | true | |
+| `post_call_eval_setup_id` | uuid \| null | null | Run this eval on every call |
+| `summary_prompt_default` | string ≤ 2000 \| null | null | |
+| `dispositions_default` | string[] | `[]` | |
+| `low_balance_threshold_micros` | int | 5 000 000 | Triggers `billing.low_balance` |
+| `notification_emails` | email[] | `[]` | Billing/security notifications in addition to owners |
+| `data_export_enabled` | bool | true | CSV exports in dashboard |
+| `onboarding_completed_at` | datetime \| null | null | Set by the dashboard onboarding wizard (`25` §3) |
+
+Nested groups (each a Pydantic sub-model with `extra="forbid"`; `PATCH /v1/org` deep-merges them):
+
+| Path | Type | Default | Meaning |
+|---|---|---|---|
+| `compliance.enforce_calling_hours` | bool | false | Apply `calling_hours` to non-batch API calls (`23`) |
+| `llm.allow_model_override` | bool | false | Allow per-call `model` values outside the platform model allowlist |
+| `llm.context_budget_tokens` | int 1 000–64 000 | 6 000 | Max prompt tokens for dialogue context assembly (`10`) |
+| `privacy.redact_transcripts` | bool | false | Shorthand that forces `pii_redaction` ≥ `transcripts` |
+| `privacy.zero_retention` | bool | false | Vendor calls use zero-retention options (`enable_logging=false` for ElevenLabs); requires enterprise |
+| `redaction.enabled` | bool | false | Real-time PCI redaction before text reaches the LLM (`28` §7) |
+| `analysis.retranscribe` | bool | false | Post-call diarized re-transcription with ElevenLabs batch STT (`18`) |
+| `memory.default_enabled` | bool | false | Memory on for calls/personas that do not specify (`20`) |
+| `tools.allow_send_sms` | bool | true | Built-in SMS tool/node allowed (`13`, `21`) |
+| `tools.allow_schedule_callback` | bool | false | Built-in schedule-callback tool allowed |
+| `engine.speculative` | bool | true | Speculative dialogue generation in parallel with routing (`11`) |
+| `engine.tool_fillers` | bool | true | Speak tool `speech`/filler phrases while tools run |
+| `engine.allow_callbacks` | bool | false | Agent may schedule callback calls |
+| `voices.allow_raw_provider_ids` | bool | false | `voice` may be a raw ElevenLabs voice_id not in the catalog (`15`) |
+| `experiments.sticky_by_contact` | bool | false | Experiment arm assignment hashed by contact instead of call id (`20`) |
+
+Python layout: `OrgSettings` contains fields `compliance: ComplianceSettings`, `llm: LlmSettings` (which also holds the
+override fields `base_url`, `api_key_ref`, `dialogue_model`, `router_model`, `analysis_model`, `fallback_model`,
+`temperature_default` listed above), `privacy: PrivacySettings`, `redaction: RedactionSettings`,
+`analysis: AnalysisSettings`, `memory: MemorySettings`, `tools: ToolsSettings`, `engine: EngineSettings`,
+`voices: VoicesSettings`, `experiments: ExperimentsSettings`, each defaulting to its own defaults.
+
+Org secrets: `PUT /v1/org/secrets/{name}` `{value}` stores envelope-encrypted values in `org_secrets` (new table,
+see shared-contract additions); `GET /v1/org/secrets` lists names only.
+
+## 8. Orgs and sub-accounts
+
+### 8.1 Org endpoints (envelope)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/me` | `{data:{principal_type, user?{id,email,name,mfa_enabled}, api_key?{id,prefix,scopes,environment}, org:{id,name,slug,plan_id,status}, role, scopes}}` |
+| GET | `/v1/org` | Org incl. `settings`, `limits` effective (plan ⊕ overrides), `data_region`, `retention_days`, `recording_retention_days`, `credits_balance` (dollars) |
+| PATCH | `/v1/org` | `{name?, settings?: partial OrgSettings, retention_days?, recording_retention_days?}`; compliance fields need `org.compliance` |
+| DELETE | `/v1/org` | Owner + reauth; sets `status='closed'`, revokes keys, releases numbers via `NumberOrderWorkflow`, schedules erasure after 30 days |
+| GET/POST/PATCH/DELETE | `/v1/org/members`, `/v1/org/members/invitations`, `/v1/org/transfer-ownership` | §6 |
+| PUT/GET/DELETE | `/v1/org/sso` | §5 |
+| PUT/GET/DELETE | `/v1/org/secrets[/{name}]` | §7 |
+
+### 8.2 Bland-compatible sub-account creation (legacy envelope)
+
+`POST /v1/orgs/create` body `{org_display_name: string, org_plan?: "start"|"build"|"scale", initial_credits?: number (dollars)}`.
+Creates a child org with `parent_org_id = ctx.org_id`, `plan_id = org_plan or parent plan`, `kyc_level = parent.kyc_level`,
+optionally transfers `initial_credits` from parent (§8.4), creates an `owner`-equivalent API key for the child, and
+returns:
+
+```json
+{"status":"success","org_id":"…","org_display_name":"…","org_plan":"build","kyc_level":1,
+ "api_key":"va_live_…","credits":10.0,"created_at":"…"}
+```
+
+Additional: `GET /v1/orgs` (list children: `{"status":"success","orgs":[{org_id, org_display_name, org_plan, kyc_level, credits, status, created_at}]}`),
+`GET /v1/orgs/{org_id}`, `POST /v1/orgs/{org_id}/suspend`, `POST /v1/orgs/{org_id}/reactivate`.
+Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
+
+### 8.3 Parent access rules
+
+- Parent-org principals with role owner/admin (or API keys with `org:write`) may act on any child org by sending
+  header `X-VA-Org-Id: <child_org_id>` (API) or via `switch-org` (dashboard). The API verifies
+  `child.parent_org_id == ctx.org_id`, then builds a new `RequestContext` with `org_id=child`, `acting_parent_org_id=parent`,
+  scopes unchanged, role preserved (admin acts as admin in child). Audit logs record both orgs.
+- Child principals can never see the parent.
+- Billing: children have independent balances; parent can transfer credits; usage rolls up in parent analytics
+  (`GET /v1/analytics/usage?include_sub_accounts=true`).
+
+### 8.4 Credit transfer
+
+`POST /v1/billing/credits/transfer` `{to_org_id, amount}` (dollars, > 0, ≤ parent available balance): single DB
+transaction writes `credit_ledger` `transfer_out` (parent) and `transfer_in` (child) with shared idempotency key
+`xfer:{request Idempotency-Key or uuid}`; updates both balances with `SELECT … FOR UPDATE` on both org rows ordered
+by id to avoid deadlocks. Also allowed child → parent by parent principals (`direction: "to_parent"`).
+
+## 9. API key endpoints (envelope)
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/v1/api_keys` | — | `{data:[{id,name,prefix,scopes,environment,created_by,last_used_at,expires_at,revoked_at,created_at}]}` |
+| POST | `/v1/api_keys` | `{name (1–100), scopes?: string[] (default ["*"]), environment?: "live"|"test", expires_at?: datetime}` | `{data:{...key, key:"va_live_…"}}` (plaintext once) |
+| PATCH | `/v1/api_keys/{id}` | `{name?}` | key |
+| POST | `/v1/api_keys/{id}/revoke` | — | key with `revoked_at` |
+| POST | `/v1/api_keys/{id}/roll` | `{expire_old_in_hours?: 0–168 (default 24)}` | new key (plaintext once); old key gets `expires_at` |
+
+Rule: requested scopes must be a subset of the caller's scopes; otherwise `FORBIDDEN`.
+
+## 10. Agent onboarding API (keys for AI agents)
+
+Purpose: let an autonomous coding agent obtain a scoped **test** key for a human who confirms by email.
+
+1. `POST /v1/agent-onboarding/keys` (public, rate limited 5/h per IP and 3/h per email)
+   `{email, agent_name (1–100), requested_scopes: string[] (subset of non-billing scopes), purpose (≤ 500)}` →
+   `{data:{request_id, status:"pending_verification", poll_url:"/v1/agent-onboarding/keys/{request_id}", expires_at}}`.
+   Sends email to `email` with approve link `{DASHBOARD_BASE_URL}/agent-onboarding/{token}`.
+2. Human opens link: if logged out → login/signup; chooses org (where they are owner/admin/developer) and confirms
+   scopes (can reduce). Approval creates an API key `environment="test"`, `name="agent:<agent_name>"`,
+   `expires_at = now + 30 days`, stored encrypted in Redis `agentkey:{request_id}` (TTL 15 min, retrievable once).
+3. Agent polls `GET /v1/agent-onboarding/keys/{request_id}` (requires the `poll_secret` returned in step 1 as header
+   `X-Poll-Secret`) → `pending_verification` | `approved` (with `key` once, then `delivered`) | `denied` | `expired`.
+4. State kept in Redis `agentreq:{request_id}` (TTL 24 h): `{email_hash, agent_name, scopes, poll_secret_hash, status, approver_user_id?, org_id?}`.
+5. Audit log `api_key.create` with `actor_type=user` (approver) and `changes.after.agent_name`.
+
+## 11. Request rate limiting per API key
+
+Token bucket in Redis (`rl:key:{api_key_id}:{bucket}`, Lua script atomic refill+take). Session principals use
+`rl:user:{user_id}:{bucket}` with the same limits as the org plan.
+
+| Plan | `default` bucket (all endpoints) | `calls_send` bucket (`POST /v1/calls`, batch create counts 1) | `burst` |
+|---|---|---|---|
+| start | 10 req/s | 2 req/s | 20 |
+| build | 50 req/s | 10 req/s | 100 |
+| scale | 100 req/s | 25 req/s | 200 |
+| enterprise | 300 req/s (override via `orgs.limits.rate_per_sec`) | 100 req/s | 600 |
+
+Responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`; on exhaustion `RATE_LIMITED`
+with `Retry-After` seconds (ceil). Call caps (daily/hourly/concurrency) are separate (`24-billing-and-limits.md`).
+
+## 12. Idempotency
+
+Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middleware: compute
+`request_hash = sha256(method+path+canonical JSON body)`; insert `idempotency_keys` row with `locked_until=now()+60s`
+(ON CONFLICT DO NOTHING). If existing row: same hash and response stored → replay stored status/body with header
+`Idempotent-Replayed: true`; same hash and locked → `IDEMPOTENCY_IN_PROGRESS`; different hash →
+`IDEMPOTENCY_KEY_REUSED`. Store response for 2xx and 4xx (not 5xx; 5xx deletes the row). Rows purged after 24 h by
+`RetentionWorkflow`.
+
+## 13. Audit logging
+
+- Written via `va_db.audit.record(ctx, action, resource_type, resource_id, before, after)` in the same transaction.
+- Actions logged (complete list): `auth.login`, `auth.login_failed`, `auth.logout`, `auth.mfa_enabled`,
+  `auth.mfa_disabled`, `auth.password_changed`, `auth.password_reset`, `auth.sso_login`, `org.update`,
+  `org.delete`, `org.ownership_transfer`, `org.sso_update`, `org.secret_set`, `org.secret_delete`,
+  `subaccount.create`, `subaccount.suspend`, `subaccount.reactivate`, `member.invite`, `member.role_change`,
+  `member.remove`, `invitation.revoke`, `api_key.create`, `api_key.revoke`, `api_key.roll`, `pathway.create`,
+  `pathway.update`, `pathway.delete`, `pathway.publish`, `pathway.promote`, `persona.publish`, `agent.version_create`,
+  `agent.env_pin`, `experiment.start`, `experiment.stop`, `tool.create`, `tool.update`, `tool.delete`, `kb.create`,
+  `kb.delete`, `voice.clone`, `voice.delete`, `number.purchase`, `number.release`, `number.inbound_update`,
+  `telnyx_account.create`, `telnyx_account.delete`, `tendlc.brand_submit`, `tendlc.campaign_submit`,
+  `widget.create`, `widget.update`, `widget.delete`, `webhook_endpoint.create`, `webhook_endpoint.update`,
+  `webhook_endpoint.delete`, `webhook.secret_rotate`, `dnc.add`, `dnc.remove`, `dnc.import`, `memory.reset`,
+  `memory.erase`, `contact.erase`, `billing.topup`, `billing.auto_recharge_update`, `billing.plan_change`,
+  `billing.credit_transfer`, `call.stop`, `call.takeover`, `call.recording_download`, `batch.create`, `batch.stop`,
+  `data.export`.
+- Redaction: keys named `password`, `secret`, `token`, `api_key`, `client_secret`, `authorization`,
+  `secret_headers`, any value matching the API key regex, and all `*_enc` fields are replaced with `"[REDACTED]"`
+  before persisting `changes`.
+- `GET /v1/audit_logs?action=&actor_id=&resource_type=&resource_id=&since=&until=&cursor=&limit=` (envelope,
+  `audit.read`). Retained per org `retention_days` (minimum 365 days when `hipaa_mode`).
+
+## 14. Tests required
+
+- Key parsing: Bearer/bare/lowercase scheme; `x-api-key` ignored; wrong length/prefix; revoked; expired; constant-time
+  dummy hash path exercised (assert hash function called once on unknown prefix).
+- Scope coverage test (§2.4) and role matrix test (§3.3 vs §3.2 table parse).
+- Tenant isolation: for every resource router, a parametrized test creates the resource in org A and asserts org B's
+  key gets `NOT_FOUND` on GET/PATCH/DELETE and the resource is absent from org B lists; RLS test runs raw SQL as
+  `va_app` without `app.org_id` set and asserts zero rows.
+- Sub-account: `X-VA-Org-Id` allowed for parent admin, denied for sibling/child principals, nesting depth.
+- Sessions: sliding expiry, absolute max, CSRF missing/mismatch/origin, MFA gating, TOTP replay, recovery code consumption.
+- SSO: state/nonce validation, JIT provisioning paths, enforce blocks password login (IdP mocked with respx + a
+  generated RSA JWKS).
+- Rate limiter: refill math with `freezegun`, headers, per-plan defaults.
+- Idempotency: replay, in-progress, reuse with different body, 5xx not stored.
+- Agent onboarding: full approve/deny/expire flows, poll secret required, single retrieval.
+- Audit redaction.
+
+## 15. Acceptance criteria
+
+- All endpoints in this spec exist, appear in OpenAPI with correct `x-envelope`, and pass the tests above.
+- No route lacks a scope or allowlist entry; matrix test passes.
+- Cross-tenant access is impossible in every resource test; RLS denies without context.
