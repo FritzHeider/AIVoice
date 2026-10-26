@@ -716,3 +716,203 @@ Re-ran: lint 0, typecheck 0, placeholders 0, test 0 (490 passed, 99.92 %, loggin
 `is_secret_key` on ~40 keys: apiKey, accessToken, clientSecret, secretKey, webhookSecret, apikey, APIKey, XApiKey,
 idToken, secretAccessKey -> True; promptTokens, apiKeyPrefix, keyId, monkey, turkey, hotkey, tokenizer, tokenCount
 -> False. Tests and specs/27 §1 Decision cover the rule. Ticked P00-T06 and committed.
+
+## Plan P00-T07 — `va_common.crypto` envelope encryption
+
+Spec refs: specs/28-security.md §3 (algorithm, blob format, data keys + cache, KEK providers, API, rotation),
+specs/28 §2 (LOCAL_MASTER_KEY local/test only), specs/02 §6 rows `KMS_PROVIDER`, `LOCAL_MASTER_KEY`, `AWS_KMS_KEY_ID`,
+specs/03 `org_data_keys`. Blob format: specs/28 §3 binary layout is normative — the plan/phase-00.md shorthand
+`v1|key_id|wrapped_dek|nonce|ciphertext` is the same fields; record that in the Decision.
+Out of scope: DB-backed `org_data_keys` store + org-creation hook (phase 01), `ReencryptWorkflow` + admin rotate
+endpoint (later phases; they call `Envelope.rewrap`), S3 stream-chunked recording encryption (recordings phase).
+
+### Dependencies
+`uv add --package va-common cryptography aioboto3`; dev group: `uv add --dev "types-aioboto3[kms]"` (so mypy strict
+types `aioboto3.Session().client("kms")`; if the stubs fight, add a `[[tool.mypy.overrides]] module=["aioboto3.*"]
+ignore_missing_imports=true` — only for aioboto3). Package description += "crypto". `uv lock`.
+
+### Package `packages/va_common/src/va_common/crypto/` (all mypy strict, every function radon CC ≤ B)
+`__init__.py` re-exports the public names below (`__all__`).
+
+`blob.py`
+```python
+BLOB_VERSION: Final = 0x01; NONCE_SIZE: Final = 12; TAG_SIZE: Final = 16; DATA_KEY_SIZE: Final = 32
+class CryptoError(Exception)                 # base: misconfiguration, missing active key
+class DecryptionError(CryptoError)           # malformed blob, wrong aad/org/key, tampering — message never includes data
+@dataclass(frozen=True, slots=True)
+class EncryptedBlob:
+    kek_id: str; encrypted_data_key: bytes; nonce: bytes; ciphertext: bytes   # ciphertext includes the 16-byte GCM tag
+    def to_bytes(self) -> bytes
+        # 0x01 | len(kek_id utf8) (1 byte, 1..255 else CryptoError) | kek_id | len(edk) (2 bytes BE, 1..65535) | edk
+        # | nonce(12) | ciphertext+tag
+    @classmethod
+    def from_bytes(cls, data: bytes) -> EncryptedBlob
+        # DecryptionError on: empty, version != 0x01, kek_id_len 0, truncated anywhere, non-utf8 kek_id, edk_len 0,
+        # ciphertext shorter than TAG_SIZE. Use memoryview/offset helper `_take(data, offset, n)` to keep CC low.
+def column_aad(table: str, column: str, row_id: UUID | str) -> str      # f"{table}.{column}:{row_id}"
+```
+
+`kms.py`
+```python
+NIL_ORG_ID: Final = UUID(int=0)              # platform-level secrets (platform_encrypt)
+LOCAL_KEK_ID: Final = "local:v1"
+@dataclass(frozen=True, slots=True)
+class WrappedDataKey: kek_id: str; encrypted_data_key: bytes
+@dataclass(frozen=True, slots=True)
+class DataKey:
+    kek_id: str; plaintext: bytes = field(repr=False); encrypted_data_key: bytes
+    @property wrapped -> WrappedDataKey
+class KmsProvider(Protocol):
+    async def generate_data_key(self, org_id: UUID) -> DataKey
+    async def decrypt_data_key(self, org_id: UUID, wrapped: WrappedDataKey) -> bytes
+class LocalKmsProvider:
+    def __init__(self, master_key: bytes, *, kek_id: str = LOCAL_KEK_ID) -> None   # len != 32 -> CryptoError
+    @classmethod from_hex(cls, value: str) -> LocalKmsProvider                      # 64 hex chars else CryptoError (no value in msg)
+    generate_data_key: dk = os.urandom(32); nonce = os.urandom(12);
+        encrypted = nonce + AESGCM(kek).encrypt(nonce, dk, _org_context(org_id))   # _org_context = f"org_id={org_id}".encode()
+        (org binding mirrors the AWS encryption context)
+    decrypt_data_key: kek_id mismatch -> DecryptionError; len < 12+16 -> DecryptionError; InvalidTag -> DecryptionError;
+        result length != 32 -> DecryptionError
+class KmsClient(Protocol):   # subset of the aiobotocore KMS client, boto3 keyword signatures
+    async def generate_data_key(self, *, KeyId: str, KeySpec: str, EncryptionContext: Mapping[str, str]) -> Mapping[str, Any]
+    async def decrypt(self, *, CiphertextBlob: bytes, KeyId: str, EncryptionContext: Mapping[str, str]) -> Mapping[str, Any]
+class AwsKmsProvider:
+    def __init__(self, client: KmsClient, key_id: str) -> None                     # empty key_id -> CryptoError
+    generate_data_key: resp = await client.generate_data_key(KeyId=key_id, KeySpec="AES_256",
+        EncryptionContext={"org_id": str(org_id)}); DataKey(kek_id=resp["KeyId"] (ARN), plaintext=resp["Plaintext"],
+        encrypted_data_key=resp["CiphertextBlob"]); plaintext len != 32 -> CryptoError
+    decrypt_data_key: client.decrypt(CiphertextBlob=..., KeyId=wrapped.kek_id, EncryptionContext={"org_id": ...});
+        botocore.exceptions.ClientError with Error.Code in {"InvalidCiphertextException","IncorrectKeyException"}
+        -> DecryptionError (from None); other ClientErrors propagate; plaintext len != 32 -> DecryptionError
+@asynccontextmanager
+async def aws_kms_provider(key_id: str, *, region_name: str | None = None,
+                           session: aioboto3.Session | None = None) -> AsyncIterator[AwsKmsProvider]
+    # session.client("kms", region_name=region_name, config=botocore.config.Config(connect_timeout=5, read_timeout=10,
+    #   retries={"max_attempts": 3, "mode": "standard"})) — every network call has a timeout (MASTER_PROMPT §4.7)
+@asynccontextmanager
+async def open_kms_provider(settings: CryptoSettings) -> AsyncIterator[KmsProvider]
+    # local -> LocalKmsProvider.from_hex(settings.local_master_key.get_secret_value()); aws -> aws_kms_provider(...)
+```
+
+`cache.py`
+```python
+class DataKeyCache:   # LRU + TTL for unwrapped data keys (specs/28 §3: 10 000 entries, 10 min)
+    def __init__(self, *, max_entries: int = 10_000, ttl_seconds: float = 600.0, clock: Clock | None = None)  # SystemClock default; uses clock.monotonic()
+    def get(self, org_id: UUID, wrapped: WrappedDataKey) -> bytes | None   # expired -> evicted, None; hit -> move_to_end
+    def put(self, org_id: UUID, wrapped: WrappedDataKey, plaintext: bytes) -> None   # evict oldest beyond max_entries
+    def clear(self) -> None; def __len__(self) -> int
+    # key = (org_id, kek_id, encrypted_data_key); OrderedDict
+```
+
+`envelope.py`
+```python
+class DataKeyStore(Protocol):            # phase 01 implements it over org_data_keys (status='active')
+    async def active_data_key(self, org_id: UUID) -> WrappedDataKey | None
+class Envelope:
+    def __init__(self, provider: KmsProvider, store: DataKeyStore, *, cache: DataKeyCache | None = None) -> None
+    async def create_data_key(self, org_id: UUID) -> WrappedDataKey     # generate via provider, cache plaintext, return wrapped for the caller to persist
+    async def encrypt(self, org_id: UUID, plaintext: bytes, aad: str) -> bytes
+        # active key from store (None -> CryptoError "no active data key"); unwrap (cache, else provider + cache.put);
+        # nonce = os.urandom(12); AESGCM(dk).encrypt(nonce, plaintext, aad.encode()); EncryptedBlob(...).to_bytes()
+    async def decrypt(self, org_id: UUID, blob: bytes, aad: str) -> bytes
+        # EncryptedBlob.from_bytes; unwrap the EMBEDDED key (never a store lookup); InvalidTag -> DecryptionError
+    async def encrypt_str(...)-> bytes / decrypt_str(...) -> str      # utf-8; invalid utf-8 after decrypt -> DecryptionError
+    async def platform_encrypt(self, plaintext: bytes, aad: str) -> bytes / platform_decrypt(...)   # org_id = NIL_ORG_ID
+    async def rewrap(self, org_id: UUID, blob: bytes, aad: str) -> bytes
+        # key-rotation helper for ReencryptWorkflow: decrypt with the embedded key; if the embedded
+        # (kek_id, encrypted_data_key) already equals the active key return blob unchanged; else encrypt under active key
+```
+`va_common/settings.py`: add
+```python
+class KmsProviderName(StrEnum): LOCAL = "local"; AWS = "aws"
+class CryptoSettings(BaseServiceSettings):   # api, worker, media Settings extend it (specs/02 §6 scope "api, worker, media")
+    kms_provider: KmsProviderName = KmsProviderName.LOCAL
+    local_master_key: SecretStr = SecretStr("")
+    aws_kms_key_id: str = ""
+    model_validator(after): local + production -> ValueError ("KMS_PROVIDER=local is refused when VA_ENV=production");
+        local requires local_master_key to be 64 hex chars (ValueError naming LOCAL_MASTER_KEY, never the value);
+        aws requires non-empty aws_kms_key_id
+```
+Export `CryptoSettings`, `KmsProviderName` in settings `__all__`.
+
+### Tests (`packages/va_common/tests/`)
+Test-only helpers in `tests/crypto_fakes.py` (NOT in src): `InMemoryDataKeyStore` (dict org_id -> WrappedDataKey,
+`activate(org_id, wrapped)`) and `FakeKmsClient` implementing the boto3 keyword signatures with an in-memory AESGCM
+master key; `KeyId` returned as an ARN `arn:aws:kms:us-east-1:111122223333:key/<uuid>`; raises
+`botocore.exceptions.ClientError({"Error": {"Code": "InvalidCiphertextException", ...}}, "Decrypt")` when the encryption
+context or ciphertext does not match; records calls (to assert KeyId/KeySpec/EncryptionContext). Fixture constants are
+generated with `os.urandom`/`secrets` at test time, never hard-coded key material.
+- `test_crypto_blob.py`: to_bytes/from_bytes round trip with exact byte layout asserted (version byte, kek len, BE
+  edk len); hypothesis round trip over kek_id (1..255 utf-8 bytes) / edk / ciphertext; every malformed case above ->
+  DecryptionError (parametrized); kek_id > 255 bytes and edk > 65535 -> CryptoError on encode; column_aad format.
+- `test_crypto_kms.py`: Local: wrap/unwrap round trip; wrong org -> DecryptionError; wrong master key; tampered
+  wrapped key; foreign kek_id; bad master key length / non-hex / wrong-length hex -> CryptoError; DataKey repr
+  hides plaintext. AWS (FakeKmsClient): generate passes KeyId, KeySpec="AES_256", EncryptionContext {"org_id": str};
+  kek_id = returned ARN; decrypt passes KeyId=wrapped.kek_id and same context; InvalidCiphertextException ->
+  DecryptionError; other ClientError (e.g. "AccessDeniedException") propagates; bad plaintext length paths; empty
+  key_id -> CryptoError. `aws_kms_provider` with a fake session object whose `client()` returns an async context manager
+  yielding FakeKmsClient — assert service name "kms", region and Config timeouts/retries. `open_kms_provider` for
+  local and aws settings.
+- `test_crypto_cache.py`: hit/miss, TTL expiry with `va_common.time.FrozenClock.advance` (no sleeps), LRU eviction order at
+  max_entries, get refreshes recency, clear/len, keys distinct per org.
+- `test_crypto_envelope.py` (both providers via parametrized fixture): encrypt/decrypt round trip incl. empty
+  plaintext and hypothesis bytes; blob parses and embeds active kek_id/edk; two encryptions differ (random nonce);
+  wrong aad (row swap: `column_aad("tools","secret_headers_enc",row_a)` vs row_b) -> DecryptionError; wrong org ->
+  DecryptionError; flipped byte in ciphertext / tag / nonce / edk -> DecryptionError; truncated blob -> DecryptionError;
+  no active key -> CryptoError; decrypt after rotation (old blob still decrypts via embedded key while store points to
+  new key); rewrap moves to the new key and still decrypts, unchanged when already current (identity bytes);
+  encrypt_str/decrypt_str unicode; invalid utf-8 -> DecryptionError; platform_encrypt/decrypt use NIL org (blob not
+  decryptable as another org); cache: second decrypt does not call the provider (counting wrapper), create_data_key
+  primes the cache.
+- `test_settings.py` additions: CryptoSettings defaults require LOCAL_MASTER_KEY (missing -> ValidationError naming the
+  var, not leaking value); valid local; production+local refused; aws without key id refused; aws valid; conftest
+  clears `KMS_PROVIDER`, `LOCAL_MASTER_KEY`, `AWS_KMS_KEY_ID` if not already.
+Coverage 100 % on the crypto package; async tests via pytest-asyncio (asyncio_mode = "auto" already set).
+
+### Docs
+- specs/28 §3 `> Decision (2026-10-25):` — (a) API is async (`await envelope.encrypt(...)`) because AWS KMS unwrap is
+  network I/O; it lives on an `Envelope(provider, store, cache)` object; (b) binary blob layout above is the plan's
+  `v1|key_id|wrapped_dek|nonce|ciphertext`; ciphertext carries the GCM tag at its end; (c) local wrapped key =
+  `nonce(12) | AES-256-GCM(KEK, data key, aad="org_id=<uuid>") + tag`, mirroring the AWS encryption context;
+  (d) `DataKeyStore.active_data_key` protocol, implemented over `org_data_keys` in phase 01; decryption uses only the
+  embedded wrapped key; cache keyed by (org_id, kek_id, encrypted_data_key); (e) `rewrap` is the ReencryptWorkflow
+  primitive and is a no-op on blobs already under the active key; (f) failures raise `DecryptionError`
+  (never carrying key/plaintext material), surfaced by the API as INTERNAL_ERROR; (g) local-in-production refusal and
+  key-format checks enforced by `CryptoSettings` validation at startup; AWS client timeouts connect 5 s / read 10 s,
+  3 standard retries.
+- AGENTS.md learned bullet: services that store tenant secrets extend `CryptoSettings` and use
+  `open_kms_provider` + `Envelope`; test fakes live in `packages/va_common/tests/crypto_fakes.py`.
+
+### Gates
+`make fmt lint typecheck placeholders test` + `make check`; pip-audit on `uv export --all-packages
+--no-emit-workspace`, `corepack pnpm audit`, `uvx radon cc -s -a scripts packages`, `npx --yes jscpd@4`.
+build.done as plain string (memory mem-1792920384-602e).
+
+### Risks
+- Placeholder checker / secret-scan false positives on test key material — generate keys at runtime.
+- `types-aioboto3` stub version must match aioboto3; aiobotocore pins botocore — check pip-audit after lock.
+- Logging redaction: never log DataKey or plaintext; `field(repr=False)` + DecryptionError messages are generic.
+- mypy on `Mapping[str, Any]` response indexing: validate types (`isinstance(..., bytes)`) and raise CryptoError otherwise
+  (also gives coverage targets; keep helpers small for CC).
+
+## Build P00-T07 — done (Builder)
+
+`va_common.crypto` package (blob, kms, cache, envelope, `__init__` re-exports) + `CryptoSettings`/`KmsProviderName`
+in settings, per plan. Deviations: AWS client config is `aiobotocore.config.AioConfig` (stubs reject botocore
+`Config`); boto3-named params carry `# noqa: N803`; `DataKeyCache` rejects `max_entries < 1` / `ttl_seconds <= 0`;
+`EncryptedBlob.to_bytes` also rejects nonce != 12 bytes / ciphertext shorter than the tag. Test fakes in
+`packages/va_common/tests/crypto_fakes.py` (`InMemoryDataKeyStore`, `FakeKmsClient`, `CountingProvider`); the tests
+dir was added to pytest `pythonpath` and mypy `mypy_path` so tests can import it. Deps: cryptography, aioboto3
+(va-common); types-aioboto3[kms] (dev). Docs: specs/28 §3 Decision (a)-(g), AGENTS.md bullets, package description.
+Gates: fmt 0, lint 0, typecheck 0 (38 files), placeholders 0 findings, test 0 (614 passed, 99.94 %, crypto/* and
+settings.py 100 %), make check 0; pip-audit + pnpm audit no known vulnerabilities; radon avg A (2.57), all crypto
+functions A; jscpd 0 clones.
+
+## Review P00-T07 — approved
+
+Re-ran: lint 0, typecheck 0 (38 files), placeholders 0, test 0 (614 passed, 99.94 %, crypto/* 100 %). Checked blob
+layout byte-for-byte against specs/28 §3, local wrap org binding, AWS encryption context/KeyId/KeySpec, ClientError
+mapping (decrypt errors -> DecryptionError, others propagate), cache key includes org_id (wrong-org cannot hit the
+cache), rewrap identity on current key, CryptoSettings production refusal, env vars match specs/02 §6. No key literals
+in tests; no sleeps. Note for later: `open_kms_provider` relies on the AWS default region chain (no region setting in
+specs/02 §6). Ticked P00-T07 and committed.

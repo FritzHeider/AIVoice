@@ -66,6 +66,25 @@
   `ReencryptWorkflow` re-encrypts all encrypted columns for the org in batches of 500 rows; old key `retired` after
   completion. KEK rotation in AWS uses automatic KMS key rotation (no re-encryption needed).
 
+> Decision (2026-10-25): `va_common.crypto` implements this section as follows.
+> (a) The API is async (`await envelope.encrypt(...)`) because unwrapping an AWS KMS data key is network I/O; it
+> lives on `Envelope(provider, store, cache=None)`, with `create_data_key`, `encrypt`, `decrypt`,
+> `encrypt_str`/`decrypt_str`, `platform_encrypt`/`platform_decrypt` (org id `UUID(int=0)`) and `rewrap`.
+> (b) The binary layout above is normative and is the same field list as the plan shorthand
+> `v1|key_id|wrapped_dek|nonce|ciphertext`; `ciphertext | tag` is the AES-GCM output, so the tag is its last 16 bytes.
+> (c) The local wrapped key is `nonce(12) | AES-256-GCM(KEK, data key, aad="org_id=<uuid>") | tag(16)`, binding the
+> org exactly as the AWS encryption context does.
+> (d) The active key comes from a `DataKeyStore.active_data_key(org_id)` protocol (implemented over `org_data_keys`
+> in phase 01); decryption uses only the wrapped key embedded in the blob. The unwrapped-key cache is keyed by
+> `(org_id, kek_id, encrypted_data_key)`.
+> (e) `rewrap(org_id, blob, aad)` is the `ReencryptWorkflow` primitive: it decrypts with the embedded key and
+> re-encrypts under the active key, returning the input unchanged when it is already under the active key.
+> (f) Every failure to authenticate or parse raises `DecryptionError` (a `CryptoError`), whose message never carries
+> key or plaintext material; the API surfaces it as `INTERNAL_ERROR`. A missing active key raises `CryptoError`.
+> (g) `CryptoSettings` (extended by the api, worker and media settings) refuses `KMS_PROVIDER=local` with
+> `VA_ENV=production`, requires `LOCAL_MASTER_KEY` to be 64 hex chars for `local` and `AWS_KMS_KEY_ID` for `aws`,
+> at startup. The AWS KMS client uses connect timeout 5 s, read timeout 10 s, and 3 retries in standard mode.
+
 ## 4. Transport security
 
 - TLS 1.2+ everywhere external (ALB/NLB with ACM certs, policy `ELBSecurityPolicy-TLS13-1-2-2021-06`). HSTS

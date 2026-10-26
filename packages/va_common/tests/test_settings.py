@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
 
-from va_common.settings import BaseServiceSettings, Environment, LogFormat
+from va_common.settings import BaseServiceSettings, CryptoSettings, Environment, KmsProviderName, LogFormat
 
 NO_DOTENV: dict[str, Any] = {"_env_file": None}
 
@@ -108,3 +109,51 @@ def test_subclass_adds_fields_and_ignores_unrelated_env(monkeypatch: pytest.Monk
     assert settings.va_env is Environment.TEST
     assert ExampleSettings.service_name == "example"
     assert not hasattr(settings, "some_other_service_var")
+
+
+def test_crypto_settings_require_local_master_key() -> None:
+    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY must be 64 hex characters"):
+        load(CryptoSettings)
+
+
+@pytest.mark.parametrize("value", ["zz" * 32, "ab" * 31, "ab" * 33])
+def test_crypto_settings_reject_malformed_master_key(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("LOCAL_MASTER_KEY", value)
+    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY") as info:
+        load(CryptoSettings)
+    assert value not in str(info.value)
+
+
+def test_crypto_settings_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_MASTER_KEY", key)
+    settings = load(CryptoSettings)
+    assert settings.kms_provider is KmsProviderName.LOCAL
+    assert settings.local_master_key.get_secret_value() == key
+    assert settings.aws_kms_key_id == ""
+    assert key not in repr(settings)
+
+
+def test_crypto_settings_refuse_local_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VA_ENV", "production")
+    monkeypatch.setenv("LOCAL_MASTER_KEY", secrets.token_hex(32))
+    with pytest.raises(ValidationError, match="KMS_PROVIDER=local is refused when VA_ENV=production"):
+        load(CryptoSettings)
+
+
+@pytest.mark.parametrize("key_id", ["", "  "])
+def test_crypto_settings_aws_requires_key_id(monkeypatch: pytest.MonkeyPatch, key_id: str) -> None:
+    monkeypatch.setenv("KMS_PROVIDER", "aws")
+    monkeypatch.setenv("AWS_KMS_KEY_ID", key_id)
+    with pytest.raises(ValidationError, match="AWS_KMS_KEY_ID is required"):
+        load(CryptoSettings)
+
+
+def test_crypto_settings_aws_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    arn = "arn:aws:kms:us-east-1:111122223333:key/0b9d3c7e-6f21-4f0a-9d0e-2a1c7f3b5e44"
+    monkeypatch.setenv("VA_ENV", "production")
+    monkeypatch.setenv("KMS_PROVIDER", "aws")
+    monkeypatch.setenv("AWS_KMS_KEY_ID", arn)
+    settings = load(CryptoSettings)
+    assert settings.kms_provider is KmsProviderName.AWS
+    assert settings.aws_kms_key_id == arn

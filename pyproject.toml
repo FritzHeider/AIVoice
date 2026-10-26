@@ -22,6 +22,7 @@ dev = [
   "asgi-lifespan>=2.1",
   "syrupy>=6.1",
   "va-common",
+  "types-aioboto3[kms]>=15.5.0",
 ]
 
 [tool.uv]
@@ -58,7 +59,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests"
 files = ["scripts", "packages/va_common/src", "packages/va_common/tests"]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 
@@ -67,7 +68,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
 testpaths = ["scripts/tests", "packages", "apps", "sdks"]
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "packages/va_common/tests"]
 timeout = 60
 markers = [
   "integration: needs docker/testcontainers",

@@ -18,6 +18,9 @@ SETTINGS_ENV_VARS = (
     "OTEL_TRACES_SAMPLER_ARG",
     "SENTRY_DSN",
     "POD_ID",
+    "KMS_PROVIDER",
+    "LOCAL_MASTER_KEY",
+    "AWS_KMS_KEY_ID",
 )
 
 

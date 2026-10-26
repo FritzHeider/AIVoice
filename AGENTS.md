@@ -102,3 +102,11 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
   packages' conftest when they configure logging). Console format must not include `format_exc_info` (structlog
   warns, and pytest `filterwarnings=error` turns that into a failure). structlog `get_logger` returns a lazy proxy,
   not a `BoundLogger` instance, so do not `isinstance`-check it.
+- 2026-10-25 (P00-T07): services that store tenant secrets extend `va_common.settings.CryptoSettings` and build
+  `Envelope(provider, store)` inside `async with open_kms_provider(settings) as provider`. Test doubles
+  (`InMemoryDataKeyStore`, `FakeKmsClient`, `CountingProvider`) live in `packages/va_common/tests/crypto_fakes.py`;
+  that directory is on pytest `pythonpath` and mypy `mypy_path`, so tests `from crypto_fakes import ...`. Generate
+  key material at test time (`os.urandom`, `secrets.token_hex`), never as literals. Never parametrize with random
+  values: pytest-xdist workers collect different test IDs and the run errors; parametrize sizes instead.
+- 2026-10-25 (P00-T07): aioboto3 clients take `aiobotocore.config.AioConfig`, not `botocore.config.Config` (mypy
+  rejects the latter). boto3-named keyword parameters in protocols/fakes (`KeyId`, ...) need `# noqa: N803` per line.

@@ -38,7 +38,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: structlog JSON configuration, contextvars binding helpers (`bind_call_context`), phone masking (`+1415***1234`), secret redaction processor (keys matching `*key*`, `*secret*`, `*token*`, `authorization`, `password`), `LOG_TRANSCRIPTS` enforcement (forced false in production)
   - Acceptance: tests capture log output and assert masking/redaction and field binding.
 
-- [ ] P00-T07 `va_common.crypto` envelope encryption
+- [x] P00-T07 `va_common.crypto` envelope encryption — reviewer re-ran lint 0, typecheck 0, placeholders 0, test 0 (614 passed, 99.94 %, crypto/* 100 %); blob layout, local/AWS KEK providers, LRU+TTL cache, Envelope + rewrap, CryptoSettings validation per specs/28 §3
   - Spec refs: specs/28-security.md (envelope encryption design)
   - Depends on: P00-T05
   - Deliverables: `KmsProvider` protocol, `LocalKmsProvider` (AES-256-GCM master key from `LOCAL_MASTER_KEY`), `AwsKmsProvider` (aioboto3 `generate_data_key`/`decrypt`), `encrypt_bytes/decrypt_bytes` producing versioned blobs (`v1|key_id|wrapped_dek|nonce|ciphertext`), key rotation re-wrap helper

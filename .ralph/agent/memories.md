@@ -6,6 +6,14 @@
 
 ## Fixes
 
+### mem-1792981166-10bf
+> aioboto3 session.client(config=...) needs aiobotocore.config.AioConfig; mypy rejects botocore.config.Config
+<!-- tags: aws, mypy | created: 2026-10-26 -->
+
+### mem-1792981166-ce01
+> pytest-xdist: never parametrize with random values (os.urandom) - workers collect different test IDs and the run errors; parametrize sizes and generate inside the test
+<!-- tags: testing, pytest | created: 2026-10-26 -->
+
 ### mem-1792920384-602e
 > build.done backpressure parser substring-matches plain text tokens 'tests: pass', 'lint: pass', 'typecheck: pass', 'audit: pass', 'coverage: pass', 'duplication: pass', 'complexity: <number>'; emit build.done as a plain string payload, NOT --json (JSON keys like "tests":"pass" never match)
 <!-- tags: tooling, ralph | created: 2026-10-25 -->

@@ -9,12 +9,14 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, ClassVar
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["BaseServiceSettings", "Environment", "LogFormat"]
+__all__ = ["BaseServiceSettings", "CryptoSettings", "Environment", "KmsProviderName", "LogFormat"]
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+_MASTER_KEY_HEX_LEN = 64
 
 
 class Environment(StrEnum):
@@ -80,3 +82,37 @@ class BaseServiceSettings(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.va_env is Environment.LOCAL
+
+
+class KmsProviderName(StrEnum):
+    """Key-encryption-key provider selected by ``KMS_PROVIDER`` (specs/28-security.md §3)."""
+
+    LOCAL = "local"
+    AWS = "aws"
+
+
+def _is_master_key_hex(value: str) -> bool:
+    return len(value) == _MASTER_KEY_HEX_LEN and set(value) <= _HEX_DIGITS
+
+
+class CryptoSettings(BaseServiceSettings):
+    """Envelope-encryption settings for services that store tenant secrets (api, worker, media)."""
+
+    kms_provider: KmsProviderName = KmsProviderName.LOCAL
+    local_master_key: SecretStr = SecretStr("")
+    aws_kms_key_id: str = ""
+
+    @model_validator(mode="after")
+    def _check_kms_provider(self) -> CryptoSettings:
+        if self.kms_provider is KmsProviderName.AWS:
+            if not self.aws_kms_key_id.strip():
+                msg = "AWS_KMS_KEY_ID is required when KMS_PROVIDER=aws"
+                raise ValueError(msg)
+            return self
+        if self.is_production:
+            msg = "KMS_PROVIDER=local is refused when VA_ENV=production"
+            raise ValueError(msg)
+        if not _is_master_key_hex(self.local_master_key.get_secret_value()):
+            msg = "LOCAL_MASTER_KEY must be 64 hex characters (32 bytes) when KMS_PROVIDER=local"
+            raise ValueError(msg)
+        return self
