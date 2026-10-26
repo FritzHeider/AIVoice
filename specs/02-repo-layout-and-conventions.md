@@ -100,9 +100,13 @@ Apps follow the same layout (`apps/api/src/va_api/...`, `apps/api/tests/...`).
 | PostgreSQL | 16 (image `pgvector/pgvector:pg16`) |
 | Redis | 7.2 (image `redis:7.2-alpine`) |
 | ClickHouse | 24.8 (image `clickhouse/clickhouse-server:24.8`) |
-| Temporal | `temporalio/auto-setup:1.25` + `temporalio/ui:2.31` |
-| MinIO | `minio/minio:RELEASE.2024-10-13T13-34-11Z` |
+| Temporal | `temporalio/auto-setup:1.25` + `temporalio/ui:2.31.2` |
+| MinIO | `bitnamilegacy/minio:2024.10.13` (MinIO `RELEASE.2024-10-13T13-34-11Z`; client `bitnamilegacy/minio-client:2024.10.8`) |
 | k6 | 0.54 |
+
+> Decision (2026-10-25): MinIO no longer publishes `minio/minio` or `minio/mc` images and `temporalio/ui:2.31` is not a
+> real tag, so the pins above use the frozen Bitnami builds of the same MinIO releases and `temporalio/ui:2.31.2`
+> (details: specs/29 §2 Decision).
 
 Core Python dependencies (declared in the package that uses them): `fastapi`, `uvicorn[standard]`, `pydantic>=2.9`,
 `pydantic-settings`, `sqlalchemy[asyncio]>=2.0.35`, `asyncpg`, `alembic`, `pgvector`, `redis>=5.1`, `httpx[http2]`,

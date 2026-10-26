@@ -1,0 +1,25 @@
+# Prometheus for local development (specs/27, specs/29 §2).
+# Services started on the host (`uv run ...`) are reached through host.docker.internal.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+  - job_name: telephony-edge
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8100"]
+  - job_name: media-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8200"]

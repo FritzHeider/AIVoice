@@ -36,7 +36,8 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 api 8000 · telephony-edge 8100 · media-worker 8200 · dashboard 3000 · docs 3100 · fake Telnyx 9100 · fake ElevenLabs 9200 ·
 fake LLM 9300 · fake Stripe 9400 · Postgres 5432 · Redis 6379 · ClickHouse HTTP 8123 (native 9000 inside the container is
 published as 9009) · Temporal 7233 · Temporal UI 8233 · MinIO API 9000 / console 9001 · Mailpit SMTP 1025 / UI 8025 ·
-OTel collector 4317 · Prometheus 9090 · Grafana 3001
+OTel collector 4317 (OTLP HTTP 4318, collector health 13133, collector metrics 8889) · Jaeger 16686 · Prometheus 9090 ·
+Grafana 3001
 
 ## Gotchas
 
@@ -122,3 +123,17 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
 - 2026-10-25 (P00-T08): Docker-dependent tests are `@pytest.mark.integration` and skip when the daemon socket is
   unreachable; probe it with a plain socket (`test_redis_integration._docker_available`): `docker.from_env()`
   leaks a socket on failure and `filterwarnings=error` turns the ResourceWarning into a session error.
+- 2026-10-25 (P00-T09): `make up` runs `scripts/dev_up.sh` with `PROFILE ?= infra`; profiles are comma-separated
+  (`make up PROFILE=infra,observability` adds Jaeger 16686, Prometheus, Grafana; `observability` alone does not start
+  Postgres etc.). `make down` stops every profile and keeps volumes; `scripts/dev_down.sh -v` wipes them. The Docker
+  daemon here is OrbStack (`orb start`); `docker compose config` works without a daemon.
+- 2026-10-25 (P00-T09): `docker compose up --wait` exits 1 when a one-shot container exits (even with code 0), so
+  `dev_up.sh` waits on the long-running services and runs one-shot jobs (`ONE_SHOT_SERVICES`, now `minio-init`) via
+  `docker compose run --rm`. Add new one-shot services to that list.
+- 2026-10-25 (P00-T09): MinIO no longer publishes images (`minio/minio`, `minio/mc` are gone from Docker Hub; Quay
+  401s). Compose uses `bitnamilegacy/minio:2024.10.13` (data in `/bitnami/minio/data`, no `command`) and
+  `bitnamilegacy/minio-client:2024.10.8`; use the same images for CI service containers. `mc mb -p` already means
+  `--ignore-existing` (passing both errors). `temporalio/ui` tags are full semver (`2.31.2`).
+- 2026-10-25 (P00-T09): `scripts/tests/test_compose.py` keeps `docker-compose.yml` in lockstep with the specs/29 §2
+  YAML block (image, ports, environment, command, entrypoint, ulimits, profiles), the specs/02 §2 image pins, the
+  Ports line above, and `.env.example`. Change them together.

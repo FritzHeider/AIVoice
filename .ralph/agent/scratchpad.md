@@ -1159,3 +1159,201 @@ Gates re-run: make lint/typecheck/placeholders exit 0; make test 682 passed, 1 s
 Re-ran the prior leak payload: message, logentry message/formatted/params, exception value, and frame vars
 (exception + threads) are now masked/redacted; api_key/token -> [REDACTED], transcript dropped, user email/ip
 removed; type/module/filename/function/lineno intact. specs/27 §8 Decision lists the fields.
+
+## Plan P00-T09 — docker-compose infrastructure profile
+
+Spec refs: specs/29 §2 (compose YAML is normative), specs/02 §2 (image pins), AGENTS.md Ports, specs/02 §6 / `.env.example`
+(credentials, buckets, endpoints). Later tasks own the rest of the compose file: sim service = P03 (phase-03 telnyx
+bootstrap task), Dockerfiles = P20-T01, apps/e2e profiles = P20-T02, dashboards + alert rules = P19-T02. So this task
+writes ONLY infra + observability services; no `build:` entries, no `x-py-env` anchor (nothing uses it yet; P20-T02 adds it).
+
+### Environment
+Docker daemon is NOT running (OrbStack installed: `/usr/local/bin/orb`). Builder: try `orb start` (then
+`docker info`) to get a daemon for the live `make up` evidence. `docker compose` CLI v5.5.0 is present, so
+`docker compose config` works without a daemon. If the daemon cannot be started after a genuine attempt, the static
+tests + `docker compose config --quiet` are the evidence and the scratchpad must say `make up` was not run (never claim it).
+
+### Decisions (record in specs/29 §2 as `> Decision (2026-10-25):` under the YAML block)
+1. `otel-collector` runs in profiles `[infra, apps, e2e, observability]`: every service exports OTLP to 4317
+   (`.env.example` OTEL_EXPORTER_OTLP_ENDPOINT, MASTER_PROMPT §9 lists the collector under `make up`). prometheus,
+   grafana, jaeger stay `[observability]` only. The collector exports traces to jaeger only when that profile runs:
+   collector config exports traces via `otlp/jaeger` exporter (`jaeger:4317`, tls insecure) — NO: an unreachable
+   exporter just logs retries; to keep infra-only logs clean use the `debug` exporter (verbosity basic) for traces
+   and a `prometheus` exporter on `0.0.0.0:8889` for metrics, plus `otlp/jaeger`. Choose: traces -> [otlp/jaeger],
+   with `sending_queue`/`retry_on_failure` defaults (failures only warn). Metrics -> [prometheus] (:8889, scraped by
+   Prometheus). Extensions: `health_check` on `0.0.0.0:13133`. Receivers: otlp grpc `0.0.0.0:4317`, http `0.0.0.0:4318`.
+   Processors: `memory_limiter` (check_interval 1s, limit_percentage 80, spike_limit_percentage 20) then `batch`.
+2. `make up` with no PROFILE must start the `infra` profile (today every service has a profile, so the current Makefile
+   starts nothing). Makefile: `PROFILE ?= infra`, `up: scripts/dev_up.sh $(PROFILE)`, `down: scripts/dev_down.sh`.
+3. `make down` stops all profiles: `docker compose --profile '*' down --remove-orphans` (keeps volumes; `dev_down.sh -v`
+   / `--volumes` also removes named volumes).
+4. Prometheus alert rules file mount is deferred to P19-T02 (spec mounts `infra/grafana/alerts.yaml`, plan P19 names
+   `infra/prometheus/alerts.yml`; P19 resolves which). Mounting a missing file makes Docker create a directory, so
+   do not mount it now.
+5. Healthchecks added beyond spec (plan requires them): mailpit (`["CMD", "/mailpit", "readyz"]`), temporal-ui
+   (`["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null || exit 1"]` — verify wget exists in image; if not,
+   omit and note), prometheus (`wget -qO- http://localhost:9090/-/ready`), grafana (`wget -qO- http://localhost:3000/api/health`),
+   jaeger (`wget -qO- http://localhost:14269/` admin port; verify), otel-collector: the contrib image is distroless
+   (no shell/wget) — no container healthcheck; readiness is the `health_check` extension on 13133 published as
+   `13133:13133` so dev_up.sh can curl it. Document which services lack a healthcheck and why.
+6. Temporal healthcheck: spec uses `tctl`; `temporalio/auto-setup:1.25` ships both `tctl` and `temporal`. Keep spec form
+   if it works on a live daemon; otherwise use `["CMD", "temporal", "operator", "cluster", "health", "--address",
+   "temporal:7233"]` and record a Decision. Add `start_period: 30s` (schema setup is slow).
+7. postgres-init `01-roles.sql` per spec text after the YAML: roles `va_app`, `va_system` (LOGIN PASSWORD 'va') and
+   database `temporal`. Risk: auto-setup also creates `temporal` + `temporal_visibility`; verify auto-setup tolerates
+   an existing `temporal` DB (its create step ignores "already exists" in 1.25 — confirm on live run). If it fails,
+   drop the CREATE DATABASE and record a Decision. Make role creation idempotent with `DO $$ ... IF NOT EXISTS ... $$`.
+   File lives at `infra/docker/postgres-init/01-roles.sql` (placeholder gate scans infra/; keep it clean).
+8. `minio-init` is one-shot. `docker compose up --wait` can fail on an exited container on some compose versions.
+   Test on the live daemon; if `--wait` errors on `minio-init exited (0)`, `dev_up.sh` runs
+   `docker compose --profile P up -d --wait --wait-timeout 180 <long-running services>` and then
+   `docker compose --profile P run --rm minio-init`. Make `mc mb` idempotent: `mc mb --ignore-existing`.
+   Add `restart: "no"`.
+
+### Files
+- `docker-compose.yml`: `name: voiceagents`; services postgres, redis, clickhouse, temporal, temporal-ui, minio,
+  minio-init, mailpit (profiles `[infra, apps, e2e]` exactly as spec; temporal-ui `[infra, apps]`), otel-collector
+  (decision 1, ports 4317, 4318, 13133, 8889), jaeger, prometheus, grafana (`[observability]`). Images/ports/env exactly
+  as specs/29 §2. Named volumes: `pgdata`, `miniodata` per spec, plus `redisdata` (`/data`, AOF is on),
+  `chdata` (`/var/lib/clickhouse`), `prometheusdata`, `grafanadata` — record in the Decision. Grafana env:
+  `GF_SECURITY_ADMIN_USER=admin`, `GF_SECURITY_ADMIN_PASSWORD=admin`, `GF_AUTH_ANONYMOUS_ENABLED=true`,
+  `GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer` (local only). Every long-running service `restart: unless-stopped`.
+- `infra/otel/collector.yaml` (decision 1).
+- `infra/prometheus/prometheus.yml`: `global: {scrape_interval: 15s, evaluation_interval: 15s}`; jobs:
+  `otel-collector` (`otel-collector:8889`), `prometheus` (`localhost:9090`), and host-run services via
+  `host.docker.internal` (api :8000, telephony-edge :8100, media-worker :8200, `metrics_path: /metrics`). Add
+  `extra_hosts: ["host.docker.internal:host-gateway"]` on prometheus (Linux). Worker-type metrics ports are decided
+  in P00-T12; leave a comment saying P00-T12/P20-T02 add them? NO (comments that promise future work could read as
+  placeholders) — simply scrape what exists now.
+- `infra/grafana/provisioning/datasources/prometheus.yaml` (Prometheus `http://prometheus:9090`, default, uid
+  `prometheus`) and `infra/grafana/provisioning/dashboards/voiceagents.yaml` (file provider, path
+  `/var/lib/grafana/dashboards`, folder VoiceAgents) + `infra/grafana/dashboards/` containing one real dashboard
+  `platform-overview.json` is P19 scope — instead keep the dashboards dir present via `.gitkeep`? Not allowed? A
+  `.gitkeep` is fine (not a placeholder token). Simpler: do not provision the dashboards provider yet; mount only
+  `./infra/grafana/provisioning`; drop the dashboards volume until P19-T02 (Decision 4 extended).
+- `scripts/dev_up.sh` (bash, `set -euo pipefail`): arg/`PROFILE` env default `infra`; checks `docker info` reachable
+  (clear error otherwise, exit 1); creates `.env` from `.env.example` if missing (compose `env_file` users later
+  need it; harmless now); `docker compose --profile "$profile" up -d --wait --wait-timeout 180`; then for profiles
+  including the collector, poll `http://localhost:13133/` up to 30 × 1 s via curl (`curl -fsS --retry 30
+  --retry-delay 1 --retry-all-errors`, no sleep loop); prints `docker compose ps`.
+- `scripts/dev_down.sh`: `docker compose --profile '*' down --remove-orphans` plus `-v` pass-through when called with
+  `-v|--volumes`; unknown arg -> usage + exit 2.
+- `Makefile`: decisions 2–3.
+- `pyproject.toml` dev group: `pyyaml`, `types-pyyaml`; `uv lock`.
+- AGENTS.md: Ports line add OTel HTTP 4318, collector health 13133, collector metrics 8889, Jaeger 16686
+  (observability profile); learned bullets: `make up` = infra profile; observability stack via
+  `make up PROFILE=observability` (note: that profile alone does NOT start postgres etc.; use
+  `COMPOSE_PROFILES=infra,observability docker compose up -d --wait` or make dev_up.sh accept a comma list:
+  implement `dev_up.sh infra,observability` by splitting on commas into repeated `--profile` flags — do this);
+  `make down` stops all profiles, `scripts/dev_down.sh -v` wipes volumes; `docker compose config` works without a daemon.
+
+### Tests — `scripts/tests/test_compose.py` (pyyaml, repo root via `Path(__file__).resolve().parents[2]`)
+- `test_image_pins_match_toolchain_table`: parse specs/02 §2 table rows whose value has an image in backticks
+  (`pgvector/pgvector:pg16`, `redis:7.2-alpine`, `clickhouse/...:24.8`, `temporalio/auto-setup:1.25`,
+  `temporalio/ui:2.31`, `minio/minio:RELEASE...`) and assert each equals the compose service image.
+- `test_images_match_spec_compose_block`: extract the ```yaml block under specs/29 §2, yaml-load it, and for every
+  service present in BOTH files assert identical `image`, `ports`, `profiles` (except otel-collector: assert spec
+  profiles ⊂ ours and `infra` added) and `environment`. Also assert every infra/observability service in the spec
+  block that has no `build:` exists in ours (catches drift both ways).
+- `test_infra_profile_services`: set of services with `infra` in profiles == {postgres, redis, clickhouse, temporal,
+  temporal-ui, minio, minio-init, mailpit, otel-collector}.
+- `test_ports_match_agents_md`: parse the AGENTS.md "## Ports (local)" paragraph into name->port for the infra names
+  (Postgres 5432, Redis 6379, ClickHouse HTTP 8123 + 9009:9000, Temporal 7233, Temporal UI 8233, MinIO 9000/9001,
+  Mailpit 1025/8025, OTel collector 4317, Prometheus 9090, Grafana 3001) and assert each host port is published by
+  the right service; and no two services publish the same host port.
+- `test_long_running_services_have_healthchecks`: every service except minio-init and otel-collector (documented
+  exceptions) defines `healthcheck.test`; depends_on conditions reference existing services.
+- `test_named_volumes_declared`: every `name:/path` volume source without `./` is in top-level `volumes`.
+- `test_credentials_match_env_example`: parse `.env.example` (reuse `env_spec` parser if it exposes one; else simple
+  `KEY=value  # comment` split) — DATABASE_URL user/pass/db == postgres env; S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY ==
+  MINIO_ROOT_*; minio-init entrypoint creates exactly S3_BUCKET_RECORDINGS/KB/VOICES; CLICKHOUSE_URL db == CLICKHOUSE_DB;
+  host ports in REDIS_URL/TEMPORAL_HOST/SMTP_URL/OTEL_EXPORTER_OTLP_ENDPOINT/S3_ENDPOINT_URL are published.
+- `test_collector_config`: otlp grpc endpoint `0.0.0.0:4317`, http `0.0.0.0:4318`, health_check `0.0.0.0:13133`,
+  every pipeline's receivers/processors/exporters are defined; memory_limiter is first processor.
+- `test_prometheus_config`: scrapes `otel-collector:8889`; every job has static targets; file referenced in compose.
+- `test_compose_mounts_exist`: every `./` bind source exists in the repo.
+- `test_postgres_init_sql`: creates va_app, va_system, temporal DB (per spec text).
+- `test_scripts_executable_and_strict`: dev_up.sh/dev_down.sh have exec bit, `#!/usr/bin/env bash`, `set -euo pipefail`.
+- `test_makefile_up_down_use_scripts`: Makefile `up` invokes `scripts/dev_up.sh`, `PROFILE ?= infra`, `down` invokes
+  `scripts/dev_down.sh`.
+- `test_docker_compose_config_valid` (`@pytest.mark.integration`? no — it needs only the CLI): skip if
+  `shutil.which("docker")` is None; run `docker compose --profile '*' config --quiet` via subprocess with timeout=30
+  and assert rc 0 (no daemon needed). Also `docker compose --profile infra config --services` == infra set.
+- `test_dev_down_rejects_unknown_arg`: run `bash scripts/dev_down.sh --bogus` -> exit 2 (it must parse args before
+  calling docker). And `dev_up.sh` exits 1 with a message when `docker info` fails: run with `PATH` pointing at a tmp
+  dir containing a fake `docker` script that exits 1 (+ real bash path) — no daemon touched.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make check`; live: `orb start` then `make up`, `docker compose ps`
+(all healthy), `curl -fsS localhost:13133/`, `make up PROFILE=infra,observability` then `make down`. pip-audit on
+`uv export`, pnpm audit, radon, jscpd; build.done plain string (mem-1792920384-602e).
+
+### Risks
+- Live verification depends on OrbStack starting; image pulls take minutes (use timeout 600000).
+- `filterwarnings=error` + subprocess: use `subprocess.run(..., check=False, capture_output=True, timeout=...)`.
+- Temporal auto-setup vs pre-created `temporal` DB, `tctl` presence, compose `--wait` with one-shot job — see
+  decisions 6–8; fix based on live behaviour and record what was observed.
+- ClickHouse 24.8 with `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` and empty default password allows network access only
+  when `CLICKHOUSE_SKIP_USER_SETUP=1` in newer images; 24.8 is fine but verify `curl localhost:8123/ping` and a query
+  `SELECT 1` from the host.
+- The placeholder gate scans `infra/` and `scripts/` — no banned tokens in YAML comments.
+
+## Build P00-T09 — done (Builder)
+
+Files: `docker-compose.yml` (infra + observability services, no build services), `infra/docker/postgres-init/01-roles.sql`
+(idempotent roles va_app/va_system + `temporal` DB via `\gexec`), `infra/otel/collector.yaml`, `infra/prometheus/prometheus.yml`,
+`infra/grafana/provisioning/datasources/prometheus.yaml`, `scripts/dev_up.sh` (comma-separated profiles, daemon check,
+`.env` bootstrap, `up --wait` on long-running services then `run --rm` for ONE_SHOT_SERVICES, collector health poll),
+`scripts/dev_down.sh` (`--profile '*' down --remove-orphans`, `-v`), Makefile (`PROFILE ?= infra`, up/down -> scripts),
+pyproject dev group `pyyaml`/`types-pyyaml`, `scripts/tests/test_compose.py` (32 tests), AGENTS.md Ports + 4 learned bullets.
+
+Live findings (OrbStack daemon started with `orb start`, Docker 29.8.2):
+- `minio/minio` and `minio/mc` no longer exist on Docker Hub (hub API "object not found"; Quay 401). Switched to
+  `bitnamilegacy/minio:2024.10.13` (binary reports RELEASE.2024-10-13T13-34-11Z, same commit) + `bitnamilegacy/minio-client:2024.10.8`.
+  Updated specs/02 §2 table + specs/29 §2 YAML block with Decision notes.
+- `temporalio/ui:2.31` tag does not exist -> `2.31.2` (spec updated).
+- `mc mb -p` IS `--ignore-existing`; combining errors -> kept spec form.
+- `docker compose up --wait` exits 1 on `minio-init exited (0)` -> dev_up.sh splits one-shot jobs (decision 8 fallback).
+- auto-setup 1.25 tolerates the pre-created `temporal` DB; spec `tctl` healthcheck works.
+Evidence: `make up` rc 0, all 8 long-running infra services healthy, buckets created, collector `/` "Server available",
+ClickHouse `SELECT 1` -> 1, roles va_app/va_system + DBs temporal/temporal_visibility present, redis PONG, mailpit/minio 200.
+`make up PROFILE=infra,observability` rc 0: jaeger/prometheus/grafana healthy, Prometheus targets otel-collector+prometheus up
+(host api/edge/media down: not running), Grafana datasource provisioned, OTLP/HTTP span to :4318 visible in Jaeger services.
+`make down` rc 0, 0 containers left, volumes kept.
+Gates: make fmt 0, lint 0, typecheck 0 (51 files), placeholders 0 findings, test 714 passed 1 skipped cov 99.95 %,
+make check 0 (spec refs 0 problems); pip-audit + pnpm audit no vulns; radon avg A (2.70), no C+ blocks; jscpd 0 clones.
+
+## Review P00-T09 — rejected (1 finding)
+
+Gates re-run: make lint 0, typecheck 0, placeholders 0 findings, test 714 passed 1 skipped (cov 99.95 %).
+Compose/spec/Decision review otherwise clean (images, ports, env, profiles, volumes, collector + prometheus config,
+roles SQL, Makefile, AGENTS.md all consistent with specs/29 §2 + Decisions).
+
+1. `scripts/dev_up.sh:73` — `for job in "${jobs[@]}"` crashes with `jobs[@]: unbound variable` (exit 1) under
+   `set -u` on bash < 4.4 whenever the selected profiles contain no one-shot service. Reproduced with a fake `docker`
+   on PATH: `PATH=<fake>:$PATH /bin/bash scripts/dev_up.sh observability` -> rc 1 after `up --wait` (stock macOS
+   bash 3.2; `#!/usr/bin/env bash` resolves to it on any Mac without Homebrew bash, which is how `make up` invokes
+   it). AGENTS.md documents `PROFILE=observability` as a usage, and the phase exit gate is a clean clone. Fix: guard
+   empty arrays (`if [[ ${#jobs[@]} -gt 0 ]]; then ...` or `${jobs[@]+"${jobs[@]}"}`; same care for any other
+   possibly-empty array expansion, e.g. `profile_flags` when PROFILES is `,`). Add a test in
+   `scripts/tests/test_compose.py` that runs dev_up.sh with a fake `docker` (info ok, `config --services` prints
+   only long-running services) and asserts rc 0 and that `run --rm` is not invoked; run it with `bash` and, when
+   present, `/bin/bash`, so macOS dev machines catch bash-3.2 regressions.
+
+## Build P00-T09 (rework after review) — done (Builder)
+
+Finding 1 fixed in `scripts/dev_up.sh`: one-shot job loop guarded by `${#jobs[@]} -gt 0`; an empty profile list
+(e.g. `,`) now exits 2 with "no profile given" before any array expansion (`profile_flags` can no longer be empty);
+comment explains the bash 3.2 `set -u` empty-array rule. `services` was already guarded (exit 2 when empty).
+Tests added in `scripts/tests/test_compose.py` (fake `docker` + `curl` on PATH, parametrized over `bash` on PATH and
+`/bin/bash`): observability profile without one-shot jobs -> rc 0 and no `run --rm`; `infra,observability` -> `up --wait`
+lists only long-running services and the next call is `run --rm minio-init`; `,` -> rc 2 and only `docker info` called.
+Verified the old script fails 3 of these on /bin/bash 3.2 (and the `,` case on Homebrew bash too).
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0, test 720 passed 1 skipped cov 99.95 %, make check 0;
+pip-audit no known vulns, pnpm audit no vulns, radon avg A (2.69), jscpd 0 clones.
+
+## Review P00-T09 (rework) — approved
+
+Gates re-run: make lint 0, typecheck 0, placeholders 0 findings, test 720 passed 1 skipped (cov 99.95 %).
+Finding 1 resolved: `jobs` loop guarded, empty profile list exits 2 before expansion; new fake-docker tests pass on
+both PATH bash and /bin/bash 3.2 (9 dev_up tests).

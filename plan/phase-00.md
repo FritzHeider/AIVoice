@@ -50,7 +50,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `redis_client(settings)`, `http_client(settings, *, timeout, http2)` with OTel httpx instrumentation, `setup_tracing(service_name)`, `metrics` registry helpers and `/metrics` ASGI app factory
   - Acceptance: unit tests with fake Redis (testcontainers Redis in integration test) and respx for httpx.
 
-- [ ] P00-T09 docker-compose infrastructure profile
+- [x] P00-T09 docker-compose infrastructure profile — infra+observability compose, dev_up/dev_down (bash 3.2 safe), live make up all healthy; 720 passed, cov 99.95 %, lint/typecheck/placeholders clean
   - Spec refs: specs/29-infrastructure.md (docker-compose); specs/02-repo-layout-and-conventions.md (Toolchain versions)
   - Depends on: P00-T01
   - Deliverables: `docker-compose.yml` (postgres pgvector, redis, clickhouse, temporal auto-setup, temporal-ui, minio + bucket-init job creating the three buckets, mailpit, otel-collector, prometheus, grafana) with healthchecks and named volumes; `infra/otel/collector.yaml`; `infra/prometheus/prometheus.yml`; `scripts/dev_up.sh`, `scripts/dev_down.sh`

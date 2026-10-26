@@ -6,6 +6,10 @@
 
 ## Fixes
 
+### mem-1792982690-b4e4
+> bash 3.2 (stock macOS /bin/bash) under set -u errors on "${arr[@]}" when arr is empty; guard with ${#arr[@]} checks; test scripts with /bin/bash too
+<!-- tags: tooling, bash | created: 2026-10-26 -->
+
 ### mem-1792981166-10bf
 > aioboto3 session.client(config=...) needs aiobotocore.config.AioConfig; mypy rejects botocore.config.Config
 <!-- tags: aws, mypy | created: 2026-10-26 -->

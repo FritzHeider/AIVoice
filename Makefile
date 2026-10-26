@@ -4,8 +4,8 @@ SHELL := /bin/bash
 
 # pnpm comes from corepack when it is not on PATH; package.json pins packageManager.
 PNPM ?= $(shell command -v pnpm >/dev/null 2>&1 && echo pnpm || echo corepack pnpm)
-# Optional compose profile for `make up` (e.g. PROFILE=apps).
-PROFILE ?=
+# Compose profiles for `make up`, comma-separated (e.g. PROFILE=apps or PROFILE=infra,observability).
+PROFILE ?= infra
 
 .PHONY: help setup up down migrate seed fmt lint typecheck test test-ts e2e e2e-ui openapi placeholders check load
 
@@ -19,11 +19,11 @@ setup: ## Preflight toolchain, install Python and Node deps, fetch models, gener
 	scripts/fetch_models.sh
 	uv run python scripts/generate_audio_assets.py
 
-up: ## Start infra (PROFILE=apps also starts services)
-	docker compose $(if $(PROFILE),--profile $(PROFILE),) up -d --wait
+up: ## Start infra and wait until healthy (PROFILE=apps also starts services)
+	scripts/dev_up.sh $(PROFILE)
 
-down: ## Stop infra and services
-	docker compose --profile apps down
+down: ## Stop infra and services in every profile (volumes kept)
+	scripts/dev_down.sh
 
 migrate: ## Apply database migrations
 	uv run alembic -c packages/va_db/alembic.ini upgrade head

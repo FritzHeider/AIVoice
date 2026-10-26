@@ -118,20 +118,19 @@ services:
     ports: ["7233:7233"]
     healthcheck: {test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"], interval: 10s, timeout: 5s, retries: 30}
   temporal-ui:
-    image: temporalio/ui:2.31
+    image: temporalio/ui:2.31.2
     profiles: [infra, apps]
     environment: {TEMPORAL_ADDRESS: temporal:7233}
     ports: ["8233:8080"]
   minio:
-    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    image: bitnamilegacy/minio:2024.10.13
     profiles: [infra, apps, e2e]
-    command: ["server", "/data", "--console-address", ":9001"]
     environment: {MINIO_ROOT_USER: minio, MINIO_ROOT_PASSWORD: minio12345}
     ports: ["9000:9000", "9001:9001"]
-    volumes: [miniodata:/data]
+    volumes: [miniodata:/bitnami/minio/data]
     healthcheck: {test: ["CMD", "mc", "ready", "local"], interval: 5s, timeout: 3s, retries: 20}
   minio-init:
-    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    image: bitnamilegacy/minio-client:2024.10.8
     profiles: [infra, apps, e2e]
     depends_on: {minio: {condition: service_healthy}}
     entrypoint: ["sh", "-c", "mc alias set local http://minio:9000 minio minio12345 && mc mb -p local/va-recordings local/va-kb local/va-voice-samples"]
@@ -216,6 +215,34 @@ volumes: {pgdata: {}, miniodata: {}}
 
 The `e2e` profile overrides `sim` with `SIM_CLOCK: accelerated` via `docker-compose.e2e.yml`. `infra/docker/postgres-init/01-roles.sql`
 creates roles `va_app` and `va_system` (password `va` locally) and database `temporal`.
+
+> Decision (2026-10-25): P00-T09 implements the infra and observability services of this block; the `sim` service,
+> the `x-py-env` anchor, and every `build:` service arrive with their own tasks. Deviations from the block above:
+> 1. MinIO's own images are no longer published (`minio/minio` and `minio/mc` are gone from Docker Hub and Quay
+>    returns 401), so MinIO runs from the frozen Bitnami builds of the same releases: `bitnamilegacy/minio:2024.10.13`
+>    (reports `RELEASE.2024-10-13T13-34-11Z`, commit `d10bb7e1`) and `bitnamilegacy/minio-client:2024.10.8`. The
+>    Bitnami image starts the server itself (API 9000, console 9001), so `command` is dropped and data lives in
+>    `/bitnami/minio/data`. `mc mb -p` is already idempotent (`-p` is `--ignore-existing`).
+> 2. `temporalio/ui:2.31` does not exist as a tag; the pin is `temporalio/ui:2.31.2`.
+> 3. `otel-collector` also runs in `infra`, `apps`, and `e2e`, because every service exports OTLP to `:4317`
+>    (`OTEL_EXPORTER_OTLP_ENDPOINT`). It publishes 4317/4318 (OTLP), 13133 (`health_check` extension, the readiness
+>    probe `scripts/dev_up.sh` polls; the contrib image has no shell, so there is no container healthcheck), and 8889
+>    (Prometheus exporter). `infra/otel/collector.yaml` sends traces to Jaeger (`otlp/jaeger`) and exposes metrics on
+>    8889; without the observability profile trace export only retries and logs warnings.
+> 4. Healthchecks are added to mailpit (`/mailpit readyz`), temporal-ui, jaeger (admin port 14269), prometheus
+>    (`/-/ready`), and grafana (`/api/health`); temporal gets `start_period: 30s`. Long-running services use
+>    `restart: unless-stopped`; `minio-init` uses `restart: "no"`.
+> 5. Extra named volumes keep state across restarts: `redisdata` (AOF), `chdata`, `prometheusdata`, `grafanadata`.
+>    Grafana gets local-only admin `admin`/`admin` and anonymous Viewer access, and a provisioned Prometheus
+>    datasource (`infra/grafana/provisioning/datasources/prometheus.yaml`). Prometheus scrapes the collector and the
+>    host-run api/edge/media services through `host.docker.internal` (`extra_hosts: host-gateway`).
+> 6. The alert-rules mount (`./infra/grafana/alerts.yaml`) and the dashboards mount (`./infra/grafana/dashboards`) are
+>    added with the dashboards and alert rules in phase 19; mounting a missing file makes Docker create a directory.
+> 7. `make up` runs `scripts/dev_up.sh` with `PROFILE ?= infra` (comma-separated lists allowed, e.g.
+>    `PROFILE=infra,observability`). `docker compose up --wait` treats an exited one-shot container as a failure, so the
+>    script waits on the long-running services and then runs `minio-init` with `docker compose run --rm`. `make down`
+>    runs `scripts/dev_down.sh` (`docker compose --profile '*' down --remove-orphans`; `-v` also removes volumes).
+> 8. `01-roles.sql` is idempotent; `temporalio/auto-setup:1.25` accepts the pre-created `temporal` database (verified).
 
 ## 3. Kubernetes Helm chart (`infra/helm/voiceagents`)
 
