@@ -23,6 +23,8 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Regenerate TS API types | `make openapi` then `corepack pnpm --filter dashboard gen:api` and `corepack pnpm --filter @voiceagents/sdk gen:api` |
 | Regenerate OpenAPI | `make openapi` (commit `openapi/openapi.json`) |
 | Run a service on the host | `uv run python -m va_edge.serve` · `-m va_api.serve` · `-m va_media.main` · `-m va_worker.main` · `-m va_webhooks.main` · `-m va_events_sink.main` · `-m va_sim_server.main` (all take `--host`/`--port`) |
+| Pre-commit hooks | `uv run pre-commit install` once; `uv run pre-commit run --all-files` (ruff, placeholders, prettier, actionlint, gitleaks) |
+| Lint CI workflows | `uv run actionlint` |
 | Phase progress | `scripts/ralph/status.sh` |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
 
@@ -213,3 +215,14 @@ Grafana 3001
 - 2026-10-25 (P00-T13): the placeholder gate scans TS too: no `) {}` / `=> {}` bodies (give callbacks a statement,
   e.g. `() => undefined` for a never-resolving promise executor is fine), no `console.log` outside `scripts/` dirs.
   The dashboard reads the api origin from `NEXT_PUBLIC_API_BASE_URL` (`src/lib/env.ts`, inlined at build time).
+- 2026-10-25 (P00-T14): `.github/workflows/ci.yml` jobs: `check` (runs `make check` with Postgres/Redis/ClickHouse/
+  MinIO service containers that mirror docker-compose.yml, applies `infra/docker/postgres-init/01-roles.sql` with psql,
+  writes `reports/pytest.xml` + `reports/coverage.xml` via `PYTEST_ADDOPTS`), `ts-build` (`pnpm -r run build` + `gen:api`
+  drift diff), `security` (gitleaks full history, `uvx pip-audit --strict` on `uv export`, `pnpm audit --audit-level
+  high`), `actionlint`. Changing a compose image/credential means changing the CI service too
+  (`scripts/tests/test_ci_workflow.py` asserts they match). gitleaks reads `.gitleaks.toml` (default rules + scoped
+  false-positive allowlists); keep `GITLEAKS_VERSION` in ci.yml equal to the pre-commit `rev`. Local hooks run tools
+  through `uv run`/`corepack pnpm exec`, so they use the locked versions.
+- 2026-10-25 (P00-T14 review): never `importlib.reload` an app module in tests; it rebinds module globals (`app`) in
+  place and breaks identity asserts in tests that imported the old object (order-dependent under xdist). Use
+  `monkeypatch.delitem(sys.modules, mod)` + `monkeypatch.setattr(pkg, name, original)` and `importlib.import_module`.

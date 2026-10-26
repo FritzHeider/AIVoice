@@ -369,6 +369,21 @@ Jobs (parallel where independent):
 6. `helm`: `helm lint`, `helm template` + `kubeconform -strict`.
 7. `docker-build` (needs 1–3): build all images with buildx cache (no push on PR), trivy image scan.
 
+> Decision (2026-10-25): P00-T14 ships the phase-00 subset of these jobs. `check` merges jobs 1-2 by running
+> `make check` (lint, typecheck, placeholders, pytest with coverage, `test-ts`, OpenAPI drift, spec refs) with GitHub
+> service containers for Postgres, Redis, ClickHouse, and MinIO whose images, credentials, and healthchecks equal
+> docker-compose.yml (service containers cannot mount the init SQL, so a step applies
+> `infra/docker/postgres-init/01-roles.sql` with psql; Docker stays available for testcontainers). `ts-build` covers
+> job 3's builds (`pnpm -r run build`: `next build`, the widget 60 KB gzip gate, SDK tsup) plus the `gen:api` drift
+> diff; lint/typecheck/test for TS already run in `check`. `security` runs gitleaks over the full history (checksum-verified
+> release binary rather than `gitleaks-action`, which needs a licence for organisations), pip-audit on
+> `uv export --frozen --all-packages --no-emit-workspace`, and `pnpm audit --audit-level high`; semgrep, trivy,
+> checkov, and tflint join when Dockerfiles and Terraform exist. A fourth job runs actionlint. `docs`, `helm`, and
+> `docker-build` arrive with the phases that create mkdocs, the chart, and the images. Actions are pinned to their
+> current major tags. Pre-commit (`.pre-commit-config.yaml`) uses local `language: system` hooks run through `uv run` /
+> `corepack pnpm exec` so hook versions are the locked versions, plus the remote gitleaks hook pinned to the same
+> version as CI; `.gitleaks.toml` extends the default rules with path- and match-scoped false-positive allowlists.
+
 ### 6.2 `e2e.yml` (on pull_request labeled `e2e`, on push to main, nightly)
 
 `docker compose --profile e2e up -d --build --wait`, `make e2e` (pytest e2e suite, `30` §5), `make e2e-ui`

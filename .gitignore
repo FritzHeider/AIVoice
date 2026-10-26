@@ -86,3 +86,6 @@ PROMPT.md
 ._*
 .AppleDouble
 Thumbs.db
+
+# CI test reports (PYTEST_ADDOPTS in .github/workflows/ci.yml)
+/reports/

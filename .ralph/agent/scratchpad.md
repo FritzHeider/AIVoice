@@ -2245,3 +2245,152 @@ spec refs 0, openapi current. Diff checked against specs/25 §23 (tokens match T
 API client CSRF + both error envelopes), specs/26 §2.2/§3 (retry set, backoff 0.5 s×2^n full jitter cap 8 s, error
 classes by status), specs/22 §4 (Shadow DOM mount, data-* auto-init), specs/31 §1 (`errors[].error` code key). Reviewer
 fix: AGENTS.md said Vitest 3, packages pin Vitest ^4.1.12 — corrected.
+
+## Plan P00-T14 — CI workflow and pre-commit
+
+Spec refs: specs/29 §6.1 (ci.yml jobs), specs/02 §9 (gates), specs/28 T17 / §2 (gitleaks pre-commit + CI). Phase prompt:
+"`.github/workflows/ci.yml` running `make check` on push/PR with service containers".
+
+### Decisions (record as `> Decision (2026-10-25):` under specs/29 §6.1, same commit)
+(a) Phase-00 `ci.yml` jobs: `check` (merges §6.1 jobs 1–2: `make check` = lint/typecheck/placeholders/pytest/test-ts/
+    openapi drift/spec refs, with service containers Postgres/Redis/ClickHouse/MinIO + Docker for testcontainers),
+    `ts-build` (`pnpm -r run build`: next build, widget size gate ≤ 60 KB, SDK tsup; then `gen:api` drift: run
+    `pnpm --filter dashboard run gen:api` and `pnpm --filter @voiceagents/sdk run gen:api` then
+    `git diff --exit-code -- apps/dashboard/src/lib/api/schema.d.ts sdks/typescript/src/schema.d.ts`; check output is
+    prettier-stable — if gen output differs from committed only by formatting, drop the diff step and rely on the
+    schema drift Vitest tests, note in Decision), `security` (gitleaks via `gitleaks/gitleaks-action@v2` or the gitleaks
+    binary with `fetch-depth: 0`, `uvx pip-audit` on `uv export --frozen --all-packages --no-hashes --no-emit-workspace`,
+    `pnpm audit --audit-level high`), `actionlint` (runs actionlint on `.github/workflows/`). Jobs docs/helm/docker-build
+    and semgrep/trivy/checkov/tflint are added by the phases that create mkdocs/helm/Dockerfiles/terraform.
+(b) Actions pinned to major version tags (`actions/checkout@v5`, `astral-sh/setup-uv@v7` (with `enable-cache: true`,
+    `cache-dependency-glob: uv.lock`), `actions/setup-node@v5` (`node-version-file: .nvmrc`, `cache: pnpm`),
+    `pnpm/action-setup@v4` (reads `packageManager`), `actions/upload-artifact@v4`). Verify current majors with
+    `gh api repos/<owner>/<repo>/releases/latest` or web before writing; use whatever is latest.
+(c) Pre-commit hooks are `repo: local`, `language: system`, running through `uv run` / `corepack pnpm exec` so hook
+    versions equal the locked versions (no separate hook pins to drift). gitleaks hook = `repo: https://github.com/gitleaks/gitleaks`
+    pinned rev (latest tag) per specs/28 T17.
+
+### Files
+- `.github/workflows/ci.yml`:
+  - `name: ci`; `on: push: branches: [main]`, `pull_request:`; `permissions: contents: read`;
+    `concurrency: {group: ci-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true}`;
+    top-level `env: {UV_FROZEN: "1"? (no — pass --frozen explicitly), NEXT_TELEMETRY_DISABLED: "1", FORCE_COLOR: "1",
+    PYTHONUNBUFFERED: "1"}`.
+  - `check` job: `runs-on: ubuntu-latest`, `timeout-minutes: 30`, `services:` postgres (`pgvector/pgvector:pg16`,
+    env POSTGRES_USER/PASSWORD/DB = va/va/va, ports 5432:5432, `options: --health-cmd "pg_isready -U va" --health-interval
+    5s --health-timeout 3s --health-retries 20`), redis (`redis:7.2-alpine`, 6379, `redis-cli ping`), clickhouse
+    (`clickhouse/clickhouse-server:24.8`, 8123+9000? — 9000 clashes with MinIO: map clickhouse native to 9009:9000? use
+    8123:8123 and 9440? keep clickhouse 8123 only + `CLICKHOUSE_SKIP_USER_SETUP=1`/user env matching docker-compose.yml,
+    health `wget -qO- http://localhost:8123/ping`), minio (`bitnamilegacy/minio:2024.10.13`, env MINIO_ROOT_USER/PASSWORD
+    as compose, 9000:9000, health `mc ready local`). Images and env MUST match docker-compose.yml (test asserts).
+    Job env: DATABASE_URL/REDIS_URL/CLICKHOUSE_URL/S3_ENDPOINT_URL etc. with the names from specs/02 §6 pointing at
+    localhost (read `.env.example` for exact var names/forms; use only names that exist there).
+    Steps: checkout; setup-uv (python-version from `.python-version`); pnpm/action-setup; setup-node; `uv sync
+    --all-packages --frozen`; `corepack pnpm install --frozen-lockfile` (or `pnpm install --frozen-lockfile`);
+    `scripts/fetch_models.sh` with `actions/cache` keyed on `hashFiles('models/MANIFEST.json')` for `models/` (only if
+    any test needs model files — check; if not, skip this step); `make check`; upload `coverage.xml`/junit as artifact
+    (add `PYTEST_ADDOPTS: --junitxml=reports/pytest.xml --cov-report=xml:reports/coverage.xml` env so `make check`
+    stays unchanged; ensure `reports/` gitignored), `if: always()`.
+  - `ts-build`, `security`, `actionlint` jobs per Decision (a). actionlint job: `uv sync --frozen --only-group dev`? simpler:
+    `uvx --from actionlint-py@<locked version> actionlint` or `uv run actionlint` after sync.
+- `.pre-commit-config.yaml`: `default_install_hook_types: [pre-commit]`, `fail_fast: false`, repos:
+  local hooks — `ruff` (`uv run ruff check --fix`, `types_or: [python, pyi]`, `require_serial: true`), `ruff-format`
+  (`uv run ruff format`), `placeholders` (`uv run python scripts/check_no_placeholders.py`, `pass_filenames: false`,
+  `always_run: true`), `prettier` (`corepack pnpm exec prettier --write --ignore-unknown`, `files: ^(apps|sdks)/`,
+  `types_or: [javascript, jsx, ts, tsx, css, json, yaml, markdown]`), `actionlint` (`uv run actionlint`, `files:
+  ^\.github/workflows/`); remote `gitleaks` hook (pinned rev). Exclude `^(specs|plan|prompts)/` and `uv.lock|pnpm-lock.yaml`
+  globally where relevant (ruff already excludes *.md).
+- `pyproject.toml` dev group: add `actionlint-py>=1.7.12` and `pre-commit>=4` (check latest); `uv lock`.
+- `scripts/tests/test_ci_workflow.py` (pyyaml; note YAML `on:` parses as `True` key — handle):
+  - `test_actionlint_passes` — subprocess actionlint binary (resolve via `shutil.which("actionlint")` in venv; the dev dep
+    guarantees it; fail, not skip, when missing) on `.github/workflows/ci.yml`, exit 0, empty output.
+  - `test_actionlint_detects_broken_workflow` — tmp file with an undefined job in `needs:` / bad expression → exit ≠ 0.
+  - `test_triggers_push_main_and_pull_request`, `test_permissions_read_only`, `test_concurrency_cancels`.
+  - `test_check_job_runs_make_check` (a step `run` contains `make check`), `test_check_job_uses_frozen_installs`
+    (`uv sync --all-packages --frozen`, `--frozen-lockfile`).
+  - `test_service_images_match_compose` — for postgres/redis/clickhouse/minio, service `image` equals the image in
+    docker-compose.yml, and each has `--health-cmd` in options.
+  - `test_service_env_matches_compose` — credentials env equal compose's for each service.
+  - `test_job_env_names_exist_in_env_example` — every env key on the check job is a variable in `.env.example` or in an
+    explicit allowlist (`NEXT_TELEMETRY_DISABLED`, `FORCE_COLOR`, `PYTHONUNBUFFERED`, `PYTEST_ADDOPTS`).
+  - `test_every_job_has_timeout`, `test_actions_pinned_to_versions` (every `uses:` has `@` and no `@main`/`@master`).
+  - `test_security_job_runs_audits` (pip-audit, pnpm audit, gitleaks present), `test_ts_build_job_builds`.
+  - pre-commit: `test_precommit_config_valid` — `pre-commit validate-config .pre-commit-config.yaml` exit 0;
+    `test_precommit_has_required_hooks` (ids ruff, ruff-format, placeholders, prettier, gitleaks);
+    `test_precommit_local_hooks_use_locked_tools` (local entries start with `uv run` or `corepack pnpm exec`).
+  - Keep helpers tiny (jscpd), share `load_yaml` with test_compose? No cross-test import; small fixture.
+- AGENTS.md (dated P00-T14): `uv run pre-commit install`, `uv run pre-commit run --all-files`, `uv run actionlint`,
+  CI job layout, `PYTEST_ADDOPTS` reports, "CI mirrors make check".
+- specs/29 §6.1 Decision note; plan tick done by Reviewer.
+
+### Gates
+`make fmt lint typecheck placeholders test test-ts`, `make check`; `uv run actionlint` 0; `uv run pre-commit run
+--all-files` 0 (must leave tree unchanged — if prettier/ruff rewrite anything, fix the hook scope); pip-audit + pnpm audit;
+radon; jscpd. If `gh`/`act` unavailable, local commands equal to every CI step are the evidence (run `pnpm -r run build`,
+gen:api diff, pip-audit, gitleaks if installable via `brew`/binary — else note it).
+
+### Risks
+- MinIO 9000 vs ClickHouse native 9000 port clash in services → don't publish ClickHouse 9000.
+- GitHub service containers can't set `command`; bitnami minio needs none. ClickHouse may need `ulimits` → only via
+  options `--ulimit nofile=262144:262144`.
+- YAML 1.1 `on` → True in pyyaml.
+- pre-commit `prettier --write` on `.github/*.yml` or root md could rewrite specs; scope `files`.
+- actionlint runs shellcheck only if installed; fine without. pnpm action-setup must precede setup-node `cache: pnpm`.
+- Placeholder checker scans `scripts/`; `.github` not scanned.
+
+## Build P00-T14 — done (Builder)
+
+Files: `.github/workflows/ci.yml` (jobs check / ts-build / security / actionlint), `.pre-commit-config.yaml`,
+`.gitleaks.toml`, `scripts/tests/test_ci_workflow.py` (30 tests), `.gitignore` (`/reports/`), dev deps
+`actionlint-py>=1.7.12.25`, `pre-commit>=4.7.0` (uv.lock), AGENTS.md (commands rows + P00-T14 line), specs/29 §6.1 Decision.
+Deviations from plan:
+- Action majors are newer than the plan guessed (verified via `gh api .../releases/latest`): checkout@v7, setup-uv@v10,
+  setup-node@v7, pnpm/action-setup@v6, upload-artifact@v7.
+- gitleaks runs from the checksum-verified v8.30.1 release binary (gitleaks-action needs an org licence); pre-commit rev
+  v8.30.1 (test asserts the two agree). Full-history scan found one false positive (`plan/phase-20.md:48`
+  "key rotation, Telnyx/ElevenLabs" → generic-api-key); `.gitleaks.toml` extends defaults with a path+match AND allowlist.
+- Placeholder hook id is `check_no_placeholders` (the bare word trips the checker's filler-word rule in the test file).
+- No model fetch step: tests use a synthetic models dir (`apps/media_worker/tests/conftest.py`).
+- Service containers can't mount init SQL → step runs `psql -f infra/docker/postgres-init/01-roles.sql`.
+- gen:api output is byte-identical to committed schema.d.ts, so the ts-build diff step is kept.
+Gates: make fmt 0; make check 0 (ruff, mypy 139 files, placeholders 0, pytest 1120 passed 1 skipped 99.83 %, Vitest
+widget 22 / dashboard 52 / sdk 48, openapi current, spec refs 0); actionlint 0; pre-commit run --all-files all Passed,
+tree unchanged; pnpm -r build 0 (widget 2296 B gzip); gen:api diff 0; pip-audit --strict 0 vulns; pnpm audit 0; gitleaks
+git (local darwin binary) no leaks; jscpd 0 clones; radon: only pre-existing api C test. Not run: the workflow on GitHub
+itself (no act); local equivalents of every step were run instead.
+
+## Review P00-T14 — rejected (1 finding)
+
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, `uv run actionlint` 0, pre-commit validate-config 0,
+make test-ts passed. make test: **1 failed**, 1119 passed, 1 skipped (`apps/api/tests/test_serve.py::test_serve_main_defaults`).
+CI diff itself (ci.yml, .pre-commit-config.yaml, .gitleaks.toml, test_ci_workflow.py, specs/29 Decision, AGENTS.md)
+checked against specs/29 §6.1 and compose/.env.example: no findings there.
+
+1. `apps/api/tests/test_serve.py:9,16` vs `apps/api/tests/test_lifespan.py:76`: order-dependent failure, and CI
+   (`make check`, `pytest -n auto`) will hit it whenever xdist puts both files on the same worker.
+   `test_module_app_imports_without_io` calls `importlib.reload(va_api.main)`, which builds a new `app` object.
+   test_serve imported `app` at module import time (stale object), but `serve.main` lazily imports the *current*
+   `va_api.main.app`, so `seen == [(app, ...)]` fails on identity. Reproduce deterministically:
+   `uv run pytest -p no:randomly --no-cov -q apps/api/tests/test_lifespan.py apps/api/tests/test_serve.py` → 1 failed.
+   Fix the cause (no retries): in test_serve, compare against `sys.modules["va_api.main"].app` /
+   `importlib.import_module("va_api.main").app` resolved at assertion time; or have the lifespan test restore the
+   original module object (e.g. run the reload against a fresh import under `monkeypatch.setitem(sys.modules, ...)`
+   so the reload does not leak). Grep the other apps' tests for the same reload+module-level-import pattern
+   (`importlib.reload` in apps/*/tests) and fix any sibling. Re-run the reproduce command plus a full `make check`.
+
+## Build P00-T14 (rework after review) — done (Builder)
+
+Finding 1 fixed at the cause: `apps/api/tests/test_lifespan.py::test_module_app_imports_without_io` no longer calls
+`importlib.reload(va_api.main)` (which rebinds `va_api.main.app` in place and left test_serve holding a stale app). It
+now `monkeypatch.delitem(sys.modules, "va_api.main")` + `monkeypatch.setattr(va_api, "main", main)` and imports a fresh
+copy, asserting it is a distinct module with the expected app; teardown restores the original module object and package
+attribute. Sibling grep: no other `importlib.reload` in apps/*/tests or packages/*/tests (telephony_edge uses
+import_module without reload, resolves app at assertion time — fine).
+Gates: reproduce command (lifespan then serve, -p no:randomly) 7 passed; serve/lifespan/serve order 7 passed; make fmt 0,
+lint 0, typecheck 0, placeholders 0, test 1120 passed 1 skipped 99.83 %; make check 0.
+
+## Review P00-T14 (rework) — approved
+
+Re-ran: reproduce command (lifespan then serve, -p no:randomly) 7 passed; make lint 0, typecheck 0, placeholders 0,
+test 1120 passed 1 skipped 99.83 %, test-ts 0, actionlint 0. Fix removes reload and restores module via monkeypatch.
+AGENTS.md gained the no-reload gotcha. Committed 2cee168.

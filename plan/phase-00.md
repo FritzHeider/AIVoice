@@ -80,7 +80,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `apps/dashboard` (Next.js 15, Tailwind 4, shadcn/ui, tokens, root layout, `/status` page), `apps/widget` (Vite lib build, `init()` mounting Shadow DOM), `sdks/typescript` (client constructor + `health()`), ESLint/Prettier/tsconfig strict for each, Vitest tests
   - Acceptance: `pnpm -r lint typecheck test build` passes.
 
-- [ ] P00-T14 CI workflow and pre-commit
+- [x] P00-T14 CI workflow and pre-commit — ci.yml (check/ts-build/security/actionlint), pre-commit hooks, gitleaks config; actionlint 0, pytest 1120 passed 1 skipped 99.83 %, Vitest all green, lint/typecheck/placeholders 0
   - Spec refs: specs/29-infrastructure.md (CI/CD); specs/02-repo-layout-and-conventions.md (Quality gates)
   - Depends on: P00-T03, P00-T04, P00-T11, P00-T13
   - Deliverables: `.github/workflows/ci.yml` (uv + pnpm caching, service containers for Postgres/Redis/ClickHouse/MinIO, `make check`), `.pre-commit-config.yaml` (ruff, ruff-format, placeholder check, prettier)

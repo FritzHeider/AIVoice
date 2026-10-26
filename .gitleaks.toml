@@ -1,0 +1,14 @@
+# gitleaks configuration (specs/28 T17): the default ruleset plus narrowly scoped false-positive allowlists.
+# Used by the `security` CI job and the pre-commit hook; both read this file from the repository root.
+title = "voiceagents gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "plan/phase-20.md prose: 'key rotation, Telnyx/ElevenLabs' matches generic-api-key"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''key rotation, Telnyx/ElevenLabs''']
+paths = ['''^plan/phase-20\.md$''']
+condition = "AND"

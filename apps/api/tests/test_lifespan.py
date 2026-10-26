@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import socket
+import sys
 from typing import Any
 
 import pytest
@@ -73,9 +74,14 @@ def test_module_app_imports_without_io(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(msg)
 
     monkeypatch.setattr(socket.socket, "connect", no_network)
-    reloaded = importlib.reload(main)
-    assert reloaded.app.title == "VoiceAgents API"
-    assert reloaded.app.state.settings.service_name == "api"
+    # Import a fresh copy instead of importlib.reload: reload rebinds va_api.main.app in place, so tests that
+    # imported the original app object would compare against a stale one. monkeypatch restores both handles.
+    monkeypatch.delitem(sys.modules, "va_api.main")
+    monkeypatch.setattr(va_api, "main", main)
+    fresh = importlib.import_module("va_api.main")
+    assert fresh is not main
+    assert fresh.app.title == "VoiceAgents API"
+    assert fresh.app.state.settings.service_name == "api"
 
 
 def test_version_matches_metadata() -> None:

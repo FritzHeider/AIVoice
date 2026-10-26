@@ -35,6 +35,8 @@ dev = [
   "va-webhook-dispatcher",
   "va-events-sink",
   "va-sim",
+  "actionlint-py>=1.7.12.25",
+  "pre-commit>=4.7.0",
 ]
 
 [tool.uv]

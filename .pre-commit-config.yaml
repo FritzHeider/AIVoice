@@ -1,0 +1,45 @@
+# Pre-commit hooks. Install with `uv run pre-commit install`; run all with `uv run pre-commit run --all-files`.
+# Local hooks call the tools through `uv run` / `corepack pnpm exec`, so hook versions are the locked versions in
+# uv.lock and pnpm-lock.yaml. gitleaks is the only remote hook (specs/28 T17) and reads .gitleaks.toml.
+default_install_hook_types: [pre-commit]
+fail_fast: false
+exclude: ^(uv\.lock|pnpm-lock\.yaml|openapi/openapi\.json)$
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: check_no_placeholders
+        name: placeholder detector
+        entry: uv run python scripts/check_no_placeholders.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: prettier
+        name: prettier
+        entry: corepack pnpm exec prettier --write --ignore-unknown
+        language: system
+        files: ^(apps|sdks)/
+        types_or: [javascript, jsx, ts, tsx, css, json]
+      - id: actionlint
+        name: actionlint
+        entry: uv run actionlint
+        language: system
+        files: ^\.github/workflows/
+        types: [yaml]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

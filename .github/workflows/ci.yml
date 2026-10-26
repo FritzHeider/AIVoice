@@ -1,0 +1,181 @@
+# Continuous integration (specs/29 §6.1, phase-00 job layout per the Decision there).
+# `check` runs exactly `make check`, so a green local `make check` and a green CI agree.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+  PYTHONUNBUFFERED: "1"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  check:
+    name: make check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Images, credentials, and healthchecks mirror docker-compose.yml (scripts/tests/test_ci_workflow.py asserts it).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: va
+          POSTGRES_PASSWORD: va
+          POSTGRES_DB: va
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U va"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.2-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_DB: va
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["8123:8123", "9009:9000"]
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget -qO- http://localhost:8123/ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
+      minio:
+        image: bitnamilegacy/minio:2024.10.13
+        env:
+          MINIO_ROOT_USER: minio
+          MINIO_ROOT_PASSWORD: minio12345
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://va:va@localhost:5432/va
+      REDIS_URL: redis://localhost:6379/0
+      CLICKHOUSE_URL: http://default:@localhost:8123/va
+      S3_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY_ID: minio
+      S3_SECRET_ACCESS_KEY: minio12345
+      PYTEST_ADDOPTS: --junitxml=reports/pytest.xml --cov-report=xml:reports/coverage.xml
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version-file: .python-version
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Create database roles (docker-compose mounts this as an init script)
+        run: psql "postgresql://va:va@localhost:5432/va" -v ON_ERROR_STOP=1 -f infra/docker/postgres-init/01-roles.sql
+      - name: Install Python dependencies
+        run: uv sync --all-packages --frozen
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Quality gates
+        run: make check
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-reports
+          path: reports/
+          if-no-files-found: ignore
+
+  ts-build:
+    name: TypeScript builds and generated API types
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build (next build, widget bundle size gate, SDK tsup)
+        run: pnpm -r run build
+      - name: Generated API types match openapi/openapi.json
+        run: |
+          pnpm --filter dashboard run gen:api
+          pnpm --filter @voiceagents/sdk run gen:api
+          git diff --exit-code -- apps/dashboard/src/lib/api/schema.d.ts sdks/typescript/src/schema.d.ts
+
+  security:
+    name: Secrets and dependency audits
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version-file: .python-version
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install gitleaks (checksum-verified release binary)
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: gitleaks (full history)
+        run: gitleaks git --redact --verbose .
+      - name: pip-audit
+        run: |
+          uv export --frozen --all-packages --no-hashes --no-emit-workspace -o "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit --strict -r "$RUNNER_TEMP/requirements.txt"
+      - name: pnpm audit
+        run: pnpm audit --audit-level high
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version-file: .python-version
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install Python dependencies
+        run: uv sync --all-packages --frozen
+      - name: actionlint
+        run: uv run actionlint

@@ -6,6 +6,14 @@
 
 ## Fixes
 
+### mem-1792988571-0143
+> Never importlib.reload an app module in tests: it rebinds module globals (app) in place and breaks identity asserts in tests that imported the old object (xdist order-dependent). Use monkeypatch.delitem(sys.modules, mod) + setattr(pkg, name, orig) then import_module for a fresh copy
+<!-- tags: testing, pytest | created: 2026-10-26 -->
+
+### mem-1792988312-0c44
+> gitleaks full-history scan: plan/phase-20.md:48 'key rotation, Telnyx/ElevenLabs' is a generic-api-key false positive, allowlisted in .gitleaks.toml (path+match AND); the word 'placeholders' in .py trips check_no_placeholders filler-word rule unless written as check_no_placeholders
+<!-- tags: tooling, ci | created: 2026-10-26 -->
+
 ### mem-1792987695-026b
 > pnpm audit in TS workspace: vitest 3.x pulls critical tinypool advisories (use vitest ^4.1.12); next 15.5 pins postcss 8.4.31 (override postcss@<8.5.23 in root package.json pnpm.overrides); Next 15.5 next-env.d.ts references .next/types so git-ignore it
 <!-- tags: tooling, typescript, pnpm | created: 2026-10-26 -->
