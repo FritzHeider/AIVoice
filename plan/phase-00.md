@@ -86,5 +86,11 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `.github/workflows/ci.yml` (uv + pnpm caching, service containers for Postgres/Redis/ClickHouse/MinIO, `make check`), `.pre-commit-config.yaml` (ruff, ruff-format, placeholder check, prettier)
   - Acceptance: workflow YAML validates with `actionlint` (run via `uvx`/binary in a test or documented script) and the same commands pass locally.
 
+- [x] P00-FIX-1: make exit gate pass — `make setup` fails at the toolchain preflight: `uv run --no-project --python 3.12` puts the interpreter dir (`/opt/homebrew/bin`) first on PATH, so `check_toolchain.py` sees Homebrew node 26.9.0 rather than the shell's nvm node 22 ("FAIL node: found 26.9.0, need >=22,<23") — check_toolchain `--search-path` + Makefile passes "$$PATH"; review re-ran lint/typecheck/placeholders 0, pytest 1125 passed 1 skipped 99.83 %, preflight with flag ok node 22.23.4; builder clean-clone setup/up/check 0
+  - Spec refs: specs/02 §2, §3
+  - Depends on: P00-T01
+  - Deliverables: `scripts/check_toolchain.py` `--search-path` option (tools resolved and run with the caller's PATH), Makefile `setup` passes `--search-path "$$PATH"`, tests, AGENTS.md row
+  - Acceptance: on a clean clone under /Users with nvm node 22 first on the shell PATH and Homebrew node 26 in /opt/homebrew/bin, `make setup && make up && make check` exits 0; unit tests prove the search path wins over the process PATH
+
 ## Phase exit gate
 `make setup && make up && make check` passes; `docker compose ps` all healthy; `make openapi` clean.

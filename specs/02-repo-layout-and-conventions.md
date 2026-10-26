@@ -150,6 +150,10 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 > succeed while workspace packages are still being added. `scripts/check_toolchain.py` is the `make setup` preflight for
 > the §2 versions (Docker/Compose are warnings only, since they are needed for `make up`, not setup). Root ruff config
 > excludes `*.md` so `ruff format` never rewrites code samples in specs, prompts, or plans.
+>
+> Decision (2026-10-25): `make setup` runs the preflight as `check_toolchain.py --search-path "$$PATH"`: `uv run
+> --python 3.12` prepends the interpreter's directory to PATH, which can shadow the shell's node/pnpm/uv/docker, so the
+> preflight resolves tools against the caller's PATH instead.
 
 ## 4. Python conventions
 

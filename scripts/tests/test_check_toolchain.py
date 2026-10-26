@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -149,6 +151,7 @@ def test_subprocess_runner_success(monkeypatch: pytest.MonkeyPatch) -> None:
         "text": True,
         "timeout": ct.COMMAND_TIMEOUT_SECONDS,
         "check": False,
+        "env": None,
     }
 
 
@@ -169,3 +172,68 @@ def test_subprocess_runner_unavailable(monkeypatch: pytest.MonkeyPatch, error: E
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert ct.subprocess_runner(("pnpm", "--version")) is None
+
+
+def test_parse_args_search_path() -> None:
+    assert ct.parse_args(["--search-path", "/a:/b"]).search_path == "/a:/b"
+
+
+def test_parse_args_default_none() -> None:
+    assert ct.parse_args([]).search_path is None
+
+
+def write_tool(directory: Path, name: str, body: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text(f"#!/bin/sh\n{body}\n")
+    tool.chmod(0o755)
+
+
+def test_subprocess_runner_uses_search_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    good, shadow = tmp_path / "good", tmp_path / "shadow"
+    write_tool(good, "node", "echo v22.1.0")
+    write_tool(shadow, "node", "echo v26.9.0")
+    monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{os.environ['PATH']}")
+
+    chosen = ct.subprocess_runner(
+        ("node", "--version"), search_path=f"{good}{os.pathsep}{os.environ['PATH']}"
+    )
+    assert chosen is not None
+    assert "22.1.0" in chosen
+
+    inherited = ct.subprocess_runner(("node", "--version"))
+    assert inherited is not None
+    assert "26.9.0" in inherited
+
+
+def test_main_with_search_path_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good, shadow = tmp_path / "good", tmp_path / "shadow"
+    write_tool(good, "uv", "echo uv 0.12.17")
+    write_tool(good, "node", "echo v22.1.0")
+    write_tool(good, "pnpm", "echo 9.15.9")
+    write_tool(
+        good,
+        "docker",
+        'if [ "$1" = compose ]; then echo "Docker Compose version v2.29.0"; '
+        'else echo "Docker version 27.0.0"; fi',
+    )
+    write_tool(shadow, "node", "echo v26.9.0")
+    monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{good}{os.pathsep}/usr/bin{os.pathsep}/bin")
+
+    assert (
+        ct.main(["--search-path", f"{good}{os.pathsep}/usr/bin{os.pathsep}/bin"], python_version=(3, 12, 7))
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "ok   node 22.1.0" in out
+    assert "ok   docker compose 2.29.0" in out
+
+    assert ct.main([], python_version=(3, 12, 7)) == 1
+    assert "FAIL node: found 26.9.0, need >=22,<23" in capsys.readouterr().out
+
+
+def test_makefile_setup_passes_shell_path() -> None:
+    makefile = Path(__file__).resolve().parents[2] / "Makefile"
+    assert 'check_toolchain.py --search-path "$$PATH"' in makefile.read_text()

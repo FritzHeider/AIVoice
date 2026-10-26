@@ -2,10 +2,16 @@
 
 Checks that the local Python, uv, Node.js, pnpm, and Docker versions satisfy the pinned ranges. Required tools
 fail the check (exit 1); optional tools (Docker, only needed for `make up`) print a warning.
+
+`--search-path` takes the caller's shell PATH because `uv run --python X` prepends the interpreter's directory
+(e.g. /opt/homebrew/bin), which can shadow the node, pnpm, uv, and docker the shell would actually use.
 """
 
 from __future__ import annotations
 
+import argparse
+import functools
+import os
 import re
 import subprocess
 import sys
@@ -106,17 +112,27 @@ def evaluate(req: Requirement, output: str | None) -> CheckResult:
     )
 
 
-def subprocess_runner(cmd: Sequence[str]) -> str | None:
-    """Run ``cmd`` and return combined stdout/stderr, or ``None`` when it cannot run successfully."""
+def subprocess_runner(cmd: Sequence[str], search_path: str | None = None) -> str | None:
+    """Run ``cmd`` and return combined stdout/stderr, or ``None`` when it cannot run successfully.
+
+    When ``search_path`` is given, the command (and any ``#!/usr/bin/env`` shims it starts) resolves against
+    that PATH instead of this process's PATH.
+    """
+    env = None if search_path is None else {**os.environ, "PATH": search_path}
     try:
         completed = subprocess.run(
-            list(cmd), capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS, check=False
+            list(cmd), capture_output=True, text=True, timeout=COMMAND_TIMEOUT_SECONDS, check=False, env=env
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if completed.returncode != 0:
         return None
     return completed.stdout + completed.stderr
+
+
+def make_runner(search_path: str | None) -> Runner:
+    """Return a runner that resolves commands against ``search_path`` (``None`` keeps this process's PATH)."""
+    return functools.partial(subprocess_runner, search_path=search_path)
 
 
 def run_checks(
@@ -142,12 +158,27 @@ def format_result(result: CheckResult) -> str:
     return f"{label} {result.name}: {result.message}"
 
 
+def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Check the local toolchain against the pinned ranges.")
+    parser.add_argument(
+        "--search-path",
+        default=None,
+        help=(
+            "PATH used to find node, pnpm, uv, and docker; pass the shell's $PATH because `uv run` prepends "
+            "the interpreter directory"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
 def main(
     argv: Sequence[str] | None = None,
-    runner: Runner = subprocess_runner,
+    runner: Runner | None = None,
     python_version: tuple[int, ...] = tuple(sys.version_info[:3]),
 ) -> int:
-    del argv
+    args = parse_args(argv)
+    if runner is None:
+        runner = make_runner(args.search_path)
     results = run_checks(runner, python_version)
     for result in results:
         print(format_result(result))

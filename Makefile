@@ -13,7 +13,7 @@ help: ## List available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-14s %s\n", $$1, $$2}'
 
 setup: ## Preflight toolchain, install Python and Node deps, fetch models, generate audio assets
-	uv run --no-project --python 3.12 python scripts/check_toolchain.py
+	uv run --no-project --python 3.12 python scripts/check_toolchain.py --search-path "$$PATH"
 	uv sync --all-packages
 	$(PNPM) install
 	scripts/fetch_models.sh

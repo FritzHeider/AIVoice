@@ -8,7 +8,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Purpose | Command |
 |---|---|
 | Install everything | `make setup` |
-| Toolchain preflight | `uv run --no-project --python 3.12 python scripts/check_toolchain.py` |
+| Toolchain preflight | `uv run --no-project --python 3.12 python scripts/check_toolchain.py --search-path "$PATH"` |
 | Start infra + simulators | `make up` (apps too: `make up PROFILE=apps`) |
 | Stop | `make down` |
 | Migrate DB | `make migrate` |
@@ -226,3 +226,9 @@ Grafana 3001
 - 2026-10-25 (P00-T14 review): never `importlib.reload` an app module in tests; it rebinds module globals (`app`) in
   place and breaks identity asserts in tests that imported the old object (order-dependent under xdist). Use
   `monkeypatch.delitem(sys.modules, mod)` + `monkeypatch.setattr(pkg, name, original)` and `importlib.import_module`.
+- 2026-10-25 (P00-FIX-1): `uv run --no-project --python X` prepends the interpreter's directory to PATH (e.g.
+  `/opt/homebrew/bin`), which shadows nvm's node 22 with Homebrew's node 26. Tools that must match the shell's PATH get
+  it passed explicitly (`check_toolchain.py --search-path "$$PATH"` in the Makefile).
+- 2026-10-25 (P00-FIX-1): exit-gate clean clones go under `/Users/...`: Docker Desktop cannot bind-mount from
+  `/var/tmp` clones (collector config "not a directory"). The compose project name is fixed (`voiceagents`), so a
+  clone's `make up` replaces the main stack; run `make down` there and `make up` from the main repo afterwards.

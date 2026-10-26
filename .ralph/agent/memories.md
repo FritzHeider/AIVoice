@@ -6,6 +6,10 @@
 
 ## Fixes
 
+### mem-1792988928-d413
+> Exit-gate clean clones must live under /Users (Docker Desktop cannot bind-mount from /var/tmp: collector.yaml 'not a directory'); compose project name is fixed 'voiceagents' so a clone's make up replaces the main stack - make down/up from main repo after. uv run --no-project --python 3.12 prepends /opt/homebrew/bin to PATH, shadowing nvm node 22 with brew node 26
+<!-- tags: tooling, docker, ci | created: 2026-10-26 -->
+
 ### mem-1792988571-0143
 > Never importlib.reload an app module in tests: it rebinds module globals (app) in place and breaks identity asserts in tests that imported the old object (xdist order-dependent). Use monkeypatch.delitem(sys.modules, mod) + setattr(pkg, name, orig) then import_module for a fresh copy
 <!-- tags: testing, pytest | created: 2026-10-26 -->

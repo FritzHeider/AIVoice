@@ -2394,3 +2394,108 @@ lint 0, typecheck 0, placeholders 0, test 1120 passed 1 skipped 99.83 %; make ch
 Re-ran: reproduce command (lifespan then serve, -p no:randomly) 7 passed; make lint 0, typecheck 0, placeholders 0,
 test 1120 passed 1 skipped 99.83 %, test-ts 0, actionlint 0. Fix removes reload and restores module via monkeypatch.
 AGENTS.md gained the no-reload gotcha. Committed 2cee168.
+
+## Phase 00 exit gate run (Planner, 2026-10-25) — failed in `make setup`
+
+Clean clone (`git clone` to /Users/drop/AIVOICE-exitclone; /var/tmp is not in Docker Desktop file sharing, so the
+collector bind mount fails there — use a clone under /Users). Result:
+- `make setup` exit 2: `FAIL node: found 26.9.0, need >=22,<23`. Cause: `uv run --no-project --python 3.12` prepends the
+  interpreter's directory (`/opt/homebrew/bin`, Homebrew python3.12) to PATH; Homebrew also has node 26 there, shadowing
+  the shell's nvm node 22.23.4 (`make` itself sees node 22). Only the preflight is affected: the rest of setup calls
+  pnpm/node directly from make.
+- Remaining setup steps run by hand + `make up` (all 8 containers up; 7 healthy, otel-collector is distroless with no
+  compose healthcheck, dev_up checks :13133 from the host — accepted in P00-T09) + `make check` (1120 passed 1 skipped,
+  Vitest 22/52/48, drift/spec refs 0) + `make openapi` (tree clean): all exit 0.
+Clones deleted; stack restarted from the main repo. Added P00-FIX-1.
+
+## Plan P00-FIX-1 — toolchain preflight uses the caller's PATH
+
+Spec refs: specs/02 §2 (pinned toolchain ranges), §3 (`make setup`).
+
+### `scripts/check_toolchain.py`
+- Add `import argparse`, `import os`.
+- `subprocess_runner(cmd, search_path: str | None = None) -> str | None`: when `search_path` is not None, run with
+  `env={**os.environ, "PATH": search_path}` (POSIX subprocess resolves the executable against the env's PATH, and
+  `#!/usr/bin/env node` shims like pnpm/corepack then also pick the caller's node). Keep timeout/None semantics.
+- `make_runner(search_path: str | None) -> Runner`: returns `functools.partial(subprocess_runner, search_path=search_path)`
+  (or a small closure) so `run_checks` keeps its `Runner` signature.
+- `parse_args(argv) -> argparse.Namespace`: `--search-path` (str, default None, help: "PATH used to find node, pnpm,
+  uv, docker; pass the shell's $PATH because `uv run` prepends the interpreter directory").
+- `main(argv=None, runner: Runner | None = None, python_version=...)`: parse args (replace `del argv`); `runner = runner
+  if runner is not None else make_runner(args.search_path)`. Keep every function radon CC ≤ B.
+- Module docstring: one sentence on why `--search-path` exists.
+
+### `Makefile`
+`setup` line 16 → `uv run --no-project --python 3.12 python scripts/check_toolchain.py --search-path "$$PATH"`.
+
+### Tests (`scripts/tests/test_check_toolchain.py`, extend; keep existing tests passing — adapt any that call
+`main(argv, runner, ...)` positionally)
+- `test_parse_args_search_path` / `test_parse_args_default_none`.
+- `test_subprocess_runner_uses_search_path`: tmp dir A with executable `node` script printing `v22.1.0`, tmp dir B with
+  `node` printing `v26.9.0`; `monkeypatch.setenv("PATH", f"{B}:{os.environ['PATH']}")`; `subprocess_runner(("node",
+  "--version"), search_path=f"{A}:{os.environ['PATH']}")` contains `22.1.0`; with `search_path=None` contains `26.9.0`.
+  (Scripts: `#!/bin/sh\necho v22.1.0`, chmod 0o755.)
+- `test_main_with_search_path_passes`: full `main(["--search-path", ...])` with fake tools for uv/node/pnpm/docker in tmp
+  dir A (in range) and node 26 in B on process PATH → exit 0, output has `ok   node 22.1.0`; and without the flag → 1.
+  docker fakes: `docker --version` → "Docker version 27.0.0"; `docker compose version` → "Docker Compose version v2.29.0"
+  (one sh script switching on `$1`). Use real python version arg to avoid host dependence.
+- `test_makefile_setup_passes_shell_path`: Makefile text contains `check_toolchain.py --search-path "$$PATH"`.
+
+### Docs
+- AGENTS.md command row (line 11) → add `--search-path "$PATH"`; add gotcha: "`uv run --no-project --python X`
+  prepends the interpreter's directory to PATH (e.g. /opt/homebrew/bin), shadowing nvm node; tools that must match the
+  shell's PATH get it passed explicitly." Also gotcha: Docker Desktop cannot bind-mount from /var/tmp clones; exit-gate
+  clean clones go under /Users.
+- specs/02 near line 150 (existing check_toolchain note): append `> Decision (2026-10-25):` sentence on `--search-path`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make check`; then the exit-gate reproduction: clean clone under
+/Users/drop (e.g. `/Users/drop/AIVOICE-exitclone`), `make setup && make up && make check` exit 0 with the builder's
+uncommitted change applied (commit to a temp branch in the clone or copy the two files), delete the clone, and
+`make up` from the main repo afterwards (the compose project name is fixed `voiceagents`, so the clone's bind mounts
+replace the main stack's). radon, jscpd.
+
+### Risks
+- Windows irrelevant (POSIX-only dev).
+- Existing tests may call `main(None, runner, version)` positionally — keep parameter order.
+- Don't break the CI workflow: ci.yml does not call `make setup` (check), so no change there.
+
+## Build P00-FIX-1 — done (Builder)
+
+Files: `scripts/check_toolchain.py` (`subprocess_runner(cmd, search_path=None)` runs with `env={**os.environ, PATH}`
+when set, else `env=None`; `make_runner(search_path)` via functools.partial; `parse_args` with `--search-path`;
+`main(argv, runner: Runner | None = None, ...)`), `Makefile` setup line passes `--search-path "$$PATH"`,
+`scripts/tests/test_check_toolchain.py` (+5 tests: parse_args x2, runner uses search path with real shell-script fakes
+vs shadowing PATH, full main with/without flag, Makefile text; existing kwargs test now expects `env: None`),
+AGENTS.md (command row + two gotchas), specs/02 §3 Decision.
+Tests fail without the change (6 failed with Makefile + check_toolchain.py stashed).
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0, make check 0 (1125 passed 1 skipped 99.83 %, Vitest 22/52/48,
+openapi current, spec refs 0). Exit-gate reproduction: clean clone /Users/drop/AIVOICE-exitclone + changed files →
+`make setup` 0 (ok node 22.23.4), `make up` 0 (7 healthy + otel-collector up), `make check` 0; clone `make down`,
+deleted, main repo `make up` 0. radon no C+ in check_toolchain.py; pip-audit 0 vulns; pnpm audit 0; jscpd 0 clones.
+
+## Planner — build.blocked on P00-FIX-1 (2026-10-25)
+
+Cause: backpressure only. The build.done payload said `complexity: A`, but the parser needs `complexity: <number>`
+(see memory mem-1792920384-602e), so Ralph turned it into build.blocked. The code is fine: the uncommitted P00-FIX-1
+change (check_toolchain.py, Makefile, tests, AGENTS.md, specs/02) is still in the working tree. Running
+`uvx radon cc -a -s scripts/check_toolchain.py` now gives an average of A (3.17).
+No split or new prerequisite is needed. Builder: don't re-implement. Re-run `make fmt lint typecheck placeholders test`
+(or `make check`), pip-audit/pnpm audit, radon and jscpd on the existing diff. Then emit build.done as a plain string with
+numeric complexity, e.g. `tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, duplication: pass,
+complexity: 3.17, specs: pass`. The clean-clone exit-gate reproduction from the previous build already passed, so it
+doesn't need repeating unless the diff changes.
+
+## Build P00-FIX-1 (re-verify after payload-format block) — done (Builder)
+
+No code changes; existing diff re-verified. make fmt 0; make check 0 (ruff ok, mypy 139 files, placeholders 0, pytest
+1125 passed 1 skipped 99 %, Vitest 22/52/48, openapi current, spec refs 0). radon check_toolchain.py avg A (3.17);
+pip-audit --strict 0 vulns; pnpm audit 0; jscpd: 0 clones in changed files (repo-wide 4 pre-existing clones, 0.10 %,
+none in check_toolchain/Makefile).
+
+## Review P00-FIX-1 — approved
+
+Re-ran: make lint 0, typecheck 0, placeholders 0, test 1125 passed 1 skipped 99.83 %. Preflight via `uv run --no-project
+--python 3.12 ... --search-path "$PATH"` exit 0 (ok node 22.23.4). Diff (check_toolchain.py, Makefile, tests, AGENTS.md,
+specs/02 Decision) matches the plan; tests use real shell-script fakes against a shadowing PATH. No findings.
+Next: Planner re-runs the phase exit gate on a clean clone under /Users.
