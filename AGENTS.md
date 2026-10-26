@@ -63,3 +63,11 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
   (`specs: pass` optional). It substring-matches a plain string: emit without `--json` (JSON keys never match). Get them
   for real: audit = `uvx pip-audit` on `uv export` + `corepack pnpm audit`; complexity = `uvx radon cc -s -a`;
   duplication = `npx --yes jscpd@4`.
+- 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (104 keys);
+  `scripts/tests/test_env_example.py` fails when a variable exists on only one side, when a literal dev value differs,
+  or when an assignment loses its trailing comment. Add new variables to the spec table and `.env.example` in the same
+  commit. The mirror rules (literal / empty / free dev-value classes) are the `> Decision (2026-10-25)` block under
+  that table; the parsers live in `scripts/env_spec.py`.
+- 2026-10-25 (P00-T02): a stale `.DS_Store` inside `.venv/lib` makes `uv sync` fail with
+  `failed to remove directory .venv/lib: Directory not empty`. Fix: `find .venv -name .DS_Store -delete && rm -rf .venv`
+  then re-sync. This repo lives on an external volume where Finder writes `.DS_Store` everywhere.

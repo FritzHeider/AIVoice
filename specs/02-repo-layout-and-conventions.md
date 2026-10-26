@@ -288,6 +288,24 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `SIM_CLOCK` | sim | `realtime` | `realtime` or `accelerated` |
 | `SLACK_ALERTS_WEBHOOK` | CI (live-smoke workflow) | empty | Slack incoming webhook for live smoke failures |
 
+> Decision (2026-10-25): how `.env.example` mirrors this table is fixed as follows, and
+> `scripts/tests/test_env_example.py` (parsers in `scripts/env_spec.py`) fails when either side drifts.
+> The table declares 105 names in 104 rows — the `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` `` row declares two
+> names and splits its dev-value cell on `/` positionally — of which 104 are literal keys and one
+> (`LOG_LEVEL_<COMPONENT>`) is a name template. Dev-value cells fall into three classes: **literal** (the cell starts
+> with a backtick; the required value is the first backticked span, so `` `localhost:8100` (tunnel host for live
+> tests) `` means `localhost:8100` and ``` `console` in local, `json` elsewhere ``` means `console`), **empty** (the
+> cell is `empty` or starts with `empty `), and **free** (prose such as `64 random hex chars` or
+> ``created by `scripts/telnyx_bootstrap.py` ``). `.env.example` then carries, in table order, one
+> `NAME=value  # comment` line per literal key with a non-empty trailing comment; literal-class values appear
+> verbatim, double-quoted when they contain spaces (`EMAIL_FROM`); empty-class values are assigned empty;
+> free-class values are only required to be present, and the four secret-shaped ones (`SECRET_KEY`,
+> `STREAM_TOKEN_SECRET`, `LOCAL_MASTER_KEY`, `API_KEY_PEPPER`) carry distinct, visibly synthetic 64-hex dev fillers
+> with a comment pointing at `openssl rand -hex 32`, so the file never holds real entropy or a real credential.
+> Name templates are not assignments: they appear only inside a comment line that contains the templated name.
+> Standalone comment lines (section headers, preamble) and blank lines are unconstrained. Parity is enforced through
+> `make test` only; §9 deliberately lists no separate env gate.
+
 ## 7. Git and commits
 
 - Conventional Commits: `feat(engine): …`, `fix(media): …`, `test(api): …`, `docs(specs): …`, `chore(ci): …`.

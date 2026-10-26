@@ -1,252 +1,283 @@
+# Ralph scratchpad — VoiceAgents, phase 00
 
-## Plan P00-T02 — `.env.example` and settings contract (Planner, 2026-10-25)
-Spec: specs/02 §6 (table at lines ~184-289, 110+ rows). Goal: `.env.example` mirrors every variable with its dev value
-+ a comment; a test parses the spec table and fails on any drift in either direction (names AND literal dev values).
-
-### Files
-1. `/Users/drop/AIVOICE/scripts/env_contract.py` (pure functions, no I/O except `main`; typed for mypy --strict):
-   ```python
-   SPEC_PATH = Path("specs/02-repo-layout-and-conventions.md"); ENV_EXAMPLE_PATH = Path(".env.example")
-   class ValueRule(StrEnum): LITERAL="literal"; EMPTY="empty"; HEX64="hex64"
-   @dataclass(frozen=True) class SpecVar: name: str; rule: ValueRule; literal: str | None; template: bool = False
-   @dataclass(frozen=True) class EnvEntry: name: str; value: str; line: int; commented: bool  # commented=True only for "# NAME=value" template examples
-   def extract_section(spec_text: str, heading_prefix: str = "## 6.") -> str   # text from heading to next "## "; ValueError if absent
-   def parse_spec_table(spec_text: str) -> list[SpecVar]
-   def classify_dev_value(cell: str) -> tuple[ValueRule, str | None]
-   def parse_env_example(text: str) -> list[EnvEntry]          # raises ValueError("line N: ...") on malformed assignment
-   def check(spec_text: str, env_text: str) -> list[str]       # human-readable problems, [] when in parity
-   def main(argv: Sequence[str] | None = None) -> int          # prints problems; exit 1 if any (argparse --spec/--env overrides)
-   ```
-   Table parsing: rows between `| Variable |` header and end of section; skip separator `|---|`. Split cells on `|`
-   (no cell in §6 contains an escaped pipe — verify; if one does, split on ` | ` respecting backticks).
-   - Name cell: all backticked tokens `` `([A-Z][A-Z0-9_<>]*)` ``. Multi-name row (`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`)
-     pairs with dev cell split on ` / ` (`minio` / `minio12345`). Names containing `<` (`LOG_LEVEL_<COMPONENT>`) → template=True.
-   - classify_dev_value(cell), checked in this order:
-     a. cell lower starts with "empty" → EMPTY (covers "empty", "empty (host-only cookie)")
-     b. contains "hex chars" (`64 random hex chars`, `64 hex chars`) → HEX64
-     c. starts with a backtick literal → LITERAL = first backticked token (`localhost:8100` (tunnel…) → `localhost:8100`;
-        `true` (forced…) → `true`; `console` in local… → `console`; `http://localhost:9100/v2` (sim) → that URL)
-     d. anything else ("sim public key printed by `make up`", "created by …bootstrap", "created by bootstrap", "hostname",
-        "generated at startup", "unset") → EMPTY (runtime-provided; the comment in .env.example says where it comes from).
-        Note (d) must be checked before (c) only in the sense that (c) requires the cell to START with a backtick —
-        "sim public key printed by `make up`" does not, so it lands in (d). Unit-test every distinct phrasing.
-   - parse_env_example: blank lines skipped; `# NAME=value` where NAME matches a template pattern → commented entry;
-     other `#` lines are comments; `NAME=value` with NAME `[A-Z][A-Z0-9_]*`; value: strip one pair of matching
-     surrounding `"` or `'`; no inline comments supported (a `#` inside an unquoted value is kept literally — never needed).
-     Anything else → ValueError.
-   - check() problems (each a distinct message, sorted for stable output):
-     `missing in .env.example: NAME`, `not in spec: NAME`, `duplicate: NAME (lines a, b)`,
-     `value mismatch: NAME expected 'x' got 'y'`, `expected empty: NAME got 'y'`, `expected 64 hex chars: NAME`,
-     `no comment above: NAME` (the line directly above each assignment must be a `#` comment line),
-     `duplicate hex value shared by: A, B` (HEX64 secrets must be pairwise distinct),
-     template rows: `.env.example` must contain a commented example `# LOG_LEVEL_<something>=...` whose name matches
-     the template with `<COMPONENT>` → `[A-Z0-9_]+` → else `missing template example: LOG_LEVEL_<COMPONENT>`.
-2. `/Users/drop/AIVOICE/.env.example` — every §6 variable in spec order, grouped with section comment headers
-   (Core, Database, Redis/ClickHouse, Temporal, S3, Public hosts, Secrets & KMS, Telnyx, ElevenLabs, LLM, Stripe,
-   Email/SSO, Observability, Media, Platform policy, COGS, Simulators, Live smoke tests, Rotation, Dashboard, Clock, CI).
-   Each assignment preceded by a one-line comment derived from the spec Meaning/Used-by columns (e.g.
-   `# api, worker, media: KMS provider - local (AES-256-GCM master key from env) or aws`). Specific values:
-   - `EMAIL_FROM="VoiceAgents <no-reply@voiceagents.local>"` (quoted: spaces + angle brackets; dotenv + compose both strip).
-   - HEX64 (`SECRET_KEY`, `STREAM_TOKEN_SECRET`, `LOCAL_MASTER_KEY`, `API_KEY_PEPPER`): generate four distinct values with
-     `python -c 'import secrets; print(secrets.token_hex(32))'`; comment says "local dev only - generate a fresh value
-     for every shared environment". These are dev-only throwaways (spec mandates a dev value), never used outside local/test.
-   - Runtime-provided (empty): `TELNYX_PUBLIC_KEY` (comment: read from `.sim/telnyx_public_key` written at sim startup),
-     `TELNYX_CALL_CONTROL_APP_ID` / `TELNYX_MESSAGING_PROFILE_ID` / `TELNYX_OUTBOUND_VOICE_PROFILE_ID` (scripts/telnyx_bootstrap.py),
-     `POD_ID` (defaults to hostname), `PLATFORM_POOL_ORG_ID` (scripts/seed_dev.py), `SIM_ED25519_PRIVATE_KEY` (generated at sim startup).
-   - Template: `# LOG_LEVEL_VA_MEDIA=DEBUG` under a comment explaining `LOG_LEVEL_<COMPONENT>`.
-   - Avoid the words the placeholder gate will ban (TODO/TBD/placeholder/example.com/your-api-key) in comments; the file
-     is outside the gate's scan roots anyway, but keep it clean. No `$` characters (compose interpolation).
-3. `/Users/drop/AIVOICE/scripts/tests/test_env_example.py`:
-   - `test_env_example_matches_spec`: `check(real spec, real .env.example) == []` (paths resolved from repo root via
-     `Path(__file__).resolve().parents[2]`).
-   - `test_spec_table_parsed_completely`: parsed var count == number of `| \`` rows in §6 (+1 for the S3 two-name row);
-     includes `VA_ENV`, `SLACK_ALERTS_WEBHOOK`, both S3 key names, template `LOG_LEVEL_<COMPONENT>`.
-   - `test_classify_dev_value` parametrized over every distinct phrasing listed above.
-   - `test_parse_env_example_quotes_comments_and_errors`: quoted value stripped; commented template parsed; malformed line → ValueError with line number.
-   - Drift tests with crafted fixtures (small synthetic spec section + env text): `test_var_added_to_spec_only_fails`,
-     `test_var_added_to_env_only_fails`, `test_value_mismatch_fails`, `test_empty_rule_fails_on_value`,
-     `test_hex_rule_fails_on_bad_and_duplicate_values`, `test_missing_comment_fails`, `test_duplicate_assignment_fails`,
-     `test_missing_template_example_fails`, `test_missing_section_raises`.
-   - `test_main_exit_codes` with tmp_path files + capsys: 0 + no output on parity; 1 + problem lines on drift.
-   Coverage of env_contract.py ≥ 95 %.
-
-### Spec decision (same commit, append under specs/02 §6 table)
-`> Decision (2026-10-25): .env.example lists every variable above in table order with a comment line before each.
-Values: the literal dev value; "empty"/runtime-provided rows (bootstrap/seed/sim-generated, hostname) are left empty and
-resolved at runtime; "64 (random) hex chars" rows hold distinct local-only random values; LOG_LEVEL_<COMPONENT> appears
-only as a commented example. scripts/env_contract.py + scripts/tests/test_env_example.py enforce parity (run by make test).`
-
-### AGENTS.md
-Commands row: `Check .env.example parity | uv run python scripts/env_contract.py`. Learned bullet: adding an env var
-means editing specs/02 §6 AND .env.example (comment line above) or `make test` fails.
-
-### Gates
-make fmt, make lint, make typecheck, make test (coverage ≥85 %), make test-ts; `uv run python scripts/env_contract.py` exit 0.
-make placeholders still n/a (P00-T03). Evidence extras per AGENTS.md (pip-audit, radon on env_contract.py, jscpd);
-emit build.done as plain-text tokens.
-
-### Risks
-- Spec cells with odd formatting (e.g. `COGS_TELNYX_OUTBOUND_PER_MIN_MICROS` meaning cell contains parentheses/backticks) —
-  only name and dev cells are parsed; meaning cell ignored.
-- Table may contain a pipe inside backticks in some cell — verify with a quick scan; parser must not mis-split.
-- ruff S105/S106 may flag hard-coded "secret"-named strings in tests; use fixtures that don't trip them or `# noqa: S105` with reason.
+Thinking journal for the current objective. Append new entries at the bottom.
 
 ---
 
-## Phase 01 Planner note (2026-10-25)
-Phase-01 loop started while phase 00 had only P00-T01 ticked (the P00-T02 plan above was never built). Every P01 task
-depends transitively on P00-T05/P00-T08, so I inserted prerequisite tasks P01-T00a (=P00-T05), P01-T00b (=P00-T08),
-P01-T00c (=P00-T03, the placeholders gate) at the top of plan/phase-01.md. Reviewer: when approving P01-T00a, tick BOTH
-`P01-T00a` in plan/phase-01.md and `P00-T05` in plan/phase-00.md. The P00-T02 plan above is NOT for this loop.
+## 2026-10-25 — Planner orientation
 
-## Plan P01-T00a — execute P00-T05: `va_common` core (settings, clock, ids, json, errors, money)
-Spec: specs/02 §4 (Time, IDs, Money, Errors, Settings), §6 (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, VA_CLOCK);
-specs/31 §3 (codes), §4 (AppError fields, CODES parity test); specs/01 §4 (Settings via pydantic-settings);
-specs/24 (round_half_up in integer micros with Decimal).
+`plan/phase-00.md` state: P00-T01 ticked. First unticked task with all dependencies satisfied is
+**P00-T02 `.env.example` and settings contract** (depends on P00-T01 ✓). Previous event was `work.start`, not
+`build.blocked`, so no task splitting is needed.
 
-### Package scaffold (new workspace member; `packages/*` already in uv workspace members)
-- `packages/va_common/pyproject.toml`: name `va-common`, version `0.1.0`, requires-python `>=3.12,<3.13`,
-  build-backend hatchling (`[tool.hatch.build.targets.wheel] packages = ["src/va_common"]`), dependencies:
-  `pydantic>=2.9`, `pydantic-settings>=2.6`, `orjson>=3.10`, `uuid-utils>=0.9`. (No other deps — infra helpers come in P01-T00b.)
-- `packages/va_common/src/va_common/__init__.py` (docstring only + `__all__: list[str] = []`), `py.typed` (empty).
-- `packages/va_common/tests/__init__.py` must NOT exist (importlib mode); add `tests/conftest.py` only if needed.
-- Root `pyproject.toml`: `[tool.mypy] files = ["scripts", "packages/va_common/src", "packages/va_common/tests"]`,
-  `mypy_path = "scripts:packages/va_common/src"`. Run `uv lock` and commit uv.lock.
-  Also add `"va-common"` to the root `dev` dependency group with `[tool.uv.sources] va-common = { workspace = true }`
-  so plain `uv run pytest` / `uv run mypy` always have it installed; verify with `uv sync && uv run python -c "import va_common"`.
+Runtime task list was empty (`ralph tools task ready` → "No ready tasks"), and this scratchpad had been deleted
+from the worktree, so both are being recreated from the plan file.
 
-### Modules (all fully typed, mypy --strict clean)
-1. `va_common/time.py`
-   ```python
-   def utcnow() -> datetime                       # datetime.now(UTC)
-   def ensure_utc(dt: datetime) -> datetime       # ValueError on naive; converts aware to UTC
-   class Clock(Protocol):
-       def now(self) -> datetime: ...             # aware UTC
-       def monotonic(self) -> float: ...
-   class SystemClock:                             # now() -> utcnow(); monotonic() -> time.monotonic()
-   class FrozenClock:
-       def __init__(self, start: datetime, monotonic_start: float = 0.0) -> None   # ValueError if naive
-       def now(self) -> datetime; def monotonic(self) -> float
-       def advance(self, delta: timedelta | float) -> None   # float = seconds; negative -> ValueError
-       def set(self, when: datetime) -> None                 # moves now(); monotonic advances by forward delta only; backwards -> ValueError
-   ```
-   `Clock` is `@runtime_checkable`. No clock factory yet (VA_CLOCK wiring belongs to va_voice/media later).
-2. `va_common/ids.py`
-   ```python
-   PUBLIC_PREFIXES: Final = {"tool": "TL-", "knowledge_base": "KB-", "prompt": "PT-"}
-   PublicKind = Literal["tool", "knowledge_base", "prompt"]
-   def new_id() -> uuid.UUID                      # uuid.UUID(str(uuid_utils.uuid7())) -> stdlib UUID, version 7
-   def to_public(kind: PublicKind, value: uuid.UUID) -> str      # "TL-<canonical lowercase uuid>"
-   def from_public(kind: PublicKind, value: str) -> uuid.UUID    # strict: exact prefix (case-sensitive), canonical
-       # 36-char hyphenated uuid (accept upper-case hex, normalise); raise AppError("INVALID_INPUT", f"Invalid {label} id: {value!r}", field=None)
-   def parse_uuid(value: str) -> uuid.UUID        # bare uuid, same strictness, AppError INVALID_INPUT
-   ```
-   Import order: ids imports errors (no cycle; errors imports nothing from va_common).
-3. `va_common/json.py` (always absolute imports inside the package)
-   ```python
-   def dumps(obj: object, *, sort_keys: bool = False, indent: bool = False) -> bytes
-       # orjson.dumps with OPT_PASSTHROUGH_DATETIME (+ OPT_SORT_KEYS / OPT_INDENT_2) and a `default` hook:
-       #   datetime -> ensure_utc(dt) then isoformat with "+00:00" -> "Z" (naive -> TypeError("naive datetime not allowed"))
-       #   Decimal -> str; pydantic BaseModel -> model_dump(mode="json"); set/frozenset -> sorted list; else TypeError
-       # UUID uses orjson native canonical string.
-   def dumps_str(obj: object, *, sort_keys: bool = False, indent: bool = False) -> str
-   def loads(data: bytes | bytearray | memoryview | str) -> Any   # orjson.loads; malformed raises orjson.JSONDecodeError (a ValueError)
-   ```
-4. `va_common/errors.py`
-   ```python
-   CODES: Final[Mapping[str, int]] = MappingProxyType({...})   # every row of specs/31 §3 in table order
-   # KB_ERROR's HTTP column is "400/500": map to 400 (default) and document via Decision note; AppError accepts an explicit
-   # http_status override so KB processing failures can raise 500.
-   class AppError(Exception):
-       def __init__(self, code: str, message: str, http_status: int | None = None, details: Mapping[str, object] | None = None, *, field: str | None = None) -> None
-           # unknown code -> ValueError(f"unknown error code {code!r}"); http_status defaults to CODES[code];
-           # explicit http_status must be 400-599 else ValueError. Stores .code .message .http_status .field .details (dict copy, {} default)
-       def to_item(self) -> dict[str, object]     # {"error": code, "message": message, + "field" if set, + "details" if non-empty}
-       def __str__ -> f"{code}: {message}"; __repr__ includes http_status
-   def not_found(resource: str = "Resource") -> AppError    # AppError("NOT_FOUND", f"{resource} not found")
-   def internal_error() -> AppError                          # ("INTERNAL_ERROR", "Internal server error")
-   ```
-   Signature order follows specs/02 §4 `AppError(code, message, http_status, details)` with `field` keyword-only (specs/31 §4 lists it).
-5. `va_common/money.py`
-   ```python
-   MICROS_PER_DOLLAR: Final = 1_000_000
-   def dollars_to_micros(value: Decimal | int | str) -> int   # Decimal(str) exact; round_half_up to integer micros;
-       # floats REJECTED with TypeError (never floats); NaN/Inf -> ValueError; bool -> TypeError
-   def micros_to_dollars_str(micros: int) -> str              # exact, 6 decimals: 1_500_000 -> "1.500000", -1 -> "-0.000001"
-   def micros_to_dollars(micros: int) -> Decimal              # Decimal quantized to 6 places (API "decimal numbers rounded to 6 places")
-   def round_half_up_micros(quantity: Decimal | int, unit_price_micros: Decimal | int) -> int   # specs/24 rounding: Decimal product, ROUND_HALF_UP to int
-   ```
-6. `va_common/settings.py`
-   ```python
-   Environment = Literal["local", "test", "staging", "production"]
-   class BaseServiceSettings(BaseSettings):
-       model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True, case_sensitive=False)
-       va_env: Environment = "local"           # field names == lower-cased env names, no aliases
-       log_level: Literal["DEBUG","INFO","WARNING","ERROR","CRITICAL"] = "INFO"   # validator upper-cases input
-       log_transcripts: bool = False
-       otel_exporter_otlp_endpoint: str = "http://localhost:4317"
-       sentry_dsn: str = ""
-       @model_validator(mode="before") on the raw input: if va_env (case-insensitive key) == "production", set log_transcripts False
-       @property is_production -> bool
-   ```
-   Only the "all"-scoped vars from §6 live in the base (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, OTEL_EXPORTER_OTLP_ENDPOINT,
-   SENTRY_DSN). Service-specific vars belong to each service's `Settings` subclass in later tasks. Defaults equal the
-   §6 dev values EXCEPT log_transcripts default False (safe default; .env sets true locally) — note in Decision.
-   Tests must isolate env: `monkeypatch.delenv` + `_env_file=None`.
+`BaseServiceSettings` itself belongs to **P00-T05**, not here. P00-T02 is only the committed env contract plus the
+test that keeps it locked to specs/02 §6.
 
-### Tests (packages/va_common/tests/)
-- `test_errors.py`: `test_codes_match_spec_table` — reads `specs/31-error-catalog.md` (path via
-  `Path(__file__).resolve().parents[3] / "specs/31-error-catalog.md"`), extracts the §3 section (from `## 3. Error codes`
-  to next `## `, so §3a detail codes are excluded), parses rows `| \`CODE\` | HTTP |`, HTTP "400/500" → 400 (first
-  value); asserts `dict(CODES) == parsed` (both directions, exact). Plus: unknown code raises ValueError; default status;
-  override status; invalid override ValueError; to_item with/without field/details; details copied (mutating input
-  doesn't change error); str/repr; not_found/internal_error helpers; CODES immutable (TypeError on assignment).
-- `test_ids.py`: new_id is version 7, monotonic ordering of 1000 consecutive ids (uuid7 sorts by time); hypothesis
-  `@given(st.uuids(), st.sampled_from(kinds))` round-trip `from_public(kind, to_public(kind, u)) == u`; upper-case hex
-  accepted; wrong prefix / missing prefix / lowercase prefix "tl-" / garbage / braces / urn form / no hyphens → AppError
-  with code INVALID_INPUT and http_status 400; parse_uuid same.
-- `test_money.py`: hypothesis round-trip `dollars_to_micros(micros_to_dollars_str(m)) == m` for ints in ±10^15;
-  `dollars_to_micros("0.0000005") == 1` (half-up), `"0.0000004" -> 0`, `"-0.0000005" -> -1` (ROUND_HALF_UP is away from
-  zero in Decimal — assert that exact behaviour and document), int input `3 -> 3_000_000`; float → TypeError; bool →
-  TypeError; "NaN"/"Infinity" → ValueError; invalid string → ValueError; micros_to_dollars Decimal exponent -6;
-  round_half_up_micros(Decimal("1.5"), 3) == 5 (4.5 → 5), (Decimal("2"), Decimal("0.25")) == 1? (0.5 → 1).
-- `test_time.py`: utcnow tz is UTC; ensure_utc naive → ValueError, +02:00 aware → converted; FrozenClock now/advance
-  (timedelta and float), negative advance ValueError, set forward/backward, monotonic advances in lockstep; naive start
-  ValueError; SystemClock now is aware and within freezegun frozen time (`freeze_time("2026-01-01")`), monotonic non-decreasing;
-  `isinstance(SystemClock(), Clock)` requires `@runtime_checkable` on Clock — add it.
-- `test_json.py`: dumps of dict with UUID, aware datetime (Z suffix), Decimal ("1.10" kept as string), pydantic model,
-  set → sorted list; naive datetime → TypeError; unsupported type (object()) → TypeError; sort_keys option; indent option;
-  dumps_str returns str; loads accepts bytes/str/memoryview; malformed → ValueError (orjson.JSONDecodeError).
-- `test_settings.py`: defaults with clean env (`_env_file=None`); env overrides (VA_ENV=staging, LOG_LEVEL=debug →
-  "DEBUG"); invalid VA_ENV → ValidationError; LOG_TRANSCRIPTS=true honoured in local, forced False in production;
-  settings frozen (assignment raises ValidationError); subclass adding a field reads its env var (proves extensibility);
-  `.env` file loading via tmp_path + `_env_file=tmp/.env`.
-Coverage target: 100 % lines/branches on va_common (small pure modules).
+---
 
-### Spec decisions (append in the same commit)
-- specs/31 after §4: `> Decision (2026-10-25): KB_ERROR's "400/500" maps to 400 in CODES (the parity test reads the
-  first status); KB processing failures raise AppError("KB_ERROR", ..., http_status=500) via the explicit override.`
-- specs/02 §4 after Settings bullet: `> Decision (2026-10-25): BaseServiceSettings holds only the variables §6 marks
-  "all" (VA_ENV, LOG_LEVEL, LOG_TRANSCRIPTS, OTEL_EXPORTER_OTLP_ENDPOINT, SENTRY_DSN); services add the rest in their own
-  Settings subclass. LOG_TRANSCRIPTS defaults to false in code (the .env dev value is true) and is forced false when
-  VA_ENV=production. Money: dollars_to_micros rejects floats; rounding is Decimal ROUND_HALF_UP (away from zero for
-  negatives).`
+## Plan P00-T02 — `.env.example` and settings contract
 
-### AGENTS.md
-- Learned bullet (P01-T00a): how va_common gets installed for `uv run` (workspace source + dev group, or --all-packages),
-  and "every new package must be added to root mypy `files` and `mypy_path`" already exists — extend with the exact pattern.
-- Conventions: `va_common.ids.to_public("tool", id)`; `va_common.errors.AppError(code, message, http_status=None, details=None, field=)`.
+### Spec reading (done)
 
-### Gates (Builder)
-`make fmt lint typecheck test` (+ `test-ts`, no TS change). `make placeholders` will fail because
-scripts/check_no_placeholders.py does not exist until P01-T00c — report that honestly (same as P00-T01 evidence) and
-instead grep the new files for TODO|FIXME|XXX|TBD|HACK|NotImplementedError|placeholder → must be empty.
-Backpressure extras (see AGENTS.md): audit via `uv export --no-hashes --all-packages > logs/p01t00a-req.txt && uvx pip-audit -r logs/p01t00a-req.txt`
-+ `corepack pnpm audit`; complexity via `uvx radon cc -s -a packages/va_common/src`; duplication via `npx --yes jscpd@4 packages/va_common`.
-Commit: `feat(common): add va_common core settings, clock, ids, json, errors, money` with footer `Task: P01-T00a` (and `Task: P00-T05` line).
+- `specs/02-repo-layout-and-conventions.md` §1 lists `.env.example` at the repository root (committed).
+- §6 is the normative table: 104 rows, lines 186–289 of the spec, 4 cells per row
+  (`Variable | Used by | Dev value | Meaning`). Measured composition:
+  - 105 variable names (one row, `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` ``, declares two names and two
+    dev values `` `minio` / `minio12345` ``);
+  - 1 of those names is a template, `LOG_LEVEL_<COMPONENT>` (dev value `unset`) → **104 literal keys** must appear
+    in `.env.example`;
+  - dev-value cells fall into exactly three classes with no per-variable exceptions needed:
+    **76 literal** (cell starts with a backtick → required value is the first backticked span, e.g.
+    `` `localhost:8100` (tunnel host for live tests) `` → `localhost:8100`; `` `console` in local, `json` elsewhere ``
+    → `console`), **16 empty** (cell is `empty` or starts with `empty `, e.g. `empty (host-only cookie)`), and
+    **12 free/descriptive** (`64 random hex chars`, `64 hex chars`, `hostname`, `generated at startup`,
+    `created by bootstrap`, `created by `scripts/telnyx_bootstrap.py``, `created by `scripts/seed_dev.py` / bootstrap`,
+    `sim public key printed by `make up``, `unset`).
+  - The "starts with a backtick" test is what keeps `sim public key printed by `make up`` and
+    `created by `scripts/telnyx_bootstrap.py`` out of the literal class even though they contain backticks.
+- §7: `.env` is gitignored, `.env.example` is committed — `.gitignore` already has `.env`, `.env.*`,
+  `!.env.example`, so no `.gitignore` change is needed.
+- §9: the gate table does **not** contain an env gate, and §3 fixes the `make check` recipe. So parity is enforced
+  through `make test` (pytest) only — do **not** add a new command to `make check` or a new Makefile target.
+
+### Mirror contract (resolves the §6 ambiguity; must be written into the spec in the same commit)
+
+`.env.example` mirrors §6 under these rules, which the test enforces:
+
+1. One `NAME=value  # comment` line per spec variable, in **spec table order**, with a non-empty trailing comment.
+2. Literal-class rows carry the spec's literal value verbatim. Values containing spaces are double-quoted
+   (`EMAIL_FROM="VoiceAgents <no-reply@voiceagents.local>"`); the parser strips one layer of surrounding quotes
+   before comparing.
+3. Empty-class rows are present with an empty value (`AWS_KMS_KEY_ID=`).
+4. Free-class rows are present with a usable local value; the test asserts presence only, not the value. Secret-shaped
+   free rows (`SECRET_KEY`, `STREAM_TOKEN_SECRET`, `LOCAL_MASTER_KEY`, `API_KEY_PEPPER`) get 64 hex characters that are
+   visibly non-random dev fillers (repeated `deadbeef`/`cafebabe`/`feedface`-style patterns, one distinct pattern per
+   variable) and a trailing comment telling the reader to regenerate with `openssl rand -hex 32`. No real entropy and
+   no real credential ever lands in the file.
+5. Templated names (any name containing `<`) are **not** assignments; they appear only as a commented example line
+   whose text contains the templated name, e.g.
+   `# LOG_LEVEL_VA_MEDIA=DEBUG  # per-logger override, LOG_LEVEL_<COMPONENT>; unset by default`.
+6. Standalone comment lines are free (section headers like `# --- Telephony (Telnyx) ---` and the file preamble).
+   Blank lines are free.
+7. No duplicate keys; no key absent from §6.
+
+Add this to `specs/02-repo-layout-and-conventions.md` §6 as a single
+`> Decision (2026-10-25): …` block directly under the table, in the same commit (master prompt rule 1005/§8).
+
+### Files
+
+**Create `scripts/env_spec.py`** — typed, no CLI, no side effects at import. Imported by the test
+(`pythonpath = ["scripts"]`). Public interface:
+
+```python
+SPEC_PATH: Final[Path]          # repo-root-relative specs/02-repo-layout-and-conventions.md
+ENV_EXAMPLE_PATH: Final[Path]   # repo-root-relative .env.example
+SECTION_HEADING: Final[str]     # "## 6. Environment variables (complete list; mirror in `.env.example` with dev values)"
+
+class DevValueKind(StrEnum):      # LITERAL | EMPTY | FREE
+    ...
+
+@dataclass(frozen=True, slots=True)
+class SpecVar:
+    name: str                     # e.g. "S3_ACCESS_KEY_ID"
+    used_by: str
+    dev_cell: str                 # raw Dev value cell
+    kind: DevValueKind
+    literal: str | None           # set iff kind is LITERAL
+    meaning: str
+    templated: bool               # "<" in name
+
+@dataclass(frozen=True, slots=True)
+class EnvAssignment:
+    name: str
+    value: str                    # one layer of surrounding quotes stripped
+    comment: str                  # trailing comment text without the leading "#", stripped
+    line_no: int
+
+def repo_root() -> Path: ...                              # parents of __file__, no cwd dependence
+def parse_spec_table(markdown: str) -> list[SpecVar]: ...  # skips the |---| separator row; splits "A / B" names and values
+def parse_env_example(text: str) -> list[EnvAssignment]: ...
+def commented_lines(text: str) -> list[str]: ...           # standalone "#" lines, for the templated-name check
+def split_trailing_comment(rhs: str) -> tuple[str, str]: ...  # quote-aware: quoted value first, then "#"
+```
+
+Parsing details to get right:
+- table slice = lines after the §6 heading starting with `|`, drop the header row and the `|---|` separator row,
+  stop at the first non-`|` line; assert exactly 4 cells per row.
+- name cell: strip `` ` ``, split on `/`, strip each; a 2-name row also splits its dev cell on `/` positionally.
+- literal extraction: `re.match(r"`([^`]*)`", cell)`.
+- `split_trailing_comment`: if the value starts with `"` or `'`, consume through the matching closing quote, then the
+  remainder must be blank or start with `#`; otherwise split on the first `#`.
+
+**Create `.env.example`** — 104 assignments in spec order, grouped by section-header comments, preamble explaining
+`cp .env.example .env`, that `.env` is gitignored, and that `make up` writes the simulator Telnyx public key to
+`.sim/telnyx_public_key`. Every assignment line gets a trailing comment: use the spec Meaning cell when it is
+non-empty, otherwise a short factual note (and append the parenthetical tail of the dev cell, e.g. "tunnel host for
+live tests", where the spec has one).
+
+**Create `scripts/tests/test_env_example.py`** — tests (names and assertions):
+- `test_spec_table_shape` — 104 rows parsed, 105 names, names unique, exactly one templated name
+  (`LOG_LEVEL_<COMPONENT>`), class counts 76/16/12.
+- `test_s3_credential_row_splits_into_two_vars` — `S3_ACCESS_KEY_ID` → `minio`, `S3_SECRET_ACCESS_KEY` → `minio12345`.
+- `test_literal_extraction_ignores_trailing_prose` — table-driven over `EDGE_PUBLIC_HOST` (`localhost:8100`),
+  `LOG_FORMAT` (`console`), `WEBHOOK_ALLOW_PRIVATE` (`true`), `LLM_MODEL_COSTS_JSON` (`{}`).
+- `test_descriptive_dev_cells_are_free` — `TELNYX_PUBLIC_KEY` and `TELNYX_CALL_CONTROL_APP_ID` are `FREE` despite
+  containing backticks.
+- `test_env_example_has_no_duplicate_keys`.
+- `test_env_example_covers_every_spec_variable` — set difference both ways; failure message lists missing and extra
+  names (this is the acceptance criterion in both directions).
+- `test_env_example_order_matches_spec_order` — separate assertion so ordering drift is distinguishable from
+  presence drift.
+- `test_env_example_literal_values_match_spec`.
+- `test_env_example_empty_valued_variables_are_empty`.
+- `test_every_assignment_has_a_trailing_comment`.
+- `test_templated_variables_appear_only_as_commented_examples` — `LOG_LEVEL_<COMPONENT>` is not an assignment and is
+  mentioned in a standalone comment line.
+- `test_secret_shaped_values_are_64_hex_and_distinct` — the four secret-shaped free vars are `[0-9a-f]{64}`, mutually
+  distinct, and their comments mention `openssl rand -hex 32`.
+- `test_parity_detects_variable_added_to_spec_only` / `test_parity_detects_variable_added_to_env_only` — synthetic
+  mini spec/env strings through the parsers, proving the check fails in each direction.
+- `test_split_trailing_comment_handles_quoted_values` — `'"a b"  # c'` → `("a b", "c")`, plain, and no-comment cases.
+- `test_email_from_is_quoted_in_the_file` — raw-text assertion that the quoting convention is actually used.
+
+### Also in this commit
+
+- `specs/02-repo-layout-and-conventions.md` §6: the `> Decision (2026-10-25)` mirror-contract block above.
+- `AGENTS.md` "Learned during the build": one dated bullet — `.env.example` mirrors specs/02 §6 one-to-one in table
+  order and `scripts/tests/test_env_example.py` fails on drift in either direction; add new variables to the spec
+  table and the example file together.
+- `.ralph/agent/decisions.md`: create with the header template from the `ralph-tools` skill if absent, then
+  **DEC-001** — put the §6 table parser in `scripts/env_spec.py` rather than inline in the test. Confidence 75.
+  Alternatives: parser inside the test module (less reusable, invisible to future settings tests); a new
+  `scripts/check_env_example.py` gate (rejected — §3/§9 fix the `make check` recipe and list no env gate, so adding
+  one would contradict the spec). Reversible: yes, module-local move.
+- Tick `- [x] P00-T02 … — <evidence>` only in the Reviewer pass, not by the Builder.
+
+### Gates to run (Builder)
+
+`make fmt` → `make lint` → `make typecheck` → `make test`, plus `make test-ts` (unchanged TS, should stay green).
+`make placeholders` and the openapi/spec-ref gates do not exist yet (P00-T03/P00-T04) — report them as not-yet-present
+rather than passing. Backpressure tokens for `build.done` must be obtained for real per AGENTS.md
+(`uvx pip-audit` over `uv export`, `corepack pnpm audit`, `uvx radon cc -s -a`, `npx --yes jscpd@4`) and the payload
+emitted as a plain string, never `--json`.
 
 ### Risks
-- `filterwarnings = ["error"]`: pydantic-settings may warn about missing `.env` — passing `_env_file=None` in tests avoids it.
-- hypothesis + pytest-xdist: fine; keep examples ≤ 200 (default) for speed.
-- `va_common/json.py` shadowing: inside the package always use absolute imports; stdlib `json` is not needed.
-- uuid_utils.uuid7() returns `uuid_utils.UUID`, not stdlib — convert via `uuid.UUID(bytes=u.bytes)`.
+
+- **Coverage gate.** `make test` runs `--cov-fail-under=85` over `scripts`, `packages`, `apps`, `sdks`.
+  `scripts/env_spec.py` must be fully exercised by the new test, including the quote-aware comment splitter's
+  no-comment and single-quote branches, or the gate fails for the whole repo.
+- **mypy strict** covers `scripts` (including `scripts/tests`): annotate every test function `-> None` and type the
+  parser helpers precisely; `files`/`mypy_path` in the root `pyproject.toml` already include `scripts`, so no config
+  change is needed.
+- **`filterwarnings = ["error"]`** is active; keep the parser free of deprecated stdlib calls.
+- **Secret-shaped example values.** Keep them obviously synthetic (repeated hex words) so no reviewer or scanner
+  mistakes `.env.example` for a leaked credential.
+- **Spec edit vs. ruff.** The root ruff config excludes `*.md`, so adding the Decision block cannot be reformatted —
+  but keep the block inside 110 columns anyway to match the surrounding file.
+
+---
+
+## 2026-10-25 — Builder P00-T02, implementation notes
+
+Everything in the plan was written, with two corrections to the plan's measurements and one environment problem that
+stopped the gate run.
+
+### Correction 1 — dev-value class counts are 77/16/12, not 76/16/12
+
+Measured with the real parser against `specs/02-repo-layout-and-conventions.md`:
+
+```
+names 105
+Counter({'literal': 77, 'empty': 16, 'free': 12})
+unique 105
+templated ['LOG_LEVEL_<COMPONENT>']
+literal-keys 104
+```
+
+The plan's 76 does not add up (76+16+12 = 104 ≠ 105 names). `LOG_LEVEL_<COMPONENT>` has dev value `unset`, so it is
+already counted in the 12 FREE rows; the remaining split is 77 LITERAL + 16 EMPTY. The 12 FREE names are
+`SECRET_KEY`, `STREAM_TOKEN_SECRET`, `LOCAL_MASTER_KEY`, `TELNYX_PUBLIC_KEY`, `TELNYX_CALL_CONTROL_APP_ID`,
+`TELNYX_MESSAGING_PROFILE_ID`, `TELNYX_OUTBOUND_VOICE_PROFILE_ID`, `POD_ID`, `PLATFORM_POOL_ORG_ID`,
+`SIM_ED25519_PRIVATE_KEY`, `API_KEY_PEPPER`, `LOG_LEVEL_<COMPONENT>`. `test_spec_table_shape` asserts 77/16/12.
+
+### Correction 2 — the table has 104 rows declaring 105 names
+
+Same thing stated the other way: 104 literal keys go into `.env.example`, because the 105th name is the template.
+Both numbers are asserted separately so a future row addition fails loudly on whichever is wrong.
+
+### Decisions made while writing the files
+
+- Non-secret FREE variables whose value is produced by the local stack (`TELNYX_PUBLIC_KEY`,
+  `TELNYX_CALL_CONTROL_APP_ID`, `TELNYX_MESSAGING_PROFILE_ID`, `TELNYX_OUTBOUND_VOICE_PROFILE_ID`,
+  `PLATFORM_POOL_ORG_ID`, `SIM_ED25519_PRIVATE_KEY`, `POD_ID`) are assigned empty with a comment naming what writes
+  them (`.sim/telnyx_public_key` from `make up`, `scripts/telnyx_bootstrap.py`, `scripts/seed_dev.py`). Inventing a
+  fake id would be mock data in a committed config file; the test only asserts presence for the FREE class.
+- The four secret-shaped FREE variables get distinct repeated-hex-word fillers (`deadbeef…`, `cafebabe…`,
+  `feedface…`, `0badc0de…`), each 64 hex chars, each commented with `openssl rand -hex 32`.
+- `.env.example` comments avoid every token the P00-T03 placeholder checker will reject (no `TODO`/`TBD`/`XXX`, no
+  `placeholder`, no `example.com`, no `your-api-key`) — the file is at the repository root and so is outside the
+  checker's scan roots, but the test module in `scripts/` is inside them.
+- Added `test_empty_dev_cells_with_trailing_prose_are_empty` (`SESSION_COOKIE_DOMAIN`),
+  `test_free_valued_variables_are_all_defined`, `test_parity_detects_changed_literal_value`, and
+  `test_preamble_documents_how_to_create_a_local_env` beyond the planned list; every planned test exists.
+
+### Files written
+
+- `scripts/env_spec.py` — `EnvSpecError`, `DevValueKind`, `SpecVar`, `EnvAssignment`, `repo_root`,
+  `parse_spec_table`, `classify_dev_value`, `split_trailing_comment`, `parse_env_example`, `commented_lines`,
+  `load_spec_variables`, `load_env_example`. `classify_dev_value` is public (it was private in the plan) so the
+  three-class rule can be unit-tested directly.
+- `.env.example` — 104 assignments in spec order under 24 section headers, with the documented preamble.
+- `scripts/tests/test_env_example.py` — 30 test cases including both parity directions and the parser error paths
+  (unterminated quote, text after a quoted value, non-assignment line, missing heading, prose instead of a table,
+  no data rows, wrong cell count, name/value count mismatch, empty name, unterminated backtick).
+- `specs/02-repo-layout-and-conventions.md` §6 — the `> Decision (2026-10-25)` mirror contract under the table.
+- `AGENTS.md` — the P00-T02 parity bullet and the `.venv/.DS_Store` gotcha.
+- `.ralph/agent/decisions.md` — created with the journal template plus DEC-001 (parser as a library module rather
+  than a new `make check` gate, since specs/02 §3/§9 fix the gate list).
+
+## Blocker P00-T02
+
+**What.** The gates were never run. The host filesystem filled up mid-iteration and the shell became unusable: every
+command now fails before it executes with
+
+```
+ENOSPC: no space left on device, open '/private/tmp/claude-501/.../tasks/<id>.output'
+```
+
+because the tool harness cannot create the output file it captures stdout into. `echo ok` fails the same way, so this
+is not specific to `uv`, `pytest`, or this repository.
+
+**Why it matters here.** Two consequences:
+
+1. No gate evidence exists. `make fmt`, `make lint`, `make typecheck`, and `make test` were not run against the new
+   files, so the ruff formatting of `scripts/env_spec.py` and `scripts/tests/test_env_example.py` is unverified, and
+   so is `mypy --strict` over both. Two selected rules were pre-empted by hand because they could not be checked:
+   `TRY003` (every `raise EnvSpecError(...)` now passes a `msg` local instead of an inline f-string) and `PLR2004`
+   (the `2` and `-1` literals became `_HEADER_ROWS` and `end < 0`). What remains unverified is mostly
+   `ruff format` whitespace and line wrapping in both files, which `make fmt` fixes mechanically.
+   `make placeholders` and the openapi/spec-ref gates do not exist yet (P00-T03/P00-T04), so they are not-yet-present
+   rather than passing, as planned.
+2. `ralph emit` also runs through the shell, so this iteration cannot publish its own event. That is why this blocker
+   is recorded in the scratchpad only.
+
+**What is known good.** Before the disk filled, the parser was run against the committed spec with the system CPython
+3.12 and produced the counts quoted above, which is how corrections 1 and 2 were found. That exercised
+`parse_spec_table`, `_table_rows`, `_cells`, `classify_dev_value`, and `load_spec_variables` on the real 104-row
+table. `parse_env_example` and the test module have never been executed.
+
+**Earlier environment damage, already repaired.** The same disk pressure had left `.venv` without a `bin/` directory,
+and `uv sync` could not rebuild it because a Finder `.DS_Store` kept `.venv/lib` non-empty
+(`failed to remove directory '.venv/lib': Directory not empty (os error 66)`). Fixed with
+`find .venv -name .DS_Store -delete && rm -rf .venv && uv sync --all-packages`, which exited 0. The gotcha is now in
+`AGENTS.md`.
+
+**Proposal.** Free space on the boot volume, then re-run the Builder on P00-T02. No code needs to be rewritten first:
+the next activation only has to run `make fmt` → `make lint` → `make typecheck` → `make test`, fix whatever ruff and
+mypy report in the two new Python files, and confirm `test_env_example.py` passes — including that the coverage gate
+still clears 85% now that `scripts/env_spec.py` is in the coverage source set. Do not re-derive the spec counts; they
+are measured above. Two runtime-state items could not be recorded either, because `ralph tools` is also shell-bound:
+a `fix` memory for the `.venv/.DS_Store` failure (text is in `AGENTS.md`) and a task for this blocker.
