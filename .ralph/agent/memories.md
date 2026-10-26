@@ -6,6 +6,10 @@
 
 ## Fixes
 
+### mem-1792987695-026b
+> pnpm audit in TS workspace: vitest 3.x pulls critical tinypool advisories (use vitest ^4.1.12); next 15.5 pins postcss 8.4.31 (override postcss@<8.5.23 in root package.json pnpm.overrides); Next 15.5 next-env.d.ts references .next/types so git-ignore it
+<!-- tags: tooling, typescript, pnpm | created: 2026-10-26 -->
+
 ### mem-1792986234-2b28
 > uv_build workspace app whose import package differs from the dist name needs [tool.uv.build-backend] module-name = "va_x" in its pyproject, else uv sync fails 'Expected a Python module at src/va_<dist>'
 <!-- tags: tooling, uv | created: 2026-10-26 -->

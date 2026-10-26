@@ -306,14 +306,15 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `LOG_LEVEL_<COMPONENT>` | all | unset | per-logger level override, e.g. `LOG_LEVEL_VA_MEDIA=DEBUG` (`27-observability.md`) |
 | `OTEL_TRACES_SAMPLER_ARG` | all | `0.1` | HTTP trace sampling ratio; calls are always sampled |
 | `NEXT_PUBLIC_SENTRY_DSN` | dashboard | empty | browser Sentry DSN |
+| `NEXT_PUBLIC_API_BASE_URL` | dashboard | `http://localhost:8000` | browser base URL for API calls |
 | `VA_CLOCK` | media, worker | `system` | `system` or `fake-shared` (accelerated e2e only; reads virtual time from the simulator) |
 | `SIM_CLOCK` | sim | `realtime` | `realtime` or `accelerated` |
 | `SLACK_ALERTS_WEBHOOK` | CI (live-smoke workflow) | empty | Slack incoming webhook for live smoke failures |
 
 > Decision (2026-10-25): how `.env.example` mirrors this table is fixed as follows, and
 > `scripts/tests/test_env_example.py` (parsers in `scripts/env_spec.py`) fails when either side drifts.
-> The table declares 105 names in 104 rows — the `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` `` row declares two
-> names and splits its dev-value cell on `/` positionally — of which 104 are literal keys and one
+> The table declares 106 names in 105 rows — the `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` `` row declares two
+> names and splits its dev-value cell on `/` positionally — of which 105 are literal keys and one
 > (`LOG_LEVEL_<COMPONENT>`) is a name template. Dev-value cells fall into three classes: **literal** (the cell starts
 > with a backtick; the required value is the first backticked span, so `` `localhost:8100` (tunnel host for live
 > tests) `` means `localhost:8100` and ``` `console` in local, `json` elsewhere ``` means `console`), **empty** (the
@@ -327,6 +328,10 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 > Name templates are not assignments: they appear only inside a comment line that contains the templated name.
 > Standalone comment lines (section headers, preamble) and blank lines are unconstrained. Parity is enforced through
 > `make test` only; §9 deliberately lists no separate env gate.
+
+> Decision (2026-10-25): `NEXT_PUBLIC_API_BASE_URL` (dashboard) is the browser origin of the api. The dashboard
+> calls the api cross-origin with `credentials: "include"`; the api's CORS allow-list is `DASHBOARD_BASE_URL`
+> (`28-security.md` §5). Next inlines `NEXT_PUBLIC_*` values at build time, so a deployed image is built per api origin.
 
 ## 7. Git and commits
 

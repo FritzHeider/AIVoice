@@ -1,0 +1,51 @@
+/*
+ * Design tokens (specs/25 §23). Colours are OKLCH values of the Tailwind 4 palette: indigo for the primary action,
+ * zinc neutrals, and the status hues named by the spec. Themed tokens are `light-dark(<light>, <dark>)`: the system
+ * preference picks the value through `color-scheme`, and a `.light` or `.dark` class on <html> forces one.
+ * tests/tokens.test.ts parses this file and checks every text/background pair for WCAG AA contrast (>= 4.5:1).
+ */
+:root {
+  color-scheme: light dark;
+
+  --background: light-dark(oklch(100% 0 0), oklch(14.1% 0.005 285.823));
+  --foreground: light-dark(oklch(14.1% 0.005 285.823), oklch(98.5% 0 0));
+  --muted: light-dark(oklch(96.7% 0.001 286.375), oklch(21% 0.006 285.885));
+  --muted-foreground: light-dark(oklch(44.2% 0.017 285.786), oklch(70.5% 0.015 286.067));
+  --card: light-dark(oklch(100% 0 0), oklch(21% 0.006 285.885));
+  --border: light-dark(oklch(92% 0.004 286.32), oklch(27.4% 0.006 286.033));
+  --primary: light-dark(oklch(51.1% 0.262 276.966), oklch(67.3% 0.182 276.935));
+  --primary-foreground: light-dark(oklch(100% 0 0), oklch(14.1% 0.005 285.823));
+  --success: oklch(59.6% 0.145 163.225);
+  --warning: oklch(76.9% 0.188 70.08);
+  --danger: oklch(58.6% 0.253 17.585);
+  --info: oklch(58.8% 0.158 241.966);
+
+  --node-default: oklch(58.5% 0.233 277.117);
+  --node-wait: oklch(76.9% 0.188 70.08);
+  --node-kb: oklch(70.4% 0.14 182.503);
+  --node-webhook: oklch(60.6% 0.25 292.717);
+  --node-transfer: oklch(70.5% 0.213 47.604);
+  --node-end: oklch(64.5% 0.246 16.439);
+  --node-sms: oklch(72.3% 0.219 149.579);
+  --node-code: oklch(55.4% 0.046 257.417);
+  --node-button: oklch(71.5% 0.143 215.221);
+  --node-transfer-pathway: oklch(66.7% 0.295 322.15);
+  --node-scheduling: oklch(76.8% 0.233 130.85);
+  --node-global: oklch(68.5% 0.169 237.323);
+
+  --radius: 8px;
+  --space: 4px;
+  --font-sans: "Inter Variable", ui-sans-serif, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+}
+
+:root.light {
+  color-scheme: light;
+}
+
+:root.dark {
+  color-scheme: dark;
+}

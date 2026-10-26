@@ -110,6 +110,14 @@ class WidgetConfig(BaseModel):
   for custom colors (API rejects with `INVALID_INPUT` field `config.theme.text_color` when contrast < 4.5), screen-reader
   labels for all controls, visible focus rings, voice mode shows live captions of both sides.
 
+> Decision (2026-10-25): phase 00 ships the embed foundation only: `init({widgetKey, userToken?, open?})` (validates
+> the `wgt_` prefix, throws `WidgetConfigError`; idempotent per key, a different key remounts), auto-init from
+> `document.currentScript` `data-*` attributes (deferred to `DOMContentLoaded` while the document is loading; failures
+> dispatch a `va-widget:error` `CustomEvent` on `window` instead of logging), the Shadow DOM host, and the launcher with
+> its open state (`aria-expanded`, `data-open` on the host). The IIFE global `window.VoiceAgentsWidget` exposes the
+> module exports; the panel, the rest of the JS API, and `audio-worklet.js` arrive with the widget phase. The size gate
+> is `apps/widget/scripts/check-size.mjs`, run by `pnpm build` (fails above 61 440 bytes gzipped).
+
 ## 5. Public protocol
 
 ### 5.1 `POST /widget/v1/session`

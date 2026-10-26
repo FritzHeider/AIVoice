@@ -1,0 +1,46 @@
+/** English UI strings (specs/25 §23: every user-visible string lives here). */
+export const en = {
+  app: {
+    name: "VoiceAgents",
+    titleTemplate: "%s · VoiceAgents",
+    description: "Build, deploy, and monitor AI phone agents.",
+  },
+  status: {
+    title: "Status",
+    eyebrow: "System status",
+    heading: "Is the platform answering?",
+    lede: "Live probes against the VoiceAgents API, refreshed every 10 seconds.",
+    allOperational: "All systems operational",
+    degraded: "Degraded: some dependencies are failing",
+    checking: "Checking…",
+    unreachableTitle: "The API is not answering",
+    unreachableBody: "The dashboard could not reach the API at",
+    retry: "Retry now",
+    retrying: "Retrying…",
+    lastChecked: "Last checked",
+    version: "Version",
+    requestId: "Request ID",
+    rows: {
+      liveness: { label: "API process", detail: "GET /healthz" },
+      readiness: { label: "Dependencies", detail: "GET /readyz" },
+      publicHealth: { label: "Public API", detail: "GET /v1/health" },
+    },
+    checkColumn: "Dependency",
+    resultColumn: "Result",
+    checkStatus: { ok: "Operational", error: "Error", timeout: "Timed out" },
+    rowStatus: { ok: "Operational", down: "Down", unavailable: "Unavailable", loading: "Checking" },
+    failingLabel: "Failing",
+  },
+  notFound: {
+    code: "404",
+    title: "Page not found",
+    body: "Nothing lives at this address yet. The status page shows whether the platform is up.",
+    action: "Open the status page",
+  },
+  error: {
+    title: "Something went wrong",
+    body: "This page failed to render. Retrying usually helps; if it keeps failing, share the reference below.",
+    reference: "Reference",
+    retry: "Try again",
+  },
+} as const;

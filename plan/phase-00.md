@@ -74,7 +74,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `apps/telephony_edge`, `apps/media_worker`, `apps/worker`, `apps/webhook_dispatcher`, `apps/events_sink`, `apps/sim` packages each with `Settings`, `main` entry, lifespan management, `/healthz`, `/readyz`, `/metrics`, SIGTERM handling
   - Acceptance: tests start each app in-process (asgi-lifespan) and assert health/readiness behaviour including 503 when Redis is unreachable.
 
-- [ ] P00-T13 TypeScript workspace scaffolds
+- [x] P00-T13 TypeScript workspace scaffolds — lint/typecheck/placeholders 0; pytest 1090 passed; Vitest widget 22 (100%), dashboard 52 (99.3%), sdk 48 + type tests (99%); pnpm -r build ok (widget.js 2296 B gzip); pnpm audit 0; jscpd 0; spec refs 0; openapi current
   - Spec refs: specs/02-repo-layout-and-conventions.md (TypeScript conventions); specs/25-dashboard.md (design tokens, layout); specs/22-web-widget.md (embed script); specs/26-sdks-cli-mcp-docs.md (TypeScript SDK)
   - Depends on: P00-T01
   - Deliverables: `apps/dashboard` (Next.js 15, Tailwind 4, shadcn/ui, tokens, root layout, `/status` page), `apps/widget` (Vite lib build, `init()` mounting Shadow DOM), `sdks/typescript` (client constructor + `health()`), ESLint/Prettier/tsconfig strict for each, Vitest tests

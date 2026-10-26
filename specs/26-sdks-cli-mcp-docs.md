@@ -121,6 +121,14 @@ async with AsyncVoiceAgents() as aclient:
   HMAC (works in edge runtimes).
 - Tests: Vitest with `msw` mocking; type tests with `tsd`.
 
+> Decision (2026-10-25): (a) Type tests use Vitest `expectTypeOf` (`vitest run --typecheck`, files `tests/*.test-d.ts`)
+> instead of `tsd`, which needs built `.d.ts` files while `pnpm -r test` runs before `build`. (b) Browsers forbid setting
+> `User-Agent`, so the SDK identifies itself with `X-VA-Client: voiceagents-typescript/<version>` on every request.
+> (c) Schema drift is a Vitest test (`tests/schema.test.ts`) that regenerates the types from `openapi/openapi.json` with
+> `openapi-typescript` and compares them with the committed `src/schema.d.ts`. (d) Retries follow §2.2 exactly
+> (connection errors and timeouts, 408, 409 `IDEMPOTENCY_IN_PROGRESS`, 429, 500, 502, 503, 504); a `Retry-After` of
+> delta-seconds or HTTP date up to 60 s replaces the backoff delay, longer values fall back to the backoff.
+
 ## 4. CLI `va` (`sdks/cli`, Typer + Rich, depends on `voiceagents`)
 
 Config file `~/.config/voiceagents/config.toml`: profiles `{name: {api_key, base_url, org_id?}}`, `default_profile`.

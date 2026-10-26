@@ -2053,3 +2053,195 @@ worker runner, dispatcher/sink/sim settings and runners against specs/01 §1, sp
 Non-blocking note for the workflow phase: `va_worker.task_queues` docstring says packages "append" to `REGISTRATIONS`,
 which is a Final tuple — the workflow phase should replace the tuple literal (or add a register function) and wire
 `task_queue_names(settings.temporal_task_queue)` into the registrations.
+
+## Plan P00-T13 — TypeScript workspace scaffolds
+
+Acceptance: `corepack pnpm -r lint typecheck test build` (run as separate `pnpm -r run <x>` passes) exits 0; `make lint
+typecheck test-ts` and `make check` stay green. Node 22, pnpm 9.15.9 via corepack (no `pnpm` on PATH).
+
+### Spec conflicts / decisions (record as `> Decision (2026-10-25):` in the named spec, same commit)
+1. specs/02 §6 + `.env.example`: add `NEXT_PUBLIC_API_BASE_URL` | dashboard | `http://localhost:8000` | browser base URL
+   for API calls — directly after `NEXT_PUBLIC_SENTRY_DSN` in both (parity test enforces order/value/comment; update any
+   hard-coded count in `scripts/tests/test_env_example.py` if present). Needed because the dashboard calls the api
+   cross-origin with `credentials: "include"` (api CORS already allows `DASHBOARD_BASE_URL`).
+2. specs/25 §23: `/status` is a client page (TanStack Query) calling api `GET /healthz`, `GET /readyz` (unlisted probes,
+   zod-parsed bodies per specs/27 §9 Decision) and `GET /v1/health` via openapi-fetch. No `/` page yet (Home needs auth,
+   phase 02+): `/` renders the designed `not-found.tsx`. Fonts self-hosted via `@fontsource-variable/inter` +
+   `@fontsource-variable/jetbrains-mono` (no network at build; spec fonts kept — specs beat the generic aesthetics
+   guidance's Inter ban). Token colours written in OKLCH (Tailwind 4 palette values for indigo-600/400, emerald-600,
+   amber-500, rose-600, sky-600).
+3. specs/26 §3: SDK type tests use Vitest `expectTypeOf` (`vitest --typecheck`) instead of `tsd` (tsd needs built
+   `.d.ts`; `pnpm -r test` runs before `build`). Schema drift checked by a Vitest test (below).
+4. specs/22 §4: this phase ships `init()` + auto-init + Shadow DOM mount only; `window.VoiceAgentsWidget` = IIFE global
+   exposing `init` (full JS API, audio worklet, components arrive with the widget phase — say so in module docstring as
+   scope, not as a stub). Size budget enforced at build (`scripts/check-size.mjs`, ≤ 60 KB gzip).
+
+### Root files
+- `tsconfig.base.json`: `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`,
+  `noFallthroughCasesInSwitch`, `verbatimModuleSyntax`, `isolatedModules`, `target ES2022`, `module ESNext`,
+  `moduleResolution Bundler`, `skipLibCheck`, `forceConsistentCasingInFileNames`.
+- `eslint.base.mjs`: exports `base({ tsconfigRootDir, react?: boolean })` returning flat config: `@eslint/js`
+  recommended, `typescript-eslint` `strictTypeChecked` + `stylisticTypeChecked` with `parserOptions.projectService`,
+  when react: `eslint-plugin-react-hooks` (recommended) + `eslint-plugin-jsx-a11y` (flat recommended);
+  `eslint-config-prettier` last; ignores `dist`, `.next`, `coverage`, `**/schema.d.ts`, `next-env.d.ts`.
+  Root `package.json` devDependencies: everything `eslint.base.mjs` imports + `eslint`, `prettier`, `typescript`.
+- `.prettierrc.json` (`printWidth 100`, `semi true`, `singleQuote false`, `trailingComma all`), `.prettierignore`
+  (`dist`, `.next`, `coverage`, `**/schema.d.ts`, `pnpm-lock.yaml`, `next-env.d.ts`).
+- Root `package.json` scripts unchanged. Each package declares its own devDeps too (eslint, prettier, typescript,
+  vitest, @vitest/coverage-v8) so `pnpm -r run` resolves bins locally.
+- Every package scripts: `format: prettier --write .`, `lint: eslint . --max-warnings 0 && prettier --check .`,
+  `typecheck: tsc --noEmit`, `test: vitest run --coverage`, `build`. Vitest coverage thresholds 80 (lines/branches/
+  functions/statements), excluding config files, `schema.d.ts`, Next `app/**/layout.tsx`? (no — keep layout covered via
+  test or exclude only `*.config.*`, `next-env.d.ts`).
+
+### A. `sdks/typescript` — npm `@voiceagents/sdk`
+- `package.json`: `type: module`, `exports` (import → `dist/index.js`, require → `dist/index.cjs`, types),
+  `files: ["dist"]`, `engines.node >=18`, scripts above + `build: tsup`, `gen:api: openapi-typescript
+  ../../openapi/openapi.json -o src/schema.d.ts`. devDeps: tsup, openapi-typescript, msw, vitest, coverage-v8.
+- `tsup.config.ts`: entry `src/index.ts`, formats esm+cjs, dts, clean, target es2020.
+- `src/schema.d.ts` (generated, committed).
+- `src/version.ts`: `export const VERSION = "0.0.0"` matching package.json (test asserts equality).
+- `src/errors.ts`: `VoiceAgentsError extends Error`; `APIError(status, code, message, requestId, body)`;
+  subclasses `BadRequestError` 400, `AuthenticationError` 401, `InsufficientCreditsError` 402,
+  `PermissionDeniedError` 403, `NotFoundError` 404, `ConflictError` 409, `RateLimitError` 429,
+  `InternalServerError` ≥500; `APIConnectionError`, `APITimeoutError`. `parseErrorBody(body): {code, message}` handles
+  envelope `{errors:[{code,message,...}]}`/`{error:{...}}` and legacy shapes — read `ErrorEnvelope`/`ErrorLegacy` in
+  `openapi/openapi.json` + specs/31 §4 for exact fields; `makeAPIError(status, body, requestId)`.
+- `src/client.ts`: `export interface ClientOptions {apiKey?: string; baseURL?: string; timeout?: number; maxRetries?:
+  number; orgId?: string; fetch?: typeof fetch; defaultHeaders?: Record<string,string>}`;
+  `DEFAULT_BASE_URL = "https://api.voiceagents.ai"`, `DEFAULT_TIMEOUT_MS = 30000`, `DEFAULT_MAX_RETRIES = 2`.
+  `class VoiceAgentsClient { constructor(options?: ClientOptions); readonly baseURL; readonly timeout; readonly
+  maxRetries; health(): Promise<HealthStatus> /* GET /v1/health, typed from schema components["schemas"]["HealthStatus"]
+  */ }`. apiKey falls back to `globalThis.process?.env.VOICEAGENTS_API_KEY` (guarded for non-Node), baseURL to
+  `VOICEAGENTS_BASE_URL` then default; trailing slash stripped. Private `request<T>(method, path)`:
+  headers `Authorization: Bearer` (when apiKey), `X-VA-Org-Id` (when orgId), `User-Agent`-equivalent
+  `X-VA-Client: voiceagents-typescript/<VERSION>` (browsers forbid User-Agent; record in Decision 3), `Accept`,
+  defaultHeaders merged; timeout via `AbortSignal.timeout`-equivalent AbortController → `APITimeoutError`; retries on
+  connection error, 408, 429 (honour `Retry-After` seconds), 500/502/503/504 with backoff `min(8000, 500*2^n)` full
+  jitter; sleep + random injectable via a non-exported constructor seam (`ClientOptions` internal `_sleep`/`_random`
+  NOT public — use a second internal options type exported only from `src/internal.ts` for tests). Non-2xx after
+  retries → `makeAPIError` with `X-Request-Id`.
+- `src/index.ts`: re-exports client, errors, VERSION, types `HealthStatus`, `ClientOptions`, `paths`/`components`.
+- Tests (`tests/`, msw `setupServer`): `client.test.ts` — `health returns status ok`, `sends bearer and org headers`,
+  `apiKey from env`, `baseURL trailing slash stripped`, `retries 503 then succeeds (sleep called with jittered delay)`,
+  `honours Retry-After`, `gives up after maxRetries → InternalServerError with requestId`, `404 → NotFoundError code
+  from envelope body`, `legacy body parsed`, `network error → APIConnectionError after retries`,
+  `timeout → APITimeoutError` (fake sleep, abort), `custom fetch used`; `errors.test.ts` status → class table;
+  `types.test-d.ts` (`expectTypeOf(client.health()).resolves.toEqualTypeOf<{status:"ok"}>()`, constructor rejects
+  unknown option via `// @ts-expect-error`); `schema.test.ts` — regenerate with `openapiTS(new URL(openapi.json))` +
+  `astToString` and compare to committed `src/schema.d.ts` (drift check); `version.test.ts`.
+
+### B. `apps/widget` — `@voiceagents/widget` (private)
+- Vite 6/7 lib build: `vite.config.ts` `build.lib {entry: src/index.ts, name: "VoiceAgentsWidget", formats: ["iife"],
+  fileName: () => "widget.js"}`, `outDir dist`, minify. `build: vite build && node scripts/check-size.mjs`
+  (gzipSync dist/widget.js, fail > 61440 bytes, prints size). Vitest env `jsdom`.
+- `src/index.ts`: `export interface WidgetOptions {widgetKey: string; userToken?: string; open?: boolean; target?:
+  Document}`; `export interface WidgetHandle {root: ShadowRoot; host: HTMLDivElement; destroy(): void}`;
+  `ROOT_ID = "va-widget-root"`; `init(options): WidgetHandle` — validates `widgetKey` starts with `wgt_` (throws
+  `WidgetConfigError`), idempotent (second call returns existing handle for same key; different key → destroys and
+  remounts), creates `<div id="va-widget-root">` appended to `body`, `attachShadow({mode: "open"})`, injects a
+  `<style>` with CSS variables (light/dark via `prefers-color-scheme`, `prefers-reduced-motion`) and an accessible
+  launcher `<button type="button" aria-label=... aria-expanded="false" part="launcher">` (text via textContent only),
+  `data-open` reflected on host. `readScriptConfig(script: HTMLOrSVGScriptElement | null): WidgetOptions | null` reads
+  `data-widget-key`, `data-user-token`, `data-open="true"`; `autoInit()` runs at module load when
+  `document.currentScript` has `data-widget-key` (errors reported via `console.error`? — placeholder checker flags
+  console debug? check rules; else dispatch `CustomEvent("va-widget:error")` on window).
+- Tests: mount creates host+shadow root, launcher has accessible name and aria-expanded, styles isolated inside shadow
+  (no `<style>` in document head), idempotent, remount on new key, destroy removes host, invalid key throws,
+  readScriptConfig parses/ignores, autoInit with fake currentScript, data-open sets open state.
+
+### C. `apps/dashboard` — `dashboard` (private; name must be `dashboard` for `pnpm --filter dashboard`)
+- Next 15 (app router, `src/` dir), React 19, Tailwind 4 (`@tailwindcss/postcss`, `postcss.config.mjs`),
+  shadcn/ui init: `components.json` (style new-york, rsc true, tsx, css `src/app/globals.css`, aliases `@/components`,
+  `@/lib/utils`), `src/lib/utils.ts` `cn()` (clsx + tailwind-merge), `src/components/ui/button.tsx`, `card.tsx`,
+  `badge.tsx` (shadcn sources, class-variance-authority). TanStack Query 5, openapi-fetch, openapi-typescript, zod.
+  scripts: `dev: next dev -p 3000`, `build: next build`, `start: next start -p 3000`, `gen:api: openapi-typescript
+  ../../openapi/openapi.json -o src/lib/api/schema.d.ts`, lint/format/typecheck/test as above. `NEXT_TELEMETRY_DISABLED=1`
+  via `.npmrc`? no — set `env` in scripts or `next.config.ts` cannot; use `cross-env`-free: `"build": "next build"`
+  and document `NEXT_TELEMETRY_DISABLED=1` in AGENTS.md / CI. `next.config.ts`: `reactStrictMode`, `poweredByHeader:
+  false`, `typedRoutes` off.
+- `src/styles/tokens.css`: every token from specs/25 §23 (light `:root`, dark `.dark` + `@media (prefers-color-scheme:
+  dark) :root:not(.light)`), `--radius: 8px`, `--space: 4px`, `--font-sans` (Inter Variable), `--font-mono`
+  (JetBrains Mono Variable). `src/app/globals.css`: `@import "tailwindcss"; @import "../styles/tokens.css";
+  @theme inline {...}` mapping tokens to Tailwind colours, `::selection`, focus-visible ring, reduced-motion.
+- `src/app/layout.tsx`: html `lang="en"`, imports fontsource + globals, `metadata` (title template
+  "%s · VoiceAgents"), `viewport.themeColor` light/dark, `<Providers>` (client, `QueryClientProvider`, QueryClient
+  staleTime 30 s, refetchOnWindowFocus true).
+- `src/app/status/page.tsx` (server shell + `generateMetadata` title "Status") renders `<StatusView />` client
+  component `src/components/status/status-view.tsx`: three rows — API liveness (`/healthz`: status + version),
+  readiness (`/readyz`: overall + per-check table with ok/error/timeout badges, failing list), public health
+  (`/v1/health` via openapi-fetch client). Loading skeleton, unreachable error state with retry button, refetch every
+  10 s, `aria-live="polite"` region; all strings from `src/i18n/en.ts`.
+- `src/lib/env.ts`: `apiBaseUrl()` reads `process.env.NEXT_PUBLIC_API_BASE_URL` (zod url, default
+  `http://localhost:8000`, strip trailing slash).
+- `src/lib/api/schema.d.ts` (generated), `src/lib/api/client.ts` (`createApiClient(baseUrl, fetch?)` openapi-fetch
+  with `credentials: "include"`), `src/lib/api/errors.ts` (`ApiError {code, message, field?, requestId}` +
+  `toApiError(status, body, requestId)` both envelopes), `src/lib/api/probes.ts` (`fetchLiveness`, `fetchReadiness`:
+  zod schemas `livenessSchema {status:"ok", version}`, `readinessSchema {status:"ok"|"unavailable", checks:
+  record<"ok"|"error"|"timeout">, failing?: string[], version}`; 503 readiness body is data, not an error; other
+  non-2xx → ApiError; network → ApiError code `NETWORK_ERROR`? — use a local `ProbeUnreachableError`).
+- `src/app/api/healthz/route.ts` (specs/27 §9): `GET` → `{"status":"ok","version": <package.json version>}`,
+  `dynamic = "force-dynamic"`.
+- `src/app/not-found.tsx`, `src/app/error.tsx` (client, retry) designed with tokens.
+- Tests (Vitest, jsdom, Testing Library, msw or injected fetch): `tokens.test.ts` (parse tokens.css; every spec token
+  present in light and dark; oklch→sRGB→WCAG contrast ≥ 4.5 for foreground/background, muted-foreground/background,
+  primary-foreground/primary, card/foreground), `probes.test.ts` (ok, 503 readiness parsed, malformed body → error,
+  network error), `errors.test.ts`, `env.test.ts`, `status-view.test.tsx` (renders ok rows, failing check badge text,
+  unreachable state + retry triggers refetch), `healthz-route.test.ts`, `schema.test.ts` (drift: regenerate and compare
+  like the SDK — share the comparison helper? no cross-package import; jscpd: keep each ≤ 10 lines).
+
+### Docs
+- AGENTS.md (dated P00-T13): TS layout, root `tsconfig.base.json`/`eslint.base.mjs`/prettier, commands
+  (`corepack pnpm --filter dashboard dev`, `gen:api` in dashboard + sdk after `make openapi`, schema drift tests),
+  `NEXT_TELEMETRY_DISABLED=1`, widget size gate, `NEXT_PUBLIC_API_BASE_URL`.
+
+### Gates
+`corepack pnpm install` (lockfile updated, committed), `corepack pnpm -r run lint`, `typecheck`, `test`, `build`;
+`make fmt lint typecheck placeholders test test-ts`, `make check`; `corepack pnpm audit` (fix highs via overrides if
+any); pip-audit unchanged; radon unchanged; `npx --yes jscpd@4` 0 clones (now includes TS). Smoke: `make up`, run api
+(`uv run uvicorn va_api.main:app --port 8000`) + `corepack pnpm --filter dashboard start` after build; curl
+`localhost:3000/api/healthz` 200 and `/status` 200 HTML; widget: dist/widget.js size printed.
+
+### Risks
+- `next build` offline: no `next/font/google` (fontsource only); disable telemetry; ESLint during build — set
+  `eslint.ignoreDuringBuilds: true` in next.config since lint runs separately (avoid next's legacy eslint plugin
+  requirement).
+- Placeholder checker scans TS (empty functions, console usage) — read its TS rules before writing (`noop` callbacks
+  need bodies or comments per rule).
+- `exactOptionalPropertyTypes` vs openapi-fetch/Next types — use `skipLibCheck`.
+- jsdom + React 19 + Testing Library versions; Vitest 3 `@vitejs/plugin-react` for TSX.
+- msw v2 in Node 22 fine; ensure `onUnhandledRequest: "error"`.
+- pnpm audit may flag transitive dev deps; prefer upgrades, document any override.
+
+## Build P00-T13 — done (Builder)
+
+Implemented per plan, with these deviations (all recorded as `> Decision (2026-10-25)` in the named specs):
+- Versions: Next 15.5.28, React 19.2, TS 5.9 (typescript-eslint caps < 6.1), ESLint 9, Vitest 4.1 (3.2 pulled
+  critical tinypool / vitest advisories), Vite 7, zod 4, jest-dom 7. Root `pnpm.overrides`: `postcss@<8.5.23` →
+  `^8.5.23` (Next pins 8.4.31, 2 highs) and `esbuild@<0.28.1` → `^0.28.1` (tsup). `pnpm audit`: 0.
+- Tokens use CSS `light-dark()` + `color-scheme` (`:root.light` / `:root.dark` force) instead of duplicated `.dark` and
+  media blocks (jscpd flagged the duplicate). specs/25 Decision (d) updated accordingly.
+- `next-env.d.ts` git-ignored (`apps/dashboard/.gitignore`): Next 15.5 writes a reference to `.next/types/routes.d.ts`,
+  which breaks `tsc` on a clean clone.
+- `.jscpd.json` at the root excludes generated `schema.d.ts` (the two copies are identical by construction).
+- SDK retries also cover timeouts and 409 `IDEMPOTENCY_IN_PROGRESS` (specs/26 §2.2); Retry-After accepts delta-seconds
+  or HTTP date ≤ 60 s.
+- Dashboard CSRF middleware (`va_csrf` → `X-CSRF-Token` on unsafe methods) included; 401/MFA redirects left to phase 02.
+- `.env.example` + specs/02 §6 gained `NEXT_PUBLIC_API_BASE_URL` (counts in test_env_example: 106 names / 105 keys /
+  78 literal).
+
+Gates (this iteration): make fmt 0; make check 0 (ruff + 3× eslint/prettier, mypy + 3× tsc, placeholders 0 findings,
+pytest 1090 passed 1 skipped 99.83 %, Vitest widget 22 / dashboard 52 / sdk 48 + type tests, openapi current, spec refs
+0); `pnpm -r run build` 0 (widget.js 2296 B gzip, /status first load 153 kB); pnpm audit 0; pip-audit 0; jscpd 0 clones;
+radon avg A (2.56), only the pre-existing api C test. Smoke: api on :8000 + `next start` :3000 → `/api/healthz` 200
+`{"status":"ok","version":"0.0.0"}`, `/status` 200 with heading, `/` 404 page, api CORS allows origin localhost:3000 with
+credentials and exposes X-Request-Id.
+
+## Review P00-T13 — approved
+
+Re-ran: make lint, typecheck, placeholders (0), test (1090 passed, 1 skipped), test-ts (widget 22, dashboard 52, sdk 48 +
+type tests; coverage ≥ 93 % branches everywhere), `pnpm -r run build` (widget.js 2296 B gzip), pnpm audit 0, jscpd 0,
+spec refs 0, openapi current. Diff checked against specs/25 §23 (tokens match Tailwind 4 OKLCH values for the named hues,
+API client CSRF + both error envelopes), specs/26 §2.2/§3 (retry set, backoff 0.5 s×2^n full jitter cap 8 s, error
+classes by status), specs/22 §4 (Shadow DOM mount, data-* auto-init), specs/31 §1 (`errors[].error` code key). Reviewer
+fix: AGENTS.md said Vitest 3, packages pin Vitest ^4.1.12 — corrected.
