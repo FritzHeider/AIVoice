@@ -110,3 +110,15 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
   values: pytest-xdist workers collect different test IDs and the run errors; parametrize sizes instead.
 - 2026-10-25 (P00-T07): aioboto3 clients take `aiobotocore.config.AioConfig`, not `botocore.config.Config` (mypy
   rejects the latter). boto3-named keyword parameters in protocols/fakes (`KeyId`, ...) need `# noqa: N803` per line.
+- 2026-10-25 (P00-T08): build Redis and HTTP clients only with `va_common.redis.redis_client(settings)` and
+  `va_common.http.http_client(settings, timeout=...)` (timeout is required; never construct `httpx.AsyncClient` or
+  `redis.asyncio.Redis` directly). Readiness uses `redis_ping(client, timeout_s=1.0)` (ruff ASYNC109 bans an async
+  `timeout` parameter). Services start with `va_common.observability.init(...)` and call `.shutdown()` on exit.
+- 2026-10-25 (P00-T08): tracing tests use `setup_tracing(..., span_processor=SimpleSpanProcessor(InMemorySpanExporter()),
+  set_global=False)` (helper: `obs_helpers.memory_provider()` in `packages/va_common/tests`); the default sampler
+  ratio is 0.1, so pass `otel_traces_sampler_arg=1.0` when a test expects spans. Metrics tests use
+  `build_metrics(service, new_registry(process_collectors=False))`, never the prometheus_client global `REGISTRY`.
+  prometheus_client 0.26 exposes `# TYPE <name>_total counter` with the full counter name.
+- 2026-10-25 (P00-T08): Docker-dependent tests are `@pytest.mark.integration` and skip when the daemon socket is
+  unreachable; probe it with a plain socket (`test_redis_integration._docker_available`): `docker.from_env()`
+  leaks a socket on failure and `filterwarnings=error` turns the ResourceWarning into a session error.

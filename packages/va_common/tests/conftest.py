@@ -21,6 +21,7 @@ SETTINGS_ENV_VARS = (
     "KMS_PROVIDER",
     "LOCAL_MASTER_KEY",
     "AWS_KMS_KEY_ID",
+    "REDIS_URL",
 )
 
 

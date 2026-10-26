@@ -1,15 +1,23 @@
 [project]
 name = "va-common"
 version = "0.1.0"
-description = "Shared VoiceAgents primitives: settings, clock, ids, JSON, errors, money, logging, masking, crypto"
+description = "Shared VoiceAgents primitives: settings, clock, ids, JSON, errors, money, logging, masking, crypto, redis, http, tracing, metrics"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aioboto3>=15.5.0",
     "cryptography>=50.0.2",
+    "httpx[http2]>=0.28.1",
     "opentelemetry-api>=1.45.1",
+    "opentelemetry-exporter-otlp>=1.45.1",
+    "opentelemetry-instrumentation-httpx>=0.66b1",
+    "opentelemetry-instrumentation-redis>=0.66b1",
+    "opentelemetry-sdk>=1.45.1",
     "orjson>=3.13.0",
+    "prometheus-client>=0.26.0",
     "pydantic>=2.9",
     "pydantic-settings>=2.16.1",
+    "redis>=5.1",
+    "sentry-sdk>=2.73.0",
     "structlog>=26.1.0",
     "uuid-utils>=1.1.0",
 ]

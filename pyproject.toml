@@ -23,6 +23,7 @@ dev = [
   "syrupy>=6.1",
   "va-common",
   "types-aioboto3[kms]>=15.5.0",
+  "fakeredis>=2.40.0",
 ]
 
 [tool.uv]

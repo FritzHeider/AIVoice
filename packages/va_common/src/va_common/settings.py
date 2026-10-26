@@ -12,7 +12,14 @@ from typing import Any, ClassVar
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-__all__ = ["BaseServiceSettings", "CryptoSettings", "Environment", "KmsProviderName", "LogFormat"]
+__all__ = [
+    "BaseServiceSettings",
+    "CryptoSettings",
+    "Environment",
+    "KmsProviderName",
+    "LogFormat",
+    "RedisSettings",
+]
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -82,6 +89,12 @@ class BaseServiceSettings(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.va_env is Environment.LOCAL
+
+
+class RedisSettings(BaseServiceSettings):
+    """Redis connection for backend services (``REDIS_URL``, scope "all backend" in specs/02 §6)."""
+
+    redis_url: str = "redis://localhost:6379/0"
 
 
 class KmsProviderName(StrEnum):

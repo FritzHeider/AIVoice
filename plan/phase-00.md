@@ -44,7 +44,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `KmsProvider` protocol, `LocalKmsProvider` (AES-256-GCM master key from `LOCAL_MASTER_KEY`), `AwsKmsProvider` (aioboto3 `generate_data_key`/`decrypt`), `encrypt_bytes/decrypt_bytes` producing versioned blobs (`v1|key_id|wrapped_dek|nonce|ciphertext`), key rotation re-wrap helper
   - Acceptance: round-trip tests, tamper detection test, AWS provider tested against a fake client implementing the boto3 KMS method signatures.
 
-- [ ] P00-T08 `va_common` infrastructure helpers
+- [x] P00-T08 `va_common` infrastructure helpers — redis/http factories, OTel tracing (force-sample, OTLP gRPC), 56-metric CATALOG parity with specs/27 §3, observability.init + Sentry redaction; 682 passed, coverage 99.95 %, lint/mypy/placeholders clean
   - Spec refs: specs/02-repo-layout-and-conventions.md (Core Python dependencies); specs/27-observability.md (tracing, metrics)
   - Depends on: P00-T05
   - Deliverables: `redis_client(settings)`, `http_client(settings, *, timeout, http2)` with OTel httpx instrumentation, `setup_tracing(service_name)`, `metrics` registry helpers and `/metrics` ASGI app factory

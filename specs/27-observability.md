@@ -52,6 +52,16 @@ Package: `va_common.logging`, `va_common.tracing`, `va_common.metrics`. Every se
 - Propagation: W3C `traceparent`. API → Temporal workflow headers → activities. The call trace id is stored in
   `call:{id}:ctx.trace_context` so the media worker continues the same trace.
 
+> Decision (2026-10-25): `va_common.tracing.setup_tracing(service_name, settings, version=...)` builds the provider.
+> Force-sampling is a root sampler (`ForceSampleSampler`) that returns RECORD_AND_SAMPLE when the span's start
+> attributes contain `va.force_sample=True` (build them with `force_sampled_attributes(...)`) and otherwise delegates
+> to `TraceIdRatioBased(OTEL_TRACES_SAMPLER_ARG)`; it sits under `ParentBased`, so children follow the parent. The
+> exporter is OTLP over gRPC (collector port 4317), plaintext for `http://` endpoints, 10 s export timeout.
+> `service.version` is passed by the service; `k8s.pod.name` is `POD_ID` or the host name (the same rule as the log
+> `pod` field, `va_common.tracing.resolve_pod`). httpx and redis clients are instrumented per client by the
+> `va_common.http.http_client` and `va_common.redis.redis_client` factories. `setup_tracing` installs the global
+> tracer provider and the W3C `traceparent` + baggage propagators unless `set_global=False` (tests).
+
 ### 2.1 Span catalog
 
 | Span name | Service | Attributes |
@@ -89,6 +99,14 @@ Each service exposes `/metrics` (api 8000, edge 8100, media 8200 on the same por
 events-sink 9500 dedicated ports). Library: `prometheus-client`, multiprocess mode not used (single process per pod).
 Histogram default latency buckets (ms): `[5,10,25,50,75,100,150,200,300,400,500,650,800,1000,1300,1600,2000,3000,5000,10000]`
 named `LAT_MS`.
+
+> Decision (2026-10-25): `va_common.metrics.CATALOG` holds every row of §3.1-§3.5 keyed by `Service`;
+> `packages/va_common/tests/test_metrics.py` parses these tables and asserts exact parity. Combined rows (`a` / `b`)
+> are two metrics; a "(X only)" label applies only to the metric whose name contains X. §3.5 is split by prefix:
+> `va_webhook_*` belongs to webhook-dispatcher, `va_events_sink_*` to events-sink. Every histogram uses `LAT_MS`.
+> Each process builds its own `CollectorRegistry` with `build_metrics(service)` (catalog plus the process, platform,
+> and GC collectors) and never uses the prometheus_client global registry; `/metrics` is served by
+> `metrics_app(registry)` (ASGI) or `render_latest(registry)`.
 
 ### 3.1 api
 
@@ -247,6 +265,16 @@ Responses: `{data: {series: [...rows as objects...], totals?: {...}}, errors: nu
 (tracing via OTel), `send_default_pii=False`, `before_send` applies the same redaction as logs, environment and release
 tags, `org_id`/`call_id` set as tags (never user email). Dashboard uses `@sentry/nextjs` with the same rules
 (`NEXT_PUBLIC_SENTRY_DSN`).
+
+> Decision (2026-10-25): `va_common.observability.init(service_name, settings, version=..., service=...)` configures
+> logging, tracing, metrics (when `service` is given), and Sentry, and returns an `Observability` whose `shutdown()`
+> flushes spans and Sentry. Sentry is initialised only when `SENTRY_DSN` is non-empty, with the asyncio and httpx
+> integrations (the FastAPI integration enables itself when FastAPI is installed). `before_send` applies
+> `va_common.logging.redact` to `extra`, `contexts`, `request`, `logentry` (`message`, `formatted`, `params`),
+> breadcrumbs, and the local `vars` of every frame in `exception.values[].stacktrace` and
+> `threads.values[].stacktrace`; masks phone numbers in `message` and each `exception.values[].value`; leaves
+> structural fields (exception `type`/`module`, frame `filename`/`function`/`lineno`) intact; removes `user.email`
+> and `user.ip_address`; and copies the structlog-bound `org_id`/`call_id` into tags.
 
 ## 9. Health and readiness
 

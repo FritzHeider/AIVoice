@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import socket
 import sys
 from collections.abc import Mapping, MutableMapping
 from contextlib import AbstractContextManager
@@ -25,6 +24,7 @@ from structlog.typing import Processor
 
 from va_common.masking import REDACTED, is_secret_key, mask_phones_in_text
 from va_common.settings import BaseServiceSettings, LogFormat
+from va_common.tracing import resolve_pod
 
 __all__ = [
     "RAW_MEDIA_KEYS",
@@ -251,7 +251,7 @@ def configure_logging(
         "service": settings.service_name,
         "env": settings.va_env.value,
         "version": version,
-        "pod": pod or env.get("POD_ID") or socket.gethostname(),
+        "pod": pod or resolve_pod(env),
     }
     shared = _shared_processors(settings, fields)
     structlog.configure(

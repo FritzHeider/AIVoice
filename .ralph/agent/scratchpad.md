@@ -916,3 +916,246 @@ mapping (decrypt errors -> DecryptionError, others propagate), cache key include
 cache), rewrap identity on current key, CryptoSettings production refusal, env vars match specs/02 §6. No key literals
 in tests; no sleeps. Note for later: `open_kms_provider` relies on the AWS default region chain (no region setting in
 specs/02 §6). Ticked P00-T07 and committed.
+
+## Plan P00-T08 — `va_common` infrastructure helpers (redis, http, tracing, metrics, observability init)
+
+Spec refs: specs/02 §2 (core deps: `redis>=5.1`, `httpx[http2]`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp`,
+`opentelemetry-instrumentation-httpx`, `prometheus-client`, `sentry-sdk`), specs/02 §4 (Container holds clients),
+specs/02 §6 (`REDIS_URL` scope "all backend", `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_SAMPLER_ARG`, `SENTRY_DSN`,
+`POD_ID`), specs/27 §2 (TracerProvider/Resource/sampler/force-sample/propagation), specs/27 §3 (metric tables, `LAT_MS`,
+per-service `/metrics`), specs/27 §8 (Sentry), specs/27 header (`va_common.observability.init(service_name, settings)`),
+MASTER_PROMPT §4.7 (every network call has a timeout).
+Out of scope: FastAPI/asyncpg instrumentation and request metrics middleware (P00-T11 / phase 01), `/healthz` `/readyz`
+endpoints (P00-T11/T12 — they will use `redis_ping` from here), Temporal TracingInterceptor (worker phase).
+Docker is NOT available on this machine right now: the testcontainers test must skip cleanly, coverage comes from unit tests.
+
+### Dependencies
+`uv add --package va-common "redis>=5.1" "httpx[http2]" opentelemetry-sdk opentelemetry-exporter-otlp
+opentelemetry-instrumentation-httpx opentelemetry-instrumentation-redis prometheus-client sentry-sdk`;
+dev: `uv add --dev fakeredis` (async fake for unit tests). Package description += "redis, http, tracing, metrics".
+`uv lock`; pip-audit afterwards (grpcio comes with the OTLP gRPC exporter).
+
+### `settings.py`
+```python
+class RedisSettings(BaseServiceSettings):      # services with REDIS_URL ("all backend" scope) extend it
+    redis_url: str = "redis://localhost:6379/0"
+```
+Add to `__all__`. (Settings classes compose by multiple inheritance later: `class Settings(CryptoSettings, RedisSettings)`.)
+conftest `SETTINGS_ENV_VARS` += `REDIS_URL`.
+
+### `va_common/redis.py`
+```python
+REDIS_SOCKET_TIMEOUT_S: Final = 5.0; REDIS_CONNECT_TIMEOUT_S: Final = 2.0; REDIS_HEALTH_CHECK_INTERVAL_S: Final = 30
+def redis_client(settings: RedisSettings, *, url: str | None = None, decode_responses: bool = False,
+                 max_connections: int = 50, tracer_provider: TracerProvider | None = None) -> redis.asyncio.Redis
+    # Redis.from_url(url or settings.redis_url, socket_timeout, socket_connect_timeout, health_check_interval,
+    #   retry_on_timeout=True, max_connections, decode_responses, client_name=settings.service_name)
+    # empty url -> CryptoError? no: ValueError("REDIS_URL is empty"). `url=` override exists for SIM_STATE_REDIS_URL.
+    # OTel: RedisInstrumentor().instrument_client(client, tracer_provider=...) when tracer_provider given
+    #   (verify instrument_client exists in the installed opentelemetry-instrumentation-redis; if not, call
+    #   RedisInstrumentor().instrument(tracer_provider=...) once from setup_tracing instead and record that).
+async def redis_ping(client: Redis, *, timeout: float = 1.0) -> bool
+    # asyncio.timeout(timeout): await client.ping(); False on TimeoutError / redis.exceptions.RedisError / OSError
+    # (specs/27 §9 "all within 1 s"); never raises.
+```
+
+### `va_common/http.py`
+```python
+DEFAULT_CONNECT_TIMEOUT_S: Final = 5.0
+def http_client(settings: BaseServiceSettings, *, timeout: float | httpx.Timeout, http2: bool = False,
+                base_url: str = "", headers: Mapping[str, str] | None = None, max_connections: int = 100,
+                max_keepalive: int = 20, transport: httpx.AsyncBaseTransport | None = None,
+                tracer_provider: TracerProvider | None = None, version: str = "unknown") -> httpx.AsyncClient
+    # `timeout` is required keyword (no default — callers must choose); float -> httpx.Timeout(timeout,
+    #   connect=min(timeout, DEFAULT_CONNECT_TIMEOUT_S)); timeout <= 0 -> ValueError.
+    # headers: {"User-Agent": f"voiceagents-{settings.service_name}/{version}", **headers}; follow_redirects=False;
+    # limits httpx.Limits(max_connections, max_keepalive_connections); http2 flag passed through (h2 installed).
+    # HTTPXClientInstrumentor.instrument_client(client, tracer_provider=tracer_provider) always (global provider when None).
+```
+
+### `va_common/tracing.py`
+```python
+FORCE_SAMPLE_ATTRIBUTE: Final = "va.force_sample"
+class ForceSampleSampler(Sampler):   # root sampler: attribute va.force_sample is True -> RECORD_AND_SAMPLE, else delegate
+    def __init__(self, delegate: Sampler) -> None; should_sample(...); get_description() -> f"ForceSample{{{delegate}}}"
+def build_sampler(ratio: float) -> Sampler   # ParentBased(root=ForceSampleSampler(TraceIdRatioBased(ratio)))
+def build_resource(service_name: str, settings: BaseServiceSettings, *, version: str, pod: str) -> Resource
+    # service.name, service.version, deployment.environment (= va_env value), k8s.pod.name
+def resolve_pod(environ: Mapping[str, str] | None = None) -> str   # POD_ID or socket.gethostname(); refactor
+    # logging.configure_logging to use it (one place for the rule)
+def setup_tracing(service_name: str, settings: BaseServiceSettings, *, version: str = "unknown",
+                  span_processor: SpanProcessor | None = None, set_global: bool = True,
+                  environ: Mapping[str, str] | None = None) -> TracerProvider
+    # span_processor default: BatchSpanProcessor(OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint,
+    #   insecure=endpoint.startswith("http://"), timeout=10)) — gRPC exporter (collector 4317).
+    # set_global: trace.set_tracer_provider(provider) and propagate.set_global_textmap(CompositePropagator(
+    #   [TraceContextTextMapPropagator(), W3CBaggagePropagator()])). Tests pass set_global=False (OTel global can be set once).
+def force_sampled_attributes(**attrs: AttributeValue) -> dict[str, AttributeValue]  # {**attrs, "va.force_sample": True}
+    # helper for the call root span (specs/27 §2 "calls are always sampled")
+def shutdown_tracing(provider: TracerProvider) -> None   # force_flush + shutdown
+```
+
+### `va_common/metrics.py`
+```python
+LAT_MS: Final[tuple[float, ...]] = (5,10,25,50,75,100,150,200,300,400,500,650,800,1000,1300,1600,2000,3000,5000,10000)
+class MetricKind(StrEnum): COUNTER="counter"; GAUGE="gauge"; HISTOGRAM="histogram"
+class Service(StrEnum): API="api"; TELEPHONY_EDGE="telephony_edge"; MEDIA_WORKER="media_worker"; WORKER="worker";
+    WEBHOOK_DISPATCHER="webhook_dispatcher"; EVENTS_SINK="events_sink"
+@dataclass(frozen=True, slots=True) class MetricSpec: name: str; kind: MetricKind; labels: tuple[str, ...] = (); doc: str
+CATALOG: Final[Mapping[Service, tuple[MetricSpec, ...]]]   # every row of specs/27 §3.1-§3.5, exact names/labels;
+    # §3.5 split: va_webhook_* -> WEBHOOK_DISPATCHER, va_events_sink_* -> EVENTS_SINK. Combined rows
+    # ("a / b") become two specs; "(ended only)" -> va_media_calls_started_total has no labels,
+    # va_media_calls_ended_total has end_reason. All histograms use LAT_MS. Counter names keep "_total"
+    # (prometheus_client strips/re-adds it; exposition name is identical).
+def new_registry(*, process_collectors: bool = True) -> CollectorRegistry   # fresh registry (+Process/Platform/GC collectors)
+class ServiceMetrics:
+    def __init__(self, service: Service, registry: CollectorRegistry) -> None   # registers every CATALOG[service] metric
+    registry: CollectorRegistry
+    def counter(self, name: str) -> Counter; def gauge(self, name: str) -> Gauge; def histogram(self, name: str) -> Histogram
+        # unknown name or wrong kind -> KeyError/TypeError with the name in the message
+def build_metrics(service: Service, registry: CollectorRegistry | None = None) -> ServiceMetrics
+def metrics_app(registry: CollectorRegistry) -> ASGIApp   # prometheus_client.make_asgi_app(registry); typed via a Protocol/alias
+def render_latest(registry: CollectorRegistry) -> tuple[bytes, str]   # generate_latest + CONTENT_TYPE_LATEST (for FastAPI route)
+```
+
+### `va_common/observability.py`
+```python
+@dataclass(slots=True) class Observability: tracer_provider: TracerProvider; metrics: ServiceMetrics | None; sentry_enabled: bool
+    def shutdown(self) -> None   # shutdown_tracing + sentry_sdk.flush(timeout=2) when enabled
+def init(service_name: str, settings: BaseServiceSettings, *, version: str = "unknown", service: Service | None = None,
+         span_processor=None, set_global=True, environ=None, stream=None) -> Observability
+    # configure_logging(settings, version=..., stream/environ) + setup_tracing + build_metrics(service) when given
+    # + init_sentry(settings, version)
+def init_sentry(settings: BaseServiceSettings, *, version: str) -> bool
+    # empty SENTRY_DSN -> False, no init. Else sentry_sdk.init(dsn, environment=va_env, release=version,
+    #   traces_sample_rate=0.0, send_default_pii=False, integrations=[AsyncioIntegration(), HttpxIntegration()],
+    #   before_send=sentry_before_send(policy)) -> True. FastAPI integration auto-enables when fastapi is installed.
+def sentry_before_send(policy: RedactionPolicy) -> Callable[[Event, Hint], Event | None]
+    # applies va_common.logging.redact to event["extra"], ["contexts"], ["request"] (headers/data), breadcrumbs[].data;
+    # drops ["user"]["email"]/["ip_address"] (never user email, specs/27 §8)
+```
+If `observability.py` makes the task too large, Sentry stays in this file anyway (it is ~40 lines); keep functions CC ≤ B.
+
+### Tests (`packages/va_common/tests/`)
+- `test_redis.py`: client built from settings carries timeouts/health interval/retry/client_name (inspect
+  `client.connection_pool.connection_kwargs`), `url=` override, empty url -> ValueError; `redis_ping` True against
+  fakeredis (`fakeredis.FakeAsyncRedis`), False on ConnectionError (fake client raising), False on timeout (client whose
+  ping awaits an `asyncio.Event` never set, timeout=0.01 — no sleeps); tracing instrumented client emits a span to
+  `InMemorySpanExporter` for a fakeredis command (if instrument_client works with FakeAsyncRedis; otherwise assert
+  the instrumentor was applied).
+  `test_redis_integration.py` (`@pytest.mark.integration`): testcontainers `RedisContainer("redis:7.2-alpine")` →
+  `redis_client(url=...)` set/get + `redis_ping` True; fixture skips (`pytest.skip("docker unavailable")`) when the Docker
+  daemon cannot be reached (check via `docker.from_env().ping()` in try/except).
+- `test_http.py` (respx): required timeout applied (connect capped at 5 s), zero/negative -> ValueError,
+  User-Agent header, custom headers merge, base_url, no redirect following, http2 flag, limits; request through
+  respx produces an httpx client span in `InMemorySpanExporter` with `http.request.method`/`http.method` attribute and
+  a `traceparent` header on the outgoing request when inside a parent span.
+- `test_tracing.py`: resource attributes (service.name/version, deployment.environment, k8s.pod.name from POD_ID and
+  hostname fallback); sampler: ratio 0 drops a normal root span, keeps one with `force_sampled_attributes`, child of a
+  sampled parent is sampled under ratio 0 (ParentBased); ratio 1 samples all; description string; default processor
+  is BatchSpanProcessor with OTLP exporter endpoint from settings (inspect, no network: shut down immediately);
+  `set_global=True` sets the global textmap to tracecontext+baggage (use a fixture that saves/restores
+  `propagate.get_global_textmap()`; for the tracer provider global, patch `trace.set_tracer_provider` via
+  monkeypatch and assert it was called with the provider); shutdown flushes in-memory exporter.
+- `test_metrics.py`: parses every table under specs/27 §3.1–§3.5 (path resolved from repo root via
+  `Path(__file__).parents[3] / "specs/27-observability.md"`, since conftest chdirs to tmp_path) — names (split " / "),
+  kind, labels (backticked tokens, "—" none, "(X only)" scoping) — and asserts exact CATALOG parity both directions;
+  each `build_metrics(service)` registers all metrics (exposition contains each name with `# TYPE`); histogram buckets
+  == LAT_MS; accessor wrong kind/unknown name errors; two services get independent registries; `metrics_app` served
+  via httpx `ASGITransport` returns 200 `text/plain; version=0.0.4` with observed values; `render_latest` content type.
+- `test_observability.py`: `init` configures logging (StringIO stream, JSON line contains service), tracer provider
+  with in-memory processor, metrics for given service, `sentry_enabled` False without DSN; with DSN
+  (`https://public@example.invalid/1` built at runtime) `sentry_sdk.init` called with the asserted kwargs (monkeypatch
+  `sentry_sdk.init` to capture — no network); `sentry_before_send` redacts `extra.api_key`, request header
+  `authorization`, phone numbers in breadcrumbs, drops user email/ip; `shutdown` calls flush only when enabled.
+Coverage 100 % on the new modules. No sleeps; `asyncio.timeout` with an Event for timeouts.
+
+### Docs
+- specs/27 §3 `> Decision (2026-10-25):` CATALOG lives in `va_common.metrics`, keyed by service; §3.5 split by prefix;
+  each service uses its own `CollectorRegistry` (built by `build_metrics`), plus process/platform/GC collectors;
+  `/metrics` via `metrics_app(registry)` (mounted on the same port for api/edge/media, dedicated port for worker types —
+  P00-T12).
+- specs/27 §2 `> Decision (2026-10-25):` force-sample = root sampler checks span attribute `va.force_sample=True`
+  (`force_sampled_attributes`) under `ParentBased`; gRPC OTLP exporter (insecure for `http://` endpoints, 10 s timeout);
+  `service.version` passed by the service; `k8s.pod.name` = `POD_ID` or hostname (same rule as logs); httpx and redis
+  clients are instrumented per client by the factories; global provider/propagator set by `setup_tracing`.
+- specs/27 §8 Decision: `observability.init` performs logging + tracing + metrics + Sentry; Sentry before_send reuses
+  `redact()` and strips user email/ip.
+- specs/02 §6 nothing new (no new env vars). AGENTS.md learned bullets: use `redis_client`/`http_client` factories (never
+  raw `httpx.AsyncClient`), `http_client` requires `timeout=`; tests use `setup_tracing(..., span_processor=
+  SimpleSpanProcessor(InMemorySpanExporter()), set_global=False)` and `build_metrics(service)` (fresh registry, never
+  the prometheus global REGISTRY); integration tests skip without Docker.
+
+### Gates
+`make fmt lint typecheck placeholders test` + `make check`; `uvx pip-audit` on `uv export --all-packages
+--no-emit-workspace`, `corepack pnpm audit`, `uvx radon cc -s -a scripts packages`, `npx --yes jscpd@4`. build.done
+as a plain string (mem-1792920384-602e).
+
+### Risks
+- `filterwarnings = error`: OTel emits warnings on overriding the global tracer provider and on deprecated semconv;
+  sentry/grpc may emit DeprecationWarnings on import — keep tests on `set_global=False`; add narrowly scoped
+  `filterwarnings` entries only for third-party warnings that cannot be avoided, with a comment naming the source.
+- prometheus_client `Counter("x_total")` registers as `x`; the exposition still shows `x_total` — test on exposition text.
+- Missing stubs: `prometheus_client` and `fakeredis` ship types; OTel ships `py.typed`; if `sentry_sdk` typing of
+  `Event`/`Hint` is awkward, use `sentry_sdk.types` (`Event`, `Hint`).
+- xdist + random parametrize ban (mem-1792981166-ce01) — no random values in parametrize.
+- Instrumenting the same httpx client twice / uninstrument leaks between tests: build a new client per test and close it.
+
+## Build P00-T08 — done (Builder)
+
+Implemented per plan: `RedisSettings` (+ conftest `REDIS_URL`), `va_common.redis` (`redis_client`, `redis_ping`),
+`va_common.http` (`http_client` with required `timeout`, `build_timeout`, `user_agent`), `va_common.tracing`
+(`ForceSampleSampler`, `build_sampler`, `build_resource`, `resolve_pod` — logging now uses it, `setup_tracing`,
+`force_sampled_attributes`, `shutdown_tracing`), `va_common.metrics` (56-metric `CATALOG`, `ServiceMetrics`,
+`build_metrics`, `new_registry`, `metrics_app`, `render_latest`), `va_common.observability` (`init`, `init_sentry`,
+`sentry_before_send` which also tags bound org_id/call_id per specs/27 §8).
+Deviations from plan, all deliberate:
+- `redis_ping(client, *, timeout_s=1.0)`: ruff ASYNC109 forbids an async `timeout` parameter.
+- `RedisInstrumentor().instrument_client` exists in 0.66b1, so it is used per client.
+- prometheus_client 0.26 exposes `# TYPE x_total counter` (full name); tests assert on that.
+- Integration test probes the Docker socket with a raw socket: `docker.from_env()` leaked a socket
+  (ResourceWarning -> session error under filterwarnings=error). Docker absent here -> it skips.
+Docs: specs/27 §2, §3, §8 Decision notes; AGENTS.md three bullets.
+Gates: make check exit 0 (678 passed, 1 skipped; total coverage 99%, new modules 100%), pip-audit no known vulns,
+pnpm audit clean, radon avg A (2.60), no C+ blocks, jscpd 0 clones.
+
+## Review P00-T08 — rejected (1 finding)
+
+Gates re-run by Reviewer: `make lint typecheck placeholders` exit 0; `make test` 678 passed, 1 skipped, coverage
+99.95 %. Metrics CATALOG, sampler/resource/exporter, redis/http factories, AGENTS.md bullets all match specs/27.
+
+1. `packages/va_common/src/va_common/observability.py:136-146` (`sentry_before_send`) — specs/27 §8 says
+   `before_send` "applies the same redaction as logs", and §1 log redaction masks phone numbers in **any** string
+   field (logs run `format_exc_info` before `redact_processor`, so exception text is masked in logs). The hook only
+   redacts `extra`, `contexts`, `request`, and breadcrumbs. Verified leak (reviewer ran it):
+   `{'message': 'dial +14155550123', 'logentry': {'message': 'dial %s', 'params': ['+14155550123']},
+   'exception': {'values': [{'value': 'invalid number +14155550123'}]}}` comes back unchanged. Also
+   `exception.values[].stacktrace.frames[].vars` (sentry-sdk captures local variables by default) and
+   `threads.values[].stacktrace.frames[].vars` go out unredacted. Sentry's built-in EventScrubber drops some
+   secret-named keys but does not mask phone numbers or transcripts.
+   Fix: also mask `message`, `logentry.message`/`logentry.formatted`/`logentry.params`, `exception.values[].value`,
+   and run `redact()` on each frame's `vars` (exception and threads stacktraces). Keep functions at CC <= B. The
+   simplest safe option is to redact every top-level section except the structural keys Sentry needs (`event_id`,
+   `timestamp`, `level`, `platform`, `sdk`, `modules`, ...), but make sure `exception.values[].type`/`module`/
+   frame `filename`/`function`/`lineno` survive. Add tests for message, logentry params, exception value, and frame
+   vars (`api_key` -> `[REDACTED]`, phone masked, `transcript` dropped). Update the specs/27 §8 Decision note to list
+   the redacted fields.
+
+## Build P00-T08 (rework after review) — done (Builder)
+
+Finding 1 fixed: `sentry_before_send` now also redacts `logentry` (message/formatted/params via `redact`), masks
+phones in `message` and every `exception.values[].value`, and runs `redact()` on each frame's `vars` in
+`exception.values[].stacktrace.frames` and `threads.values[].stacktrace.frames` (api_key -> [REDACTED], phone masked,
+transcript dropped). Exception `type`/`module` and frame `filename`/`function`/`lineno` untouched. Small helpers
+(`_redact_message`, `_redact_frames`, `_redact_stack_entry`, `_stack_values`, `_redact_stacks`), all CC A.
+4 new tests (message/logentry/exception value, frame vars in exception + threads, odd shapes, mask_phones=False).
+specs/27 §8 Decision note lists the redacted fields.
+Gates: make fmt/lint/typecheck/placeholders/test exit 0 (682 passed, 1 skipped, coverage 99.95 %, observability.py
+100 %); make check exit 0; pip-audit + pnpm audit no vulns; radon avg A (2.62); jscpd 0 clones.
+
+## Review P00-T08 (rework) — approved
+
+Gates re-run: make lint/typecheck/placeholders exit 0; make test 682 passed, 1 skipped, coverage 99.95 %.
+Re-ran the prior leak payload: message, logentry message/formatted/params, exception value, and frame vars
+(exception + threads) are now masked/redacted; api_key/token -> [REDACTED], transcript dropped, user email/ip
+removed; type/module/filename/function/lineno intact. specs/27 §8 Decision lists the fields.
