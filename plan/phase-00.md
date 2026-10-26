@@ -26,7 +26,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `scripts/check_spec_refs.py` (every `specs/<file>.md` path mentioned in `plan/*.md` and `prompts/*.md` exists; every `§N` reference paired with a spec file resolves to a heading starting with `## N.` or `## N ` in that file), `scripts/check_openapi_drift.py` (imports `va_api.main:app`, renders OpenAPI with sorted keys, compares to `openapi/openapi.json`), tests for both.
   - Acceptance: both scripts pass on the repo and fail on crafted fixtures.
 
-- [ ] P00-T05 `va_common` core: settings, clock, ids, json, errors
+- [x] P00-T05 `va_common` core: settings, clock, ids, json, errors — lint/typecheck/placeholders 0; 383 tests pass, 99.90 % total, va_common 100 %; CODES parity with specs/31 §3 (62 rows); review rework (date/time JSON, positional details) verified
   - Spec refs: specs/02-repo-layout-and-conventions.md (Python conventions, IDs, Money, Errors); specs/31-error-catalog.md (all)
   - Depends on: P00-T01
   - Deliverables: `BaseServiceSettings` (pydantic-settings), `Clock` protocol + `SystemClock` + `FrozenClock`, `ids.new_id()` (uuid7), `ids.to_public/from_public` for `TL-`/`KB-`/`PT-`, orjson helpers, `AppError`, `CODES` table, `micros` money helpers (`dollars_to_micros`, `micros_to_dollars_str`)

@@ -21,10 +21,14 @@ dev = [
   "types-python-dateutil>=2.9.0.20261021",
   "asgi-lifespan>=2.1",
   "syrupy>=6.1",
+  "va-common",
 ]
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+va-common = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -54,8 +58,8 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts"
-files = ["scripts"]
+mypy_path = "scripts:packages/va_common/src"
+files = ["scripts", "packages/va_common/src", "packages/va_common/tests"]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 
 [tool.pytest.ini_options]

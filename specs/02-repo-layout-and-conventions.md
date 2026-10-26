@@ -171,6 +171,24 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 - Tests: `pytest-asyncio` in `auto` mode; integration tests use testcontainers (Postgres with pgvector image,
   Redis, ClickHouse, MinIO); Temporal tests use `WorkflowEnvironment.start_time_skipping()`.
 
+> Decision (2026-10-25): `va_common` core API details (P00-T05).
+> - `va_common.time.Clock` is a protocol with `now()` (aware UTC), `monotonic()` (seconds) and `async sleep()`;
+>   `SystemClock` is the real implementation and `FrozenClock` (tests) moves only via `advance()`/`sleep()` (both move
+>   wall and monotonic time) or `set()` (wall clock only). Naive datetimes raise `ValueError` everywhere.
+> - `va_common.json` (orjson) serializes `Decimal` as a string, pydantic models via `model_dump(mode="json")`, sets as
+>   sorted lists, aware datetimes as UTC ISO-8601, dates as `YYYY-MM-DD` and aware times as ISO-8601 keeping their own
+>   offset (a bare time has no date to convert to UTC); naive datetimes, naive times and unknown types raise `TypeError`.
+> - `AppError(code, message, http_status=None, details=None, *, field=None)`: the first four parameters follow the
+>   signature above and may be passed positionally; `field` is keyword-only.
+> - Money: `dollars_to_micros` rounds half-even at the sixth decimal place (floats go through `str()` first; `bool`,
+>   NaN and infinities are rejected); `micros_to_dollars_str` renders exactly six decimals (`-90_000 -> "-0.090000"`).
+> - Public ids: the prefix is case-sensitive (`TL-`, never `tl-`); `to_public` emits the canonical lower-case
+>   hyphenated UUID; parsing accepts any hex case but only the 36-character hyphenated form. Malformed or
+>   wrong-prefix ids raise `AppError("INVALID_INPUT")` echoing at most 64 characters of the input.
+> - `BaseServiceSettings` fields are the lower-cased "all"-scope variables of §6 with their table defaults
+>   (`LOG_TRANSCRIPTS` defaults to `true`; production forcing is applied by the logging setup). An unset or empty
+>   `LOG_FORMAT` resolves from `VA_ENV`. Settings are frozen and read `.env` from the working directory.
+
 ## 5. TypeScript conventions
 
 - `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`. ESLint flat config with

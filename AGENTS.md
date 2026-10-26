@@ -86,3 +86,12 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
 - 2026-10-25 (P00-T04): `check_openapi_drift.py` skips (exit 0) only while both `va_api` and `openapi/openapi.json`
   are absent; P00-T11 must add both together, and `scripts/export_openapi.py` must write the file with
   `check_openapi_drift.render` (the single canonical serializer) or the gate will report drift.
+- 2026-10-25 (P00-T05): adding a workspace package = member dir under `packages/` (src layout, `uv_build` backend,
+  `py.typed`) + entry in the root `[dependency-groups] dev` with `[tool.uv.sources] <name> = { workspace = true }`
+  (so plain `uv sync` installs it) + append its `src` to mypy `mypy_path` and `src`/`tests` to mypy `files`.
+- 2026-10-25 (P00-T05): mypy runs without the pydantic plugin, so `Settings(_env_file=None)` is a `call-arg` error.
+  In tests pass it through a typed kwargs dict (`cls(**{"_env_file": None})` via a `dict[str, Any]`), and give every
+  settings field a default. `packages/va_common/tests/conftest.py` clears the settings env vars and `chdir`s to
+  `tmp_path` so a developer `.env` never leaks into tests.
+- 2026-10-25 (P00-T05): orjson wraps exceptions raised by a `default=` handler in `JSONEncodeError` with a generic
+  message; the original is on `__cause__` (`va_common.json.dumps` re-raises it as `TypeError`).

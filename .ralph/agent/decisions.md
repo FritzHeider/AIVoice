@@ -72,3 +72,17 @@ Template:
   strict automatically with no later edit needed.
 - **Reversibility:** yes — delete the bootstrap branch in `main()` once `va_api` exists.
 - **Timestamp:** 2026-10-25T00:00:00Z
+
+## DEC-004 — Default HTTP status for the two-status `KB_ERROR` code
+
+- **Decision:** specs/31 §3 lists `KB_ERROR` as `400/500`, but `CODES` maps each code to one status.
+- **Chosen Option:** `CODES["KB_ERROR"] = 400`; `500` allowed only as an explicit `http_status` override via
+  `va_common.errors.ALTERNATE_STATUSES`. Recorded as the `> Decision (2026-10-25)` block in specs/31 §4.
+- **Confidence:** 75
+- **Alternatives Considered:**
+  - Default 500 — rejected: most KB failures (bad file content, parse failures) are caused by the client upload.
+  - `CODES` values as sets — rejected: specs/31 §4 fixes `CODES: dict[str, int]`.
+- **Reasoning:** keeps the spec's type, makes the first-listed status the default, and still lets server-side
+  failures (embedding provider down) report 500 deliberately.
+- **Reversibility:** yes — change one entry in `CODES`/`ALTERNATE_STATUSES` and the spec note.
+- **Timestamp:** 2026-10-25T00:00:00Z

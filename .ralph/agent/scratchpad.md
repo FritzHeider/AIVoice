@@ -317,3 +317,210 @@ Reviewer re-ran: make lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (
 Verified all five previously-failing lines now report `missing-spec` against the real specs/ index; short form
 `specs/02 §3.`, glob `specs/*.md`, backtick-wrapped full form and `#anchor` suffix still resolve correctly.
 Spec Decision (a) wording matches implementation. Ticked and committed.
+
+## Plan P00-T05 — `va_common` core: settings, clock, ids, json, errors, money
+
+Spec: specs/02 §4 (time, IDs, money, errors, settings), specs/31 §3 + §4 (CODES parity), specs/01 §4 (env selection),
+specs/02 §6 rows `VA_ENV`, `LOG_LEVEL`, `LOG_TRANSCRIPTS`, `LOG_FORMAT`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_TRACES_SAMPLER_ARG`, `SENTRY_DSN` (the "all" rows). No `packages/` dir exists yet — this task creates the first
+workspace member. Checked: ruff 0.17 A005 (stdlib-module shadowing) does NOT flag `va_common/time.py` or
+`va_common/json.py` (non-strict mode only checks top-level modules), so use the spec names `va_common.time`, `va_common.json`.
+
+### Package scaffold
+- `packages/va_common/pyproject.toml`: `name = "va-common"`, `version = "0.1.0"`, `requires-python = ">=3.12,<3.13"`,
+  build backend `uv_build` (or hatchling; whichever `uv init --lib` emits with uv 0.12), src layout, deps added with
+  `uv add --package va-common pydantic pydantic-settings orjson uuid-utils` (pydantic>=2.9 per specs/02 §2).
+- `packages/va_common/src/va_common/__init__.py` (docstring only + `__all__ = []` not needed — keep a one-line docstring),
+  `py.typed` (empty marker; the placeholder gate ignores empty marker files? verify; if flagged, it's non-code so fine).
+- Root `pyproject.toml`: add `"va-common"` to `[dependency-groups] dev` with `[tool.uv.sources] va-common = { workspace = true }`
+  so plain `uv sync`/`uv run` installs it; mypy `files += ["packages/va_common/src", "packages/va_common/tests"]`,
+  `mypy_path = "scripts:packages/va_common/src"`. Run `uv lock` and commit `uv.lock`.
+
+### Modules (all mypy strict, every function radon CC ≤ B)
+1. `va_common/time.py`
+   ```python
+   def utcnow() -> datetime                                  # datetime.now(UTC)
+   def ensure_utc(dt: datetime) -> datetime                  # ValueError on naive; converts aware -> UTC
+   class Clock(Protocol):
+       def now(self) -> datetime: ...                        # aware UTC
+       def monotonic(self) -> float: ...                     # seconds
+       async def sleep(self, seconds: float) -> None: ...
+   class SystemClock:  now()=utcnow(), monotonic()=time.monotonic(), sleep=asyncio.sleep
+   class FrozenClock:
+       def __init__(self, start: datetime | None = None) -> None   # default 2026-01-01T00:00:00Z; naive -> ValueError
+       def advance(self, delta: float | timedelta) -> None          # negative -> ValueError; moves now AND monotonic
+       def set(self, dt: datetime) -> None                         # jump wall clock only (monotonic unchanged); naive -> ValueError
+       async def sleep(self, seconds: float) -> None               # advance(seconds) then await asyncio.sleep(0)
+   ```
+   (Protocol method bodies `...` are allowed by the placeholder gate — specs/02 §9.1 Decision.)
+2. `va_common/ids.py`
+   ```python
+   class PublicPrefix(StrEnum): TOOL = "TL"; KNOWLEDGE_BASE = "KB"; PROMPT = "PT"
+   def new_id() -> uuid.UUID                       # stdlib UUID from uuid_utils.uuid7() (version 7, time-ordered)
+   def to_public(prefix: PublicPrefix, value: uuid.UUID) -> str     # f"{prefix}-{value}" lowercase canonical
+   def parse_public(value: str) -> tuple[PublicPrefix, uuid.UUID]   # any known prefix
+   def from_public(value: str, prefix: PublicPrefix) -> uuid.UUID   # wrong/missing prefix or bad uuid ->
+         AppError("INVALID_INPUT", f"Invalid {prefix.value}- id: {value!r}")  (message must not exceed 200 chars: truncate value)
+   def is_public(value: str, prefix: PublicPrefix) -> bool
+   ```
+   Prefix match is case-sensitive (`TL-`); UUID part accepts any case and hyphenated 36-char form only (no braces/urn).
+3. `va_common/json.py` (orjson)
+   ```python
+   def dumps(obj: object, *, sort_keys: bool = False) -> bytes     # default handler: Decimal -> str, pydantic BaseModel ->
+                                                                   # model_dump(mode="json"), set/frozenset -> sorted list; else TypeError
+   def dumps_str(obj: object, *, sort_keys: bool = False) -> str
+   def loads(data: bytes | bytearray | memoryview | str) -> Any
+   ```
+   Naive datetimes are rejected by default handler path? orjson serialises naive datetimes natively — pass
+   `OPT_PASSTHROUGH_DATETIME` and handle datetime in `default`: aware -> `isoformat()` in UTC, naive -> TypeError
+   (enforces the "never naive" rule at the boundary). UUID/enum/dataclass stay native.
+4. `va_common/errors.py`
+   ```python
+   CODES: Final[Mapping[str, int]]                   # all 63 rows of specs/31 §3, in table order (MappingProxyType)
+   ALTERNATE_STATUSES: Final[Mapping[str, frozenset[int]]] = {"KB_ERROR": frozenset({500})}
+   class AppError(Exception):
+       def __init__(self, code: str, message: str, http_status: int | None = None, *,
+                    field: str | None = None, details: Mapping[str, Any] | None = None) -> None
+           # unknown code -> ValueError; http_status None -> CODES[code]; status not in {CODES[code]} | ALTERNATE_STATUSES.get(code)
+           # -> ValueError. Attributes: code, message, http_status, field, details (dict copy, default {}).
+       def to_error_item(self) -> dict[str, Any]     # {"error","message"} + "field" if set + "details" if non-empty
+       def __repr__/__str__                           # "CODE: message" (str), no details leak in str
+   def status_for(code: str) -> int                  # CODES lookup, ValueError on unknown
+   ```
+   Decision: `KB_ERROR` row is `400/500` → `CODES["KB_ERROR"] = 400` (first listed: client-caused processing errors are
+   the Bland default) and 500 is permitted only as an explicit `http_status` override.
+5. `va_common/money.py`
+   ```python
+   MICROS_PER_DOLLAR: Final = 1_000_000
+   def dollars_to_micros(value: Decimal | int | str | float) -> int   # Decimal(str(value)) for float; quantize to 1e-6
+         # ROUND_HALF_EVEN; bool, NaN, ±inf, unparsable str -> ValueError/TypeError (bool -> TypeError)
+   def micros_to_dollars(micros: int) -> Decimal                       # exact, quantized to 6 places
+   def micros_to_dollars_str(micros: int) -> str                       # fixed 6 decimals: 1_500_000 -> "1.500000", -90_000 -> "-0.090000"
+   ```
+   bool input to micros_* -> TypeError.
+6. `va_common/settings.py`
+   ```python
+   class Environment(StrEnum): LOCAL="local"; TEST="test"; STAGING="staging"; PRODUCTION="production"
+   class LogFormat(StrEnum): CONSOLE="console"; JSON="json"
+   class BaseServiceSettings(BaseSettings):
+       model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", frozen=True,
+                                         case_sensitive=False)
+       service_name: ClassVar[str] = "va"           # subclasses override
+       va_env: Environment = Environment.LOCAL       # VA_ENV
+       log_level: str = "INFO"                       # validated/upper-cased against DEBUG/INFO/WARNING/ERROR/CRITICAL
+       log_transcripts: bool = False                 # forcing false in production belongs to P00-T06 (do not implement here)
+       log_format: LogFormat | None = None           # resolved by model_validator: console in local, json elsewhere
+       otel_exporter_otlp_endpoint: str = ""         # empty = tracing exporter disabled (wired in P00-T08)
+       otel_traces_sampler_arg: float = Field(0.1, ge=0.0, le=1.0)
+       sentry_dsn: str = ""
+       @property is_production -> bool; @property is_local -> bool
+   ```
+   Field names map 1:1 to the spec §6 variable names (lower-case). Keep `log_format` typed as `LogFormat` after
+   validation (use a `mode="before"` validator on the raw value + `model_validator(mode="after")` via `object.__setattr__`
+   only if needed for frozen; simplest: field `log_format: LogFormat` with `default_factory` impossible because it
+   depends on va_env → use `model_validator(mode="before")` on the input dict to fill `log_format` from `va_env`).
+
+### Tests (`packages/va_common/tests/`, `conftest.py` with an autouse fixture that `monkeypatch.delenv`s the settings
+vars and `chdir`s to `tmp_path` so a developer `.env` never leaks in)
+- `test_time.py`: utcnow aware UTC; ensure_utc converts +02:00 and rejects naive; SystemClock now/monotonic monotone,
+  `await sleep(0)`; FrozenClock default start, advance(float/timedelta) moves now+monotonic, negative advance and naive
+  start/set raise, set() leaves monotonic, `await sleep(5)` advances exactly 5 s without real waiting; both classes satisfy
+  `Clock` (assign to a `Clock`-typed variable — checked by mypy).
+- `test_ids.py`: new_id version 7, unique over 1000, monotonically non-decreasing by time (sorted ids == generation order
+  within the same ms is not guaranteed → assert `.version == 7` and timestamp bits close to now);
+  hypothesis `@given(st.uuids(), st.sampled_from(PublicPrefix))`: `from_public(to_public(p,u),p)==u` and
+  `parse_public` round-trip; upper-case uuid accepted; wrong prefix / lowercase prefix / missing dash / bad uuid /
+  braces → AppError INVALID_INPUT 400 with truncated value in message; is_public true/false.
+- `test_json.py`: dumps returns bytes; UUID/datetime(UTC)/Decimal/BaseModel/set/enum serialise; naive datetime and
+  unknown object → TypeError; sort_keys orders nested keys; dumps_str/loads round-trip; loads accepts bytes/str/memoryview.
+- `test_errors.py`: **parity** — parse `specs/31-error-catalog.md` §3 (repo root = `Path(__file__).resolve().parents[3]`;
+  rows matching ``^\| `([A-Z_]+)` \| ([0-9/]+) \|`` between `## 3.` and `## 3a.`) and assert `set(CODES)==set(table)`,
+  `CODES[c]==first status`, and `{CODES[c]} | ALTERNATE_STATUSES.get(c, ∅) == all statuses in the cell`; table has 63
+  rows and CODES has no extras. AppError defaults status, accepts KB_ERROR 500, rejects KB_ERROR 404 and unknown code,
+  to_error_item omits empty field/details, details dict is copied (mutating input doesn't change error), str format;
+  status_for.
+- `test_money.py`: examples (0, 1, "0.09"→90_000, Decimal("1.2345675") half-even → 1_234_568, 0.1 float → 100_000,
+  negatives, "1e-6"); invalid inputs (True, "abc", NaN, inf); hypothesis `st.integers(-10**15, 10**15)`:
+  `dollars_to_micros(micros_to_dollars_str(m)) == m` and `dollars_to_micros(micros_to_dollars(m)) == m`;
+  `@given(st.decimals(places=6, allow_nan=False, allow_infinity=False, min/max ±1e9))`: exact round-trip.
+- `test_settings.py`: defaults (`_env_file=None`); env vars override (VA_ENV=production → is_production, log_format json);
+  local default console; explicit LOG_FORMAT wins; invalid VA_ENV / LOG_LEVEL / sampler 1.5 → ValidationError;
+  LOG_LEVEL lower-case normalised; `.env` file in tmp cwd is read; settings are frozen (assignment raises);
+  subclass with extra field + `service_name` override works and ignores unrelated env vars.
+Coverage target 100 % on va_common (global gate 85 %).
+
+### Docs
+- specs/31 §4: append `> Decision (2026-10-25):` — KB_ERROR default 400, 500 as explicit override via
+  `ALTERNATE_STATUSES`; parity test treats a multi-status cell as {default} ∪ alternates.
+- specs/02 §4: append `> Decision (2026-10-25):` — `va_common.time.Clock` API (now/monotonic/sleep, FrozenClock for
+  tests); `va_common.json` rejects naive datetimes; money string = fixed 6 decimals, ROUND_HALF_EVEN on input; public
+  ids: case-sensitive prefix, canonical lower-case UUID, parse errors → `INVALID_INPUT`.
+- AGENTS.md learned bullets: (1) adding a workspace package = member dir + root dev-group entry with workspace source +
+  mypy files/mypy_path; (2) va_common tests isolate env via conftest; use `_env_file=None` when constructing settings in tests.
+- decisions.md: DEC-004 (KB_ERROR status choice).
+
+### Gates
+`make fmt lint typecheck placeholders test test-ts` and full `make check`; `uvx pip-audit` on `uv export`,
+`corepack pnpm audit`, `uvx radon cc -s -a scripts packages`, `npx --yes jscpd@4`. Emit build.done as plain string.
+
+### Risks
+- `filterwarnings = ["error"]`: pydantic-settings may warn if `env_file` missing? (it does not); hypothesis
+  HealthCheck warnings → keep strategies cheap.
+- frozen BaseSettings + derived `log_format` → use before-validator, not post-init mutation.
+- pytest importlib mode + per-package `tests/` without `__init__.py`: fine; conftest in packages/va_common/tests only.
+- `uuid_utils.uuid7()` returns `uuid_utils.UUID`, not stdlib — convert (`uuid.UUID(int=x.int)`) or use `uuid_utils.compat.uuid7`.
+
+## Build P00-T05 — done (Builder)
+
+Created `packages/va_common` (uv_build, src layout, py.typed; deps pydantic>=2.9, pydantic-settings, orjson,
+uuid-utils) with `time`, `ids`, `json`, `errors`, `money`, `settings`; root pyproject wires it into the dev group
+(workspace source) and mypy files/mypy_path; uv.lock updated.
+Deviations from the plan, all following the spec over the plan:
+- specs/31 §3 has **62** rows, not 63; the parity test asserts 62, table order, and `{default} ∪ alternates`.
+- `BaseServiceSettings` defaults follow the specs/02 §6 table: `log_transcripts=True`,
+  `otel_exporter_otlp_endpoint="http://localhost:4317"` (plan said False / "").
+- `log_format` field has a typed default (CONSOLE) and is resolved from `va_env` in a before-validator when
+  unset/empty, so mypy (no pydantic plugin) does not require it as a constructor arg.
+- `new_id()` uses `uuid_utils.compat.uuid7` (returns stdlib `uuid.UUID`). Error echo of bad ids capped at 64 chars.
+Docs: specs/31 §4 Decision (KB_ERROR), specs/02 §4 Decision (va_common API), DEC-004, 3 AGENTS.md bullets.
+Gates: make fmt 0; lint 0; typecheck 0 (24 files); placeholders 0 (0 findings); test 0 (378 passed, total 99.90 %,
+va_common 100 %); make check 0 (drift bootstrap skip; spec refs 0 problems); pip-audit (`uv export --all-packages
+--no-emit-workspace` + `--no-deps`) no known vulnerabilities; pnpm audit clean; radon avg A (2.69), max B (10,
+pre-existing scripts/tests/test_env_example.py); jscpd 0 clones. No TypeScript changed.
+
+## Review P00-T05
+
+Re-ran gates: make lint 0, typecheck 0 (24 files), placeholders 0 (0 findings), test 0 (378 passed, 99.90 %,
+va_common 100 %). CODES parity test, settings defaults vs specs/02 §6, money/ids/time all checked and correct.
+Rejected for 2 findings:
+
+1. `packages/va_common/src/va_common/json.py:20` — `OPT_PASSTHROUGH_DATETIME` passes `datetime.date` and
+   `datetime.time` to `default` too (not only `datetime`), and `_default` has no branch for them, so
+   `dumps(date(2026, 1, 2))` and `dumps(time(1, 2))` raise `TypeError: Type is not JSON serializable: date`
+   (verified). Dates are ordinary payload values (billing periods, usage days, Call Object dates) and must serialize.
+   Required: after the `datetime` branch, serialize `date` as `isoformat()` (`"2026-01-02"`); for `time`, serialize
+   aware times via `isoformat()` and reject naive `time` the same way as naive datetimes (or serialize as
+   `isoformat()` and document it — pick one and record it in the specs/02 §4 Decision bullet for `va_common.json`).
+   Add tests for `date`, aware/naive `time`, and a `date` nested in a dict/model.
+2. `packages/va_common/src/va_common/errors.py:58-66` — specs/02 §4 states the contract as
+   `AppError(code, message, http_status, details)`, but `details` is keyword-only here, so the documented positional
+   call `AppError("KB_ERROR", "m", 500, {"code": "x"})` raises `TypeError`. Required: make the signature
+   `(code, message, http_status=None, details=None, *, field=None)` (spec order; `field` keyword-only since it is not
+   in the §4 signature) and add a test calling it positionally with `details`.
+
+## Build P00-T05 (rework after review) — done (Builder)
+
+1. `va_common.json`: `date` -> `isoformat()` (`"2026-01-02"`); aware `time` -> `isoformat()` keeping its own offset
+   (no date to convert to UTC); naive `time` -> `TypeError` like naive datetimes. `datetime` branch stays first
+   (datetime subclasses date). Tests: bare date, date nested in dict + pydantic model, aware times (UTC and -05:00),
+   naive time rejected. specs/02 §4 Decision bullet updated.
+2. `AppError` signature now `(code, message, http_status=None, details=None, *, field=None)`; test calls
+   `AppError("KB_ERROR", "m", 500, {"code": "x"})` positionally. Decision bullet added to specs/02 §4. No non-test callers.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (383 passed, 99 % total, va_common json/errors
+100 %), make check 0; pip-audit + pnpm audit clean; radon avg A (2.69); jscpd 0 clones.
+
+## Review P00-T05 (rework) — approved
+
+Re-ran: lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (383 passed, 99.90 %). Verified `dumps` handles
+date / aware time and rejects naive time; `AppError("KB_ERROR","m",500,{"code":"x"})` works positionally; tests
+cover both; specs/02 §4 Decision updated. Ticked P00-T05 and committed.

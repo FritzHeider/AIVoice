@@ -109,3 +109,10 @@ Some errors carry finer-grained codes in `errors[].details.code` while the top-l
 - `va_api.errors.install_handlers(app)` renders according to `route.openapi_extra["x-envelope"]` (`legacy` or
   `envelope`), set by router-level dependencies per family in §1.
 - Legacy error `message` for the top-level field equals the first error's message.
+
+> Decision (2026-10-25): `KB_ERROR` is the only code whose §3 cell lists two statuses (`400/500`).
+> `CODES["KB_ERROR"]` is `400` (the first listed status: client-caused processing errors are the default) and `500`
+> is accepted only as an explicit `http_status` override, declared in `va_common.errors.ALTERNATE_STATUSES`.
+> `AppError` rejects any status that is neither the code's default nor one of its alternates. The parity test treats
+> a multi-status cell as `{default} ∪ alternates`, with the default equal to the first status in the cell; it also
+> asserts `CODES` lists the codes in table order (62 rows).
