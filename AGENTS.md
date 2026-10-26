@@ -80,3 +80,9 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
 - 2026-10-25 (P00-T03 review): the `empty-function` rule is a plain regex on `) {}` / `=> {}`, so empty `if (x) {}`
   blocks and TS parameter-property constructors (`constructor(private readonly x: X) {}`) are findings. Declare
   fields explicitly and assign them in a non-empty constructor body instead.
+- 2026-10-25 (P00-T04): `check_spec_refs.py` pairs a `§N` only with a spec reference earlier on the SAME line, so write
+  `specs/02 §9.1` (or `specs/02-repo-layout-and-conventions.md §9`) on one line; a bare `§N` is unchecked prose.
+  Short `specs/NN` must match exactly one spec file. Run alone: `uv run python scripts/check_spec_refs.py`.
+- 2026-10-25 (P00-T04): `check_openapi_drift.py` skips (exit 0) only while both `va_api` and `openapi/openapi.json`
+  are absent; P00-T11 must add both together, and `scripts/export_openapi.py` must write the file with
+  `check_openapi_drift.render` (the single canonical serializer) or the gate will report drift.

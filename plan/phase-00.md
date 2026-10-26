@@ -20,7 +20,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `scripts/check_no_placeholders.py`, `scripts/tests/test_check_no_placeholders.py` (positive and negative cases for every rule, including AST stub detection, Protocol/abstractmethod allowances, JSX `placeholder=` allowance, empty catch detection)
   - Acceptance: `make placeholders` exits 0 on the repo; each rule has at least one failing-fixture test.
 
-- [ ] P00-T04 Spec reference and OpenAPI drift gates
+- [x] P00-T04 Spec reference and OpenAPI drift gates — both gates exit 0 on repo (drift: bootstrap skip until P00-T11; spec refs: 0 problems), exit 1 on fixtures; 229 tests pass, 99.87 % cov, both modules 100 %; lint/typecheck/placeholders/check green
   - Spec refs: specs/02-repo-layout-and-conventions.md (Quality gates)
   - Depends on: P00-T01
   - Deliverables: `scripts/check_spec_refs.py` (every `specs/<file>.md` path mentioned in `plan/*.md` and `prompts/*.md` exists; every `§N` reference paired with a spec file resolves to a heading starting with `## N.` or `## N ` in that file), `scripts/check_openapi_drift.py` (imports `va_api.main:app`, renders OpenAPI with sorted keys, compares to `openapi/openapi.json`), tests for both.

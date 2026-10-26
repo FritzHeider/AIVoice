@@ -337,6 +337,22 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | spec-refs | `uv run python scripts/check_spec_refs.py` | exit 0 |
 | e2e (phase-gated) | `make e2e` | exit 0 (required from phase 05 onward when the task touches call flow) |
 
+> Decision (2026-10-25): (a) `scripts/check_spec_refs.py` scans `plan/*.md` and `prompts/*.md`. A full-form reference
+> is any `specs/<name>.md` token (excluding globs containing `*`) and is looked up literally, so a misspelled name is
+> `missing-spec`; the short form `specs/NN` (exactly two digits, not followed by a letter, digit, `_` or `-`) must
+> match exactly one file starting with `NN-` (otherwise `missing-spec` / `ambiguous-spec`). Pairing is line-scoped:
+> each `§N` / `§N.M` (optionally `§ N`) pairs with the nearest preceding successfully resolved spec reference on the same line and must match a heading of
+> level 2 or deeper that starts with the number followed by `.` or a space (`missing-section` otherwise); a `§` with no
+> spec reference before it on its line is prose and is not checked, and a `§` after an unresolved spec reference is
+> not reported again. Ranges such as `§3–§9` check each endpoint. Output `path:line: kind: detail`; exit 1 on
+> problems, 2 when `specs/` is missing. (b) `scripts/check_openapi_drift.py` imports `va_api.main:app` and compares
+> `render(app.openapi())` with `openapi/openapi.json`, where `render` is
+> `json.dumps(schema, sort_keys=True, indent=2, ensure_ascii=False) + "\n"`; `scripts/export_openapi.py` must import
+> and use `check_openapi_drift.render` so export and check never disagree. Drift prints a unified diff (capped at
+> 200 lines) and exits 1. While neither the `va_api` package nor `openapi/openapi.json` exists (bootstrap, until
+> P00-T11) the gate prints a skip notice and exits 0; any half-state (only one of them present) or an import
+> failure inside the app exits 1. Invalid `--app` (not `module:attribute`) exits 2.
+
 ### 9.1 `scripts/check_no_placeholders.py` behaviour
 
 - Scans tracked files under `apps/`, `packages/`, `sdks/`, `infra/`, `scripts/` (excluding `node_modules`, `.venv`,

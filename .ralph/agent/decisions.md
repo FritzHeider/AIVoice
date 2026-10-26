@@ -57,3 +57,18 @@ Template:
   clearly intended to allow.
 - **Reversibility:** yes — each allowance is one regex alternative or predicate in `scripts/check_no_placeholders.py`.
 - **Timestamp:** 2026-10-25T00:00:00Z
+
+## DEC-003 — OpenAPI drift gate behaviour before the API exists
+
+- **Decision:** `make check` runs `scripts/check_openapi_drift.py` from P00-T04 on, but `va_api` and
+  `openapi/openapi.json` only arrive in P00-T11. Should the gate fail, be left out of `make check`, or skip?
+- **Chosen Option:** skip with exit 0 and a stderr notice only while BOTH the `va_api` package and the committed
+  document are absent; any half-state or import failure exits 1. Recorded in the specs/02 §9 Decision block.
+- **Confidence:** 80
+- **Alternatives Considered:**
+  - Fail until P00-T11 — rejected: `make check` would be red for six tasks, violating "keep the build green".
+  - Remove the call from the `make check` recipe — rejected: specs/02 §3 fixes the recipe.
+- **Reasoning:** the skip condition cannot be hit once P00-T11 lands (both artefacts exist), so the gate becomes
+  strict automatically with no later edit needed.
+- **Reversibility:** yes — delete the bootstrap branch in `main()` once `va_api` exists.
+- **Timestamp:** 2026-10-25T00:00:00Z
