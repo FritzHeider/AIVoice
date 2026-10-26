@@ -524,3 +524,195 @@ Gates: fmt 0, lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (383 pass
 Re-ran: lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (383 passed, 99.90 %). Verified `dumps` handles
 date / aware time and rejects naive time; `AppError("KB_ERROR","m",500,{"code":"x"})` works positionally; tests
 cover both; specs/02 §4 Decision updated. Ticked P00-T05 and committed.
+
+## Plan P00-T06 — `va_common` logging and masking
+
+Spec refs: specs/27-observability.md §1 (processors, standard fields, binding, redaction, per-component levels),
+specs/27-observability.md §8 (Sentry reuses the log redaction → expose a pure function), specs/02 §4 Logging rule,
+specs/02 §6 rows `LOG_LEVEL`, `LOG_TRANSCRIPTS`, `LOG_FORMAT`, `LOG_LEVEL_<COMPONENT>`, `POD_ID`.
+Out of scope: tracing/metrics setup, `va_common.observability.init` (P00-T08 — it will call `configure_logging`),
+FastAPI request-id middleware (P00-T11), `va_compliance.redaction` (transcript PII, later phase).
+
+### Dependencies
+`uv add --package va-common structlog opentelemetry-api` (otel-api only: `otel_trace_processor` reads the current span;
+the SDK/exporter arrive in P00-T08). Update the package `description` to mention logging/masking. `uv lock`.
+
+### `packages/va_common/src/va_common/masking.py` (pure, no structlog import)
+```python
+REDACTED: Final = "[REDACTED]"
+def mask_phone(number: str) -> str
+    # E.164 "+<7..15 digits>": >= 11 digits -> "+" + first 4 digits + "***" + last 4  (+14155550123 -> +1415***0123)
+    # 7..10 digits -> "+" + first 2 + "***" + last 2. Anything not matching ^\+[1-9]\d{6,14}$ -> returned unchanged.
+def mask_phones_in_text(text: str) -> str
+    # re.sub of (?<![\d+])\+[1-9]\d{6,14}(?!\d) via mask_phone; handles numbers embedded in prose/URLs.
+def is_secret_key(name: str) -> bool
+    # lower-case, split on [_\-.\s]+ ; True when any segment in
+    # {"key","secret","token","password","passwd","authorization","cookie","pepper","dsn","credential","credentials"}
+    # and the LAST segment is not in {"prefix","id","ids","count","version","type","name","length"}.
+    # => api_key, xi-api-key, client_secret, access_token, Authorization, sentry_dsn, api_key_pepper -> True;
+    #    api_key_prefix (access-log field, spec §1), key_id, pepper_version, prompt_tokens, completion_tokens,
+    #    turn_index, monkey -> False ("tokens" plural is a count, not a secret).
+```
+
+### `packages/va_common/src/va_common/logging.py`
+```python
+TRANSCRIPT_KEYS: Final = frozenset({"text", "transcript"})
+RAW_MEDIA_KEYS: Final = frozenset({"audio", "payload"})
+@dataclass(frozen=True, slots=True)
+class RedactionPolicy:
+    mask_phones: bool = True
+    allow_transcripts: bool = False
+    @classmethod
+    def from_settings(cls, settings: BaseServiceSettings) -> RedactionPolicy
+        # mask_phones = not (log_level == "DEBUG" and is_local); allow_transcripts = transcripts_allowed(settings)
+def transcripts_allowed(settings: BaseServiceSettings) -> bool   # log_transcripts and not is_production (forced false)
+def redact(data: Mapping[str, Any], policy: RedactionPolicy, *, hipaa: bool = False) -> dict[str, Any]
+    # recursive (dict / list / tuple values, depth cap 8 -> deeper containers replaced by REDACTED):
+    #  - RAW_MEDIA_KEYS: key dropped; TRANSCRIPT_KEYS: dropped unless policy.allow_transcripts and not hipaa
+    #  - is_secret_key(key): value -> REDACTED
+    #  - bytes/bytearray/memoryview values -> f"<{n} bytes>" (raw audio never reaches output)
+    #  - str values -> mask_phones_in_text when policy.mask_phones; other values unchanged
+    # Pure function: P00-T08 Sentry before_send reuses it.
+class RedactProcessor:
+    def __init__(self, policy: RedactionPolicy) -> None
+    def __call__(self, logger: object, method_name: str, event_dict: MutableMapping[str, Any]) -> MutableMapping[str, Any]
+        # hipaa = bool(event_dict.get("hipaa_mode")) (bound by org context); returns redact(...) result.
+        # The "event" message string is phone-masked too.
+def otel_trace_processor(logger, method_name, event_dict) -> event_dict
+    # opentelemetry.trace.get_current_span().get_span_context(); if is_valid: trace_id = f"{id:032x}", span_id = f"{id:016x}"
+def component_levels(environ: Mapping[str, str]) -> dict[str, int]
+    # LOG_LEVEL_<COMPONENT>=<LEVEL> -> {"<component lower-case>": logging level int}; bare "LOG_LEVEL" ignored;
+    # invalid level -> ValueError naming the variable. (LOG_LEVEL_VA_MEDIA=DEBUG -> logger "va_media".)
+def configure_logging(settings: BaseServiceSettings, *, version: str = "unknown", pod: str | None = None,
+                      stream: TextIO | None = None, environ: Mapping[str, str] | None = None) -> None
+    # stdlib-backed structlog so uvicorn/httpx/temporal stdlib logs share the pipeline:
+    # shared chain = [structlog.contextvars.merge_contextvars, structlog.stdlib.add_log_level (key "level"),
+    #   structlog.stdlib.add_logger_name, TimeStamper(fmt="iso", utc=True, key="ts"), _static_fields(service=
+    #   settings.service_name, env=settings.va_env.value, version, pod), StackInfoRenderer(),
+    #   otel_trace_processor, RedactProcessor(RedactionPolicy.from_settings(settings))]
+    # JSON: + format_exc_info, JSONRenderer(serializer=_serialize) where _serialize = orjson.dumps(..., default=str).decode()
+    #   (lenient: logging must never raise on an odd value — do NOT use va_common.json which rejects naive datetimes)
+    # CONSOLE: ConsoleRenderer(colors=False) and NO format_exc_info (structlog warns otherwise; pytest filterwarnings=error)
+    # structlog.configure(processors=[*shared, ProcessorFormatter.wrap_for_formatter], logger_factory=LoggerFactory(),
+    #   wrapper_class=structlog.stdlib.BoundLogger, cache_logger_on_first_use=True)
+    # Root logger: remove the handler a previous configure_logging call installed (idempotent; marker attribute),
+    #   add StreamHandler(stream or sys.stdout) with ProcessorFormatter(foreign_pre_chain=shared, processors=
+    #   [ProcessorFormatter.remove_processors_meta, renderer]); root level = settings.log_level; apply
+    #   component_levels(environ if not None else os.environ); logging.getLogger("uvicorn.access").disabled = True
+    #   (spec §1 access logs come from middleware). pod default: os.environ.get("POD_ID") or socket.gethostname().
+def get_logger(name: str | None = None, **initial_values: Any) -> structlog.stdlib.BoundLogger
+def bind_call_context(*, org_id: UUID | str, call_id: UUID | str, turn_index: int | None = None) -> None
+    # structlog.contextvars.bind_contextvars with str() ids; turn_index only if not None
+def bind_turn(turn_index: int) -> None
+def bound_context(**values: Any) -> AbstractContextManager[None]   # wraps structlog.contextvars.bound_contextvars
+def clear_context() -> None                                         # clear_contextvars
+```
+Keep every function radon CC ≤ B (split `redact` into `_redact_value` / `_redact_item` helpers).
+
+### Tests
+`packages/va_common/tests/conftest.py`: add `"POD_ID"` to cleared vars; add autouse fixture that after each test calls
+`structlog.reset_defaults()`, `structlog.contextvars.clear_contextvars()` and removes the handler installed by
+`configure_logging` from the root logger (restore root level) so tests do not leak config into each other.
+Helper in tests: `configure(settings, stream=io.StringIO(), environ={})` then `json.loads` each line.
+- `test_masking.py`: mask_phone examples (+14155550123 → +1415***0123; +442071838750 → +4420***8750; 8-digit → +12***78;
+  non-E.164 "4155550123", "+0123…", "+1-415…" unchanged); mask_phones_in_text in prose with two numbers, number in
+  URL query, digit runs longer than 15 untouched, `+` preceded by digit untouched; hypothesis
+  `st.from_regex(r"\+[1-9]\d{10,14}", fullmatch=True)`: masked keeps first 5/last 4 chars, contains "***", and the
+  middle digits never appear; is_secret_key parametrized true/false lists above (case-insensitive, `-` separators).
+- `test_logging.py`:
+  - JSON line has ts (ISO, UTC "Z"/+00:00), level, event, logger, service (subclass `service_name="api"`), env,
+    version, pod (explicit and POD_ID env fallback, and hostname fallback).
+  - bind_call_context / bind_turn fields appear; bound_context removes them on exit; clear_context; UUID ids rendered as str.
+  - phone masked in event message, top-level field and nested dict/list; NOT masked when LOG_LEVEL=DEBUG and
+    VA_ENV=local; still masked when DEBUG in staging.
+  - secrets: authorization, api_key, xi-api-key, nested `headers={"Authorization": ...}` → "[REDACTED]";
+    api_key_prefix and prompt_tokens kept.
+  - audio/payload keys dropped; bytes value rendered as "<N bytes>".
+  - transcripts: `text` kept in local with LOG_TRANSCRIPTS=true; dropped when LOG_TRANSCRIPTS=false; dropped in
+    production even with LOG_TRANSCRIPTS=true (transcripts_allowed False); dropped when `hipaa_mode=True` bound.
+  - redact() pure: input mapping not mutated; depth cap.
+  - otel: inside `trace.use_span(NonRecordingSpan(SpanContext(trace_id=..., span_id=..., is_remote=False)))`
+    trace_id/span_id rendered as 32/16 hex; absent with no span.
+  - component_levels: LOG_LEVEL_VA_MEDIA=debug → {"va_media": 10}; ignores LOG_LEVEL and unrelated vars; invalid → ValueError;
+    configure_logging applies it (a `va_media` stdlib logger emits DEBUG while root is INFO; root INFO filters debug).
+  - foreign stdlib logger (`logging.getLogger("thirdparty").warning("x +14155550123")`) rendered as JSON and masked.
+  - exception: `log.exception` in JSON includes `exception` traceback text; console format renders a non-JSON line
+    without warnings.
+  - configure_logging twice → exactly one handler (no duplicate lines); uvicorn.access disabled.
+Coverage 100 % on masking.py/logging.py.
+
+### Docs
+- specs/27-observability.md §1: `> Decision (2026-10-25):` — secret-key rule (segment match + exempt suffixes, value
+  replaced by `[REDACTED]` rather than dropped so the key's presence stays visible; raw-media keys and gated transcript
+  keys dropped); phone mask shape for 7–10-digit numbers; transcripts allowed iff LOG_TRANSCRIPTS and VA_ENV ≠
+  production (and never with bound `hipaa_mode`); `LOG_LEVEL_<COMPONENT>` names a stdlib/structlog logger (lower-cased
+  suffix); `version` passed by the service (default "unknown"), `pod` = POD_ID or hostname; logs stdlib-backed.
+- AGENTS.md learned bullet: use `va_common.logging.get_logger`; tests reset structlog via conftest; console renderer
+  omits format_exc_info.
+
+### Gates
+`make fmt lint typecheck placeholders test` + `make check`; pip-audit on `uv export --all-packages --no-emit-workspace`,
+`corepack pnpm audit`, `uvx radon cc -s -a scripts packages`, `npx --yes jscpd@4`. build.done as plain string.
+
+### Risks
+- `cache_logger_on_first_use=True` + test reconfiguration: always call get_logger after configure in tests.
+- mypy strict with structlog types (`EventDict` = MutableMapping[str, Any]; processor typing via `structlog.typing.Processor`).
+- module named `logging.py` inside va_common: use `import logging` (absolute → stdlib) — fine as with json.py.
+- ProcessorFormatter foreign records: `event` comes from record message; ensure redaction runs in foreign_pre_chain.
+
+## Build P00-T06 — done (Builder)
+
+Added `va_common.masking` (mask_phone, mask_phones_in_text, is_secret_key, REDACTED) and `va_common.logging`
+(RedactionPolicy, transcripts_allowed, redact, RedactProcessor, otel_trace_processor, component_levels,
+configure_logging, get_logger, bind_call_context, bind_turn, bound_context, clear_context) as planned; deps structlog
+26.1 + opentelemetry-api 1.45 (uv.lock updated). conftest: POD_ID cleared + `reset_logging` autouse fixture.
+Implementation notes beyond the plan:
+- `structlog.stdlib.filter_by_level` is first in the structlog chain only (not foreign_pre_chain, where logger is None).
+- In JSON format `format_exc_info` runs in the shared chain BEFORE redaction, so phone numbers in tracebacks are masked.
+- Reconfiguring resets component loggers set by the previous call to NOTSET (module-level set).
+- Root handler identified by a private `_VaHandler` subclass instead of a marker attribute.
+- `pod` falls back through the `environ` argument (os.environ when None) then hostname.
+Docs: specs/27 §1 `> Decision (2026-10-25)`; AGENTS.md bullet.
+Gates: fmt 0; lint 0; typecheck 0 (28 files); placeholders 0 (0 findings); test 0 (471 passed, total 99 %,
+logging.py/masking.py 100 %); make check 0; pip-audit + pnpm audit no known vulnerabilities; radon avg A (2.71),
+new code max B (9, _redact_value); jscpd 0 clones. No TypeScript changed.
+
+## Review P00-T06
+
+Re-ran gates: make lint 0, typecheck 0 (28 files), placeholders 0 (0 findings), test 0 (471 passed, 99.92 %,
+logging.py/masking.py 100 %). Pipeline, binding helpers, transcript/hipaa gating, phone masking, component levels,
+handler idempotency and the specs/27 §1 Decision all check out. Rejected for 1 finding:
+
+1. `packages/va_common/src/va_common/masking.py:57-68` (`is_secret_key`) — camelCase and concatenated keys are not
+   recognised as secrets because segmentation only splits on `_ - . whitespace`. Verified: `apiKey`, `accessToken`,
+   `clientSecret`, `secretKey`, `webhookSecret`, `apikey` all return False, so their values are logged in clear.
+   The plan/phase-00.md P00-T06 deliverable requires redaction of keys matching `*key*`, `*secret*`, `*token*`
+   (substring), and MASTER_PROMPT §4.6 forbids secrets in logs; JSON from SDKs/vendors/dashboard commonly uses
+   camelCase. Required: also split camelCase boundaries (e.g. `re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)` before
+   lower-casing) AND treat a segment as secret when it *contains* one of the secret words as a suffix/word
+   (`apikey`, `secretkey`, `accesstoken` -> True) while keeping the exempt-last-segment rule and the plural-`tokens`
+   exception (`prompt_tokens`, `completion_tokens`, `api_key_prefix`, `key_id`, `turn_index`, `monkey` stay False —
+   pick a rule that keeps `monkey`/`turkey` False, e.g. segment ends with a secret word and either equals it or the
+   prefix is in a small set like `api`, `access`, `refresh`, `client`, `secret`, `private`, `session`, `auth`,
+   `webhook`, `x`, `xi`, or just check `segment.endswith(("key","secret","token","password"))` and exempt a short
+   allowlist). Add parametrized tests for `apiKey`, `accessToken`, `clientSecret`, `secretKey`, `webhookSecret`,
+   `apikey` -> True and `promptTokens`, `apiKeyPrefix`, `keyId`, `monkey` -> False, plus one log-output test with a
+   camelCase secret nested in a dict. Update the specs/27 §1 Decision text describing the rule.
+
+## Build P00-T06 (rework after review) — done (Builder)
+
+`is_secret_key` now splits camelCase/acronym boundaries (`apiKey`, `APIKey`, `XApiKey`) before lower-casing, and a
+segment is secret when it is a secret word, ends with `secret`/`password`/`passwd`/`credential(s)` (`dbpassword`), or
+is `key`/`token` glued to a qualifier in {api, access, refresh, client, secret, private, session, auth, bearer,
+webhook, signing, id, x, xi} (`apikey`, `accesstoken`, `refreshtoken`); exempt-last-segment rule unchanged, so
+`apiKeyPrefix`, `keyId`, `promptTokens`, `monkey`, `turkey`, `hotkey`, `tokenizer` stay False. Tests: parametrized
+true/false additions + `test_camel_case_secrets_redacted_in_nested_payload` (log output). specs/27 §1 Decision updated.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 (0 findings), test 0 (490 passed, 99 %, masking.py 100 %),
+make check 0; pip-audit + pnpm audit no known vulnerabilities; radon avg A (2.72), new max B (6); jscpd 0 clones.
+
+## Review P00-T06 (rework) — approved
+
+Re-ran: lint 0, typecheck 0, placeholders 0, test 0 (490 passed, 99.92 %, logging.py/masking.py 100 %). Probed
+`is_secret_key` on ~40 keys: apiKey, accessToken, clientSecret, secretKey, webhookSecret, apikey, APIKey, XApiKey,
+idToken, secretAccessKey -> True; promptTokens, apiKeyPrefix, keyId, monkey, turkey, hotkey, tokenizer, tokenCount
+-> False. Tests and specs/27 §1 Decision cover the rule. Ticked P00-T06 and committed.

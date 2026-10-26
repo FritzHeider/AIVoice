@@ -95,3 +95,10 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
   `tmp_path` so a developer `.env` never leaks into tests.
 - 2026-10-25 (P00-T05): orjson wraps exceptions raised by a `default=` handler in `JSONEncodeError` with a generic
   message; the original is on `__cause__` (`va_common.json.dumps` re-raises it as `TypeError`).
+- 2026-10-25 (P00-T06): log through `va_common.logging.get_logger(__name__)` after `configure_logging(settings,
+  version=...)`; bind call fields with `bind_call_context` / `bind_turn` / `bound_context`. Tests capture output with
+  `configure_logging(settings, stream=io.StringIO(), environ={}, pod="p")`; the `reset_logging` autouse fixture in
+  `packages/va_common/tests/conftest.py` resets structlog, contextvars, and the root handler (copy it into other
+  packages' conftest when they configure logging). Console format must not include `format_exc_info` (structlog
+  warns, and pytest `filterwarnings=error` turns that into a failure). structlog `get_logger` returns a lazy proxy,
+  not a `BoundLogger` instance, so do not `isinstance`-check it.

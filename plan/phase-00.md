@@ -32,7 +32,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `BaseServiceSettings` (pydantic-settings), `Clock` protocol + `SystemClock` + `FrozenClock`, `ids.new_id()` (uuid7), `ids.to_public/from_public` for `TL-`/`KB-`/`PT-`, orjson helpers, `AppError`, `CODES` table, `micros` money helpers (`dollars_to_micros`, `micros_to_dollars_str`)
   - Acceptance: test parses specs/31 §3 table and asserts exact `CODES` parity; property tests (hypothesis) for id round-trips and money conversion.
 
-- [ ] P00-T06 `va_common` logging and masking
+- [x] P00-T06 `va_common` logging and masking — structlog JSON/console pipeline, redaction (secrets incl. camelCase, phones, transcripts, raw media), OTel ids, component levels; 490 tests pass, logging.py/masking.py 100 % coverage
   - Spec refs: specs/27-observability.md (logging); specs/02-repo-layout-and-conventions.md (Logging rule)
   - Depends on: P00-T05
   - Deliverables: structlog JSON configuration, contextvars binding helpers (`bind_call_context`), phone masking (`+1415***1234`), secret redaction processor (keys matching `*key*`, `*secret*`, `*token*`, `authorization`, `password`), `LOG_TRANSCRIPTS` enforcement (forced false in production)

@@ -22,6 +22,26 @@ Package: `va_common.logging`, `va_common.tracing`, `va_common.metrics`. Every se
 - Access logs: uvicorn access log disabled; middleware logs one line per request: `method`, `path` (template, not
   raw), `status`, `duration_ms`, `principal_type`, `api_key_prefix`.
 
+> Decision (2026-10-25): `va_common.logging` implements this section. Logging is stdlib-backed structlog
+> (`ProcessorFormatter` on one root handler) so uvicorn/httpx/temporalio lines get the same fields and redaction.
+> Secret keys are matched by segment, not raw substring: the key is split on `_`, `-`, `.`, whitespace and camelCase
+> boundaries (`apiKey`, `APIKey` -> `api`, `key`), then lower-cased; it is secret when any segment is one of `key`,
+> `secret`, `token`, `password`, `passwd`, `authorization`, `cookie`, `pepper`, `dsn`, `credential(s)`, or ends
+> with `secret`, `password`, `passwd`, `credential(s)` (`dbpassword`), or is `key`/`token` glued to a known
+> qualifier (`api`, `access`, `refresh`, `client`, `secret`, `private`, `session`, `auth`, `bearer`, `webhook`,
+> `signing`, `id`, `x`, `xi`: `apikey`, `accesstoken`; `monkey`, `hotkey` stay visible), and the last segment is not
+> `prefix`, `id`, `ids`, `count`, `version`, `type`, `name`, `length` (so `api_key_prefix`, `keyId`,
+> `prompt_tokens`/`promptTokens` stay visible). Secret values are replaced by
+> `[REDACTED]` rather than dropped so the key's presence stays visible; raw-media keys (`audio`, `payload`) and
+> gated transcript keys (`text`, `transcript`) are dropped; bytes values render as `<N bytes>`. The rules apply
+> recursively to nested mappings/lists (containers deeper than 8 levels become `[REDACTED]`) and the pure
+> `redact()` function is what Sentry `before_send` reuses (§8). E.164 numbers with 7-10 digits mask as
+> `+12***78` (first 2, last 2). Transcripts are allowed iff `LOG_TRANSCRIPTS=true` and `VA_ENV` ≠ production,
+> and never on a line with a bound `hipaa_mode=True`. `LOG_LEVEL_<COMPONENT>` names a stdlib/structlog logger by
+> the lower-cased suffix (`LOG_LEVEL_VA_MEDIA` -> logger `va_media` and its children). `version` is passed by the
+> service (default `unknown`); `pod` is `POD_ID` or the hostname. In console format `format_exc_info` is omitted
+> (the console renderer formats exceptions itself).
+
 ## 2. Tracing (OpenTelemetry)
 
 - SDK: `TracerProvider` with `Resource(service.name, service.version, deployment.environment, k8s.pod.name)`,
