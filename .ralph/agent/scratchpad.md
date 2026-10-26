@@ -1357,3 +1357,178 @@ pip-audit no known vulns, pnpm audit no vulns, radon avg A (2.69), jscpd 0 clone
 Gates re-run: make lint 0, typecheck 0, placeholders 0 findings, test 720 passed 1 skipped (cov 99.95 %).
 Finding 1 resolved: `jobs` loop guarded, empty profile list exits 2 before expansion; new fake-docker tests pass on
 both PATH bash and /bin/bash 3.2 (9 dev_up tests).
+
+## Plan P00-T10 — ML model and audio asset scripts
+
+Spec refs: specs/07 §5.3 (Silero VAD v5 ONNX, tag `v5.1.2`, path `src/silero_vad/data/silero_vad.onnx`, sha256 in
+`models/MANIFEST.json` recorded on first fetch and verified later), specs/07 §10.2 (background tracks), specs/02 §1
+layout (`models/`, `assets/audio/` committed, procedural, no third-party audio), specs/06 §10.2 (hold music playback).
+`.gitignore` already ignores `/models/*.onnx` and keeps `models/MANIFEST.json` + `assets/audio/` tracked.
+Makefile `setup` already calls `scripts/fetch_models.sh` and `uv run python scripts/generate_audio_assets.py`.
+
+### Decisions (record as `> Decision (2026-10-25):` in the named spec, same commit)
+1. specs/07 §5.3: the fetch logic lives in `scripts/fetch_models.py` (typed, tested); `scripts/fetch_models.sh` is the
+   spec-named entry point and only `exec uv run --no-sync python scripts/fetch_models.py "$@"` (with
+   `set -euo pipefail`, cd to repo root via `dirname "$0"`). Manifest format below.
+2. specs/07 §10.2: assets are stored at their playback level so the mixer applies unit gain: `static` −40 dBFS RMS,
+   `office`/`cafe`/`restaurant` −22 dBFS RMS, `hold_music` −18 dBFS RMS (peak-limited to −1 dBFS). Master synthesis
+   at 16 kHz; the `.ulaw` (8 kHz G.711 μ-law, raw, no header) is derived by FFT-domain low-pass at 3 400 Hz (static
+   keeps its 300 Hz high-pass) + 2:1 decimation; `.pcm16k` is raw little-endian int16 mono 16 kHz. Randomness comes
+   only from `numpy.random.PCG64(seed).random_raw()` (bit-generator streams are version-stable, unlike `Generator`
+   methods); float conversion is ours (`(raw >> 11) * 2**-53`). Fixed seeds per track (e.g. crc32 of the track name
+   XOR a global seed constant `20261025`).
+3. specs/06 §10.2 step 1 + specs/07 §10.2: hold music is a procedural asset `assets/audio/hold_music.{ulaw,pcm16k,wav}`
+   (60 s loop). The playback URL becomes `https://{PUBLIC_API_BASE}/static/hold/hold_music.wav` (Telnyx
+   `playback_start` accepts WAV or MP3; we have no MP3 encoder and add none). The WAV is 16 kHz 16-bit PCM mono,
+   written with stdlib `wave` (deterministic header). Serving it is the API's job in a later phase; only the spec line
+   changes now.
+
+### A. `scripts/fetch_models.py` (mypy strict, every function radon CC ≤ B)
+- Constants: `REPO_ROOT = Path(__file__).resolve().parents[1]`, `MANIFEST_PATH = REPO_ROOT / "models/MANIFEST.json"`,
+  `SILERO = ModelSpec(name="silero_vad", path="models/silero_vad.onnx",
+  url="https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx",
+  source="snakers4/silero-vad", tag="v5.1.2", license="MIT")`; `MODELS: tuple[ModelSpec, ...] = (SILERO,)`.
+- `@dataclass(frozen=True) class ModelSpec` (name, path, url, source, tag, license).
+- `@dataclass(frozen=True) class ManifestEntry` (name, path, url, source, tag, license, sha256, bytes).
+- Manifest JSON (sorted keys, indent 2, trailing newline):
+  `{"version": 1, "models": [{"name","path","url","source","tag","license","sha256","bytes"}]}`.
+- `load_manifest(path) -> dict[str, ManifestEntry]` (missing file -> `{}`; malformed -> `ManifestError`).
+- `write_manifest(path, entries)` atomic (tmp + `os.replace`).
+- `sha256_file(path) -> str` (chunked 1 MiB).
+- `Fetcher = Callable[[str], bytes]`; `http_fetch(url) -> bytes` via `urllib.request.urlopen(url, timeout=60)`
+  (only `https://` allowed; `S310` noqa justified by the scheme check; max 50 MB guard).
+- `verify(spec, entry, root) -> VerifyResult` enum: `OK`, `MISSING`, `MISMATCH`, `UNRECORDED`.
+- `fetch_one(spec, entry|None, root, fetch) -> ManifestEntry`: if file exists and matches the recorded sha -> return
+  entry (no download). Else download; if an entry exists and the digest differs -> raise `ChecksumError` and do NOT
+  write the file; write atomically to `models/` (`mkdir(parents=True, exist_ok=True)`); return new/same entry.
+  Also reject when the recorded `url`/`tag` differs from `spec` (manifest pinned to another release) -> `ManifestError`
+  unless `--update` is given (then re-record).
+- `main(argv: Sequence[str] | None = None, *, root: Path = REPO_ROOT, fetch: Fetcher = http_fetch) -> int`
+  argparse: `--check` (verify only, never download: exit 0 all OK, exit 1 and print `models/silero_vad.onnx:
+  sha256 mismatch (expected X, got Y)` / `missing` / `not recorded in manifest`), `--update` (accept new digest,
+  re-record). Default mode: fetch missing/mismatched files, record first digests, exit 1 on `ChecksumError`/
+  `ManifestError`/`urllib.error.URLError`/`TimeoutError` with a one-line message on stderr. Prints one status line per
+  model (`ok`, `downloaded`, `recorded`).
+- Builder runs `scripts/fetch_models.sh` for real once, commits `models/MANIFEST.json` with the real sha256 + byte
+  count; sanity-check the downloaded file starts with ONNX protobuf bytes and is ~2 MB (v5 is ≈ 2.2 MB).
+
+### B. `scripts/generate_audio_assets.py` (mypy strict, CC ≤ B; numpy only)
+- `pyproject.toml` dev group: add `numpy>=2.3` (scripts run in the root env); `uv lock`. Do not add scipy/soxr.
+- Constants: `SR = 16_000`, `SR_ULAW = 8_000`, `LOOP_S = 60.0`, `XFADE_S = 0.5`, `SEED = 20261025`,
+  `OUT_DIR = REPO_ROOT / "assets/audio"`, `TRACKS = ("static", "office", "cafe", "restaurant", "hold_music")`,
+  `TARGET_DBFS = {"static": -40.0, "office": -22.0, "cafe": -22.0, "restaurant": -22.0, "hold_music": -18.0}`.
+- `class Rng` wrapping `np.random.PCG64(seed)`: `uniform(n) -> NDArray[float64]`, `normal(n)` (Box–Muller from
+  two uniforms), `poisson_times(rate_hz, duration_s, jitter) -> NDArray` (exponential inter-arrival via −ln(u)/rate).
+- DSP helpers (all vectorized, no Python per-sample loops): `bandpass_fft(x, lo, hi, sr)` (rfft, zero bins outside,
+  irfft n=len), `pink(n, rng)` (white -> spectrum × 1/sqrt(f), f≥1 Hz), `brown(n, rng)` (spectrum × 1/f, then
+  high-pass 20 Hz), `envelope(n, rng, f_lo=3, f_hi=6)` (sum of 3 sinusoids with random freq/phase, mapped to
+  0.2…1.0), `murmur(n, rng)` = bandpass(white, 200, 2000) × envelope, `clicks(n, rng, rate 2–6/s, 5–20 ms bursts)`
+  (white bursts × exp decay placed by slicing at Poisson onsets), `clinks(n, rng, 0.2–1/s)` (decaying sinusoids
+  2–5 kHz, decay 40–120 ms), `rumble(n, rng)` = bandpass(brown, 20, 120).
+- Recipes per specs/07 §10.2: `static` = bandpass(pink, 300, 3400); `office` = brown + clicks + 0.5·murmur;
+  `cafe` = murmur + clinks; `restaurant` = 1.5·murmur + clinks + rumble; `hold_music` = I–vi–IV–V (C, A m, F, G)
+  at 72 BPM, 2-bar chords, soft additive tones (fundamental + 2 harmonics at −9/−15 dB) with ADSR per note plus an
+  arpeggio voice in eighth notes; all frequencies < 3 400 Hz so the 8 kHz version is intact.
+- `make_loop(x_long, sr)`: synthesize `LOOP_S + XFADE_S` seconds, equal-power cross-fade the last 0.5 s into the
+  first 0.5 s, return exactly `LOOP_S * sr` samples (seam continuity).
+- `level(x, target_dbfs)`: scale to target RMS; soft peak limit at −1 dBFS (scale down if peak > 0.89; recompute so
+  RMS stays ≥ target − 0.5 dB, which holds for all recipes — assert in tests).
+- `to_pcm16(x) -> bytes` (round half-even via `np.rint`, clip, `<i2`), `decimate_to_8k(x)` (FFT low-pass 3 400 Hz,
+  take `x[::2]`), `ulaw_encode(pcm: NDArray[int16]) -> bytes` (G.711 μ-law, bias 0x84, clip 32635, segment via
+  vectorized bit-length; bytes inverted ^0xFF). Do NOT use `audioop` (deprecated -> DeprecationWarning ->
+  `filterwarnings=error`). Also `ulaw_decode` (for tests and as the inverse reference).
+- `write_wav(path, pcm16k_bytes)` via `wave` (nchannels 1, sampwidth 2, 16 kHz) — hold_music only.
+- `render(track) -> dict[str, bytes]` mapping filename -> bytes (`{track}.ulaw`, `{track}.pcm16k`, plus
+  `hold_music.wav`).
+- `main(argv=None, *, out_dir=OUT_DIR) -> int`: argparse `--check` (render in memory and compare with files on
+  disk; exit 1 listing missing/different files), `--out DIR`. Default writes atomically only when content differs and
+  prints `wrote`/`unchanged` per file. Generation for all tracks must take < 10 s (FFT on ~1 M samples is fast).
+- Run it and commit the 11 files under `assets/audio/` (sizes: `.ulaw` 480 000 B, `.pcm16k` 1 920 000 B, wav
+  1 920 044 B → ≈ 12 MB total; acceptable, specs/02 says assets are committed).
+
+### C. Tests
+`scripts/tests/test_fetch_models.py` (no network: inject a fake `fetch` returning fixture bytes made at test time):
+- `test_first_fetch_records_sha_and_bytes`: empty root -> main() 0, file written, manifest entry sha == hashlib of
+  bytes, url/tag/license from `SILERO`.
+- `test_second_run_does_not_download` (fake fetch raises if called) -> 0, prints ok.
+- `test_check_fails_on_corrupted_model` (flip a byte) -> `main(["--check"])` == 1, stderr mentions `mismatch` and the
+  path. (acceptance)
+- `test_check_fails_when_missing` / `test_check_fails_when_unrecorded` -> 1.
+- `test_corrupted_file_is_redownloaded_when_digest_matches_manifest` -> 0, file restored.
+- `test_download_mismatching_manifest_is_rejected_and_not_written` -> 1, existing file untouched / absent.
+- `test_manifest_pinned_to_other_tag_is_rejected` -> 1; `--update` re-records -> 0.
+- `test_network_error_exits_1` (fetch raises `urllib.error.URLError`).
+- `test_http_fetch_rejects_non_https` (`ValueError` for `file://`/`http://`), and a respx-free unit of the size
+  guard with a monkeypatched `urlopen` returning an object with `read(n)`.
+- `test_committed_manifest_matches_spec`: repo `models/MANIFEST.json` has exactly one entry, url contains
+  `v5.1.2/src/silero_vad/data/silero_vad.onnx`, sha256 is 64 hex, bytes > 1 MB; and that url/tag match specs/07 §5.3
+  text (parse the tag and path from the spec).
+- `test_shell_wrapper`: `scripts/fetch_models.sh` executable, `#!/usr/bin/env bash`, `set -euo pipefail`, execs
+  `scripts/fetch_models.py`.
+- `test_model_check_if_present`: if `models/silero_vad.onnx` exists locally, `main(["--check"])` == 0 (skip otherwise).
+
+`scripts/tests/test_generate_audio_assets.py`:
+- `test_committed_assets_are_byte_identical_to_regeneration` (acceptance): `main(["--check"])` == 0 against the repo
+  `assets/audio/`; plus render twice in-process -> equal bytes.
+- `test_check_detects_modified_asset`: write to tmp out dir, alter one byte -> `--check` 1; missing file -> 1.
+- `test_write_is_idempotent`: second run reports `unchanged`, mtimes unchanged.
+- `test_sizes_and_formats` (parametrize over tracks): `.ulaw` == 480 000 B, `.pcm16k` == 1 920 000 B; WAV header
+  1 ch / 2 bytes / 16 000 Hz / 960 000 frames.
+- `test_levels` (parametrize): RMS of pcm16k within ±0.5 dB of `TARGET_DBFS`, peak ≤ −1 dBFS; μ-law decoded RMS
+  within ±1 dB of target (static uses ±1 dB too).
+- `test_static_is_band_limited`: >99 % of spectral energy in 300–3 400 Hz.
+- `test_ulaw_band_limit`: 8 kHz files have <1 % energy above 3 450 Hz (decimation alias check).
+- `test_loop_seam_is_continuous`: |x[-1] − x[0]| and the RMS of the 20 ms around the seam (tail+head concatenated)
+  within 3 dB of the track RMS (no click/gap).
+- `test_ulaw_codec_known_values`: G.711 table spot checks (0 -> 0xFF, 32767 -> 0x80, −32768 -> 0x00, 1 -> 0xFF,
+  −1 -> 0x7F) and decode(encode(x)) error within μ-law segment step for a ramp over the full int16 range.
+- `test_clicks_and_clinks_rates`: count onsets produced by the event generators for a fixed seed lie within the
+  spec ranges (office clicks 2–6 /s mean, cafe clinks 0.2–1 /s).
+- `test_rng_is_stable`: first 4 raw uniforms for seed 1 equal hard-coded constants (detects a numpy bit-generator
+  change before the asset drift test does).
+- `test_hold_music_band_limited_and_tonal`: spectral peaks at the chord fundamentals (C4 261.63 Hz etc.) and no
+  energy above 3 400 Hz.
+
+### D. Docs
+- specs/07 §5.3 + §10.2 Decisions (1, 2, 3 above); specs/06 §10.2 step 1 URL → `hold_music.wav` with Decision 3.
+- AGENTS.md learned bullets: `scripts/fetch_models.sh --check` verifies, `--update` re-pins; `.onnx` not committed,
+  manifest is; `generate_audio_assets.py --check` is the asset drift check and assets must be regenerated + committed
+  when the generator changes; use `PCG64.random_raw`, never `Generator` methods, for anything committed; no `audioop`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make check`; `scripts/fetch_models.sh` (real download), then
+`scripts/fetch_models.sh --check` (0), corrupt a copy -> 1; `uv run python scripts/generate_audio_assets.py` twice
+(second run all `unchanged`), `--check` 0; `shasum` of assets equal across both runs. pip-audit on `uv export`, pnpm
+audit, radon cc (no C+), jscpd. build.done plain string per mem-1792920384-602e.
+
+### Risks
+- numpy `Generator` stream changes across versions -> avoided via raw PCG64 output + own conversion; `test_rng_is_stable`.
+- Cross-platform float ULP differences (arm64 Mac vs x86 CI) could flip an int16/μ-law rounding on a rare sample and
+  break the byte-identity test in CI. Keep math simple (FFT + elementwise), round once at the end. If CI ever shows
+  drift, the fallback is to compare sha256 per platform; do not pre-emptively weaken the test.
+- 12 MB of committed binaries; fine per specs/02, but tests that render all tracks must stay < 10 s total — render once
+  per session with a module-scoped fixture (`functools.cache` on `render`), xdist-safe (pure function).
+- `uv run --no-sync` in the wrapper requires `uv sync` first (Makefile setup order already does that).
+- GitHub raw URL availability; tests never hit the network.
+
+## Build P00-T10 — done (Builder)
+
+Files: `scripts/fetch_models.py` + `scripts/fetch_models.sh` (exec wrapper), `models/MANIFEST.json` (real fetch:
+silero v5.1.2, 2 327 524 B, sha256 2623a295…788f; `.onnx` ignored), `scripts/generate_audio_assets.py` + 11 files in
+`assets/audio/`, tests `scripts/tests/test_fetch_models.py` (30) and `test_generate_audio_assets.py` (41); numpy>=2.3
+dev dep; Decisions in specs/07 §5.3, §10.2 and specs/06 §10.2 (hold_music.wav); AGENTS.md bullets.
+Deviations from plan (recorded in specs/07 §10.2 Decision): hold music at 64 BPM (not 72) so 60 s = exactly two
+I–vi–IV–V progressions, rendered circularly (no cross-fade); `.ulaw` is levelled separately from `.pcm16k` so both
+hit the target RMS; limiter is tanh soft-clip (office hits it once, RMS -22.13 dB). Seam test = seam jump ≤ 99.9th
+percentile of sample steps (+ 20 ms RMS check on stationary `static`), since sparse clicks make windowed RMS noisy.
+Gates: make fmt 0, lint 0, typecheck 0 (55 files), placeholders 0 findings, make test 791 passed 1 skipped cov 99 %
+(fetch_models 100 %, generate 99 %), make check 0. Real `fetch_models.sh --check` 0; corrupted byte -> 1 with mismatch
+message; regeneration twice -> all 11 `unchanged`, shasum identical. pip-audit no known vulns, pnpm audit no vulns,
+radon avg A (2.63, no C+), jscpd 0 clones.
+
+## Review P00-T10 — approved
+
+Re-ran: make lint 0, typecheck 0, placeholders 0 findings, make test 791 passed 1 skipped (cov 99.92 %), make check 0;
+`generate_audio_assets.py --check` 0, `fetch_models.sh --check` 0, `--check --update` rejected (argparse exit 2).
+Checked μ-law codec (bias 0x84 / clip 32635, decode precedence), make_loop seam math, hold-music timing (8 chords of
+7.5 s = 60 s), spec Decisions in 07 §5.3/§10.2 and 06 §10.2 (no remaining hold_music.mp3 refs), specs/02 layout.

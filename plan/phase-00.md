@@ -56,7 +56,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `docker-compose.yml` (postgres pgvector, redis, clickhouse, temporal auto-setup, temporal-ui, minio + bucket-init job creating the three buckets, mailpit, otel-collector, prometheus, grafana) with healthchecks and named volumes; `infra/otel/collector.yaml`; `infra/prometheus/prometheus.yml`; `scripts/dev_up.sh`, `scripts/dev_down.sh`
   - Acceptance: `make up` brings all services to healthy; ports match AGENTS.md.
 
-- [ ] P00-T10 ML model and audio asset scripts
+- [x] P00-T10 ML model and audio asset scripts — fetch_models.sh/.py + MANIFEST (silero v5.1.2, sha256 pinned; --check fails on corrupted byte), generate_audio_assets.py + 11 committed assets byte-identical on regeneration (--check 0); make check 0, 791 passed 1 skipped, cov 99.92 %
   - Spec refs: specs/07-media-pipeline.md (Silero VAD model, background tracks); specs/02-repo-layout-and-conventions.md (`models/`, `assets/audio/`)
   - Depends on: P00-T01
   - Deliverables: `scripts/fetch_models.sh` (downloads Silero VAD ONNX from the official snakers4/silero-vad repository, computes sha256, writes/validates `models/MANIFEST.json`), `scripts/generate_audio_assets.py` (procedurally synthesizes office, cafe, restaurant, phone-static backgrounds and hold music as 8 kHz μ-law and 16 kHz PCM files, deterministic seed), generated files committed under `assets/audio/`

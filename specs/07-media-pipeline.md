@@ -96,6 +96,13 @@ resampled to 16 kHz), (c) local recording buffer only when `test_mode` (Telnyx r
 - Model: Silero VAD v5 ONNX (`models/silero_vad.onnx`, MIT, fetched by `scripts/fetch_models.sh` from the
   `snakers4/silero-vad` repository path `src/silero_vad/data/silero_vad.onnx` at tag `v5.1.2`, sha256 recorded in
   `models/MANIFEST.json` on first fetch and verified on every later fetch).
+
+> Decision (2026-10-25): the fetch logic lives in `scripts/fetch_models.py` (typed, tested);
+> `scripts/fetch_models.sh` is the entry point and only runs it via `uv run --no-sync`. The manifest is
+> `{"version": 1, "models": [{"name", "path", "url", "source", "tag", "license", "sha256", "bytes"}]}` (sorted keys,
+> 2-space indent). A download whose sha256 differs from the recorded one is rejected and not written; a manifest
+> pinned to another url/tag is rejected. `--check` verifies without downloading (exit 1 on missing, unrecorded, or
+> mismatching files); `--update` re-records a new digest or pin. The `.onnx` is git-ignored, the manifest is committed.
 - I/O: inputs `input` float32 `[1, 576]` (64 samples of context from the previous window + 512 new samples, values in
   [−1, 1]), `state` float32 `[2, 1, 128]`, `sr` int64 scalar `16000`; outputs `output` float32 `[1, 1]`
   (speech probability) and `stateN` float32 `[2, 1, 128]`. State starts as zeros, context starts as zeros.
@@ -241,6 +248,18 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
   - `restaurant`: denser murmur (×1.5 level) + clinks + low rumble.
   Loops are cross-faded over 500 ms at the seam.
 - Levels: `null` (default) → `static` at −40 dBFS; `office`/`cafe`/`restaurant` → −22 dBFS RMS; `"none"` → no track.
+
+> Decision (2026-10-25): assets are stored at their playback level so the mixer applies unit gain: `static` −40 dBFS
+> RMS, `office`/`cafe`/`restaurant` −22 dBFS RMS, `hold_music` −18 dBFS RMS, peaks soft-limited (tanh) below −1 dBFS.
+> Each track is synthesized once at 16 kHz; `.pcm16k` is raw little-endian int16 mono 16 kHz, and `.ulaw` is raw
+> G.711 μ-law 8 kHz (no header) derived by an FFT-domain low-pass at 3 400 Hz plus 2:1 decimation, levelled
+> separately so both formats hit the target. Randomness comes only from `numpy.random.PCG64(seed).random_raw()`
+> (bit-generator streams are stable across numpy versions, `Generator` methods are not) with our own float
+> conversion; each track's seed is `crc32(track) ^ 20261025`. Office clicks are a Poisson process at 4 /s, clinks at
+> 0.6 /s. Hold music (`assets/audio/hold_music.{ulaw,pcm16k,wav}`, see `06` §10.2) is a procedural I–vi–IV–V
+> progression in C at 64 BPM (two bars per chord, so the 60 s loop holds exactly two progressions and is rendered
+> circularly instead of cross-faded), with every partial below 3 400 Hz. `generate_audio_assets.py --check` is the
+> drift check: committed files must be byte-identical to a regeneration.
 - Mixing: decode TTS frame to int16, add `background_frame × gain`, clip to int16, encode. Agent speech is not ducked.
 - Background never goes to the STT (it is outbound only).
 
