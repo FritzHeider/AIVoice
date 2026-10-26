@@ -8,7 +8,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `pyproject.toml` (uv workspace members for all apps/packages/sdks, `[dependency-groups] dev`, ruff, mypy strict, pytest, coverage config), `Makefile`, `.gitignore`, `.editorconfig`, `package.json`, `pnpm-workspace.yaml`, `.nvmrc` (22), `.python-version` (3.12)
   - Acceptance: `uv sync --all-packages` and `pnpm install` succeed; `make lint` and `make typecheck` run (on an empty tree they pass); every Makefile target from specs/02 exists.
 
-- [ ] P00-T02 `.env.example` and settings contract
+- [x] P00-T02 `.env.example` and settings contract — 104 vars mirrored in spec order; fmt/lint/typecheck exit 0; 65 passed, 99.64% cov (env_spec.py 99%); parity fails both directions (test_parity_detects_variable_added_to_{spec,env}_only); radon avg A 3.29; jscpd 0 clones; pip-audit + pnpm audit clean; placeholders gate pending P00-T03
   - Spec refs: specs/02-repo-layout-and-conventions.md (Environment variables)
   - Depends on: P00-T01
   - Deliverables: `.env.example` containing every variable in the table with its dev value and a comment; `scripts/tests/test_env_example.py` parsing the spec table and asserting parity.

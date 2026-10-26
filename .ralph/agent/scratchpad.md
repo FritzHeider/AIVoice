@@ -281,3 +281,12 @@ mypy report in the two new Python files, and confirm `test_env_example.py` passe
 still clears 85% now that `scripts/env_spec.py` is in the coverage source set. Do not re-derive the spec counts; they
 are measured above. Two runtime-state items could not be recorded either, because `ralph tools` is also shell-bound:
 a `fix` memory for the `.venv/.DS_Store` failure (text is in `AGENTS.md`) and a task for this blocker.
+
+## Review P00-T02 — approved (2026-10-25)
+
+Blocker resolved: disk freed (15 GiB available). Gates run on the committed P00-T02 files with no code changes needed:
+`make fmt` (4 files unchanged), `make lint` pass, `make typecheck` pass (mypy, 4 files), `make test` 65 passed,
+coverage 99.64% (`scripts/env_spec.py` 99%, one partial branch 89->99). radon avg A (3.29), jscpd 0 clones,
+pip-audit and pnpm audit clean. `make placeholders` is not present until P00-T03, as planned. Acceptance verified by
+`test_parity_detects_variable_added_to_spec_only` and `test_parity_detects_variable_added_to_env_only`.
+Next: P00-T03 placeholder detector gate.
