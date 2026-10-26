@@ -6,6 +6,12 @@ requires-python = "==3.12.*"
 members = [
     "va-api",
     "va-common",
+    "va-events-sink",
+    "va-media-worker",
+    "va-sim",
+    "va-telephony-edge",
+    "va-webhook-dispatcher",
+    "va-worker",
     "voiceagents-workspace",
 ]
 
@@ -2088,6 +2094,7 @@ version = "0.1.0"
 source = { editable = "packages/va_common" }
 dependencies = [
     { name = "aioboto3" },
+    { name = "asyncpg" },
     { name = "cryptography" },
     { name = "httpx", extra = ["http2"] },
     { name = "opentelemetry-api" },
@@ -2101,13 +2108,18 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "redis" },
     { name = "sentry-sdk" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "structlog" },
+    { name = "temporalio" },
     { name = "uuid-utils" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=15.5.0" },
+    { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "opentelemetry-api", specifier = ">=1.45.1" },
@@ -2121,8 +2133,110 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.16.1" },
     { name = "redis", specifier = ">=5.1" },
     { name = "sentry-sdk", specifier = ">=2.73.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
+    { name = "starlette", specifier = ">=1.0" },
     { name = "structlog", specifier = ">=26.1.0" },
+    { name = "temporalio", specifier = ">=1.8" },
     { name = "uuid-utils", specifier = ">=1.1.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+]
+
+[[package]]
+name = "va-events-sink"
+version = "0.1.0"
+source = { editable = "apps/events_sink" }
+dependencies = [
+    { name = "starlette" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-media-worker"
+version = "0.1.0"
+source = { editable = "apps/media_worker" }
+dependencies = [
+    { name = "redis" },
+    { name = "starlette" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "redis", specifier = ">=5.1" },
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-sim"
+version = "0.1.0"
+source = { editable = "apps/sim" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-telephony-edge"
+version = "0.1.0"
+source = { editable = "apps/telephony_edge" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.162.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-webhook-dispatcher"
+version = "0.1.0"
+source = { editable = "apps/webhook_dispatcher" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-worker"
+version = "0.1.0"
+source = { editable = "apps/worker" }
+dependencies = [
+    { name = "starlette" },
+    { name = "temporalio" },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "temporalio", specifier = ">=1.8" },
+    { name = "va-common", editable = "packages/va_common" },
 ]
 
 [[package]]
@@ -2154,6 +2268,12 @@ dev = [
     { name = "types-pyyaml" },
     { name = "va-api" },
     { name = "va-common" },
+    { name = "va-events-sink" },
+    { name = "va-media-worker" },
+    { name = "va-sim" },
+    { name = "va-telephony-edge" },
+    { name = "va-webhook-dispatcher" },
+    { name = "va-worker" },
 ]
 
 [package.metadata]
@@ -2182,6 +2302,12 @@ dev = [
     { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },
     { name = "va-api", editable = "apps/api" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-events-sink", editable = "apps/events_sink" },
+    { name = "va-media-worker", editable = "apps/media_worker" },
+    { name = "va-sim", editable = "apps/sim" },
+    { name = "va-telephony-edge", editable = "apps/telephony_edge" },
+    { name = "va-webhook-dispatcher", editable = "apps/webhook_dispatcher" },
+    { name = "va-worker", editable = "apps/worker" },
 ]
 
 [[package]]

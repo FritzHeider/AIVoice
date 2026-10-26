@@ -1,0 +1,20 @@
+[project]
+name = "va-worker"
+version = "0.1.0"
+description = "VoiceAgents Temporal worker host: task queues, probes, metrics"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "starlette>=1.0",
+    "temporalio>=1.8",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "va_worker"
+
+[tool.uv.sources]
+va-common = { workspace = true }

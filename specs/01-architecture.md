@@ -45,6 +45,18 @@
 | `docs` | `apps/docs` | MkDocs Material static site | 3100 | Public documentation + API reference + `llms.txt`. |
 | `sim` | `apps/sim` | `python -m va_sim.server` | 9100–9400 | Local/dev/test simulators: fake Telnyx (REST + media WS client + webhook emitter) on 9100, fake ElevenLabs (TTS WS, STT WS, REST) on 9200, fake Telnyx Inference (OpenAI-compatible) on 9300, fake Stripe on 9400. |
 
+> Decision (2026-10-25): the sim process is `python -m va_sim_server.main` (package `va_sim_server` per
+> `02-repo-layout-and-conventions.md` §1 and the `29-infrastructure.md` §1.1 image table), not `va_sim.server`; it serves
+> the four simulators on `--port` (default 9100) plus 100, 200, 300. `uvicorn va_edge.main:app` stays valid (module-level
+> app); the images run `python -m va_edge.serve` / `python -m va_api.serve`. Every service runs through
+> `va_common.service.serve`, which owns SIGTERM/SIGINT (the first requests a graceful stop, a second forces it), runs the
+> service's drain with the listener open, then shuts uvicorn down; a crashed supervised background task exits 1.
+> Distribution names follow the Dockerfile rule `va-${SERVICE//_/-}`: `va-telephony-edge`, `va-media-worker`,
+> `va-worker`, `va-webhook-dispatcher`, `va-events-sink`, `va-sim`. Task queues derive from `TEMPORAL_TASK_QUEUE` by
+> replacing its `-main` suffix (`va-main` → `va-postcall`, `va-ingest`, `va-system`). Locally the worker metrics port
+> 9300 and the dispatcher's 9400 collide with the fake LLM and fake Stripe; run the sim with `--port 19100` when the
+> worker or dispatcher runs on the host.
+
 Infrastructure dependencies: PostgreSQL 16 with `pgvector` ≥ 0.7 and `pg_trgm`; Redis 7.2; ClickHouse 24.x;
 Temporal Server 1.24+ (dev: `temporalio/auto-setup`); S3-compatible object storage (dev: MinIO); Deno 2.x
 binary available to the media worker and worker (custom code nodes, `13-tools-and-dynamic-data.md` §8).

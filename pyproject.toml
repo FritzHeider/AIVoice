@@ -29,6 +29,12 @@ dev = [
   "numpy>=2.3",
   "va-api",
   "openapi-spec-validator>=0.9.0",
+  "va-telephony-edge",
+  "va-media-worker",
+  "va-worker",
+  "va-webhook-dispatcher",
+  "va-events-sink",
+  "va-sim",
 ]
 
 [tool.uv]
@@ -37,6 +43,12 @@ package = false
 [tool.uv.sources]
 va-common = { workspace = true }
 va-api = { workspace = true }
+va-telephony-edge = { workspace = true }
+va-media-worker = { workspace = true }
+va-worker = { workspace = true }
+va-webhook-dispatcher = { workspace = true }
+va-events-sink = { workspace = true }
+va-sim = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -66,8 +78,26 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support"
-files = ["scripts", "packages/va_common/src", "packages/va_common/tests", "apps/api/src", "apps/api/tests"]
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/sim/src"
+files = [
+  "scripts",
+  "packages/va_common/src",
+  "packages/va_common/tests",
+  "apps/api/src",
+  "apps/api/tests",
+  "apps/telephony_edge/src",
+  "apps/telephony_edge/tests",
+  "apps/media_worker/src",
+  "apps/media_worker/tests",
+  "apps/worker/src",
+  "apps/worker/tests",
+  "apps/webhook_dispatcher/src",
+  "apps/webhook_dispatcher/tests",
+  "apps/events_sink/src",
+  "apps/events_sink/tests",
+  "apps/sim/src",
+  "apps/sim/tests",
+]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 
 [tool.pytest.ini_options]
@@ -75,7 +105,13 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
 testpaths = ["scripts/tests", "packages", "apps", "sdks"]
-pythonpath = ["scripts", "packages/va_common/tests", "apps/api/tests/support"]
+pythonpath = [
+  "scripts",
+  "packages/va_common/tests",
+  "apps/api/tests/support",
+  "apps/media_worker/tests/support",
+  "apps/worker/tests/support",
+]
 timeout = 60
 markers = [
   "integration: needs docker/testcontainers",

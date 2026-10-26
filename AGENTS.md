@@ -19,6 +19,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Simulator end-to-end | `make e2e` (single flow: `uv run pytest tests_e2e -m e2e -k barge_in`) |
 | Dashboard e2e | `make e2e-ui` |
 | Regenerate OpenAPI | `make openapi` (commit `openapi/openapi.json`) |
+| Run a service on the host | `uv run python -m va_edge.serve` · `-m va_api.serve` · `-m va_media.main` · `-m va_worker.main` · `-m va_webhooks.main` · `-m va_events_sink.main` · `-m va_sim_server.main` (all take `--host`/`--port`) |
 | Phase progress | `scripts/ralph/status.sh` |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
 
@@ -164,3 +165,24 @@ Grafana 3001
   so `va_api.errors.error_response` sets `X-Request-Id` and the security headers itself. The request id lives in
   `scope["va.request_id"]`, never `scope["state"]`: asgi-lifespan passes one shared lifespan-state dict to every
   request. Readiness checks use `va_common.health.run_checks` (concurrent, 1 s each, details logged only).
+- 2026-10-25 (P00-T12): services share `va_common.service`: `probe_routes()` / `probe_app()` serve `/healthz`
+  `/readyz` `/metrics` from `app.state.probes` (`ProbeState`: version, registry, `checks`, `liveness` returning a
+  failure reason); `service_scope` / `service_lifespan` / `probe_service_app` wire observability + the container;
+  `Supervisor(stop.task_failed)` runs background tasks (a crash stops the process with exit 1); `serve(app,
+  parse_bind(...), stop=..., drain=...)` owns SIGTERM/SIGINT via `ManagedServer` (uvicorn never installs handlers).
+  Never call `uvicorn.run` in a service. Dependencies come from `va_common.checks.open_dependencies()`
+  (`deps.postgres/redis/temporal/clickhouse(...)` create the client, register cleanup, and add the readiness check in
+  call order). Metrics/probe ports: worker 9300, dispatcher 9400, sink 9500; on the host they collide with the fake
+  LLM/Stripe, so run the sim with `--port 19100` next to them.
+- 2026-10-25 (P00-T12): service tests use `packages/va_common/tests/service_helpers.py`: `settings_of(Cls, **kw)`,
+  `isolate_env(monkeypatch, tmp_path, *SettingsClasses)` in an autouse `isolated_env` fixture, `reset_logging`
+  (autouse, re-export it from the app `conftest.py` with `__all__`), `FakeContainer`, `make_client`,
+  `readiness_of`, `UNREACHABLE` URLs, `track_closes`, `capture_serve`, `json_log_stream`/`log_events`, and
+  `RecordingServer` (a `ManagedServer` with a `ready` event and `url`, for real-uvicorn tests on port 0; never poll
+  with sleeps). App-specific helpers go in `apps/<app>/tests/support/<short>_helpers.py` (unique module names; add
+  the dir to pytest `pythonpath` and mypy `mypy_path`). A uv_build app whose package name differs from the
+  distribution needs `[tool.uv.build-backend] module-name = "va_x"` in its pyproject.
+- 2026-10-25 (P00-T12): uvicorn calls `sys.exit()` on startup failure (port in use, lifespan error); in an asyncio
+  task that SystemExit escapes the event loop, so `run_server` converts it to `ServerStartupError`. Cancelling a
+  running server must still let uvicorn close its sockets (`_abort`), or pytest's unraisable-socket warning fails a
+  later test.

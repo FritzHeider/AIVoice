@@ -1,10 +1,11 @@
 [project]
 name = "va-common"
 version = "0.1.0"
-description = "Shared VoiceAgents primitives: settings, clock, ids, JSON, errors, money, logging, masking, crypto, redis, http, tracing, metrics"
+description = "Shared VoiceAgents primitives: settings, clock, ids, JSON, errors, money, logging, masking, crypto, redis, http, tracing, metrics, readiness checks, service runtime"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "aioboto3>=15.5.0",
+    "asyncpg>=0.32.0",
     "cryptography>=50.0.2",
     "httpx[http2]>=0.28.1",
     "opentelemetry-api>=1.45.1",
@@ -18,8 +19,12 @@ dependencies = [
     "pydantic-settings>=2.16.1",
     "redis>=5.1",
     "sentry-sdk>=2.73.0",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "starlette>=1.0",
     "structlog>=26.1.0",
+    "temporalio>=1.8",
     "uuid-utils>=1.1.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [build-system]

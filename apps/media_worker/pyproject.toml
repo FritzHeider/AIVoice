@@ -1,0 +1,20 @@
+[project]
+name = "va-media-worker"
+version = "0.1.0"
+description = "VoiceAgents media worker: real-time call pipeline host, admission, drain, probes, metrics"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "starlette>=1.0",
+    "redis>=5.1",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "va_media"
+
+[tool.uv.sources]
+va-common = { workspace = true }

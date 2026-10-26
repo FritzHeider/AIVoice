@@ -6,8 +6,17 @@ from typing import Any, ClassVar
 
 import pytest
 from pydantic import ValidationError
+from service_helpers import settings_of
 
-from va_common.settings import BaseServiceSettings, CryptoSettings, Environment, KmsProviderName, LogFormat
+from va_common.settings import (
+    BaseServiceSettings,
+    CryptoSettings,
+    DatabaseSettings,
+    Environment,
+    KmsProviderName,
+    LogFormat,
+    TemporalSettings,
+)
 
 NO_DOTENV: dict[str, Any] = {"_env_file": None}
 
@@ -157,3 +166,33 @@ def test_crypto_settings_aws_in_production(monkeypatch: pytest.MonkeyPatch) -> N
     settings = load(CryptoSettings)
     assert settings.kms_provider is KmsProviderName.AWS
     assert settings.aws_kms_key_id == arn
+
+
+def test_database_and_temporal_mixin_defaults() -> None:
+    database = settings_of(DatabaseSettings)
+    temporal = settings_of(TemporalSettings)
+    assert (database.database_url, database.database_pool_size) == (
+        "postgresql+asyncpg://va:va@localhost:5432/va",
+        10,
+    )
+    assert (temporal.temporal_host, temporal.temporal_namespace, temporal.temporal_task_queue) == (
+        "localhost:7233",
+        "default",
+        "va-main",
+    )
+
+
+def test_database_and_temporal_mixins_read_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@db:5432/x")
+    monkeypatch.setenv("DATABASE_POOL_SIZE", "4")
+    monkeypatch.setenv("TEMPORAL_HOST", "temporal:7233")
+    monkeypatch.setenv("TEMPORAL_TASK_QUEUE", "stage-main")
+    assert settings_of(DatabaseSettings).database_pool_size == 4
+    assert settings_of(DatabaseSettings).database_url.endswith("@db:5432/x")
+    temporal = settings_of(TemporalSettings)
+    assert (temporal.temporal_host, temporal.temporal_task_queue) == ("temporal:7233", "stage-main")
+
+
+def test_database_pool_size_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        settings_of(DatabaseSettings, database_pool_size=0)

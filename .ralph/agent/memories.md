@@ -6,6 +6,14 @@
 
 ## Fixes
 
+### mem-1792986234-2b28
+> uv_build workspace app whose import package differs from the dist name needs [tool.uv.build-backend] module-name = "va_x" in its pyproject, else uv sync fails 'Expected a Python module at src/va_<dist>'
+<!-- tags: tooling, uv | created: 2026-10-26 -->
+
+### mem-1792986234-b9d2
+> uvicorn Server.serve calls sys.exit() on startup failure; inside an asyncio task SystemExit escapes the loop - catch it in the coroutine (va_common.service._serve -> ServerStartupError). Cancelling a running uvicorn task without shutdown leaks its listening socket (pytest unraisable warning in a later test)
+<!-- tags: testing, uvicorn, service | created: 2026-10-26 -->
+
 ### mem-1792982690-b4e4
 > bash 3.2 (stock macOS /bin/bash) under set -u errors on "${arr[@]}" when arr is empty; guard with ${#arr[@]} checks; test scripts with /bin/bash too
 <!-- tags: tooling, bash | created: 2026-10-26 -->

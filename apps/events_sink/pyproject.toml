@@ -1,0 +1,19 @@
+[project]
+name = "va-events-sink"
+version = "0.1.0"
+description = "VoiceAgents events sink: Redis Streams to ClickHouse host, probes, metrics"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "starlette>=1.0",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "va_events_sink"
+
+[tool.uv.sources]
+va-common = { workspace = true }

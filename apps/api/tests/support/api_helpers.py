@@ -2,66 +2,35 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from service_helpers import FakeContainer, failing, make_client, ok_check, settings_of
 
 from va_api.settings import ApiSettings
 from va_common.health import CheckFn
 
+__all__ = ["FakeChecks", "failing", "make_client", "make_settings", "ok_check", "sample_app"]
+
 
 def make_settings(**overrides: Any) -> ApiSettings:
-    kwargs: dict[str, Any] = {"_env_file": None, **overrides}
-    return ApiSettings(**kwargs)
-
-
-async def ok_check() -> None:
-    return None
+    return settings_of(ApiSettings, **overrides)
 
 
 @dataclass
-class FakeChecks:
-    """A container factory whose readiness checks are the given callables; records lifecycle and calls."""
+class FakeChecks(FakeContainer):
+    """The api's default fake container (Postgres, Redis, Temporal all ok); counts readiness lookups."""
 
-    checks: dict[str, CheckFn] = field(
+    checks: Mapping[str, CheckFn] = field(
         default_factory=lambda: {"postgres": ok_check, "redis": ok_check, "temporal": ok_check}
     )
-    opened: int = 0
-    closed: int = 0
     calls: int = 0
 
     def readiness_checks(self) -> dict[str, CheckFn]:
         self.calls += 1
-        return dict(self.checks)
-
-    @asynccontextmanager
-    async def __call__(self, _settings: ApiSettings) -> AsyncIterator[FakeChecks]:
-        self.opened += 1
-        try:
-            yield self
-        finally:
-            self.closed += 1
-
-
-def failing(exc: Exception) -> Callable[[], Awaitable[None]]:
-    async def check() -> None:
-        raise exc
-
-    return check
-
-
-@asynccontextmanager
-async def make_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """Run the app's lifespan and yield a client; app exceptions become 500 responses, as under uvicorn."""
-    async with LifespanManager(app) as manager:
-        transport = httpx.ASGITransport(app=manager.app, raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            yield client
+        return super().readiness_checks()
 
 
 def sample_app(container: FakeChecks | None = None, **settings_overrides: Any) -> FastAPI:

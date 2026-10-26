@@ -22,8 +22,8 @@ from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_openapi
 from va_api.routers.health import probe_router, public_router
 from va_api.settings import ApiSettings
-from va_common import observability
 from va_common.metrics import Service, build_metrics
+from va_common.service import ProbeState, container_checks, service_scope
 
 __all__ = ["CORS_ALLOW_HEADERS", "CORS_ALLOW_METHODS", "CORS_EXPOSE_HEADERS", "ROUTERS", "app", "create_app"]
 
@@ -55,19 +55,20 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        obs = observability.init("api", cfg, version=__version__) if init_observability else None
-        try:
-            async with container_factory(cfg) as container:
-                app.state.container = container
-                yield
-        finally:
-            if obs is not None:
-                obs.shutdown()
+        async with service_scope(
+            app.state, cfg, container_factory, version=__version__, init_observability=init_observability
+        ):
+            yield
 
     app = FastAPI(title=TITLE, version=__version__, lifespan=lifespan)
     app.state.settings = cfg
     app.state.metrics = build_metrics(Service.API)
-    app.state.readiness_timeout_s = readiness_timeout_s
+    app.state.probes = ProbeState(
+        __version__,
+        app.state.metrics.registry,
+        checks=container_checks(app.state),
+        readiness_timeout_s=readiness_timeout_s,
+    )
     app.state.routers = routers
     app.add_middleware(
         CORSMiddleware,

@@ -15,10 +15,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 __all__ = [
     "BaseServiceSettings",
     "CryptoSettings",
+    "DatabaseSettings",
     "Environment",
     "KmsProviderName",
     "LogFormat",
     "RedisSettings",
+    "TemporalSettings",
 ]
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -95,6 +97,21 @@ class RedisSettings(BaseServiceSettings):
     """Redis connection for backend services (``REDIS_URL``, scope "all backend" in specs/02 §6)."""
 
     redis_url: str = "redis://localhost:6379/0"
+
+
+class DatabaseSettings(BaseServiceSettings):
+    """Postgres (``DATABASE_URL``, ``DATABASE_POOL_SIZE``: api, edge, worker, media, dispatcher)."""
+
+    database_url: str = "postgresql+asyncpg://va:va@localhost:5432/va"
+    database_pool_size: int = Field(default=10, ge=1)
+
+
+class TemporalSettings(BaseServiceSettings):
+    """Temporal client (``TEMPORAL_HOST``/``_NAMESPACE``/``_TASK_QUEUE``: api, edge, worker, media)."""
+
+    temporal_host: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "va-main"
 
 
 class KmsProviderName(StrEnum):

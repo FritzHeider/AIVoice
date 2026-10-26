@@ -5,13 +5,10 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from va_api import __version__
 from va_api.envelopes import legacy_router
-from va_common.health import liveness_body, run_checks
-from va_common.metrics import render_latest
+from va_common.service import ProbeState, liveness_response, metrics_response, readiness_response
 
 __all__ = ["HealthStatus", "probe_router", "public_router"]
 
@@ -38,21 +35,21 @@ async def health_get() -> HealthStatus:
     return HealthStatus(status="ok")
 
 
+def _probes(request: Request) -> ProbeState:
+    probes: ProbeState = request.app.state.probes
+    return probes
+
+
 @probe_router.get("/healthz")
-async def healthz() -> dict[str, str]:
-    return liveness_body(__version__)
+async def healthz(request: Request) -> Response:
+    return liveness_response(_probes(request))
 
 
 @probe_router.get("/readyz")
-async def readyz(request: Request) -> JSONResponse:
-    state = request.app.state
-    report = await run_checks(
-        state.container.readiness_checks(), timeout_s=state.readiness_timeout_s, version=__version__
-    )
-    return JSONResponse(report.body(), status_code=report.http_status)
+async def readyz(request: Request) -> Response:
+    return await readiness_response(_probes(request))
 
 
 @probe_router.get("/metrics")
 async def metrics(request: Request) -> Response:
-    body, content_type = render_latest(request.app.state.metrics.registry)
-    return Response(content=body, media_type=content_type)
+    return metrics_response(_probes(request))

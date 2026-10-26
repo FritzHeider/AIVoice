@@ -68,7 +68,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `apps/api/src/va_api/main.py` (`create_app()`), request-id middleware, CORS config, `install_handlers` rendering legacy vs envelope errors via `x-envelope`, validation error re-rendering to 400, `/healthz`, `/readyz`, `scripts/export_openapi.py`, `openapi/openapi.json`
   - Acceptance: tests for both envelopes, 400 validation shape, `X-Request-Id` echo/generation; `make openapi` + drift check pass.
 
-- [ ] P00-T12 Service skeletons with health and graceful shutdown
+- [x] P00-T12 Service skeletons with health and graceful shutdown — va_common.service runtime + checks; edge/media/worker/dispatcher/sink/sim with /healthz,/readyz,/metrics and signal-owned graceful shutdown; 1090 passed, coverage 99.83%, lint/typecheck/placeholders/check green, jscpd 0
   - Spec refs: specs/01-architecture.md (Planes and services); specs/27-observability.md (health/readiness)
   - Depends on: P00-T08, P00-T11
   - Deliverables: `apps/telephony_edge`, `apps/media_worker`, `apps/worker`, `apps/webhook_dispatcher`, `apps/events_sink`, `apps/sim` packages each with `Settings`, `main` entry, lifespan management, `/healthz`, `/readyz`, `/metrics`, SIGTERM handling

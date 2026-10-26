@@ -1783,3 +1783,273 @@ Re-ran: make lint (pass), make typecheck (81 files, no issues), make placeholder
 99.81 %), check_openapi_drift (current), check_spec_refs (0), openapi_spec_validator on openapi/openapi.json (valid).
 Reviewed envelopes/errors/middleware/main/container/health/openapi against specs/31 §1/§3/§4, specs/27 §9, specs/02 §6
 env vars, specs/26 §1. Codes used by HTTP mapping all exist in CODES with matching status. Tests use events, no sleeps.
+
+## Plan P00-T12 — Service skeletons with health and graceful shutdown
+
+Goal: six runnable services (`telephony_edge`, `media_worker`, `worker`, `webhook_dispatcher`, `events_sink`, `sim`)
+on one shared runtime in `va_common`, so each app is a few small files (jscpd must stay at 0 clones). Readiness per
+specs/27 §9 table; `/healthz` `/readyz` `/metrics` on the service port (edge 8100, media 8200, sim 9100-9400) or on the
+metrics port (worker 9300, dispatcher 9400, sink 9500); SIGTERM/SIGINT → graceful stop.
+
+### Spec conflicts to resolve (Decisions dated 2026-10-25, same commit)
+- specs/01 §1 lists sim as `python -m va_sim.server`; specs/02 §1 (package `va_sim_server`) and specs/29 §1.1
+  (`va_sim_server.main`) agree on `va_sim_server.main` → use that; Decision note under the specs/01 §1 table. Same note:
+  `uvicorn va_edge.main:app` stays valid (module-level `app`), and `va_edge.serve` / `va_api.serve` (specs/29 §1.1
+  images) run the app through the shared runner (`python -m va_edge.serve`). Distribution names follow the Dockerfile
+  rule `va-${SERVICE//_/-}`: `va-telephony-edge`, `va-media-worker`, `va-worker`, `va-webhook-dispatcher`,
+  `va-events-sink`, `va-sim`.
+- specs/27 §9 Decision (append to the existing one): liveness failure is 503 `{"status":"unavailable","reason":<str>,
+  "version":v}` (media `event_loop_lag`, worker `temporal_worker_stopped`); worker liveness requires every started
+  Temporal worker to be running, and phase 00 registers no task queues (no workflows exist; `temporalio.worker.Worker`
+  refuses zero workflows/activities), so the worker runs probes + Temporal client only until `va_workflows` adds
+  registrations; media `vad` check = model file present and sha256 equal to `models/MANIFEST.json` (verified once in
+  the lifespan via `asyncio.to_thread`; real onnxruntime session load arrives with `va_voice`); media `capacity` check
+  fails when active calls ≥ `MEDIA_MAX_CALLS_PER_POD`; `draining` check fails after SIGTERM; sim readiness checks Redis
+  only when `SIM_STATE_REDIS_URL` is set (empty → no checks → ok); events-sink ClickHouse check = HTTP `GET /ping`
+  (expects body `Ok.`) on `CLICKHOUSE_URL`'s scheme/host/port (credentials/db stripped), no clickhouse-connect yet.
+- specs/01 §3 graceful drain: implemented as: SIGTERM → `SADD media:pods:draining {pod_id}`, readiness 503, listener
+  stays open while active calls > 0, up to `MEDIA_DRAIN_TIMEOUT_S`, then server exit; `SREM` on shutdown. Note it in
+  the same specs/27 Decision (one line referencing specs/01 §3).
+
+### va_common changes
+1. `settings.py`: add mixins (all fields defaulted, spec names):
+   - `DatabaseSettings(BaseServiceSettings)`: `database_url = "postgresql+asyncpg://va:va@localhost:5432/va"`,
+     `database_pool_size: int = Field(10, ge=1)`.
+   - `TemporalSettings(BaseServiceSettings)`: `temporal_host = "localhost:7233"`, `temporal_namespace = "default"`,
+     `temporal_task_queue = "va-main"`.
+   - export both; `ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings)` drops its duplicated fields
+     (field order irrelevant; `.env.example` unaffected).
+2. New `va_common/checks.py` (moved from `va_api/health.py` + `va_api/container.py`; va_api imports them from here,
+   delete `va_api/health.py`, keep `va_api.container.Container/build_container/ContainerFactory/ReadinessSource`):
+   `CHECK_TIMEOUT_S = 1.0`; `class TemporalConnector` (unchanged code, moved); `TemporalCheck` Protocol;
+   `async postgres_check(engine: AsyncEngine)`, `async redis_check(client: Redis)`, `async temporal_check(connector)`,
+   new `async clickhouse_check(client: httpx.AsyncClient, ping_url: str)` (GET, `raise_for_status`, body.strip() ==
+   "Ok." else `ConnectionError`), `clickhouse_ping_url(clickhouse_url: str) -> str` (`urllib.parse`: keep scheme +
+   hostname + port, path `/ping`; raises `ValueError` for non-http(s) schemes), `create_engine(settings:
+   DatabaseSettings) -> AsyncEngine` (`create_async_engine(url, pool_size=..., pool_pre_ping=True)`).
+   Add deps to `packages/va_common/pyproject.toml`: `sqlalchemy[asyncio]>=2.0.35`, `asyncpg>=0.32.0`,
+   `temporalio>=1.8`, `starlette>=1.0` (match installed 1.10), `uvicorn[standard]>=0.54.0`. Update description.
+   Move the corresponding api tests (`apps/api/tests/test_checks.py` checks/connector tests) to
+   `packages/va_common/tests/test_checks.py`; keep container/readyz-real-container tests in api.
+3. New `va_common/service.py` (pure Starlette + uvicorn; every function CC ≤ B):
+   - `@dataclass ProbeState`: `version: str`, `registry: Collector`, `checks: Callable[[], Mapping[str, CheckFn]]`,
+     `liveness: Callable[[], str | None] = lambda: None` (returns failure reason), `readiness_timeout_s: float = 1.0`.
+   - `async liveness_response(state) -> JSONResponse` (200 `liveness_body(v)` or 503 `{"status":"unavailable",
+     "reason":r,"version":v}`), `async readiness_response(state) -> JSONResponse` (`run_checks`), `metrics_response(
+     state) -> Response` (`render_latest`).
+   - `probe_routes() -> list[Route]`: GET `/healthz`, `/readyz`, `/metrics`, handlers read `request.app.state.probes`.
+     api's `probe_router` handlers delegate to the three response helpers (api keeps FastAPI APIRoutes so its
+     metrics `route` label still comes from `scope["route"]`; `app.state.probes` set in api `create_app` / lifespan).
+   - `probe_app(lifespan) -> Starlette`: `Starlette(routes=probe_routes(), lifespan=lifespan)` for metrics-port
+     services.
+   - `class Supervisor`: `__init__(on_failure: Callable[[str, BaseException], None])`; `start(name, factory:
+     Callable[[], Awaitable[None]]) -> asyncio.Task[None]` (done-callback: cancelled → nothing; exception → log
+     `service.task_failed` with name + exc_info and call `on_failure`; normal return → log `service.task_exited`);
+     `async aclose()` cancels all and awaits them (`gather(return_exceptions=True)`); `running(name) -> bool`.
+   - `class StopController`: `asyncio.Event`-based `request(reason: str)` (first reason kept, logs `service.stop_
+     requested`), `requested: bool`, `reason`, `async wait()`.
+   - `class ManagedServer(uvicorn.Server)`: overrides `capture_signals` with a no-op `contextlib.contextmanager`
+     (signals are owned by `run_server`).
+   - `async run_server(app, *, host, port, stop: StopController, drain: Callable[[], Awaitable[None]] | None = None,
+     install_signals: bool = True, server_factory=ManagedServer) -> None`: `uvicorn.Config(app, host, port,
+     lifespan="on", log_config=None, access_log=False, timeout_graceful_shutdown=10)`; when `install_signals`, add
+     loop signal handlers SIGTERM/SIGINT → `stop.request(signal name)` (removed in `finally`); run `server.serve()`
+     as a task; wait for first of {server task done, stop.wait()}; on stop: `await drain()` if given, then
+     `server.should_exit = True` and await the server task. If the server task finishes first with
+     `server.started` False → raise `RuntimeError("server failed to start")` (port in use, lifespan failure).
+   - `def run_main(coro_factory: Callable[[], Awaitable[None]]) -> int`: `asyncio.run(...)`, returns 0, or 1 after
+     logging `service.crashed` for an exception (KeyboardInterrupt → 130).
+4. `metrics.py` `Service`: add nothing (sim builds `new_registry()` without catalog).
+
+### Per-app layout (each: `apps/<dir>/pyproject.toml` (uv_build, deps `va-common` + what it imports), `src/<pkg>/
+`__init__.py` (`__version__` from `importlib.metadata.version("<dist>")`), `py.typed`, `settings.py`, `container.py`
+(where it has deps), `app.py`/`main.py`, `tests/conftest.py`, `tests/support/<pkg>_helpers.py`, tests)
+Container pattern copied from api: `@dataclass Container` + `readiness_checks() -> dict[str, CheckFn]`,
+`@asynccontextmanager build_container(settings)` (no network at startup, closes everything), test seam
+`container_factory`. Every `create_app(settings=None, *, container_factory=build_container, init_observability=True,
+readiness_timeout_s=1.0, ...)` sets `app.state.probes = ProbeState(...)` (checks bound to `app.state.container` in
+the lifespan) and `observability.init("<service_name>", cfg, version=__version__)` / `obs.shutdown()` in lifespan.
+
+A. `apps/telephony_edge` → `va_edge` (dist `va-telephony-edge`, deps fastapi, va-common):
+   `EdgeSettings(RedisSettings, DatabaseSettings, TemporalSettings)` (+ `edge_public_host = "localhost:8100"`,
+   `media_public_host = "localhost:8200"`), `service_name="telephony-edge"`; container checks postgres/redis/temporal;
+   `main.py`: `create_app() -> FastAPI` (FastAPI title "VoiceAgents Telephony Edge", `openapi_url=None`,
+   `app.router.routes.extend(probe_routes())`, metrics `build_metrics(Service.TELEPHONY_EDGE)`); module `app =
+   create_app()`. `serve.py`: `main(argv=None) -> int` (`--host` default `0.0.0.0` with `# noqa: S104` comment
+   explaining container bind, `--port` 8100) → `run_main(lambda: run_server(app, host, port, stop=StopController()))`;
+   `if __name__ == "__main__": raise SystemExit(main())`.
+B. `apps/media_worker` → `va_media` (dist `va-media-worker`, deps fastapi, va-common):
+   `MediaSettings(RedisSettings, DatabaseSettings, TemporalSettings)` + `media_drain_timeout_s: float = 2700`,
+   `media_max_calls_per_pod: int = Field(60, ge=1)`, `pod_id: str = ""` (validator: empty → `socket.gethostname()`),
+   `service_name="media-worker"`.
+   - `calls.py` `class CallRegistry(max_calls)`: `admit(call_id) -> bool` (False at capacity or duplicate),
+     `release(call_id)`, `active: int`, `at_capacity: bool`, `async wait_idle(timeout_s) -> bool` (asyncio.Event set
+     when active hits 0).
+   - `drain.py` `class DrainState`: `draining: bool`; `async begin(redis, pod_id)` (idempotent; sets flag then
+     `SADD media:pods:draining pod_id`; Redis errors logged `media.drain_mark_failed`, flag still set), `async
+     clear(redis, pod_id)` (`SREM`, errors logged). Key constant `DRAINING_PODS_KEY = "media:pods:draining"`.
+   - `loop_lag.py` `class LoopLagMonitor(interval_s=0.25, threshold_s=0.5)`: `async run()` loop (`loop.time()` before/
+     after `asyncio.sleep(interval)`; `record(lag)`), `record(lag_s)` (stores, sets gauge if given), `lag_s`,
+     `first_sample` Event, `healthy -> bool`, `liveness() -> str | None` ("event_loop_lag").
+   - `vad_model.py`: `MODEL_NAME = "silero_vad.onnx"`; `async verify_vad_model(models_dir: Path) -> None` reads
+     `MANIFEST.json` (read exact schema from P00-T10's `models/MANIFEST.json` and `scripts/fetch_models.py`), hashes the
+     file in `asyncio.to_thread`; raises `VadModelError` (missing file / manifest entry / mismatch). `class VadStatus`
+     (`loaded: bool`, `error: str | None`); readiness `vad` check raises when not loaded.
+   - `container.py`: Redis client + checks `draining`, `capacity`, `redis`, `vad` (order as in specs/27 §9).
+   - `main.py`: `create_app(settings=None, *, container_factory, init_observability, readiness_timeout_s, models_dir:
+     Path = Path("models"), monitor: LoopLagMonitor | None = None) -> FastAPI`; lifespan: obs → container →
+     `verify_vad_model` (failure logged `media.vad_model_unavailable`, readiness stays 503) → Supervisor starts the
+     loop-lag monitor (`on_failure` requests stop) → yield → `drain.clear` → `supervisor.aclose()`.
+     `app.state.registry: CallRegistry`, `app.state.drain`, liveness = monitor.liveness. `async drain(app)`:
+     `await drain.begin(...)`, `await registry.wait_idle(settings.media_drain_timeout_s)` (log `media.drain_timeout`
+     with remaining active count when False). `main(argv=None) -> int` (`--host 0.0.0.0`, `--port 8200`) runs
+     `run_server(app, ..., drain=partial(drain, app))`; module-level `app = create_app()`; `__main__` guard.
+C. `apps/worker` → `va_worker` (dist `va-worker`, deps temporalio, va-common):
+   `WorkerSettings(RedisSettings, DatabaseSettings, TemporalSettings)`, `service_name="worker"`, `METRICS_PORT=9300`.
+   - `task_queues.py`: `TASK_QUEUES = ("va-main", "va-postcall", "va-ingest", "va-system")` (specs/01 §1; derive from
+     `settings.temporal_task_queue` base: `va-main` → `va-postcall`, `va-ingest`, `va-system` by replacing the
+     `-main` suffix — function `task_queue_names(base) -> tuple[str, ...]`, `ValueError` when base lacks `-main`);
+     `@dataclass(frozen) TaskQueueRegistration(task_queue, workflows: Sequence[type], activities: Sequence[Callable])`;
+     `REGISTRATIONS: tuple[TaskQueueRegistration, ...] = ()` with a docstring stating `va_workflows` appends them.
+   - `runner.py` `class TemporalWorkers(connector, registrations, *, worker_factory=temporalio.worker.Worker)`:
+     `async run()` (connects client, builds one worker per registration, runs them in a TaskGroup; no registrations →
+     returns immediately after logging `worker.no_task_queues`), `async shutdown()` (each `worker.shutdown()`),
+     `liveness() -> str | None` (`"temporal_worker_stopped"` when any built worker is not running; `WorkerLike`
+     Protocol with `run()`, `shutdown()`, `is_running`).
+   - `container.py`: engine, redis, TemporalConnector; checks postgres/redis/temporal.
+   - `main.py`: `create_app(...) -> Starlette` (`probe_app(lifespan)`; lifespan: obs → container → supervisor starts
+     `TemporalWorkers.run` (failure → `stop.request`) → yield → workers.shutdown → supervisor.aclose); `async run(
+     settings, *, host="0.0.0.0", port=9300, stop)`; `main(argv=None)`; `__main__` guard.
+D. `apps/webhook_dispatcher` → `va_webhooks` (dist `va-webhook-dispatcher`, deps sqlalchemy, va-common):
+   `DispatcherSettings(RedisSettings, DatabaseSettings)` + `webhook_allow_private: bool = True` with validator forcing
+   False when `va_env in {staging, production}` (specs/02 §6); container: engine only (redis client not opened —
+   readiness is Postgres only per specs/27 §9); metrics port 9400; `main.py` same shape as worker without background
+   tasks (outbox loop arrives with specs/19 work).
+E. `apps/events_sink` → `va_events_sink` (dist `va-events-sink`): `EventsSinkSettings(RedisSettings)` +
+   `clickhouse_url = "http://default:@localhost:8123/va"`; container: redis + `http_client(settings, timeout=...)` +
+   ping url; checks redis/clickhouse; metrics port 9500; same `main.py` shape.
+F. `apps/sim` → `va_sim_server` (dist `va-sim`): `SimSettings(BaseServiceSettings)` + `sim_clock: Literal["realtime",
+   "accelerated"] = "realtime"`, `sim_state_redis_url: str = ""`, `sim_workers: int = Field(1, ge=1)`;
+   `SIM_PORTS = {"telnyx": 9100, "elevenlabs": 9200, "llm": 9300, "stripe": 9400}`; `create_app(name, settings, *,
+   redis_factory)` → Starlette probe app (registry `new_registry(process_collectors=False)` per port to avoid
+   duplicate process collectors; checks `{"redis": ...}` only when `sim_state_redis_url`); `async run(settings, stop)`
+   runs the four servers concurrently with one shared StopController (`install_signals` only once — the runner
+   installs handlers in `run`, servers get `install_signals=False`); `main(argv=None)`; `__main__` guard. The sim's
+   vendor routes come with `packages/va_sim` (phase 03) — mention in the module docstring as scope, not as a stub.
+
+Shared workspace edits: root `pyproject.toml` dev group + `[tool.uv.sources]` for each new dist; mypy `mypy_path`
+append each `apps/<dir>/src` and `apps/<dir>/tests/support`, `files` each `src` + `tests`; pytest `pythonpath`
+append each `tests/support`. Test-support module names must be unique across apps (`edge_helpers`, `media_helpers`,
+`worker_helpers`, `webhooks_helpers`, `sink_helpers`, `sim_helpers`). `uv lock` + `uv sync --all-packages`.
+Reuse one generic client helper: add `packages/va_common/tests/service_helpers.py` with `make_client(app)`
+(LifespanManager + ASGITransport `raise_app_exceptions=False`), `ok_check`, `failing(exc)`, `FakeContainer(checks)`
+factory — apps' helpers import from it to keep jscpd at 0 (api keeps its own helpers or switches to these).
+
+### Tests (names → assertion)
+va_common:
+- `test_checks.py`: moved api checks tests + `test_clickhouse_check_ok` / `_bad_body_raises` / `_http_error_raises`
+  (respx), `test_clickhouse_ping_url_strips_credentials_and_db` (parametrize http/https, default port kept absent),
+  `test_clickhouse_ping_url_rejects_native_scheme`, `test_create_engine_does_not_connect`.
+- `test_service.py`: `test_probe_routes_liveness_ok`, `test_liveness_failure_503_reason`, `test_readiness_ok_and_503`
+  (body shape, `failing`), `test_metrics_route_renders_registry`, `test_unknown_path_404`, `test_supervisor_failure_
+  calls_on_failure_and_logs`, `test_supervisor_aclose_cancels`, `test_supervisor_normal_exit_logged`,
+  `test_stop_controller_keeps_first_reason`, `test_run_server_serves_and_stops_on_request` (real uvicorn on port 0?
+  uvicorn with port 0 → read bound port from `server.servers[0].sockets[0].getsockname()`; wait for `server.started`
+  via polling an Event set in app lifespan, then httpx GET /healthz, then `stop.request("test")`),
+  `test_run_server_runs_drain_before_exit` (drain coroutine records order), `test_run_server_signal_handler_requests
+  _stop` (`os.kill(os.getpid(), SIGTERM)` with install_signals=True → reason `SIGTERM`; handlers removed afterwards),
+  `test_run_server_startup_failure_raises` (lifespan raising → RuntimeError), `test_run_main_exit_codes` (0, 1 on
+  exception, logs `service.crashed`).
+- `test_settings.py` additions: Database/Temporal mixin defaults and env reading.
+Per app (`apps/<dir>/tests/`):
+- `test_settings.py`: defaults match specs/02 §6 values; env override; (dispatcher) private forced False in
+  staging/production; (media) `pod_id` defaults to hostname; (worker) `task_queue_names("va-main")` and ValueError.
+- `test_health.py`: `test_healthz_ok_without_dependencies` (body + version from metadata), `test_readyz_all_ok`,
+  `test_readyz_redis_unreachable_503` (real container factory with `REDIS_URL=redis://127.0.0.1:1/0`,
+  `DATABASE_URL` port 1, `TEMPORAL_HOST=127.0.0.1:1`; assert 503, `redis` in failing with status error|timeout; for
+  dispatcher: `test_readyz_postgres_unreachable_503` and `test_readyz_does_not_check_redis`; for sim: with and
+  without `SIM_STATE_REDIS_URL`), `test_metrics_exposes_service_catalog` (one catalog metric name from specs/27 §3.x
+  for that service present; sim: process-less registry renders), `test_container_closed_on_shutdown`,
+  `test_observability_init_and_shutdown_called` (monkeypatch `observability.init`).
+- media extras: `test_calls.py` (admit/release/capacity/duplicate/wait_idle true+timeout using events, no sleeps
+  beyond the timeout under test of 0.01), `test_drain.py` (fakeredis: SADD/SREM, idempotent, redis error logged and
+  flag set; readyz 503 with `draining` failing after `begin`; capacity check 503 when registry full), `test_loop_lag.py`
+  (`record(0.6)` → liveness `event_loop_lag`, `/healthz` 503; real `run()` produces a first sample < threshold),
+  `test_vad_model.py` (tmp manifest+file ok; missing file, mismatched hash, missing entry → `VadModelError`; app with
+  bad models_dir → readyz `vad` error; with good tmp dir → `vad` ok), `test_drain_flow.py` (`drain(app)` with an
+  admitted call released from another task → returns; with timeout 0.01 → logs `media.drain_timeout`).
+- worker extras: `test_runner.py` (no registrations → returns, liveness None; fake worker factory: runs, liveness
+  None while running, `"temporal_worker_stopped"` after it stops, `shutdown` called; worker failure → supervisor
+  requests stop).
+- sim: `test_run.py` (`run()` with four ephemeral ports via a `ports` override parameter → all four `/healthz` 200,
+  stop → returns).
+- each app `test_main.py`: `test_main_parses_args_and_runs` (monkeypatch `run_server`/`run_main` to capture host/port;
+  default ports 8100/8200/9300/9400/9500), `test_module_app_imports_without_io` where a module-level app exists.
+- api: existing tests stay green after the refactor (`ApiSettings` mixins, checks moved, probe handlers delegating).
+
+### Docs
+- specs/01 §1 and specs/27 §9 Decisions above (keep `check_spec_refs` happy: spec + § on the same line).
+- AGENTS.md (dated P00-T12): shared runtime (`va_common.service`: `probe_routes`/`probe_app`/`ProbeState`,
+  `Supervisor`, `StopController`, `run_server` owns signals via `ManagedServer`), `va_common.checks` home of
+  readiness checks + `TemporalConnector`, settings mixins, commands to run each service (`uv run python -m
+  va_edge.serve`, `-m va_media.main`, `-m va_worker.main`, `-m va_webhooks.main`, `-m va_events_sink.main`,
+  `-m va_sim_server.main`), metrics ports, test-support module naming rule, `service_helpers.make_client`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make check` (drift + spec refs), `make openapi` → `unchanged` (api schema
+must not change; if it does, the refactor leaked into routes — fix, do not regenerate blindly), pip-audit on
+`uv export`, pnpm audit, `uvx radon cc -s -a` (no C+), `npx --yes jscpd@4` (0 clones). Smoke with `make up`: start
+each service (`uv run python -m ...`), curl `/healthz` + `/readyz` (200), `docker compose stop redis` → edge/media/
+worker/sink 503 with `redis` failing, dispatcher still 200; restart redis; `kill -TERM` each pid → exits 0 within a few
+seconds (media with no calls exits promptly and SREMs its pod id). build.done plain string (mem-1792920384-602e).
+
+### Risks
+- uvicorn `Server.serve` signal capture: overriding `capture_signals` is the supported seam in 0.54 (method exists);
+  a test asserts SIGTERM reaches `StopController` and the process does not re-raise the signal after exit.
+- Real-uvicorn tests need port 0 and readiness synchronisation via an Event set when `server.started`; never sleep.
+- Several FastAPI/Starlette apps in one process each build their own registry (`build_metrics` per app) — never the
+  global REGISTRY (duplicate timeseries errors).
+- temporalio connect to port 1 may retry inside the 1 s budget → accept `error|timeout`.
+- Moving checks out of va_api must keep `apps/api` coverage and tests green; jscpd may flag the per-app
+  `build_container`/lifespan shapes — keep them minimal and push shared pieces into `va_common.service`.
+- Task is large (6 apps); if it cannot finish in one Builder activation, emit build.blocked with what remains so the
+  Planner can split (T12a runtime+edge+media, T12b worker/dispatcher/sink, T12c sim).
+
+## Build P00-T12 — done (Builder)
+
+Implemented the plan with these deliberate differences (all recorded in the spec Decisions or AGENTS.md):
+- Dependency containers: instead of six hand-written Container classes, `va_common.checks.open_dependencies()` yields a
+  `Dependencies` stack (`postgres/redis/temporal/clickhouse(...)` create the client, push its cleanup on an
+  AsyncExitStack, add the check in call order). api's `Container` keeps its fields (engine/redis/temporal) on top of it.
+  Edge/dispatcher/sink/sim containers are the `Dependencies` object; media and worker wrap it in a tiny dataclass that
+  exposes the Redis client / Temporal connector they need.
+- `va_common.service` additionally has `service_scope` / `service_lifespan` / `probe_service_app` / `ContainerFactory[S]`
+  / `container_checks` / `observed` / `parse_bind` + `Bind` / `serve` (exit code 1 when a supervised task failure stopped
+  the process). StopController: a second request forces the exit (skips a hanging drain, sets `force_exit`).
+  `run_server` converts uvicorn's startup `sys.exit` into `ServerStartupError` and, when cancelled, lets uvicorn close
+  its sockets (bounded) before re-raising.
+- Media: no module-level `app` (specs/01 §1 runs it only as `python -m va_media.main`); lag ticker interval 0.1 s per the
+  specs/27 §3 `va_event_loop_lag_ms` row (plan said 0.25). `va_media_draining` gauge + lag histogram wired.
+- Also added `va_api.serve` (specs/29 §1.1 image module) via the same runner.
+- Sim `--port` is the base port (telnyx = port, +100, +200, +300).
+- Test-support dirs only where needed: `apps/media_worker/tests/support/media_helpers.py`,
+  `apps/worker/tests/support/worker_helpers.py`; everything else uses `packages/va_common/tests/service_helpers.py`
+  (va_common and api conftests now import `isolate_env`/`reset_logging` from it).
+
+Evidence (this iteration): make fmt 0; make lint 0; make typecheck 0 (138 files); make placeholders 0 findings;
+make test 1090 passed 1 skipped, coverage 99.83%; make check 0 (openapi current, spec refs 0 problems);
+make openapi → unchanged; pip-audit (uv export, --no-deps) no known vulnerabilities; pnpm audit no known
+vulnerabilities; radon no C+ (avg A 2.01); jscpd 0 clones.
+Smoke (logs/smoke_p00t12.sh, infra up): all six services healthz/readyz 200 (sim on 19100-19400); `docker compose stop
+redis` → edge/media/worker/sink readyz 503 failing ["redis"], dispatcher + sim stay 200; restart → all 200; SIGTERM →
+every process exit 0 within 1 s; `media:pods:draining` empty afterwards.
+
+## Review P00-T12 — approved
+
+Re-ran: make lint 0, make typecheck 0 (138 files), make placeholders 0 findings, make test 1090 passed 1 skipped
+(99.83%), make check 0 (openapi current, spec refs 0), jscpd 0 clones, radon: no C+ in the new code (only the two
+pre-existing api test functions from P00-T11). Reviewed va_common.service/checks, media (drain/registry/lag/vad),
+worker runner, dispatcher/sink/sim settings and runners against specs/01 §1, specs/02 §6, specs/27 §9 + Decisions.
+Non-blocking note for the workflow phase: `va_worker.task_queues` docstring says packages "append" to `REGISTRATIONS`,
+which is a Final tuple — the workflow phase should replace the tuple literal (or add a register function) and wire
+`task_queue_names(settings.temporal_task_queue)` into the registrations.

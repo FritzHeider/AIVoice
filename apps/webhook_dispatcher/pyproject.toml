@@ -1,0 +1,20 @@
+[project]
+name = "va-webhook-dispatcher"
+version = "0.1.0"
+description = "VoiceAgents webhook dispatcher: outbox delivery host, probes, metrics"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.9",
+    "starlette>=1.0",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "va_webhooks"
+
+[tool.uv.sources]
+va-common = { workspace = true }

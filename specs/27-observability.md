@@ -299,6 +299,20 @@ Responses: `{"status":"ok","checks":{"postgres":"ok",...},"version":"…"}`; fai
 > echoed `X-Request-Id` or `req_<uuidv7 hex>` (`31-error-catalog.md` §4 Decision), not uuid4. The access line event is
 > `http.request` with `method`, `path` (route template, `unmatched` for 404s), `status`, `duration_ms`.
 
+> Decision (2026-10-25): a liveness failure is 503 `{"status":"unavailable","reason":r,"version":v}` with `r` =
+> `event_loop_lag` (media: last lag sample of a 100 ms ticker ≥ 500 ms) or `temporal_worker_stopped` (worker: a started
+> Temporal worker is no longer running). Phase 00 registers no task queues (`temporalio.worker.Worker` refuses an empty
+> registration), so the worker polls nothing and stays live until `va_workflows` adds `TaskQueueRegistration`s. Media
+> readiness checks run in the order `draining`, `capacity` (fails when active calls ≥ `MEDIA_MAX_CALLS_PER_POD`),
+> `redis`, `vad` (model file present and sha256 equal to `models/MANIFEST.json`, verified once at startup in a worker
+> thread; the onnxruntime session load arrives with `va_voice`). The `01-architecture.md` §3 drain is: SIGTERM →
+> `SADD media:pods:draining {POD_ID}`, `draining` fails, the listener stays open while calls remain (up to
+> `MEDIA_DRAIN_TIMEOUT_S`, `media.drain_timeout` logged with `active_calls` when exceeded), then exit; `SREM` on every
+> shutdown. The events-sink ClickHouse check is HTTP `GET /ping` (body `Ok.`) on `CLICKHOUSE_URL`'s scheme, host, and
+> port (credentials and database dropped). The sim checks Redis only when `SIM_STATE_REDIS_URL` is set (else no checks,
+> 200). Dependency clients and their checks come from `va_common.checks.open_dependencies`; probe routes, supervision,
+> and the runner from `va_common.service`.
+
 ## 10. Grafana dashboards (`infra/grafana/dashboards/*.json`)
 
 | Dashboard | Panels |
