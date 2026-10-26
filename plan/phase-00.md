@@ -62,7 +62,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `scripts/fetch_models.sh` (downloads Silero VAD ONNX from the official snakers4/silero-vad repository, computes sha256, writes/validates `models/MANIFEST.json`), `scripts/generate_audio_assets.py` (procedurally synthesizes office, cafe, restaurant, phone-static backgrounds and hold music as 8 kHz μ-law and 16 kHz PCM files, deterministic seed), generated files committed under `assets/audio/`
   - Acceptance: re-running produces byte-identical audio; manifest check fails on a corrupted model file.
 
-- [ ] P00-T11 API skeleton with envelopes and OpenAPI export
+- [x] P00-T11 API skeleton with envelopes and OpenAPI export — 954 passed, 1 skipped, 99.81 % cov; lint/typecheck/placeholders green; openapi/openapi.json current and valid 3.1; spec refs 0 problems
   - Spec refs: specs/31-error-catalog.md (Envelope matrix, Implementation); specs/01-architecture.md (api service)
   - Depends on: P00-T05, P00-T06, P00-T08
   - Deliverables: `apps/api/src/va_api/main.py` (`create_app()`), request-id middleware, CORS config, `install_handlers` rendering legacy vs envelope errors via `x-envelope`, validation error re-rendering to 400, `/healthz`, `/readyz`, `scripts/export_openapi.py`, `openapi/openapi.json`

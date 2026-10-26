@@ -34,6 +34,16 @@
 - Nullable via `anyOf [type, null]`; enums named components (for example `CallStatus`, `NodeType`); discriminated unions with
   `discriminator.propertyName` (pathway nodes by `type`, tools inline vs id).
 
+> Decision (2026-10-25): `servers` is built from `OPENAPI_PUBLIC_SERVER_URL` (`Production`) followed by
+> `http://localhost:8000` (`Local`), collapsed to the single Local entry when both are equal: the
+> `02-repo-layout-and-conventions.md` §6 default `http://localhost:8000` wins over the `https://api.voiceagents.ai`
+> text above, so the committed document has one server until release CI sets the variable. A `Health` tag is
+> appended after the family tags for `GET /v1/health` (`operationId` `health_get`, `x-scope: public`). The probes
+> `/healthz`, `/readyz`, `/metrics` are excluded from the document. FastAPI's generated `422` response is replaced by
+> `400` and every operation gets a `default` response, both referencing `ErrorLegacy` or `ErrorEnvelope` by its
+> `x-envelope`; the unused `HTTPValidationError`/`ValidationError` components are dropped. Contact: VoiceAgents
+> Support, `https://voiceagents.ai/support`, `support@voiceagents.ai`.
+
 ## 2. Python SDK `voiceagents` (`sdks/python`)
 
 ### 2.1 Layout

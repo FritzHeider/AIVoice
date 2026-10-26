@@ -1,0 +1,23 @@
+[project]
+name = "va-api"
+version = "0.1.0"
+description = "VoiceAgents public REST API (FastAPI): envelopes, error handlers, health, OpenAPI"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "asyncpg>=0.32.0",
+    "email-validator>=2.3.0",
+    "fastapi>=0.162.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.16.1",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "temporalio>=1.8",
+    "uvicorn[standard]>=0.54.0",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }

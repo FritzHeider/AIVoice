@@ -116,3 +116,19 @@ Some errors carry finer-grained codes in `errors[].details.code` while the top-l
 > `AppError` rejects any status that is neither the code's default nor one of its alternates. The parity test treats
 > a multi-status cell as `{default} ∪ alternates`, with the default equal to the first status in the cell; it also
 > asserts `CODES` lists the codes in table order (62 rows).
+
+> Decision (2026-10-25): `x-envelope` is set by route classes, not router dependencies (dependencies never run for
+> requests that match no route). Routers are built only with `va_api.envelopes.legacy_router(...)` /
+> `envelope_router(...)` (`LegacyRoute` / `EnvelopedRoute` stamp `openapi_extra["x-envelope"]`; a conflicting explicit
+> value raises). Requests that match no route (404) are classified from the §1 patterns: a trailing `*` is a raw prefix
+> match (`/numbers/*` and `/internal/*` also match the bare path), no `*` is an exact match, the longest matching
+> pattern wins (`/v1/orgs/1` is legacy, `/v1/org/x` envelope), and an unknown path is legacy. Framework
+> `HTTPException`s map to codes by status: 400 `INVALID_INPUT`, 401 `AUTH_FAILURE`, 403 `FORBIDDEN`, 404 `NOT_FOUND`
+> ("Not found."), 409 `CONFLICT`, 429 `RATE_LIMITED`, 503 `SERVICE_UNAVAILABLE`, 504 `UPSTREAM_TIMEOUT`, any other 4xx
+> `INVALID_INPUT` (405 keeps status 405, message "Method not allowed.", and its `Allow` header), any other 5xx
+> `INTERNAL_ERROR`; the status and exception headers (`Allow`, `Retry-After`) are preserved. Unhandled exceptions
+> render 500 `INTERNAL_ERROR` "Internal server error" with no exception text. Validation `field`: the leading location
+> segment (`body`, `query`, `path`, `header`, `cookie`) is dropped, list indexes stay (`items.0.name`), the field is
+> omitted for invalid JSON or an empty path, and Pydantic's `Value error, ` message prefix is stripped. `request_id`
+> (body and `X-Request-Id`) echoes a well-formed incoming `X-Request-Id` (`[A-Za-z0-9._:-]{1,128}`), otherwise it is
+> `req_` + the 32 hex digits of a UUIDv7 (the `05-calls-api.md` example format).

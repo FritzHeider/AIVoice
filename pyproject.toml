@@ -27,6 +27,8 @@ dev = [
   "pyyaml>=6.0.3",
   "types-pyyaml>=6.0.12.20260906",
   "numpy>=2.3",
+  "va-api",
+  "openapi-spec-validator>=0.9.0",
 ]
 
 [tool.uv]
@@ -34,6 +36,7 @@ package = false
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-api = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -63,8 +66,8 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests"
-files = ["scripts", "packages/va_common/src", "packages/va_common/tests"]
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support"
+files = ["scripts", "packages/va_common/src", "packages/va_common/tests", "apps/api/src", "apps/api/tests"]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 
 [tool.pytest.ini_options]
@@ -72,7 +75,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
 testpaths = ["scripts/tests", "packages", "apps", "sdks"]
-pythonpath = ["scripts", "packages/va_common/tests"]
+pythonpath = ["scripts", "packages/va_common/tests", "apps/api/tests/support"]
 timeout = 60
 markers = [
   "integration: needs docker/testcontainers",

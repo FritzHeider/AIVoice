@@ -291,6 +291,14 @@ tags, `org_id`/`call_id` set as tags (never user email). Dashboard uses `@sentry
 Responses: `{"status":"ok","checks":{"postgres":"ok",...},"version":"…"}`; failures return 503 with failing checks.
 `/v1/health` on the api is public and returns `{"status":"ok"}` only.
 
+> Decision (2026-10-25): readiness bodies are `{"status":"ok","checks":{name:"ok"},"version":v}` (200) or
+> `{"status":"unavailable","checks":{name:"ok"|"error"|"timeout"},"failing":[sorted names],"version":v}` (503).
+> Each check runs concurrently with a 1 s budget; failure details (exception type) are logged as
+> `health.check_failed`, never returned. `/healthz` returns `{"status":"ok","version":v}`. The shared implementation
+> is `va_common.health.run_checks` (every service uses it). The request id bound by the middleware (§1) is the
+> echoed `X-Request-Id` or `req_<uuidv7 hex>` (`31-error-catalog.md` §4 Decision), not uuid4. The access line event is
+> `http.request` with `method`, `path` (route template, `unmatched` for 404s), `status`, `duration_ms`.
+
 ## 10. Grafana dashboards (`infra/grafana/dashboards/*.json`)
 
 | Dashboard | Panels |

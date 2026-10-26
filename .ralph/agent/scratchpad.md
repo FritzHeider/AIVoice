@@ -1532,3 +1532,254 @@ Re-ran: make lint 0, typecheck 0, placeholders 0 findings, make test 791 passed 
 `generate_audio_assets.py --check` 0, `fetch_models.sh --check` 0, `--check --update` rejected (argparse exit 2).
 Checked μ-law codec (bias 0x84 / clip 32635, decode precedence), make_loop seam math, hold-music timing (8 chords of
 7.5 s = 60 s), spec Decisions in 07 §5.3/§10.2 and 06 §10.2 (no remaining hold_music.mp3 refs), specs/02 layout.
+
+## Plan P00-T11 — API skeleton with envelopes and OpenAPI export
+
+Spec refs: specs/31 §1 (envelope matrix, `request_id`, validation → 400), specs/31 §4 (install_handlers, x-envelope),
+specs/01 §1 (api: `uvicorn va_api.main:app`, port 8000), specs/26 §1 (OpenAPI rules: info, servers, operationId regex,
+tags order, x-envelope, x-scope, examples, ErrorLegacy/ErrorEnvelope, ApiKeyAuth), specs/27 §9 (api readyz = Postgres
+`SELECT 1`, Redis PING, Temporal connected, all within 1 s; body shape), specs/27 §1 (middleware binds `request_id`),
+specs/28 §5 (CORS + `X-Content-Type-Options`/`Referrer-Policy` on all responses), specs/04 §2.4 (public allowlist
+includes `GET /v1/health`, `GET /openapi.json`), specs/02 §6 (api env vars), specs/02 §9 Decision (b) (drift gate).
+
+### Package `apps/api` (workspace member, `uv_build`, src layout, `py.typed`)
+- `apps/api/pyproject.toml`: name `va-api`, version `0.1.0`; deps via `uv add --package va-api`: `va-common`
+  (workspace), `fastapi`, `uvicorn[standard]`, `sqlalchemy[asyncio]>=2.0.35`, `asyncpg`, `temporalio>=1.8`,
+  `pydantic>=2.9`, `pydantic-settings`. Root: dev group `va-api` + `[tool.uv.sources] va-api = { workspace = true }`,
+  dev dep `openapi-spec-validator`; mypy `mypy_path` += `apps/api/src:apps/api/tests`, `files` += `apps/api/src`,
+  `apps/api/tests`; pytest `pythonpath` += `apps/api/tests` (for the test-route helper module). `uv lock`.
+- `va_api/__init__.py`: `__version__ = "0.1.0"` (test: equals `importlib.metadata.version("va-api")`).
+- `va_api/settings.py`: `class ApiSettings(RedisSettings)`, `service_name = "api"`, fields (specs/02 §6 defaults):
+  `database_url`, `database_pool_size: int = 10`, `temporal_host = "localhost:7233"`, `temporal_namespace = "default"`,
+  `public_api_base_url = "http://localhost:8000"`, `dashboard_base_url = "http://localhost:3000"`,
+  `openapi_public_server_url = "http://localhost:8000"`. No secrets yet (phase 02).
+- `va_api/envelopes.py`:
+  - `class Envelope(StrEnum)`: `LEGACY = "legacy"`, `ENVELOPE = "envelope"`.
+  - `FAMILIES: Final[tuple[tuple[str, Envelope], ...]]` = every pattern of the specs/31 §1 table verbatim
+    (`/v1/calls*` … `/v2/batches*` legacy; `/v1/knowledge*` … `/v1/audit_logs*`, `/internal/*` envelope; `/v1/me`
+    exact).
+  - `classify_path(path: str) -> Envelope`: pattern ending `*` = raw prefix match (`/numbers/*` and `/internal/*` also
+    match the bare `/numbers` / `/internal`); pattern without `*` = exact match; **longest matching pattern wins**
+    (`/v1/orgs/x` → legacy via `/v1/orgs*` over `/v1/org*`; `/v1/memory` envelope; `/v1/me` envelope); no match →
+    `LEGACY` (Bland default).
+  - `class EnvelopeRoute(APIRoute)` with class attr `envelope: ClassVar[Envelope]`; `__init__(self, path, endpoint,
+    **kwargs)` sets `kwargs["openapi_extra"] = {**(kwargs.get("openapi_extra") or {}), "x-envelope": self.envelope}`
+    (route-supplied keys such as `x-scope` kept; an explicit conflicting `x-envelope` raises `ValueError`).
+    Subclasses `LegacyRoute`, `EnvelopedRoute`.
+  - `legacy_router(**kwargs) -> APIRouter` / `envelope_router(**kwargs) -> APIRouter` → `APIRouter(route_class=...)`.
+  - `route_envelope(scope: Scope) -> Envelope`: `scope.get("route")` (FastAPI `APIRoute.matches` puts the matched
+    route in the child scope; Builder confirms with a test) → its `openapi_extra["x-envelope"]` when present, else
+    `classify_path(scope["path"])` (404/405/unmatched paths).
+- `va_api/errors.py`:
+  - Pydantic models (OpenAPI components, also used by tests to validate bodies): `ErrorItem{error: str, message: str,
+    field: str | None = None, details: dict[str, Any] | None = None}` (examples via `json_schema_extra`),
+    `ErrorLegacy{status: Literal["error"], message: str, errors: list[ErrorItem], request_id: str}`,
+    `ErrorEnvelope{data: None, errors: list[ErrorItem], request_id: str}`.
+  - `error_body(envelope, items: Sequence[Mapping[str, Any]], request_id) -> dict[str, Any]`: legacy →
+    `{"status":"error","message": items[0]["message"], "errors": items, "request_id": rid}`; envelope →
+    `{"data": None, "errors": items, "request_id": rid}` (items omit absent `field`/`details`).
+  - `error_response(request, status, items, headers=None) -> JSONResponse` (envelope via `route_envelope`, request id
+    via `request_id_of(request)`; also sets `X-Request-Id` + security headers itself so the 500 path, which runs in
+    Starlette's ServerErrorMiddleware outside our middleware, still carries them).
+  - `validation_items(exc: RequestValidationError) -> list[dict]`: one item per error, `error="INVALID_INPUT"`,
+    `field` = dotted `loc` without the leading `body`/`query`/`path`/`header`/`cookie` segment (ints kept as
+    `items.0.name`); omitted when empty or when `type == "json_invalid"`; `message` = pydantic `msg` with a leading
+    `"Value error, "` stripped.
+  - `HTTP_STATUS_CODES: Mapping[int, str]` for Starlette `HTTPException`: 400 INVALID_INPUT, 401 AUTH_FAILURE,
+    403 FORBIDDEN, 404 NOT_FOUND, 409 CONFLICT, 413 KB_FILE_TOO_LARGE is wrong → use INVALID_INPUT, 429 RATE_LIMITED,
+    503 SERVICE_UNAVAILABLE, 504 UPSTREAM_TIMEOUT; other 4xx → INVALID_INPUT, other 5xx → INTERNAL_ERROR. Status and
+    exc headers (`Allow`, `Retry-After`) preserved; 404 message "Not found.", 405 "Method not allowed.", otherwise
+    `exc.detail` when it is a string.
+  - `install_handlers(app: FastAPI) -> None`: `AppError` → `exc.http_status`, `[exc.to_error_item()]`;
+    `RequestValidationError` → 400; `StarletteHTTPException` → mapping above; `Exception` → 500
+    `INTERNAL_ERROR`/"Internal server error" (logs `api.unhandled_exception` with `exc_info`, `request_id`, method,
+    route; body never contains exception text).
+- `va_api/middleware.py` (pure ASGI, no `BaseHTTPMiddleware`):
+  - `REQUEST_ID_HEADER = "x-request-id"`; valid incoming = `^[A-Za-z0-9._:-]{1,128}$` (echoed), else generated
+    `"req_" + new_id().hex` (UUIDv7 via `va_common.ids.new_id`). `request_id_of(request) -> str` reads
+    `request.state.request_id` (generates and stores if absent).
+  - `RequestContextMiddleware(app)`: http/websocket scopes only; stores id in `scope["state"]["request_id"]`, runs the
+    app inside `structlog.contextvars.bound_contextvars(request_id=...)`, appends `x-request-id`,
+    `x-content-type-options: nosniff`, `referrer-policy: no-referrer` to `http.response.start` (no duplicates).
+  - `MetricsMiddleware(app, metrics: ServiceMetrics)`: `va_http_requests_total{route,method,status}` and
+    `va_http_request_duration_ms{route,method}` (monotonic); route label = matched `APIRoute.path_format` from
+    `scope["route"]`, else `"unmatched"`; status 500 recorded when the app raises before `http.response.start`.
+  - Order in `create_app` (outer → inner): RequestContext → Metrics → CORS → router (add in reverse).
+- CORS (specs/28 §5): `CORSMiddleware(allow_origins=[settings.dashboard_base_url], allow_credentials=True,
+  allow_methods=["GET","POST","PUT","PATCH","DELETE","OPTIONS"], allow_headers=["Authorization","Content-Type",
+  "Idempotency-Key","X-CSRF-Token","X-VA-Org-Id","Last-Event-ID"], expose_headers=["X-Request-Id","Retry-After"])`.
+- `va_common/health.py` (framework-free, reused by every service in P00-T12):
+  `CheckFn = Callable[[], Awaitable[None]]` (raises on failure); `class CheckStatus(StrEnum)` ok/error/timeout;
+  `@dataclass(frozen=True) CheckResult(name, status, detail: str | None)`;
+  `@dataclass(frozen=True) ReadinessReport(results, version)` with `ok`, `failing -> tuple[str, ...]` (sorted),
+  `http_status` (200/503), `body()` → ok: `{"status":"ok","checks":{name: "ok"},"version": v}`; failing:
+  `{"status":"unavailable","checks":{...},"failing":[...],"version": v}`;
+  `async def run_checks(checks: Mapping[str, CheckFn], *, timeout_s: float = 1.0, version: str) -> ReadinessReport`
+  (concurrent in `asyncio.TaskGroup`, each under `asyncio.timeout`; `TimeoutError` → timeout; `Exception` → error with
+  `detail = type(exc).__name__`, logged as `health.check_failed` with name/detail; `CancelledError` propagates);
+  `liveness_body(version) -> {"status":"ok","version": v}`. Details are logged, never returned.
+- `va_api/container.py`:
+  - `class TemporalConnector` (`host`, `namespace`; `async client() -> temporalio.client.Client` lazily connects under
+    an `asyncio.Lock` and caches; failed connect leaves cache empty; `connect` callable injectable, default
+    `Client.connect`); `async check(timeout_s)` → `check_health(timeout=timedelta(seconds=timeout_s))`, raises
+    `ConnectionError` when False.
+  - `@dataclass(slots=True) class Container(settings, engine: AsyncEngine, redis: Redis, temporal: TemporalConnector)`
+    with `readiness_checks() -> dict[str, CheckFn]` = postgres/redis/temporal from `va_api.health`.
+  - `@asynccontextmanager async def build_container(settings) -> AsyncIterator[Container]`: `create_async_engine(url,
+    pool_size=settings.database_pool_size, pool_pre_ping=True)`, `va_common.redis.redis_client(settings)`, connector;
+    no network at startup; exit: `engine.dispose()`, `redis.aclose()`.
+  - `ContainerFactory = Callable[[ApiSettings], AbstractAsyncContextManager[ReadinessSource]]` where
+    `ReadinessSource` is a Protocol with `readiness_checks()` (tests pass fakes).
+- `va_api/health.py`: `async postgres_check(engine)` (`SELECT 1` via `engine.connect()`), `redis_check(client)`
+  (`redis_ping(client, timeout_s=1.0)`, False → `ConnectionError`), `temporal_check(connector)`.
+- `va_api/routers/health.py`: `public_router = legacy_router(tags=["Health"])` with
+  `GET /v1/health` (`operation_id="health_get"`, `response_model=HealthStatus` = `{status: Literal["ok"]}` with example,
+  `openapi_extra={"x-scope": "public"}`) → `{"status":"ok"}`; `probe_router = APIRouter(include_in_schema=False)` with
+  `GET /healthz` (`liveness_body(__version__)`), `GET /readyz` (`run_checks(app.state.container.readiness_checks(),
+  timeout_s=app.state.readiness_timeout_s, version=__version__)` → JSONResponse(body, status)), `GET /metrics`
+  (`render_latest(app.state.metrics.registry)`).
+- `va_api/openapi.py`: `TAGS` = specs/26 §1 tag list in order + `"Health"` appended (as `openapi_tags` dicts);
+  `build_openapi(app, settings) -> dict` (installed as `app.openapi`, cached on `app.openapi_schema`):
+  `get_openapi(title="VoiceAgents API", version=__version__, openapi_version="3.1.0", routes=app.routes, tags=TAGS,
+  contact={"name": "VoiceAgents Support", "url": "https://voiceagents.ai/support", "email": "support@voiceagents.ai"},
+  license_info={"name": "Proprietary"}, servers=servers(settings))`; then: add `ErrorItem`/`ErrorLegacy`/
+  `ErrorEnvelope` component schemas (`model_json_schema(ref_template="#/components/schemas/{model}")`, hoist `$defs`)
+  and `securitySchemes.ApiKeyAuth = {"type":"http","scheme":"bearer"}`; for every operation replace a `"422"`
+  response with `"400"` and add `"default"`, both `{"description": ..., "content": {"application/json": {"schema":
+  {"$ref": "#/components/schemas/ErrorLegacy|ErrorEnvelope"}}}}` by the operation's `x-envelope`; drop
+  `HTTPValidationError`/`ValidationError` components when unreferenced.
+  `servers(settings)`: `[{"url": OPENAPI_PUBLIC_SERVER_URL, "description": "Production"}, {"url":
+  "http://localhost:8000", "description": "Local"}]`, collapsed to the single Local entry when equal (dev default).
+- `va_api/main.py`: `create_app(settings: ApiSettings | None = None, *, container_factory: ContainerFactory =
+  build_container, init_observability: bool = True, readiness_timeout_s: float = 1.0) -> FastAPI`:
+  `FastAPI(title=..., version=__version__, lifespan=...)`; `app.state.settings/metrics/readiness_timeout_s`
+  (`build_metrics(Service.API)` — per-app registry), middleware, `install_handlers`, include `public_router`,
+  `probe_router`, `app.openapi = partial(build_openapi, app, settings)`. Lifespan: when `init_observability`,
+  `obs = observability.init("api", settings, version=__version__)` (no `service=`; metrics are per app) and
+  `obs.shutdown()` on exit; `async with container_factory(settings) as container: app.state.container = container;
+  yield`. Module level: `app = create_app()` (no I/O at import; drift gate + uvicorn import this).
+- `scripts/export_openapi.py`: `main(argv=None) -> int` with `--root` (default repo root), `--app` (default
+  `check_openapi_drift.DEFAULT_APP`, validated by `check_openapi_drift.app_target`), `--out` (default
+  `openapi/openapi.json`); text = `check_openapi_drift.render(check_openapi_drift.load_app(app).openapi())`; atomic
+  write (tmp + `os.replace`, `mkdir -p`) only when changed; prints `wrote <path>` / `unchanged <path>`; exit 1 with a
+  one-line stderr message when loading fails. Then run `make openapi` and commit `openapi/openapi.json`.
+
+### Tests
+`apps/api/tests/conftest.py`: clear api env vars + chdir tmp (copy pattern from va_common conftest incl.
+`reset_logging`), `settings` fixture (`ApiSettings(**{"_env_file": None})` via typed kwargs dict), `FakeChecks`
+container factory (dict of name → async callable, records calls), `make_client(app)` helper: `LifespanManager` +
+`httpx.AsyncClient(transport=ASGITransport(app, raise_app_exceptions=False), base_url="http://test")`.
+`apps/api/tests/sample_routes.py`: test-only legacy router (`/v1/calls/_t/...`) and envelope router
+(`/v1/knowledge/_t/...`): raise AppError (with field/details), body model `{phone_number: str (pattern),
+voicemail: {action: Literal["hangup","leave_message"]}}`, query `limit: int = Query(25, ge=1, le=100)`, a
+`field_validator` raising `ValueError("must be E.164")`, raise `HTTPException(409)`/`(429, headers Retry-After)`,
+raise `RuntimeError("secret detail")`.
+- `test_errors.py`: `test_app_error_legacy_shape`, `test_app_error_envelope_shape_with_details`,
+  `test_legacy_message_equals_first_error`, `test_validation_400_legacy_one_item_per_field` (2 bad fields → 2 items,
+  fields `phone_number`, `voicemail.action`), `test_validation_400_envelope`, `test_validation_query_field`,
+  `test_invalid_json_body_has_no_field`, `test_value_error_prefix_stripped`, `test_unknown_path_uses_family`
+  (parametrize `/v1/knowledge/x` envelope, `/v1/calls/x/y` legacy, `/nope` legacy),
+  `test_method_not_allowed_keeps_allow_header`, `test_http_exception_mapping` (parametrize 401/403/404/409/429 with
+  Retry-After/503/418/502), `test_unhandled_exception_is_500_without_leak` (no "secret detail"/"Traceback" in body,
+  X-Request-Id + nosniff headers present, log line has `request_id` and the exception), `test_bodies_validate_against
+  _models` (ErrorLegacy/ErrorEnvelope `model_validate`), `test_kb_error_alternate_status_rendered` (500 override).
+- `test_envelopes.py`: `test_classify_every_spec_family` (parse specs/31 §1 table rows, assert each pattern → its
+  family; sample paths derived from each pattern), `test_longest_match_wins` (`/v1/orgs/1` legacy, `/v1/org` envelope,
+  `/v1/me` envelope, `/v1/memory/x` envelope, `/v1/meetings` legacy fallback), `test_route_class_sets_x_envelope`
+  (keeps `x-scope`, conflicting value raises), `test_scope_route_is_set_by_fastapi`,
+  `test_app_routes_match_family` (every APIRoute in `create_app()` under `/v1`, `/v2`, `/numbers`, `/internal` has
+  `x-envelope` == `classify_path(path)`).
+- `test_request_context.py`: `test_generated_id_format` (`^req_[0-9a-f]{32}$`, UUID version 7),
+  `test_valid_incoming_id_echoed`, `test_invalid_incoming_id_replaced` (parametrize 129 chars, space, `<`),
+  `test_ids_unique_per_request`, `test_error_body_request_id_matches_header`, `test_request_id_bound_in_logs_and_cleared`,
+  `test_security_headers_on_all_responses` (200, 404, 500, CORS preflight), `test_no_duplicate_headers`.
+- `test_cors.py`: `test_preflight_from_dashboard_allowed` (origin echoed, credentials, methods, the six headers),
+  `test_other_origin_not_allowed`, `test_simple_request_exposes_request_id`.
+- `test_health.py`: `test_healthz_does_not_touch_dependencies`, `test_v1_health_body_exact`,
+  `test_readyz_all_ok` (200, checks postgres/redis/temporal ok, version), `test_readyz_redis_down_503`
+  (`failing == ["redis"]`, detail not in body), `test_readyz_timeout` (readiness_timeout_s 0.05, slow check →
+  "timeout"), `test_readyz_checks_run_concurrently`, `test_metrics_counts_requests` (route `/v1/health`, status 200;
+  unknown path → `unmatched`), `test_probe_routes_not_in_schema`.
+- `test_checks.py`: `test_postgres_check_unreachable_raises` (`127.0.0.1:1`), `test_redis_check_ok_with_fakeredis`,
+  `test_redis_check_unreachable_raises`, `test_temporal_connector_caches_client` (injected connect counting),
+  `test_temporal_connector_retries_after_failed_connect`, `test_temporal_check_unhealthy_raises`,
+  `test_build_container_opens_and_closes` (no network; engine disposed, redis closed),
+  `test_readyz_real_container_reports_unreachable` (all three pointed at port 1 → 503, statuses error|timeout).
+- `test_lifespan.py`: `test_observability_init_and_shutdown_called` (monkeypatch `va_api.main.observability.init`),
+  `test_container_closed_on_shutdown`, `test_module_app_imports_without_io`, `test_version_matches_metadata`.
+- `test_openapi.py`: `test_openapi_31_and_info` (title, version, license Proprietary, contact),
+  `test_servers_default_single_local`, `test_servers_production_then_local`, `test_tags_order_matches_spec`
+  (parse specs/26 §1 tags line + Health), `test_operations_contract` (operationId regex `^[a-z]+(_[a-z0-9]+)+$` +
+  unique, tag, x-envelope, x-scope, 2xx example), `test_no_422_and_400_refs_envelope_component` (app + sample routes),
+  `test_error_components_and_security_scheme`, `test_committed_document_is_current`
+  (`render(create_app(default settings).openapi())` == `openapi/openapi.json`), `test_committed_document_is_valid_31`
+  (`openapi_spec_validator.validate`).
+- `packages/va_common/tests/test_health.py`: ok/error/timeout/mixed reports, body shapes, `failing` sorted, detail is
+  the exception type name and logged, cancellation propagates, empty checks → ok.
+- `scripts/tests/test_export_openapi.py`: writes canonical file for a fake app module (reuse the drift test's
+  `app_dir` pattern), second run `unchanged`, drift check passes on the exported file, load failure → 1, bad `--app`
+  → 2, default app export into tmp root == committed file.
+- Existing `scripts/tests/test_check_openapi_drift.py::test_repository_state` now exercises the real app (must stay 0).
+
+### Docs (Decisions dated 2026-10-25, same commit)
+- specs/31 §4: route classes (`LegacyRoute`/`EnvelopedRoute` via `legacy_router`/`envelope_router`) set x-envelope
+  instead of dependencies (dependencies do not run for path-unmatched errors); unmatched paths classified from the §1
+  patterns (longest match, `*` prefix, default legacy); HTTPException → code mapping incl. 405 as INVALID_INPUT with
+  status 405; validation `field` rules (leading location dropped, omitted for invalid JSON, `Value error, ` stripped);
+  request id = echoed `[A-Za-z0-9._:-]{1,128}` or `req_<uuidv7 hex>` (matches the specs/05 example).
+- specs/27 §1 + §9: request id format (supersedes "uuid4"); readiness body (`unavailable`, `failing`, statuses
+  ok/error/timeout, details logged only); `va_common.health.run_checks` is the shared implementation.
+- specs/26 §1: servers collapse to one Local entry when `OPENAPI_PUBLIC_SERVER_URL` equals the local URL (specs/02 §6
+  default wins over the `https://api.voiceagents.ai` text here); `Health` tag appended; `GET /v1/health` is
+  `health_get` with `x-scope: public`; `/healthz`, `/readyz`, `/metrics` excluded from the schema; FastAPI 422 → 400
+  plus `default` error response referencing ErrorLegacy/ErrorEnvelope.
+- AGENTS.md: `make openapi` after any route/model change (drift gate); new routers come from
+  `legacy_router`/`envelope_router` only; API test client recipe (LifespanManager + ASGITransport
+  `raise_app_exceptions=False`); `create_app(init_observability=False, container_factory=...)` in tests; 500 handler
+  runs outside middleware so it sets headers itself; apps/api added to mypy/pytest paths.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make openapi` (second run `unchanged`), `uv run python
+scripts/check_openapi_drift.py` (0), `make check`; smoke: `uv run uvicorn va_api.main:app --port 8000` with `make up`
+infra → `/healthz` 200, `/readyz` 200 (Temporal up) and 503 after `docker compose stop redis` (restart after);
+pip-audit on `uv export`, pnpm audit, `uvx radon cc -s -a` (no C+), jscpd. build.done plain string (mem-1792920384-602e).
+
+### Risks
+- Starlette `ServerErrorMiddleware` re-raises after sending the 500 → test transport needs
+  `raise_app_exceptions=False`; pytest `filterwarnings=error` may surface warnings from it — assert none.
+- `scope["route"]` is set by FastAPI's `APIRoute.matches`; if a FastAPI version stops doing so, the envelope falls back
+  to path classification (still correct for spec families) — covered by `test_scope_route_is_set_by_fastapi`.
+- Developer `.env` with a non-default `OPENAPI_PUBLIC_SERVER_URL` makes the module-level drift gate fail locally; tests
+  build the app from explicit default settings. Document in AGENTS.md.
+- temporalio connect to a closed port may retry internally; readiness timeout bounds it (test accepts error|timeout).
+- asyncpg/SQLAlchemy engine must not connect at import or startup (readyz is the only probe); `pool_pre_ping` only.
+- 1 s budget per check: run checks concurrently so total readyz ≤ ~1 s.
+
+## Build P00-T11 — done (Builder)
+
+Implemented per plan, with these deviations (all recorded in specs/AGENTS.md):
+- FastAPI 0.162 routing: an `include_router(prefix=...)` prefix is NOT in `scope["route"].path_format`, so routers
+  carry their own prefix (`legacy_router(prefix=...)`) and `create_app(routers=ROUTERS)` includes them without one.
+  `app.state.routers` lists them (tests walk them for `test_app_routes_match_family`). `routers=` is also the test seam
+  for the sample routers.
+- Request id stored in `scope["va.request_id"]`, not `scope["state"]` (asgi-lifespan shares one state dict across
+  requests — caught by `test_ids_unique_per_request`).
+- MetricsMiddleware also logs the specs/27 §1 access line (`http.request`: method, path template, status, duration_ms).
+- Test helpers in `apps/api/tests/support/` (pytest pythonpath + mypy_path); `apps/api/tests` is in mypy `files` but
+  NOT `mypy_path` (otherwise duplicate module `conftest`/`test_health` with va_common in one mypy run).
+- `email-validator` added to va-api (FastAPI validates the OpenAPI contact email; without it a warning is logged).
+- `openapi.py` `servers()` strips a trailing slash before comparing to the Local URL.
+
+Evidence (this iteration): make fmt ok; make lint "All checks passed!"; make typecheck "no issues found in 81 source
+files"; make placeholders "0 finding(s)"; make test 954 passed, 1 skipped, TOTAL 99% (va_api files 98-100%);
+make check exit 0 (drift "openapi/openapi.json is current", spec refs 0 problems); make openapi twice → wrote, then
+unchanged; pip-audit "No known vulnerabilities found"; pnpm audit clean; radon average A (2.08), no C+; jscpd 0 clones.
+Smoke with `make up` + `uvicorn va_api.main:app`: /healthz 200 with headers; /readyz 200; `docker compose stop redis`
+→ 503 `failing:["redis"]`; restart → 200; /v1/calls/nope legacy 404, /v1/knowledge/nope envelope 404.
+Infra left running.
+
+## Review P00-T11 — approved
+Re-ran: make lint (pass), make typecheck (81 files, no issues), make placeholders (0), make test (954 passed, 1 skipped,
+99.81 %), check_openapi_drift (current), check_spec_refs (0), openapi_spec_validator on openapi/openapi.json (valid).
+Reviewed envelopes/errors/middleware/main/container/health/openapi against specs/31 §1/§3/§4, specs/27 §9, specs/02 §6
+env vars, specs/26 §1. Codes used by HTTP mapping all exist in CODES with matching status. Tests use events, no sleeps.

@@ -146,3 +146,21 @@ Grafana 3001
   randomness only from `numpy.random.PCG64(seed).random_raw()`, never `Generator` methods (their streams may change
   between numpy versions). Do not use `audioop` (deprecated, `filterwarnings=error`); use the μ-law codec in the
   generator.
+- 2026-10-25 (P00-T11): run `make openapi` after any route or response-model change and commit `openapi/openapi.json`;
+  `make check` fails on drift. The drift gate imports the module-level `va_api.main:app`, so a developer `.env`
+  with a non-default `OPENAPI_PUBLIC_SERVER_URL` makes it fail locally (tests build the app from explicit settings).
+- 2026-10-25 (P00-T11): build API routers only with `va_api.envelopes.legacy_router(prefix=...)` /
+  `envelope_router(prefix=...)` and add them to `va_api.main.ROUTERS`. Put the prefix on the router, never on
+  `include_router`: FastAPI 0.162 keeps an include-time prefix out of `route.path_format`, which the metrics
+  `route` label and `x-envelope` lookup read from `scope["route"]`. Every operation needs `operation_id=`, one tag,
+  `openapi_extra={"x-scope": ...}`, and a response model with an `examples` entry (`test_operations_contract`).
+- 2026-10-25 (P00-T11): API tests build `create_app(settings, container_factory=FakeChecks(), init_observability=False,
+  routers=...)` and talk to it through `api_helpers.make_client(app)` (asgi-lifespan + `httpx.ASGITransport(
+  raise_app_exceptions=False)`, so unhandled errors come back as 500s like under uvicorn). Helpers live in
+  `apps/api/tests/support/` (on pytest `pythonpath` and mypy `mypy_path`); test dirs themselves must NOT be on
+  `mypy_path` or every package's `conftest.py` collides as module `conftest` in the single `uv run mypy` run. New
+  apps follow the same layout (`apps/<app>/tests/support/`).
+- 2026-10-25 (P00-T11): the 500 handler runs in Starlette's outermost `ServerErrorMiddleware`, outside our middleware,
+  so `va_api.errors.error_response` sets `X-Request-Id` and the security headers itself. The request id lives in
+  `scope["va.request_id"]`, never `scope["state"]`: asgi-lifespan passes one shared lifespan-state dict to every
+  request. Readiness checks use `va_common.health.run_checks` (concurrent, 1 s each, details logged only).
