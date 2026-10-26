@@ -14,7 +14,7 @@ Legend: `- [ ]` open · `- [x]` done (append ` — <evidence>`). Each task: Spec
   - Deliverables: `.env.example` containing every variable in the table with its dev value and a comment; `scripts/tests/test_env_example.py` parsing the spec table and asserting parity.
   - Acceptance: test fails if a variable is added to the spec but not `.env.example` or vice versa.
 
-- [ ] P00-T03 Placeholder detector gate
+- [x] P00-T03 Placeholder detector gate — make lint/typecheck/placeholders/test exit 0 (0 findings; 176 passed, 99.81% total cov, checker 100%); every rule has failing + allowed fixtures; git discovery covers tracked+untracked-not-ignored; spec §9.1 Decision (a–h), DEC-002
   - Spec refs: specs/02-repo-layout-and-conventions.md (`scripts/check_no_placeholders.py` behaviour)
   - Depends on: P00-T01
   - Deliverables: `scripts/check_no_placeholders.py`, `scripts/tests/test_check_no_placeholders.py` (positive and negative cases for every rule, including AST stub detection, Protocol/abstractmethod allowances, JSX `placeholder=` allowance, empty catch detection)

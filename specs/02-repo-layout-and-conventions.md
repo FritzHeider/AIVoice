@@ -352,6 +352,27 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 - Prints `path:line: rule: excerpt` for each finding; exit 1 if any.
 - Has its own tests in `scripts/tests/test_check_no_placeholders.py`.
 
+> Decision (2026-10-25): (a) "Tracked files" means `git ls-files --cached --others --exclude-standard` under the five
+> roots, i.e. tracked plus untracked-but-not-ignored files, so uncommitted work is checked before it is committed;
+> cached paths that no longer exist on disk are skipped. (b) The markers `TODO`, `FIXME`, `XXX`, `HACK`, `TBD` match
+> case-sensitively in upper case with word boundaries (prose such as "a quick hack" or "todo list" is not a marker);
+> every other phrase matches case-insensitively. (c) Besides `placeholder=` (with optional spaces, including `={`) and
+> `::placeholder`, two more spans are allowed: the Tailwind variant `placeholder:` (the utility form of
+> `::placeholder`, used by shadcn/ui inputs) and the literal identifier `check_no_placeholders` (this gate's
+> spec-mandated module name). An allowed span never hides a bare occurrence elsewhere on the same line.
+> (d) Besides `Protocol` methods (including `typing.Protocol` and generic `Protocol[T]`) and `@abstractmethod`,
+> functions decorated with `@overload`/`typing.overload` may have `...` bodies, and `.pyi` stub files are not
+> AST-checked. A class whose body is only `pass`/`...` is allowed when it has a docstring and is an exception class
+> (a base named `BaseException` or ending in `Error`/`Exception`/`Warning`) or a `Protocol`; a class whose body is
+> only a docstring is always allowed. (e) "CLI modules" are everything under `sdks/cli/`, any module inside a
+> directory named `cli`, and files named `cli.py` or `__main__.py`; "scripts" for the `print(`/`console.log` rules
+> means any path with a `scripts` directory component. (f) "Test source" for the `example.com` rule means a path with
+> a `tests`, `tests_e2e`, or `__tests__` directory, or a file named `test_*.py`, `*_test.py`, `conftest.py`,
+> `*.test.*`, or `*.spec.*`. (g) There is no generic inline suppression; the only marker is `// va-allow-console`.
+> (h) Rule ids printed in findings: `marker`, `filler-word`, `not-implemented`, `implement-me`, `lorem-ipsum`,
+> `sample-api-key`, `example-domain`, `stub-body`, `print-call`, `syntax-error`, `empty-function`, `empty-catch`,
+> `console-log`. Exit code 2 means the git file listing failed.
+
 ## 10. Bland-compatibility conventions
 
 - Public API paths mirror Bland (`/v1/calls`, `/v1/pathway`, `/v2/batches/create`, …). Field names are

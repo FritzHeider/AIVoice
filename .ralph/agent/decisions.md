@@ -38,3 +38,22 @@ Template:
 - **Reversibility:** yes — moving the functions into the test module or into a gate script is a module-local change
   with no callers outside `scripts/`.
 - **Timestamp:** 2026-10-25T00:00:00Z
+
+## DEC-002 — Scope and allowances of the unfinished-work detector gate
+
+- **Decision:** specs/02 §9.1 leaves open which files count as "tracked", how case-insensitive the markers are, and
+  whether common legitimate uses (Tailwind `placeholder:` variant, `@overload` stubs, `.pyi` files, the gate's own
+  module name) must fail.
+- **Chosen Option:** scan tracked + untracked-not-ignored files; markers upper-case only with word boundaries; allow
+  the Tailwind `placeholder:` variant, the identifier `check_no_placeholders`, `@overload` bodies, and `.pyi` files;
+  no generic suppression comment. Recorded as the `> Decision (2026-10-25)` block under specs/02 §9.1.
+- **Confidence:** 75
+- **Alternatives Considered:**
+  - Tracked files only — rejected: Builder output is uncommitted when gates run, so the gate would miss it.
+  - Case-insensitive markers — rejected: flags ordinary English ("hack", "todo list") and forces awkward prose.
+  - Failing on Tailwind `placeholder:` — rejected: shadcn/ui's Input ships it; it is the utility form of the
+    allowed `::placeholder` pseudo-element. Failing on the module name would make `make placeholders` unrunnable.
+- **Reasoning:** keeps the gate strict on real unfinished work while not punishing framework idioms the spec
+  clearly intended to allow.
+- **Reversibility:** yes — each allowance is one regex alternative or predicate in `scripts/check_no_placeholders.py`.
+- **Timestamp:** 2026-10-25T00:00:00Z

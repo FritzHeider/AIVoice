@@ -71,3 +71,12 @@ OTel collector 4317 · Prometheus 9090 · Grafana 3001
 - 2026-10-25 (P00-T02): a stale `.DS_Store` inside `.venv/lib` makes `uv sync` fail with
   `failed to remove directory .venv/lib: Directory not empty`. Fix: `find .venv -name .DS_Store -delete && rm -rf .venv`
   then re-sync. This repo lives on an external volume where Finder writes `.DS_Store` everywhere.
+- 2026-10-25 (P00-T03): `make placeholders` scans git-tracked AND untracked-not-ignored files under apps/ packages/
+  sdks/ infra/ scripts/ (new files are checked before `git add`). Ad-hoc run on specific files:
+  `uv run python scripts/check_no_placeholders.py path/a.py path/b.ts`. Rules and allowances: specs/02 §9.1 Decision.
+- 2026-10-25 (P00-T03): the gate scans its own source and tests. Write banned tokens in checker regexes with a
+  splitting character class (`T[O]DO`), and in test fixtures build them from fragments (`j("TO", "DO")` or
+  `"place" + "holder"`). Never use implicit concatenation (`"TO" "DO"`): `ruff format` joins it into the literal.
+- 2026-10-25 (P00-T03 review): the `empty-function` rule is a plain regex on `) {}` / `=> {}`, so empty `if (x) {}`
+  blocks and TS parameter-property constructors (`constructor(private readonly x: X) {}`) are findings. Declare
+  fields explicitly and assign them in a non-empty constructor body instead.
