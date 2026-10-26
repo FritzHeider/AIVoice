@@ -2499,3 +2499,11 @@ Re-ran: make lint 0, typecheck 0, placeholders 0, test 1125 passed 1 skipped 99.
 --python 3.12 ... --search-path "$PATH"` exit 0 (ok node 22.23.4). Diff (check_toolchain.py, Makefile, tests, AGENTS.md,
 specs/02 Decision) matches the plan; tests use real shell-script fakes against a shadowing PATH. No findings.
 Next: Planner re-runs the phase exit gate on a clean clone under /Users.
+
+## Phase 00 exit gate re-run (Planner, 2026-10-25) — passed
+
+Clean clone /Users/drop/AIVOICE-exitclone at 1a154c5: `make setup && make up && make check` exit 0 (ok node 22.23.4;
+ruff ok; pytest 1125 passed 1 skipped; Vitest widget 22 / dashboard 52 / sdk 48; openapi current; spec refs 0). Log:
+logs/exitgate-p00.log. `docker compose ps`: 7 healthy + otel-collector up (distroless, no compose healthcheck, accepted in
+P00-T09). `make openapi` exit 0, tree unchanged, openapi-spec-validator: valid 3.1.0. Clone `make down` + deleted; main
+repo `make up` 0. README build status row 00 → complete. Phase 00 done.
