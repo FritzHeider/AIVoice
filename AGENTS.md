@@ -265,3 +265,19 @@ Grafana 3001
   login-role transaction). New model areas reuse these instead of copying, which keeps jscpd at 0 clones. Partial
   indexes use `Index(..., postgresql_where=text("status IN ('pending', 'active')"))`; mixin columns land after the
   class's own columns (SoftDeleteMixin before TimestampMixin in the bases puts `deleted_at` before `created_at`).
+- 2026-10-27 (P01-T04): `va_db.models._columns` holds the column builders every model module uses: `tz()`,
+  `org_fk()`, `org_id_column(nullable=False)`, `fk_column(target, ondelete, nullable=True)`, `int_column(n)`,
+  `bool_column(default=...)`, `text_column("x")`, `text_array_column("{}")`, `jsonb_column(default=None)` and
+  `jsonb_default(literal)`. Use them instead of spelling out `mapped_column(...)`; jscpd (0 clones) flags the
+  repeated column blocks otherwise. Import lists that still overlap may be wrapped in `# jscpd:ignore-start` /
+  `# jscpd:ignore-end  (reason)` (ruff ERA001 flags a bare end marker as commented-out code). `jsonb_default` escapes `:` because `text("'{\"style\":0}'")` otherwise turns `:0` into a
+  bind parameter (pin the compiled default in a unit test whenever a JSON literal has colons). `pgvector`
+  (0.5.x, ships `py.typed`, no mypy override needed) provides `pgvector.sqlalchemy.Vector`; it binds lists as text and
+  reads `list[float]` back, so annotate `Mapped[list[float]]`. Expression and DESC indexes are declared after the
+  class (`Index("voices_name_scope_uq", func.coalesce(Voice.org_id, text("'...'::uuid")), func.lower(Voice.name),
+  unique=True, postgresql_where=Voice.deleted_at.is_(None))`). Generated columns use `Computed(..., persisted=True)`;
+  `model_introspection.server_defaults` skips them and `computed_columns` reports them. `Mapped[Any]` makes a column
+  NOT NULL, so nullable JSONB of any shape is `Mapped[Any | None]` with `nullable=True`. `scratch_session` also runs
+  `CREATE EXTENSION IF NOT EXISTS vector`. `model_factories.assert_check_enforced(session, builder, column, accepted,
+  rejected)` covers range/regex CHECKs and `assert_rejected(session, model, match)` covers UNIQUE violations.
+  specs/03 §1 Decision: every tenant table has an `org_id`-leading index (13 §5 tables gained `<table>_org_idx`).

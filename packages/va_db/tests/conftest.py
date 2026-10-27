@@ -43,6 +43,7 @@ async def scratch_session(pg_url: str) -> AsyncIterator[AsyncSession]:
         async with engine.connect() as connection:
             transaction = await connection.begin()
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await connection.run_sync(Base.metadata.create_all)
             async with AsyncSession(bind=connection, join_transaction_mode="create_savepoint") as scratch:
                 yield scratch

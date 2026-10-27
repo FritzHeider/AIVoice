@@ -10,24 +10,21 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Literal, get_args
 
-from sqlalchemy import (
-    BigInteger,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
-    Integer,
-    LargeBinary,
-    Text,
-    UniqueConstraint,
-    Uuid,
-    text,
-)
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy import BigInteger, Date, ForeignKey, Index, LargeBinary, Text, UniqueConstraint, Uuid, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from va_db.base import Base, IdMixin, SoftDeleteMixin, TimestampMixin
 from va_db.models._checks import check_in
+from va_db.models._columns import (
+    fk_column,
+    int_column,
+    jsonb_column,
+    org_id_column,
+    text_array_column,
+    text_column,
+    tz,
+)
 
 __all__ = [
     "NumberOrder",
@@ -50,14 +47,6 @@ NumberOrderStatus = Literal["pending", "success", "failure"]
 NumberPoolStrategy = Literal["round_robin", "least_recently_used", "random", "local_match"]
 
 
-def _tz() -> DateTime:
-    return DateTime(timezone=True)
-
-
-def _org_fk() -> ForeignKey:
-    return ForeignKey("orgs.id", ondelete="CASCADE")
-
-
 class TelnyxAccount(IdMixin, TimestampMixin, Base):
     """``telnyx_accounts``: a customer's own Telnyx account ("Bring Your Own Telnyx")."""
 
@@ -67,7 +56,7 @@ class TelnyxAccount(IdMixin, TimestampMixin, Base):
         Index("telnyx_accounts_org_idx", "org_id"),
     )
 
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), _org_fk(), nullable=False)
+    org_id: Mapped[uuid.UUID] = org_id_column()
     label: Mapped[str] = mapped_column(Text, nullable=False)
     api_key_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     # Ed25519 public key for their webhooks.
@@ -78,9 +67,7 @@ class TelnyxAccount(IdMixin, TimestampMixin, Base):
     outbound_voice_profile_id: Mapped[str | None] = mapped_column(Text)
     # Opaque value returned to customers as ``encrypted_key``.
     encrypted_key_handle: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    status: Mapped[TelnyxAccountStatus] = mapped_column(
-        Text, nullable=False, server_default=text("'pending'")
-    )
+    status: Mapped[TelnyxAccountStatus] = text_column("pending")
     status_detail: Mapped[str | None] = mapped_column(Text)
 
 
@@ -102,30 +89,22 @@ class PhoneNumber(IdMixin, SoftDeleteMixin, TimestampMixin, Base):
         Index("phone_numbers_org_idx", "org_id"),
     )
 
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), _org_fk(), nullable=False)
+    org_id: Mapped[uuid.UUID] = org_id_column()
     e164: Mapped[str] = mapped_column(Text, nullable=False)
     # NULL = platform account.
-    telnyx_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("telnyx_accounts.id", ondelete="SET NULL")
-    )
+    telnyx_account_id: Mapped[uuid.UUID | None] = fk_column("telnyx_accounts.id", "SET NULL")
     telnyx_phone_number_id: Mapped[str | None] = mapped_column(Text)
     country_code: Mapped[str] = mapped_column(Text, nullable=False)
-    number_type: Mapped[NumberType] = mapped_column(Text, nullable=False, server_default=text("'local'"))
+    number_type: Mapped[NumberType] = text_column("local")
     label: Mapped[str | None] = mapped_column(Text)
     # voice, sms, mms.
-    capabilities: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{voice}'")
-    )
-    inbound_config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    sms_config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
+    capabilities: Mapped[list[str]] = text_array_column("{voice}")
+    inbound_config: Mapped[dict[str, Any]] = jsonb_column("{}")
+    sms_config: Mapped[dict[str, Any]] = jsonb_column("{}")
     monthly_cost_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    status: Mapped[PhoneNumberStatus] = mapped_column(Text, nullable=False, server_default=text("'active'"))
-    purchased_at: Mapped[datetime | None] = mapped_column(_tz())
-    released_at: Mapped[datetime | None] = mapped_column(_tz())
+    status: Mapped[PhoneNumberStatus] = text_column("active")
+    purchased_at: Mapped[datetime | None] = mapped_column(tz())
+    released_at: Mapped[datetime | None] = mapped_column(tz())
 
 
 class NumberOrder(IdMixin, TimestampMixin, Base):
@@ -137,7 +116,7 @@ class NumberOrder(IdMixin, TimestampMixin, Base):
         Index("number_orders_org_idx", "org_id"),
     )
 
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), _org_fk(), nullable=False)
+    org_id: Mapped[uuid.UUID] = org_id_column()
     telnyx_order_id: Mapped[str | None] = mapped_column(Text)
     requested_numbers: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     status: Mapped[NumberOrderStatus] = mapped_column(Text, nullable=False)
@@ -153,14 +132,10 @@ class NumberPool(IdMixin, TimestampMixin, Base):
         UniqueConstraint("org_id", "name"),
     )
 
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), _org_fk(), nullable=False)
+    org_id: Mapped[uuid.UUID] = org_id_column()
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    strategy: Mapped[NumberPoolStrategy] = mapped_column(
-        Text, nullable=False, server_default=text("'round_robin'")
-    )
-    max_calls_per_number_per_day: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("100")
-    )
+    strategy: Mapped[NumberPoolStrategy] = text_column("round_robin")
+    max_calls_per_number_per_day: Mapped[int] = int_column(100)
 
 
 class NumberPoolMember(TimestampMixin, Base):
@@ -175,9 +150,9 @@ class NumberPoolMember(TimestampMixin, Base):
     phone_number_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("phone_numbers.id", ondelete="CASCADE"), primary_key=True
     )
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), _org_fk(), nullable=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(_tz())
-    calls_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    org_id: Mapped[uuid.UUID] = org_id_column()
+    last_used_at: Mapped[datetime | None] = mapped_column(tz())
+    calls_today: Mapped[int] = int_column(0)
     calls_today_date: Mapped[date | None] = mapped_column(Date)
 
 
@@ -197,10 +172,10 @@ class TelnyxEvent(IdMixin, TimestampMixin, Base):
     # Telnyx ``data.id``.
     telnyx_event_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    org_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), _org_fk())
+    org_id: Mapped[uuid.UUID | None] = org_id_column(nullable=True)
     call_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     call_control_id: Mapped[str | None] = mapped_column(Text)
-    occurred_at: Mapped[datetime] = mapped_column(_tz(), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    processed_at: Mapped[datetime | None] = mapped_column(_tz())
+    occurred_at: Mapped[datetime] = mapped_column(tz(), nullable=False)
+    payload: Mapped[dict[str, Any]] = jsonb_column()
+    processed_at: Mapped[datetime | None] = mapped_column(tz())
     process_error: Mapped[str | None] = mapped_column(Text)

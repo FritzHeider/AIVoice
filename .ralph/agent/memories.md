@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793120870-f54b
+> va_db models: use _columns builders (org_id_column, fk_column, int_column, bool_column, text_column, text_array_column, jsonb_column) - jscpd flags repeated mapped_column blocks; overlapping import headers can be wrapped in '# jscpd:ignore-start' / '# jscpd:ignore-end  (reason)' (bare end marker trips ruff ERA001)
+<!-- tags: database, testing, tooling | created: 2026-10-27 -->
+
 ### mem-1793119288-abc7
 > va_db model tests: reuse tests/support/model_introspection (get_table etc.) + model_factories (make_org, assert_enum_check_enforced) and conftest scratch_session; copying tenancy test bodies trips jscpd clone gate
 <!-- tags: database, testing | created: 2026-10-27 -->
@@ -9,6 +13,10 @@
 ## Decisions
 
 ## Fixes
+
+### mem-1793120870-bd75
+> SQLAlchemy text() treats ':0'/':true' inside JSON literals as bind params; JSONB server defaults must go through va_db.models._columns.jsonb_default (escapes colons). Also Mapped[Any] makes a column NOT NULL - use Mapped[Any | None] + nullable=True
+<!-- tags: database, sqlalchemy | created: 2026-10-27 -->
 
 ### mem-1793118560-6911
 > SQLAlchemy 2.1 + asyncpg returns inet columns as ipaddress.IPv4Address/IPv6Address (not str); annotate Mapped[IpAddress | None] from va_db.models

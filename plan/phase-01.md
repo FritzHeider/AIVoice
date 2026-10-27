@@ -38,7 +38,7 @@
   - Deliverables: `TelnyxAccount`, `PhoneNumber`, `NumberOrder`, `NumberPool`, `NumberPoolMember`, `TelnyxEvent`
   - Acceptance: partial unique index on active E.164 verified by integration test.
 
-- [ ] P01-T04 Agent configuration models
+- [x] P01-T04 Agent configuration models — 24 §5 tables in library/pathways/agents.py + _columns builders; org_idx Decision in specs/03 §1; make test 1387 passed (99.85 %, va_db 100 %), va_db integration 87 passed / 0 skipped, lint/typecheck/placeholders clean, jscpd 0 clones, radon A
   - Spec refs: specs/03-data-model.md (Agent configuration resources)
   - Depends on: P01-T02
   - Deliverables: `Prompt`, `Voice`, `VoiceSample`, `VoiceRating`, `Tool`, `KnowledgeBase`, `KbDocument`, `KbChunk` (Vector(1024), computed tsvector), `PathwayFolder`, `Pathway`, `PathwayVersion`, `PathwayUnitTest`, `PathwayTestRun`, `Persona`, `PersonaVersion`, `Agent`, `AgentVersion`, `Experiment`, `ExperimentArm`, `Disposition`, `CitationSchema`, `EvalSetup`, `EvalSetupVersion`, `Widget`

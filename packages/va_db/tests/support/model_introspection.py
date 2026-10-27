@@ -8,6 +8,7 @@ from typing import Any, Final
 
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKeyConstraint,
     PrimaryKeyConstraint,
@@ -26,6 +27,7 @@ __all__ = [
     "DIALECT",
     "check_names",
     "columns",
+    "computed_columns",
     "constraint",
     "enum_check_values",
     "foreign_keys",
@@ -73,12 +75,26 @@ def check_names(tables: Iterable[str]) -> set[str]:
 
 
 def server_defaults(tables: Iterable[str]) -> dict[tuple[str, str], str]:
-    """Compiled server defaults keyed by ``(table, column)``, excluding ``created_at``/``updated_at``."""
+    """Compiled server defaults keyed by ``(table, column)``, excluding ``created_at``/``updated_at`` and
+    generated columns (see :func:`computed_columns`).
+    """
     return {
         (name, column.name): str(column.server_default.arg.compile(dialect=DIALECT))  # type: ignore[attr-defined]
         for name in tables
         for column in get_table(name).columns
-        if column.server_default is not None and column.name not in _TIMESTAMPS
+        if column.server_default is not None
+        and not isinstance(column.server_default, Computed)
+        and column.name not in _TIMESTAMPS
+    }
+
+
+def computed_columns(tables: Iterable[str]) -> dict[tuple[str, str], tuple[str, bool | None]]:
+    """``GENERATED ALWAYS AS (<sqltext>)`` columns by ``(table, column)``, with their ``persisted`` flag."""
+    return {
+        (name, column.name): (str(column.computed.sqltext), column.computed.persisted)
+        for name in tables
+        for column in get_table(name).columns
+        if column.computed is not None
     }
 
 

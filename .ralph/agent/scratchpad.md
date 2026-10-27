@@ -416,3 +416,179 @@ telnyx_account_id, nullable CASCADE org_id on telnyx_events, no FK on call_id), 
 phone_numbers_e164_active_uq, and the plain indexes. All match. The integration tests cover the acceptance case
 (e164 unique among pending/active only) plus the cascade and SET NULL paths. The shared test-support refactor keeps
 the tenancy expectations unchanged. Ticked + committed.
+
+## Plan P01-T04 — Agent configuration models (2026-10-27)
+
+Spec: specs/03 §5 (24 tables, column for column), §1 conventions, §10. Same rules as P01-T02/T03: an explicit SQL type
+on every mapped_column, `check_in(col, get_args(Literal))` for enums, `server_default=text(...)`, explicit index
+names, no `index=True`, no relationship(), plain FKs. Mixin base order `IdMixin, SoftDeleteMixin, TimestampMixin`
+puts deleted_at right before created_at, as in phone_numbers.
+
+### Spec decision (record in specs/03 §1 as `> Decision (2026-10-27):` in the same commit)
+§1 says every tenant table has an index that starts with `org_id`. §3 and §4 follow that rule, but 13 §5 tables have
+no such index: voice_samples, voice_ratings, kb_documents, kb_chunks, pathway_unit_tests, pathway_test_runs,
+persona_versions, agent_versions, experiments, experiment_arms, citation_schemas, eval_setups, eval_setup_versions.
+(tools and dispositions are covered by UNIQUE (org_id, ...)). Decision: the §1 convention wins. Add
+`CREATE INDEX <table>_org_idx ON <table>(org_id);` to each of those 13 tables in the §5 SQL block (directly after its
+CREATE TABLE / existing indexes) and in the models. Why: the RLS predicate `org_id = app.org_id` and the org-scoped
+list endpoints need it. Two things depend on this: the P01-T07 migration copies the DDL, and P01-T08 conformance
+parses the spec.
+
+### Shared helpers (avoid jscpd clones)
+New `packages/va_db/src/va_db/models/_columns.py` with `tz() -> DateTime` (timezone=True), `org_fk() -> ForeignKey`
+(orgs.id CASCADE), and `jsonb_default(literal: str)` returning `text(f"'{literal}'::jsonb")`. Refactor telephony.py
+(`_tz`, `_org_fk`) and tenancy.py (`_tz`) onto them. Nothing changes in behaviour, so the existing unit tests stay green.
+
+### Dependency
+`uv add --package va-db pgvector` (latest; it pulls numpy). If pgvector ships no py.typed, add a
+`[[tool.mypy.overrides]] module = ["pgvector.*"] ignore_missing_imports = true` to the root pyproject and note it in
+AGENTS.md. Run `uvx pip-audit` afterwards.
+
+### Files
+1. `packages/va_db/src/va_db/models/library.py`. Literals:
+   `VoiceProvider = Literal["elevenlabs"]`, `VoiceService = Literal["ELEVEN_FLASH","ELEVEN_TURBO","ELEVEN_MULTILINGUAL"]`,
+   `VoiceCategory = Literal["premade","cloned","generated","professional","shared"]`,
+   `VoiceCloneStatus = Literal["processing","ready","failed"]`, `ToolHttpMethod = Literal["GET","POST","PUT","PATCH","DELETE"]`,
+   `KnowledgeBaseStatus = Literal["PROCESSING","COMPLETED","FAILED"]` (also used by kb_documents.status),
+   `KbDocumentType = Literal["FILE","WEB_SCRAPE","TEXT"]`.
+   Models: `Prompt` (prompts; tags text[] '{}'; soft delete; prompts_org_idx), `Voice` (voices; org_id **nullable**
+   CASCADE; defaults description '', provider 'elevenlabs', service 'ELEVEN_FLASH', category 'premade', is_public
+   false, tags '{}', language_codes '{en}', settings
+   `'{"stability":0.5,"similarity_boost":0.75,"style":0,"use_speaker_boost":true,"speed":1.0}'::jsonb` (copy exactly),
+   rating_sum/rating_count 0. clone_status is nullable with a check, consent is nullable JSONB, plus soft delete. Indexes: voices_org_idx,
+   `voices_name_scope_uq` = unique on (`coalesce(org_id, '00000000-0000-0000-0000-000000000000'::uuid)`, `lower(name)`)
+   WHERE deleted_at IS NULL, and `voices_provider_uq` = unique on (same coalesce, provider_voice_id) WHERE deleted_at IS NULL.
+   Build the expressions with `func.coalesce(<col>, text("'0000...'::uuid"))` / `func.lower(<col>)` declared after
+   the class (as audit_logs does) or with `text()` in __table_args__. Compile once and pin the real DDL in the unit test.
+   `VoiceSample` (voice_samples; voice_id CASCADE; voice_samples_voice_idx + new voice_samples_org_idx),
+   `VoiceRating` (voice_ratings; TimestampMixin only; composite PK voice_id+user_id → voice_ratings_pkey; column
+   order voice_id, org_id, user_id, rating; rating SmallInteger, `CheckConstraint("rating BETWEEN 1 AND 5",
+   name="rating_check")`; users FK CASCADE; new voice_ratings_org_idx),
+   `Tool` (tools; `CheckConstraint("name ~ '^[A-Za-z][A-Za-z0-9_]{0,63}$'", name="name_check")`, method default
+   'POST' + check_in, headers/query/response_map `'{}'::jsonb`, secret_headers_enc LargeBinary NULL, body JSONB NULL,
+   input_schema `'{"type":"object","properties":{}}'::jsonb`, timeout_ms Integer 10000 check BETWEEN 100 AND 60000,
+   retries SmallInteger 0 check BETWEEN 0 AND 3, soft delete, `UniqueConstraint("org_id","name")` → tools_org_id_name_key),
+   `KnowledgeBase` (knowledge_bases; status 'PROCESSING', chunk sizes 400/60, counts 0, soft delete, org idx),
+   `KbDocument` (kb_documents; type check, no default; size_bytes BigInteger NULL; status default 'PROCESSING'; kb idx + new org idx),
+   `KbChunk` (kb_chunks; heading_path text[] '{}'; `embedding` = `pgvector.sqlalchemy.Vector(1024)` NOT NULL;
+   `tsv` = `TSVECTOR` with `Computed("to_tsvector('simple', content)", persisted=True)`, nullable, Mapped[str | None];
+   indexes kb_chunks_kb_idx, new kb_chunks_org_idx,
+   `Index("kb_chunks_embedding_hnsw","embedding", postgresql_using="hnsw", postgresql_with={"m":16,"ef_construction":64},
+   postgresql_ops={"embedding":"vector_cosine_ops"})`, `Index("kb_chunks_tsv_idx","tsv", postgresql_using="gin")`).
+   Annotate `embedding` with the type the integration round-trip actually returns (pgvector returns a numpy ndarray;
+   for writes accept `list[float]`). Pick a Mapped annotation that mypy --strict accepts and say why in a comment.
+2. `packages/va_db/src/va_db/models/pathways.py`. `VersionStatus = Literal["draft","published","archived"]` (shared
+   with persona_versions; re-export from here), `PathwayTestRunKind = Literal["unit","simulation","regression"]`,
+   `PathwayTestRunStatus = Literal["queued","running","passed","failed","error"]`.
+   `PathwayFolder` (self FK parent_id CASCADE, org idx), `Pathway` (folder_id SET NULL; production/staging_version
+   NULL; draft/latest default 1; soft delete; org idx), `PathwayVersion` (status no default + check; nodes/edges
+   `'[]'::jsonb`, global_config `'{}'::jsonb`; graph_hash NN; published_by users SET NULL; UNIQUE(pathway_id,
+   version_number) → pathway_versions_pathway_id_version_number_key; org idx), `PathwayUnitTest` (source_call_id
+   Uuid NULL **no FK** since calls arrive in P01-T05; history/expected JSONB NN with no default; simulated_variations default 5
+   check BETWEEN 0 AND 20; pathway idx + new org idx), `PathwayTestRun` (kind/status checks with no default; results
+   `'[]'::jsonb`; `pathway_test_runs_pathway_idx (pathway_id, created_at DESC)` declared after the class with
+   `.desc()`, as audit_logs does; new org idx).
+3. `packages/va_db/src/va_db/models/agents.py`. `ExperimentStatus = Literal["draft","running","stopped"]`.
+   `Persona`, `PersonaVersion` (config JSONB NN; UNIQUE(persona_id, version_number); new org idx), `Agent`
+   (env_pins '{}'; soft delete; org idx), `AgentVersion` (raw-string check `semver ~ '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'`
+   name semver_check; branch default 'main' + `char_length(branch) BETWEEN 1 AND 64` name branch_check; pathway_id
+   FK **RESTRICT** nullable; pathway_version NULL; call_settings '{}'; changelog ''; created_by users SET NULL;
+   UNIQUE(agent_id, semver); `agent_versions_agent_branch_idx (agent_id, branch, created_at DESC)`; new org idx),
+   `Experiment` (status 'draft' + check; primary_metric Text default 'disposition_rate' with **no** CHECK (spec has
+   none; keep the comment); primary_metric_config '{}'; partial unique `experiments_one_running_per_agent ON (agent_id)
+   WHERE status = 'running'`; new org idx), `ExperimentArm` (agent_version_id FK RESTRICT; weight Integer check
+   BETWEEN 0 AND 100; new org idx), `Disposition` (tag check `tag ~ '^[A-Z][A-Z0-9_]{0,63}$'`; UNIQUE(org_id, tag)),
+   `CitationSchema` (variables JSONB NN with no default; new org idx), `EvalSetup` (latest_version 1; new org idx),
+   `EvalSetupVersion` (criteria JSONB NN; pass_threshold `Numeric(5, 2)` default `70`, Mapped[Decimal];
+   UNIQUE(eval_setup_id, version_number); new org idx), `Widget` (FKs pathway/agent/persona/voice all SET NULL;
+   allowed_domains '{}'; messages_per_minute 20 check BETWEEN 1 AND 600; voice_enabled false; config '{}';
+   public_key `unique=True` → widgets_public_key_key; soft delete; widgets_org_idx).
+   Docstrings name the Pydantic models the spec comments cite (GlobalConfig, PersonaConfig, WidgetConfig, ...).
+4. `va_db/models/__init__.py`: re-export the 24 models and 11 Literals. Keep `__all__` sorted.
+5. specs/03 §5 SQL: the 13 org indexes plus the Decision note (see above).
+
+### Tests
+- conftest `scratch_session`: add `CREATE EXTENSION IF NOT EXISTS vector` before create_all (container is
+  pgvector/pgvector:pg16). Tenancy and telephony integration tests must still pass.
+- `test_agent_config_models.py` (unit, reuses support/model_introspection; split into two files by area if it gets
+  past ~500 lines): all 24 tables registered; full ordered (name, nullable) column list per table; enum checks equal
+  the Literal tuples (voices provider/service/category/clone_status, tools method, knowledge_bases status,
+  kb_documents type/status, pathway_versions status, persona_versions status, pathway_test_runs kind/status,
+  experiments status); exact CHECK-name set over the 24 tables, plus the compiled sqltext of the non-enum checks (rating,
+  name regex, timeout_ms, retries, simulated_variations, semver, branch, weight, tag, messages_per_minute); full
+  server-default map, including the voices.settings and tools.input_schema JSON literals; the UNIQUE and PK sets,
+  including voice_ratings_pkey (voice_id, user_id); the FK set with ondelete (RESTRICT on agent_versions.pathway_id and
+  experiment_arms.agent_version_id; SET NULL on widgets ×4, pathways.folder_id, pathway_versions.published_by,
+  agent_versions.created_by; nullable CASCADE on voices.org_id); assert pathway_unit_tests.source_call_id has no FK;
+  the exact index DDL set (HNSW `USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`, GIN tsv,
+  both voices expression-unique partial indexes, the experiments partial unique, two DESC indexes, every org_idx);
+  column types (Vector dim 1024, TSVECTOR plus `Computed` persisted with the exact sqltext, Numeric(5,2), SmallInteger
+  rating/retries, LargeBinary secret_headers_enc, BigInteger size_bytes); every timestamp tz-aware; the text[] column
+  set; and every §5 table except voices has NOT NULL org_id with an index or UNIQUE starting with org_id (this test
+  guards the Decision).
+- `test_agent_config_models_integration.py` (integration, `scratch_session`, model_factories builders):
+  - `test_voice_defaults` covers settings JSON equality, '{en}', 'premade', and a platform voice with org_id NULL.
+  - `test_voice_name_unique_per_scope`: a case-insensitive duplicate name in the same org fails; another org and the
+    platform scope succeed; two platform voices with the same name fail; a soft-deleted duplicate is allowed. Do the
+    same for provider_voice_id.
+  - `test_enum_values_accepted_and_rejected`: parametrized over every enum column through `assert_enum_check_enforced`.
+  - `test_range_and_pattern_checks`: boundary values pass and out-of-range values fail for each non-enum check, e.g.
+    tool name "1bad", semver "1.2", tag "lower", branch "" and 65 chars.
+  - `test_kb_chunk_embedding_and_tsv`: insert a 1024-dim embedding; it round-trips and tsv is populated
+    (`tsv @@ to_tsquery('simple', ...)` matches); a 3-dim vector fails.
+  - `test_experiment_one_running_per_agent`: a second running experiment fails; draft and stopped ones are allowed.
+  - `test_restrict_and_set_null_paths`: deleting a pathway referenced by agent_versions raises; deleting an
+    agent_version referenced by an arm raises; deleting a voice nulls widgets.voice_id; deleting a folder cascades
+    child folders and nulls pathways.folder_id.
+  - `test_version_uniques`: pathway/persona/eval_setup version_number and agent semver duplicates fail.
+  - `test_eval_pass_threshold_decimal`: the default is Decimal("70.00").
+  Inside the scratch transaction, check that the indexes really exist: `pg_indexes` has kb_chunks_embedding_hnsw
+  (`USING hnsw`) and kb_chunks_tsv_idx (`USING gin`). This is an early answer to the acceptance item that P01-T07 will
+  re-verify after migration.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` with Docker up and
+0 skipped; `uvx pip-audit` on uv export (pgvector and numpy are new); `uvx radon cc -s -a packages/va_db/src`;
+`npx --yes jscpd@4 --silent` (0 clones; the three model files must not repeat column blocks, so use `_columns.py`);
+va_db coverage at 100 %. AGENTS.md: record the pgvector dependency/mypy note, `_columns.py`, the org-index Decision, and
+the vector extension in scratch_session.
+
+### Risks
+- Expression indexes made of text() inside __table_args__ may not attach to the table. Fall back to module-level
+  `Index(...)` with column expressions. Pin the compiled DDL from real output.
+- asyncpg has no codec for `vector`. The SQLAlchemy Vector bind sends text and asyncpg falls back to the text format.
+  If binding fails, register the codec only for the scratch connection in tests and record a fix memory. Do NOT add
+  a connect listener to engine.py, because the extension may not exist yet at connect time.
+- jscpd can flag the large expected-column dicts against each other. Keep them as data and split them by file if needed.
+- A regex CHECK containing `\.` needs a raw string, and the compiled sqltext must equal the spec text.
+
+## Build P01-T04 (2026-10-27)
+Implemented per plan, with these deviations and findings for the Reviewer:
+- pgvector 0.5.1 (`uv add --package va-db pgvector`) ships `py.typed` and no longer pulls numpy; its result processor
+  returns `list[float]`, so `KbChunk.embedding: Mapped[list[float]]`. No mypy override was needed.
+- Bug caught while pinning DDL: `text("'{\"style\":0,...}'::jsonb")` compiled `:0`/`:true` as bind params. The fix is
+  `_columns.jsonb_default`, which escapes `:`. Unit tests pin the compiled voices.settings and tools.input_schema
+  literals, and test_columns.py asserts that no params appear.
+- `Mapped[Any]` made `tools.body` NOT NULL; it is now `Mapped[Any | None]` with `nullable=True` (the column-list test caught it).
+- `_columns.py` grew past the plan, because jscpd flagged 11 clones of repeated column blocks: `org_id_column(nullable=)`,
+  `fk_column`, `int_column`, `bool_column`, `text_column`, `text_array_column`, `jsonb_column(default=None)`. These were
+  applied to tenancy and telephony as well; behaviour is unchanged and their unit and integration tests are unchanged and green.
+  The last clone was the agents/library import header only, so agents.py wraps it in `# jscpd:ignore-start/end` with a reason.
+- `pathway_test_runs_org_idx` is declared module-level next to the DESC index (same DDL).
+- model_introspection: `server_defaults` skips `Computed`; new `computed_columns`. model_factories: new `assert_rejected`,
+  `assert_check_enforced` (`assert_enum_check_enforced` now delegates to it).
+- `pathway_unit_tests.source_call_id` has no FK, as in the spec.
+- Integration: 32 new tests, including pg_indexes `USING hnsw ... WITH (m='16', ef_construction='64')` and `USING gin (tsv)`,
+  cosine-distance ordering, tsv @@ match, and 3-dim vector rejection ("expected 1024 dimensions, not 3").
+- specs/03 §1 Decision plus the 13 `<table>_org_idx` statements in §5. AGENTS.md is updated.
+Gates: make fmt 0, lint 0, typecheck 0 (168 files), placeholders 0 findings, make test 1387 passed (99.85 %,
+va_db 100 %), `pytest packages/va_db -m integration -rs` 87 passed / 0 skipped, pip-audit no known vulns,
+radon A (1.15), jscpd 0 clones.
+
+## Review P01-T04 (2026-10-27) — APPROVED
+Re-ran: make lint/typecheck/placeholders clean; make test 1387 passed (99.85 %); `pytest packages/va_db -m integration`
+87 passed, 0 skipped; jscpd 0 clones; radon A (1.15). Compared library.py, pathways.py, agents.py against specs/03 §5
+column by column: types, nullability, defaults (voices.settings and tools.input_schema JSON literals), CHECKs,
+ondelete (RESTRICT x2, SET NULL paths), voices expression/partial uniques, HNSW/GIN, DESC indexes, the experiments
+partial unique, and widgets.public_key UNIQUE all match. The spec diff adds only the 13 org_idx lines plus the §1
+Decision. Unit tests pin the compiled DDL, and integration tests exercise the behaviour that matters.

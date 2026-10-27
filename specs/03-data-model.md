@@ -19,6 +19,13 @@ this markdown file, extracts every ```sql block, and applies it to a scratch dat
 - JSON: `jsonb`, validated in Python by Pydantic models named in comments.
 - Row-Level Security: enabled on every table with `org_id` (§6).
 
+> Decision (2026-10-27): the `org_id` index rule above is binding for every tenant table. §5 originally left 13
+> tables without one (voice_samples, voice_ratings, kb_documents, kb_chunks, pathway_unit_tests, pathway_test_runs,
+> persona_versions, agent_versions, experiments, experiment_arms, citation_schemas, eval_setups,
+> eval_setup_versions); each now has `CREATE INDEX <table>_org_idx ON <table>(org_id)` because the RLS predicate
+> `org_id = app.org_id` and the org-scoped list endpoints filter on it. A UNIQUE constraint that starts with
+> `org_id` (tools, dispositions) satisfies the rule.
+
 ## 2. Extensions, roles, helper functions
 
 ```sql
@@ -367,6 +374,7 @@ CREATE TABLE voice_samples (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX voice_samples_voice_idx ON voice_samples(voice_id);
+CREATE INDEX voice_samples_org_idx ON voice_samples(org_id);
 
 CREATE TABLE voice_ratings (
   voice_id   uuid NOT NULL REFERENCES voices(id) ON DELETE CASCADE,
@@ -377,6 +385,7 @@ CREATE TABLE voice_ratings (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (voice_id, user_id)
 );
+CREATE INDEX voice_ratings_org_idx ON voice_ratings(org_id);
 
 CREATE TABLE tools (
   id            uuid PRIMARY KEY,                     -- public "TL-<uuid>"
@@ -436,6 +445,7 @@ CREATE TABLE kb_documents (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX kb_documents_kb_idx ON kb_documents(kb_id);
+CREATE INDEX kb_documents_org_idx ON kb_documents(org_id);
 
 CREATE TABLE kb_chunks (
   id          uuid PRIMARY KEY,
@@ -456,6 +466,7 @@ CREATE TABLE kb_chunks (
 CREATE INDEX kb_chunks_kb_idx ON kb_chunks(kb_id);
 CREATE INDEX kb_chunks_embedding_hnsw ON kb_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX kb_chunks_tsv_idx ON kb_chunks USING gin(tsv);
+CREATE INDEX kb_chunks_org_idx ON kb_chunks(org_id);
 
 CREATE TABLE pathway_folders (
   id         uuid PRIMARY KEY,
@@ -517,6 +528,7 @@ CREATE TABLE pathway_unit_tests (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX pathway_unit_tests_pathway_idx ON pathway_unit_tests(pathway_id);
+CREATE INDEX pathway_unit_tests_org_idx ON pathway_unit_tests(org_id);
 
 CREATE TABLE pathway_test_runs (
   id              uuid PRIMARY KEY,
@@ -532,6 +544,7 @@ CREATE TABLE pathway_test_runs (
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX pathway_test_runs_pathway_idx ON pathway_test_runs(pathway_id, created_at DESC);
+CREATE INDEX pathway_test_runs_org_idx ON pathway_test_runs(org_id);
 
 CREATE TABLE personas (
   id                 uuid PRIMARY KEY,
@@ -559,6 +572,7 @@ CREATE TABLE persona_versions (
   updated_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (persona_id, version_number)
 );
+CREATE INDEX persona_versions_org_idx ON persona_versions(org_id);
 
 CREATE TABLE agents (
   id            uuid PRIMARY KEY,
@@ -588,6 +602,7 @@ CREATE TABLE agent_versions (
   UNIQUE (agent_id, semver)
 );
 CREATE INDEX agent_versions_agent_branch_idx ON agent_versions(agent_id, branch, created_at DESC);
+CREATE INDEX agent_versions_org_idx ON agent_versions(org_id);
 
 CREATE TABLE experiments (
   id           uuid PRIMARY KEY,
@@ -603,6 +618,7 @@ CREATE TABLE experiments (
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX experiments_one_running_per_agent ON experiments(agent_id) WHERE status = 'running';
+CREATE INDEX experiments_org_idx ON experiments(org_id);
 
 CREATE TABLE experiment_arms (
   id            uuid PRIMARY KEY,
@@ -614,6 +630,7 @@ CREATE TABLE experiment_arms (
   created_at    timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX experiment_arms_org_idx ON experiment_arms(org_id);
 
 CREATE TABLE dispositions (
   id          uuid PRIMARY KEY,
@@ -634,6 +651,7 @@ CREATE TABLE citation_schemas (
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX citation_schemas_org_idx ON citation_schemas(org_id);
 
 CREATE TABLE eval_setups (                            -- "workbench setups"
   id          uuid PRIMARY KEY,
@@ -644,6 +662,7 @@ CREATE TABLE eval_setups (                            -- "workbench setups"
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX eval_setups_org_idx ON eval_setups(org_id);
 
 CREATE TABLE eval_setup_versions (
   id            uuid PRIMARY KEY,
@@ -656,6 +675,7 @@ CREATE TABLE eval_setup_versions (
   updated_at    timestamptz NOT NULL DEFAULT now(),
   UNIQUE (eval_setup_id, version_number)
 );
+CREATE INDEX eval_setup_versions_org_idx ON eval_setup_versions(org_id);
 
 CREATE TABLE widgets (
   id                 uuid PRIMARY KEY,
