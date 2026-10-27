@@ -6,6 +6,14 @@
 
 ## Fixes
 
+### mem-1793117779-05cf
+> va_db assumes va_app/va_system via asyncpg connect_args server_settings={'role': ...} (startup parameter = session default). Never SET ROLE in a pool connect listener: it runs in an implicit txn and a rolled-back first txn (exception or engine.connect() reset-on-return) reverts to the login role => RLS bypass for superuser login
+<!-- tags: database, testing | created: 2026-10-27 -->
+
+### mem-1793117599-1425
+> Integration tests silently skipped on OrbStack (no DOCKER_HOST, socket at ~/.orbstack/run/docker.sock): docker_probe.docker_available() now uses testcontainers.core.docker_client.get_docker_host() (docker context aware). Use testcontainers.community.<name> imports; legacy testcontainers.redis/postgres raise DeprecationWarning (error under filterwarnings)
+<!-- tags: testing, docker | created: 2026-10-27 -->
+
 ### mem-1792988928-d413
 > Exit-gate clean clones must live under /Users (Docker Desktop cannot bind-mount from /var/tmp: collector.yaml 'not a directory'); compose project name is fixed 'voiceagents' so a clone's make up replaces the main stack - make down/up from main repo after. uv run --no-project --python 3.12 prepends /opt/homebrew/bin to PATH, shadowing nvm node 22 with brew node 26
 <!-- tags: tooling, docker, ci | created: 2026-10-26 -->

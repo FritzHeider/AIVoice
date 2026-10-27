@@ -5,22 +5,22 @@
 > `make check` has no script yet. The tasks below execute the named phase-00 tasks exactly as specified in
 > `plan/phase-00.md` (same deliverables and acceptance). Completing one ticks it here AND ticks the phase-00 task.
 
-- [ ] P01-T00a Prerequisite: execute P00-T05 (`va_common` core: settings, clock, ids, json, errors)
+- [x] P01-T00a Prerequisite: execute P00-T05 (`va_common` core: settings, clock, ids, json, errors) — satisfied by P00-T05 (ticked in plan/phase-00.md; va_common settings/time/ids/json/errors present)
   - Spec refs: specs/02-repo-layout-and-conventions.md (Python conventions); specs/31-error-catalog.md (all)
   - Depends on: P00-T01
   - Deliverables and acceptance: as P00-T05 in plan/phase-00.md
 
-- [ ] P01-T00b Prerequisite: execute P00-T08 (`va_common` infrastructure helpers)
+- [x] P01-T00b Prerequisite: execute P00-T08 (`va_common` infrastructure helpers) — satisfied by P00-T08 (ticked in plan/phase-00.md; va_common redis/http/tracing/metrics/observability present)
   - Spec refs: specs/02-repo-layout-and-conventions.md (Toolchain versions); specs/27-observability.md
   - Depends on: P01-T00a
   - Deliverables and acceptance: as P00-T08 in plan/phase-00.md
 
-- [ ] P01-T00c Prerequisite: execute P00-T03 (placeholder detector gate, required by `make check`)
+- [x] P01-T00c Prerequisite: execute P00-T03 (placeholder detector gate, required by `make check`) — satisfied by P00-T03 (ticked in plan/phase-00.md; scripts/check_no_placeholders.py + make placeholders)
   - Spec refs: specs/02-repo-layout-and-conventions.md (Quality gates)
   - Depends on: P00-T01
   - Deliverables and acceptance: as P00-T03 in plan/phase-00.md
 
-- [ ] P01-T01 Engine, sessions, base model
+- [x] P01-T01 Engine, sessions, base model — va_db engine (role via asyncpg server_settings), tenant_session/system_session, Base + mixins; 15 pgvector/pg16 integration tests incl. role-survives-rollback regressions; make test 1154 passed, va_db 100 % coverage
   - Spec refs: specs/03-data-model.md (Conventions, Extensions roles helper functions, Triggers and RLS)
   - Depends on: P00-T05, P00-T08
   - Deliverables: `va_db.engine.create_engine(settings, role)`, `tenant_session(org_id)` (sets `app.org_id` with `set_config(..., true)` inside a transaction), `system_session()`, `Base`, `IdMixin`, `TimestampMixin`, `SoftDeleteMixin`

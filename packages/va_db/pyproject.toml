@@ -1,0 +1,17 @@
+[project]
+name = "va-db"
+version = "0.1.0"
+description = "VoiceAgents Postgres layer: role-assuming engines, tenant/system sessions, declarative base and mixins"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "asyncpg>=0.32.0",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }

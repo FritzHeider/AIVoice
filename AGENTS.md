@@ -127,7 +127,7 @@ Grafana 3001
   `build_metrics(service, new_registry(process_collectors=False))`, never the prometheus_client global `REGISTRY`.
   prometheus_client 0.26 exposes `# TYPE <name>_total counter` with the full counter name.
 - 2026-10-25 (P00-T08): Docker-dependent tests are `@pytest.mark.integration` and skip when the daemon socket is
-  unreachable; probe it with a plain socket (`test_redis_integration._docker_available`): `docker.from_env()`
+  unreachable; probe it with `docker_probe.docker_available()` (`packages/va_common/tests`): `docker.from_env()`
   leaks a socket on failure and `filterwarnings=error` turns the ResourceWarning into a session error.
 - 2026-10-25 (P00-T09): `make up` runs `scripts/dev_up.sh` with `PROFILE ?= infra`; profiles are comma-separated
   (`make up PROFILE=infra,observability` adds Jaeger 16686, Prometheus, Grafana; `observability` alone does not start
@@ -232,3 +232,17 @@ Grafana 3001
 - 2026-10-25 (P00-FIX-1): exit-gate clean clones go under `/Users/...`: Docker Desktop cannot bind-mount from
   `/var/tmp` clones (collector config "not a directory"). The compose project name is fixed (`voiceagents`), so a
   clone's `make up` replaces the main stack; run `make down` there and `make up` from the main repo afterwards.
+- 2026-10-27 (P01-T01): `docker_probe.docker_available()` resolves the daemon like testcontainers does (properties
+  file, `DOCKER_HOST`, then the active docker context, e.g. OrbStack `~/.orbstack/run/docker.sock`). Before this,
+  integration tests silently skipped on OrbStack machines without `DOCKER_HOST`. Import containers from
+  `testcontainers.community.<name>` (`testcontainers.redis`/`.postgres` emit a DeprecationWarning, an error here).
+- 2026-10-27 (P01-T01): DB access: `va_db.Database.from_settings(settings)` builds a `va_app` and a `va_system`
+  engine (one `DATABASE_URL`; the role is the asyncpg `server_settings={"role": ...}` startup parameter;
+  specs/03 §2 Decision). Never assume a role with `SET ROLE` from a pool `"connect"` listener: it runs in an
+  implicit transaction, and a rolled-back first transaction (exception or pool reset) silently reverts the
+  connection to the login role, which bypasses RLS for a superuser/owner login. Services call
+  `configure_database(db)` at startup and `await db.dispose()` on exit; code uses
+  `va_db.session.tenant_session(org_id)` (transaction + `set_config('app.org_id', ..., true)`) or
+  `system_session()` (specs/03 §2 repositories only). Postgres integration tests use
+  `pg_container.running_postgres()` (`packages/va_db/tests/support`, `pgvector/pgvector:pg16`, spec roles + an
+  `rls_probe` table).

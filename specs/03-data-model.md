@@ -41,6 +41,18 @@ Roles (created by the migration when absent; passwords come from the deployment,
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
   `TelnyxEventRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
+> Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
+> role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
+> `server_settings`, `DbRole.APP`, `DbRole.SYSTEM`); `role=None` keeps the login role and is used only by migrations
+> and test setup. A startup parameter is the session default for `role`, so no transaction rollback, pool
+> reset-on-return, or `RESET ROLE` can revert a pooled connection to the login role (a `SET ROLE` issued after
+> connecting would be undone if the connection's first transaction rolled back). As `va_app`, RLS applies even when
+> the login role is a superuser or the table owner, because `current_user` is `va_app` and every tenant table has
+> `FORCE ROW LEVEL SECURITY`. Consequently the `0001_initial`
+> migration must `GRANT va_app, va_system TO CURRENT_USER` (Postgres 16 requires explicit membership with the `SET`
+> option for a non-superuser login) and grant table privileges to both roles. `va_system` is created with
+> `BYPASSRLS`; neither role gets a password from the migration.
+
 ## 3. Tenancy, identity, access
 
 ```sql

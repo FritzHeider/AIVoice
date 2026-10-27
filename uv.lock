@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "va-api",
     "va-common",
+    "va-db",
     "va-events-sink",
     "va-media-worker",
     "va-sim",
@@ -2230,6 +2231,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-db"
+version = "0.1.0"
+source = { editable = "packages/va_db" }
+dependencies = [
+    { name = "asyncpg" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
 name = "va-events-sink"
 version = "0.1.0"
 source = { editable = "apps/events_sink" }
@@ -2374,6 +2392,7 @@ dev = [
     { name = "types-pyyaml" },
     { name = "va-api" },
     { name = "va-common" },
+    { name = "va-db" },
     { name = "va-events-sink" },
     { name = "va-media-worker" },
     { name = "va-sim" },
@@ -2410,6 +2429,7 @@ dev = [
     { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },
     { name = "va-api", editable = "apps/api" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-media-worker", editable = "apps/media_worker" },
     { name = "va-sim", editable = "apps/sim" },
