@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 from model_introspection import DIALECT
-from sqlalchemy import Boolean, Column, Integer, Text
+from sqlalchemy import BigInteger, Boolean, Column, Integer, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from va_db.models._columns import (
@@ -12,6 +12,7 @@ from va_db.models._columns import (
     int_column,
     jsonb_column,
     jsonb_default,
+    micros_column,
     text_array_column,
     text_column,
 )
@@ -36,6 +37,8 @@ def test_builders_produce_not_null_columns_with_spec_defaults() -> None:
         "langs": text_array_column("{en}").column,
         "payload": jsonb_column().column,
         "settings": jsonb_column("[]").column,
+        "price": micros_column(0).column,
+        "amount": micros_column().column,
     }
     assert all(column.nullable is False for column in columns.values())
     assert [type(column.type) for column in columns.values()] == [
@@ -46,8 +49,11 @@ def test_builders_produce_not_null_columns_with_spec_defaults() -> None:
         ARRAY,
         JSONB,
         JSONB,
+        BigInteger,
+        BigInteger,
     ]
-    defaults = {name: _default_sql(column) for name, column in columns.items() if name != "payload"}
+    without_default = {"payload", "amount"}
+    defaults = {name: _default_sql(column) for name, column in columns.items() if name not in without_default}
     assert defaults == {
         "on": "true",
         "off": "false",
@@ -55,8 +61,9 @@ def test_builders_produce_not_null_columns_with_spec_defaults() -> None:
         "label": "'main'",
         "langs": "'{en}'",
         "settings": "'[]'::jsonb",
+        "price": "0",
     }
-    assert columns["payload"].server_default is None
+    assert all(columns[name].server_default is None for name in without_default)
 
 
 def test_text_column_rejects_quotes() -> None:

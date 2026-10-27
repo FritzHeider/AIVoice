@@ -296,3 +296,15 @@ Grafana 3001
   column strings, `?` = nullable), `assert_enum_check_mirrors`, and `leading_columns` (the org-index rule).
   `batch_items.call_id` has no FK on purpose: `calls.batch_item_id` points the other way, and a cycle would break
   create_all/drop ordering.
+- 2026-10-27 (P01-T06): model modules by specs/03 section: `tenancy` §3, `telephony` §4, `library`/`pathways`/
+  `agents` §5, `calls` §6, `memory` §7, `messaging` §8, `billing` §9 (webhooks + billing), `security` §9a. Model
+  modules reference other tables only through string FKs and may import only shared constants/Literals from a
+  sibling (`EMBEDDING_DIMENSIONS`, `VersionStatus`), never a model class; `tests/test_model_imports.py` enforces
+  an acyclic va_db import graph, `configure_mappers()`, and that the `CREATE TABLE` names of specs/03 §3–§9a equal
+  `Base.metadata.tables`. System-scope tables (`plans`, `stripe_events`) skip `IdMixin` and declare
+  `id: Mapped[str] = mapped_column(Text, primary_key=True)` first (no org_id, no RLS). An FK with no `ON DELETE` in
+  the spec is `ForeignKey("plans.id")` (never `ondelete="NO ACTION"`, which renders explicitly). Micro-dollar
+  columns use `_columns.micros_column(default=None)` (bigint NOT NULL). Org-index tests use
+  `model_introspection.assert_org_indexed(table, nullable=...)` and `org_index_ddl(tables)`. Re-inserting a
+  duplicate text-PK row in a test needs `session.expunge(original)` first (SQLAlchemy warns on the identity
+  conflict, an error under filterwarnings).

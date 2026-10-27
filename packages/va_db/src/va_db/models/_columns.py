@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, TextClause, Uuid, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Text, TextClause, Uuid, func, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import MappedColumn, mapped_column
 from sqlalchemy.sql.functions import Function
@@ -15,6 +15,7 @@ __all__ = [
     "int_column",
     "jsonb_column",
     "jsonb_default",
+    "micros_column",
     "org_fk",
     "org_id_column",
     "platform_scope",
@@ -56,6 +57,13 @@ def int_column(default: int) -> MappedColumn[Any]:
     return mapped_column(Integer, nullable=False, server_default=text(str(default)))
 
 
+def micros_column(default: int | None = None) -> MappedColumn[Any]:
+    """``bigint NOT NULL`` micro-dollars, with ``DEFAULT <default>`` when ``default`` is given."""
+    if default is None:
+        return mapped_column(BigInteger, nullable=False)
+    return mapped_column(BigInteger, nullable=False, server_default=text(str(default)))
+
+
 def text_column(default: str) -> MappedColumn[Any]:
     """``text NOT NULL DEFAULT '<default>'``."""
     if "'" in default:
@@ -86,7 +94,8 @@ def jsonb_column(default: str | None = None) -> MappedColumn[Any]:
 
 
 def platform_scope(org_id: Any) -> Function[Any]:
-    """``coalesce(org_id, '00000000-0000-0000-0000-000000000000'::uuid)``: the scope key of uniqueness indexes
-    on tables whose ``org_id`` NULL rows are platform-wide, so platform rows share the nil UUID as one scope.
+    """``coalesce(<column>, '00000000-0000-0000-0000-000000000000'::uuid)``: the scope key of uniqueness
+    indexes on nullable scope columns. NULL means the shared scope (platform rows for voices/DNC, org-wide
+    memory for memories), so all NULL rows share the nil UUID as one scope.
     """
     return func.coalesce(org_id, text("'00000000-0000-0000-0000-000000000000'::uuid"))

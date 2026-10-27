@@ -13,7 +13,6 @@ from typing import Any, Literal, get_args
 
 from sqlalchemy import (
     REAL,
-    BigInteger,
     Boolean,
     CheckConstraint,
     Index,
@@ -39,6 +38,7 @@ from va_db.models._columns import (
     int_column,
     jsonb_column,
     jsonb_default,
+    micros_column,
     org_id_column,
     platform_scope,
     text_column,
@@ -299,7 +299,7 @@ class Call(IdMixin, TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     disposition_tag: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
-    price_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    price_micros: Mapped[int] = micros_column(0)
     credit_hold_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))
     workflow_id: Mapped[str | None] = mapped_column(Text)
     memory_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True))

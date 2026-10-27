@@ -30,6 +30,12 @@ this markdown file, extracts every ```sql block, and applies it to a scratch dat
 > scan), batch_items, call_legs, call_turns, call_events, call_analyses, citations, eval_runs, guard_rail_events, and
 > dnc_entries (nullable `org_id`, like voices) each get `CREATE INDEX <table>_org_idx ON <table>(org_id)`. On the
 > partitioned call_events table it is a partitioned index that every monthly partition inherits.
+>
+> §7–§9a likewise: memory_changes, messages, ten_dlc_brands, ten_dlc_campaigns, org_subscriptions (whose only
+> `org_id`-leading index is the partial `org_subscriptions_active_uq`), and org_data_keys (likewise partial
+> `org_data_keys_active_uq`) each get `CREATE INDEX <table>_org_idx ON <table>(org_id)`. The other §7–§9a tenant
+> tables already have one (memories and org_llm_providers through their non-partial uniques). plans and
+> stripe_events are system scope: text primary keys, no `org_id`, no RLS.
 
 ## 2. Extensions, roles, helper functions
 
@@ -998,6 +1004,7 @@ CREATE TABLE memory_changes (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX memory_changes_memory_idx ON memory_changes(memory_id, created_at DESC);
+CREATE INDEX memory_changes_org_idx ON memory_changes(org_id);
 ```
 
 ## 8. Messaging and widget conversations
@@ -1052,6 +1059,7 @@ CREATE TABLE messages (
   updated_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX messages_conversation_idx ON messages(conversation_id, created_at);
+CREATE INDEX messages_org_idx ON messages(org_id);
 
 CREATE TABLE ten_dlc_brands (
   id              uuid PRIMARY KEY,
@@ -1063,6 +1071,7 @@ CREATE TABLE ten_dlc_brands (
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX ten_dlc_brands_org_idx ON ten_dlc_brands(org_id);
 
 CREATE TABLE ten_dlc_campaigns (
   id                 uuid PRIMARY KEY,
@@ -1076,6 +1085,7 @@ CREATE TABLE ten_dlc_campaigns (
   created_at         timestamptz NOT NULL DEFAULT now(),
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX ten_dlc_campaigns_org_idx ON ten_dlc_campaigns(org_id);
 ```
 
 ## 9. Webhooks and billing
@@ -1154,6 +1164,7 @@ CREATE TABLE org_subscriptions (
   updated_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX org_subscriptions_active_uq ON org_subscriptions(org_id) WHERE status IN ('active','past_due','trialing');
+CREATE INDEX org_subscriptions_org_idx ON org_subscriptions(org_id);
 
 CREATE TABLE credit_ledger (                           -- append-only
   id             uuid PRIMARY KEY,
@@ -1293,6 +1304,7 @@ CREATE TABLE org_data_keys (                          -- per-org wrapped data ke
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX org_data_keys_active_uq ON org_data_keys(org_id) WHERE status = 'active';
+CREATE INDEX org_data_keys_org_idx ON org_data_keys(org_id);
 ```
 
 ## 10. Triggers and RLS

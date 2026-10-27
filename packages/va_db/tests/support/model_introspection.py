@@ -27,16 +27,21 @@ from va_db.base import Base
 __all__ = [
     "DIALECT",
     "assert_enum_check_mirrors",
+    "assert_enum_checks_mirror",
+    "assert_org_indexed",
     "check_names",
     "columns",
     "computed_columns",
     "constraint",
+    "enum_check_names",
     "enum_check_values",
+    "expected_foreign_keys",
     "foreign_keys",
     "get_table",
     "index_ddl",
     "leading_columns",
     "naive_timestamps",
+    "org_index_ddl",
     "server_defaults",
     "spec_column_mismatches",
     "text_array_columns",
@@ -178,3 +183,35 @@ def spec_column_mismatches(spec_columns: Mapping[str, str]) -> dict[str, list[tu
 def assert_enum_check_mirrors(table: str, column: str, literal: Any, expected: tuple[str, ...]) -> None:
     """``<table>_<column>_check`` lists exactly the ``Literal`` values, in the spec's order."""
     assert enum_check_values(table, column) == get_args(literal) == expected
+
+
+def assert_org_indexed(table: str, *, nullable: bool = False) -> None:
+    """specs/03 §1: ``org_id`` (NOT NULL unless ``nullable``) leads an index or UNIQUE constraint."""
+    assert get_table(table).c.org_id.nullable is nullable
+    assert "org_id" in leading_columns(table)
+
+
+def org_index_ddl(tables: Iterable[str]) -> set[str]:
+    """``CREATE INDEX <table>_org_idx ON <table> (org_id)`` added by the specs/03 §1 decision."""
+    return {f"CREATE INDEX {table}_org_idx ON {table} (org_id)" for table in tables}
+
+
+def enum_check_names(enum_columns: Iterable[tuple[str, str]]) -> set[str]:
+    """``<table>_<column>_check`` for every ``(table, column)`` enumeration."""
+    return {f"{table}_{column}_check" for table, column in enum_columns}
+
+
+def expected_foreign_keys(
+    org_tables: Iterable[str], others: Iterable[tuple[str, str, str, str | None]]
+) -> set[tuple[str, str, str, str, str | None]]:
+    """The :func:`foreign_keys` set for ``org_id`` CASCADE on ``org_tables`` plus ``(table, column, target,
+    ondelete)`` ``others``, with conventional ``<table>_<column>_fkey`` names.
+    """
+    org_fks = {(table, "org_id", "orgs.id", "CASCADE") for table in org_tables}
+    return {(f"{t}_{c}_fkey", t, c, target, ondelete) for t, c, target, ondelete in {*org_fks, *others}}
+
+
+def assert_enum_checks_mirror(enums: Mapping[tuple[str, str], tuple[Any, tuple[str, ...]]]) -> None:
+    """:func:`assert_enum_check_mirrors` for every ``(table, column) -> (Literal, spec values)`` entry."""
+    for (table, column), (literal, expected) in enums.items():
+        assert_enum_check_mirrors(table, column, literal, expected)

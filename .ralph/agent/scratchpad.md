@@ -762,3 +762,187 @@ calls_external_id_check, FK ondelete (self FK parent_call_id SET NULL; eval_runs
 FK-less columns (batch_items.call_id, credit_hold_id, memory_id, call_events org_id/call_id, dnc call_id), call_events
 composite PK + RANGE partitioning, partial/DESC/expression indexes. The spec diff only adds the 10 org_idx lines and
 the "§6 likewise" Decision paragraph. The platform_scope refactor leaves the voices DDL unchanged (pinned by tests).
+
+## Plan P01-T06 — Memory, messaging, webhook, billing, §9a models (2026-10-27)
+Spec: specs/03 §7, §8, §9, §9a (20 tables). Depends on T05 (ticked). Same conventions as T02–T05: `_columns`
+builders, `check_in(get_args(Literal))`, spec-named indexes, `metadata_` mapping, tests via model_introspection /
+model_factories, jscpd 0 clones.
+
+### Spec decision (extend the §1 Decision in the same commit)
+Tables in §7–§9a with no plain index leading with org_id: memory_changes, messages, ten_dlc_brands,
+ten_dlc_campaigns, org_subscriptions (only a *partial* unique), org_data_keys (only a partial unique). Add
+`CREATE INDEX <table>_org_idx ON <table>(org_id);` after each table's indexes in the SQL blocks, and append a third
+paragraph to the §1 Decision ("§7–§9a likewise: ..."). Already satisfied: memories (non-partial unique starting
+org_id), conversations (lookup idx), webhook_endpoints, webhook_deliveries, credit_ledger, credit_holds,
+usage_events, invoices, org_llm_providers (org_id UNIQUE), dnc_imports, erasure_requests, org_secrets
+(UNIQUE(org_id,name)). plans and stripe_events are system scope (no org_id, no RLS) — say so in the paragraph.
+
+### Files (new model modules import only va_db.base, _checks, _columns, and library.EMBEDDING_DIMENSIONS — no
+### sibling-model imports beyond that; FKs are strings)
+1. `packages/va_db/src/va_db/models/memory.py` (§7):
+   - `MemoryChangeType` Literal ('summary','fact_set','fact_delete','open_item_add','open_item_close','reset').
+   - `Memory` (memories): org_id; contact_id fk contacts CASCADE NN; persona_id fk personas CASCADE NULL (comment:
+     NULL = org-wide memory); summary text_column(''); facts jsonb '{}'; open_items '[]'; recent_messages '[]';
+     enabled bool true; summary_embedding `Vector(EMBEDDING_DIMENSIONS)` NULL `Mapped[list[float] | None]`
+     (import the constant from va_db.models.library). Index `memories_contact_persona_uq` unique on
+     ("org_id","contact_id", platform_scope(persona_id)) — reuse `_columns.platform_scope` and widen its docstring to
+     "NULL means the shared scope (platform rows for voices/DNC, org-wide memory for memories)"; do NOT rename
+     (DDL pinned by earlier tests). Docstring names the facts/open_items/recent_messages shapes per the spec comments.
+   - `MemoryChange` (memory_changes): memory_id fk memories CASCADE NN; call_id, conversation_id plain Uuid NULL
+     (**no FK**, spec has none); change_type check (no default); before/after JSONB NULL `Mapped[Any | None]`
+     (memory fix: not Mapped[Any]). Indexes: module-level `memory_changes_memory_idx (memory_id, created_at DESC)`
+     with `.desc()`; memory_changes_org_idx.
+2. `packages/va_db/src/va_db/models/messaging.py` (§8):
+   - Literals `ConversationChannel` (sms,mms,widget,imessage,rcs), `ConversationRunnerType` (objective,pathway,
+     persona,agent — distinct from calls.RunnerType, say why in a comment), `ConversationStatus` (active,
+     human_takeover,closed,timed_out), `MessageDirection`, `MessageRole` (user,assistant,human_agent,system),
+     `MessageStatus` (8 values in spec order), `TenDlcBrandStatus`, `TenDlcCampaignStatus`.
+   - `Conversation`: columns in spec order; SET NULL FKs widget, contact, pathway, persona, agent; engine_state/
+     request_data '{}'; `metadata_` → "metadata" '{}' (same comment as Call); status text_column('active')+check;
+     time_out_minutes int_column(1440); last_message_at tz NULL; webhook/summary/disposition_tag Text NULL.
+     Indexes conversations_lookup_idx (org_id, channel, agent_number, user_number, status) and
+     conversations_widget_idx (widget_id, widget_visitor_id).
+   - `Message`: conversation_id fk CASCADE NN; body NN; media_urls text_array_column('{}'); telnyx_message_id Text
+     unique (→ messages_telnyx_message_id_key); status text_column('queued')+check; error JSONB NULL Mapped[Any|None];
+     segments int_column(1); price_micros bigint default 0; node_id NULL. Indexes messages_conversation_idx
+     (conversation_id, created_at), messages_org_idx.
+   - `TenDlcBrand` (ten_dlc_brands): telnyx_brand_id unique; payload jsonb NN no default (comment 21-messaging §6);
+     status check no default; status_detail NULL; org idx.
+   - `TenDlcCampaign` (ten_dlc_campaigns): brand_id fk ten_dlc_brands CASCADE NN; telnyx_campaign_id unique;
+     use_case NN; payload NN; status check; status_detail; org idx.
+3. `packages/va_db/src/va_db/models/billing.py` (§9 — webhooks and billing as the spec groups them):
+   - Literals `WebhookFormat` (bland,envelope), `WebhookDeliveryStatus` (pending,delivering,succeeded,failed,dead),
+     `SubscriptionStatus` (active,past_due,canceled,trialing), `CreditEntryType` (11 values), `CreditHoldStatus`
+     (held,captured,released), `UsageMeter` (13 values), `InvoiceStatus` (draft,finalized,paid,void).
+   - `WebhookEndpoint`: url NN; description text_column(''); event_types text_array_column('{*}'); enabled bool
+     true; phi_allowed bool false; webhook_endpoints_org_idx (org_id).
+   - `WebhookDelivery`: event_id/event_type/url NN; endpoint_id fk SET NULL; payload jsonb NN; format
+     text_column('bland')+check; status text_column('pending')+check; attempts SmallInteger NN default 0;
+     next_attempt_at tz NN server_default now(); last_status_code/last_response_ms Integer NULL; last_error NULL;
+     call_id/batch_id/conversation_id Uuid NULL **no FK**; delivered_at tz NULL. UniqueConstraint("event_id","url")
+     → webhook_deliveries_event_id_url_key. Indexes: `webhook_deliveries_due_idx (next_attempt_at)` partial
+     `postgresql_where=text("status IN ('pending', 'delivering')")`; module-level
+     `webhook_deliveries_org_idx (org_id, created_at DESC)`.
+   - `Plan` (plans): **no IdMixin**; `id: Mapped[str] = mapped_column(Text, primary_key=True)` declared first; name
+     NN; six bigint NN rate columns with no default; tts_rate_micros_per_1k_chars bigint default 0; four Integer
+     NULL caps (comment: NULL = unlimited); features text_array '{}'; stripe_price_id NULL; is_public bool true;
+     TimestampMixin. No org_id.
+   - `OrgSubscription`: plan_id `mapped_column(Text, ForeignKey("plans.id"), nullable=False)` (no ondelete →
+     NO ACTION; FK test asserts ondelete None); status check no default; stripe_subscription_id unique;
+     current_period_start/end tz NN; cancel_at_period_end bool false. Indexes `org_subscriptions_active_uq` unique on
+     org_id WHERE status IN ('active', 'past_due', 'trialing'); org_subscriptions_org_idx.
+   - `CreditLedger` (credit_ledger): entry_type check; amount_micros/balance_after_micros bigint NN (no default);
+     reference_type/reference_id NULL; description ''; idempotency_key NN; UNIQUE(org_id, idempotency_key) →
+     credit_ledger_org_id_idempotency_key_key; module-level credit_ledger_org_created_idx (org_id, created_at DESC).
+     Docstring: append-only.
+   - `CreditHold` (credit_holds): reference_type/reference_id NN; amount_micros NN; status check; expires_at tz NN;
+     credit_holds_org_status_idx (org_id, status).
+   - `UsageEvent` (usage_events): meter check; quantity `Numeric(18, 6)` NN Mapped[Decimal]; unit_price_micros,
+     amount_micros NN; cost_micros default 0; reference_type/reference_id NN; idempotency_key NN; occurred_at tz NN;
+     UNIQUE(org_id, idempotency_key); module-level usage_events_org_time_idx (org_id, occurred_at DESC).
+   - `Invoice` (invoices): period_start/end tz NN; subtotal/credits_applied/total micros NN; line_items jsonb NN no
+     default; status check; stripe_invoice_id unique; pdf_s3_key NULL; module-level invoices_org_idx
+     (org_id, period_start DESC).
+   - `StripeEvent` (stripe_events): **no IdMixin**, `id` Text PK (Stripe event id); `type` Text NN (attribute name is
+     fine); payload jsonb NN; processed_at tz NULL; TimestampMixin. No org_id.
+   - If the "bigint NOT NULL DEFAULT 0" mapped_column repeats (calls.price_micros, messages.price_micros,
+     usage_events.cost_micros, plans.tts_rate...) and jscpd flags it, add `_columns.micros_column(default: int |
+     None = None)` (bigint NOT NULL, optional DEFAULT) and use it in calls.py too (DDL unchanged, pinned by tests).
+4. `packages/va_db/src/va_db/models/security.py` (§9a):
+   - Literals `JobStatus` (queued,running,completed,failed — shared by dnc_imports and erasure_requests),
+     `OrgDataKeyStatus` (active,retired).
+   - `OrgLlmProvider`: `org_id` = `mapped_column(Uuid, org_fk(), nullable=False, unique=True)` →
+     org_llm_providers_org_id_key; base_url NN; api_key_enc LargeBinary NN; models jsonb NN (docstring:
+     {"dialogue","router","analysis","fallback"}, 10-llm-gateway); supports_tool_choice bool true; baa_covered bool
+     false; last_probe_at tz NULL; last_probe_error NULL.
+   - `DncImport`: status check; s3_key NN; total/inserted/invalid/duplicates Integer NULL; error NULL; module-level
+     dnc_imports_org_idx (org_id, created_at DESC).
+   - `ErasureRequest`: selector jsonb NN; status check; result JSONB NULL Mapped[Any|None]; module-level
+     erasure_requests_org_idx (org_id, created_at DESC).
+   - `OrgSecret`: name NN with `CheckConstraint("name ~ '^[A-Z][A-Z0-9_]{0,63}$'", name="name_check")`
+     (→ org_secrets_name_check); value_enc bytea NN; UNIQUE(org_id, name) → org_secrets_org_id_name_key.
+   - `OrgDataKey`: kek_id NN; encrypted_data_key bytea NN; status check; `org_data_keys_active_uq` unique on org_id
+     WHERE status = 'active'; org_data_keys_org_idx.
+   - Module docstring: envelope encryption (28-security), {{secrets.NAME}} (04 §7).
+5. `va_db/models/__init__.py`: re-export the 20 models and new Literals, `__all__` sorted.
+6. specs/03: the 6 org_idx lines + §1 Decision paragraph.
+7. AGENTS.md: list the model modules by spec section; system-scope tables (plans, stripe_events) use text PKs and
+   no IdMixin; model modules must not import each other except for shared constants (import-graph test).
+
+### Tests
+- `tests/test_memory_messaging_models.py` (unit, §7+§8, 6 tables) and `tests/test_billing_models.py` (unit, §9+§9a,
+  14 tables). Each: tables registered; spec_column_mismatches == {}; assert_enum_check_mirrors for every enum
+  column; exact check_names set (incl. org_secrets_name_check sqltext); server_defaults map (incl. '{*}', 1440,
+  'bland', jsonb '{}'/'[]'); unique_and_pk set (plans/stripe_events PK = id Text; messages/ten_dlc/subscription/
+  invoice stripe ids; ledger/usage (org_id, idempotency_key); webhook (event_id,url); org_secrets; org_llm_providers
+  org_id); foreign_keys set incl. org_subscriptions.plan_id → plans.id ondelete None; **no-FK assertions** for
+  memory_changes.call_id/conversation_id, webhook_deliveries.call_id/batch_id/conversation_id; exact index_ddl
+  (partials, DESC, the memories coalesce expression, every Decision org_idx); every org table has a NOT NULL org_id
+  and "org_id" in leading_columns; plans/stripe_events have no org_id column; types (Vector(1024) on
+  summary_embedding, Numeric(18,6), SmallInteger attempts, LargeBinary *_enc, BigInteger micros, ARRAY(Text)
+  via text_array_columns); naive_timestamps == []; `Conversation.metadata_` maps to "metadata". If a §1-org-index
+  parametrized test would be cloned a third time, move it into model_introspection as
+  `assert_org_indexed(table, *, nullable=False)` and reuse it from test_call_models/test_agent_config_models.
+- `tests/test_model_imports.py` (acceptance "no cycles"): ast-parse every module under va_db (src), build the
+  intra-va_db import graph (from va_db.x import ...; resolve package `__init__`), assert acyclic via DFS
+  (graphlib.TopologicalSorter.static_order raising CycleError is the simplest), and `sqlalchemy.orm.configure_mappers()`
+  succeeds after `import va_db.models`. Assert every specs/03 §3–§9a table name is in Base.metadata.tables (parse
+  `CREATE TABLE (\w+)` from specs/03-data-model.md — gives T08 a head start; path via repo root relative to test).
+- `tests/test_memory_messaging_models_integration.py` and `tests/test_billing_models_integration.py`
+  (scratch_session; add `make_contact`, `make_conversation`, `make_plan` to model_factories if reused):
+  - defaults for each table (jsonb '{}'/'[]', bools, 1440, 'queued', '{*}', next_attempt_at populated, Decimal
+    quantity round-trip Decimal("1.500000")).
+  - enum checks accepted/rejected via assert_enum_check_enforced, parametrized over every enum column.
+  - `memories_contact_persona_uq`: two org-wide (NULL persona) memories for one contact fail; one per persona plus
+    one NULL pass; summary_embedding 1024-float round-trip.
+  - `org_subscriptions_active_uq`: second active/trialing fails; canceled + active ok.
+  - `org_data_keys_active_uq`: second active fails; retired + active ok.
+  - uniques: webhook (event_id,url); ledger and usage (org_id, idempotency_key) same key other org ok; org_secrets
+    (org_id,name); messages.telnyx_message_id; org_llm_providers one per org.
+  - `org_secrets_name_check`: 'API_KEY' ok, 'api_key', '1KEY', 65-char name rejected.
+  - plan FK: deleting a plan referenced by a subscription raises (NO ACTION); plan without org_id inserts with text id.
+  - delete paths: contact delete cascades memories → memory_changes; persona delete cascades persona memory;
+    conversation delete cascades messages; widget/contact/pathway/persona/agent delete nulls conversation FKs;
+    brand delete cascades campaigns; endpoint delete nulls webhook_deliveries.endpoint_id; org delete cascades
+    org_llm_providers/org_data_keys.
+  - bytea round-trip (OrgSecret.value_enc).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (0 skipped);
+`uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones); va_db coverage 100 %; pip-audit
+(no new deps).
+
+### Risks
+- `metadata` reserved → `metadata_`. `type` and `schema` attribute names are fine.
+- Partial-index WHERE text must be literal SQL (no colons) — fine; regex CHECK has none either.
+- Text-PK models without IdMixin: TimestampMixin columns must still sort last (match how tenancy/calls order).
+- plan FK without ondelete: ForeignKey("plans.id") — foreign_keys helper reports None; don't pass ondelete="NO ACTION"
+  (it would render explicitly and break T08 parity).
+- Vector import: Mapped[list[float] | None]; asyncpg needs pgvector codec as already set up for kb_chunks.
+- Unit test files ≤ ~500 lines each; split integration by area as listed.
+
+## Build P01-T06 (2026-10-27)
+New: va_db/models/memory.py (§7), messaging.py (§8), billing.py (§9), security.py (§9a): 20 tables, all
+Literals, spec-named indexes; models/__init__ re-exports (131 names). `_columns.micros_column(default=None)` added
+and used by calls.price_micros (DDL unchanged); `platform_scope` docstring widened (memories reuse it). specs/03:
+6 `<table>_org_idx` lines (memory_changes, messages, ten_dlc_brands, ten_dlc_campaigns, org_subscriptions,
+org_data_keys) + "§7–§9a likewise" paragraph in the §1 Decision. AGENTS.md P01-T06 entry.
+Tests: test_memory_messaging_models.py, test_billing_models.py (unit), *_integration.py for both (37 tests),
+test_model_imports.py (ast import graph acyclic via graphlib, configure_mappers, sibling model imports are
+constants/Literals only — agents imports pathways.VersionStatus so "no sibling imports" was too strict — and the
+specs/03 §3–§9a CREATE TABLE set == Base.metadata.tables exactly: 72 tables). model_introspection gained
+assert_org_indexed, org_index_ddl, enum_check_names, expected_foreign_keys, assert_enum_checks_mirror; call/agent
+config unit tests refactored to use them (jscpd 0 clones).
+Gates: make fmt 0, lint 0, typecheck 0 (180 files), placeholders 0 findings, make test 1563 passed (99.87 %,
+va_db 100 %), `pytest packages/va_db -m integration -rs` 151 passed / 0 skipped, radon A (1.11), jscpd 0 clones,
+pip-audit no known vulns. Note: the very first `make test` run of this iteration had 1 failed + 40 errors in va_db
+integration setup (output not kept); three later full runs were green — likely Docker contention right after my
+standalone integration runs; flag if it recurs.
+
+## Review P01-T06 (2026-10-27) — APPROVED
+Re-ran: make lint 0, typecheck 0 (180 files), placeholders 0 findings, make test 1563 passed / 0 skipped (99.87 %,
+va_db 100 %), jscpd 0 clones, radon A (1.11). Checked memory.py, messaging.py, billing.py, security.py column by
+column against specs/03 §7–§9a: types, nullability, defaults, CHECK lists in spec order, FK ondelete (plans FK
+NO ACTION, no-FK call/conversation/batch refs), unique names, partial/DESC/coalesce indexes, Decision org_idx lines.
+Tests cover defaults, enum enforcement, partial uniques, cascades/SET NULL, bytea/vector/numeric round-trips.
+Minor, not blocking: test_cycle_detection_reports_a_cycle exercises graphlib itself rather than va_db.

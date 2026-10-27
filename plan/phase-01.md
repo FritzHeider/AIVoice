@@ -50,7 +50,7 @@
   - Deliverables: `Contact`, `Batch`, `BatchItem`, `Call`, `CallLeg`, `CallTurn`, `CallEvent` (partitioned; model maps to parent table), `CallAnalysis`, `Citation`, `EvalRun`, `GuardRailEvent`, `DncEntry`
   - Acceptance: inserting a `CallEvent` lands in the correct monthly partition (integration test).
 
-- [ ] P01-T06 Memory, messaging, webhook, billing models
+- [x] P01-T06 Memory, messaging, webhook, billing models — 20 §7–§9a tables (memory, messaging, billing, security modules), org_idx Decision for 6 tables, import-graph/mapper/spec-table tests; make test 1563 passed (99.87 %, va_db 100 %), lint/typecheck/placeholders 0, jscpd 0 clones, radon A (1.11)
   - Spec refs: specs/03-data-model.md (Memory, Messaging and widget conversations, Webhooks and billing, Additional tables §9a)
   - Depends on: P01-T05
   - Deliverables: `Memory`, `MemoryChange`, `Conversation`, `Message`, `TenDlcBrand`, `TenDlcCampaign`, `WebhookEndpoint`, `WebhookDelivery`, `Plan`, `OrgSubscription`, `CreditLedger`, `CreditHold`, `UsageEvent`, `Invoice`, `StripeEvent`, plus the §9a tables (added by the Planner 2026-10-27; no other task maps them and 0001/parity need them): `OrgLlmProvider`, `DncImport`, `ErasureRequest`, `OrgSecret`, `OrgDataKey`

@@ -5,13 +5,15 @@ from typing import Any
 import pytest
 from model_introspection import (
     assert_enum_check_mirrors,
+    assert_org_indexed,
     check_names,
     constraint,
+    expected_foreign_keys,
     foreign_keys,
     get_table,
     index_ddl,
-    leading_columns,
     naive_timestamps,
+    org_index_ddl,
     server_defaults,
     spec_column_mismatches,
     unique_and_pk,
@@ -284,9 +286,9 @@ _OTHER_FKS = {
 
 
 def test_foreign_keys_ondelete() -> None:
-    org_fks = {(table, "org_id", "orgs.id", "CASCADE") for table in _TABLES if table != "call_events"}
-    expected = {(f"{t}_{c}_fkey", t, c, target, ondelete) for t, c, target, ondelete in org_fks | _OTHER_FKS}
-    assert foreign_keys(_TABLES) == expected
+    assert foreign_keys(_TABLES) == expected_foreign_keys(
+        (table for table in _TABLES if table != "call_events"), _OTHER_FKS
+    )
 
 
 @pytest.mark.parametrize(
@@ -344,15 +346,13 @@ _DECISION_ORG_INDEXED = (
 
 
 def test_indexes() -> None:
-    decision = {f"CREATE INDEX {table}_org_idx ON {table} (org_id)" for table in _DECISION_ORG_INDEXED}
-    assert index_ddl(_TABLES) == _SPEC_INDEXES | decision
+    assert index_ddl(_TABLES) == _SPEC_INDEXES | org_index_ddl(_DECISION_ORG_INDEXED)
 
 
 @pytest.mark.parametrize("table", _TABLES)
 def test_every_table_has_an_org_id_leading_index(table: str) -> None:
     """specs/03 §1: an index that starts with ``org_id``; it is NOT NULL except for the platform DNC list."""
-    assert get_table(table).c.org_id.nullable is (table == "dnc_entries")
-    assert "org_id" in leading_columns(table)
+    assert_org_indexed(table, nullable=table == "dnc_entries")
 
 
 @pytest.mark.parametrize(

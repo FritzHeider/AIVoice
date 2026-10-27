@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793125348-d9c3
+> va_db model tests: shared helpers in model_introspection (assert_org_indexed, org_index_ddl, enum_check_names, expected_foreign_keys, assert_enum_checks_mirror) - use them instead of per-file parametrized copies, jscpd flags the 10-line windows
+<!-- tags: database, testing | created: 2026-10-27 -->
+
 ### mem-1793122444-3076
 > va_db partitioned tables (call_events): PrimaryKeyConstraint must include partition key; __table_args__ trailing dict {'postgresql_partition_by': 'RANGE (created_at)'}; server-default-only PK part (created_at) is filled by asyncpg RETURNING at flush; create_all makes only the parent so tests CREATE TABLE ... PARTITION OF ... FOR VALUES FROM (date_trunc('month', now())) TO (...) themselves
 <!-- tags: database, sqlalchemy, testing | created: 2026-10-27 -->
@@ -17,6 +21,10 @@
 ## Decisions
 
 ## Fixes
+
+### mem-1793125348-9962
+> va_db tests: 'ruff check --fix --select RUF100' strips '# noqa: F401  (reason)' comments whole from import-for-side-effect lines (conftest, model_introspection) - never run RUF100 autofix on va_db; restore with git checkout
+<!-- tags: tooling, ruff | created: 2026-10-27 -->
 
 ### mem-1793120870-bd75
 > SQLAlchemy text() treats ':0'/':true' inside JSON literals as bind params; JSONB server defaults must go through va_db.models._columns.jsonb_default (escapes colons). Also Mapped[Any] makes a column NOT NULL - use Mapped[Any | None] + nullable=True
