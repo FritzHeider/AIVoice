@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793119288-abc7
+> va_db model tests: reuse tests/support/model_introspection (get_table etc.) + model_factories (make_org, assert_enum_check_enforced) and conftest scratch_session; copying tenancy test bodies trips jscpd clone gate
+<!-- tags: database, testing | created: 2026-10-27 -->
+
 ## Decisions
 
 ## Fixes

@@ -32,7 +32,7 @@
   - Deliverables: models `Org`, `User`, `Membership`, `Invitation`, `Session`, `EmailToken`, `ApiKey`, `SsoConnection`, `AuditLog`, `IdempotencyKey`
   - Acceptance: model unit tests for defaults and CHECK-constrained enums (Python `Literal` types mirror constraints).
 
-- [ ] P01-T03 Telephony models
+- [x] P01-T03 Telephony models — 6 models + 5 Literals match specs/03 §4; make test 1289 passed (99.84 %, va_db 100 %), va_db integration 55 passed / 0 skipped, lint/typecheck/placeholders clean
   - Spec refs: specs/03-data-model.md (Telephony: carrier accounts, numbers, pools)
   - Depends on: P01-T02
   - Deliverables: `TelnyxAccount`, `PhoneNumber`, `NumberOrder`, `NumberPool`, `NumberPoolMember`, `TelnyxEvent`

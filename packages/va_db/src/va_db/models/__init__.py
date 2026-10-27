@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+from va_db.models.telephony import (
+    NumberOrder,
+    NumberOrderStatus,
+    NumberPool,
+    NumberPoolMember,
+    NumberPoolStrategy,
+    NumberType,
+    PhoneNumber,
+    PhoneNumberStatus,
+    TelnyxAccount,
+    TelnyxAccountStatus,
+    TelnyxEvent,
+)
 from va_db.models.tenancy import (
     ApiKey,
     ApiKeyEnvironment,
@@ -37,11 +50,22 @@ __all__ = [
     "IpAddress",
     "MemberRole",
     "Membership",
+    "NumberOrder",
+    "NumberOrderStatus",
+    "NumberPool",
+    "NumberPoolMember",
+    "NumberPoolStrategy",
+    "NumberType",
     "Org",
     "OrgStatus",
+    "PhoneNumber",
+    "PhoneNumberStatus",
     "Session",
     "SsoConnection",
     "SsoProvider",
+    "TelnyxAccount",
+    "TelnyxAccountStatus",
+    "TelnyxEvent",
     "User",
     "UserStatus",
 ]

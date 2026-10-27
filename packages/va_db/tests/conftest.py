@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 from docker_probe import docker_available
 from pg_container import running_postgres
-from service_helpers import isolate_env
+from service_helpers import isolate_env, settings_of
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+import va_db.models  # noqa: F401  (registers every table on Base.metadata)
 from va_common.settings import DatabaseSettings
+from va_db.base import Base
+from va_db.engine import create_engine
 from va_db.session import configure_database
 
 
@@ -28,3 +33,19 @@ def pg_url() -> Iterator[str]:
         pytest.skip("docker unavailable")
     with running_postgres() as url:
         yield url
+
+
+@pytest.fixture
+async def scratch_session(pg_url: str) -> AsyncIterator[AsyncSession]:
+    """Every model table, created inside one login-role transaction that is rolled back at teardown."""
+    engine = create_engine(settings_of(DatabaseSettings, database_url=pg_url, database_pool_size=1), None)
+    try:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS citext"))
+            await connection.run_sync(Base.metadata.create_all)
+            async with AsyncSession(bind=connection, join_transaction_mode="create_savepoint") as scratch:
+                yield scratch
+            await transaction.rollback()
+    finally:
+        await engine.dispose()

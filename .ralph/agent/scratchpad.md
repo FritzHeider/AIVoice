@@ -286,3 +286,133 @@ Re-ran lint/typecheck/placeholders (pass, 0 findings), make test (1252 passed, 9
 column order, types (citext/inet/jsonb/text[]/bytea/smallint/bigint), nullability, server defaults, CHECKs, UNIQUE,
 FK ondelete, and named indexes (audit_logs DESC) all match. IpAddress deviation is documented in AGENTS.md and memory.
 The plan amendment that moves the §9a tables into P01-T06 is accepted. Ticked + committed.
+
+## Plan P01-T03 — Telephony models (2026-10-27)
+
+Spec: specs/03 §4 (6 tables, column for column), §1 conventions, §10 (RLS scope note below). Follow every P01-T02
+rule (explicit SQL type on every mapped_column, `check_in(col, get_args(Literal))`, server_default via `text(...)`,
+explicit index names, no `index=True`, no relationship(), plain FKs).
+
+### Files
+1. `packages/va_db/src/va_db/models/telephony.py` — Literal aliases (exact spec order):
+   `TelnyxAccountStatus = Literal["pending","active","error","deleted"]`,
+   `NumberType = Literal["local","toll_free","mobile","national"]`,
+   `PhoneNumberStatus = Literal["pending","active","releasing","released"]`,
+   `NumberOrderStatus = Literal["pending","success","failure"]`,
+   `NumberPoolStrategy = Literal["round_robin","least_recently_used","random","local_match"]`.
+   Models (class → table):
+   - `TelnyxAccount`→telnyx_accounts (IdMixin, TimestampMixin): org_id CASCADE NOT NULL, label Text NN,
+     api_key_enc LargeBinary NN, public_key Text NN, call_control_app_id / messaging_profile_id /
+     outbound_voice_profile_id Text NULL, encrypted_key_handle Text NN `unique=True` (→ telnyx_accounts_encrypted_key_handle_key),
+     status Text NN default `'pending'` + check, status_detail Text NULL. `Index("telnyx_accounts_org_idx","org_id")`.
+   - `PhoneNumber`→phone_numbers (IdMixin, SoftDeleteMixin, TimestampMixin): org_id CASCADE NN, e164 Text NN,
+     telnyx_account_id Uuid FK telnyx_accounts.id SET NULL nullable, telnyx_phone_number_id Text NULL,
+     country_code Text NN, number_type Text NN default `'local'` + check, label Text NULL,
+     capabilities ARRAY(Text) NN default `'{voice}'` (Mapped[list[str]]), inbound_config JSONB NN `'{}'::jsonb`
+     (docstring: InboundConfig, specs/16 §4), sms_config JSONB NN `'{}'::jsonb` (SmsNumberConfig, specs/21 §3),
+     monthly_cost_micros BigInteger NN default `0`, status Text NN default `'active'` + check, purchased_at,
+     released_at tz NULL; deleted_at (mixin) must land AFTER released_at and BEFORE created_at — the ordered-columns
+     unit test asserts it. If mixin ordering does not produce that, declare `deleted_at` explicitly in the class with
+     the same type instead of the mixin (do NOT change base.py sort orders that tenancy relies on), and note it.
+     Indexes: `Index("phone_numbers_e164_active_uq", "e164", unique=True,
+     postgresql_where=text("status IN ('pending', 'active')"))`, `Index("phone_numbers_org_idx","org_id")`.
+   - `NumberOrder`→number_orders (IdMixin, TimestampMixin): org_id CASCADE NN, telnyx_order_id Text NULL,
+     requested_numbers ARRAY(Text) NN (no default), status Text NN (NO default) + check, error Text NULL.
+     `Index("number_orders_org_idx","org_id")`.
+   - `NumberPool`→number_pools (IdMixin, TimestampMixin): org_id CASCADE NN, name Text NN, strategy Text NN default
+     `'round_robin'` + check, max_calls_per_number_per_day Integer NN default `100`;
+     `UniqueConstraint("org_id","name")` (→ number_pools_org_id_name_key). No extra index (UNIQUE starts with org_id).
+   - `NumberPoolMember`→number_pool_members (TimestampMixin only): pool_id Uuid FK number_pools.id CASCADE PK,
+     phone_number_id Uuid FK phone_numbers.id CASCADE PK, org_id CASCADE NN, last_used_at tz NULL,
+     calls_today Integer NN default `0`, calls_today_date `Date` NULL (Mapped[date | None]). PK name
+     number_pool_members_pkey (pool_id, phone_number_id). `Index("number_pool_members_org_idx","org_id")`.
+   - `TelnyxEvent`→telnyx_events (IdMixin, TimestampMixin; system scope, docstring cites §2 TelnyxEventRepo):
+     telnyx_event_id Text NN unique (→ telnyx_events_telnyx_event_id_key), event_type Text NN,
+     org_id Uuid FK orgs.id CASCADE **nullable**, call_id Uuid NULL with **no FK** (spec has none; calls arrive in
+     P01-T05 and events can precede the call row), call_control_id Text NULL, occurred_at tz NN, payload JSONB NN
+     (no default), processed_at tz NULL, process_error Text NULL. Indexes `telnyx_events_call_idx(call_id)`,
+     `telnyx_events_ccid_idx(call_control_id)`. No org index (spec has none; do not invent).
+2. `packages/va_db/src/va_db/models/__init__.py` — re-export the 6 models + 5 Literals, `__all__` sorted.
+
+### Test refactor (keep jscpd at 0 clones)
+- New `packages/va_db/tests/support/model_introspection.py` with the helpers now private in test_tenancy_models.py:
+  `table(name) -> Table`, `constraint(table, name)`, `enum_check_values(table, column) -> tuple[str, ...]`
+  (asserts `<table>_<column>_check` starts with `<column> IN (` and regex-parses values),
+  `server_defaults(tables) -> dict[(table,col), str]` (excludes created_at/updated_at),
+  `index_ddl(tables) -> set[str]` (whitespace-normalised CreateIndex compile, postgresql dialect),
+  `unique_and_pk(tables)`, `foreign_keys(tables) -> set[(name, table, column, target, ondelete)]`,
+  `check_names(tables)`. Refactor test_tenancy_models.py to use them (assertions unchanged).
+- Move the integration `session` fixture (login-role engine, transaction, citext, `Base.metadata.create_all`,
+  savepoint AsyncSession, rollback) from test_tenancy_models_integration.py into conftest.py as `scratch_session`
+  (rename usages), plus a shared `make_org(session, **values) -> Org` helper in a support module
+  (`support/model_factories.py`: `flushed(session, model)`, `make_org`, `make_user`) used by both integration modules.
+
+### Tests
+- `test_telephony_models.py` (unit): tables registered; full ordered (name, nullable) list per table (catches the
+  deleted_at position); enum checks mirror Literals (5 params, values == spec tuples); exact CHECK-name set for the 6
+  tables; server defaults map (telnyx_accounts.status 'pending', phone_numbers number_type 'local', capabilities
+  '{voice}', inbound_config/sms_config '{}'::jsonb, monthly_cost_micros 0, status 'active', number_pools strategy
+  'round_robin', max_calls 100, number_pool_members calls_today 0) — number_orders.status / payload have none;
+  unique + PK names (incl. number_pool_members_pkey composite); FKs + ondelete (8 rows incl. telnyx_events_org_id_fkey
+  CASCADE, phone_numbers_telnyx_account_id_fkey SET NULL) and assert telnyx_events.call_id has no FK;
+  index DDL set exactly: `CREATE UNIQUE INDEX phone_numbers_e164_active_uq ON phone_numbers (e164) WHERE status IN
+  ('pending', 'active')`, plus the 5 plain ones; column types (LargeBinary api_key_enc, ARRAY(Text) capabilities /
+  requested_numbers, JSONB inbound_config/sms_config/payload, BigInteger monthly_cost_micros, Integer
+  max_calls/calls_today, Date calls_today_date, Uuid call_id); every timestamp tz-aware; telnyx_events.org_id nullable.
+- `test_telephony_models_integration.py` (integration, `scratch_session`):
+  - `test_phone_number_defaults` — capabilities ['voice'], {} configs, 0 micros, 'local', 'active', deleted_at None.
+  - `test_e164_unique_among_active_numbers` (the task's acceptance) — org A active +15555550100; org B same e164
+    'pending' → IntegrityError (in begin_nested); set A to 'released' → B insert succeeds; a second 'released' row
+    with same e164 also succeeds; 'releasing' duplicates allowed.
+  - `test_enum_values_accepted_and_rejected` — parametrized over the 5 enum columns; every Literal value inserts,
+    'bogus' → IntegrityError.
+  - `test_number_pool_name_unique_per_org` — same name same org fails, other org OK.
+  - `test_pool_member_composite_pk_and_cascades` — duplicate (pool, number) fails; deleting the pool removes members;
+    deleting a phone number removes members.
+  - `test_telnyx_account_delete_sets_number_account_null`.
+  - `test_telnyx_event_without_org_or_call` — org_id/call_id NULL accepted; duplicate telnyx_event_id fails;
+    payload JSON round-trips; calls_today_date round-trips as `datetime.date`.
+  Use `+1555555xxxx`-style fictional numbers, `os.urandom` for api_key_enc, secrets.token_hex for handles.
+
+### Notes for later tasks (record, do not implement)
+- §10 RLS: telnyx_events has nullable org_id and is not in the voices/dnc_entries list, so P01-T07 must NOT enable
+  RLS on it (system scope via TelnyxEventRepo). number_pool_members has NOT NULL org_id → RLS applies.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (Docker up, 0 skipped);
+`uvx pip-audit` on uv export; `uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones);
+va_db coverage 100 %. AGENTS.md: note the support/model_introspection + model_factories helpers and the
+`scratch_session` fixture.
+
+### Risks
+- Mixin column ordering for deleted_at (see above).
+- `postgresql_where` compiled text must match the unit expectation exactly; compile once and copy the real output.
+- `Date` import from sqlalchemy (not DateTime); mypy: `Mapped[date | None]`.
+- Moving fixtures must not change tenancy test behaviour; rerun those integration tests (43 still pass).
+
+## Build P01-T03 (2026-10-27)
+Implemented per plan. Notes for the Reviewer:
+- `va_db/models/telephony.py`: 6 models + 5 Literals, re-exported from `va_db.models`. Mixin ordering already puts
+  `deleted_at` after `released_at` and before `created_at` (bases `IdMixin, SoftDeleteMixin, TimestampMixin`); no
+  base.py change and no explicit column needed. `telnyx_events.call_id` has no FK; `org_id` nullable CASCADE.
+- Shared test helpers: `tests/support/model_introspection.py` (helper is `get_table`, not `table`, because tests
+  parametrize on `table`; added `naive_timestamps`, `text_array_columns`) and `tests/support/model_factories.py`
+  (`flushed`, `make_org`, `make_user`, `assert_enum_check_enforced`, `ModelBuilder`). `scratch_session` fixture in
+  conftest.py. Tenancy unit/integration tests refactored onto them with the same expectations; the tenancy text[]
+  and tz checks now compare whole sets (same coverage, fewer test IDs: suite 1298 -> 1289).
+- Extra integration coverage: duplicate encrypted_key_handle rejected; e164 duplicates allowed for released and
+  releasing rows; pool member daily counters round-trip (`calls_today_date` as `datetime.date`).
+- Builder E.164 numbers come from an itertools counter (no random values, no collisions).
+Gates: fmt 0, lint 0, typecheck 0 (161 files), placeholders 0 findings, make test 1289 passed (99.84 %, va_db 100 %),
+`pytest packages/va_db -m integration -rs` 55 passed / 0 skipped, pip-audit no known vulns, radon A (1.19),
+jscpd 0 clones.
+
+## Review P01-T03 (2026-10-27) — APPROVED
+Re-ran lint, typecheck, placeholders (0 findings), make test (1289 passed, 99.84 %), and
+`pytest packages/va_db -m integration` (55 passed, 108 deselected, none skipped). make fmt left no diff.
+Checked telephony.py against specs/03 §4 column by column: types, nullability, defaults, CHECK values, UNIQUE
+(encrypted_key_handle, telnyx_event_id, number_pools(org_id,name)), composite PK, FK ondelete (SET NULL on
+telnyx_account_id, nullable CASCADE org_id on telnyx_events, no FK on call_id), the partial unique index
+phone_numbers_e164_active_uq, and the plain indexes. All match. The integration tests cover the acceptance case
+(e164 unique among pending/active only) plus the cascade and SET NULL paths. The shared test-support refactor keeps
+the tenancy expectations unchanged. Ticked + committed.

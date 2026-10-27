@@ -1,27 +1,33 @@
 from __future__ import annotations
 
-import re
 from typing import Any, get_args
 
 import pytest
+from model_introspection import (
+    DIALECT,
+    check_names,
+    columns,
+    constraint,
+    enum_check_values,
+    foreign_keys,
+    get_table,
+    index_ddl,
+    naive_timestamps,
+    server_defaults,
+    text_array_columns,
+    unique_and_pk,
+)
 from sqlalchemy import (
     BigInteger,
     Boolean,
-    CheckConstraint,
     DateTime,
-    ForeignKeyConstraint,
     Integer,
     LargeBinary,
-    PrimaryKeyConstraint,
     SmallInteger,
-    Table,
     Text,
-    UniqueConstraint,
     Uuid,
 )
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET, JSONB
-from sqlalchemy.schema import CreateIndex
+from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB
 
 from va_db.base import Base
 from va_db.models import (
@@ -34,8 +40,6 @@ from va_db.models import (
     SsoProvider,
     UserStatus,
 )
-
-_DIALECT = postgresql.dialect()  # type: ignore[no-untyped-call]
 
 _TABLES = (
     "orgs",
@@ -191,23 +195,13 @@ _COLUMNS: dict[str, list[tuple[str, bool]]] = {
 }
 
 
-def _table(name: str) -> Table:
-    return Base.metadata.tables[name]
-
-
-def _constraint(table: str, name: str) -> Any:
-    matches = [c for c in _table(table).constraints if c.name == name]
-    assert len(matches) == 1, f"{table}: expected one constraint named {name}"
-    return matches[0]
-
-
 def test_tables_registered() -> None:
     assert set(_TABLES) <= set(Base.metadata.tables)
 
 
 @pytest.mark.parametrize("table", _TABLES)
 def test_columns_order_and_nullability(table: str) -> None:
-    assert [(column.name, column.nullable) for column in _table(table).columns] == _COLUMNS[table]
+    assert columns(table) == _COLUMNS[table]
 
 
 @pytest.mark.parametrize(
@@ -227,21 +221,11 @@ def test_columns_order_and_nullability(table: str) -> None:
 def test_enum_checks_mirror_literals(
     table: str, column: str, literal: Any, expected: tuple[str, ...]
 ) -> None:
-    constraint = _constraint(table, f"{table}_{column}_check")
-    assert isinstance(constraint, CheckConstraint)
-    sql = str(constraint.sqltext)
-    assert sql.startswith(f"{column} IN (")
-    assert tuple(re.findall(r"'([^']*)'", sql)) == get_args(literal) == expected
+    assert enum_check_values(table, column) == get_args(literal) == expected
 
 
 def test_check_constraints_are_exactly_the_spec_set() -> None:
-    names = {
-        constraint.name
-        for table in _TABLES
-        for constraint in _table(table).constraints
-        if isinstance(constraint, CheckConstraint)
-    }
-    assert names == {
+    assert check_names(_TABLES) == {
         "orgs_kyc_level_check",
         "orgs_status_check",
         "orgs_data_region_check",
@@ -266,7 +250,7 @@ def test_check_constraints_are_exactly_the_spec_set() -> None:
     ],
 )
 def test_range_checks(name: str, sql: str) -> None:
-    assert str(_constraint("orgs", name).sqltext) == sql
+    assert str(constraint("orgs", name).sqltext) == sql
 
 
 _SERVER_DEFAULTS: dict[tuple[str, str], str] = {
@@ -300,20 +284,14 @@ _SERVER_DEFAULTS: dict[tuple[str, str], str] = {
 
 
 def test_server_defaults() -> None:
-    actual = {
-        (table, column.name): str(column.server_default.arg.compile(dialect=_DIALECT))  # type: ignore[attr-defined]
-        for table in _TABLES
-        for column in _table(table).columns
-        if column.server_default is not None and column.name not in {"created_at", "updated_at"}
-    }
-    assert actual == _SERVER_DEFAULTS
+    assert server_defaults(_TABLES) == _SERVER_DEFAULTS
 
 
 @pytest.mark.parametrize("table", _TABLES)
 def test_timestamps_and_ids(table: str) -> None:
-    columns = _table(table).c
+    columns = get_table(table).c
     for name in ("created_at", "updated_at"):
-        assert str(columns[name].server_default.arg.compile(dialect=_DIALECT)) == "now()"  # type: ignore[union-attr]
+        assert str(columns[name].server_default.arg.compile(dialect=DIALECT)) == "now()"  # type: ignore[union-attr]
     if table != "idempotency_keys":
         assert columns.id.primary_key
         assert columns.id.server_default is None
@@ -321,13 +299,7 @@ def test_timestamps_and_ids(table: str) -> None:
 
 
 def test_unique_and_primary_key_names() -> None:
-    found = {
-        (constraint.name, tuple(column.name for column in constraint.columns))
-        for table in _TABLES
-        for constraint in _table(table).constraints
-        if isinstance(constraint, UniqueConstraint | PrimaryKeyConstraint)
-    }
-    assert found == {
+    assert unique_and_pk(_TABLES) == {
         *((f"{table}_pkey", ("id",)) for table in _TABLES if table != "idempotency_keys"),
         ("idempotency_keys_pkey", ("org_id", "key")),
         ("orgs_slug_key", ("slug",)),
@@ -343,21 +315,7 @@ def test_unique_and_primary_key_names() -> None:
 
 
 def test_foreign_keys_ondelete() -> None:
-    found = set()
-    for table in _TABLES:
-        for constraint in _table(table).constraints:
-            if isinstance(constraint, ForeignKeyConstraint):
-                (element,) = constraint.elements
-                found.add(
-                    (
-                        constraint.name,
-                        table,
-                        element.parent.name,
-                        element.target_fullname,
-                        constraint.ondelete,
-                    )
-                )
-    assert found == {
+    assert foreign_keys(_TABLES) == {
         ("orgs_parent_org_id_fkey", "orgs", "parent_org_id", "orgs.id", "RESTRICT"),
         ("memberships_org_id_fkey", "memberships", "org_id", "orgs.id", "CASCADE"),
         ("memberships_user_id_fkey", "memberships", "user_id", "users.id", "CASCADE"),
@@ -375,12 +333,7 @@ def test_foreign_keys_ondelete() -> None:
 
 
 def test_indexes() -> None:
-    ddl = {
-        " ".join(str(CreateIndex(index).compile(dialect=_DIALECT)).split())
-        for table in _TABLES
-        for index in _table(table).indexes
-    }
-    assert ddl == {
+    assert index_ddl(_TABLES) == {
         "CREATE INDEX orgs_parent_idx ON orgs (parent_org_id)",
         "CREATE INDEX memberships_user_idx ON memberships (user_id)",
         "CREATE INDEX invitations_org_idx ON invitations (org_id)",
@@ -420,24 +373,19 @@ def test_indexes() -> None:
     ],
 )
 def test_column_types(table: str, column: str, sql_type: type[Any]) -> None:
-    column_type = _table(table).c[column].type
+    column_type = get_table(table).c[column].type
     assert type(column_type) is sql_type
     if isinstance(column_type, DateTime):
         assert column_type.timezone is True
 
 
-@pytest.mark.parametrize(
-    ("table", "column"),
-    [("users", "mfa_recovery_codes_hash"), ("api_keys", "scopes"), ("sso_connections", "allowed_domains")],
-)
-def test_text_array_columns(table: str, column: str) -> None:
-    column_type = _table(table).c[column].type
-    assert isinstance(column_type, ARRAY)
-    assert type(column_type.item_type) is Text
+def test_text_array_columns() -> None:
+    assert text_array_columns(_TABLES) == {
+        ("users", "mfa_recovery_codes_hash"),
+        ("api_keys", "scopes"),
+        ("sso_connections", "allowed_domains"),
+    }
 
 
 def test_every_timestamp_is_timezone_aware() -> None:
-    for table in _TABLES:
-        for column in _table(table).columns:
-            if isinstance(column.type, DateTime):
-                assert column.type.timezone is True, f"{table}.{column.name}"
+    assert naive_timestamps(_TABLES) == []

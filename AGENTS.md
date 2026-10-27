@@ -257,3 +257,11 @@ Grafana 3001
   inside one login-role transaction that is rolled back at teardown (DDL is transactional), with an
   `AsyncSession(join_transaction_mode="create_savepoint")` and `begin_nested()` around expected IntegrityErrors.
   The session-scoped `pg_url` fixture is in `packages/va_db/tests/conftest.py`.
+- 2026-10-27 (P01-T03): model tests share helpers in `packages/va_db/tests/support/`: `model_introspection`
+  (`get_table`, `columns`, `enum_check_values`, `check_names`, `server_defaults`, `index_ddl`, `unique_and_pk`,
+  `foreign_keys`, `naive_timestamps`, `text_array_columns`; name the helper `get_table`, not `table`, because tests
+  parametrize on `table`) and `model_factories` (`flushed`, `make_org`, `make_user`, `assert_enum_check_enforced`).
+  Integration tests take the `scratch_session` fixture (conftest.py: every model table created in a rolled-back
+  login-role transaction). New model areas reuse these instead of copying, which keeps jscpd at 0 clones. Partial
+  indexes use `Index(..., postgresql_where=text("status IN ('pending', 'active')"))`; mixin columns land after the
+  class's own columns (SoftDeleteMixin before TimestampMixin in the bases puts `deleted_at` before `created_at`).
