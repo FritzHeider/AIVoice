@@ -62,7 +62,7 @@
   - Deliverables: `packages/va_db/alembic.ini`, `migrations/env.py` (async), `versions/0001_initial.py` (extensions, roles if absent, `set_updated_at`, all tables/indexes, per-table triggers via loop, RLS enable/force + policies, platform_read policies, call_events partitions for current month + 3), full `downgrade()`
   - Acceptance: upgrade → downgrade → upgrade on fresh DB passes; `make migrate` works against compose Postgres.
 
-- [ ] P01-T08 Schema conformance and autogenerate parity tests
+- [x] P01-T08 Schema conformance and autogenerate parity tests — spec-applied DB == migrated DB (columns/constraints/indexes/extensions/function + §10 trigger/RLS/policies); autogenerate_diff == []; 6 drift negatives on a metadata copy; make test 1603 passed 99.87 %, va_db integration 179 passed, jscpd 0 clones
   - Spec refs: specs/03-data-model.md (header paragraph: conformance test)
   - Depends on: P01-T07
   - Deliverables: `packages/va_db/tests/test_schema_matches_spec.py` (extracts ```sql blocks from the spec, applies to scratch DB, diffs `information_schema.columns`, indexes, constraints against migrated DB), `test_autogenerate_parity.py`

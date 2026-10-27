@@ -12,6 +12,7 @@ from typing import Final
 
 import pytest
 from migration_helpers import downgrade, fresh_database, query, upgrade
+from schema_catalog import TABLES_SQL
 from service_helpers import settings_of
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -24,10 +25,6 @@ pytestmark = pytest.mark.integration
 
 SPEC_EXTENSIONS: Final = frozenset({"vector", "pg_trgm", "citext"})
 PLATFORM_READ_TABLES: Final = frozenset({"voices", "dnc_entries"})
-TABLES_SQL: Final = """
-SELECT c.relname FROM pg_class c
-WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND NOT c.relispartition
-"""
 INSERT_ORG: Final = """
 INSERT INTO orgs (id, name, slug, webhook_signing_secret_enc, created_at, updated_at)
 VALUES (:id, 'Org', :slug, '\\x00'::bytea, '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z')
@@ -37,14 +34,6 @@ INSERT INTO call_events (id, org_id, call_id, seq, category, message, created_at
 VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, 'call', 'routed', :at)
 RETURNING tableoid::regclass::text
 """
-
-
-@pytest.fixture(scope="module")
-def migrated_url(pg_url: str) -> Iterator[str]:
-    """One database migrated to head, shared by the read-mostly tests of this module."""
-    with fresh_database(pg_url) as url:
-        upgrade(url)
-        yield url
 
 
 def _names(url: str, sql: str, **params: object) -> set[str]:

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793130055-a7eb
+> va_db schema checks: schema_catalog.snapshot() compares spec-applied vs migrated DB; autogenerate_diff (alembic 1.20.1) has zero noise on expression/partial/hnsw indexes, vector(1024), server defaults - any new exclusion must be a named commented exception in schema_catalog.include_object; Postgres "char" columns (contype, attgenerated) come back as bytes via asyncpg - cast ::text
+<!-- tags: database, alembic, testing | created: 2026-10-27 -->
+
 ### mem-1793125348-d9c3
 > va_db model tests: shared helpers in model_introspection (assert_org_indexed, org_index_ddl, enum_check_names, expected_foreign_keys, assert_enum_checks_mirror) - use them instead of per-file parametrized copies, jscpd flags the 10-line windows
 <!-- tags: database, testing | created: 2026-10-27 -->

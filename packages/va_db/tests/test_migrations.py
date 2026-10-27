@@ -12,7 +12,7 @@ from typing import Final
 import pytest
 from alembic import command
 from migration_helpers import alembic_config, load_initial_revision
-from model_introspection import spec_table_names
+from model_introspection import spec_sql_blocks, spec_table_names
 
 from va_db.base import Base
 
@@ -119,6 +119,16 @@ def test_cli_runs_configure_logging_from_the_ini() -> None:
 def test_tables_follow_spec_order_and_match_the_models() -> None:
     assert list(INITIAL.TABLES) == spec_table_names()
     assert set(INITIAL.TABLES) == set(Base.metadata.tables)
+
+
+def test_spec_blocks_cover_sections_2_to_10() -> None:
+    blocks = spec_sql_blocks()
+    assert len(blocks) == 11
+    assert blocks[0].startswith("CREATE EXTENSION IF NOT EXISTS vector;")
+    assert "CREATE POLICY tenant_isolation ON calls" in blocks[-1]
+    assert not any("ENGINE =" in block for block in blocks)
+    created = [name for block in blocks for name in re.findall(r"CREATE TABLE (\w+)", block)]
+    assert created == spec_table_names()
 
 
 def test_spec_sections_hold_only_create_statements() -> None:

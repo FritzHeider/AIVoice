@@ -324,3 +324,12 @@ Grafana 3001
   timed out (30 s) under xdist load. `ruff` per-file ignores for `packages/va_db/migrations/**`: `INP001`,
   `N999` (plus `RUF001` in 0001, whose spec comments are verbatim). A compose volume created before this task
   has `va_system` without BYPASSRLS; `make migrate` fixes it.
+- 2026-10-27 (P01-T08): `test_schema_matches_spec.py` applies every relational specs/03 ```sql block (§2-§10, via
+  `model_introspection.spec_sql_blocks()`, split with 0001's `statements()`, run with `exec_driver_sql` so no
+  `text()` bind parsing) to one fresh DB and compares `schema_catalog.snapshot()` (columns with `format_type`,
+  constraints, indexdefs, triggers, policies, RLS flags, extensions, non-extension functions) with the migrated DB.
+  `test_autogenerate_parity.py` runs Alembic `compare_metadata` (type + server default) of `Base.metadata` against
+  the migrated DB and must return `[]`; the only exclusions are `alembic_version` and `call_events_pYYYYMM` in
+  `schema_catalog.include_object`. Alembic 1.20 compares expression/partial indexes without warnings. Add any
+  future autogenerate-noise filter only as a named, commented exception there. Drift negatives mutate a
+  `Table.to_metadata` copy, never `Base.metadata`. `migrated_url` is a module-scoped fixture in the va_db conftest.

@@ -46,6 +46,7 @@ __all__ = [
     "org_index_ddl",
     "server_defaults",
     "spec_column_mismatches",
+    "spec_sql_blocks",
     "spec_table_names",
     "text_array_columns",
     "unique_and_pk",
@@ -62,6 +63,13 @@ def spec_table_names() -> list[str]:
     markdown = SPEC_03.read_text(encoding="utf-8")
     relational = markdown[markdown.index("\n## 3. ") : markdown.index("\n## 10. ")]
     return re.findall(r"CREATE TABLE (\w+)", relational)
+
+
+def spec_sql_blocks() -> list[str]:
+    """The relational ```sql blocks of specs/03 §2-§10, in spec order (§12 ClickHouse is not Postgres)."""
+    markdown = SPEC_03.read_text(encoding="utf-8")
+    relational = markdown[markdown.index("\n## 2. ") : markdown.index("\n## 11. ")]
+    return re.findall(r"```sql\n(.*?)```", relational, re.DOTALL)
 
 
 def get_table(name: str) -> Table:

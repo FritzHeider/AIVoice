@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from docker_probe import docker_available
+from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
 from service_helpers import isolate_env, settings_of
 from sqlalchemy import text
@@ -32,6 +33,14 @@ def pg_url() -> Iterator[str]:
     if not docker_available():
         pytest.skip("docker unavailable")
     with running_postgres() as url:
+        yield url
+
+
+@pytest.fixture(scope="module")
+def migrated_url(pg_url: str) -> Iterator[str]:
+    """One database migrated to head per test module, for read-mostly migration and schema tests."""
+    with fresh_database(pg_url) as url:
+        upgrade(url)
         yield url
 
 

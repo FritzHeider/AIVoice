@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import secrets
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
@@ -29,6 +29,7 @@ __all__ = [
     "fresh_database",
     "load_initial_revision",
     "query",
+    "query_many",
     "upgrade",
 ]
 
@@ -68,21 +69,29 @@ def downgrade(url: str, revision: str = "base") -> None:
         command.downgrade(alembic_config(), revision)
 
 
-async def _query(url: str, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
+async def _queries(url: str, statements: Sequence[tuple[str, dict[str, Any]]]) -> list[list[tuple[Any, ...]]]:
     settings = settings_of(DatabaseSettings, database_url=url, database_pool_size=1)
     engine = create_engine(settings, None)
     try:
         async with engine.connect() as connection:
             await connection.execution_options(isolation_level="AUTOCOMMIT")
-            result = await connection.execute(text(sql), params)
-            return [tuple(row) for row in result] if result.returns_rows else []
+            rows = []
+            for sql, params in statements:
+                result = await connection.execute(text(sql), params)
+                rows.append([tuple(row) for row in result] if result.returns_rows else [])
+            return rows
     finally:
         await engine.dispose()
 
 
 def query(url: str, sql: str, **params: Any) -> list[tuple[Any, ...]]:
     """Run one autocommitted statement as the login role and return its rows (empty for no result set)."""
-    return asyncio.run(_query(url, sql, params))
+    return asyncio.run(_queries(url, [(sql, params)]))[0]
+
+
+def query_many(url: str, sqls: Sequence[str]) -> list[list[tuple[Any, ...]]]:
+    """:func:`query` for several parameterless statements over one connection, rows per statement."""
+    return asyncio.run(_queries(url, [(sql, {}) for sql in sqls]))
 
 
 @contextmanager

@@ -1113,3 +1113,163 @@ compare); RLS rule = §10 text (NOT NULL org_id + voices/dnc_entries), exact pol
 no password, BYPASSRLS repair, GRANT TO CURRENT_USER per §2 Decision; colon-escape regex leaves `::casts` and
 `:=` alone; downgrade keeps roles. Compose: make migrate → downgrade base → make migrate → `current` = 0001 (head).
 Tests are behavioural (catalog-exact sets, trigger advance, partition routing at bounds, roles-absent path).
+
+## Plan P01-T08 — Schema conformance and autogenerate parity tests (2026-10-27)
+Spec refs: specs/03 header paragraph (conformance test), §2–§10 sql blocks; plan/phase-01.md T08 acceptance; phase
+constraint "autogenerate comparison against the models ... no differences (excluding RLS/trigger objects)".
+No production code changes expected. If a test exposes a real model/migration mismatch, fix the model (or the
+0001 SQL if it deviates from the spec). Never weaken the comparison to make it pass. Record any spec-level
+ambiguity as a `> Decision (2026-10-27):` in specs/03 in the same commit.
+
+### Which spec blocks are applied (conformance)
+- Relational blocks = every ```sql fence between `## 2.` and `## 11.` (§2, §3, §4, §5, §6, §7, §8, §9, §9a, and
+  the two §10 blocks). §12 ClickHouse is excluded because it is not Postgres. The §10 blocks are examples for
+  `calls` (trigger, ENABLE/FORCE RLS, tenant_isolation) and voices/dnc_entries (platform_read). Apply them as
+  written. They are compared only on those objects (see below), because the migration generates the rest in loops.
+- Execution: split each block with `statements()` from 0001 (load via `migration_helpers.load_initial_revision()`)
+  and run each statement with `AsyncConnection.exec_driver_sql(stmt)` in one login-role transaction. That way no
+  text() bind parsing happens, and `'{}'::jsonb` and `:=` need no escaping. Risk: the asyncpg dialect may
+  %-format driver SQL. Check whether any spec statement contains `%`. If one does and it breaks, use `%%` for
+  that run only and document why in a comment.
+
+### Files
+1. `packages/va_db/tests/support/model_introspection.py`: add `spec_sql_blocks() -> list[str]`. It returns the
+   relational ```sql blocks of SPEC_03 (§2 up to `## 11.`) in order. Reuse the `relational`-slice idiom.
+   `spec_table_names` stays as is.
+2. `packages/va_db/tests/support/schema_catalog.py` (new, typed, docstrings):
+   - `TABLES_SQL` moved here from test_migrations_integration.py (import it there; no jscpd clone).
+   - `@dataclass(frozen=True) class CatalogSnapshot` with frozenset fields:
+     `columns` (table, column, ordinal_position, data_type, udt_name, is_nullable, column_default,
+     character_maximum_length, numeric_precision, numeric_scale, is_generated, generation_expression), taken from
+     information_schema.columns. Atttypmod also goes through `format_type(a.atttypid, a.atttypmod)` from
+     pg_attribute so `vector(1024)` and `numeric(10,3)` are compared exactly. Fold this into the columns query
+     with a join, or use a second field `column_types`.
+     `constraints` (table, conname, contype, pg_get_constraintdef(oid, true)).
+     `indexes` (table, indexname, indexdef) from pg_indexes.
+     `triggers` (table, tgname, pg_get_triggerdef) with NOT tgisinternal.
+     `policies` (tablename, policyname, cmd, roles, qual, with_check) from pg_policies.
+     `rls` (relname, relrowsecurity, relforcerowsecurity).
+     `extensions` (extname) and `functions` (proname, pg_get_functiondef) for set_updated_at.
+     Every table-scoped query is limited to schema public, `relkind IN ('r','p') AND NOT relispartition`, and
+     `relname <> 'alembic_version'`. This excludes call_events_pYYYYMM and their cloned indexes and triggers.
+     Indexes and constraints are filtered by joining to that relation set.
+   - `snapshot(url) -> CatalogSnapshot` (sync, `migration_helpers.query`), plus
+     `restrict(snapshot, tables) -> CatalogSnapshot` for the §10 subset comparison.
+   - `apply_spec(url) -> None`: applies spec_sql_blocks() as described above (async helper + asyncio.run, as in
+     migration_helpers._query; pool_size 1, `create_engine(settings, None)`).
+   - `diff(a, b) -> dict[str, tuple[frozenset, frozenset]]`: per field, (only_in_a, only_in_b), with empty
+     fields omitted, so a failing assert prints a readable diff.
+3. `packages/va_db/tests/test_schema_matches_spec.py` (integration, `pytestmark = pytest.mark.integration`):
+   - module fixture `spec_and_migrated(pg_url)`: two `fresh_database`s. Apply the spec to one and `upgrade()` the
+     other. Snapshot both.
+   - `test_spec_tables_equal_model_tables`: spec snapshot table set == set(Base.metadata.tables) ==
+     set(spec_table_names()) (72).
+   - `test_columns_match_spec`: columns and column types equal (assert `diff(...) == {}` per field).
+   - `test_constraints_match_spec`: equal (names, kinds, definitions: CHECK lists, FK ondelete, uniques, PKs).
+   - `test_indexes_match_spec`: equal (partial, DESC, coalesce, hnsw/gin, org_idx).
+   - `test_extensions_and_function_match_spec`: extensions ⊇ {vector, pg_trgm, citext} on both and equal.
+     set_updated_at definitions are equal.
+   - `test_section_10_examples_match_migration`: for `calls`, `voices`, `dnc_entries`, the spec DB's triggers,
+     policies, and rls rows equal the migrated DB's rows restricted to those tables. The spec DB has exactly the
+     §10 objects, and the migrated DB has the same for those tables.
+   - `test_spec_blocks_cover_every_section` (unit, no marker, or in test_migrations.py): spec_sql_blocks() has 11
+     blocks. The first contains `CREATE EXTENSION IF NOT EXISTS vector`. None contains `ENGINE =` (ClickHouse
+     excluded). The set of CREATE TABLE names over the blocks == spec_table_names().
+4. `packages/va_db/tests/test_autogenerate_parity.py`:
+   - helper (put in support/schema_catalog.py or a new support/autogen.py) `autogenerate_diff(url, metadata) ->
+     list[Any]`. It uses an async engine (login role) and `connection.run_sync(lambda c: compare_metadata(
+     MigrationContext.configure(c, opts={"compare_type": True, "compare_server_default": True,
+     "include_object": include_object}), metadata))`.
+   - `include_object(obj, name, type_, reflected, compare_to)`: for type_ == "table", skip `alembic_version` and
+     partitions matching `^call_events_p\d{6}$`. Skip nothing else. RLS, policies, and triggers are invisible to
+     autogenerate, which satisfies the exclusion.
+   - Known comparator noise, to handle narrowly only if it appears:
+     (a) alembic warns "autogenerate skipping functional index" (or similar) for expression indexes (coalesce
+     ones). filterwarnings=error turns this into a failure. Wrap compare_metadata in
+     `warnings.catch_warnings()` + `filterwarnings("ignore", message=<exact text>, category=UserWarning)`. Then
+     add a separate assertion that every expression index is covered by test_indexes_match_spec (the conformance
+     test compares their indexdef exactly) and by an explicit check that the model's index names == the
+     reflected index names for every table, which covers expression indexes skipped by autogenerate.
+     (b) server-default text differences (e.g. `now()` vs `now()`, jsonb casts). Fix them through a
+     `compare_server_default` callable only if they are proven equivalent. The callable must normalise both sides
+     by running `SELECT <a> IS NOT DISTINCT FROM <b>` or by canonicalising the model default with
+     `pg_get_expr` on the DB. Prefer evaluating both default expressions on the DB. Document each normalisation
+     in a comment.
+     (c) pgvector `Vector` type comparison. pgvector.sqlalchemy registers the reflection type, so check that
+     `vector(1024)` compares cleanly.
+     Anything else is a real diff: fix the model.
+   - module fixture `migrated_url` (fresh_database + upgrade). Reuse the one in test_migrations_integration by
+     moving it to conftest.py as a module-scoped fixture `migrated_url` (no duplicate fixture code).
+   - `test_models_match_migrated_schema`: `autogenerate_diff(url, Base.metadata) == []`.
+   - `test_model_index_names_match_database` (covers indexes autogenerate skips): for every table, the
+     {index names} in metadata == pg_indexes names (non-constraint indexes) in the migrated DB.
+   - `test_parity_detects_model_drift` parametrized over mutations of a temporary metadata copy
+     (`copy = MetaData(); for t in Base.metadata.sorted_tables: t.to_metadata(copy)`). Base.metadata is never
+     mutated, which the test asserts afterwards. Each case is (id, mutate(copy), expected diff op name):
+     - "column-added": `Column("drift", Text)` appended to orgs → `add_column`
+     - "column-removed": rebuild by `copy.remove(t)` + `Table(...)` without one column? Simpler: in the copy, set
+       `include_object` ... Use: drop `orgs.c.slug` via `copy.tables["orgs"]._columns.remove(...)` only if public
+       API fails. Otherwise skip this case and rely on the next three.
+     - "nullability-flipped": `copy.tables["agents"].c.<a NOT NULL text col>.nullable = True` → `modify_nullable`
+     - "type-changed": `.type = Integer()` on a text column → `modify_type`
+     - "default-changed": `.server_default = DefaultClause(text("'x'"))` on a column with a text default →
+       `modify_default`
+     - "index-removed": `copy.tables["calls"].indexes.remove(<named index>)` → `remove_index`
+     The assertion flattens the diff (modify_* entries come as nested lists of tuples) and checks that the expected
+     op name, together with the table name, is present.
+5. `packages/va_db/tests/test_migrations_integration.py`: use the shared `migrated_url` fixture and `TABLES_SQL`
+   from the support modules (delete the local copies).
+6. AGENTS.md: one bullet under va_db testing on the conformance and parity tests, the spec-apply mechanics
+   (exec_driver_sql, statements()), and the rule that "autogenerate noise is filtered only by named, commented
+   exceptions".
+
+### Gates
+`make fmt lint typecheck placeholders test` (do NOT run jscpd/compose concurrently with make test, see the flake
+memory); `uv run pytest packages/va_db -m integration -rs` (0 skipped); jscpd 0 clones; radon A; va_db coverage
+100 %; check_spec_refs. Show the negative test fails for real: temporarily alter a model column locally, run
+test_models_match_migrated_schema, record the failing output in the build note, and revert.
+
+### Risks
+- Autogenerate noise (expression/partial/hnsw indexes, server defaults, vector type). Handle it narrowly as above.
+  Each exception is commented, so a reviewer can verify it is not hiding real drift.
+- Spec text wrapped at >110 columns is fine here because the test reads the markdown, not 0001.
+- information_schema.columns `column_default` for computed tsvector columns is NULL and `generation_expression`
+  is set, which is compared as well.
+- Two extra fresh DBs per module under xdist mean more load on the worker server (fsync=off already). Keep the
+  conformance snapshots module-scoped so each DB is built once.
+- Constraint names generated by Postgres (e.g. `<t>_<col>_check`) must match between the spec DB and the migrated
+  DB. They will, since both run the same DDL, but the comparison also guards against 0001 drift.
+
+## Build P01-T08 (2026-10-27)
+New: tests/support/schema_catalog.py (TABLES_SQL moved here; CatalogSnapshot of columns [format_type, attnotnull,
+pg_get_expr default, attgenerated, attidentity], constraints [conparentid = 0: partition clones excluded], indexdefs,
+triggers, policies, RLS flags, extensions, non-extension functions in public; snapshot/restrict/diff; apply_spec via
+exec_driver_sql + 0001 statements() in one txn; include_object [alembic_version + call_events_pYYYYMM only];
+autogenerate_diff with compare_type + compare_server_default). tests/test_schema_matches_spec.py (7 integration
+tests), tests/test_autogenerate_parity.py (8: parity == [], index names per table == DB, 6 drift cases incl. an
+expression index). model_introspection.spec_sql_blocks(); migration_helpers.query_many (one connection, _query
+generalised); migrated_url moved to conftest (module scope); test_migrations.py +1 unit test (11 blocks, no
+ClickHouse, CREATE TABLE names == spec_table_names). AGENTS.md bullet.
+Deviation from plan: no autogenerate noise appeared at all (alembic 1.20.1 compares expression/partial/hnsw indexes,
+server defaults, and vector(1024) cleanly, without warnings), so no warning filter and no compare_server_default
+callable exist. No model or 0001 change was needed: spec DB == migrated DB and models == migrated DB on the first run.
+The "column-removed" drift case was skipped as the plan allowed (no public API); an expression-index case replaces it.
+Negative proofs (reverted, git diff clean):
+- tenancy.py orgs.slug CITEXT -> Text: test_models_match_migrated_schema FAILED with
+  [('modify_type', None, 'orgs', 'slug', {...}, CITEXT(), ...)].
+- specs/03 hnsw `m = 16` -> `m = 8`: test_table_objects_match_spec[indexes] FAILED showing kb_chunks_embedding_hnsw
+  WITH (m='8', ...) vs (m='16', ...).
+Gates: make fmt 0; make lint 0; make typecheck 0 (188 files); make placeholders 0 findings; check_spec_refs 0;
+make test 1603 passed, 99.87 % (run alone); pytest packages/va_db -m integration -rs 179 passed / 0 skipped;
+jscpd@4 0 clones; radon A (2.57 overall); pip-audit no known vulns; pnpm audit clean.
+
+## Review P01-T08 (2026-10-27) — APPROVED
+Re-ran (sequentially, nothing heavy concurrently): make lint 0, typecheck 0, placeholders 0 findings, make test 1603
+passed / 99.87 % (no scratch_session timeout this time), pytest packages/va_db -m integration 179 passed, jscpd@4
+0 clones. Own negative proof: personas.name nullable=True → test_models_match_migrated_schema FAILED with
+('modify_nullable', None, 'personas', 'name', ...); reverted, src diff clean.
+Checked: spec blocks = §2..§10 (11, no ClickHouse), applied via exec_driver_sql + statements() in one txn; snapshot
+restricted to non-partition public tables minus alembic_version; conparentid = 0 drops partition-clone FKs on
+referencing tables; include_object excludes only alembic_version + call_events_pYYYYMM; drift cases mutate a
+to_metadata copy and re-assert Base.metadata parity. column-removed case skipped as plan allowed; type/nullable/default
+cases cover "altering a model column". Uses pg_attribute/format_type instead of information_schema.columns: stricter.
