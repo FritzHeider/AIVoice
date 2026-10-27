@@ -20,7 +20,23 @@
 
 ## Decisions
 
+### mem-1793128976-28d0
+> Every new migration must GRANT SELECT, INSERT, UPDATE, DELETE on new tables to va_app, va_system and add §10 trigger/RLS; RLS = NOT NULL org_id + voices/dnc_entries; call_events partitions call_events_pYYYYMM (UTC months)
+<!-- tags: database, alembic | created: 2026-10-27 -->
+
 ## Fixes
+
+### mem-1793129328-3035
+> make test flake: pytest-timeout 60s in va_db scratch_session setup (2 errors) when host is busy (jscpd/compose concurrently); isolated rerun green. Seen in P01-T06 and P01-T07 reviews - don't run heavy jobs alongside make test; root-cause pending
+<!-- tags: database, testing, docker | created: 2026-10-27 -->
+
+### mem-1793128976-0fb7
+> va_db test Postgres runs with fsync=off: DROP DATABASE forces a checkpoint and timed out (asyncpg 30s) with 8 xdist containers; also never boot an extra container in a test - Docker daemon create timed out (60s) under full make test; rename roles aside instead
+<!-- tags: database, testing, docker | created: 2026-10-27 -->
+
+### mem-1793128976-c741
+> Alembic+asyncpg: op.execute(str) wraps in text() (':0' in JSON literal = bind param) and asyncpg prepares each statement (no multi-statement strings); va_db migrations use execute_script(sql) from 0001_initial (splits on top-level ';', escapes colons)
+<!-- tags: database, alembic | created: 2026-10-27 -->
 
 ### mem-1793125348-9962
 > va_db tests: 'ruff check --fix --select RUF100' strips '# noqa: F401  (reason)' comments whole from import-for-side-effect lines (conftest, model_introspection) - never run RUF100 autofix on va_db; restore with git checkout

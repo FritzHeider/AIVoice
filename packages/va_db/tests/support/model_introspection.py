@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any, Final, get_args
 
 from sqlalchemy import (
@@ -26,6 +27,7 @@ from va_db.base import Base
 
 __all__ = [
     "DIALECT",
+    "SPEC_03",
     "assert_enum_check_mirrors",
     "assert_enum_checks_mirror",
     "assert_org_indexed",
@@ -44,6 +46,7 @@ __all__ = [
     "org_index_ddl",
     "server_defaults",
     "spec_column_mismatches",
+    "spec_table_names",
     "text_array_columns",
     "unique_and_pk",
 ]
@@ -51,6 +54,14 @@ __all__ = [
 DIALECT: Final = postgresql.dialect()  # type: ignore[no-untyped-call]
 
 _TIMESTAMPS: Final = frozenset({"created_at", "updated_at"})
+SPEC_03: Final = Path(__file__).resolve().parents[4] / "specs" / "03-data-model.md"
+
+
+def spec_table_names() -> list[str]:
+    """Table names created in specs/03 §3-§9a, in spec order (the relational schema; §12 is ClickHouse)."""
+    markdown = SPEC_03.read_text(encoding="utf-8")
+    relational = markdown[markdown.index("\n## 3. ") : markdown.index("\n## 10. ")]
+    return re.findall(r"CREATE TABLE (\w+)", relational)
 
 
 def get_table(name: str) -> Table:

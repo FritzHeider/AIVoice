@@ -1329,6 +1329,26 @@ CREATE POLICY platform_read ON voices FOR SELECT USING (org_id IS NULL);
 CREATE POLICY platform_read ON dnc_entries FOR SELECT USING (org_id IS NULL);
 ```
 
+> Decision (2026-10-27): `packages/va_db/migrations/versions/0001_initial.py` holds the §2–§9a SQL blocks verbatim
+> (lines over 110 columns are wrapped outside string literals; meaning unchanged) and runs one statement at a time,
+> because asyncpg prepares each statement. Additional rules for the migration:
+> - Roles: `CREATE ROLE va_app LOGIN` / `CREATE ROLE va_system LOGIN BYPASSRLS` only when absent, never with a
+>   password. If `va_system` exists without `BYPASSRLS`, the migration runs `ALTER ROLE va_system BYPASSRLS`. Then it
+>   runs `GRANT va_app, va_system TO CURRENT_USER`. Migrations run as the `DATABASE_URL` login role (§2 Decision).
+> - Privileges: `USAGE` on schema `public` and `SELECT, INSERT, UPDATE, DELETE` on every 0001 table (never
+>   `alembic_version`) go to `va_app` and `va_system`. There are no default privileges, so every later migration that
+>   adds a table grants the same explicitly. Partitions need no grants because queries reach them through the parent.
+> - The trigger and RLS loops are DO blocks over `pg_catalog`, limited to the 0001 tables (base or partitioned,
+>   never a partition). Each table with `updated_at` gets `<table>_set_updated_at`; the trigger on `call_events` is
+>   cloned onto its partitions. Each table whose `org_id` is NOT NULL, plus `voices` and `dnc_entries`, gets
+>   ENABLE + FORCE RLS and `tenant_isolation` with the exact text above. `plans` and `telnyx_events` have a nullable
+>   `org_id`, are system scope, and get no RLS.
+> - `call_events` partitions are named `call_events_pYYYYMM` and cover the UTC month `[month start, next month
+>   start)`. 0001 creates the current UTC month plus the next 3. `va_db.partitions.ensure_call_event_partitions` (P01-T13)
+>   must use the same names and bounds.
+> - `downgrade()` drops the 72 tables in reverse order (`DROP TABLE IF EXISTS … CASCADE`), `set_updated_at()`, and
+>   the three extensions. Roles and role memberships stay, because they are cluster-wide.
+
 `va_db.session.tenant_session(org_id)` opens a transaction and executes `SELECT set_config('app.org_id', :org_id, true)`.
 Sub-account access (parent org admins acting on child orgs) switches `app.org_id` to the child after an authorization
 check in the API layer; RLS is never relaxed for it.

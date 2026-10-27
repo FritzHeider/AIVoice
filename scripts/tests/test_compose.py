@@ -305,7 +305,7 @@ def test_grafana_datasource_points_at_prometheus() -> None:
 def test_postgres_init_sql() -> None:
     sql = INIT_SQL_PATH.read_text(encoding="utf-8")
     assert "CREATE ROLE va_app LOGIN PASSWORD 'va'" in sql
-    assert "CREATE ROLE va_system LOGIN PASSWORD 'va'" in sql
+    assert "CREATE ROLE va_system LOGIN BYPASSRLS PASSWORD 'va'" in sql
     assert "CREATE DATABASE temporal" in sql
 
 

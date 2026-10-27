@@ -11,7 +11,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Toolchain preflight | `uv run --no-project --python 3.12 python scripts/check_toolchain.py --search-path "$PATH"` |
 | Start infra + simulators | `make up` (apps too: `make up PROFILE=apps`) |
 | Stop | `make down` |
-| Migrate DB | `make migrate` |
+| Migrate DB | `make migrate` (SQL only: `uv run alembic -c packages/va_db/alembic.ini upgrade head --sql`; back out: `... downgrade base`) |
 | Seed dev data | `make seed` (prints dev API key `va_test_…` and dashboard login) |
 | Format | `make fmt` |
 | All gates | `make check` |
@@ -291,8 +291,8 @@ Grafana 3001
   server default, and asyncpg + RETURNING fill it at flush. `create_all` makes the parent only, so tests create
   partitions themselves (`CREATE TABLE call_events_2026_10 PARTITION OF call_events FOR VALUES FROM (...) TO (...)`;
   bounds may be expressions such as `date_trunc('month', now())`); an insert with no matching partition fails with
-  `no partition of relation "call_events" found for row`. P01-T13's `ensure_call_event_partitions(now)` should use
-  the same `call_events_YYYY_MM` naming. Model unit tests use `model_introspection.spec_column_mismatches` (spec
+  `no partition of relation "call_events" found for row`. Migration and P01-T13 partitions are named
+  `call_events_pYYYYMM` (specs/03 §10 Decision). Model unit tests use `model_introspection.spec_column_mismatches` (spec
   column strings, `?` = nullable), `assert_enum_check_mirrors`, and `leading_columns` (the org-index rule).
   `batch_items.call_id` has no FK on purpose: `calls.batch_item_id` points the other way, and a cycle would break
   create_all/drop ordering.
@@ -308,3 +308,19 @@ Grafana 3001
   `model_introspection.assert_org_indexed(table, nullable=...)` and `org_index_ddl(tables)`. Re-inserting a
   duplicate text-PK row in a test needs `session.expunge(original)` first (SQLAlchemy warns on the identity
   conflict, an error under filterwarnings).
+- 2026-10-27 (P01-T07): Alembic lives in `packages/va_db` (`alembic.ini`, `migrations/env.py`, `migrations/versions/`).
+  It reads `DATABASE_URL` and runs as the login role, one transaction per revision. Revisions run SQL through
+  `execute_script(sql)` (see `0001_initial.py`): asyncpg prepares every statement, so a multi-statement string
+  fails, and `op.execute(str)` wraps the string in `text()`, which reads `"style":0` as a bind parameter. The
+  helper splits at top-level `;` and escapes such colons. Every migration that adds a table must
+  `GRANT SELECT, INSERT, UPDATE, DELETE` on it to `va_app, va_system` (there are no default privileges) and add
+  RLS/trigger statements per specs/03 §10. The partition naming and the RLS table rule are in the specs/03 §10
+  Decision. Migration tests use `tests/support/migration_helpers` (`fresh_database(pg_url)` creates
+  `mig_<hex>` on the session server; `upgrade`/`downgrade(url)`; `query(url, sql, **params)` autocommits as
+  the login role and returns tuples; `alembic_config(StringIO)` for `--sql` output; `load_initial_revision()`).
+  These tests are sync because env.py calls `asyncio.run`. The roles-absent test renames the worker
+  server's roles aside (`spec_roles_set_aside`) instead of booting a second container: under the full suite the
+  Docker daemon timed out creating it. Test Postgres runs with `fsync=off`; before that, the forced checkpoint of `DROP DATABASE`
+  timed out (30 s) under xdist load. `ruff` per-file ignores for `packages/va_db/migrations/**`: `INP001`,
+  `N999` (plus `RUF001` in 0001, whose spec comments are verbatim). A compose volume created before this task
+  has `va_system` without BYPASSRLS; `make migrate` fixes it.

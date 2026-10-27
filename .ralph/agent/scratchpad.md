@@ -946,3 +946,170 @@ column against specs/03 §7–§9a: types, nullability, defaults, CHECK lists in
 NO ACTION, no-FK call/conversation/batch refs), unique names, partial/DESC/coalesce indexes, Decision org_idx lines.
 Tests cover defaults, enum enforcement, partial uniques, cascades/SET NULL, bytea/vector/numeric round-trips.
 Minor, not blocking: test_cycle_detection_reports_a_cycle exercises graphlib itself rather than va_db.
+
+## Plan P01-T07 — Alembic initial migration (exact DDL) (2026-10-27)
+Spec refs: specs/03 §1, §2 (+ its Decision), every ```sql block §3–§9a, §10. Verified: the 72 spec tables appear
+in FK-dependency order (no forward REFERENCES), so DDL can run in spec order with no deferred ALTERs.
+
+### Spec decision (add to specs/03 §10 as `> Decision (2026-10-27):` in the same commit)
+- Roles: created only when absent, `CREATE ROLE va_app LOGIN` / `CREATE ROLE va_system LOGIN BYPASSRLS`, no
+  password. If `va_system` already exists without BYPASSRLS (the compose init script created it that way), the
+  migration runs `ALTER ROLE va_system BYPASSRLS`. Then `GRANT va_app, va_system TO CURRENT_USER`.
+- Privileges: `GRANT USAGE ON SCHEMA public` and `SELECT, INSERT, UPDATE, DELETE` on every 0001 table (not
+  alembic_version) to va_app and va_system. Later migrations that add tables must grant explicitly (no default
+  privileges). Partitions need no grants because they are always reached through the parent.
+- call_events partitions are named `call_events_pYYYYMM` with UTC month bounds `[month start, next month start)`.
+  0001 creates the current UTC month plus 3. P01-T13 `ensure_call_event_partitions` must use the same name/bounds.
+- The trigger and RLS loops run in DO blocks over pg_catalog: every public base or partitioned table that is not
+  a partition (`relkind IN ('r','p') AND NOT relispartition`) with an `updated_at` column gets
+  `<t>_set_updated_at`. Every such table with an `org_id` column gets ENABLE + FORCE RLS + `tenant_isolation`
+  (exact §10 text). voices and dnc_entries also get `platform_read`.
+- downgrade(): drops all 72 tables (explicit reverse-order tuple, `DROP TABLE IF EXISTS ... CASCADE`), the
+  set_updated_at function, and the three extensions. It keeps roles and role memberships because they are
+  cluster-wide and may be used by other databases.
+
+### Files
+1. `packages/va_db/pyproject.toml`: add `alembic>=1.16` (whatever `uv add --package va-db alembic` resolves; keep
+   the lower bound at the resolved minor). Run `uv lock`.
+2. `packages/va_db/alembic.ini`: `script_location = %(here)s/migrations`, `file_template = %%(rev)s_%%(slug)s`,
+   no `sqlalchemy.url` (env.py takes it from settings), standard logger sections (WARN root, alembic INFO).
+3. `packages/va_db/migrations/env.py` (async):
+   - `target_metadata = Base.metadata` after `import va_db.models` (P01-T08 autogenerate uses it).
+   - URL from `DatabaseSettings().database_url` (DATABASE_URL, specs/02 §6), read fresh on every run.
+   - online: `create_engine(settings, None)` from va_db.engine (login role, per the §2 Decision) →
+     `async with engine.connect() as c: await c.run_sync(_run)` with `context.configure(connection=...,
+     target_metadata=..., transaction_per_migration=True)` and `context.begin_transaction()`; dispose engine in
+     `finally`. Entry `asyncio.run(...)`.
+   - offline: `context.configure(url=..., literal_binds=True, dialect_opts={"paramstyle": "named"})` so
+     `alembic upgrade head --sql` emits the script.
+   - Typed functions, module docstring citing specs/03.
+4. `packages/va_db/migrations/script.py.mako`: the standard template, fully typed (`def upgrade() -> None:`), with
+   `revision: str`, `down_revision: str | None`, docstring.
+5. `packages/va_db/migrations/versions/0001_initial.py`: `revision = "0001"`, `down_revision = None`.
+   - Module-level SQL constants, one triple-quoted string per spec section, copied verbatim from the spec
+     (EXTENSIONS_AND_FUNCTIONS §2, TENANCY §3, TELEPHONY §4, AGENT_CONFIGURATION §5, CALLS §6, MEMORY §7,
+     MESSAGING §8, WEBHOOKS_AND_BILLING §9, ADDITIONAL §9a), plus the Decision org_idx lines, which are already in
+     the spec blocks. Wrap spec lines longer than 110 chars (36 of them, mostly long CHECK IN lists) at commas.
+     The SQL meaning is unchanged, and P01-T08 compares catalogs, not text. Keep `'{}'::jsonb` and similar
+     defaults exactly as written. No `:name` tokens appear in the DDL. Execute through `op.execute(sql)` with a
+     plain string, not text(), so colons like `'{}'::jsonb` are never treated as bind params. Confirm this with
+     the offline test.
+   - ROLES (DO block above), GRANTS (DO block looping pg_tables in schema public where tablename <>
+     'alembic_version'), TRIGGERS and RLS (DO blocks as in the Decision, using `format('%I')`), PLATFORM_READ (the
+     two §10 statements verbatim), CALL_EVENT_PARTITIONS (DO block `FOR i IN 0..3` that computes
+     `date_trunc('month', now() AT TIME ZONE 'UTC') + make_interval(months => i)`, converts it back with
+     `AT TIME ZONE 'UTC'`, and runs `CREATE TABLE IF NOT EXISTS call_events_p<YYYYMM> PARTITION OF call_events FOR
+     VALUES FROM (...) TO (...)`).
+   - `upgrade()`: run the statements in order: extensions/function → sections → grants → triggers → RLS → platform_read →
+     partitions. `downgrade()` as in the Decision, with `_TABLES: Final[tuple[str, ...]]` in spec order and
+     iterated reversed.
+   - asyncpg cannot run several statements with bind params in one execute, but plain multi-statement strings
+     work through `op.execute` in the simple-query protocol only. If asyncpg rejects multi-statement text
+     ("cannot insert multiple commands into a prepared statement"), split each constant on top-level `;` with a
+     small helper `_statements(sql) -> list[str]` that respects `$$` bodies, and execute each statement. This
+     helper is the likely path because SQLAlchemy+asyncpg prepares statements. Unit-test it.
+6. Tooling: add `packages/va_db/migrations` to mypy `files`. Add ruff per-file-ignores for
+   `packages/va_db/migrations/**`: `INP001` (not a package) and `N999` if 0001_initial trips it. Do not add other
+   ignores. Check that coverage tracks env.py and the versions files, since alembic loads them in-process.
+7. `infra/docker/postgres-init/01-roles.sql`: create va_system with `BYPASSRLS` (dev parity with §2).
+8. specs/03 §10 Decision. AGENTS.md: `make migrate`, `alembic upgrade head --sql`, partition naming, the "grant
+   new tables to va_app/va_system in each migration" rule, and that migrations run as the login role.
+
+### Tests
+- `packages/va_db/tests/test_migrations.py` (unit, no Docker):
+  - offline `command.upgrade(cfg, "head", sql=True)` with stdout captured (Config(..., stdout=buf) / capsys)
+    contains `CREATE TABLE orgs`, `PARTITION BY RANGE (created_at)`, `CREATE POLICY platform_read ON voices`,
+    `'{}'::jsonb`, and every Base.metadata table name in a `CREATE TABLE` statement.
+  - `_statements` splitter: `$$` bodies stay intact, trailing whitespace/empty statements are dropped, and the
+    statement count for the §2 block is 4. Import the version module via importlib from its path.
+  - `_TABLES` == the spec's CREATE TABLE order (reuse the parser from test_model_imports, or move it to
+    model_introspection to avoid a jscpd clone) and set-equal to Base.metadata.tables.
+- `packages/va_db/tests/test_migrations_integration.py` (integration). Each test gets a fresh database:
+  `CREATE DATABASE mig_<hex>` on the session `pg_url` server via a login connection with AUTOCOMMIT, and DATABASE_URL
+  is monkeypatched to it. Tests are sync, call `alembic.command`, and inspect through `asyncio.run(helper)`, or
+  are async and run commands via `asyncio.to_thread`.
+  - `test_upgrade_creates_every_model_table`: public base/partitioned non-partition tables minus alembic_version
+    == Base.metadata table names. Extensions vector/pg_trgm/citext installed; `set_updated_at` exists.
+  - `test_updated_at_triggers`: trigger `<t>_set_updated_at` exists for exactly the metadata tables with an
+    updated_at column. Behaviour: insert an org, then UPDATE in a later txn, and updated_at advances.
+  - `test_rls_enabled_and_forced`: relrowsecurity and relforcerowsecurity hold for exactly the tables with an org_id
+    column. The tenant_isolation qual/with_check (pg_policies) match the §10 expression, and platform_read exists
+    only on voices and dnc_entries.
+  - `test_rls_smoke`: as va_app through Database(...).tenant_session, org A cannot see org B's contact row. The full
+    harness is P01-T09.
+  - `test_grants`: `has_table_privilege(role, t, 'SELECT,INSERT,UPDATE,DELETE')` for both roles on every table,
+    and false on alembic_version for va_app.
+  - `test_call_event_partitions`: 4 partitions named call_events_pYYYYMM for the DB's current UTC month +0..3,
+    with bounds from pg_get_expr(relpartbound). call_events_org_idx is a partitioned index attached on each
+    partition. An insert routes into the current partition.
+  - `test_downgrade_then_upgrade`: upgrade head → downgrade base leaves no tables except alembic_version, no
+    set_updated_at, and no extensions; then upgrade head succeeds and the table set matches again.
+  - `test_roles_created_when_absent` uses a dedicated container without SETUP_SQL. Give `running_postgres` a
+    `setup_sql: str | None = SETUP_SQL` parameter. Assert va_app/va_system exist, va_system has rolbypassrls,
+    rolpassword is NULL (pg_authid), and current_user is a member of both. Then downgrade, run
+    `ALTER ROLE va_system NOBYPASSRLS`, upgrade, and assert BYPASSRLS is restored.
+- Add any reused helpers (fresh-db context manager, alembic Config builder) to tests/support, not copied.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (0 skipped);
+`make up` (infra) then `make migrate`, then `uv run alembic -c packages/va_db/alembic.ini downgrade base &&
+make migrate` against compose Postgres (evidence for the acceptance criterion); radon; jscpd 0 clones; va_db
+coverage 100 % (now including migrations/); pip-audit (alembic is new).
+
+### Risks
+- asyncpg multi-statement execution, handled by the splitter as above.
+- CREATE EXTENSION vector requires superuser or trusted-extension rights. The compose `va` user and the
+  testcontainer user are superusers.
+- PG16 GRANT role TO CURRENT_USER requires ADMIN. It works for a superuser or the creator of the roles.
+- alembic_version is created before upgrade runs, so the GRANT loop must exclude it explicitly.
+- The BEFORE UPDATE trigger on partitioned call_events is supported on PG13+ (row triggers propagate to
+  partitions).
+- Partition names in the test must come from the DB's `now()`, not Python's clock, so a month rollover mid-test
+  cannot break it.
+- Compose pgdata may already hold roles without BYPASSRLS, which the migration fixes. If `make migrate` finds
+  leftover tables from an earlier experiment, `make down -v` first and note it.
+
+## Build P01-T07 (2026-10-27)
+New: packages/va_db/alembic.ini, migrations/env.py (async online through `create_engine(settings, None)`, offline
+`--sql`, `configure_logger` attribute gates fileConfig), migrations/script.py.mako (typed; empty bodies render as
+`pass` so the placeholder gate catches an unfilled revision), migrations/versions/0001_initial.py: spec §2-§9a
+blocks verbatim. They were generated once from the spec; 36 lines over 110 chars were wrapped outside string
+literals, and the result is equal to the spec after whitespace/comment normalisation. Also ROLES, GRANTS
+(explicit TABLES list), UPDATED_AT_TRIGGERS / ROW_LEVEL_SECURITY DO loops limited to the 0001 tables,
+PLATFORM_READ, CALL_EVENT_PARTITIONS (call_events_pYYYYMM, UTC months), `statements()` splitter (dollar quotes,
+literals, comments), and `execute_script()` (escapes `:word` colons because op.execute wraps strings in text()).
+Downgrade covers 72 tables, the function, and the extensions; roles stay.
+Deviations from plan (recorded in the specs/03 §10 Decision): RLS applies to NOT NULL org_id + voices/dnc_entries per the
+spec text, not to "every org_id column" (plans and telnyx_events have a nullable org_id and are system scope).
+The loops are scoped to the revision's tables, not to all public tables (the test server has rls_probe).
+Roles test: renames the worker server's roles aside instead of a second container (the Docker daemon timed out
+creating one under the full suite). Test Postgres now runs with fsync=off (DROP DATABASE checkpoint hit
+asyncpg's 30 s timeout under xdist); the va_db suite went from ~4.5 to ~1.5 min.
+Other: alembic 1.20.1 dependency; mypy files += packages/va_db/migrations; ruff per-file ignores INP001/N999
+(+RUF001 for 0001's verbatim en dash); spec_table_names moved to model_introspection; 01-roles.sql va_system
+BYPASSRLS (+ test_compose assertion); AGENTS.md (migrate commands, conventions, partition naming fixed to pYYYYMM).
+Tests: test_migrations.py (12 unit tests: offline upgrade/downgrade SQL, colon escaping, grants list, logging, TABLES ==
+spec order == models, splitter), test_migrations_integration.py (13: tables/extensions/function/version,
+every model index + hnsw/gin, triggers exact + behaviour, RLS exact + forced, tenant_isolation deparse ==
+rls_probe spec policy, platform_read, tenant_session smoke, grants per privilege, partitions + routing at
+bounds + out-of-range rejection, partitioned index attachment, downgrade→upgrade, roles absent + BYPASSRLS restore).
+Gates: make fmt 0; make lint 0; make typecheck 0 (185 files); make placeholders 0 findings; check_spec_refs 0;
+make test 1587 passed (99.87 %; va_db incl. migrations/env.py and 0001 100 %); pytest packages/va_db -m
+integration -rs 164 passed / 0 skipped; radon A (1.21); jscpd 0 clones; pip-audit no known vulns; pnpm audit
+clean; scripts compose/ci tests 68 passed.
+Compose acceptance: `make migrate` on the empty compose DB → 73 tables (72 + alembic_version), 4 partitions,
+67 policies, 71 triggers, va_system BYPASSRLS fixed; `alembic downgrade base` → only alembic_version, no
+extensions/function; `make migrate` again → OK. The compose DB is left migrated at 0001.
+
+## Review P01-T07 (2026-10-27) — APPROVED
+Re-ran: make lint 0, typecheck 0, placeholders 0 findings, jscpd@4 0 clones, radon A (migrations 2.13).
+make test: the first run had 1585 passed + 2 setup errors, both pytest-timeout (60 s) in `scratch_session` setup
+(test_call_models_integration / test_memory_messaging_models_integration, which are pre-T07 model tests). jscpd and
+compose `make migrate` were running at the same time. The isolated rerun had 1587 passed, 0 errors (99.87 %).
+This is the same signature as the T06 first-run note, so it is a recurring load-sensitive flake: the scratch_session
+setup hangs on the server under host contention. It is not caused by this diff; it is tracked as a fix task.
+Verified: the 9 SQL constants equal specs/03 §2–§9a sql blocks after whitespace/comment normalisation (scripted
+compare); RLS rule = §10 text (NOT NULL org_id + voices/dnc_entries), exact policy text; roles absent-only,
+no password, BYPASSRLS repair, GRANT TO CURRENT_USER per §2 Decision; colon-escape regex leaves `::casts` and
+`:=` alone; downgrade keeps roles. Compose: make migrate → downgrade base → make migrate → `current` = 0001 (head).
+Tests are behavioural (catalog-exact sets, trigger advance, partition routing at bounds, roles-absent path).

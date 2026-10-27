@@ -56,7 +56,7 @@
   - Deliverables: `Memory`, `MemoryChange`, `Conversation`, `Message`, `TenDlcBrand`, `TenDlcCampaign`, `WebhookEndpoint`, `WebhookDelivery`, `Plan`, `OrgSubscription`, `CreditLedger`, `CreditHold`, `UsageEvent`, `Invoice`, `StripeEvent`, plus the §9a tables (added by the Planner 2026-10-27; no other task maps them and 0001/parity need them): `OrgLlmProvider`, `DncImport`, `ErasureRequest`, `OrgSecret`, `OrgDataKey`
   - Acceptance: model import graph has no cycles; `mypy --strict` clean.
 
-- [ ] P01-T07 Alembic initial migration (exact DDL)
+- [x] P01-T07 Alembic initial migration (exact DDL) — 0001_initial verbatim spec §2–§9a DDL + roles/grants/trigger+RLS loops/platform_read/call_events_pYYYYMM partitions, async env.py; make test 1587 passed (99.87 %, va_db incl. migrations 100 %), 25 migration tests; compose upgrade→downgrade→upgrade OK; lint/typecheck/placeholders 0, jscpd 0
   - Spec refs: specs/03-data-model.md (all SQL blocks, Triggers and RLS)
   - Depends on: P01-T06
   - Deliverables: `packages/va_db/alembic.ini`, `migrations/env.py` (async), `versions/0001_initial.py` (extensions, roles if absent, `set_updated_at`, all tables/indexes, per-table triggers via loop, RLS enable/force + policies, platform_read policies, call_events partitions for current month + 3), full `downgrade()`

@@ -76,6 +76,9 @@ select = [
 "scripts/**" = ["T20", "S603", "S607"]
 "apps/*/src/*/api/**" = ["PLR0913"]
 "apps/*/src/*/routers/**" = ["PLR0913"]
+# Alembic scripts are not a package; revision files start with the revision number; 0001 keeps spec comments verbatim.
+"packages/va_db/migrations/**" = ["INP001", "N999"]
+"packages/va_db/migrations/versions/0001_initial.py" = ["INP001", "N999", "RUF001"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -89,6 +92,7 @@ files = [
   "packages/va_common/tests",
   "packages/va_db/src",
   "packages/va_db/tests",
+  "packages/va_db/migrations",
   "apps/api/src",
   "apps/api/tests",
   "apps/telephony_edge/src",

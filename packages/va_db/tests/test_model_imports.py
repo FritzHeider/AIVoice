@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import ast
 import importlib
-import re
 from collections.abc import Iterator
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Final
 
 import pytest
+from model_introspection import spec_table_names
 from sqlalchemy.orm import configure_mappers
 
 import va_db
@@ -18,7 +18,6 @@ import va_db.models  # registers every table on Base.metadata
 from va_db.base import Base
 
 _SRC: Final = Path(va_db.__file__).parent
-_SPEC: Final = Path(__file__).resolve().parents[3] / "specs" / "03-data-model.md"
 
 
 def _module_name(path: Path) -> str:
@@ -93,14 +92,7 @@ def test_mappers_configure() -> None:
     configure_mappers()
 
 
-def spec_tables() -> set[str]:
-    """Table names created in specs/03 §3-§9a (the relational schema; §12 is ClickHouse)."""
-    markdown = _SPEC.read_text(encoding="utf-8")
-    relational = markdown[markdown.index("\n## 3. ") : markdown.index("\n## 10. ")]
-    return set(re.findall(r"CREATE TABLE (\w+)", relational))
-
-
 def test_every_spec_table_is_mapped() -> None:
-    tables = spec_tables()
+    tables = set(spec_table_names())
     assert {"orgs", "calls", "memories", "plans", "org_data_keys"} <= tables
     assert tables == set(Base.metadata.tables)

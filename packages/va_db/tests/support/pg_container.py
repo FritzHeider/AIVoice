@@ -8,6 +8,9 @@ from contextlib import contextmanager
 from typing import Final
 
 PG_IMAGE: Final = "pgvector/pgvector:pg16"
+# The server is disposable, so durability is traded for speed: with fsync on, the forced checkpoints of
+# DROP DATABASE (and heavy DDL) on one container per xdist worker outran asyncpg's 30 s command timeout.
+SERVER_COMMAND: Final = "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
 
 # Roles as in specs/03-data-model.md §2 (no passwords: the test logs in as the superuser and assumes
 # each role through the connection's ``role`` startup parameter)
@@ -41,7 +44,8 @@ def running_postgres() -> Iterator[str]:
     )
 
     password = secrets.token_hex(16)
-    with PostgresContainer(PG_IMAGE, username="va", password=password, dbname="va", driver=None) as container:
+    server = PostgresContainer(PG_IMAGE, username="va", password=password, dbname="va", driver=None)
+    with server.with_command(SERVER_COMMAND) as container:
         result = container.exec(["psql", "-U", "va", "-d", "va", "-v", "ON_ERROR_STOP=1", "-c", SETUP_SQL])
         if result.exit_code != 0:
             msg = f"database setup failed: {result.output.decode(errors='replace')}"

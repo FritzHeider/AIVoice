@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "VoiceAgents Postgres layer: role-assuming engines, tenant/system sessions, declarative base and mixins"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "alembic>=1.20.1",
     "asyncpg>=0.32.0",
     "pgvector>=0.5.1",
     "sqlalchemy[asyncio]>=2.0.35",
