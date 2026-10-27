@@ -317,7 +317,7 @@ Grafana 3001
   RLS/trigger statements per specs/03 §10. The partition naming and the RLS table rule are in the specs/03 §10
   Decision. Migration tests use `tests/support/migration_helpers` (`fresh_database(pg_url)` creates
   `mig_<hex>` on the session server; `upgrade`/`downgrade(url)`; `query(url, sql, **params)` autocommits as
-  the login role and returns tuples; `alembic_config(StringIO)` for `--sql` output; `load_initial_revision()`).
+  the login role and returns tuples; `alembic_config(StringIO)` for `--sql` output; `load_revision("0001_initial.py")`).
   These tests are sync because env.py calls `asyncio.run`. The roles-absent test renames the worker
   server's roles aside (`spec_roles_set_aside`) instead of booting a second container: under the full suite the
   Docker daemon timed out creating it. Test Postgres runs with `fsync=off`; before that, the forced checkpoint of `DROP DATABASE`
@@ -353,3 +353,10 @@ Grafana 3001
   specs/03 §2 `va_system` bullet (`test_repositories.py`), so add a new one to the spec first. With SQLAlchemy 2.1,
   `select(Model)` is typed `Select[Model]` (not `Select[tuple[Model]]`) and `Result.tuples()` is deprecated (an
   error under filterwarnings); rows unpack directly.
+- 2026-10-27 (P01-T11): seed-data migrations (`0002_seed_plans.py`) are hand-written `INSERT`s run with
+  `op.execute(sa.text(...))` (no colons, one statement); the downgrade deletes exactly the seeded keys and
+  fails on FK references rather than dropping data. The head revision is now `0002`, so a migrated test DB
+  already holds the `start`/`build`/`scale`/`enterprise` plans: tests that insert plans use random ids.
+  `tests/support/plan_catalog.parse_spec_plans()` parses the specs/24 §2 table and seed-value paragraph;
+  `test_seed_plans*.py` compare it with the offline SQL and the migrated `plans` rows, so a spec price change
+  needs a new seed migration.

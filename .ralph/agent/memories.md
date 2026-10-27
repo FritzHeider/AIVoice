@@ -30,6 +30,10 @@
 
 ## Fixes
 
+### mem-1793134471-2c7d
+> make test flake variant (P01-T11 build): 138 errors = pytest-timeout 60s in conftest pg_url -> pg_container.running_postgres (testcontainers boot) right after compose make migrate + alembic round-trip; isolated rerun 1756 passed. Docker daemon latency, same family as scratch_session timeout
+<!-- tags: database, testing, docker | created: 2026-10-27 -->
+
 ### mem-1793133155-6419
 > SQLAlchemy AsyncSession.begin_nested() autoflushes pending changes into the OUTER transaction before the savepoint; make add()/setattr inside the begin_nested block or an IntegrityError aborts the caller's tenant transaction. Failed savepoint expires touched objects (attribute access -> MissingGreenlet)
 <!-- tags: database, sqlalchemy | created: 2026-10-27 -->

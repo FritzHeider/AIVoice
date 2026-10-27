@@ -14,7 +14,7 @@ from typing import Any, Final
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from migration_helpers import load_initial_revision, query_many
+from migration_helpers import load_revision, query_many
 from model_introspection import spec_sql_blocks
 from service_helpers import settings_of
 from sqlalchemy import Connection, MetaData
@@ -160,7 +160,7 @@ def diff(
 
 
 async def _apply_spec(url: str) -> None:
-    statements = load_initial_revision().statements
+    statements = load_revision("0001_initial.py").statements
     engine = create_engine(settings_of(DatabaseSettings, database_url=url, database_pool_size=1), None)
     try:
         async with engine.begin() as connection:

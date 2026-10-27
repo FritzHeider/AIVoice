@@ -38,6 +38,15 @@ analyze endpoint LLM tokens at COGS × 1.2.
 
 `effective_price(org, meter) -> int` resolves org override → plan → default.
 
+> Decision (2026-10-27): `0002_seed_plans` inserts the four rows above exactly. "custom" cells take the
+> micro-dollar seed values (Enterprise: fee 0, connected 80 000, transfer 25 000, SMS 20 000, widget 10 000);
+> "unlimited" caps are NULL; `tts_rate_micros_per_1k_chars` is 120 000 for every plan (the TTS standalone
+> $0.00012/char × 1 000); `is_public` is true for all four (Enterprise is listed as contact-sales);
+> `stripe_price_id` stays NULL (set per environment by deployment, never by a migration). The `numbers` column is
+> not a `plans` column (`PLAN_NUMBER_CAPS`, `16-phone-numbers.md` §3). The downgrade deletes exactly these four ids
+> and fails on an `org_subscriptions` reference rather than dropping data. `packages/va_db/tests/support/plan_catalog.py`
+> parses this section, so the seed test fails if the table and the migration drift apart.
+
 ## 3. Metering rules
 
 | Meter | Quantity | Unit price | When posted | Idempotency key |

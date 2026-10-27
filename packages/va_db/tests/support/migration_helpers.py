@@ -23,11 +23,11 @@ from va_db.engine import create_engine
 
 __all__ = [
     "ALEMBIC_INI",
-    "INITIAL_REVISION",
+    "VERSIONS",
     "alembic_config",
     "downgrade",
     "fresh_database",
-    "load_initial_revision",
+    "load_revision",
     "query",
     "query_many",
     "upgrade",
@@ -35,7 +35,7 @@ __all__ = [
 
 VA_DB_ROOT: Final = Path(__file__).resolve().parents[2]
 ALEMBIC_INI: Final = VA_DB_ROOT / "alembic.ini"
-INITIAL_REVISION: Final = VA_DB_ROOT / "migrations" / "versions" / "0001_initial.py"
+VERSIONS: Final = VA_DB_ROOT / "migrations" / "versions"
 
 
 def alembic_config(output: StringIO | None = None, *, configure_logger: bool = False) -> Config:
@@ -45,9 +45,11 @@ def alembic_config(output: StringIO | None = None, *, configure_logger: bool = F
     return config
 
 
-def load_initial_revision() -> ModuleType:
-    """Import ``0001_initial.py`` from its path (revision files are not importable by module name)."""
-    spec = importlib.util.spec_from_file_location("va_db_migration_0001_initial", INITIAL_REVISION)
+def load_revision(filename: str) -> ModuleType:
+    """Import a revision file such as ``0001_initial.py`` from its path (not importable by module name)."""
+    spec = importlib.util.spec_from_file_location(
+        f"va_db_migration_{Path(filename).stem}", VERSIONS / filename
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)

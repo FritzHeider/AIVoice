@@ -80,7 +80,7 @@
   - Deliverables: `TenantRepository[T]`, cursor encode/decode (base64 of `created_at|id`), soft-delete filtering, `NotFound` → `AppError('NOT_FOUND')`, system repos: `PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`, `TelnyxEventRepo`
   - Acceptance: pagination stable across inserts (tests insert between pages); limit bounds enforced (1–100).
 
-- [ ] P01-T11 Plans seed migration
+- [x] P01-T11 Plans seed migration — 0002_seed_plans inserts start/build/scale/enterprise per specs/24 §2 (Decision recorded); unit + integration tests parse the spec; make test 1756 passed (0002 100 %), va_db integration 271 passed 0 skipped, jscpd 0 clones
   - Spec refs: specs/24-billing-and-limits.md (plans seed data)
   - Depends on: P01-T07
   - Deliverables: `versions/0002_seed_plans.py` inserting the plan catalogue with exact micro-dollar values; downgrade deletes them

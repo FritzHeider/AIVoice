@@ -1,4 +1,4 @@
-"""0001_initial on real Postgres: tables, triggers, RLS, grants, partitions, roles (specs/03 §2-§10)."""
+"""Migrations to head on real Postgres: tables, triggers, RLS, grants, partitions, roles (specs/03 §2-§10)."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_upgrade_creates_every_model_table(migrated_url: str) -> None:
     assert _names(migrated_url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'") == {
         "set_updated_at"
     }
-    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0001"
+    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0002"
 
 
 def test_every_model_index_exists(migrated_url: str) -> None:
@@ -207,6 +207,9 @@ def test_call_event_indexes_attach_to_every_partition(migrated_url: str) -> None
 def test_downgrade_then_upgrade_on_a_fresh_database(pg_url: str) -> None:
     with fresh_database(pg_url) as url:
         upgrade(url)
+        downgrade(url, "0001")
+        assert query(url, "SELECT count(*) FROM plans") == [(0,)]
+        assert _names(url, TABLES_SQL) == {*Base.metadata.tables, "alembic_version"}
         downgrade(url)
         assert _names(url, TABLES_SQL) == {"alembic_version"}
         assert query(url, "SELECT version_num FROM alembic_version") == []
@@ -214,6 +217,7 @@ def test_downgrade_then_upgrade_on_a_fresh_database(pg_url: str) -> None:
         assert _names(url, "SELECT extname FROM pg_extension").isdisjoint(SPEC_EXTENSIONS)
         upgrade(url)
         assert _names(url, TABLES_SQL) == {*Base.metadata.tables, "alembic_version"}
+        assert query(url, "SELECT count(*) FROM plans") == [(4,)]
 
 
 SPEC_ROLES: Final = ("va_app", "va_system")

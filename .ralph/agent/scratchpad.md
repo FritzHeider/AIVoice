@@ -1615,3 +1615,100 @@ query (pending|delivering, next_attempt_at <= now, LIMIT 200, SKIP LOCKED), spec
 credit_holds/webhook_deliveries DDL. Non-blocking notes: test_attempt_outcomes overwrites the first mark_processed error
 before asserting it (TelnyxEvent test asserts only the second call); outbox tests delete the whole webhook_deliveries
 table of the module DB (fine while only this module polls it).
+
+## Plan P01-T11 — Plans seed migration (2026-10-27)
+
+### Spec decisions (record in specs/24 §2 as `> Decision (2026-10-27):` in the same commit)
+- "custom" cells resolve to the "Micro-dollar seed values" paragraph: enterprise monthly_fee 0, connected 80 000,
+  transfer 25 000, sms 20 000, widget 10 000 (per-org values come from `orgs.limits` overrides).
+- "unlimited" caps -> NULL. The `numbers` column of the table is not a `plans` column (it is `PLAN_NUMBER_CAPS` in
+  va_billing.plans, specs/16 §3) and is not seeded.
+- `tts_rate_micros_per_1k_chars` = 120 000 for every plan ($0.00012/char x 1000, the §2 "TTS standalone" price).
+- `is_public` true for all four (Bland lists Enterprise publicly as contact-sales); `stripe_price_id` NULL (set by
+  ops/deploy per environment, never in a migration).
+- Downgrade `DELETE FROM plans WHERE id IN ('start','build','scale','enterprise')`; it fails with an FK error if
+  org_subscriptions reference them (intended: no silent data loss).
+
+### Files
+1. `packages/va_db/migrations/versions/0002_seed_plans.py` (new): revision "0002", down_revision "0001", docstring
+   citing specs/24 §2. Hand-written SQL constants (no colons, no execute_script needed):
+   - `PLAN_IDS: Final = ("start", "build", "scale", "enterprise")`
+   - `SEED_PLANS: Final = """INSERT INTO plans (id, name, monthly_fee_micros, connected_rate_micros_per_min,
+     transfer_rate_micros_per_min, min_attempt_micros, sms_rate_micros, widget_message_micros,
+     tts_rate_micros_per_1k_chars, daily_call_cap, hourly_call_cap, concurrency_cap, voice_clone_cap, features,
+     is_public) VALUES (...4 rows...)"""` with `features` as `ARRAY[...]::text[]` / `'{}'::text[]`:
+     start: Start, 0, 120000, 50000, 15000, 20000, 10000, 120000, 100, 100, 10, 1, {}
+     build: Build, 249000000, 100000, 40000, 15000, 20000, 10000, 120000, 2000, 1000, 50, 5,
+            {local_presence, analysis_schema, webhooks_org}
+     scale: Scale, 449000000, 90000, 30000, 15000, 20000, 10000, 120000, 5000, 1000, 100, 15,
+            {local_presence, analysis_schema, webhooks_org, citations, white_label_widget}
+     enterprise: Enterprise, 0, 80000, 25000, 15000, 20000, 10000, 120000, NULL x4, the 12 features of the spec row
+     in spec order.
+   - `upgrade()`: `op.execute(sa.text(SEED_PLANS))`; `downgrade()`: `op.execute(sa.text(DELETE_PLANS))` where
+     DELETE_PLANS is built from PLAN_IDS.
+   Keep lines ≤ 110 cols; ruff per-file ignores for migrations already apply.
+2. `packages/va_db/tests/support/plan_catalog.py` (new): `parse_spec_plans() -> dict[str, SpecPlan]` reading
+   specs/24 §2 (markdown slice between "\n## 2. " and "\n## 3. "):
+   - `SpecPlan` frozen dataclass mirroring the seeded columns (id, name, 6 price micros, tts, 4 caps, features tuple).
+   - table rows `| \`id\` | ...|` -> cells; `$x` -> `round(Decimal(x) * 1_000_000)`; "2 000" -> 2000;
+     "unlimited" -> None; `` `{a, b}` `` -> tuple; "custom"/"custom (per-org override)" -> taken from the
+     paragraph lists: regex over "connected 120 000 / ... / enterprise default 80 000", "transfer ...", "fees ..."
+     (4 values each, index by plan order) and single values "SMS 20 000", "widget 10 000", "min attempt 15 000";
+     TTS from "$0.00012/char" x 1000.
+   - also `paragraph_values()` so the unit test can assert table and paragraph agree on every non-custom cell.
+   Export `SPEC_PLAN_COLUMNS` (ordered seeded column names) for SELECT building.
+3. `packages/va_db/tests/test_seed_plans.py` (new, unit): parse yields exactly start/build/scale/enterprise; table
+   dollar cells == paragraph micro values for non-custom cells (catches spec drift); enterprise caps all None;
+   offline `alembic upgrade 0001:0002 --sql` contains one `INSERT INTO plans` and the `UPDATE alembic_version ...
+   '0002'`; offline `downgrade 0002:0001 --sql` contains the DELETE with the 4 ids and no DROP; revision chain
+   (0002.down_revision == "0001") via importlib load (generalise `load_initial_revision` into
+   `load_revision(filename)` in migration_helpers, keep the old name as a thin call or update its callers).
+4. `packages/va_db/tests/test_seed_plans_integration.py` (new, `pytestmark = integration`, uses `migrated_url`):
+   SELECT seeded columns FROM plans ORDER BY id == parse_spec_plans() (all columns, features as list,
+   stripe_price_id NULL, is_public true); `va_system` and `va_app` can SELECT plans (system_session read through
+   `open_database(migrated_url)` returning 4 rows).
+5. Modify `packages/va_db/tests/test_migrations_integration.py`: head version assertion "0001" -> "0002";
+   `test_downgrade_then_upgrade_on_a_fresh_database`: after first upgrade, `downgrade(url, "0001")` -> plans has 0 rows
+   and tables intact, then `downgrade(url)` to base as now, then upgrade head -> 4 plans. (No extra fresh_database —
+   DROP DATABASE checkpoint flake memory.)
+6. Modify `packages/va_db/tests/test_migrations.py`: keep '0001' INSERT assertion, add `UPDATE alembic_version SET
+   version_num='0002'` assertion for head.
+7. `specs/24-billing-and-limits.md` §2: the Decision above. `AGENTS.md`: bullet — seed data migrations are
+   hand-written INSERTs, downgrade deletes exactly seeded keys, plan test parses specs/24 §2.
+
+### Gates
+`make fmt lint typecheck placeholders`; `make test` run alone (scratch_session flake); `uv run pytest
+packages/va_db -m integration -rs` 0 skipped; va_db coverage 100 % (migrations included); jscpd@4 0 clones; radon A;
+check_spec_refs; pip-audit/pnpm audit. Compose: `make migrate` then `uv run alembic -c packages/va_db/alembic.ini
+downgrade base` and `upgrade head` against the dev DB. Negative proof (revert): change build connected rate to 110000
+in 0002 -> integration test fails.
+
+### Risks
+- Existing tests that assert "head == 0001" (found: test_migrations_integration line 68). grep `"0001"` again after.
+- Any integration test inserting plan ids start/build/scale/enterprise into a migrated DB would now collide
+  (none found: billing model tests use scratch_session + random plan ids).
+- Spec table parsing of the enterprise "custom (per-org override)" cell — handle by prefix "custom".
+
+## Build P01-T11 (2026-10-27)
+Implemented per plan. Deviations: `DELETE_PLANS` is a literal string (ruff S608 flagged the join); the unit test
+asserts it lists exactly `PLAN_IDS`. `load_initial_revision()` became `load_revision(filename)` and both callers
+(test_migrations, schema_catalog) were updated, with no alias left behind. The tenant-session read in the integration
+test uses a random org id because plans has no RLS.
+Files: migrations/versions/0002_seed_plans.py; tests/support/plan_catalog.py; tests/test_seed_plans.py;
+tests/test_seed_plans_integration.py; migration_helpers.py, schema_catalog.py, test_migrations.py,
+test_migrations_integration.py (head 0002, downgrade 0001 empties plans, re-upgrade gives 4 rows); specs/24 §2 Decision;
+AGENTS.md P01-T11 bullet (+ load_revision rename).
+Gates: make fmt/lint/typecheck exit 0 (mypy 207 files); placeholders 0 findings; make test exit 0 (1756 passed,
+99.88 %, 0002_seed_plans.py 100 %). One earlier full run hit 138 pytest-timeout errors in pg_url container boot
+(Docker latency right after the compose round-trip). The isolated rerun was green; recorded as a memory.
+`pytest packages/va_db -m integration -rs` 271 passed 0 skipped; jscpd@4 0 clones; radon: new code all A;
+check_spec_refs 0; pip-audit (--no-deps) no known vulns; corepack pnpm audit no known vulns.
+Compose: make migrate ran 0001->0002; alembic downgrade base + upgrade head OK, current 0002 (head).
+Negative proof (reverted): build connected 110000 in 0002 -> test_plans_rows_equal_the_spec_catalogue fails.
+
+## Review P01-T11 (2026-10-27) — APPROVED
+Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (1756 passed, 0002_seed_plans.py 100 %);
+`pytest packages/va_db -m integration -rs` 271 passed, 0 skipped; jscpd@4 0 clones. Checked the 0002 INSERT values
+against the specs/24 §2 table and seed-value paragraph cell by cell (fees, rates, caps, features in spec order,
+enterprise custom -> seed values, unlimited -> NULL) and against the specs/03 plans DDL (all NOT NULL columns set).
+No other code inserts the seeded ids into migrated DBs (billing model tests use random plan ids in scratch DBs).

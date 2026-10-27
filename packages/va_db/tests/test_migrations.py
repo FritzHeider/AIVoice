@@ -11,12 +11,12 @@ from typing import Final
 
 import pytest
 from alembic import command
-from migration_helpers import alembic_config, load_initial_revision
+from migration_helpers import alembic_config, load_revision
 from model_introspection import spec_sql_blocks, spec_table_names
 
 from va_db.base import Base
 
-INITIAL: Final[ModuleType] = load_initial_revision()
+INITIAL: Final[ModuleType] = load_revision("0001_initial.py")
 SPEC_SECTIONS: Final = (
     "TENANCY",
     "TELEPHONY",
@@ -49,6 +49,10 @@ def test_offline_upgrade_creates_every_model_table(upgrade_sql: str) -> None:
     created = re.findall(r"^CREATE TABLE (\w+) \(", upgrade_sql, re.MULTILINE)
     assert sorted(created) == sorted([*Base.metadata.tables, "alembic_version"])
     assert "INSERT INTO alembic_version (version_num) VALUES ('0001')" in upgrade_sql
+    assert (
+        "UPDATE alembic_version SET version_num='0002' WHERE alembic_version.version_num = '0001'"
+        in upgrade_sql
+    )
 
 
 def test_offline_upgrade_keeps_spec_ddl(upgrade_sql: str) -> None:
