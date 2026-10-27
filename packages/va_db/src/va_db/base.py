@@ -31,9 +31,9 @@ class Base(AsyncAttrs, DeclarativeBase):
 
 
 class IdMixin:
-    """``id uuid PRIMARY KEY`` generated in Python as UUIDv7 (no database default)."""
+    """``id uuid PRIMARY KEY`` generated in Python as UUIDv7 (no database default); first column."""
 
-    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=new_id)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=new_id, sort_order=-1)
 
 
 class TimestampMixin:

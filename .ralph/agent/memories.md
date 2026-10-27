@@ -6,6 +6,10 @@
 
 ## Fixes
 
+### mem-1793118560-6911
+> SQLAlchemy 2.1 + asyncpg returns inet columns as ipaddress.IPv4Address/IPv6Address (not str); annotate Mapped[IpAddress | None] from va_db.models
+<!-- tags: database, sqlalchemy | created: 2026-10-27 -->
+
 ### mem-1793117779-05cf
 > va_db assumes va_app/va_system via asyncpg connect_args server_settings={'role': ...} (startup parameter = session default). Never SET ROLE in a pool connect listener: it runs in an implicit txn and a rolled-back first txn (exception or engine.connect() reset-on-return) reverts to the login role => RLS bypass for superuser login
 <!-- tags: database, testing | created: 2026-10-27 -->

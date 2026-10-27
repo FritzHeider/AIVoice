@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
-from docker_probe import docker_available
-from pg_container import running_postgres
 from service_helpers import settings_of
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -25,14 +23,6 @@ _USER = text("SELECT current_user")
 
 class _BoomError(Exception):
     """Raised inside a session to force a rollback."""
-
-
-@pytest.fixture(scope="session")
-def pg_url() -> Iterator[str]:
-    if not docker_available():
-        pytest.skip("docker unavailable")
-    with running_postgres() as url:
-        yield url
 
 
 @pytest.fixture

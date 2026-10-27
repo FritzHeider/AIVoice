@@ -246,3 +246,14 @@ Grafana 3001
   `system_session()` (specs/03 §2 repositories only). Postgres integration tests use
   `pg_container.running_postgres()` (`packages/va_db/tests/support`, `pgvector/pgvector:pg16`, spec roles + an
   `rls_probe` table).
+- 2026-10-27 (P01-T02): models live in `va_db.models.<area>` (re-exported from `va_db.models`). Every `mapped_column`
+  passes an explicit SQL type (`Text`, `CITEXT`, `INET`, `JSONB`, `ARRAY(Text)`, ...): an unannotated
+  `Mapped[SomeLiteral]` becomes a native `Enum`. Enumerations are a module-level `Literal` alias plus
+  `check_in("<column>", get_args(Alias))` in `__table_args__` (constraint name `<table>_<column>_check`), so the
+  Literal is the single source of truth. Indexes are always named explicitly as in the spec (no `index=True`).
+  `inet` columns come back as `ipaddress.IPv4Address`/`IPv6Address` with SQLAlchemy 2.1 + asyncpg (annotate
+  `Mapped[IpAddress | None]`). `IdMixin.id` has `sort_order=-1` so `create_all` column order matches the spec.
+  Model integration tests (`test_tenancy_models_integration.py`) run `CREATE EXTENSION` + `Base.metadata.create_all`
+  inside one login-role transaction that is rolled back at teardown (DDL is transactional), with an
+  `AsyncSession(join_transaction_mode="create_savepoint")` and `begin_nested()` around expected IntegrityErrors.
+  The session-scoped `pg_url` fixture is in `packages/va_db/tests/conftest.py`.

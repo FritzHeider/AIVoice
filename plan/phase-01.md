@@ -26,7 +26,7 @@
   - Deliverables: `va_db.engine.create_engine(settings, role)`, `tenant_session(org_id)` (sets `app.org_id` with `set_config(..., true)` inside a transaction), `system_session()`, `Base`, `IdMixin`, `TimestampMixin`, `SoftDeleteMixin`
   - Acceptance: integration test with testcontainers Postgres (`pgvector/pgvector:pg16`) verifies `current_setting('app.org_id')` inside and outside sessions.
 
-- [ ] P01-T02 Tenancy and identity models
+- [x] P01-T02 Tenancy and identity models — 10 §3 tables column-for-column (types, defaults, CHECKs, FKs, named indexes); unit + 43 integration tests passed (not skipped); make test 1252 passed, va_db 100 %
   - Spec refs: specs/03-data-model.md (Tenancy, identity, access)
   - Depends on: P01-T01
   - Deliverables: models `Org`, `User`, `Membership`, `Invitation`, `Session`, `EmailToken`, `ApiKey`, `SsoConnection`, `AuditLog`, `IdempotencyKey`
@@ -51,9 +51,9 @@
   - Acceptance: inserting a `CallEvent` lands in the correct monthly partition (integration test).
 
 - [ ] P01-T06 Memory, messaging, webhook, billing models
-  - Spec refs: specs/03-data-model.md (Memory, Messaging and widget conversations, Webhooks and billing)
+  - Spec refs: specs/03-data-model.md (Memory, Messaging and widget conversations, Webhooks and billing, Additional tables §9a)
   - Depends on: P01-T05
-  - Deliverables: `Memory`, `MemoryChange`, `Conversation`, `Message`, `TenDlcBrand`, `TenDlcCampaign`, `WebhookEndpoint`, `WebhookDelivery`, `Plan`, `OrgSubscription`, `CreditLedger`, `CreditHold`, `UsageEvent`, `Invoice`, `StripeEvent`
+  - Deliverables: `Memory`, `MemoryChange`, `Conversation`, `Message`, `TenDlcBrand`, `TenDlcCampaign`, `WebhookEndpoint`, `WebhookDelivery`, `Plan`, `OrgSubscription`, `CreditLedger`, `CreditHold`, `UsageEvent`, `Invoice`, `StripeEvent`, plus the §9a tables (added by the Planner 2026-10-27; no other task maps them and 0001/parity need them): `OrgLlmProvider`, `DncImport`, `ErasureRequest`, `OrgSecret`, `OrgDataKey`
   - Acceptance: model import graph has no cycles; `mypy --strict` clean.
 
 - [ ] P01-T07 Alembic initial migration (exact DDL)

@@ -162,3 +162,127 @@ pip-audit no known vulns (pnpm not on PATH this shell; no TS changes), radon A (
 Re-ran lint/typecheck/placeholders (pass, 0 findings) and make test (1154 passed, 99.83 %, va_db 100 %).
 Confirmed integration tests execute (Docker up, 15/15 PASSED, none skipped), including the 5 role-survives-rollback
 regressions. Role now via asyncpg `server_settings={"role": ...}`; spec §2 Decision and AGENTS.md match. Ticked + committed.
+
+## Plan P01-T02 — Tenancy and identity models (2026-10-27)
+
+Spec: specs/03 §1 (conventions), §3 (the 10 tables, column for column), specs/04 §3.1 (role names).
+Planner also amended plan/phase-01.md: §9a tables (`org_llm_providers`, `dnc_imports`, `erasure_requests`,
+`org_secrets`, `org_data_keys`) had no owning task; they are now P01-T06 deliverables. Do NOT model them here.
+
+### Files
+1. `packages/va_db/src/va_db/models/__init__.py` — re-export every model + Literal alias below, `__all__` sorted.
+   Later tasks add `telephony.py`, `agents.py`, ... next to it. Do not add relationship()s (plain FKs only, avoids
+   import cycles across modules; repositories query by FK).
+2. `packages/va_db/src/va_db/models/_checks.py` — `def check_in(column: str, values: tuple[str, ...]) -> CheckConstraint`
+   building `"<column> IN ('a', 'b', ...)"` with `name=f"{column}_check"` (naming convention turns it into
+   `<table>_<column>_check`, Postgres' own name for an inline column CHECK). Callers pass `get_args(SomeLiteral)` so the
+   Literal is the single source of truth. Reject empty tuples / values containing `'` with ValueError (unit-tested).
+3. `packages/va_db/src/va_db/models/tenancy.py` — Literal aliases (exact spec order):
+   `OrgStatus = Literal["active","suspended","closed"]`, `DataRegion = Literal["us","eu"]`,
+   `UserStatus = Literal["active","disabled"]`,
+   `MemberRole = Literal["owner","admin","developer","analyst","billing","viewer"]`,
+   `EmailTokenPurpose = Literal["verify_email","reset_password"]`, `ApiKeyEnvironment = Literal["live","test"]`,
+   `SsoProvider = Literal["oidc"]`, `AuditActorType = Literal["user","api_key","system"]`.
+   Models (class → table): `Org`→orgs, `User`→users, `Membership`→memberships, `Invitation`→invitations,
+   `Session`→sessions, `EmailToken`→email_tokens, `ApiKey`→api_keys, `SsoConnection`→sso_connections,
+   `AuditLog`→audit_logs, `IdempotencyKey`→idempotency_keys. All but IdempotencyKey use `IdMixin, TimestampMixin`;
+   IdempotencyKey uses only TimestampMixin with composite PK `(org_id, key)` → `idempotency_keys_pkey`.
+   Rules:
+   - EVERY `mapped_column` passes an explicit SQL type (never rely on annotation inference; SQLAlchemy maps
+     `Literal` to `Enum` otherwise): `Text`, `CITEXT` / `INET` / `JSONB` / `ARRAY(Text)` from
+     `sqlalchemy.dialects.postgresql`, `SmallInteger`, `Integer`, `BigInteger`, `Boolean`, `LargeBinary` (bytea),
+     `DateTime(timezone=True)`, `Uuid(as_uuid=True)`.
+   - Annotations: enum columns `Mapped[OrgStatus]` etc.; jsonb `Mapped[dict[str, Any]]`; text[] `Mapped[list[str]]`;
+     inet `Mapped[str | None]` (asyncpg dialect returns str — verify in integration test); nullable → `X | None`.
+   - Nullability exactly per spec (nullable=False wherever NOT NULL; PK columns implied).
+   - server_default exactly per spec, no Python-side defaults besides IdMixin: `text("'start'")`, `text("0")`,
+     `text("false")`, `text("5000000")`, `text("25000000")`, `text("'{}'::jsonb")`, `text("'us'")`, `text("365")`,
+     `text("90")`, `text("''")`, `text("'{}'")` (text[]), `text("'{*}'")` (api_keys.scopes), `text("1")`,
+     `text("'live'")`, `text("'viewer'")`, `text("'active'")`.
+   - CHECKs: `check_in(...)` for every enum; `CheckConstraint("kyc_level BETWEEN 0 AND 3", name="kyc_level_check")`,
+     `retention_days BETWEEN 1 AND 3650`, `recording_retention_days BETWEEN 0 AND 3650` (same naming pattern).
+     `sso_connections.default_role` has NO check in the spec — annotate `Mapped[MemberRole]` but add no constraint.
+   - UNIQUE: column `unique=True` for orgs.slug, orgs.stripe_customer_id, users.email, invitations.token_hash,
+     sessions.token_hash, email_tokens.token_hash, api_keys.prefix (→ `<table>_<col>_key`);
+     `UniqueConstraint("org_id","user_id")` on memberships, `UniqueConstraint("org_id","issuer")` on sso_connections.
+   - FKs with exact `ondelete`: orgs.parent_org_id RESTRICT; tenant org_id CASCADE; memberships.user_id CASCADE;
+     invitations.invited_by (no ondelete); sessions.user_id CASCADE, sessions.active_org_id SET NULL;
+     email_tokens.user_id CASCADE; api_keys.created_by SET NULL.
+   - Named indexes exactly as spec (explicit names override the convention): `orgs_parent_idx(parent_org_id)`,
+     `memberships_user_idx(user_id)`, `invitations_org_idx(org_id)`, `sessions_user_idx(user_id)`,
+     `api_keys_org_idx(org_id)`, `audit_logs_org_created_idx(org_id, created_at DESC)` — the DESC one is declared
+     after the class: `Index("audit_logs_org_created_idx", AuditLog.org_id, AuditLog.created_at.desc())`.
+     No `index=True` anywhere (would invent unnamed indexes not in the spec).
+   - Class docstrings name the table and the Pydantic schema noted in spec comments (OrgLimitsOverride, OrgSettings)
+     but do not define those schemas here (later phases).
+4. `packages/va_db/src/va_db/__init__.py` — unchanged (models are imported as `va_db.models`).
+
+### Tests
+- `packages/va_db/tests/conftest.py`: move the session-scoped `pg_url` fixture here from
+  test_session_integration.py (one container per worker, shared by both integration modules).
+- `test_checks.py` (unit): `check_in` SQL text and name; ValueError for empty tuple and quote in value.
+- `test_tenancy_models.py` (unit, no Docker):
+  - `test_tables_registered` — the 10 table names are in `Base.metadata.tables`.
+  - `test_enum_checks_mirror_literals` — parametrized (table, column, Literal, expected spec tuple): constraint named
+    `<table>_<column>_check` exists; its values parsed from the compiled SQL == `get_args(Literal)` == spec tuple.
+  - `test_range_checks` — kyc_level / retention_days / recording_retention_days constraint text + names.
+  - `test_server_defaults` — parametrized (table, column, expected compiled default) for every defaulted column.
+  - `test_nullability` — parametrized over the spec's nullable columns (e.g. users.password_hash, sessions.ip) and a
+    sample of NOT NULL ones; or assert the full {column: nullable} map per table (preferred, catches drift).
+  - `test_unique_and_pk_names` — `orgs_slug_key`, `orgs_stripe_customer_id_key`, `users_email_key`,
+    `memberships_org_id_user_id_key`, `sso_connections_org_id_issuer_key`, `idempotency_keys_pkey(org_id,key)`, ...
+  - `test_foreign_keys_ondelete` — parametrized (table, column, target, ondelete).
+  - `test_indexes` — exact set of index names + column order + DESC on audit_logs (compile CreateIndex).
+  - `test_column_types` — CITEXT on orgs.slug/users.email/invitations.email, INET on sessions.ip/audit_logs.ip,
+    ARRAY(Text) on users.mfa_recovery_codes_hash/api_keys.scopes/sso_connections.allowed_domains, JSONB, LargeBinary,
+    SmallInteger (kyc_level, pepper_version), BigInteger micros.
+- `test_tenancy_models_integration.py` (`pytestmark = pytest.mark.integration`, uses `pg_url`): a login-role engine
+  (`create_engine(settings, None)`), one connection + transaction ROLLED BACK at teardown (DDL is transactional, so
+  the container stays clean for other modules): `CREATE EXTENSION IF NOT EXISTS citext`,
+  `conn.run_sync(Base.metadata.create_all)`; `AsyncSession(bind=conn, join_transaction_mode="create_savepoint")`.
+  - `test_org_defaults` — insert `Org(name, slug, webhook_signing_secret_enc=os.urandom(32))`, refresh: every spec
+    default (plan_id 'start', kyc 0, status 'active', 0/0 micros, recharge False/5_000_000/25_000_000, limits {},
+    settings {}, 'us', 365, 90, created_at/updated_at tz-aware).
+  - `test_user_api_key_sso_defaults` — users (name '', mfa False, codes [], admin False, 'active'); api_keys
+    (scopes ['*'], pepper_version 1, 'live'); sso_connections (allowed_domains [], 'viewer', enforce False).
+  - `test_enum_values_accepted_and_rejected` — parametrized (model builder, column, Literal): each Literal value
+    inserts; `"bogus"` raises IntegrityError (CheckViolation) inside `begin_nested()`.
+  - `test_range_checks_enforced` — kyc_level 4, retention_days 0, recording_retention_days 3651 rejected; bounds accepted.
+  - `test_citext_unique_email_case_insensitive` — users 'A@x.test' then 'a@x.test' → IntegrityError.
+  - `test_inet_round_trips_as_str` — Session.ip '203.0.113.7' reads back as that str.
+  - `test_idempotency_key_composite_pk` — same (org, key) twice → IntegrityError; other org same key OK.
+  - `test_org_delete_cascades` — deleting an org removes its memberships/api_keys; parent org with child → RESTRICT error.
+  Use `va_common.ids.new_id` for ids, `secrets`/`os.urandom` for hashes/secrets (no literal secrets; mind the
+  gitleaks + placeholder filler-word rules in AGENTS.md).
+
+### Gates
+`make fmt lint typecheck placeholders test` with Docker up (confirm integration tests PASSED, not skipped:
+`uv run pytest packages/va_db -m integration -rs`), `uvx pip-audit` on uv export, `uvx radon cc -s -a
+packages/va_db/src`, `npx --yes jscpd@4 --silent`. va_db coverage ≥ 85 % (target 100 %). AGENTS.md: note the
+explicit-SQL-type rule, `check_in` + Literal convention, and the rolled-back create_all integration pattern.
+
+### Risks
+- `Mapped[Literal[...]]` without explicit type → SQLAlchemy Enum; the explicit `Text` avoids it. mypy: Literal in
+  Mapped is fine.
+- CITEXT needs the extension inside the scratch transaction (created there, rolled back with it).
+- `Session` model name shadows `sqlalchemy.orm.Session` for star-importers; never import both under that name.
+- Parsing CHECK values in unit tests: compile constraint `.sqltext` and regex `'([^']*)'`.
+
+## Build P01-T02 (2026-10-27)
+Implemented per plan. Deviations/notes for the Reviewer:
+- `inet` is NOT returned as str: SQLAlchemy 2.1.6 + asyncpg yields `IPv4Address`/`IPv6Address`. Columns annotated
+  `Mapped[IpAddress | None]` (`type IpAddress = IPv4Address | IPv6Address`, exported from va_db.models); the
+  integration test round-trips v4 and v6 on sessions.ip and audit_logs.ip.
+- `IdMixin.id` gained `sort_order=-1` (base.py) so model column order == spec order (id first); unit test
+  `test_columns_order_and_nullability` asserts the full ordered (name, nullable) list per table.
+- Extra unit tests beyond the plan: exact set of CHECK names, every timestamp tz-aware, text[] item types.
+- `pg_url` moved to conftest.py; test_session_integration.py otherwise unchanged.
+Gates: fmt 0, lint 0, typecheck 0 (156 files), placeholders 0 findings, make test 1252 passed (99.84 %, va_db 100 %),
+integration `-m integration` 43 passed / 0 skipped, pip-audit no known vulns, radon A (1.24), jscpd 0 clones.
+
+## Review P01-T02 (2026-10-27) — APPROVED
+Re-ran lint/typecheck/placeholders (pass, 0 findings), make test (1252 passed, 99.84 %), and
+`pytest packages/va_db -m integration` (43 passed, none skipped). Checked tenancy.py against specs/03 §3 line by line:
+column order, types (citext/inet/jsonb/text[]/bytea/smallint/bigint), nullability, server defaults, CHECKs, UNIQUE,
+FK ondelete, and named indexes (audit_logs DESC) all match. IpAddress deviation is documented in AGENTS.md and memory.
+The plan amendment that moves the §9a tables into P01-T06 is accepted. Ticked + committed.
