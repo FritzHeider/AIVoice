@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "starlette>=1.0",
     "va-common",
+    "va-events",
 ]
 
 [build-system]
@@ -17,3 +18,4 @@ module-name = "va_events_sink"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-events = { workspace = true }

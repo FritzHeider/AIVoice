@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793135968-8be6
+> clickhouse-connect 1.11 async: create_async_client does a network round-trip (server version/settings) so open it in a supervised task; network errors and retried server errors raise OperationalError (subclass of DatabaseError); AsyncClient satisfies va_events ClickHouseCommands Protocol; server-side {name:Type} params work in INSERT ... SELECT
+<!-- tags: clickhouse, testing | created: 2026-10-27 -->
+
 ### mem-1793130055-a7eb
 > va_db schema checks: schema_catalog.snapshot() compares spec-applied vs migrated DB; autogenerate_diff (alembic 1.20.1) has zero noise on expression/partial/hnsw indexes, vector(1024), server defaults - any new exclusion must be a named commented exception in schema_catalog.include_object; Postgres "char" columns (contype, attgenerated) come back as bytes via asyncpg - cast ::text
 <!-- tags: database, alembic, testing | created: 2026-10-27 -->
@@ -29,6 +33,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793135968-c35b
+> make test flake variant (P01-T12 build): ClickHouseContainer docker create exceeded the 60s pytest-timeout while 8 xdist Postgres containers booted; the va_events integration test has pytest.mark.timeout(180) and is a single test per module (one container per xdist worker)
+<!-- tags: testing, docker, clickhouse | created: 2026-10-27 -->
 
 ### mem-1793134471-2c7d
 > make test flake variant (P01-T11 build): 138 errors = pytest-timeout 60s in conftest pg_url -> pg_container.running_postgres (testcontainers boot) right after compose make migrate + alembic round-trip; isolated rerun 1756 passed. Docker daemon latency, same family as scratch_session timeout

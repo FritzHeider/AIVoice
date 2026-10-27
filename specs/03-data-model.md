@@ -1450,3 +1450,15 @@ CREATE TABLE IF NOT EXISTS va.eval_metrics (
 
 ClickHouse DDL lives in `packages/va_events/src/va_events/clickhouse/migrations/*.sql` and is applied by
 `events-sink` at startup (idempotent `CREATE ... IF NOT EXISTS`).
+
+> Decision (2026-10-27): migrations are `NNNN_name.sql` files; `0001_init.sql` is `CREATE DATABASE IF NOT EXISTS va`
+> followed by the five tables above verbatim (a unit test compares them with this section). The ClickHouse HTTP
+> interface runs one statement per request, so the applier (`va_events.clickhouse.apply_migrations`) splits each
+> file at top-level `;` (string literals and `--` comments respected). Applied versions are recorded in
+> `va.schema_migrations (version String, name String, checksum String, applied_at DateTime64(3, 'UTC'))
+> ENGINE = ReplacingMergeTree(applied_at) ORDER BY version`, created by the applier before it reads it; checksum =
+> sha256 hex of the file bytes. Concurrent sink pods may both apply a version (all DDL is `IF NOT EXISTS`) and both
+> record it; the applier reads `argMax(checksum, applied_at)` per version, so duplicates are harmless. A recorded
+> version whose checksum differs from the packaged file raises `ClickHouseSchemaDriftError`: applied migrations are
+> immutable, changes go in a new file. The client connects to the `default` database (the path of `CLICKHOUSE_URL`
+> is ignored for DDL) and every statement qualifies `va.` explicitly, so the applier can create `va` itself.

@@ -1712,3 +1712,175 @@ Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (
 against the specs/24 §2 table and seed-value paragraph cell by cell (fees, rates, caps, features in spec order,
 enterprise custom -> seed values, unlimited -> NULL) and against the specs/03 plans DDL (all NOT NULL columns set).
 No other code inserts the seeded ids into migrated DBs (billing model tests use random plan ids in scratch DBs).
+
+## Plan P01-T12 — ClickHouse schema applier (2026-10-27)
+
+Context found: `packages/va_events` does NOT exist yet (only va_common, va_db). clickhouse-connect is NOT in uv.lock
+(only clickhouse-driver via testcontainers). PyPI: clickhouse-connect 1.11.0 (extra `async` = native aiohttp client).
+events_sink today: probe app via `probe_service_app`, container = `Dependencies` with redis + clickhouse ping checks.
+Compose ClickHouse 24.8 creates db `va` (CLICKHOUSE_DB); CLICKHOUSE_URL default `http://default:@localhost:8123/va`.
+
+### Spec decisions (same commit)
+specs/03 §12 `> Decision (2026-10-27):`
+- 0001_init.sql = `CREATE DATABASE IF NOT EXISTS va` + the six §12 CREATE TABLE statements verbatim (both sql blocks).
+- Applied versions live in `va.schema_migrations (version String, name String, checksum String,
+  applied_at DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(applied_at) ORDER BY version`, created by the applier
+  before reading it. Concurrent sink pods may both apply (DDL is IF NOT EXISTS) and both insert — ReplacingMergeTree +
+  `FINAL`/GROUP BY version makes that harmless.
+- checksum = sha256 hex of the file bytes; a recorded version whose checksum differs from the packaged file raises
+  `ClickHouseSchemaDriftError` (applied migrations are immutable: add a new file instead).
+- The client is opened with credentials/host/port from CLICKHOUSE_URL and the URL's database as default database
+  ONLY after bootstrap? -> simpler: client opened with database "default" (URL path ignored for DDL); all DDL and
+  bookkeeping are fully qualified `va.`. (Queries in later phases also qualify `va.`.)
+specs/27 §9 `> Decision (2026-10-27):` events-sink readiness adds check `clickhouse_schema` (error until
+`apply_migrations` has completed in this process). Startup does not block on ClickHouse: a supervised task retries
+transient connection errors with backoff 0.5 s doubling to 5 s cap; drift or a SQL error is fatal (supervisor ->
+StopController -> exit 1, like va_worker).
+
+### Files
+1. `packages/va_events/pyproject.toml` (dist `va-events`, module `va_events`, uv_build like va_db; deps
+   `clickhouse-connect[async]>=1.11`, `va-common` workspace). `src/va_events/{__init__.py (docstring + __version__ via
+   importlib.metadata), py.typed}`. Root pyproject: `va-events` in dev group + `[tool.uv.sources]`; mypy `mypy_path`
+   add `packages/va_events/src`, `files` add `packages/va_events/src`, `packages/va_events/tests`. `uv lock`/`uv sync
+   --all-packages`. events_sink pyproject: add `va-events` dep + source. If clickhouse_connect lacks py.typed, add a
+   `[[tool.mypy.overrides]] module = ["clickhouse_connect.*"] ignore_missing_imports = true` WITH a comment, and keep
+   our code typed through the Protocol below (verify first: `ls .venv/.../clickhouse_connect/py.typed`).
+   BUILDER MUST VERIFY the installed clickhouse-connect async API (`clickhouse_connect.get_async_client` signature,
+   `AsyncClient.command(cmd, parameters=...)`, `AsyncClient.query(...).result_rows`, `close()` coroutine or not,
+   exception classes `clickhouse_connect.driver.exceptions.OperationalError` / `DatabaseError`) by reading the
+   installed source, not from memory.
+2. `packages/va_events/src/va_events/clickhouse/__init__.py` — re-exports (`apply_migrations`, `load_migrations`,
+   `Migration`, `ClickHouseSchemaDriftError`, `open_clickhouse`, `ClickHouseTarget`, `parse_clickhouse_url`).
+3. `packages/va_events/src/va_events/clickhouse/migrations/0001_init.sql` — header `--` comment citing specs/03 §12,
+   `CREATE DATABASE IF NOT EXISTS va;` then the 6 tables copied character-for-character from specs/03 §12.
+   Confirm uv_build ships `.sql` in the wheel (it includes all files under the module dir; verify with
+   `uv build --package va-events` + `unzip -l`), and read via `importlib.resources.files("va_events.clickhouse")
+   .joinpath("migrations")` (directory, not a package).
+4. `packages/va_events/src/va_events/clickhouse/schema.py`:
+   - `MIGRATION_FILE_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")`
+   - `@dataclass(frozen=True, slots=True) class Migration: version: str; name: str; statements: tuple[str, ...];
+     checksum: str`
+   - `split_statements(sql: str) -> tuple[str, ...]`: drop `--` line comments outside quotes, split on `;` outside
+     single quotes (handle `''` escapes), strip, drop empties.
+   - `load_migrations(directory: Traversable | None = None) -> tuple[Migration, ...]`: sorted by version; reject
+     non-matching `.sql` names and duplicate versions with ValueError.
+   - `class ClickHouseCommands(Protocol)`: the structural subset of AsyncClient used (`command`, `query` returning
+     an object with `result_rows`) — shape it to the real signatures so `AsyncClient` is assignable (assert by a
+     typed assignment in a test, mypy proves it).
+   - `class ClickHouseSchemaDriftError(RuntimeError)` with version/expected/recorded in message.
+   - `SCHEMA_MIGRATIONS_DDL: Final`, `async def apply_migrations(client, *, clock: Clock,
+     migrations: Sequence[Migration] | None = None) -> list[str]`: CREATE DATABASE IF NOT EXISTS va; DDL; read
+     `SELECT version, argMax(checksum, applied_at) FROM va.schema_migrations GROUP BY version`; for each migration:
+     recorded & equal -> skip; recorded & different -> raise drift; else run statements in order then INSERT
+     (server-side parameters `{version:String}` etc., applied_at = clock.now()). Log `clickhouse.migration_applied`
+     (version, name, statements). Return the versions applied now.
+5. `packages/va_events/src/va_events/clickhouse/client.py`:
+   - `@dataclass(frozen=True, slots=True) class ClickHouseTarget: host, port, username, password (repr=False),
+     secure: bool, database: str`.
+   - `parse_clickhouse_url(url) -> ClickHouseTarget`: http/https only (ValueError otherwise, message without the
+     URL — it may contain a password), default port 8123/8443, percent-decoded user/password, user default
+     "default", database = path stripped or "default".
+   - `@asynccontextmanager async def open_clickhouse(url, *, connect_timeout_s=5.0, send_receive_timeout_s=30.0)`
+     -> yields the AsyncClient created with `database="default"` (Decision) and closes it on exit. Client creation
+     may do a network round-trip in clickhouse-connect (it queries server version) — if so, do NOT call it inside
+     build_container; create it inside the bootstrap task instead (builder checks; record in AGENTS.md).
+6. `apps/events_sink/src/va_events_sink/schema.py`:
+   - `@dataclass class SchemaState: applied: bool = False` + `async def check(self) -> None` raising
+     `ConnectionError("clickhouse schema not applied")` until applied.
+   - `async def bootstrap_schema(connect: Callable[[], AbstractAsyncContextManager[ClickHouseCommands]],
+     state, *, clock, sleep=asyncio.sleep, initial_backoff_s=0.5, max_backoff_s=5.0) -> None`: loop: open client,
+     apply_migrations, set applied, return; on transient errors (clickhouse_connect OperationalError, OSError,
+     aiohttp.ClientError / whatever the verified client raises for refused connections) log
+     `clickhouse.schema_retry` with attempt + backoff and sleep; other exceptions propagate.
+7. `apps/events_sink/src/va_events_sink/container.py` + `main.py`: container dataclass `SinkContainer(dependencies,
+   schema: SchemaState)` with `readiness_checks()` = deps checks + `{"clickhouse_schema": schema.check}`.
+   `create_app` gets a worker-style lifespan (service_scope + Supervisor(controller.task_failed) starting
+   "clickhouse_schema" -> bootstrap_schema(partial(open_clickhouse, settings.clickhouse_url), ...)); test seams
+   `schema_connect` and `stop: StopController | None`; `main()` passes stop to `serve` like va_worker.
+   Update the module docstrings (remove "come with the analytics work" for the schema part).
+
+### Tests
+- `packages/va_events/tests/test_clickhouse_schema.py` (unit): packaged load -> exactly ("0001","init"), 7
+  statements (CREATE DATABASE + 6 tables); spec parity: parse specs/03 §12 ```sql blocks, split, whitespace-normalise,
+  equal to statements[1:] (catches drift either side); split_statements quote/comment cases (`';'` inside literal,
+  `''` escape, trailing comment, empty); load_migrations rejects bad filename / duplicate version (tmp dir via
+  pathlib, Path satisfies Traversable); fake client (records commands, serves rows): first apply runs bootstrap +
+  all statements + insert, returns ["0001"]; second apply with recorded checksum runs no table DDL, returns [];
+  drift raises with version in message; two synthetic migrations applied in version order; applied_at uses
+  FrozenClock.
+- `packages/va_events/tests/test_clickhouse_client.py`: parse_clickhouse_url cases (compose default, https default
+  8443, explicit port, %40 in password, no path -> "default", rejects clickhouse:// and missing host, error message
+  does not contain the password); open_clickhouse closes the client (monkeypatch the factory symbol).
+- `packages/va_events/tests/test_clickhouse_integration.py` (`pytestmark = integration`, docker_available skip):
+  module fixture `ClickHouseContainer("clickhouse/clickhouse-server:24.8")` from `testcontainers.community
+  .clickhouse` (legacy import path warns -> error); URL `http://user:pass@host:<8123 mapped>/va`; apply twice ->
+  ["0001"] then []; `system.columns` (database='va') per table == expected (name, type) parsed from the spec DDL
+  (helper in tests maps the spec column list; Nullable/LowCardinality strings compare verbatim); engines from
+  `system.tables` (MergeTree x4, ReplacingMergeTree calls_fact + schema_migrations); one schema_migrations row
+  for 0001 with the packaged checksum; tamper the recorded checksum (INSERT newer row) -> drift on next apply.
+- `apps/events_sink/tests/test_schema_bootstrap.py`: fake connect failing 2x with the transient error then OK ->
+  sleeps [0.5, 1.0], state applied; backoff caps at 5.0; non-transient error propagates; app-level: lifespan with a
+  fake connect -> /readyz checks include `clickhouse_schema: ok`; drift -> stop.failed is True. Update
+  test_events_sink.py expected check dicts (FakeContainer probes) for the new check.
+- Coverage: va_events 100 %, events_sink 100 %.
+
+### Gates
+`uv lock && uv sync --all-packages`; `make fmt lint typecheck placeholders`; `make test` ALONE (scratch_session /
+container-boot flake memories); `uv run pytest packages/va_events apps/events_sink -m integration -rs` 0 skipped;
+jscpd@4 0 clones; radon A; check_spec_refs; pip-audit (new deps clickhouse-connect/aiohttp/lz4/zstd) + pnpm audit.
+Compose: `make up` then `uv run python -m va_events_sink.main --port 19500` briefly -> /readyz 200 with
+clickhouse_schema ok, and `curl 'http://localhost:8123/?query=SHOW+TABLES+FROM+va'` lists the 6 tables.
+Negative proof (revert): change `UInt32` -> `UInt64` for call_events.seq in 0001_init.sql -> spec-parity unit test
+and integration column test fail.
+
+### Risks
+- clickhouse-connect async API/typing differs from assumptions -> verify installed source first; keep Protocol tight.
+- clickhouse-connect may emit DeprecationWarning/ResourceWarning (filterwarnings=error) - close clients/sessions.
+- ClickHouse container boot under xdist (one per worker module fixture): boot ~5-10 s; module scope, single module.
+- HTTP endpoint runs one statement per request: never send the whole file; the splitter is mandatory.
+- New package must be added to workspace sources, dev group, mypy paths, or imports fail in tests.
+
+## Build P01-T12 (2026-10-27)
+Implemented per plan. Facts/deviations:
+- specs/03 §12 has FIVE tables (call_events, call_turns, calls_fact, usage_events_raw, eval_metrics), not six:
+  0001_init.sql = CREATE DATABASE + 5 tables = 6 statements; engines MergeTree x4, ReplacingMergeTree calls_fact
+  + schema_migrations.
+- clickhouse-connect 1.11.0 (ships py.typed, no mypy override). `create_async_client` awaits `_initialize()`
+  (network round-trip) -> opened only inside the supervised bootstrap task. Network failures and retried server
+  errors -> `OperationalError` (subclass of `DatabaseError`); TRANSIENT_ERRORS = (OperationalError, OSError).
+  `AsyncClient` is assignable to the `ClickHouseCommands` Protocol (checked with mypy).
+- Record insert is `INSERT ... SELECT {version:String}, ...` with applied_at formatted as a millisecond UTC string.
+- `bootstrap_schema` sleeps with `clock.sleep` (va_common Clock already has sleep), so there is no separate `sleep`
+  seam. SchemaState wraps an asyncio.Event (`wait()` for tests). The readiness check is added in
+  `main.sink_checks` (container checks + `clickhouse_schema`); the container factory is unchanged, so FakeContainer
+  still works. A fresh SchemaState is created per lifespan on `app.state.schema`.
+- The log field of `clickhouse.migration_applied` is `migration` (not `version`): the compose smoke run showed
+  `version=` overwriting the bound service version.
+- The ClickHouse integration test is one test (one container per xdist worker) with `pytest.mark.timeout(180)`.
+  First full `make test`: its Docker container *create* call hit the 60 s default while 8 PG containers were booting,
+  plus 8 known va_db load flakes (scratch_session timeout, DROP DATABASE WITH (FORCE) "being accessed by other
+  users"). The next two isolated runs were green.
+- radon: every new function is A (helpers `_http_host`, `_reject_duplicate_versions`, test `logged`/
+  `assert_schema_matches_spec`).
+Files: packages/va_events/{pyproject.toml, src/va_events/{__init__,py.typed}, src/va_events/clickhouse/{__init__,
+schema,client}.py, clickhouse/migrations/0001_init.sql, tests/{conftest, test_clickhouse_schema,
+test_clickhouse_client, test_clickhouse_integration}.py, tests/support/ch_support.py};
+apps/events_sink/{pyproject.toml, src/va_events_sink/{main,schema}.py, tests/test_events_sink.py,
+tests/test_schema_bootstrap.py, tests/support/sink_helpers.py}; root pyproject (dev dep, source, mypy paths, pytest
+pythonpath); uv.lock (clickhouse-connect 1.11.0, lz4, backports-zstd); specs/03 §12 + specs/27 §9 Decisions; AGENTS.md.
+Gates: make fmt/lint/typecheck exit 0 (mypy 219 files); placeholders 0; make test exit 0 (1797 passed, 99.88 %;
+va_events + events_sink 100 %); `pytest packages/va_events apps/events_sink -m integration -rs` 1 passed, 0 skipped;
+jscpd@4 0 clones; radon new code all A; check_spec_refs 0; pip-audit --no-deps no known vulns; pnpm audit none;
+uv build ships migrations/0001_init.sql in the wheel.
+Compose: `python -m va_events_sink.main --port 19500` -> /readyz 200 {redis, clickhouse, clickhouse_schema: ok};
+SHOW TABLES FROM va lists the 5 tables + schema_migrations; 0001 recorded.
+Negative proof (reverted): call_events.seq UInt32->UInt64 in 0001_init.sql -> test_initial_migration_tables_equal_
+the_spec_ddl and the integration test fail.
+
+## Review P01-T12 (2026-10-27) — APPROVED
+Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (1797 passed; va_events + events_sink
+100 %); `pytest packages/va_events apps/events_sink -m integration -rs` 1 passed, 0 skipped; jscpd@4 0 clones;
+check_spec_refs 0. Checked 0001_init.sql against specs/03 §12 (5 tables, all IF NOT EXISTS so a crash between DDL and
+the record insert re-applies cleanly); splitter handles quotes/comments; drift raises before any DDL of that version;
+retry loop only catches OperationalError/OSError, other errors propagate to the supervisor (exit 1, tested);
+readiness check `clickhouse_schema` matches the specs/27 §9 Decision; no URL/password in errors or logs.

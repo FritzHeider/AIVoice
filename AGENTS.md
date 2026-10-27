@@ -360,3 +360,17 @@ Grafana 3001
   `tests/support/plan_catalog.parse_spec_plans()` parses the specs/24 §2 table and seed-value paragraph;
   `test_seed_plans*.py` compare it with the offline SQL and the migrated `plans` rows, so a spec price change
   needs a new seed migration.
+- 2026-10-27 (P01-T12): `packages/va_events` (dist `va-events`) owns the ClickHouse schema: packaged
+  `va_events/clickhouse/migrations/NNNN_name.sql` (uv_build ships the `.sql` files; read them with
+  `importlib.resources`), `apply_migrations(client, clock=...)` (records `va.schema_migrations`, raises
+  `ClickHouseSchemaDriftError` when an applied file changed: never edit an applied file, add `0002_*.sql`), and
+  `open_clickhouse(CLICKHOUSE_URL)` (clickhouse-connect 1.11 `AsyncClient` on database `default`; DDL and queries
+  qualify `va.`). `create_async_client` does a network round-trip (server version/settings), so open it in a
+  supervised task, never in `build_container`. clickhouse-connect wraps network failures and retried server errors in
+  `OperationalError` (a subclass of `DatabaseError`, which non-retried SQL errors raise). Server-side parameters
+  (`{name:String}`) work in `INSERT ... SELECT`. The events sink runs `bootstrap_schema` in its lifespan
+  (`create_app(schema_connect=..., clock=..., stop=...)` test seams; `app.state.schema.wait()` in tests instead of
+  polling). Fakes: `packages/va_events/tests/support/ch_support.py` (`FakeClickHouse`, spec §12 parsers) and
+  `apps/events_sink/tests/support/sink_helpers.py` (`FakeConnect`, `never_connects`, `RecordingClock`). ClickHouse
+  integration tests use `testcontainers.community.clickhouse.ClickHouseContainer("clickhouse/clickhouse-server:24.8")`
+  on the mapped 8123 port, one test per module (each xdist worker running a test boots its own container).

@@ -36,6 +36,7 @@ dev = [
   "va-events-sink",
   "va-sim",
   "va-db",
+  "va-events",
   "actionlint-py>=1.7.12.25",
   "pre-commit>=4.7.0",
 ]
@@ -53,6 +54,7 @@ va-webhook-dispatcher = { workspace = true }
 va-events-sink = { workspace = true }
 va-sim = { workspace = true }
 va-db = { workspace = true }
+va-events = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -85,7 +87,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/sim/src:packages/va_db/src:packages/va_db/tests/support"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_db/src:packages/va_events/src:packages/va_events/tests/support:packages/va_db/tests/support"
 files = [
   "scripts",
   "packages/va_common/src",
@@ -93,6 +95,8 @@ files = [
   "packages/va_db/src",
   "packages/va_db/tests",
   "packages/va_db/migrations",
+  "packages/va_events/src",
+  "packages/va_events/tests",
   "apps/api/src",
   "apps/api/tests",
   "apps/telephony_edge/src",
@@ -119,9 +123,11 @@ pythonpath = [
   "scripts",
   "packages/va_common/tests",
   "packages/va_db/tests/support",
+  "packages/va_events/tests/support",
   "apps/api/tests/support",
   "apps/media_worker/tests/support",
   "apps/worker/tests/support",
+  "apps/events_sink/tests/support",
 ]
 timeout = 60
 markers = [

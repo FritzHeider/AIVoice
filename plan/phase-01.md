@@ -86,7 +86,7 @@
   - Deliverables: `versions/0002_seed_plans.py` inserting the plan catalogue with exact micro-dollar values; downgrade deletes them
   - Acceptance: test compares seeded rows with the spec table parsed from specs/24.
 
-- [ ] P01-T12 ClickHouse schema applier
+- [x] P01-T12 ClickHouse schema applier — va_events 0001_init.sql (spec §12 verbatim, parity test), apply_migrations + va.schema_migrations checksum drift check, events_sink supervised bootstrap + clickhouse_schema readiness; make test 1797 passed (va_events/events_sink 100 %), testcontainers ClickHouse integration 1 passed 0 skipped (apply twice, columns/engines match), jscpd 0 clones
   - Spec refs: specs/03-data-model.md (ClickHouse schema); specs/27-observability.md (analytics)
   - Depends on: P00-T08
   - Deliverables: `packages/va_events/src/va_events/clickhouse/migrations/0001_init.sql`, `apply_migrations(client)` (idempotent, records applied versions in `va.schema_migrations`), wired into `events_sink` startup

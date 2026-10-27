@@ -313,6 +313,12 @@ Responses: `{"status":"ok","checks":{"postgres":"ok",...},"version":"…"}`; fai
 > 200). Dependency clients and their checks come from `va_common.checks.open_dependencies`; probe routes, supervision,
 > and the runner from `va_common.service`.
 
+> Decision (2026-10-27): events-sink readiness adds the check `clickhouse_schema` after `redis` and `clickhouse`; it
+> fails until the ClickHouse migrations (specs/03-data-model.md §12) have been applied by this process. Startup does
+> not block on ClickHouse: a supervised task applies them, retrying transient errors (clickhouse-connect
+> `OperationalError`, `OSError`) after 0.5 s doubling to a 5 s cap and logging `clickhouse.schema_retry`
+> (`attempt`, `backoff_s`, `error`). Schema drift or a SQL error is fatal: the task fails and the process exits 1.
+
 ## 10. Grafana dashboards (`infra/grafana/dashboards/*.json`)
 
 | Dashboard | Panels |
