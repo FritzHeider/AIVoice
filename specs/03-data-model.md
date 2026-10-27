@@ -71,6 +71,22 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > option for a non-superuser login) and grant table privileges to both roles. `va_system` is created with
 > `BYPASSRLS`; neither role gets a password from the migration.
 
+> Decision (2026-10-27): repositories live in `va_db.repositories`. `TenantRepository[M]` (get, list, create, update,
+> soft_delete) serves every table with `id`, `org_id`, and `created_at`; it runs on a `tenant_session` and also filters
+> `org_id = :org_id` explicitly, so NULL-org platform rows (`voices`, `dnc_entries`) are not returned by it
+> (resource-specific repositories add them). Soft-deleted rows are excluded unless `include_deleted=True`; absent,
+> deleted, and other-org rows raise `NOT_FOUND`; a unique violation raises `CONFLICT` inside a savepoint so the
+> caller's transaction stays usable. The `va_system` repositories subclass `SystemRepository` (`system_scope = True`),
+> take only a `system_session()` session, and are exactly the `...Repo` names of the `va_system` bullet above
+> (`packages/va_db/tests/test_repositories.py` enforces it): `PhoneNumberRoutingRepo.get_active(e164)`;
+> `OutboxRepo.claim_due(now, limit=200, lease=5 min)` (one `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP
+> LOCKED)` that sets `delivering` and `next_attempt_at = now + lease`, so a crashed dispatcher's rows become due
+> again), `mark_succeeded`, `schedule_retry`, `mark_dead` (each `attempts + 1`); `SchedulerRepo.due_scheduled_calls(now)`;
+> `RetentionRepo.retention_policies()` and `purge_expired(now, batch_size=1000)` (specs/28 §8.1 step 5 windows, batched
+> by `ctid`); `BillingReconcileRepo.calls_ended_between(start, end)` (half-open, keyset by id),
+> `release_expired_holds(now)`, `balance_drifts()`, `set_balance(org_id, micros)`; `TelnyxEventRepo.record(event)`
+> (`ON CONFLICT (telnyx_event_id) DO NOTHING`, `None` = duplicate) and `mark_processed(id, now, error)`.
+
 ## 3. Tenancy, identity, access
 
 ```sql

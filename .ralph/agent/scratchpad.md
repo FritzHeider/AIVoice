@@ -1409,3 +1409,209 @@ Checked: TENANT_TABLE_NAMES derived from metadata (65) and asserted equal to cat
 semantics (USING hides, WITH CHECK raises) documented and both raise paths asserted; B's row re-verified from B;
 fail-closed check on app_engine without app.org_id is meaningful (pool_size 1, a leaked setting would expose B's
 org_id and fail). Unknown type -> TypeError; overrides each name their CHECK. No production code changed.
+
+## Plan P01-T10 — Repository layer and pagination (2026-10-27)
+Spec refs: specs/31 §2 (limit 1–100 default 25, opaque base64 cursor of (created_at, id), `{"next_cursor","has_more"}`),
+specs/31 §3 (NOT_FOUND never reveals existence; INVALID_INPUT 400; CONFLICT 409), specs/03 §1 (soft delete: queries
+exclude deleted rows by default), §2 (va_system only for the six named system_scope repos), specs/06 §7 step 2
+(`PhoneNumberRoutingRepo.get_active(to)`), specs/19 §8 (outbox poll: pending|delivering, next_attempt_at <= now,
+ORDER BY next_attempt_at LIMIT 200 FOR UPDATE SKIP LOCKED, mark delivering; dead after attempt 8 / 410),
+specs/28 §8.1 step 5 (purge windows), specs/24 §12 (reconcile: ended calls 48 h, release expired holds, ledger-sum
+balance drift), specs/17 (scheduled calls: status 'scheduled' + start_time). No schema/migration change.
+Scope rule: generic data access only; retry schedules, routing decisions, reconcile math stay in later phases.
+
+### Spec decisions (same commit)
+- specs/31 §2 `> Decision (2026-10-27):` cursor = URL-safe base64 without `=` padding of
+  `"<created_at UTC ISO-8601 with microseconds>|<uuid>"`; lists are ordered `created_at DESC, id DESC` (newest first)
+  and the next page is the keyset `(created_at, id) < cursor`, so rows inserted after the first page never shift or
+  duplicate later pages; malformed cursor → `INVALID_INPUT` field `cursor`; limit outside 1–100 → `INVALID_INPUT`
+  field `limit`.
+- specs/03 §2 `> Decision (2026-10-27):` lists each system repo's method set (below), that they live in
+  `va_db.repositories`, accept only a `system_session()` session, and that `TenantRepository` filters
+  `org_id = :org_id` explicitly in addition to RLS, so platform rows (voices/dnc_entries with NULL org_id) are not
+  returned by the generic repository (resource-specific repos add them in later phases).
+
+### Files (all new unless noted; src typed, docstrings, `__all__`; keep every function radon A)
+1. `packages/va_db/src/va_db/pagination.py`
+   - `DEFAULT_PAGE_LIMIT: Final = 25`, `MAX_PAGE_LIMIT: Final = 100`
+   - `@dataclass(frozen=True, slots=True) class Cursor: created_at: datetime; id: uuid.UUID`
+   - `def encode_cursor(created_at: datetime, row_id: uuid.UUID) -> str` (naive datetime → ValueError; converts to UTC)
+   - `def decode_cursor(value: str) -> Cursor` — any failure (bad base64, non-ASCII/UTF-8, missing `|`, bad ISO,
+     naive datetime, bad UUID, empty) → `AppError("INVALID_INPUT", "Invalid cursor.", field="cursor")` (chain `from`)
+   - `def validate_limit(limit: int) -> int` → `AppError("INVALID_INPUT", "limit must be between 1 and 100.", field="limit")`
+   - `@dataclass(frozen=True, slots=True) class Page[T]: items: tuple[T, ...]; next_cursor: str | None; has_more: bool`
+     with `def pagination(self) -> dict[str, str | bool | None]` → `{"next_cursor": ..., "has_more": ...}`.
+2. `packages/va_db/src/va_db/repositories/__init__.py` — re-exports everything below.
+3. `packages/va_db/src/va_db/repositories/base.py`
+   - `class NotFoundError(AppError)`: `__init__(self, resource: str)` → code `NOT_FOUND`, message
+     `f"{resource} not found."` (resource = model `__tablename__`; never the id, never says "other org").
+   - `IMMUTABLE_COLUMNS: Final = frozenset({"id", "org_id", "created_at", "updated_at", "deleted_at"})`
+   - `class TenantRepository[M: Base]`:
+     `__init__(self, model: type[M], session: AsyncSession, org_id: uuid.UUID, *, clock: Clock | None = None)`;
+     validates the table has columns `id`, `org_id`, `created_at` (else `TypeError` naming the table; so
+     idempotency_keys, voice_ratings, number_pool_members, call_events, plans, orgs are rejected); `_soft = "deleted_at"
+     in table.c`. Every statement filters `org_id == self.org_id` (+ `deleted_at IS NULL` unless include_deleted).
+     - `async def get(self, row_id, *, include_deleted=False) -> M` → `NotFoundError`.
+     - `async def list(self, *, limit=DEFAULT_PAGE_LIMIT, cursor: str | None = None,
+        where: Sequence[ColumnElement[bool]] = (), include_deleted=False) -> Page[M]` — validate_limit, decode cursor,
+        `ORDER BY created_at DESC, id DESC`, `tuple_(created_at, id) < (c.created_at, c.id)`, fetch limit+1;
+        next_cursor from last returned item only when has_more.
+     - `async def create(self, values: Mapping[str, Any]) -> M` — keys in IMMUTABLE_COLUMNS minus {"id"} or unknown
+       attributes → `ValueError` (programming error); sets org_id; add + flush inside `session.begin_nested()`;
+       unique violation (asyncpg `UniqueViolationError` / sqlstate 23505 via `IntegrityError.orig`) →
+       `AppError("CONFLICT", f"{table} already exists.")`; then `session.refresh(obj)` so server defaults are loaded.
+     - `async def update(self, row_id, values: Mapping[str, Any]) -> M` — IMMUTABLE_COLUMNS/unknown keys → ValueError;
+       get (NotFoundError for other org/deleted), setattr, flush in savepoint (23505 → CONFLICT), refresh (updated_at
+       from trigger).
+     - `async def soft_delete(self, row_id) -> M` — model without deleted_at → `TypeError`; get (deleted → NotFound,
+       so a second soft_delete raises NotFound); `deleted_at = clock.now()`; flush; refresh.
+     - helper `_validate_keys(values, forbidden)` shared by create/update.
+   - `class SystemRepository`: `system_scope: ClassVar[bool] = True`; `__init__(self, session: AsyncSession)`.
+     Docstring cites specs/03 §2 (only the listed repos; obtain the session from `Database.system_session()`).
+4. `packages/va_db/src/va_db/repositories/routing.py` — `PhoneNumberRoutingRepo(SystemRepository)`:
+   `async def get_active(self, e164: str) -> PhoneNumber | None` (status 'active', deleted_at IS NULL; pending,
+   releasing, released, soft-deleted → None).
+5. `repositories/outbox.py` — `OutboxRepo`:
+   - `CLAIM_LIMIT: Final = 200`, `DEFAULT_LEASE: Final = timedelta(minutes=5)`
+   - `async def claim_due(self, now: datetime, *, limit=CLAIM_LIMIT, lease=DEFAULT_LEASE) -> list[WebhookDelivery]`
+     — one statement: subquery `SELECT id ... WHERE status IN ('pending','delivering') AND next_attempt_at <= :now
+     ORDER BY next_attempt_at LIMIT :limit FOR UPDATE SKIP LOCKED`, `UPDATE ... SET status='delivering',
+     next_attempt_at = now + lease RETURNING` (lease makes rows of a crashed dispatcher due again); result ordered by
+     next_attempt_at in Python? No — return in subquery order (sort returned rows by original next_attempt_at is lost;
+     document "order not guaranteed"). limit < 1 → ValueError.
+   - `async def mark_succeeded(self, delivery_id, *, now, status_code: int, response_ms: int) -> WebhookDelivery`
+     (status succeeded, delivered_at=now, attempts+1, last_status_code/last_response_ms, last_error NULL)
+   - `async def schedule_retry(self, delivery_id, *, next_attempt_at, status_code: int | None, error: str,
+     response_ms: int | None) -> WebhookDelivery` (status pending, attempts+1)
+   - `async def mark_dead(self, delivery_id, *, status_code: int | None, error: str, response_ms: int | None)
+     -> WebhookDelivery` (status dead, attempts+1)
+   - unknown id → `NotFoundError("webhook_deliveries")`. Shared private `_finish(delivery_id, values)` (UPDATE ...
+     attempts = attempts + 1 RETURNING) to avoid three copies.
+6. `repositories/scheduler.py` — `SchedulerRepo.due_scheduled_calls(self, now, *, limit=100) -> list[Call]`
+   (status 'scheduled', start_time <= now, ORDER BY start_time, id; recovery sweep for scheduled calls whose
+   CallWorkflow did not start).
+7. `repositories/retention.py` — `RetentionRepo`:
+   - `@dataclass(frozen=True, slots=True) class RetentionPolicy: org_id; retention_days: int; recording_retention_days: int`
+   - `async def retention_policies(self) -> list[RetentionPolicy]` (all orgs, ordered by id)
+   - `PURGE_RULES: Final[tuple[PurgeRule, ...]]` — `PurgeRule(table, column, age: timedelta | None)`:
+     idempotency_keys.created_at 24 h, telnyx_events.created_at 30 d, stripe_events.created_at 90 d,
+     webhook_deliveries.created_at 30 d, sessions.expires_at (age None = `< now`), email_tokens.expires_at,
+     invitations.expires_at (specs/28 §8.1 step 5, in this order).
+   - `async def purge_expired(self, now: datetime, *, batch_size: int = 1000) -> dict[str, int]` — per rule,
+     repeat `DELETE FROM t WHERE ctid IN (SELECT ctid FROM t WHERE col < cutoff LIMIT :batch)` until a batch deletes
+     fewer than batch_size; returns counts keyed by table (0 included). batch_size < 1 → ValueError. Tables via
+     `Base.metadata.tables[...]` (Core, no raw SQL strings).
+8. `repositories/billing_reconcile.py` — `BillingReconcileRepo`:
+   - `async def calls_ended_between(self, start, end, *, after_id: uuid.UUID | None = None, limit: int = 1000)
+     -> list[Call]` (start <= ended_at < end, keyset by id ascending)
+   - `async def release_expired_holds(self, now, *, limit: int = 1000) -> list[CreditHold]` (status 'held' and
+     expires_at <= now → 'released' RETURNING; captured/released untouched; SKIP LOCKED subquery like outbox)
+   - `@dataclass(frozen=True, slots=True) class BalanceDrift: org_id; materialized_micros: int; ledger_micros: int`
+   - `async def balance_drifts(self) -> list[BalanceDrift]` (orgs LEFT JOIN SUM(credit_ledger.amount_micros) grouped;
+     `coalesce(sum, 0) <> credits_balance_micros`; ordered by org id)
+   - `async def set_balance(self, org_id, balance_micros: int) -> None` (unknown org → NotFoundError("orgs"))
+9. `repositories/telnyx_events.py` — `TelnyxEventRepo`:
+   - `async def record(self, *, telnyx_event_id: str, event_type: str, occurred_at: datetime, payload: dict[str, Any],
+     org_id=None, call_id=None, call_control_id=None) -> TelnyxEvent | None` — `pg insert ... on_conflict_do_nothing(
+     index_elements=["telnyx_event_id"]).returning(TelnyxEvent)`; None = duplicate (dedupe).
+   - `async def mark_processed(self, event_id: uuid.UUID, *, now: datetime, error: str | None = None) -> None`
+     (sets processed_at, process_error; unknown → NotFoundError("telnyx_events"))
+10. `packages/va_db/src/va_db/__init__.py` (modify): no re-export of repositories (keep import graph acyclic;
+    callers import `va_db.repositories`). Check `test_model_imports` import-graph test still passes; extend if it
+    enumerates modules.
+11. `AGENTS.md` (modify): bullet — TenantRepository usage, pagination/cursor format, NotFoundError, system repos list
+    and that each new system repo must be listed in specs/03 §2 (enforced by test).
+
+### Tests (`packages/va_db/tests/`)
+- `test_pagination.py` (unit): round-trip encode/decode (microseconds, non-UTC aware input normalised to UTC);
+  encoded value is URL-safe without `=`; naive datetime → ValueError; parametrized invalid cursors ("", "!!!",
+  base64 of "no-sep", of "2026-01-01T00:00:00|not-a-uuid", of naive "2026-01-01T00:00:00|<uuid>", of b"\xff") →
+  AppError code INVALID_INPUT, field "cursor", http 400; validate_limit 1/25/100 ok, 0/101/-1 → field "limit";
+  Page.pagination() shape.
+- `test_repositories.py` (unit, no DB): TenantRepository(IdempotencyKey/VoiceRating/Org/Plan, ...) → TypeError;
+  soft_delete on a model without deleted_at (e.g. Call) → TypeError (raised before any SQL; use a session mock-free
+  path: construct with `AsyncSession()` unbound, the check fires first); create/update with org_id/created_at/unknown
+  key → ValueError; NotFoundError code/status/message has no id; `SystemRepository` subclasses ==
+  names parsed from specs/03 §2 bullet `va_system` (backticked names ending in `Repo`) and all have system_scope True.
+- `test_repositories_integration.py` (`pytestmark = integration`; `database` fixture via `open_database(migrated_url)`,
+  orgs via `OrgFactory`, rows via `RowFactory` from tests/support/tenant_rows):
+  - get/create/update/soft_delete round-trip on `prompts` (soft-delete table): create returns server defaults
+    (created_at, tags == []); update changes name and updated_at advances (separate transactions); soft_delete sets
+    deleted_at = FrozenClock time; get/list exclude it; include_deleted returns it; second soft_delete → NotFound.
+  - cross-org: repo for org A on B's prompt id: get/update/soft_delete → NotFoundError; list never contains it.
+  - create duplicate on `dispositions` (UNIQUE org_id, tag) → AppError CONFLICT and the session stays usable
+    (a following get succeeds in the same transaction).
+  - pagination: 7 rows with controlled created_at (Core insert in tenant_session, including two rows sharing one
+    created_at to prove id tie-break); pages of 3 → 3/3/1, has_more True/True/False, next_cursor None on last;
+    concatenation == expected order with no duplicates; **stability**: after page 1, insert 3 new rows (separate
+    transaction, newer created_at) and 1 row with created_at older than all, then fetch page 2/3 → the original rows
+    in order followed by the older row (keyset semantics), none of the newer rows, no duplicates.
+  - limit 0 / 101 → INVALID_INPUT; garbage cursor → INVALID_INPUT; `where=[Prompt.name == "x"]` filter.
+  - system repos (via `database.system_session()`):
+    PhoneNumberRoutingRepo: active number found; same e164 released (other row) ignored; soft-deleted → None; unknown → None.
+    OutboxRepo: due pending + expired-lease delivering claimed; future rows, succeeded/dead not claimed; second claim
+    inside lease returns []; claimed rows have status delivering and next_attempt_at = now + lease; limit honoured;
+    mark_succeeded/schedule_retry/mark_dead field effects and attempts increments; unknown id → NotFoundError;
+    SKIP LOCKED: two concurrent system sessions claim disjoint sets.
+    SchedulerRepo: only scheduled + due calls, ordered by start_time.
+    RetentionRepo: rows just inside/outside each window (FrozenClock-style fixed now) → exact counts per table,
+    survivors remain; batch_size 2 with 5 expired rows deletes all 5; policies list contains the test orgs with
+    their values; batch_size 0 → ValueError.
+    BillingReconcileRepo: ended-window bounds (start inclusive, end exclusive) + keyset after_id; expired held holds
+    released, captured/unexpired untouched; drift detected for an org whose balance != ledger sum and absent for a
+    matching org; set_balance clears the drift; unknown org → NotFoundError.
+    TelnyxEventRepo: record returns row, duplicate telnyx_event_id → None (one row); mark_processed sets fields;
+    unknown → NotFoundError.
+  Note: the module DB is shared by tests (module-scoped migrated_url) — assertions on global sets (drifts, policies,
+  purge counts, claim_due) must scope to rows created by the test (filter by own org ids / ids) or use a unique
+  `now` far in the future/past; prefer fresh orgs per test and assert membership, not equality, on cross-org lists.
+  Retention purge counts are global — run them with `now` values and rows whose timestamps are unique to the test
+  (e.g. year 2099) or assert survivors/deletions by id instead of exact counts.
+
+### Gates
+`make fmt lint typecheck placeholders`; `make test` alone (scratch_session flake memory); `uv run pytest
+packages/va_db -m integration -rs` (0 skipped); va_db coverage 100 %; jscpd@4 0 clones; radon A; check_spec_refs;
+pip-audit/pnpm audit. Negative proofs (revert after): drop the `org_id` filter in TenantRepository._base_select and
+run the cross-org test as va_system-bypassing? (RLS would still hide — instead prove with keyset: change `<` to `<=`
+in list → stability/no-duplicate test fails); remove `with_for_update(skip_locked=True)` → concurrent claim test
+fails or deadlocks within timeout (record which).
+
+### Risks
+- SQLAlchemy ORM `update().returning(Model)` / `insert().on_conflict_do_nothing().returning(Model)` need
+  `select(Model).from_statement(stmt)` or `session.scalars(stmt)` with ORM-enabled DML; use `session.scalars(stmt)`
+  (SQLAlchemy 2 supports ORM DML RETURNING) and `execution_options(populate_existing=True)`.
+- `func.now()` vs clock: repos take explicit `now` arguments (system) or a Clock (tenant soft delete); no
+  `datetime.now()` calls.
+- created_at = transaction start: rows created in one transaction share created_at — tie-break by id (UUIDv7) is
+  what makes ordering total; the test covers it.
+- Unique violation inside a savepoint keeps the outer tenant transaction alive; without begin_nested the session
+  would be in failed state — test asserts usability.
+- Concurrent SKIP LOCKED test needs pool_size ≥ 2 for the system engine: open a second Database for the second session.
+
+## Build P01-T10 (2026-10-27)
+Implemented per plan, with these deviations (all recorded in specs/03 §2 Decision):
+- `TelnyxEventRepo.record(event: NewTelnyxEvent)` takes a frozen dataclass instead of 7 keyword args (ruff PLR0913).
+- `TenantRepository._savepoint()` is an async context manager; mutations (add/setattr) happen INSIDE
+  `begin_nested()` because entering it autoflushes pending changes into the outer transaction (first attempt aborted
+  the whole tenant transaction on CONFLICT). A failed savepoint expires touched rows; the test keeps ids.
+- CallEvent was dropped from the "rejected model" list: it has id/org_id/created_at, so it is a valid tenant table.
+- Extra test: platform voices (NULL org) are visible via RLS platform_read but not through TenantRepository.
+Files: va_db/pagination.py, va_db/repositories/{__init__,base,routing,outbox,scheduler,retention,billing_reconcile,
+telnyx_events}.py; tests test_pagination.py, test_repositories.py, test_repositories_integration.py; specs/03 §2 and
+specs/31 §2 Decisions; AGENTS.md bullet.
+Gates (this iteration): make fmt ok; make lint exit 0; make typecheck exit 0 (mypy 203 files); make placeholders 0
+findings; make test exit 0 (1744 passed, total 99.88 %, va_db 1617 stmts 0 missed; new modules 100 %);
+`pytest packages/va_db -m integration -rs` 268 passed 0 skipped; jscpd@4 0 clones; radon no B+ (avg A 1.37);
+check_spec_refs 0 problems; pip-audit no known vulns; pnpm audit no known vulns.
+Negative proofs (reverted): keyset `<` -> `<=` fails both pagination tests; removing `skip_locked=True` makes the
+concurrent claim test hit its 20 s asyncio.timeout (TimeoutError) — blocks rather than deadlocks.
+
+## Review P01-T10 (2026-10-27) — APPROVED
+Re-ran: make lint typecheck placeholders exit 0 (0 placeholder findings); make test exit 0 (1744 passed, 99.88 %,
+va_db repositories/pagination 100 %); `pytest packages/va_db -m integration -rs` 268 passed, 0 skipped; jscpd@4 0 clones.
+Checked against specs/31 §2-§3 (cursor, limit 1-100 default 25, INVALID_INPUT field cursor/limit, NOT_FOUND never
+reveals existence, CONFLICT on 23505), specs/03 §2 va_system list (test enforces the exact 6 names), specs/19 poll
+query (pending|delivering, next_attempt_at <= now, LIMIT 200, SKIP LOCKED), specs/28 §8.1 step 5 purge windows, and the
+credit_holds/webhook_deliveries DDL. Non-blocking notes: test_attempt_outcomes overwrites the first mark_processed error
+before asserting it (TelnyxEvent test asserts only the second call); outbox tests delete the whole webhook_deliveries
+table of the module DB (fine while only this module polls it).

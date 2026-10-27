@@ -342,3 +342,14 @@ Grafana 3001
   rows (SELECT empty, UPDATE/DELETE rowcount 0); only `WITH CHECK` raises (INSERT with `org_id = B`, or moving A's
   row to B). Build a test `Database` with `tenant_rows.open_database(url)`. `migration_helpers.query` calls
   `asyncio.run`, so call it only from sync tests.
+- 2026-10-27 (P01-T10): data access goes through `va_db.repositories` (not re-exported from `va_db`).
+  `TenantRepository(Model, session, org_id, clock=...)` inside `tenant_session(org_id)` gives get/list/create/update/
+  soft_delete; `list(limit=, cursor=, where=[...])` returns `va_db.pagination.Page` (`.pagination()` is the response
+  object; cursor format in the specs/31 §2 Decision). Absent/deleted/other-org rows raise `NotFoundError` (code
+  `NOT_FOUND`); unique violations raise `AppError("CONFLICT")`. Make ORM changes *inside* `session.begin_nested()`:
+  entering it autoflushes pending changes into the outer transaction, where an IntegrityError aborts the whole
+  transaction. A failed savepoint expires the objects it touched (reading an attribute then raises `MissingGreenlet`;
+  keep ids, re-`get`). System repos subclass `SystemRepository`; the set must equal the `...Repo` names in the
+  specs/03 §2 `va_system` bullet (`test_repositories.py`), so add a new one to the spec first. With SQLAlchemy 2.1,
+  `select(Model)` is typed `Select[Model]` (not `Select[tuple[Model]]`) and `Result.tuples()` is deprecated (an
+  error under filterwarnings); rows unpack directly.

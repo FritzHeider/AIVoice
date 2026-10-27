@@ -74,7 +74,7 @@
   - Deliverables: factory fixtures (`OrgFactory` and per-model minimal valid row builders), parametrized test over every table with `org_id`
   - Acceptance: for every tenant table, cross-org SELECT returns 0 rows and cross-org INSERT/UPDATE raise; platform rows of `voices`/`dnc_entries` readable by all orgs.
 
-- [ ] P01-T10 Repository layer and pagination
+- [x] P01-T10 Repository layer and pagination — TenantRepository + keyset cursor (created_at DESC, id DESC) + 6 system repos; make lint/typecheck/placeholders exit 0, make test 1744 passed (99.88 %, va_db 100 %), va_db integration 268 passed 0 skipped, jscpd 0 clones
   - Spec refs: specs/31-error-catalog.md (Pagination); specs/03-data-model.md (Conventions: soft delete; Extensions roles helper functions: system-scope repositories)
   - Depends on: P01-T07
   - Deliverables: `TenantRepository[T]`, cursor encode/decode (base64 of `created_at|id`), soft-delete filtering, `NotFound` → `AppError('NOT_FOUND')`, system repos: `PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`, `TelnyxEventRepo`

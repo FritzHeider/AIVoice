@@ -30,6 +30,10 @@
 
 ## Fixes
 
+### mem-1793133155-6419
+> SQLAlchemy AsyncSession.begin_nested() autoflushes pending changes into the OUTER transaction before the savepoint; make add()/setattr inside the begin_nested block or an IntegrityError aborts the caller's tenant transaction. Failed savepoint expires touched objects (attribute access -> MissingGreenlet)
+<!-- tags: database, sqlalchemy | created: 2026-10-27 -->
+
 ### mem-1793131606-2dff
 > va_db scratch_session timeout recurred in P01-T09 build (make test run alone, gw4/gw6): asyncpg TimeoutError at conftest CREATE EXTENSION IF NOT EXISTS citext and at create_all - looks like a lock wait/server stall on pg_url DB, not CPU; rerun green. RLS harness (tenant_rows) uses migrated_url DBs only
 <!-- tags: database, testing, docker | created: 2026-10-27 -->

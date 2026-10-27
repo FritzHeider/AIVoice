@@ -22,6 +22,13 @@ Envelope endpoints use cursor pagination: query `limit` (1–100, default 25) an
 keep Bland's parameters where documented (`/v2/batches/list?take=`, `/v1/calls?from=&to=&limit=&ascending=&start_date=&end_date=&batch_id=&completed=&answered_by=&inbound=&duration_gt=&duration_lt=&campaign_id=`)
 and return `{"total_count": n, "count": m, "calls":[…]}`.
 
+> Decision (2026-10-27): the cursor is the URL-safe base64, without `=` padding, of
+> `"<created_at as UTC ISO-8601 with microseconds>|<id>"` (`va_db.pagination`). Lists are ordered
+> `created_at DESC, id DESC` (newest first; the UUIDv7 `id` breaks ties between rows created in one transaction) and the
+> next page holds the rows with `(created_at, id) < cursor`, so rows inserted after the first page never shift or
+> duplicate later pages. A malformed cursor is `INVALID_INPUT` with `field: "cursor"`; a `limit` outside 1–100 is
+> `INVALID_INPUT` with `field: "limit"`. `next_cursor` is `null` exactly when `has_more` is false.
+
 ## 3. Error codes (complete)
 
 | Code | HTTP | Meaning / when raised |
