@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, get_args
+from typing import Any
 
 import pytest
 from model_introspection import (
+    assert_enum_check_mirrors,
     check_names,
-    columns,
     computed_columns,
     constraint,
-    enum_check_values,
     foreign_keys,
     get_table,
     index_ddl,
+    leading_columns,
     naive_timestamps,
     server_defaults,
+    spec_column_mismatches,
     text_array_columns,
     unique_and_pk,
 )
@@ -21,12 +22,10 @@ from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Index,
     Integer,
     LargeBinary,
     Numeric,
     SmallInteger,
-    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import TSVECTOR
 
@@ -125,16 +124,10 @@ _SPEC_COLUMNS: dict[str, str] = {
 _TABLES = tuple(_SPEC_COLUMNS)
 
 
-def _parse(spec: str) -> list[tuple[str, bool]]:
-    return [(word.removesuffix("?"), word.endswith("?")) for word in spec.split()]
-
-
 def test_tables_registered_with_spec_columns() -> None:
     assert len(_TABLES) == 24
     assert set(_TABLES) <= set(Base.metadata.tables)
-    assert {table: columns(table) for table in _TABLES} == {
-        table: _parse(spec) for table, spec in _SPEC_COLUMNS.items()
-    }
+    assert spec_column_mismatches(_SPEC_COLUMNS) == {}
 
 
 # (table, column) -> (Literal alias, values in specs/03 §5 order).
@@ -178,8 +171,7 @@ _RULE_CHECKS: dict[tuple[str, str], str] = {
 
 @pytest.mark.parametrize("key", _ENUMS)
 def test_enum_checks_mirror_literals(key: tuple[str, str]) -> None:
-    literal, expected = _ENUMS[key]
-    assert enum_check_values(*key) == get_args(literal) == expected
+    assert_enum_check_mirrors(*key, *_ENUMS[key])
 
 
 @pytest.mark.parametrize("key", _RULE_CHECKS)
@@ -368,27 +360,16 @@ def test_indexes() -> None:
     assert index_ddl(_TABLES) == _SPEC_INDEXES | decision
 
 
-def _leading_columns(table: str) -> set[str]:
-    elements = get_table(table).indexes | {
-        c for c in get_table(table).constraints if isinstance(c, UniqueConstraint)
-    }
-    return {
-        element.columns[0].name
-        for element in elements
-        if isinstance(element, Index | UniqueConstraint) and len(element.columns) > 0
-    }
-
-
 @pytest.mark.parametrize("table", [table for table in _TABLES if table != "voices"])
 def test_tenant_tables_have_org_id_leading_index(table: str) -> None:
     """specs/03 §1: NOT NULL ``org_id`` plus an index (or UNIQUE) that starts with it."""
     assert get_table(table).c.org_id.nullable is False
-    assert "org_id" in _leading_columns(table)
+    assert "org_id" in leading_columns(table)
 
 
 def test_voices_org_id_is_nullable_and_indexed() -> None:
     assert get_table("voices").c.org_id.nullable is True
-    assert "org_id" in _leading_columns("voices")
+    assert "org_id" in leading_columns("voices")
 
 
 def test_kb_chunk_vector_and_generated_tsvector() -> None:

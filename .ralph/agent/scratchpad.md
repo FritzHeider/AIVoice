@@ -592,3 +592,173 @@ column by column: types, nullability, defaults (voices.settings and tools.input_
 ondelete (RESTRICT x2, SET NULL paths), voices expression/partial uniques, HNSW/GIN, DESC indexes, the experiments
 partial unique, and widgets.public_key UNIQUE all match. The spec diff adds only the 13 org_idx lines plus the §1
 Decision. Unit tests pin the compiled DDL, and integration tests exercise the behaviour that matters.
+
+## Plan P01-T05 — Call models (2026-10-27)
+Spec: specs/03 §6 (12 tables). Depends on T03 and T04, both ticked. Follow the T02–T04 conventions: `_columns` builders,
+`check_in` from Literals, spec-named indexes, and the jscpd/test-support memories.
+
+### Spec decision (extend the §1 Decision in the same commit)
+The §1 org-index rule is binding, but §6 leaves these tables without an index that starts with org_id: contacts (only
+*partial* uniques, which cannot serve a full-org scan), batch_items, call_legs, call_turns, call_events,
+call_analyses, citations, eval_runs, guard_rail_events, dnc_entries (nullable org_id, same as voices, which
+has voices_org_idx). Add `CREATE INDEX <table>_org_idx ON <table>(org_id);` for each of the 10 tables to the §6 SQL
+block, directly after each table's existing indexes. Then append a second paragraph to the §1 Decision note
+("§6 likewise: ...") that lists them. Why: it is the same RLS-predicate reasoning, and the P01-T07 and T08 tasks copy
+and parse this DDL. call_events_org_idx on the partitioned parent becomes a partitioned index, which is fine.
+
+### Files
+1. `packages/va_db/src/va_db/models/calls.py`. Literals (names are exact; tuples copy the spec order):
+   `BatchStatus` (created, scheduled, validating, dispatching, in_progress, completed, stopped, failed),
+   `BatchItemStatus` (pending, skipped, dispatched, completed, failed, canceled), `CallDirection` (outbound, inbound, web),
+   `CallStatus` (12 values), `AnsweredBy` (human, voicemail, ivr, unknown, no_answer, fax), `RunnerType` (task, pathway,
+   persona, agent), `EndedBy` (agent, user, system, api, guard_rail, timeout, error), `CallLegRole`, `CallLegState`,
+   `CallTurnRole` ('user','assistant','agent-action','system','human_agent'), `CallEventCategory` (18 values),
+   `CallEventLevel` (debug, info, warning, error), `CallAnalysisKind`, `EvalRunStatus`, `DncSource`.
+   Models:
+   - `Contact` (contacts): email CITEXT NULL; attributes jsonb '{}'. Indexes: three partial uniques declared as
+     `Index("contacts_phone_uq", "org_id", "phone_e164", unique=True, postgresql_where=text("phone_e164 IS NOT NULL"))`
+     (likewise for email and external), plus contacts_org_idx.
+   - `Batch` (batches): status text_column('created') + check; global_props/schedule '{}'; five int_column(0)
+     counters; created_by_key FK api_keys.id SET NULL. `batches_org_created_idx (org_id, created_at DESC)` is
+     module-level with `.desc()`.
+   - `BatchItem` (batch_items): batch_id FK CASCADE NN; ordinal Integer NN; payload jsonb NN with no default; status
+     'pending' + check; attempts SmallInteger default 0; call_id is a Uuid NULL with **no FK** (calls.batch_item_id
+     already points the other way, and a cycle would break create_all/drop ordering); UNIQUE(batch_id, ordinal) →
+     batch_items_batch_id_ordinal_key; batch_items_dispatch_idx (batch_id, status, next_attempt_at); org idx.
+   - `Call` (calls): column order exactly as in the spec. external_id gets
+     `CheckConstraint("char_length(external_id) <= 256", name="external_id_check")`. answered_by and ended_by are
+     nullable with check_in; a NULL passes the CHECK. SET NULL FKs: contact, pathway, persona, agent, agent_version,
+     experiment, experiment_arm, batch, batch_item, parent_call_id (**self** "calls.id"), phone_number, voice.
+     created_by-style columns with **no FK**: credit_hold_id and memory_id (their targets come in T06; the spec has no
+     REFERENCES). config jsonb NN with no default; request_data/metadata/variables '{}'; connected_seconds and
+     transfer_seconds `Numeric(10, 3)` NN default `0`, Mapped[Decimal]; price_micros BigInteger default 0;
+     recording_duration_ms Integer NULL; test_call bool_column(default=False). Attribute `metadata` is reserved on
+     Declarative classes, so map it as `metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, ...)`.
+     Add a comment saying why, and assert the column name in the unit test. Six indexes: `calls_org_created_idx` and
+     `calls_org_to_idx` (org_id, to_number, created_at DESC) and `calls_pathway_idx` (org_id, pathway_id,
+     created_at DESC) are module-level with `.desc()`; calls_org_status_idx; `calls_org_external_idx` partial
+     WHERE external_id IS NOT NULL (non-unique); calls_batch_idx.
+   - `CallLeg` (call_legs): call_id CASCADE NN; telnyx_account_id SET NULL; call_control_id NN; started_at
+     tz NN `server_default=func.now()`; `call_legs_ccid_uq` unique index (an index, not a constraint);
+     call_legs_call_idx; org idx.
+   - `CallTurn` (call_turns): **the attribute named `text`** shadows `sqlalchemy.text` inside the class body.
+     Either declare it with `mapped_column("text", Text, nullable=False)` under attribute `text` placed so that no later
+     line in the class body calls `text(...)` (builders are safe because they call text() in `_columns`), or name it
+     `text_` with an explicit column name "text". Prefer `text_` for clarity; mypy and the reader both see it. stt_confidence
+     `REAL` (sqlalchemy.REAL) Mapped[float | None]; latency '{}'; interrupted bool false; start_ms/end_ms Integer NN
+     with no default; UNIQUE(call_id, turn_index, role) → call_turns_call_id_turn_index_role_key;
+     call_turns_call_idx (call_id, turn_index); org idx.
+   - `CallEvent` (call_events): **no IdMixin and no TimestampMixin** (it has no updated_at, and the PK is composite).
+     Columns in spec order: id Uuid NN `default=new_id`; org_id Uuid NN with **no FK** (partitioned table; the spec
+     has no REFERENCES); call_id Uuid NN with no FK; seq Integer NN; category check; level text_column('info') + check;
+     message NN; data '{}'; created_at tz NN server_default now(). `PrimaryKeyConstraint("created_at", "id")` →
+     call_events_pkey, and `{"postgresql_partition_by": "RANGE (created_at)"}` as the trailing dict in
+     __table_args__. Indexes: call_events_call_idx (call_id, seq), call_events_org_idx. The comment cites the
+     RetentionWorkflow partition note. Do not give created_at a Python default: the server fills it
+     and RETURNING brings it back (Postgres + asyncpg do implicit RETURNING for server-generated PK parts). If the ORM
+     still complains because a PK part is NULL at flush, set `default=utcnow` from va_common.time as well, keep the
+     server default, and record the fix memory.
+   - `CallAnalysis` (call_analyses): kind check; goal Text NULL; questions/schema JSONB NULL as `Mapped[Any | None]`
+     (memory: Mapped[Any] would make them NOT NULL); `schema` is fine as an attribute name; result jsonb NN with no
+     default; model NN; call idx and org idx.
+   - `Citation` (citations): citation_schema_id FK CASCADE NN; value JSONB NULL; conditions_met Boolean NULL;
+     cited_utterances '[]'; call idx and org idx.
+   - `EvalRun` (eval_runs): call_id FK calls CASCADE **nullable**; eval_setup_version_id FK CASCADE NN; status check
+     with no default; overall_score Numeric(5,2) NULL Mapped[Decimal | None]; passed Boolean NULL; results '[]';
+     error NULL; call idx and org idx.
+   - `GuardRailEvent` (guard_rail_events): triggered Boolean NN with **no default** (plain mapped_column); action
+     NULL; turn_index Integer NULL; detail '{}'; call idx and org idx.
+   - `DncEntry` (dnc_entries): org_id_column(nullable=True); source check; call_id Uuid NULL with no FK;
+     expires_at tz NULL; `dnc_scope_phone_uq` = unique on (coalesce(org_id, '0000…'::uuid), phone_e164) **without**
+     WHERE. Reuse the same expression-building approach as voices_name_scope_uq; if the coalesce expression is
+     duplicated, factor it into a helper in `_columns.py` such as `platform_scope(column)` and use it in both
+     library.py and calls.py (jscpd). Add dnc_entries_org_idx.
+   Docstrings name the Pydantic models and specs cited in the comments (BatchSchedule 17-batches §3, SendCallConfig
+   05-calls-api §4, end_reason enumeration 05-calls-api §9).
+2. `va_db/models/__init__.py`: re-export the 12 models and 15 Literals, with `__all__` kept sorted.
+3. specs/03: the §6 org_idx lines plus the extension of the §1 Decision.
+4. AGENTS.md: `metadata_` / `text_` attribute mapping convention; call_events has no FK, a composite PK, and is
+   partitioned; the partition name used by tests (see below) is a candidate for T13.
+
+### Tests
+- `packages/va_db/tests/test_call_models.py` (unit; model_introspection): all 12 tables registered; ordered
+  (name, nullable) columns per table; every enum check equals its Literal tuple; exact CHECK-name set, plus the
+  sqltext of `calls_external_id_check`; server-default map; UNIQUE/PK set (call_events_pkey = (created_at, id),
+  batch_items and call_turns uniques); FK set with ondelete, including `calls.parent_call_id → calls.id SET NULL`;
+  **no-FK assertions** for batch_items.call_id, calls.credit_hold_id, calls.memory_id, call_events.org_id/call_id,
+  dnc_entries.call_id; exact index DDL set (three contacts partial uniques, calls_org_external_idx partial,
+  three DESC indexes, call_legs_ccid_uq UNIQUE, the dnc coalesce expression, every org_idx); the
+  `postgresql_partition_by` dialect option == "RANGE (created_at)"; types (CITEXT email, Numeric(10,3) x2,
+  Numeric(5,2), REAL, SmallInteger attempts, BigInteger price_micros); tz-aware timestamps; `Call.metadata_` maps
+  to column "metadata" and `CallTurn.text_` to "text"; every §6 table except dnc_entries has NOT NULL org_id, and all
+  12 have an index starting with org_id (this test guards the Decision). Extend the existing §5 org-index test helper
+  rather than copy it (put a shared `org_leading_index_tables()` in model_introspection if needed).
+- `packages/va_db/tests/test_call_models_integration.py` (scratch_session plus factory builders; add `make_call` and
+  `make_batch` to model_factories if reused):
+  - `test_call_event_lands_in_monthly_partition`: inside the scratch txn,
+    `CREATE TABLE call_events_2026_10 PARTITION OF call_events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')`
+    plus the 2026_11 partition, then insert CallEvents with created_at in each month and assert
+    `SELECT tableoid::regclass::text FROM call_events WHERE id = :id` gives the right partition. An insert outside every
+    partition raises ("no partition of relation"). This is the task's acceptance item. Also insert one CallEvent
+    with no created_at and check that the server default plus RETURNING populates it (needs a partition covering now; create
+    it from `SELECT date_trunc('month', now())` in the test).
+  - `test_call_defaults`: Decimal("0.000") for the seconds columns, price 0, test_call false, and the '{}' jsonb defaults.
+  - `test_enum_values_accepted_and_rejected`: parametrized over every enum column via assert_enum_check_enforced
+    (answered_by and ended_by NULL accepted).
+  - `test_external_id_length_check`: 256 chars pass, 257 fail.
+  - `test_contact_partial_uniques`: duplicate phone/email (email case-insensitive via citext)/external per org fails;
+    multiple NULLs allowed; the same value in another org is allowed.
+  - `test_dnc_scope_unique`: a duplicate phone in one org fails; a platform (NULL org) duplicate fails; the same phone in
+    an org plus the platform succeeds.
+  - `test_uniques`: batch_items (batch_id, ordinal), call_turns (call_id, turn_index, role) where the same index with
+    a different role is allowed, and call_legs call_control_id.
+  - `test_delete_paths`: deleting a call cascades legs, turns, analyses, citations, guard_rail_events and eval_runs;
+    deleting the parent call nulls parent_call_id; deleting a contact, batch or voice nulls the calls FKs; deleting a
+    batch cascades its batch_items.
+  - `test_call_turn_text_and_real_round_trip`: the `text_` attribute round-trips; stt_confidence is a float.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (Docker up, 0 skipped);
+`uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones); va_db coverage at 100 %;
+`uvx pip-audit` on uv export (no new deps expected).
+
+### Risks
+- `metadata` is reserved by Declarative (InvalidRequestError), hence `metadata_`. `text` shadows the import in the class body.
+- create_all on a table with postgresql_partition_by: SQLAlchemy emits `PARTITION BY RANGE (created_at)`, and
+  Postgres requires the PK to include the partition key, which it does. Unique and plain indexes on the parent are fine.
+- Self-referential FK calls.parent_call_id together with calls.batch_item_id → batch_items: no cycle as long as
+  batch_items.call_id has no FK. Keep it that way.
+- If jscpd flags call_id-FK + call_idx blocks repeated across call_analyses/citations/guard_rail_events/eval_runs,
+  add a small `_columns` helper (e.g. `call_fk_column()`) instead of using ignore markers.
+- test file length: split the unit test by area (calls vs. the rest) if it goes past about 500 lines.
+
+## Build P01-T05 (2026-10-27)
+Implemented per plan. Notes for the Reviewer:
+- `models/calls.py`: 12 models and 15 Literals. Local helpers `_call_id_column()` (call_id FK CASCADE NN) and
+  `_seconds_column()` (numeric(10,3) NN default 0). `Call.metadata_` maps to "metadata" and `CallTurn.text_` to "text".
+- New `_columns.platform_scope(org_id)` (coalesce with the nil uuid). library.py now uses it for both voices uniques,
+  and `_NIL_UUID` is gone; the DDL is unchanged and pinned by test_agent_config_models.
+- CallEvent: no mixins, `PrimaryKeyConstraint("created_at","id")`, partition_by RANGE (created_at). `created_at` has only
+  a server default; asyncpg RETURNING filled it at flush, so no Python default was needed. This is verified in
+  `test_call_event_created_at_comes_back_from_the_server_default`, which uses a partition whose bounds are the
+  `date_trunc('month', now())` expression.
+- specs/03: 10 `<table>_org_idx` lines in §6, plus a "§6 likewise" paragraph appended to the §1 Decision.
+- Test support (jscpd): `model_introspection.leading_columns`, `spec_column_mismatches`, `assert_enum_check_mirrors`.
+  The agent-config and telephony unit tests now use them. Their behaviour is the same, and they are green.
+- Integration (27 tests): monthly partition routing (Oct/Nov) with an out-of-range insert rejected ('no partition of
+  relation "call_events" found for row'); server-default created_at; defaults; 13 enum checks; answered_by/ended_by/
+  external_id (256 ok, 257 rejected, NULL ok); contact partial uniques including the citext email case; dnc scope;
+  batch_items/call_turns/call_legs uniques; child cascades; SET NULL paths for parent call, contact, voice, and batch
+  (+ batch_items cascade); text_/REAL round-trip.
+Gates: make fmt 0, lint 0, typecheck 0 (171 files), placeholders 0 findings, make test 1464 passed (99.86 %, va_db
+100 %), `pytest packages/va_db -m integration -rs` 114 passed / 0 skipped, radon A (1.12), jscpd 0 clones, pip-audit
+no known vulns (no new deps).
+
+## Review P01-T05 (2026-10-27) — APPROVED
+Re-ran: make lint/typecheck/placeholders clean; make test 1464 passed (99.86 %); `pytest packages/va_db -m integration`
+114 passed, 0 skipped; jscpd 0 clones; radon A (1.12). Checked calls.py against specs/03 §6 column by column: order,
+types (CITEXT, numeric(10,3) x2, numeric(5,2), REAL, smallint, bigint), nullability, defaults, every CHECK list,
+calls_external_id_check, FK ondelete (self FK parent_call_id SET NULL; eval_runs.call_id nullable CASCADE), the
+FK-less columns (batch_items.call_id, credit_hold_id, memory_id, call_events org_id/call_id, dnc call_id), call_events
+composite PK + RANGE partitioning, partial/DESC/expression indexes. The spec diff only adds the 10 org_idx lines and
+the "§6 likewise" Decision paragraph. The platform_scope refactor leaves the voices DDL unchanged (pinned by tests).

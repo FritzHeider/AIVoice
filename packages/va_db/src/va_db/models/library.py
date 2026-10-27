@@ -36,6 +36,7 @@ from va_db.models._columns import (
     int_column,
     jsonb_column,
     org_id_column,
+    platform_scope,
     text_array_column,
     text_column,
 )
@@ -74,8 +75,6 @@ EMBEDDING_DIMENSIONS = 1024
 _VOICE_SETTINGS_DEFAULT = (
     '{"stability":0.5,"similarity_boost":0.75,"style":0,"use_speaker_boost":true,"speed":1.0}'
 )
-# Scope key of the voices uniqueness indexes: platform voices (org_id NULL) share the nil UUID.
-_NIL_UUID = text("'00000000-0000-0000-0000-000000000000'::uuid")
 
 
 class Prompt(IdMixin, SoftDeleteMixin, TimestampMixin, Base):
@@ -130,14 +129,14 @@ class Voice(IdMixin, SoftDeleteMixin, TimestampMixin, Base):
 
 Index(
     "voices_name_scope_uq",
-    func.coalesce(Voice.org_id, _NIL_UUID),
+    platform_scope(Voice.org_id),
     func.lower(Voice.name),
     unique=True,
     postgresql_where=Voice.deleted_at.is_(None),
 )
 Index(
     "voices_provider_uq",
-    func.coalesce(Voice.org_id, _NIL_UUID),
+    platform_scope(Voice.org_id),
     Voice.provider_voice_id,
     unique=True,
     postgresql_where=Voice.deleted_at.is_(None),

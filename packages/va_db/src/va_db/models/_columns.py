@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, TextClause, Uuid, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, TextClause, Uuid, func, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import MappedColumn, mapped_column
+from sqlalchemy.sql.functions import Function
 
 __all__ = [
     "bool_column",
@@ -16,6 +17,7 @@ __all__ = [
     "jsonb_default",
     "org_fk",
     "org_id_column",
+    "platform_scope",
     "text_array_column",
     "text_column",
     "tz",
@@ -81,3 +83,10 @@ def jsonb_column(default: str | None = None) -> MappedColumn[Any]:
     if default is None:
         return mapped_column(JSONB, nullable=False)
     return mapped_column(JSONB, nullable=False, server_default=jsonb_default(default))
+
+
+def platform_scope(org_id: Any) -> Function[Any]:
+    """``coalesce(org_id, '00000000-0000-0000-0000-000000000000'::uuid)``: the scope key of uniqueness indexes
+    on tables whose ``org_id`` NULL rows are platform-wide, so platform rows share the nil UUID as one scope.
+    """
+    return func.coalesce(org_id, text("'00000000-0000-0000-0000-000000000000'::uuid"))

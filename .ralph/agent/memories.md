@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793122444-3076
+> va_db partitioned tables (call_events): PrimaryKeyConstraint must include partition key; __table_args__ trailing dict {'postgresql_partition_by': 'RANGE (created_at)'}; server-default-only PK part (created_at) is filled by asyncpg RETURNING at flush; create_all makes only the parent so tests CREATE TABLE ... PARTITION OF ... FOR VALUES FROM (date_trunc('month', now())) TO (...) themselves
+<!-- tags: database, sqlalchemy, testing | created: 2026-10-27 -->
+
 ### mem-1793120870-f54b
 > va_db models: use _columns builders (org_id_column, fk_column, int_column, bool_column, text_column, text_array_column, jsonb_column) - jscpd flags repeated mapped_column blocks; overlapping import headers can be wrapped in '# jscpd:ignore-start' / '# jscpd:ignore-end  (reason)' (bare end marker trips ruff ERA001)
 <!-- tags: database, testing, tooling | created: 2026-10-27 -->

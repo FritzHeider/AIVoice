@@ -281,3 +281,18 @@ Grafana 3001
   `CREATE EXTENSION IF NOT EXISTS vector`. `model_factories.assert_check_enforced(session, builder, column, accepted,
   rejected)` covers range/regex CHECKs and `assert_rejected(session, model, match)` covers UNIQUE violations.
   specs/03 §1 Decision: every tenant table has an `org_id`-leading index (13 §5 tables gained `<table>_org_idx`).
+- 2026-10-27 (P01-T05): column names that clash with Python/SQLAlchemy names keep the spec name with an
+  attribute suffix: `Call.metadata_ = mapped_column("metadata", JSONB, ...)` (`metadata` is reserved on Declarative
+  classes) and `CallTurn.text_ = mapped_column("text", Text, ...)` (it would shadow `sqlalchemy.text` in the class
+  body). Platform-scoped uniques (`org_id` NULL = platform row) use `_columns.platform_scope(Model.org_id)` for the
+  `coalesce(org_id, nil-uuid)` key (voices, dnc_entries). `call_events` is partitioned: no mixins, no FKs on
+  `org_id`/`call_id`, `PrimaryKeyConstraint("created_at", "id")` (a partitioned PK must contain the partition key)
+  and `{"postgresql_partition_by": "RANGE (created_at)"}` as the last `__table_args__` item; `created_at` has only a
+  server default, and asyncpg + RETURNING fill it at flush. `create_all` makes the parent only, so tests create
+  partitions themselves (`CREATE TABLE call_events_2026_10 PARTITION OF call_events FOR VALUES FROM (...) TO (...)`;
+  bounds may be expressions such as `date_trunc('month', now())`); an insert with no matching partition fails with
+  `no partition of relation "call_events" found for row`. P01-T13's `ensure_call_event_partitions(now)` should use
+  the same `call_events_YYYY_MM` naming. Model unit tests use `model_introspection.spec_column_mismatches` (spec
+  column strings, `?` = nullable), `assert_enum_check_mirrors`, and `leading_columns` (the org-index rule).
+  `batch_items.call_id` has no FK on purpose: `calls.batch_item_id` points the other way, and a cycle would break
+  create_all/drop ordering.

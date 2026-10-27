@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, get_args
+from typing import Any
 
 import pytest
 from model_introspection import (
+    assert_enum_check_mirrors,
     check_names,
     columns,
-    enum_check_values,
     foreign_keys,
     get_table,
     index_ddl,
@@ -139,8 +139,7 @@ _ENUMS: dict[tuple[str, str], tuple[Any, tuple[str, ...]]] = {
 
 @pytest.mark.parametrize("key", _ENUMS)
 def test_enum_checks_mirror_literals(key: tuple[str, str]) -> None:
-    literal, expected = _ENUMS[key]
-    assert enum_check_values(*key) == get_args(literal) == expected
+    assert_enum_check_mirrors(*key, *_ENUMS[key])
 
 
 def test_check_constraints_are_exactly_the_spec_set() -> None:

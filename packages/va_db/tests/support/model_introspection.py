@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
-from typing import Any, Final
+from collections.abc import Iterable, Mapping
+from typing import Any, Final, get_args
 
 from sqlalchemy import (
     CheckConstraint,
     Computed,
     DateTime,
     ForeignKeyConstraint,
+    Index,
     PrimaryKeyConstraint,
     Table,
     Text,
@@ -25,6 +26,7 @@ from va_db.base import Base
 
 __all__ = [
     "DIALECT",
+    "assert_enum_check_mirrors",
     "check_names",
     "columns",
     "computed_columns",
@@ -33,8 +35,10 @@ __all__ = [
     "foreign_keys",
     "get_table",
     "index_ddl",
+    "leading_columns",
     "naive_timestamps",
     "server_defaults",
+    "spec_column_mismatches",
     "text_array_columns",
     "unique_and_pk",
 ]
@@ -146,3 +150,31 @@ def text_array_columns(tables: Iterable[str]) -> set[tuple[str, str]]:
         for column in get_table(name).columns
         if isinstance(column.type, ARRAY) and type(column.type.item_type) is Text
     }
+
+
+def leading_columns(name: str) -> set[str]:
+    """First column of every index and UNIQUE constraint (the specs/03 §1 ``org_id`` index rule)."""
+    table = get_table(name)
+    elements: set[Index | UniqueConstraint] = {
+        *table.indexes,
+        *(c for c in table.constraints if isinstance(c, UniqueConstraint)),
+    }
+    return {element.columns[0].name for element in elements if len(element.columns) > 0}
+
+
+def spec_column_mismatches(spec_columns: Mapping[str, str]) -> dict[str, list[tuple[str, bool]]]:
+    """Actual ``(column, nullable)`` lists of the tables that differ from their spec string.
+
+    A spec string lists the columns in order, separated by spaces; a trailing ``?`` marks a nullable column.
+    """
+    mismatches = {}
+    for name, spec in spec_columns.items():
+        expected = [(word.removesuffix("?"), word.endswith("?")) for word in spec.split()]
+        if (actual := columns(name)) != expected:
+            mismatches[name] = actual
+    return mismatches
+
+
+def assert_enum_check_mirrors(table: str, column: str, literal: Any, expected: tuple[str, ...]) -> None:
+    """``<table>_<column>_check`` lists exactly the ``Literal`` values, in the spec's order."""
+    assert enum_check_values(table, column) == get_args(literal) == expected

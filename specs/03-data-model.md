@@ -25,6 +25,11 @@ this markdown file, extracts every ```sql block, and applies it to a scratch dat
 > eval_setup_versions); each now has `CREATE INDEX <table>_org_idx ON <table>(org_id)` because the RLS predicate
 > `org_id = app.org_id` and the org-scoped list endpoints filter on it. A UNIQUE constraint that starts with
 > `org_id` (tools, dispositions) satisfies the rule.
+>
+> §6 likewise: contacts (whose only `org_id`-leading indexes are partial uniques, which cannot serve a full-org
+> scan), batch_items, call_legs, call_turns, call_events, call_analyses, citations, eval_runs, guard_rail_events, and
+> dnc_entries (nullable `org_id`, like voices) each get `CREATE INDEX <table>_org_idx ON <table>(org_id)`. On the
+> partitioned call_events table it is a partitioned index that every monthly partition inherits.
 
 ## 2. Extensions, roles, helper functions
 
@@ -717,6 +722,7 @@ CREATE TABLE contacts (
 CREATE UNIQUE INDEX contacts_phone_uq ON contacts(org_id, phone_e164) WHERE phone_e164 IS NOT NULL;
 CREATE UNIQUE INDEX contacts_email_uq ON contacts(org_id, email) WHERE email IS NOT NULL;
 CREATE UNIQUE INDEX contacts_external_uq ON contacts(org_id, external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX contacts_org_idx ON contacts(org_id);
 
 CREATE TABLE batches (
   id               uuid PRIMARY KEY,
@@ -757,6 +763,7 @@ CREATE TABLE batch_items (
   UNIQUE (batch_id, ordinal)
 );
 CREATE INDEX batch_items_dispatch_idx ON batch_items(batch_id, status, next_attempt_at);
+CREATE INDEX batch_items_org_idx ON batch_items(org_id);
 
 CREATE TABLE calls (
   id                 uuid PRIMARY KEY,
@@ -839,6 +846,7 @@ CREATE TABLE call_legs (
 );
 CREATE UNIQUE INDEX call_legs_ccid_uq ON call_legs(call_control_id);
 CREATE INDEX call_legs_call_idx ON call_legs(call_id);
+CREATE INDEX call_legs_org_idx ON call_legs(org_id);
 
 CREATE TABLE call_turns (
   id              uuid PRIMARY KEY,
@@ -862,6 +870,7 @@ CREATE TABLE call_turns (
   UNIQUE (call_id, turn_index, role)
 );
 CREATE INDEX call_turns_call_idx ON call_turns(call_id, turn_index);
+CREATE INDEX call_turns_org_idx ON call_turns(org_id);
 
 CREATE TABLE call_events (
   id          uuid NOT NULL,
@@ -877,6 +886,7 @@ CREATE TABLE call_events (
 ) PARTITION BY RANGE (created_at);
 -- Partitions are created monthly by RetentionWorkflow (next 3 months ahead) and dropped after orgs' max retention.
 CREATE INDEX call_events_call_idx ON call_events(call_id, seq);
+CREATE INDEX call_events_org_idx ON call_events(org_id);
 
 CREATE TABLE call_analyses (
   id             uuid PRIMARY KEY,
@@ -892,6 +902,7 @@ CREATE TABLE call_analyses (
   updated_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX call_analyses_call_idx ON call_analyses(call_id);
+CREATE INDEX call_analyses_org_idx ON call_analyses(org_id);
 
 CREATE TABLE citations (
   id                 uuid PRIMARY KEY,
@@ -907,6 +918,7 @@ CREATE TABLE citations (
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX citations_call_idx ON citations(call_id);
+CREATE INDEX citations_org_idx ON citations(org_id);
 
 CREATE TABLE eval_runs (
   id                     uuid PRIMARY KEY,
@@ -922,6 +934,7 @@ CREATE TABLE eval_runs (
   updated_at             timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX eval_runs_call_idx ON eval_runs(call_id);
+CREATE INDEX eval_runs_org_idx ON eval_runs(org_id);
 
 CREATE TABLE guard_rail_events (
   id          uuid PRIMARY KEY,
@@ -936,6 +949,7 @@ CREATE TABLE guard_rail_events (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX guard_rail_events_call_idx ON guard_rail_events(call_id);
+CREATE INDEX guard_rail_events_org_idx ON guard_rail_events(org_id);
 
 CREATE TABLE dnc_entries (
   id         uuid PRIMARY KEY,
@@ -949,6 +963,7 @@ CREATE TABLE dnc_entries (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX dnc_scope_phone_uq ON dnc_entries(coalesce(org_id,'00000000-0000-0000-0000-000000000000'::uuid), phone_e164);
+CREATE INDEX dnc_entries_org_idx ON dnc_entries(org_id);
 ```
 
 ## 7. Memory

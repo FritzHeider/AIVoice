@@ -44,7 +44,7 @@
   - Deliverables: `Prompt`, `Voice`, `VoiceSample`, `VoiceRating`, `Tool`, `KnowledgeBase`, `KbDocument`, `KbChunk` (Vector(1024), computed tsvector), `PathwayFolder`, `Pathway`, `PathwayVersion`, `PathwayUnitTest`, `PathwayTestRun`, `Persona`, `PersonaVersion`, `Agent`, `AgentVersion`, `Experiment`, `ExperimentArm`, `Disposition`, `CitationSchema`, `EvalSetup`, `EvalSetupVersion`, `Widget`
   - Acceptance: HNSW and GIN indexes exist after migration (verified in P01-T07 tests).
 
-- [ ] P01-T05 Call models
+- [x] P01-T05 Call models — 12 §6 models + 15 Literals; 1464 tests pass (99.86 %, va_db 100 %), va_db integration 114 passed / 0 skipped incl. monthly partition routing; lint/typecheck/placeholders clean; jscpd 0; radon A (1.12)
   - Spec refs: specs/03-data-model.md (Calls)
   - Depends on: P01-T03, P01-T04
   - Deliverables: `Contact`, `Batch`, `BatchItem`, `Call`, `CallLeg`, `CallTurn`, `CallEvent` (partitioned; model maps to parent table), `CallAnalysis`, `Citation`, `EvalRun`, `GuardRailEvent`, `DncEntry`
