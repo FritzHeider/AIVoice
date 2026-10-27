@@ -333,3 +333,12 @@ Grafana 3001
   `schema_catalog.include_object`. Alembic 1.20 compares expression/partial indexes without warnings. Add any
   future autogenerate-noise filter only as a named, commented exception there. Drift negatives mutate a
   `Table.to_metadata` copy, never `Base.metadata`. `migrated_url` is a module-scoped fixture in the va_db conftest.
+- 2026-10-27 (P01-T09): `test_rls_isolation.py` proves tenant isolation for every table in
+  `tenant_rows.TENANT_TABLE_NAMES` (NOT NULL `org_id` plus `voices`/`dnc_entries`, derived from metadata, so a new
+  tenant table is covered automatically) and checks that list equals the catalog's FORCE-RLS `tenant_isolation`
+  tables. `tenant_rows.RowFactory` builds minimal rows from metadata (required columns only; required FKs get fresh
+  parents in the same session; enum CHECKs take their first value). A CHECK that the generic value violates needs a
+  commented `VALUE_OVERRIDES` entry; an unknown column type raises `TypeError`. Semantics: RLS `USING` hides B's
+  rows (SELECT empty, UPDATE/DELETE rowcount 0); only `WITH CHECK` raises (INSERT with `org_id = B`, or moving A's
+  row to B). Build a test `Database` with `tenant_rows.open_database(url)`. `migration_helpers.query` calls
+  `asyncio.run`, so call it only from sync tests.

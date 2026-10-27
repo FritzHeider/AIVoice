@@ -1273,3 +1273,139 @@ restricted to non-partition public tables minus alembic_version; conparentid = 0
 referencing tables; include_object excludes only alembic_version + call_events_pYYYYMM; drift cases mutate a
 to_metadata copy and re-assert Base.metadata parity. column-removed case skipped as plan allowed; type/nullable/default
 cases cover "altering a model column". Uses pg_attribute/format_type instead of information_schema.columns: stricter.
+
+## Plan P01-T09 — RLS isolation test harness (2026-10-27)
+Spec refs: specs/03 §10 (RLS rule + exact policies, platform_read), §1; specs/00 §4 rule 7; plan/phase-01.md T09.
+Test-only task; no production code changes. If a test exposes a missing/incorrect policy, fix 0001 (and the
+spec if the spec is wrong, with a `> Decision`). Never weaken an assertion.
+
+### Facts gathered (introspection of Base.metadata)
+- Tenant tables by the §10 rule (NOT NULL org_id, plus voices and dnc_entries) = 65. Excluded: telnyx_events and
+  plans (nullable org_id, system scope), and every table without org_id (orgs, users, sessions, email_tokens, ...).
+- Composite PKs without `id`: call_events (created_at, id), idempotency_keys (org_id, key), voice_ratings
+  (voice_id, user_id), number_pool_members (pool_id, phone_number_id). Row identity = the PK columns, never `id`.
+- Required FKs (other than org_id) point to tenant tables, to users.id (memberships, invitations.invited_by,
+  voice_ratings) or to plans.id (org_subscriptions). call_events.call_id has no FK.
+- Non-enum CHECKs that a generic value violates (these need overrides): dispositions.tag and org_secrets.name
+  `^[A-Z][A-Z0-9_]{0,63}$`, tools.name `^[A-Za-z][A-Za-z0-9_]{0,63}$`, agent_versions.semver (semver regex),
+  voice_ratings.rating 1..5, experiment_arms.weight 0..100, plus range checks on columns that all have server
+  defaults (so they are never filled). Integer value 1 satisfies every remaining range.
+
+### Semantics (record in the test module docstring)
+In tenant_session(A), a row of org B is invisible: SELECT returns 0 rows, UPDATE/DELETE affect 0 rows (Postgres RLS
+USING filters, it does not raise). "Cross-org INSERT/UPDATE raise" therefore means: INSERT with org_id = B raises
+`new row violates row-level security policy`, and UPDATE that moves A's own row to org B (SET org_id = B) raises the
+same (WITH CHECK). Both forms are asserted, plus B's row is unchanged afterwards when read in tenant_session(B).
+
+### Files
+1. `packages/va_db/tests/support/tenant_rows.py` (new, typed, docstrings, `__all__`):
+   - `TENANT_TABLE_NAMES: Final[tuple[str, ...]]` — sorted names of tables in Base.metadata with `org_id` NOT NULL,
+     plus "voices", "dnc_entries" (`PLATFORM_READ_TABLES: Final = ("dnc_entries", "voices")`). Computed from metadata
+     (function `tenant_table_names()`), so a new tenant table is covered automatically.
+   - `type RowKey = dict[str, Any]` (PK column → value).
+   - `@asynccontextmanager async def open_database(url: str) -> AsyncIterator[Database]`:
+     `Database.from_settings(settings_of(DatabaseSettings, database_url=url, database_pool_size=1))`, dispose in
+     finally. Refactor the `database` fixture in test_session_integration.py to use it (avoids a jscpd clone).
+   - `class OrgFactory`: `__init__(self, database: Database)`; `async def create(self) -> uuid.UUID` — inserts an
+     org with `model_factories.make_org(session)` inside `database.system_session()` and returns its id.
+   - `class RowFactory` — the per-model minimal valid row builder, generic over metadata with named overrides:
+     - `async def values(self, session: AsyncSession, table: Table, org_id: uuid.UUID | None) -> dict[str, Any]`:
+       for every column that is required (`not nullable`, no `server_default`, no `default`, not `Computed`):
+       `org_id` → org_id; required FK → key of a parent row created with `self.insert(session, parent_table,
+       org_id)` (target `orgs` → org_id; targets without org_id such as users/plans are built the same way, their
+       org_id column, if nullable, stays NULL); otherwise `_value(table, column)`. PK columns without a default
+       (plans.id TEXT, idempotency_keys.key) are filled too. Nullable FKs stay NULL. Each call creates fresh parents.
+     - `async def insert(self, session, table, org_id) -> RowKey`: `values()` then Core
+       `insert(table).values(**v).returning(*table.primary_key.columns)`; returns `dict(row._mapping)`.
+     - `_value(table, column)` (module function, small helpers to keep radon A): override from
+       `VALUE_OVERRIDES: Final[dict[tuple[str, str], Callable[[], Any]]]` first; else enum CHECK
+       `<table>_<column>_check` whose sqltext starts with `<column> IN (` → first allowed value (write a local
+       lookup that returns None when absent; do not call `model_introspection.enum_check_values`, it asserts);
+       else by type: UUID → `new_id()`; Text/String/CITEXT → f"{column.name}-{secrets.token_hex(6)}" (CITEXT:
+       f"{hex}@example.test"); Integer/SmallInteger/BigInteger → 1; Numeric → Decimal("1"); Boolean → False;
+       DateTime → fixed `datetime(2026, 1, 1, tzinfo=UTC)` (+ timedelta(days=1) for names ending `_end`/`expires_at`
+       if a check needs ordering); JSONB → {}; ARRAY(Text) → ["+15550100000"] for requested_numbers else [];
+       LargeBinary → `secrets.token_bytes(16)`; Vector(1024) → `[1.0] + [0.0] * 1023` (not a zero vector: hnsw
+       cosine). Unknown type → `TypeError` naming table.column (so a new type fails loudly, not silently).
+     - Overrides: dispositions.tag and org_secrets.name → f"T{hex.upper()}"; tools.name → f"t{hex}";
+       agent_versions.semver → "1.0.0"; voice_ratings.rating → 3; experiment_arms.weight → 50. Add more only when
+       an insert proves it necessary, each with a comment naming the CHECK.
+   - Keep builders free of randomness at collection time (xdist): only test IDs come from TENANT_TABLE_NAMES.
+2. `packages/va_db/tests/test_rls_isolation.py` (new; `pytestmark = pytest.mark.integration`):
+   - function fixture `database(migrated_url)` via `open_database` (function-scoped event loop; migrated_url is the
+     module-scoped conftest fixture, so one migrated DB per module).
+   - helpers `_select_keys(session, table, where)` and `_assert_rls_rejects(session, stmt)` (savepoint
+     `session.begin_nested()`, `pytest.raises(DBAPIError, match="row-level security policy")`).
+   - `test_rls_tables_are_the_tenant_tables(migrated_url)`: set(TENANT_TABLE_NAMES) == catalog tables (public,
+     relkind r/p, not a partition) with relrowsecurity AND relforcerowsecurity AND a `tenant_isolation` policy;
+     and the catalog `platform_read` tables == set(PLATFORM_READ_TABLES).
+   - `test_tenant_table_names_follow_section_10_rule` (unit, no DB, may live in test_migrations.py or a small
+     test_tenant_rows.py): 65 names, sorted, contains voices/dnc_entries, excludes plans, telnyx_events, orgs, users.
+   - `@pytest.mark.parametrize("table_name", TENANT_TABLE_NAMES) test_cross_org_access_is_impossible`:
+     1. orgs A, B via OrgFactory. 2. `tenant_session(A)`: a_key = RowFactory.insert(A) (proves a legal write and
+     the builder). `tenant_session(B)`: b_key = insert(B); b_values = values(B) (fresh parents, not inserted).
+     3. `tenant_session(A)`: all PKs of the table == [a_key]; `WHERE org_id = B` → []; `WHERE <pk> = b_key` → [];
+     INSERT b_values → RLS error; UPDATE ... SET org_id = org_id WHERE pk = b_key → rowcount 0; DELETE WHERE
+     pk = b_key → rowcount 0; UPDATE ... SET org_id = B WHERE pk = a_key → RLS error.
+     4. `tenant_session(B)`: all PKs == [b_key] (B's row survived and A's row is still invisible).
+     5. `database.app_engine.connect()` without app.org_id: `SELECT` of the table → [] (fail closed).
+   - `@pytest.mark.parametrize("table_name", PLATFORM_READ_TABLES) test_platform_rows_are_shared_read_only`:
+     insert a platform row (org_id None) via `system_session` with RowFactory; in tenant_session(A) and (B) the
+     platform row is visible; in tenant_session(A): INSERT with org_id NULL raises RLS; UPDATE / DELETE of the
+     platform row → rowcount 0; then system_session confirms it still exists.
+3. `packages/va_db/tests/test_session_integration.py`: `database` fixture uses `open_database(pg_url)`.
+4. AGENTS.md: bullet under va_db testing — test_rls_isolation, tenant_rows.RowFactory (generic metadata builder +
+   VALUE_OVERRIDES; a new CHECK that the generic value violates needs an override), the invisibility-vs-raise
+   semantics, and that new tenant tables are covered automatically.
+
+### Gates
+`make fmt lint typecheck placeholders test` (run `make test` alone; no jscpd/compose concurrently — scratch_session
+flake memory); `uv run pytest packages/va_db -m integration -rs` (0 skipped); jscpd 0 clones; radon A; va_db coverage
+100 %; check_spec_refs. Negative proof (reverted): in a scratch run, `ALTER TABLE calls DISABLE ROW LEVEL SECURITY`
+(or drop the policy) on the migrated DB via a temporary local edit, and show test_cross_org_access_is_impossible[calls]
+and test_rls_tables_are_the_tenant_tables fail; record output in the build note.
+
+### Risks
+- 65 parametrized tests × ~6 transactions under xdist: keep one migrated DB per module (migrated_url), pool_size 1,
+  dispose per test. If the 60 s timeout is approached, batch nothing silently; report timings.
+- Generic values may violate an unlisted CHECK (multi-column or regex inside an IN-check). The first insert fails
+  with the constraint name; add a commented VALUE_OVERRIDES entry.
+- RLS error vs FK/unique error ordering: INSERT with b_values uses fresh, unique values and existing B parents, so
+  the only possible failure is the WITH CHECK violation. UPDATE SET org_id = B on idempotency_keys changes a PK
+  column; WITH CHECK still fires first (no row with that key exists under B).
+- users/plans parents are inserted by va_app inside the tenant session (no RLS on them; 0001 grants va_app DML).
+
+## Build P01-T09 (2026-10-27)
+New: tests/support/tenant_rows.py (PLATFORM_READ_TABLES, tenant_table_names()/TENANT_TABLE_NAMES = 65 from
+metadata, VALUE_OVERRIDES [dispositions.tag, org_secrets.name, tools.name, agent_versions.semver,
+voice_ratings.rating, experiment_arms.weight], column_value [override -> enum IN-check first value -> by type;
+unknown type -> TypeError], open_database, OrgFactory, RowFactory.values/insert/insert_values),
+tests/test_rls_isolation.py (catalog FORCE-RLS tenant_isolation tables == TENANT_TABLE_NAMES and platform_read ==
+PLATFORM_READ_TABLES; 65x test_cross_org_access_is_impossible; 2x test_platform_rows_are_shared_read_only),
+tests/test_tenant_rows.py (5 unit tests). test_session_integration `database` fixture now uses open_database.
+AGENTS.md bullet.
+Deviations from plan: RowFactory fills `org_id` whenever the table has the column (also nullable: voices/plans
+parents), so a voices parent of voice_ratings belongs to the org, not the platform. A required FK to orgs reuses
+org_id. requested_numbers uses the generic [] (no CHECK needs a number). The "all PKs == [a_key]" check is split
+into: visible org_ids ⊆ {A} (∪ {NULL} on platform-read tables, since platform rows from the other test share the
+module DB) + keys WHERE org_id = A == [a_key]; fail-closed check: app_engine without app.org_id sees org_ids ⊆
+{NULL} on platform tables, nothing otherwise. No 0001 change needed: all 65 tables isolated on the first run; no
+extra overrides were needed beyond the plan's six.
+Negative proof (reverted, test file restored from backup): ALTER TABLE calls DISABLE ROW LEVEL SECURITY on the
+migrated DB -> test_rls_tables_are_the_tenant_tables FAILED ('citation_schemas' != 'calls', calls missing) and
+test_cross_org_access_is_impossible[calls] FAILED (visible org_ids contained org B's id).
+Gates: make fmt 0; make lint 0; make typecheck 0; make placeholders 0 findings; check_spec_refs 0;
+make test run 1: 1675 passed, 2 errors = known scratch_session setup timeout (test_tenancy_models_integration,
+asyncpg TimeoutError in CREATE EXTENSION citext / create_all; task fix:scratch-session-timeout); run 2 (alone):
+1677 passed, 99.87 %; pytest packages/va_db -m integration -rs 247 passed / 0 skipped; RLS module alone 68 passed
+in 23 s (-n 4); jscpd@4 0 clones; radon A overall (2.50), new files all A; pip-audit no known vulns.
+
+## Review P01-T09 (2026-10-27) — APPROVED
+Re-ran (sequentially): make lint 0, make typecheck 0, make placeholders 0 findings, make test 1677 passed / 99.87 %
+(no scratch_session timeout), pytest packages/va_db -m integration 247 passed, jscpd@4 0 clones.
+Own negative proof: 0001 `platform_read ON voices FOR SELECT` -> `FOR ALL` (USING doubles as WITH CHECK, so NULL-org
+inserts pass) -> test_platform_rows_are_shared_read_only[voices] FAILED "DID NOT RAISE DBAPIError"; restored, diff clean.
+Checked: TENANT_TABLE_NAMES derived from metadata (65) and asserted equal to catalog FORCE-RLS tenant_isolation tables;
+semantics (USING hides, WITH CHECK raises) documented and both raise paths asserted; B's row re-verified from B;
+fail-closed check on app_engine without app.org_id is meaningful (pool_size 1, a leaked setting would expose B's
+org_id and fail). Unknown type -> TypeError; overrides each name their CHECK. No production code changed.

@@ -4,13 +4,12 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
-from service_helpers import settings_of
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
+from tenant_rows import open_database
 
 from va_common.ids import new_id
-from va_common.settings import DatabaseSettings
 from va_db import session as db_session
 from va_db.session import Database, configure_database
 
@@ -27,11 +26,8 @@ class _BoomError(Exception):
 
 @pytest.fixture
 async def database(pg_url: str) -> AsyncIterator[Database]:
-    db = Database.from_settings(settings_of(DatabaseSettings, database_url=pg_url, database_pool_size=1))
-    try:
+    async with open_database(pg_url) as db:
         yield db
-    finally:
-        await db.dispose()
 
 
 async def _org_id(session: AsyncSession) -> str | None:

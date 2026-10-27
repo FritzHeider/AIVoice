@@ -30,6 +30,10 @@
 
 ## Fixes
 
+### mem-1793131606-2dff
+> va_db scratch_session timeout recurred in P01-T09 build (make test run alone, gw4/gw6): asyncpg TimeoutError at conftest CREATE EXTENSION IF NOT EXISTS citext and at create_all - looks like a lock wait/server stall on pg_url DB, not CPU; rerun green. RLS harness (tenant_rows) uses migrated_url DBs only
+<!-- tags: database, testing, docker | created: 2026-10-27 -->
+
 ### mem-1793129328-3035
 > make test flake: pytest-timeout 60s in va_db scratch_session setup (2 errors) when host is busy (jscpd/compose concurrently); isolated rerun green. Seen in P01-T06 and P01-T07 reviews - don't run heavy jobs alongside make test; root-cause pending
 <!-- tags: database, testing, docker | created: 2026-10-27 -->

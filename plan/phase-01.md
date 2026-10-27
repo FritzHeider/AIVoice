@@ -68,7 +68,7 @@
   - Deliverables: `packages/va_db/tests/test_schema_matches_spec.py` (extracts ```sql blocks from the spec, applies to scratch DB, diffs `information_schema.columns`, indexes, constraints against migrated DB), `test_autogenerate_parity.py`
   - Acceptance: both tests pass; deliberately altering a model column makes parity test fail (verified by a parametrized negative test using a temporary metadata copy).
 
-- [ ] P01-T09 RLS isolation test harness
+- [x] P01-T09 RLS isolation test harness — 65 tenant tables x cross-org read/write + 2 platform_read tables + catalog FORCE-RLS parity; make test 1677 passed 99.87 %, va_db integration 247 passed, jscpd 0 clones, negative proofs (calls RLS disabled; voices platform_read FOR ALL) fail as expected
   - Spec refs: specs/03-data-model.md (Triggers and RLS); specs/00-overview.md (Non-negotiable rule 7)
   - Depends on: P01-T07
   - Deliverables: factory fixtures (`OrgFactory` and per-model minimal valid row builders), parametrized test over every table with `org_id`
