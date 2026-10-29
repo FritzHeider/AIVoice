@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.auth.login_throttle import LoginThrottle
+from va_api.auth.mfa_guard import MfaGuard
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
@@ -51,6 +52,7 @@ class Container:
     password_hasher: PasswordHasher
     sessions: SessionManager
     login_throttle: LoginThrottle
+    mfa_guard: MfaGuard
     email_sender: EmailSender
     resend_limiter: ResendLimiter
 
@@ -70,7 +72,7 @@ def email_sender_for(settings: ApiSettings, clock: Clock) -> EmailSender:
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
-    session manager, the login throttle, the email sender, and the verification resend limiter.
+    session manager, the login throttle, the MFA guard, the email sender, and the verification resend limiter.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -113,6 +115,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             password_hasher=password_hasher,
             sessions=SessionManager(database=database, redis=redis, clock=clock),
             login_throttle=LoginThrottle(redis),
+            mfa_guard=MfaGuard(redis),
             email_sender=email_sender_for(settings, clock),
             resend_limiter=ResendLimiter(redis),
         )

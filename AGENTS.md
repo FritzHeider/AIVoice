@@ -457,7 +457,8 @@ Grafana 3001
   `email_tokens` rows (`count_issued_since`), no Redis key. Reset peeks the token (`IdentityRepo.peek_email_token`)
   before the policy check so a weak password does not burn the link, then consumes it in the write transaction.
   Revoking sessions inside your own transaction: `IdentityRepo.revoke_user_sessions` + `SessionManager.forget(hashes)`
-  after the commit. Recent auth for change = session `created_at` younger than 10 min. Emails share one layout in
+  after the commit. Recent auth for change = session `created_at` (or, since P02-T06b, `mfa_passed_at`) younger than
+  10 min. Emails share one layout in
   `va_common.email.templates._Copy`; senders go through `va_api.auth.verification.deliver(..., failure_event=)`.
   Tests: `link_token(container.outbox, email, "password_reset")`.
 - 2026-10-29 (P02-T06a): MFA primitives are `va_common.auth.mfa` (TOTP `match_totp(secret, code, now) -> counter |
@@ -467,3 +468,13 @@ Grafana 3001
   specs/28 §3 (j)). A column added by `ALTER TABLE ... ADD COLUMN` lands last, and `test_schema_matches_spec`
   compares attnum: list it LAST in the specs/03 DDL (as `sessions.mfa_passed_at`, migration 0003). Offline
   migration SQL in tests: `migration_helpers.offline_sql(action, revision)`.
+- 2026-10-29 (P02-T06b): MFA routes live in `va_api/routers/auth_mfa.py` (imported for side effect in `main.py`),
+  bodies in `routers/auth_mfa_schemas.py`. The MFA gate is `session_auth.gated_membership(request, active)` (replaces
+  `enforce_mfa`): it fires when the org requires MFA **or** the user enabled it (`MembershipRecord.user_mfa_enabled`,
+  or a user lookup when there is no membership); use it on every gated `/internal/auth/*` route. Code checks go
+  through `va_api.auth.mfa_guard.MfaGuard` (`auth:fail:mfa:<id>` lock + `mfa:last:<id>` Lua replay guard); counters
+  with a lock share `va_api.auth.failure_counter.FailureCounters` (the login throttle uses it too - do not copy
+  it). Recent auth = `max(created_at, mfa_passed_at)`; `SessionManager.mark_mfa_passed(active)` writes DB + cache.
+  Tests: `session_helpers.enrol_mfa(client, container)` (setup + enable, then advances the frozen clock 30 s) and
+  `mfa_code(container, secret)`; a code is accepted once per step, so advance the clock 30 s before reusing "the
+  current code" across sessions. A pydantic `model_validator` error renders as `INVALID_INPUT` without `field`.

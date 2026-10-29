@@ -377,7 +377,15 @@ async def test_session_cache_hit_and_revocation(
     await login(client, member.user.email)
     key = session_cache_key(sha256_hex(client.cookies[SESSION_COOKIE]))
     cached = json.loads(await container.redis.get(key) or b"{}")
-    assert set(cached) == {"session_id", "user_id", "active_org_id", "mfa_passed", "created_at", "expires_at"}
+    assert set(cached) == {
+        "session_id",
+        "user_id",
+        "active_org_id",
+        "mfa_passed",
+        "mfa_passed_at",
+        "created_at",
+        "expires_at",
+    }
     assert cached["user_id"] == str(member.user.id)
     assert 0 < await container.redis.ttl(key) <= 300
 

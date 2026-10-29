@@ -328,6 +328,10 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > The audit actions `auth.password_reset` and `auth.password_changed` (§13) are written by these endpoints once the
 > audit writer exists (P02-T11).
 
+> Decision (2026-10-29): **recent auth with MFA** (completes the "decided with MFA" note above). Password change
+> needs less than 10 minutes since `max(sessions.created_at, sessions.mfa_passed_at)`; `mfa/verify` and `mfa/enable`
+> set `mfa_passed_at` to now, so a long-lived session re-authenticates with an MFA code instead of a new login.
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,
@@ -403,6 +407,15 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > authentication is required for this organization." on every route except the three above (`logout-all` is
 > gated).
 
+> Decision (2026-10-29): **MFA gate, amended** (replaces the gate condition of the session-mechanics decision
+> above). The gate fires when **the active org requires MFA or the user has MFA enabled** and the session has not
+> passed MFA: a personally enabled MFA must protect the account, not only prompt the dashboard. The message stays
+> "Multi-factor authentication is required for this organization.". A user with MFA enabled and no membership is
+> gated on the gated `/internal/auth/*` routes (logout-all, resend-verification, password change); principal routes
+> still fail with `FORBIDDEN` for lack of a membership after passing the gate. `GET /session.mfa_required` follows
+> the same rule. The `sess:` cache JSON gains `mfa_passed_at` (ISO 8601 or `null`; an entry written without it
+> reads as `null`).
+
 ### 4.4 CSRF
 
 Double-submit: on session creation and on `GET /internal/auth/session`, the API sets cookie `va_csrf` (random 32
@@ -442,6 +455,37 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
 > requests. `MfaRepo.enable` applies only while the stored pending secret is the blob the code was verified against,
 > so a concurrent `setup` that replaced the secret makes it fail. The TOTP secret is encrypted with
 > `Envelope.platform_encrypt_str` and AAD `users.mfa_totp_secret_enc:<user_id>` (specs/28-security.md §3 (j)).
+
+> Decision (2026-10-29): **MFA endpoints** (envelope format, `x-public: "session-flow"`, session-authenticated with
+> CSRF and `Origin`, exempt from the §4.3 gate; `va_api.routers.auth_mfa`). **setup** takes an optional `{}` body
+> (unknown fields `INVALID_INPUT`); `CONFLICT` 409 "Multi-factor authentication is already enabled." when enabled
+> (also when a concurrent enable wins the race); otherwise a new secret, encrypted as above, replaces any pending one
+> with `mfa_enabled` still false; 200 `{data:{secret_base32, otpauth_uri, qr_svg}}` with the user's email as the
+> account label. **enable** `{code (1-32 chars)}`; `CONFLICT` "Multi-factor authentication is already enabled." or
+> "Start multi-factor setup first." (no pending secret); the code is checked (below) against the current pending
+> secret; then 10 recovery codes are generated and hashed and `MfaRepo.enable` applies only if the pending blob is
+> unchanged (else `CONFLICT` "Multi-factor setup changed; start again."); the current session is marked MFA-passed
+> (`mfa_passed=true`, `mfa_passed_at=now`); 200 `{data:{mfa_enabled:true, recovery_codes:[10 codes]}}`, shown once
+> and never logged. **verify** `{code}` or `{recovery_code}` (each 1-64 chars), exactly one, else `INVALID_INPUT`
+> "Send either code or recovery_code." (no `field`); `CONFLICT` "Multi-factor authentication is not enabled." when not
+> enrolled; a recovery code is matched against the stored hashes and spent with the conditional `UPDATE` (losing a
+> race is `INVALID_MFA_CODE`); success marks the session MFA-passed; 200 `{data:{mfa_passed:true,
+> recovery_codes_remaining:int}}`. **disable** `{code}` (TOTP only; a recovery code cannot disable); `CONFLICT` "…not
+> enabled." when not enrolled; `FORBIDDEN` 403 "Multi-factor authentication is required by one of your
+> organizations." when **any** org the user belongs to has `settings.mfa_required` true (checked before the code, so
+> no code is spent); then the code check, `MfaRepo.disable` (secret, codes, and flag cleared; a lost race is the
+> not-enabled `CONFLICT`) and `mfa:last` deleted; the session keeps `mfa_passed`; 200 `{data:{mfa_enabled:false}}`.
+> **Code checks**: the per-user counter `auth:fail:mfa:<user_id>` (10 failures in 15 minutes lock MFA checks for 15
+> minutes from the locking failure: `AUTH_LOCKED` 429 "Too many invalid codes; try again in N seconds." with
+> `Retry-After`; same `INCR`/`EXPIRE NX`/restart-on-limit mechanics as the login throttle, locked attempts not
+> counted, checked before any comparison) is separate from the email login counter, because a successful password
+> login clears that one. A wrong, malformed, or replayed code is `INVALID_MFA_CODE` 401 "Invalid or expired code."
+> with `field` `code` or `recovery_code` and counts as a failure; an accepted code clears the counter. **Replay**:
+> after a TOTP match, `mfa:last:<user_id>` is advanced by a Lua compare-and-set that accepts only a step counter
+> greater than the stored one (`SET … EX 90`); an equal or older step is a replay. Redis unavailable: the counter and
+> the replay guard log `mfa_guard_unavailable` and allow the attempt, like the other Redis-degraded auth paths (the
+> ±1 step window bounds a replay to 90 s). The audit actions `auth.mfa_enabled` and `auth.mfa_disabled` (§13) are
+> written by these endpoints once the audit writer exists (P02-T11).
 
 ## 5. OIDC SSO (enterprise, `OIDC_ENABLED=true`)
 

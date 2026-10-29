@@ -66,17 +66,45 @@ def test_cache_key_uses_hash_tag() -> None:
     assert session_cache_key("ab12") == "sess:{ab12}"
 
 
-@pytest.mark.parametrize("active_org_id", [uuid.uuid4(), None])
-def test_active_session_json_round_trip(active_org_id: uuid.UUID | None) -> None:
+@pytest.mark.parametrize(
+    ("active_org_id", "mfa_passed_at"),
+    [(uuid.uuid4(), CREATED + timedelta(minutes=3)), (None, None)],
+)
+def test_active_session_json_round_trip(
+    active_org_id: uuid.UUID | None, mfa_passed_at: datetime | None
+) -> None:
     active = ActiveSession(
         session_id=uuid.uuid4(),
         token_hash="f" * 64,
         user_id=uuid.uuid4(),
         active_org_id=active_org_id,
-        mfa_passed=True,
+        mfa_passed=mfa_passed_at is not None,
+        mfa_passed_at=mfa_passed_at,
         created_at=CREATED,
         expires_at=FIRST_EXPIRY,
     )
     data = active.to_json()
-    assert set(data) == {"session_id", "user_id", "active_org_id", "mfa_passed", "created_at", "expires_at"}
+    assert set(data) == {
+        "session_id",
+        "user_id",
+        "active_org_id",
+        "mfa_passed",
+        "mfa_passed_at",
+        "created_at",
+        "expires_at",
+    }
     assert ActiveSession.from_json(data, "f" * 64) == active
+
+
+def test_cache_entry_without_mfa_passed_at_reads_as_none() -> None:
+    data = {
+        "session_id": str(uuid.uuid4()),
+        "user_id": str(uuid.uuid4()),
+        "active_org_id": None,
+        "mfa_passed": True,
+        "created_at": CREATED.isoformat(),
+        "expires_at": FIRST_EXPIRY.isoformat(),
+    }
+    active = ActiveSession.from_json(data, "e" * 64)
+    assert active.mfa_passed is True
+    assert active.mfa_passed_at is None

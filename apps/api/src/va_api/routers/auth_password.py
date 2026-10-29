@@ -22,14 +22,13 @@ from va_api.auth.password_reset import (
     send_password_reset,
 )
 from va_api.auth.session_auth import (
-    active_membership,
     check_dashboard_origin,
     client_ip,
     clock_of,
     cookie_policy_of,
     database_of,
     email_sender_of,
-    enforce_mfa,
+    gated_membership,
     login_throttle_of,
     password_hasher_of,
     sessions_of,
@@ -182,8 +181,7 @@ async def password_change(
     body: ChangePasswordRequest, request: Request, active: CurrentSession
 ) -> DataResponse[RevokedSessionsResult]:
     """Change the password of a recently signed-in user; their other sessions are revoked."""
-    active, record = await active_membership(request, active)
-    enforce_mfa(record, active)
+    active, _ = await gated_membership(request, active)
     require_recent_auth(active, clock_of(request).now())
     user = await _verify_current(request, active, body.current_password)
     await _check_new_password(body.new_password, user.email)

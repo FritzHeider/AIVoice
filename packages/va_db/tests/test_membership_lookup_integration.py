@@ -7,8 +7,10 @@ import uuid
 import pytest
 from identity_db import IdentityDb, unique_email
 from model_factories import make_org, make_user
+from sqlalchemy import update
 
 from va_common.errors import AppError
+from va_db.models import User
 from va_db.repositories import MembershipLookupRepo, MembershipRecord, MembershipRepo
 
 pytestmark = pytest.mark.integration
@@ -104,3 +106,24 @@ async def test_for_user_in_org_reads_mfa_and_rate_override(
     assert (record.membership_id, record.role, record.org_id) == (added.id, "analyst", org.id)
     assert (record.mfa_required, record.rate_per_sec) == (mfa_required, rate_per_sec)
     assert listed == [record]
+
+
+async def test_records_carry_the_member_mfa_flag(identity_db: IdentityDb) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        org = await make_org(session)
+        enrolled = await make_user(session, unique_email())
+        plain = await make_user(session, unique_email())
+        await session.execute(update(User).where(User.id == enrolled.id).values(mfa_enabled=True))
+    async with database.tenant_session(org.id) as session:
+        await MembershipRepo(session, org.id).add(enrolled.id, "admin")
+        await MembershipRepo(session, org.id).add(plain.id, "viewer")
+    async with database.system_session() as session:
+        repo = MembershipLookupRepo(session)
+        enrolled_record = await repo.for_user_in_org(enrolled.id, org.id)
+        (listed,) = await repo.for_user(enrolled.id)
+        (plain_record,) = await repo.for_user(plain.id)
+    assert enrolled_record is not None
+    assert enrolled_record.user_mfa_enabled is True
+    assert listed.user_mfa_enabled is True
+    assert plain_record.user_mfa_enabled is False

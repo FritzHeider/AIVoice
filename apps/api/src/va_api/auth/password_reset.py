@@ -3,7 +3,8 @@
 The reset link is ``{DASHBOARD_BASE_URL}/reset-password/{token}`` (the dashboard route of specs/25) and lives
 1 hour. At most 3 reset emails go to a user per rolling hour, counted from the ``reset_password`` rows of
 ``email_tokens`` (no Redis key). Like verification, the email goes out after the response and a delivery
-failure is logged without the address. Changing a password needs a session younger than 10 minutes.
+failure is logged without the address. Changing a password needs a recent authentication: a session created,
+or verified with MFA, less than 10 minutes ago.
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ async def send_password_reset(
 
 
 def require_recent_auth(active: ActiveSession, now: datetime) -> None:
-    """``REAUTH_REQUIRED`` once the session is 10 minutes old (it is created by login or signup)."""
-    if now - active.created_at >= REAUTH_WINDOW:
+    """``REAUTH_REQUIRED`` 10 minutes after the later of the session's creation and its last MFA check."""
+    authenticated_at = active.created_at
+    if active.mfa_passed_at is not None:
+        authenticated_at = max(authenticated_at, active.mfa_passed_at)
+    if now - authenticated_at >= REAUTH_WINDOW:
         raise AppError("REAUTH_REQUIRED", REAUTH_MESSAGE)

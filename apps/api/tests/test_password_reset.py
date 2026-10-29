@@ -33,13 +33,14 @@ class FailingSender:
         raise self.error from ValueError(message.template)
 
 
-def _session() -> ActiveSession:
+def _session(mfa_passed_at: datetime | None = None) -> ActiveSession:
     return ActiveSession(
         session_id=new_id(),
         token_hash="0" * 64,
         user_id=new_id(),
         active_org_id=None,
-        mfa_passed=False,
+        mfa_passed=mfa_passed_at is not None,
+        mfa_passed_at=mfa_passed_at,
         created_at=CREATED,
         expires_at=CREATED + timedelta(days=14),
     )
@@ -65,6 +66,20 @@ def test_recent_auth_boundary() -> None:
             require_recent_auth(active, late)
         assert (excinfo.value.code, excinfo.value.http_status) == ("REAUTH_REQUIRED", 401)
         assert excinfo.value.message == REAUTH_MESSAGE
+
+
+def test_recent_auth_counts_from_the_last_mfa_verification() -> None:
+    verified = CREATED + timedelta(hours=1)
+    active = _session(mfa_passed_at=verified)
+    require_recent_auth(active, verified + timedelta(minutes=9))
+    with pytest.raises(AppError) as excinfo:
+        require_recent_auth(active, verified + REAUTH_WINDOW)
+    assert excinfo.value.code == "REAUTH_REQUIRED"
+
+
+def test_recent_auth_ignores_an_mfa_time_before_creation() -> None:
+    active = _session(mfa_passed_at=CREATED - timedelta(hours=1))
+    require_recent_auth(active, CREATED + timedelta(minutes=9))
 
 
 async def test_send_password_reset_renders_template() -> None:

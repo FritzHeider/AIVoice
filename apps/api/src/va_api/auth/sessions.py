@@ -75,6 +75,7 @@ class ActiveSession:
     user_id: uuid.UUID
     active_org_id: uuid.UUID | None
     mfa_passed: bool
+    mfa_passed_at: datetime | None
     created_at: datetime
     expires_at: datetime
 
@@ -86,6 +87,7 @@ class ActiveSession:
             user_id=row.user_id,
             active_org_id=row.active_org_id,
             mfa_passed=row.mfa_passed,
+            mfa_passed_at=row.mfa_passed_at,
             created_at=row.created_at,
             expires_at=row.expires_at,
         )
@@ -97,20 +99,26 @@ class ActiveSession:
             "user_id": str(self.user_id),
             "active_org_id": None if self.active_org_id is None else str(self.active_org_id),
             "mfa_passed": self.mfa_passed,
+            "mfa_passed_at": None if self.mfa_passed_at is None else self.mfa_passed_at.isoformat(),
             "created_at": self.created_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any], token_hash: str) -> ActiveSession:
-        """Inverse of :meth:`to_json`; ``KeyError``/``ValueError``/``TypeError`` on a malformed entry."""
+        """Inverse of :meth:`to_json`; ``KeyError``/``ValueError``/``TypeError`` on a malformed entry.
+
+        An entry written before ``mfa_passed_at`` existed reads it as ``None``.
+        """
         active_org_id = data["active_org_id"]
+        mfa_passed_at = data.get("mfa_passed_at")
         return cls(
             session_id=uuid.UUID(data["session_id"]),
             token_hash=token_hash,
             user_id=uuid.UUID(data["user_id"]),
             active_org_id=None if active_org_id is None else uuid.UUID(active_org_id),
             mfa_passed=bool(data["mfa_passed"]),
+            mfa_passed_at=None if mfa_passed_at is None else datetime.fromisoformat(mfa_passed_at),
             created_at=datetime.fromisoformat(data["created_at"]),
             expires_at=datetime.fromisoformat(data["expires_at"]),
         )
@@ -203,6 +211,15 @@ class SessionManager:
         async with self._database.global_session() as session:
             await IdentityRepo(session).set_active_org(active.session_id, org_id)
         updated = replace(active, active_org_id=org_id)
+        await self.remember(updated)
+        return updated
+
+    async def mark_mfa_passed(self, active: ActiveSession) -> ActiveSession:
+        """Record that the session passed MFA now (recent auth counts from this time too)."""
+        now = self._clock.now()
+        async with self._database.global_session() as session:
+            await IdentityRepo(session).set_mfa_passed(active.session_id, now)
+        updated = replace(active, mfa_passed=True, mfa_passed_at=now)
         await self.remember(updated)
         return updated
 

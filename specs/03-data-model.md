@@ -1426,12 +1426,14 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `tts:cache:{voice_id}:{sha256(text+settings)}` | string (base64 μ-law) | 30 d | Pre-rendered phrase cache |
 | `dyn:{org_id}:{sha256(request)}` | string JSON | per `cache` setting (default 300 s) | Dynamic data cache |
 | `widget:rl:{widget_id}:{visitor}` | token bucket | 60 s | Widget per-visitor rate limit |
-| `sess:{token_hash}` | string JSON (`session_id`, `user_id`, `active_org_id`, `mfa_passed`, `created_at`, `expires_at`) | min(300 s, time to `expires_at`), ≥ 1 s | Session cache (DB is source of truth; specs/04 §4.3); deleted on logout / logout-all / revoke |
+| `sess:{token_hash}` | string JSON (`session_id`, `user_id`, `active_org_id`, `mfa_passed`, `mfa_passed_at`, `created_at`, `expires_at`) | min(300 s, time to `expires_at`), ≥ 1 s | Session cache (DB is source of truth; specs/04 §4.3); deleted on logout / logout-all / revoke |
 | `apikey:{prefix}` | string JSON | 60 s | API key auth cache (specs/04 §2.2); deleted on revoke/change |
 | `apikey:{id}:touched` | string | 60 s | `last_used_at` write gate (`SET NX EX 60`) |
 | `auth:fail:email:{sha256(email)}` | counter | 900 s | Failed password logins per email (casefolded), login throttling (specs/04 §4.2) |
 | `auth:fail:ip:{ip}` | counter | 900 s | Failed password logins per client IP, login throttling (specs/04 §4.2) |
 | `auth:verify:resend:{user_id}` | counter | 3600 s (set on the first resend of the window) | Verification email resends per user, at most 3 per hour (specs/04 §4.1) |
+| `auth:fail:mfa:{user_id}` | counter | 900 s | Invalid MFA codes per user, 10 lock MFA checks for 15 min (specs/04 §4.5) |
+| `mfa:last:{user_id}` | string (TOTP step counter) | 90 s | Last accepted TOTP time step, replay guard (specs/04 §4.5) |
 | `call:{id}:seq` | counter | 48 h | Per-call event sequence (`19` §1) |
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |

@@ -85,6 +85,113 @@
         "title": "DataResponse[LoginResult]",
         "type": "object"
       },
+      "DataResponse_MfaDisableResult_": {
+        "examples": [
+          {
+            "data": {
+              "mfa_enabled": false
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MfaDisableResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MfaDisableResult]",
+        "type": "object"
+      },
+      "DataResponse_MfaEnableResult_": {
+        "examples": [
+          {
+            "data": {
+              "mfa_enabled": true,
+              "recovery_codes": [
+                "k7mq-2vxa-p4tc",
+                "w3nd-b6yr-h2qe",
+                "c5zj-t7lu-m4fo",
+                "r2ga-x6pk-e3vn",
+                "y4hs-q7bw-d5ci",
+                "n6fe-u2tz-a7mr",
+                "l3vo-g5kd-s6wj",
+                "b7ix-m2nc-z4hy",
+                "t5qa-j3re-f6lp",
+                "e2wu-o7sy-k5gb"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MfaEnableResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MfaEnableResult]",
+        "type": "object"
+      },
+      "DataResponse_MfaSetupResult_": {
+        "examples": [
+          {
+            "data": {
+              "otpauth_uri": "otpauth://totp/VoiceAgents:jane%40acme-dental.test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=VoiceAgents",
+              "qr_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"196\" height=\"196\">…</svg>",
+              "secret_base32": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MfaSetupResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MfaSetupResult]",
+        "type": "object"
+      },
+      "DataResponse_MfaVerifyResult_": {
+        "examples": [
+          {
+            "data": {
+              "mfa_passed": true,
+              "recovery_codes_remaining": 10
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MfaVerifyResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MfaVerifyResult]",
+        "type": "object"
+      },
       "DataResponse_ResendResult_": {
         "examples": [
           {
@@ -495,6 +602,182 @@
           "user"
         ],
         "title": "LoginResult",
+        "type": "object"
+      },
+      "MfaCodeRequest": {
+        "additionalProperties": false,
+        "description": "``{code}``: a 6-digit TOTP code (whitespace ignored) for enable and disable.",
+        "examples": [
+          {
+            "code": "492039"
+          }
+        ],
+        "properties": {
+          "code": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "MfaCodeRequest",
+        "type": "object"
+      },
+      "MfaDisableResult": {
+        "examples": [
+          {
+            "mfa_enabled": false
+          }
+        ],
+        "properties": {
+          "mfa_enabled": {
+            "title": "Mfa Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mfa_enabled"
+        ],
+        "title": "MfaDisableResult",
+        "type": "object"
+      },
+      "MfaEnableResult": {
+        "description": "MFA is on; the 10 recovery codes are shown this once.",
+        "examples": [
+          {
+            "mfa_enabled": true,
+            "recovery_codes": [
+              "k7mq-2vxa-p4tc",
+              "w3nd-b6yr-h2qe",
+              "c5zj-t7lu-m4fo",
+              "r2ga-x6pk-e3vn",
+              "y4hs-q7bw-d5ci",
+              "n6fe-u2tz-a7mr",
+              "l3vo-g5kd-s6wj",
+              "b7ix-m2nc-z4hy",
+              "t5qa-j3re-f6lp",
+              "e2wu-o7sy-k5gb"
+            ]
+          }
+        ],
+        "properties": {
+          "mfa_enabled": {
+            "title": "Mfa Enabled",
+            "type": "boolean"
+          },
+          "recovery_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Recovery Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mfa_enabled",
+          "recovery_codes"
+        ],
+        "title": "MfaEnableResult",
+        "type": "object"
+      },
+      "MfaSetupResult": {
+        "description": "The pending TOTP secret, its provisioning URI, and the URI as an inline SVG QR code.",
+        "examples": [
+          {
+            "otpauth_uri": "otpauth://totp/VoiceAgents:jane%40acme-dental.test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=VoiceAgents",
+            "qr_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"196\" height=\"196\">…</svg>",
+            "secret_base32": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+          }
+        ],
+        "properties": {
+          "otpauth_uri": {
+            "title": "Otpauth Uri",
+            "type": "string"
+          },
+          "qr_svg": {
+            "title": "Qr Svg",
+            "type": "string"
+          },
+          "secret_base32": {
+            "title": "Secret Base32",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_base32",
+          "otpauth_uri",
+          "qr_svg"
+        ],
+        "title": "MfaSetupResult",
+        "type": "object"
+      },
+      "MfaVerifyRequest": {
+        "additionalProperties": false,
+        "description": "``{code}`` or ``{recovery_code}``, exactly one.",
+        "examples": [
+          {
+            "code": "492039"
+          },
+          {
+            "recovery_code": "k7mq-2vxa-p4tc"
+          }
+        ],
+        "properties": {
+          "code": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "recovery_code": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Code"
+          }
+        },
+        "title": "MfaVerifyRequest",
+        "type": "object"
+      },
+      "MfaVerifyResult": {
+        "examples": [
+          {
+            "mfa_passed": true,
+            "recovery_codes_remaining": 10
+          }
+        ],
+        "properties": {
+          "mfa_passed": {
+            "title": "Mfa Passed",
+            "type": "boolean"
+          },
+          "recovery_codes_remaining": {
+            "title": "Recovery Codes Remaining",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mfa_passed",
+          "recovery_codes_remaining"
+        ],
+        "title": "MfaVerifyResult",
         "type": "object"
       },
       "ResendResult": {
@@ -1157,6 +1440,229 @@
           }
         },
         "summary": "Logout All",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/mfa/disable": {
+      "post": {
+        "description": "Turn MFA off with a TOTP code, unless any of the user's orgs requires MFA.",
+        "operationId": "auth_mfa_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MfaDisableResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Mfa Disable",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/mfa/enable": {
+      "post": {
+        "description": "Turn MFA on with a code from the pending secret; returns 10 recovery codes (shown once).",
+        "operationId": "auth_mfa_enable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MfaEnableResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Mfa Enable",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/mfa/setup": {
+      "post": {
+        "description": "Start (or restart) enrolment: a new pending TOTP secret, stored encrypted, MFA still off.",
+        "operationId": "auth_mfa_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EmptyBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": " Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MfaSetupResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Mfa Setup",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/mfa/verify": {
+      "post": {
+        "description": "Pass MFA for the current session with a TOTP code or a recovery code (which is used up).",
+        "operationId": "auth_mfa_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MfaVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MfaVerifyResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Mfa Verify",
         "tags": [
           "Auth"
         ],

@@ -27,10 +27,12 @@ from sqlalchemy import update
 from va_api.auth import RequestContext, require_scope
 from va_api.auth.cookies import CSRF_COOKIE
 from va_api.auth.login_throttle import LoginThrottle
+from va_api.auth.mfa_guard import MfaGuard
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
-from va_common.auth import Argon2Params, PasswordHasher
+from va_common.auth import Argon2Params, PasswordHasher, totp_code, totp_counter
+from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
 from va_db.models import MemberRole, Membership, Org, OrgStatus, User
 from va_db.provisioning import OrgProvisioner
@@ -41,14 +43,20 @@ __all__ = [
     "API_BASE_URL",
     "CHEAP_ARGON2",
     "DASHBOARD_URL",
+    "MFA_DISABLE",
+    "MFA_ENABLE",
+    "MFA_SETUP",
+    "MFA_VERIFY",
     "PASSWORD",
     "SESSION_PROBE_PATH",
     "Member",
     "SessionContainer",
+    "enrol_mfa",
     "error_of",
     "link_token",
     "login",
     "make_member",
+    "mfa_code",
     "migrated_postgres",
     "session_app",
     "session_client",
@@ -61,6 +69,10 @@ DASHBOARD_URL = "https://app.voiceagents.test"
 API_BASE_URL = "https://api.voiceagents.test"
 PASSWORD = "plum-orchard-sailboat-42"  # noqa: S105 - test users' password
 SESSION_PROBE_PATH = "/v1/knowledge/_session/whoami"
+MFA_SETUP = "/internal/auth/mfa/setup"
+MFA_ENABLE = "/internal/auth/mfa/enable"
+MFA_VERIFY = "/internal/auth/mfa/verify"
+MFA_DISABLE = "/internal/auth/mfa/disable"
 
 
 @contextmanager
@@ -75,24 +87,28 @@ def migrated_postgres() -> Iterator[str]:
 
 @dataclass
 class SessionContainer(AuthContainer):
-    """The fake api container plus a real database and provisioner, cheap password hasher, sessions, login
-    throttle, an in-memory email sender, and the verification resend limiter."""
+    """The fake api container plus a real database, envelope, and provisioner, cheap password hasher,
+    sessions, login throttle, MFA guard, an in-memory email sender, and the verification resend limiter."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
     email_sender: EmailSender = field(default_factory=InMemoryEmailSender)
     database: Database = field(init=False)
+    envelope: Envelope = field(init=False)
     provisioner: OrgProvisioner = field(init=False)
     sessions: SessionManager = field(init=False)
     login_throttle: LoginThrottle = field(init=False)
+    mfa_guard: MfaGuard = field(init=False)
     resend_limiter: ResendLimiter = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.database = self.identity.database
+        self.envelope = self.identity.envelope
         self.provisioner = self.identity.provisioner
         self.sessions = SessionManager(database=self.database, redis=self.redis, clock=self.clock)
         self.login_throttle = LoginThrottle(self.redis)
+        self.mfa_guard = MfaGuard(self.redis)
         self.resend_limiter = ResendLimiter(self.redis)
 
     @property
@@ -238,3 +254,24 @@ def link_token(sender: InMemoryEmailSender, email: str, template: str = "verify_
     match = link.search(messages[-1].text)
     assert match is not None, messages[-1].text
     return match.group(1)
+
+
+def mfa_code(container: SessionContainer, secret: str) -> str:
+    """The TOTP code of ``secret`` at the container clock's current time step."""
+    return totp_code(secret, totp_counter(container.clock.now()))
+
+
+async def enrol_mfa(client: httpx.AsyncClient, container: SessionContainer) -> tuple[str, list[str]]:
+    """Set up and enable MFA for the client's signed-in user; the secret and the recovery codes.
+
+    The clock then moves to the next time step, so the enabling code cannot collide with the caller's next.
+    """
+    setup = await client.post(MFA_SETUP, headers=write_headers(client))
+    assert setup.status_code == 200, setup.text
+    secret: str = setup.json()["data"]["secret_base32"]
+    enable = await client.post(
+        MFA_ENABLE, json={"code": mfa_code(container, secret)}, headers=write_headers(client)
+    )
+    assert enable.status_code == 200, enable.text
+    container.clock.advance(30)
+    return secret, enable.json()["data"]["recovery_codes"]

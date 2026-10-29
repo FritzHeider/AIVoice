@@ -1892,3 +1892,256 @@ recovery code format/normalisation/argon2id sequential in one thread, conditiona
 blob; array_remove consumption is safe under READ COMMITTED re-evaluation), platform_encrypt per-blob nil-org key
 (DataKeyCache bounded at 10k entries, so per-blob puts cannot grow it without limit), migration 0003 column-last.
 Recovery-code concurrency is tested sequentially (pool size 1). T06b design is carried forward above.
+
+## 2026-10-29 Planner: P02-T06a approved → next P02-T06b
+
+## Plan P02-T06b — MFA endpoints and enforcement (specs/04 §4.1 `mfa/*` rows, §4.3, §4.5; specs/03 §11; specs/31)
+
+Builds on the "T06b design carried forward" notes above. Where this plan differs, this plan wins.
+
+### Facts found while planning
+- Primitives exist: `va_common.auth.mfa` (`new_totp_secret`, `otpauth_uri`, `qr_svg`, `totp_counter`, `totp_code`,
+  `match_totp(secret, code, now) -> int|None`, `new_recovery_codes`, `hash_recovery_codes(hasher, codes)`,
+  `match_recovery_code(hasher, hashes, raw) -> str|None`), `Envelope.platform_encrypt_str(plaintext, aad)` /
+  `platform_decrypt_str(blob, aad)`, `va_db.repositories.MfaRepo(session)` (`begin_setup`, `enable(user_id,
+  secret_enc, hashes)`, `disable`, `consume_recovery_code`), `IdentityRepo.set_mfa_passed(session_id, now)`.
+  No AAD helper exists yet.
+- Current gate: `session_auth.enforce_mfa(record, active)` (org rule only), called after `active_membership` in
+  `session_principal`, `logout_all`, `resend_verification`, `password_change`. `GET /session` computes
+  `mfa_required` inline. `require_recent_auth` (auth/password_reset.py) uses `created_at` only.
+- `MembershipRecord` built only in `memberships._record` (+ expected values in
+  packages/va_db/tests/test_membership_lookup_integration.py). `va_system` has SELECT on `users` (0001 GRANTS).
+- Container already has `envelope`; test `SessionContainer` does not — add `envelope = identity.envelope`.
+- fakeredis[lua] is installed (Lua scripts work in tests); `FakeServer(); server.connected=False` for Redis-down.
+- Validation errors → `INVALID_INPUT` per pydantic error via `errors.validation_items` (a `model_validator`
+  ValueError message becomes the message; check how `field` is derived for model-level errors and set the message
+  without the "Value error, " prefix — `_VALUE_ERROR_PREFIX` is stripped already).
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/04 §4.5 (new decision after the existing one) — **MFA endpoints** (envelope, `x-public: "session-flow"`,
+   session-authenticated with CSRF + `Origin`, exempt from the MFA gate per §4.3):
+   - **setup** optional `{}` body. `CONFLICT` 409 "Multi-factor authentication is already enabled." when enabled.
+     Otherwise a new secret is encrypted (AAD `users.mfa_totp_secret_enc:<user_id>`) and stored as the pending
+     secret, replacing any earlier one (`MfaRepo.begin_setup`; a lost race with a concurrent enable → the same
+     CONFLICT). 200 `{data:{secret_base32, otpauth_uri, qr_svg}}`, account label = the user's email.
+   - **enable** `{code (1-32 chars)}`, unknown fields INVALID_INPUT. CONFLICT "Multi-factor authentication is
+     already enabled." / "Start multi-factor setup first." (no pending secret). Code checked as in "Code checks"
+     below; then 10 recovery codes are generated and hashed, `MfaRepo.enable` applies only if the pending blob is
+     unchanged (else CONFLICT "Multi-factor setup changed; start again."), the current session is marked
+     MFA-passed (`mfa_passed=true`, `mfa_passed_at=now`). 200 `{data:{mfa_enabled:true, recovery_codes:[10]}}`
+     (shown once; never logged).
+   - **verify** `{code}` or `{recovery_code}` (each 1-64 chars) — exactly one, else INVALID_INPUT "Send either
+     code or recovery_code." CONFLICT "Multi-factor authentication is not enabled." when not enrolled. A recovery
+     code is matched against the stored hashes and spent with the conditional UPDATE (losing a race =
+     INVALID_MFA_CODE). Success marks the session MFA-passed and clears the MFA failure counter. 200
+     `{data:{mfa_passed:true, recovery_codes_remaining:int}}`.
+   - **disable** `{code}` (TOTP only; a recovery code cannot disable). CONFLICT "…not enabled." when not enrolled;
+     FORBIDDEN 403 "Multi-factor authentication is required by one of your organizations." when ANY org the user
+     belongs to has `settings.mfa_required` true (checked before the code, so no code is spent). Then code check,
+     `MfaRepo.disable` (clears secret, codes, flag; lost race → CONFLICT not enabled), `mfa:last` deleted. The
+     session keeps `mfa_passed`. 200 `{data:{mfa_enabled:false}}`.
+   - **Code checks**: the per-user counter `auth:fail:mfa:<user_id>` (10 failures / 15 min → `AUTH_LOCKED` 429 "Too
+     many invalid codes; try again in N seconds." with `Retry-After`, same INCR/EXPIRE NX/restart-on-limit
+     mechanics as the login throttle; locked attempts not counted; checked before any code comparison) is
+     separate from the email login counter because a successful password login clears that one. A wrong,
+     malformed, or replayed code is `INVALID_MFA_CODE` 401 "Invalid or expired code." with `field` `code` or
+     `recovery_code`, and counts as a failure. **Replay**: after a TOTP match, `mfa:last:<user_id>` is advanced by a
+     Lua compare-and-set that accepts only a counter greater than the stored one (`SET … EX 90`); an equal or older
+     counter is a replay. Redis unavailable: counters and the replay guard log `mfa_guard_unavailable` and allow
+     (consistent with the other Redis-degraded auth paths; the ±1 step window bounds the exposure to 90 s).
+   - Audit actions `auth.mfa_enabled`/`auth.mfa_disabled` are written once the audit writer exists (P02-T11).
+2. specs/04 §4.3 — amend the "MFA gate" sentence in the session-mechanics decision (append a new short decision
+   rather than rewriting history, and reference it): the gate fires when **the active org requires MFA OR the user
+   has MFA enabled** and the session has not passed MFA (a personally enabled MFA must protect the account, not
+   only prompt the dashboard). A user with MFA enabled and no membership is gated on the `/internal/auth/*` routes
+   that are gated (logout-all, resend-verification, password change). `GET /session.mfa_required` follows the same
+   rule. Cache JSON gains `mfa_passed_at` (an older entry without it reads as null).
+3. specs/04 §4.1 password change — append a decision: recent auth = less than 10 minutes since
+   `max(sessions.created_at, sessions.mfa_passed_at)`; MFA verification (and enable) refresh it. (Reference the
+   earlier "decided with MFA" sentence.)
+4. specs/03 §11 — add rows `auth:fail:mfa:{user_id}` (counter, 900 s, MFA code failures per user, specs/04 §4.5) and
+   `mfa:last:{user_id}` (string counter, 90 s, last accepted TOTP step, replay guard, specs/04 §4.5); `sess:` row
+   lists `mfa_passed_at`.
+
+### Files
+**apps/api/src/va_api/auth/failure_counter.py** (new) — generalise LoginThrottle's mechanics (jscpd):
+  `class FailureCounters` with `__init__(self, redis: Redis, *, window_s: int, unavailable_event: str,
+  locked_message: Callable[[int], str])`; `async check(self, counters: Sequence[tuple[str, int]]) -> None`
+  (AUTH_LOCKED + Retry-After); `async record(self, counters) -> None`; `async clear(self, key: str) -> None`.
+  Same Redis error handling (`RedisError, OSError` → warning with `error=type(exc).__name__`).
+**apps/api/src/va_api/auth/login_throttle.py** — keep its public API, key helpers, constants, and log event
+  (`login_throttle_unavailable`); delegate to `FailureCounters`. Existing test_login_throttle.py must pass unchanged.
+**apps/api/src/va_api/auth/mfa_guard.py** (new):
+  - constants `MFA_FAILURE_LIMIT = 10`, `MFA_FAILURE_WINDOW_S = 900`, `MFA_REPLAY_TTL_S = 90`; messages
+    `INVALID_CODE_MESSAGE = "Invalid or expired code."`, `mfa_locked_message(n)` ("Too many invalid codes; try again
+    in {seconds_phrase(n)}."), `NOT_ENABLED_MESSAGE`, `ALREADY_ENABLED_MESSAGE`, `SETUP_FIRST_MESSAGE`,
+    `SETUP_CHANGED_MESSAGE`, `ORG_REQUIRES_MFA_MESSAGE`.
+  - `def mfa_failure_key(user_id) -> str` (`auth:fail:mfa:<id>`), `def mfa_last_key(user_id) -> str`
+    (`mfa:last:<id>`), `def mfa_secret_aad(user_id) -> str` (`users.mfa_totp_secret_enc:<id>`).
+  - `REPLAY_GUARD_LUA: Final` (GET; if stored and tonumber(stored) >= tonumber(ARGV[1]) return 0; SET KEYS[1]
+    ARGV[1] EX ARGV[2]; return 1) — ruff S105 noqa after closing quotes if flagged (memory mem-1793258976-544c).
+  - `class MfaGuard(redis)`: `check(user_id)`, `record_failure(user_id)`, `clear(user_id)` (via FailureCounters,
+    event `mfa_guard_unavailable`), `async claim_step(user_id, counter) -> bool` (registered script; Redis error →
+    warn `mfa_guard_unavailable`, return True), `async forget_steps(user_id)` (DEL mfa:last; errors logged).
+  - `def invalid_code(field: str) -> AppError` (INVALID_MFA_CODE, field).
+**apps/api/src/va_api/auth/sessions.py** — `ActiveSession.mfa_passed_at: datetime | None` (field after
+  `mfa_passed`); `of` reads `row.mfa_passed_at`; `to_json` writes ISO or None; `from_json` uses
+  `data.get("mfa_passed_at")`. `SessionManager.mark_mfa_passed(active) -> ActiveSession` (DB `set_mfa_passed(now)` in
+  global_session, `replace(..., mfa_passed=True, mfa_passed_at=now)`, `remember`). Fix every `ActiveSession(...)`
+  construction in tests (grep).
+**apps/api/src/va_api/auth/password_reset.py** — `require_recent_auth`: reference time `max(created_at,
+  mfa_passed_at)` when set; docstring/module docstring updated.
+**packages/va_db/src/va_db/repositories/memberships.py** — `MembershipRecord.user_mfa_enabled: bool = False`;
+  `_joined` selects `Membership, Org, User.mfa_enabled` joined on `User.id == Membership.user_id`; `_record` gets
+  it. Update test_membership_lookup_integration.py expectations + a test that an enrolled user reads true.
+**apps/api/src/va_api/auth/session_auth.py**:
+  - `def mfa_due(*, org_requires: bool, user_enabled: bool, passed: bool) -> bool`.
+  - replace `enforce_mfa(record, active)` by `async def gated_membership(request, active) ->
+    tuple[ActiveSession, MembershipRecord | None]`: `active_membership`, then when `record is None` load the user's
+    `mfa_enabled` via `IdentityRepo.get_user` (global_session; missing user → AUTH_FAILURE SESSION_INVALID), raise
+    MFA_REQUIRED when `mfa_due(...)`. Keep the message constant. Use it in `session_principal`, `logout_all`,
+    `resend_verification`, `password_change` (removes the repeated 2-line pattern). Remove `enforce_mfa` from
+    `__all__` and callers (grep tests).
+  - accessors `envelope_of(request) -> Envelope`, `mfa_guard_of(request) -> MfaGuard`.
+**apps/api/src/va_api/routers/auth.py** — `get_session`: `mfa_required=mfa_due(org_requires=record is not None and
+  record.mfa_required, user_enabled=user.mfa_enabled, passed=active.mfa_passed)`.
+**apps/api/src/va_api/routers/auth_mfa_schemas.py** (new; keeps auth_schemas.py < 300 lines): `MfaCodeRequest`
+  (`code: str` 1-32, extra forbid — reuse the base config used by `EmptyBody`/`LoginRequest`), `MfaVerifyRequest`
+  (`code: str | None = None` 1-64, `recovery_code: str | None = None` 1-64, `model_validator(mode="after")` exactly
+  one), results `MfaSetupResult`, `MfaEnableResult`, `MfaVerifyResult`, `MfaDisableResult` with
+  `json_schema_extra` examples like the existing schemas (no secrets that look real: use an obviously fake base32
+  example; check `check_no_placeholders`/gitleaks don't flag it).
+**apps/api/src/va_api/routers/auth_mfa.py** (new) — four routes on `internal_auth_router`, operation ids
+  `auth_mfa_setup|enable|verify|disable`, `openapi_extra=PUBLIC_MARKER`, `active: CurrentSession`. Private helpers:
+  `_load_user(request, active) -> User` (AUTH_FAILURE when gone), `_pending_secret(request, user) -> tuple[bytes,
+  str]` (decrypt), `_check_totp(request, user_id, secret, code, field="code") -> None` (guard.check → match_totp at
+  clock.now → None: record_failure + invalid_code; claim_step False: record_failure + invalid_code; success:
+  guard.clear), `_spend_recovery_code(request, user, raw) -> int` (guard.check → match_recovery_code(hasher,
+  user.mfa_recovery_codes_hash, raw) → consume in global_session; failure paths as above; returns remaining
+  count = len(hashes) - 1). Keep each function radon A/B. Mark-passed via `sessions_of(request).mark_mfa_passed`.
+**apps/api/src/va_api/main.py** — `import va_api.routers.auth_mfa  # noqa: F401  (registers routes)` like
+  auth_password.
+**apps/api/src/va_api/container.py** — `mfa_guard: MfaGuard` field, built `MfaGuard(redis)`; docstring list.
+**apps/api/tests/support/session_helpers.py** — `SessionContainer` gains `envelope: Envelope = field(init=False)`
+  (= identity.envelope) and `mfa_guard: MfaGuard = field(init=False)`; add helper `async def enrol_mfa(client,
+  container) -> tuple[str, list[str]]` (setup + enable with `totp_code(secret, totp_counter(clock.now()))`, returns
+  secret and recovery codes) used by several tests (avoid jscpd copies).
+**openapi/internal.json** — regenerate (`make openapi`); public `openapi.json` must not change.
+**specs** per decisions; **AGENTS.md** — MFA routes module, MfaGuard keys, gate rule, FailureCounters reuse.
+
+### Tests
+apps/api/tests/test_failure_counter.py (or extend test_login_throttle.py only if small): lock at limit with
+  Retry-After from TTL, window restart on the locking failure, clear, Redis down allows + logs event.
+apps/api/tests/test_mfa_guard.py (fakeredis): `claim_step` accepts increasing counters, rejects equal and lower,
+  key TTL ≤ 90; Redis down → True and `mfa_guard_unavailable` logged (structlog capture used elsewhere); failure
+  lock after 10 → AUTH_LOCKED message "Too many invalid codes; try again in 900 seconds."; `clear` resets; key
+  helpers exact strings; `forget_steps` deletes.
+apps/api/tests/test_sessions*.py / test_password_reset.py: `ActiveSession` JSON round-trip with and without
+  `mfa_passed_at` (old cache entry missing the key → None); `require_recent_auth` passes 9 min after MFA on a 1 h
+  old session and fails 10 min after MFA; `mark_mfa_passed` updates DB + cache (integration via client is fine).
+apps/api/tests/test_mfa_enrolment_integration.py (client fixture, FrozenClock):
+  - setup returns secret (32 base32), otpauth URI with the email, `<svg`; DB secret is encrypted (not equal to the
+    secret bytes) and decrypts with the AAD; `mfa_enabled` false; second setup replaces the secret.
+  - setup/enable/verify/disable need CSRF + Origin (one parametrized test: missing CSRF → FORBIDDEN) and a session
+    (no cookie → AUTH_FAILURE).
+  - enable without setup → CONFLICT; wrong code → INVALID_MFA_CODE field code; right code → 10 codes matching the
+    format, user enabled, `GET /session` shows `mfa_passed` true; enable again → CONFLICT; setup when enabled →
+    CONFLICT.
+  - enable with a code from a secret replaced by a later setup → INVALID_MFA_CODE (code checked against the
+    current pending secret).
+  - unknown body fields → INVALID_INPUT.
+apps/api/tests/test_mfa_verify_integration.py:
+  - after enrol: login again in a fresh client → `login.mfa_required` true; probe route (SESSION_PROBE_PATH) →
+    MFA_REQUIRED 401 (user-enabled MFA, org not requiring); `GET /session` 200 with `mfa_required` true;
+    `logout-all` → MFA_REQUIRED; `logout` works.
+  - verify with the current code → 200, probe now 200; same code again in another fresh session within the window
+    → INVALID_MFA_CODE (replay); next step's code (clock advanced 30 s) accepted.
+  - verify with a recovery code (upper-case, no hyphens accepted) → remaining 9; reuse → INVALID_MFA_CODE field
+    recovery_code; both/neither fields → INVALID_INPUT.
+  - verify when not enrolled → CONFLICT.
+  - 10 wrong codes → 11th attempt (even with the right code) AUTH_LOCKED with Retry-After; counter cleared by a
+    success (9 wrong, 1 right, then 9 wrong still not locked).
+  - recent auth: session created, clock +30 min, password change → REAUTH_REQUIRED; MFA verify; change → 200.
+  - org `mfa_required` gate still works for an unenrolled user (existing tests cover; keep green) and setup/enable
+    are reachable while gated (exempt) and enabling unlocks the probe.
+  - disable: with org requiring MFA in ANY membership (add a second org membership requiring it, via make_member +
+    a membership insert in system_session) → FORBIDDEN and nothing changes; otherwise wrong code →
+    INVALID_MFA_CODE; right code (next step to avoid replay) → `mfa_enabled` false, secret NULL, codes `{}`;
+    disable again → CONFLICT; a recovery code in the `code` field → INVALID_MFA_CODE.
+  - user with MFA enabled and no membership: password change → MFA_REQUIRED before verify.
+packages/va_db/tests/test_membership_lookup_integration.py: `user_mfa_enabled` reflects users.mfa_enabled.
+Keep each new test file < ~350 lines; share setup through session_helpers (`enrol_mfa`) and conftest fixtures (no
+copied fixtures — jscpd).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run python scripts/check_spec_refs.py`; `make openapi` + drift check
+(internal.json changes, openapi.json unchanged); `npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src
+packages/va_db/src apps/api/src` (none); pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done payload keys: tests, lint, typecheck, audit, coverage,
+complexity, duplication, specs.
+
+### Risks
+- Refactoring LoginThrottle must not change its behaviour or log event names (existing tests are the oracle).
+- Removing `enforce_mfa` touches 4 call sites + tests; grep `enforce_mfa` in apps/api/tests.
+- argon2 with real params runs 10× in enable; tests use CHEAP_ARGON2 via SessionContainer — fine.
+- FrozenClock: TOTP codes in tests must be computed from `container.clock.now()`; advance by 30 s between uses of
+  "the next code" to avoid the replay guard; the replay key TTL is real Redis time in fakeredis (TTL 90 s does not
+  expire during a test, which is what we want).
+- Pool size 1 per role: never hold a global_session while opening a system_session in the route helpers.
+- Model-level validator error `field`: confirm the rendered envelope (likely no field) and assert what it renders.
+- The example base32 secret in schema examples may trip gitleaks; use a short obviously-sample value or none.
+
+## 2026-10-29 Builder: P02-T06b build notes
+- Implemented per plan. New: `auth/failure_counter.py` (FailureCounters; LoginThrottle now delegates, public API and
+  `login_throttle_unavailable` event unchanged), `auth/mfa_guard.py` (MfaGuard, REPLAY_GUARD_LUA, keys/AAD/messages),
+  `routers/auth_mfa.py` + `routers/auth_mfa_schemas.py`. `session_auth.gated_membership` replaces `enforce_mfa`
+  (org OR user MFA; user lookup when no membership); `mfa_due` also used by `GET /session`. `ActiveSession.mfa_passed_at`
+  (+ cache JSON, old entries read None), `SessionManager.mark_mfa_passed`, `require_recent_auth` uses
+  max(created_at, mfa_passed_at). `MembershipRecord.user_mfa_enabled` (join users). Container `mfa_guard`.
+- Specs: specs/04 §4.1 recent-auth decision, §4.3 amended gate decision, §4.5 MFA endpoints decision; specs/03 §11
+  rows `auth:fail:mfa:{user_id}`, `mfa:last:{user_id}`, `sess:` lists `mfa_passed_at`. AGENTS.md entry.
+- Model-level validator error renders INVALID_INPUT without `field` (asserted).
+- Gates: fmt ok; lint pass; typecheck pass (307 files); placeholders 0; make test 2405 passed, coverage 99.30%;
+  check_spec_refs 0; openapi drift current (internal.json regenerated, openapi.json unchanged); jscpd 0 clones;
+  radon -n C none; pip-audit + pnpm audit no vulns; gitleaks passed.
+
+## 2026-10-29 Planner: P02-T06b build.blocked (payload format only) → re-plan same task
+Same cause as P02-T04d: the Builder's `build.done` used `--json` with an object payload (all gates reported pass:
+2405 passed, 99.30 % coverage, 0 clones, radon none, audits clean), and the loop's backpressure check did not accept
+it and converted the event to `build.blocked`. No design or code problem; no split or prerequisite. Plan P02-T06b is
+unchanged.
+Builder, this activation: do not redesign. Re-run the gates on the current working tree (`make fmt lint typecheck
+placeholders test`, `uv run python scripts/check_openapi_drift.py`, check_spec_refs, jscpd, radon, pip-audit
+--strict per mem-1793267153-9b68, pnpm audit, gitleaks), fix anything red, then emit build.done as a PLAIN STRING
+(no `--json`) with exactly these keys and real values from this run, e.g.:
+`ralph emit "build.done" "P02-T06b: tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN %), complexity: pass (radon -n C none), duplication: pass (0 clones), specs: pass"`
+
+## 2026-10-29 Builder: P02-T06b gate re-run (no code changes)
+fmt/lint/typecheck (307 files)/placeholders (0) pass; make test 2405 passed, coverage 99.30 %; openapi drift current
+(both docs); check_spec_refs 0; jscpd 0 clones; radon -n C none; pip-audit --strict + pnpm audit no vulns; gitleaks
+passed. build.done emitted as plain string.
+
+## 2026-10-29 Planner: P02-T06b build.blocked again (complexity token format) → re-plan same task
+The plain-string build.done was still converted to build.blocked. Cause, from the events log: every accepted
+build.done carried a NUMERIC complexity (`complexity: 3.4`, `complexity: 3.17`, `complexity: 2.2`). The rejected
+ones used `complexity: A` (P00-FIX-1) and `complexity: pass (radon -n C none)` (this one). The backpressure parser
+reads complexity as a number (average cyclomatic complexity). No code or design problem; plan P02-T06b is unchanged.
+Builder, this activation: do not redesign. Re-run the gates on the current tree (same list as the last re-run), fix
+anything red, compute the average with
+`uvx radon cc -s -a packages/va_common/src packages/va_db/src apps/api/src | tail -1` (the "Average complexity: A (N.NN)"
+line), and emit a PLAIN STRING whose complexity value is just that number, e.g.:
+`ralph emit "build.done" "P02-T06b tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+## 2026-10-29 Builder: P02-T06b gate re-run #2 (no code changes)
+fmt/lint/typecheck (307 files)/placeholders (0) pass; make test 2405 passed, coverage 99.30 %; openapi drift current
+(both docs); check_spec_refs 0; jscpd 0 clones (541 files); radon -n C none, average 1.89; pip-audit --strict + pnpm
+audit no vulns; gitleaks passed. build.done emitted as plain string with numeric complexity 1.89.
+
+## Review P02-T06b (2026-10-29): approved
+Re-ran: make lint/typecheck/placeholders (0 findings) pass; make test 2405 passed, coverage 99.30 %; openapi drift
+current (internal.json regenerated, openapi.json unchanged); check_spec_refs 0; jscpd 0 clones; radon -n C none.
+Diff checked against specs/04 §4.1 mfa rows, §4.3 gate, §4.5 and the new Decisions; specs/03 §11 keys; error codes
+CONFLICT/FORBIDDEN/INVALID_MFA_CODE/AUTH_LOCKED/MFA_REQUIRED/REAUTH_REQUIRED per specs/31. Disable checks the org
+requirement before the code; failure lock checked before any comparison; replay guard via Lua CAS; LoginThrottle
+behaviour and log event unchanged (existing tests green). No blocking I/O (QR in to_thread, argon2 in worker), no
+secrets logged. Ticked T06b and parent T06.

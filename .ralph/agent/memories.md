@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793269535-3669
+> MFA test helpers: session_helpers.enrol_mfa(client, container) + mfa_code(container, secret); MfaGuard replay guard accepts each TOTP step once per user, so advance FrozenClock 30 s before reusing the current code in another session; gate is session_auth.gated_membership (org OR user MFA), counters with lock reuse auth.failure_counter.FailureCounters
+<!-- tags: api, auth, testing | created: 2026-10-29 -->
+
 ### mem-1793268366-7e50
 > SQLAlchemy model column added by a later ALTER TABLE ADD COLUMN: give it mapped_column(..., sort_order=1) so it sorts after TimestampMixin created_at/updated_at like the DB attnum (test_tenancy_models column-order lists); Mapped[list[str]] .any(x) fails mypy, use literal(x, Text) == any_(col)
 <!-- tags: database, sqlalchemy | created: 2026-10-29 -->
@@ -81,6 +85,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793269824-fe85
+> Ralph build.done backpressure needs a NUMERIC complexity value: 'complexity: 3.17' (radon cc -s -a average). 'complexity: A' or 'complexity: pass (...)' converts to build.blocked even in a plain-string payload (P00-FIX-1, P02-T06b)
+<!-- tags: tooling, ralph | created: 2026-10-29 -->
 
 ### mem-1793267153-9b68
 > pip-audit on this uv workspace: uv export --no-hashes --no-emit-workspace --format requirements-txt > logs/req.txt && uvx pip-audit --strict --no-deps --disable-pip -r logs/req.txt (plain export includes -e workspace pkgs and pip install --dry-run fails)

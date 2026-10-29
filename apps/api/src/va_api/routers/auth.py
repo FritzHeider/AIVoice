@@ -3,7 +3,8 @@
 Envelope format, excluded from the public OpenAPI document and emitted to ``openapi/internal.json`` (specs/26
 §1), and marked ``x-public: session-flow``: they authenticate with the session cookie themselves instead of
 ``require_scope``. Signup and resend send the verification email after the response (a background task).
-The password routes live in :mod:`va_api.routers.auth_password` and attach to the same router.
+The password routes live in :mod:`va_api.routers.auth_password` and the MFA routes in
+:mod:`va_api.routers.auth_mfa`; both attach to the same router.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from va_api.auth.cookies import (
     set_session_cookie,
 )
 from va_api.auth.session_auth import (
-    active_membership,
     check_dashboard_origin,
     client_ip,
     clock_of,
@@ -28,9 +28,10 @@ from va_api.auth.session_auth import (
     current_session,
     database_of,
     email_sender_of,
-    enforce_mfa,
+    gated_membership,
     login_throttle_of,
     memberships_of_user,
+    mfa_due,
     password_hasher_of,
     pick_active,
     provisioner_of,
@@ -64,7 +65,13 @@ from va_db.models import User
 from va_db.provisioning import ProvisionedOrg
 from va_db.repositories import EMAIL_VERIFY_TTL, IdentityRepo, NewUser
 
-__all__ = ["INVALID_CREDENTIALS_MESSAGE", "PUBLIC_MARKER", "CurrentSession", "internal_auth_router"]
+__all__ = [
+    "INVALID_CREDENTIALS_MESSAGE",
+    "PUBLIC_MARKER",
+    "CurrentSession",
+    "OptionalEmptyBody",
+    "internal_auth_router",
+]
 
 INVALID_CREDENTIALS_MESSAGE: Final = "Invalid email or password."
 PUBLIC_MARKER: Final[dict[str, Any]] = {"x-public": "session-flow"}
@@ -221,8 +228,7 @@ async def resend_verification(
     request: Request, active: CurrentSession, background: BackgroundTasks, _body: OptionalEmptyBody = None
 ) -> DataResponse[ResendResult]:
     """Email a new verification link (3 per hour); nothing is sent once the email is verified."""
-    active, record = await active_membership(request, active)
-    enforce_mfa(record, active)
+    active, _ = await gated_membership(request, active)
     async with database_of(request).global_session() as session:
         user = await IdentityRepo(session).get_user(active.user_id)
     if user is None:
@@ -265,8 +271,7 @@ async def logout_all(
     request: Request, response: Response, active: CurrentSession, _body: OptionalEmptyBody = None
 ) -> DataResponse[RevokedSessionsResult]:
     """Revoke every session of the user (MFA-gated like any other endpoint) and clear the cookies."""
-    active, record = await active_membership(request, active)
-    enforce_mfa(record, active)
+    active, _ = await gated_membership(request, active)
     revoked = await sessions_of(request).revoke_all(active.user_id)
     clear_auth_cookies(response, cookie_policy_of(request))
     return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
@@ -294,7 +299,11 @@ async def get_session(
         memberships=[SessionMembership.of(item) for item in records],
         active_org_id=record.org_id if record is not None else None,
         mfa_passed=active.mfa_passed,
-        mfa_required=record is not None and record.mfa_required and not active.mfa_passed,
+        mfa_required=mfa_due(
+            org_requires=record is not None and record.mfa_required,
+            user_enabled=user.mfa_enabled,
+            passed=active.mfa_passed,
+        ),
         csrf_token=csrf,
         expires_at=active.expires_at,
     )

@@ -11,11 +11,9 @@ from __future__ import annotations
 from typing import Final
 
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
+from va_api.auth.failure_counter import FailureCounters
 from va_common.auth import sha256_hex
-from va_common.errors import AppError
-from va_common.logging import get_logger
 
 __all__ = [
     "EMAIL_FAILURE_LIMIT",
@@ -31,8 +29,6 @@ __all__ = [
 EMAIL_FAILURE_LIMIT: Final = 10
 IP_FAILURE_LIMIT: Final = 50
 FAILURE_WINDOW_S: Final = 900
-
-_log = get_logger(__name__)
 
 
 def email_failure_key(email: str) -> str:
@@ -63,46 +59,21 @@ class LoginThrottle:
     """Failure counters for ``POST /internal/auth/login``."""
 
     def __init__(self, redis: Redis) -> None:
-        self._redis = redis
+        self._counters = FailureCounters(
+            redis,
+            window_s=FAILURE_WINDOW_S,
+            unavailable_event="login_throttle_unavailable",
+            locked_message=locked_message,
+        )
 
     async def check(self, email: str, ip: str | None) -> None:
         """``AUTH_LOCKED`` (with ``Retry-After``) when the email or the IP is locked."""
-        counters = _counters(email, ip)
-        try:
-            async with self._redis.pipeline(transaction=True) as pipe:
-                for key, _ in counters:
-                    pipe.get(key)
-                    pipe.ttl(key)
-                replies = await pipe.execute()
-        except (RedisError, OSError) as exc:
-            _log.warning("login_throttle_unavailable", error=type(exc).__name__)
-            return
-        for index, (_, limit) in enumerate(counters):
-            count, ttl = replies[2 * index], int(replies[2 * index + 1])
-            if count is not None and int(count) >= limit:
-                retry_after = ttl if ttl > 0 else FAILURE_WINDOW_S
-                raise AppError(
-                    "AUTH_LOCKED", locked_message(retry_after), headers={"Retry-After": str(retry_after)}
-                )
+        await self._counters.check(_counters(email, ip))
 
     async def record_failure(self, email: str, ip: str | None) -> None:
         """Count one failed attempt; the failure that reaches a limit restarts that key's 15-minute window."""
-        counters = _counters(email, ip)
-        try:
-            async with self._redis.pipeline(transaction=True) as pipe:
-                for key, _ in counters:
-                    pipe.incr(key)
-                    pipe.expire(key, FAILURE_WINDOW_S, nx=True)
-                replies = await pipe.execute()
-            for index, (key, limit) in enumerate(counters):
-                if int(replies[2 * index]) == limit:
-                    await self._redis.expire(key, FAILURE_WINDOW_S)
-        except (RedisError, OSError) as exc:
-            _log.warning("login_throttle_unavailable", error=type(exc).__name__)
+        await self._counters.record(_counters(email, ip))
 
     async def clear(self, email: str) -> None:
         """Forget the email's failures after a successful login."""
-        try:
-            await self._redis.delete(email_failure_key(email))
-        except (RedisError, OSError) as exc:
-            _log.warning("login_throttle_unavailable", error=type(exc).__name__)
+        await self._counters.clear(email_failure_key(email))

@@ -8,6 +8,7 @@ from service_helpers import readiness_of, track_closes
 
 from va_api.auth import ApiKeyAuthenticator
 from va_api.auth.login_throttle import LoginThrottle
+from va_api.auth.mfa_guard import MfaGuard
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.container import Container, build_container, email_sender_for
@@ -45,6 +46,7 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert container.password_hasher.params == SPEC_ARGON2_PARAMS
         assert isinstance(container.sessions, SessionManager)
         assert isinstance(container.login_throttle, LoginThrottle)
+        assert isinstance(container.mfa_guard, MfaGuard)
         assert isinstance(container.email_sender, SmtpEmailSender)
         assert isinstance(container.resend_limiter, ResendLimiter)
         assert closed == []
