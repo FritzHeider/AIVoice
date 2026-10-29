@@ -148,7 +148,7 @@ class SessionManager:
         await self.remember(active)
         return token, active
 
-    async def start_in(
+    async def start_in(  # noqa: PLR0913 - keyword-only session attributes
         self,
         session: AsyncSession,
         *,
@@ -156,9 +156,11 @@ class SessionManager:
         active_org_id: uuid.UUID | None,
         ip: str | None,
         user_agent: str | None,
+        mfa_passed: bool = False,
     ) -> tuple[str, ActiveSession]:
         """:meth:`start` inside the caller's transaction (signup creates the user in the same one).
 
+        ``mfa_passed`` (an SSO login, whose identity provider is trusted for MFA) also sets ``mfa_passed_at``.
         Nothing is cached: the caller calls :meth:`remember` after its transaction commits.
         """
         now = self._clock.now()
@@ -169,6 +171,8 @@ class SessionManager:
             expires_at=now + SLIDING_TTL,
             ip=ip,
             user_agent=user_agent,
+            mfa_passed=mfa_passed,
+            mfa_passed_at=now if mfa_passed else None,
             created_at=now,
         )
         await repo.record_login(user_id, now)

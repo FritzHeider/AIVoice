@@ -1,9 +1,12 @@
-"""OIDC provider discovery with outbound-request guards (specs/04-auth-tenancy-rbac.md §5; specs/28 §6.4).
+"""OIDC provider requests with outbound-request guards (specs/04-auth-tenancy-rbac.md §5; specs/28 §6.4).
 
 :class:`OidcDiscovery` fetches ``{issuer}/.well-known/openid-configuration`` and returns the endpoints the
-authorization-code flow needs. The fetch never follows redirects, gives up after 5 s, reads at most 256 KiB,
-and (outside ``VA_ENV=local``/``test``) refuses plain ``http`` and issuer hosts that resolve to anything but
-global addresses. Every failure is a :class:`DiscoveryError` whose ``reason`` is shown to the admin.
+authorization-code flow needs; the SSO login also fetches the provider's JWKS
+(:meth:`OidcDiscovery.fetch_json`) and exchanges the authorization code (:meth:`OidcDiscovery.post_form`)
+through it. Every request never follows
+redirects, gives up after 5 s, reads at most 256 KiB, and (outside ``VA_ENV=local``/``test``) refuses plain
+``http`` and hosts that resolve to anything but global addresses. Every failure is a :class:`DiscoveryError`
+whose ``reason`` is shown to the admin (or logged by the login flow).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ __all__ = [
     "DISCOVERY_TIMEOUT_S",
     "ENDPOINT_FIELDS",
     "INSECURE_ISSUER",
+    "INSECURE_URL",
     "ISSUER_MISMATCH",
     "MAX_DISCOVERY_BYTES",
     "NOT_JSON_OBJECT",
@@ -51,6 +55,7 @@ MAX_DISCOVERY_BYTES: Final = 262_144
 ENDPOINT_FIELDS: Final = ("authorization_endpoint", "token_endpoint", "jwks_uri")
 # DiscoveryError reasons (the f-string ones: "HTTP <status>", "missing <field>", "insecure endpoint <field>").
 INSECURE_ISSUER: Final = "insecure issuer"
+INSECURE_URL: Final = "insecure url"
 UNREACHABLE: Final = "unreachable"
 TIMED_OUT: Final = "timed out"
 REDIRECT_NOT_ALLOWED: Final = "redirect not allowed"
@@ -156,12 +161,15 @@ class OidcDiscovery:
         if not addresses or not all(ipaddress.ip_address(address).is_global for address in addresses):
             raise DiscoveryError(ADDRESS_NOT_ALLOWED)
 
-    async def _download(self, url: str) -> bytes:
+    async def _send(
+        self, method: str, url: str, *, body: str | None = None, headers: dict[str, str]
+    ) -> bytes:
         try:
             async with self._http.stream(
-                "GET",
+                method,
                 url,
-                headers={"Accept": "application/json"},
+                content=body,
+                headers={"Accept": "application/json", **headers},
                 follow_redirects=False,
                 timeout=DISCOVERY_TIMEOUT_S,
             ) as response:
@@ -193,15 +201,33 @@ class OidcDiscovery:
             endpoints[name] = value
         return ProviderMetadata(issuer=declared, **endpoints)
 
+    async def _check(self, url: str, insecure_reason: str) -> None:
+        if not self._secure(url):
+            raise DiscoveryError(insecure_reason)
+        if not self._allow_insecure:
+            await self._check_host(_host_of(url) or "")
+
     async def fetch(self, issuer: str) -> ProviderMetadata:
         """The provider metadata of the normalised ``issuer``; :class:`DiscoveryError` on any failure."""
-        if not self._secure(issuer):
-            raise DiscoveryError(INSECURE_ISSUER)
-        host = _host_of(issuer) or ""
-        if not self._allow_insecure:
-            await self._check_host(host)
-        body = await self._download(f"{issuer}{DISCOVERY_PATH}")
+        await self._check(issuer, INSECURE_ISSUER)
+        body = await self._send("GET", f"{issuer}{DISCOVERY_PATH}", headers={})
         return self._metadata(issuer, body)
+
+    async def check_url(self, url: str) -> None:
+        """:class:`DiscoveryError` unless ``url`` passes the scheme and address rules."""
+        await self._check(url, INSECURE_URL)
+
+    async def fetch_json(self, url: str) -> dict[str, Any]:
+        """``GET url`` under the request guards; the response must be a JSON object."""
+        await self.check_url(url)
+        return _json_object(await self._send("GET", url, headers={}))
+
+    async def post_form(self, url: str, body: str, headers: dict[str, str]) -> dict[str, Any]:
+        """``POST url`` with a form-encoded ``body`` under the request guards; the response must be a JSON
+        object (any status but 200 is a :class:`DiscoveryError`)."""
+        await self.check_url(url)
+        form_headers = {"Content-Type": "application/x-www-form-urlencoded", **headers}
+        return _json_object(await self._send("POST", url, body=body, headers=form_headers))
 
 
 def _is_ip(host: str) -> bool:

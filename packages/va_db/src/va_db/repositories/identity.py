@@ -119,6 +119,7 @@ class IdentityRepo:
         ip: str | None,
         user_agent: str | None,
         mfa_passed: bool = False,
+        mfa_passed_at: datetime | None = None,
         created_at: datetime | None = None,
     ) -> IssuedSession:
         """Insert a session for ``user_id``; ``ValueError`` when ``ip`` is not an IP address.
@@ -134,6 +135,7 @@ class IdentityRepo:
             ip=_checked_ip(ip),
             user_agent=user_agent,
             mfa_passed=mfa_passed,
+            mfa_passed_at=mfa_passed_at,
             expires_at=expires_at,
         )
         if created_at is not None:

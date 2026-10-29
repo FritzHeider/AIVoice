@@ -1441,6 +1441,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `auth:verify:resend:{user_id}` | counter | 3600 s (set on the first resend of the window) | Verification email resends per user, at most 3 per hour (specs/04 §4.1) |
 | `auth:fail:mfa:{user_id}` | counter | 900 s | Invalid MFA codes per user, 10 lock MFA checks for 15 min (specs/04 §4.5) |
 | `mfa:last:{user_id}` | string (TOTP step counter) | 90 s | Last accepted TOTP time step, replay guard (specs/04 §4.5) |
+| `sso:state:{state}` | string JSON (`connection_id`, `org_id`, `nonce`, `code_verifier`, `issuer`, `token_endpoint`, `jwks_uri`) | 600 s | OIDC login state, single use via `GETDEL` (specs/04 §5) |
 | `call:{id}:seq` | counter | 48 h | Per-call event sequence (`19` §1) |
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |

@@ -12,8 +12,11 @@ import respx
 from api_helpers import make_settings
 
 from va_api.auth.oidc_discovery import (
+    ADDRESS_NOT_ALLOWED,
     DISCOVERY_PATH,
+    INSECURE_URL,
     MAX_DISCOVERY_BYTES,
+    NOT_JSON_OBJECT,
     DiscoveryError,
     OidcDiscovery,
     ProviderMetadata,
@@ -210,3 +213,43 @@ async def test_discovery_for_environment(http: httpx.AsyncClient, va_env: str, i
     # model_copy skips the validators (staging would also need a TLS SMTP_URL and the AWS KMS provider).
     settings = make_settings().model_copy(update={"va_env": Environment(va_env)})
     assert discovery_for(settings, http).allow_insecure is insecure
+
+
+async def guarded_error(call: Any) -> str:
+    with pytest.raises(DiscoveryError) as caught:
+        await call
+    return caught.value.reason
+
+
+async def test_fetch_json_and_check_url(http: Http, mock: Router) -> None:
+    jwks_url = f"{ISSUER}/jwks"
+    mock.get(jwks_url).respond(json={"keys": []})
+    discovery = OidcDiscovery(http, allow_insecure=False, resolver=resolver_of("93.184.216.34"))
+    assert await discovery.fetch_json(jwks_url) == {"keys": []}
+    await discovery.check_url(jwks_url)
+    assert await guarded_error(discovery.fetch_json("http://login.acme-dental.test/jwks")) == INSECURE_URL
+    assert await guarded_error(discovery.check_url("not a url")) == INSECURE_URL
+    mock.get(f"{ISSUER}/list").respond(json=[1, 2])
+    assert await guarded_error(discovery.fetch_json(f"{ISSUER}/list")) == NOT_JSON_OBJECT
+    private = OidcDiscovery(http, allow_insecure=False, resolver=resolver_of("10.0.0.7"))
+    assert await guarded_error(private.fetch_json(jwks_url)) == ADDRESS_NOT_ALLOWED
+    assert mock.calls.call_count == 2
+
+
+async def test_post_form_sends_the_form_and_needs_200(http: Http, mock: Router) -> None:
+    token_url = f"{ISSUER}/token"
+    route = mock.post(token_url).respond(json={"id_token": "t"})
+    discovery = OidcDiscovery(http, allow_insecure=True)
+    result = await discovery.post_form(
+        token_url, "grant_type=authorization_code", {"Authorization": "Basic x"}
+    )
+    assert result == {"id_token": "t"}
+    sent = route.calls.last.request
+    assert sent.content == b"grant_type=authorization_code"
+    assert sent.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert sent.headers["authorization"] == "Basic x"
+    assert sent.headers["accept"] == "application/json"
+    route.respond(400, json={"error": "invalid_grant"})
+    assert await guarded_error(discovery.post_form(token_url, "", {})) == "HTTP 400"
+    route.respond(302, headers={"Location": "https://elsewhere.test/"})
+    assert await guarded_error(discovery.post_form(token_url, "", {})) == "redirect not allowed"

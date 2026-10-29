@@ -26,6 +26,7 @@ from va_api.rate_limit import RateLimitHeadersMiddleware
 from va_api.routers import (
     auth_mfa,  # noqa: F401  (registers the MFA routes on internal_auth_router)
     auth_password,  # noqa: F401  (registers the password routes on internal_auth_router)
+    auth_sso,  # noqa: F401  (registers the OIDC login routes on internal_auth_router)
 )
 from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router

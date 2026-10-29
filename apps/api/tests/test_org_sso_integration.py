@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from fake_oidc import discovery_document, new_domain
 from identity_db import IdentityDb
 from session_helpers import (
     SessionContainer,
@@ -30,11 +30,6 @@ ISSUER = "https://login.acme-dental.test"
 SECRET = "idp-client-credential-7f3a"  # noqa: S105 - test client secret
 
 
-def new_domain() -> str:
-    """A domain no other test of the module (sharing one database) claims."""
-    return f"c{uuid.uuid4().hex[:10]}.acme-dental.test"
-
-
 @pytest.fixture
 def domain() -> str:
     return new_domain()
@@ -47,15 +42,6 @@ def body(domain: str) -> dict[str, Any]:
         "client_id": "voiceagents-dashboard",
         "client_secret": SECRET,
         "allowed_domains": [domain],
-    }
-
-
-def discovery_document(issuer: str) -> dict[str, str]:
-    return {
-        "issuer": issuer,
-        "authorization_endpoint": f"{issuer}/authorize",
-        "token_endpoint": f"{issuer}/token",
-        "jwks_uri": f"{issuer}/jwks",
     }
 
 

@@ -33,7 +33,10 @@ INTERNAL_PATHS = {
     "/internal/auth/password/forgot",
     "/internal/auth/password/reset",
     "/internal/auth/password/change",
+    "/internal/auth/sso/start",
+    "/internal/auth/sso/callback",
 }
+REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
 
@@ -59,7 +62,7 @@ def checked_operations(
     document: dict[str, Any], tag_names: tuple[str, ...]
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Each operation after the shared checks: unique well-formed operationId, one known tag, and an example
-    on every 2xx response."""
+    on every 2xx response; browser redirects (:data:`REDIRECT_OPERATIONS`) answer 302 without a body."""
     ids = [operation["operationId"] for _, _, operation in operations(document)]
     assert len(ids) == len(set(ids))
     for path, method, operation in operations(document):
@@ -68,7 +71,11 @@ def checked_operations(
         assert len(operation["tags"]) == 1, where
         assert operation["tags"][0] in tag_names, where
         success = [code for code in operation["responses"] if code.startswith("2")]
-        assert success, where
+        if operation["operationId"] in REDIRECT_OPERATIONS:
+            assert not success, where
+            assert "content" not in operation["responses"]["302"], where
+        else:
+            assert success, where
         for code in success:
             schema = operation["responses"][code]["content"]["application/json"]["schema"]
             assert resolve(document, schema).get("examples"), where

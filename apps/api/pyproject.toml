@@ -5,9 +5,11 @@ description = "VoiceAgents public REST API (FastAPI): envelopes, error handlers,
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "asyncpg>=0.32.0",
+    "authlib>=1.9.1",
     "email-validator>=2.3.0",
     "fastapi>=0.162.0",
     "httpx[http2]>=0.28.1",
+    "joserfc>=1.7.7",
     "pydantic>=2.9",
     "pydantic-settings>=2.16.1",
     "sqlalchemy[asyncio]>=2.0.35",

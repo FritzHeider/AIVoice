@@ -550,6 +550,61 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
 >    (checked through the system-scope `SsoConnectionLookupRepo`, specs/03 §2); the org's own domains never conflict.
 > 8. **Audit** `org.sso_update` is written once the audit writer exists (P02-T11).
 
+> Decision (2026-10-29): **SSO login flow** (`GET /internal/auth/sso/start`, `GET /internal/auth/sso/callback`;
+> internal document, `x-public: session-flow`).
+> 1. **Browser-facing errors.** Both routes are top-level navigations, so they only ever answer **302**: to the
+>    identity provider, to `{DASHBOARD_BASE_URL}/` after a login, or on any failure to
+>    `{DASHBOARD_BASE_URL}/login?sso_error=<reason>` (never a JSON envelope), logged as `sso_login_failed` with the
+>    reason and a short detail (never the email or claims). Reasons: `disabled` (`OIDC_ENABLED=false`),
+>    `invalid_email`, `not_configured` (no connection for the domain, or the state's connection was deleted or
+>    replaced), `provider_unavailable` (discovery or JWKS fetch failed, Redis unavailable, or a concurrent login
+>    created the same user or membership first), `invalid_state` (missing, malformed, unknown, expired, reused, or
+>    not bound to this browser), `provider_error` (IdP `error` parameter, missing `code`, token exchange failure, no
+>    `id_token`), `invalid_token` (signature, algorithm, `iss`, `aud`/`azp`, `exp`, `iat`, `nonce`, `sub`, `email`),
+>    `email_not_verified`, `email_domain_mismatch`, `account_disabled`.
+> 2. **authlib usage.** authlib's `AsyncOAuth2Client` lives in `authlib.integrations.httpx_client`, which is
+>    deprecated in favour of `httpx2` and warns on import, so the flow uses authlib's RFC 6749/7636 primitives
+>    (`prepare_grant_uri`, `create_s256_code_challenge`, `prepare_token_request`, `ClientAuth`
+>    `client_secret_basic`) in `va_api.auth.oidc_client`, and sends the token request through the guarded
+>    `OidcDiscovery` client (`post_form`: 5 s, no redirects, 256 KiB, scheme and global-address rules). ID tokens
+>    are validated with joserfc (`authlib.jose` is never imported).
+> 3. **start** `?email=` (3–320 characters after stripping, exactly one `@`, a non-empty local part, and a domain
+>    that, lowercased, passes the `allowed_domains` DNS rule): `for_domain` lookup (system session) → discovery of
+>    the connection's issuer → `state`, `nonce`, `code_verifier` = three `generate_token()` (43 characters) → Redis
+>    `SET sso:state:{state} <json> EX 600 NX` with `connection_id, org_id, nonce, code_verifier, issuer` (the
+>    provider's spelling), `token_endpoint, jwks_uri` → 302 to the authorization endpoint with `response_type=code`,
+>    `client_id`, `redirect_uri={PUBLIC_API_BASE_URL}/internal/auth/sso/callback`, `scope="openid email profile"`,
+>    `state`, `nonce`, `code_challenge` (S256), `code_challenge_method=S256`, `login_hint=<email>`, and the cookie
+>    **`va_sso`** = state (HttpOnly, `SameSite=Lax`, `Secure` like the session cookie, `Path=/internal/auth/sso`,
+>    `Max-Age=600`, `SESSION_COOKIE_DOMAIN`). The cookie binds the flow to the browser (login CSRF defence).
+> 4. **callback** `?state=&code=&error=`: `va_sso` is cleared on every outcome. `state` must look like a token and
+>    equal the cookie (constant time) → `GETDEL sso:state:{state}` (single use) → an IdP `error` or a missing `code`
+>    is `provider_error` → the connection is re-read in `tenant_session(org_id)` and must still have the state's
+>    `connection_id` → client secret decrypted → token request (`grant_type=authorization_code`, `code`,
+>    `redirect_uri`, `code_verifier`, HTTP Basic client authentication) to the stored `token_endpoint` → JWKS fetched
+>    from the stored `jwks_uri` → ID token validated: JWS algorithms `RS256 RS384 RS512 PS256 PS384 PS512 ES256
+>    ES384 ES512` only (never `none`/`HS*`), key chosen by `kid`; `iss` exactly the provider's discovery spelling;
+>    `aud` equals `client_id` or is a list containing it, and a list with several audiences needs
+>    `azp == client_id`; `exp` and `iat` required, `exp > now − 60 s`, `iat ≤ now + 60 s`; `nonce` equal (constant
+>    time); `sub` and `email` non-empty strings.
+> 5. **Email rule.** The email's domain (lowercased) must be in the connection's `allowed_domains` in every case
+>    (domains are unique across orgs, so an IdP can never assert an address another org owns), else
+>    `email_domain_mismatch`; `email_verified` false (boolean or the string `"false"`) is `email_not_verified`; a
+>    missing claim counts as verified because the domain matched; any other value is `invalid_token`.
+> 6. **JIT** in one `tenant_session(org_id)`: user by email (case-insensitive) → none: create (no password, name =
+>    the `name` claim stripped and cut to 200 characters or `""`, `email_verified_at=now`); an existing user that is
+>    not `active` → `account_disabled`; an existing unverified user is marked verified (the IdP proved the address).
+>    Membership: none → `default_role`; an existing one keeps its role. Then a session (14 d sliding, active org =
+>    the connection's org, `mfa_passed=true`, `mfa_passed_at=now`) and `last_login_at`. After the commit: `sess:`
+>    cache, the presented `va_session` revoked (fixation defence), `va_session` and `va_csrf` set, 302 to
+>    `{DASHBOARD_BASE_URL}/`. Logged `sso_login` with `user_id`, `org_id`, `user_created`, `membership_created`.
+>    Audit `auth.sso_login` is written once the audit writer exists (P02-T11).
+> 7. **Enforcement.** With `OIDC_ENABLED=true`, `POST /internal/auth/login` for an email whose domain's connection
+>    has `enforce=true` answers `SSO_REQUIRED` 403 "Your organization requires single sign-on." with
+>    `details.sso_url = {PUBLIC_API_BASE_URL}/internal/auth/sso/start?email=<url-encoded email>`, checked after the
+>    throttle check and before password verification (no failure is counted). With `OIDC_ENABLED=false` nothing is
+>    enforced (SSO would be unusable). Existing sessions, password reset, and API keys are unaffected.
+
 ## 6. Invitations and members
 
 - `POST /v1/org/members/invitations` `{email, role}` → invitation (7-day expiry, token 32 bytes base64url hashed);

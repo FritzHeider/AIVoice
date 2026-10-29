@@ -24,6 +24,7 @@ from va_api.auth.mfa_guard import MfaGuard
 from va_api.auth.oidc_discovery import OidcDiscovery
 from va_api.auth.rbac import scopes_for_role
 from va_api.auth.sessions import SESSION_INVALID, ActiveSession, SessionManager
+from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.middleware import request_id_of
 from va_api.settings import ApiSettings
@@ -64,6 +65,7 @@ __all__ = [
     "session_principal",
     "sessions_of",
     "settings_of",
+    "sso_states_of",
 ]
 
 MFA_REQUIRED_MESSAGE: Final = "Multi-factor authentication is required for this organization."
@@ -134,6 +136,11 @@ def mfa_guard_of(request: Request) -> MfaGuard:
 def oidc_discovery_of(request: Request) -> OidcDiscovery:
     discovery: OidcDiscovery = request.app.state.container.oidc_discovery
     return discovery
+
+
+def sso_states_of(request: Request) -> SsoStateStore:
+    states: SsoStateStore = request.app.state.container.sso_states
+    return states
 
 
 def client_ip(request: Request) -> str | None:

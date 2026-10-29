@@ -5,7 +5,6 @@ The client secret is accepted on input only; no response ever carries it in any 
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime
 from typing import Annotated, Final, Literal
@@ -13,6 +12,7 @@ from typing import Annotated, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, field_validator
 
 from va_api.auth.oidc_discovery import normalise_issuer
+from va_api.auth.sso_urls import is_dns_domain
 
 __all__ = [
     "MAX_ALLOWED_DOMAINS",
@@ -24,8 +24,6 @@ __all__ = [
 ]
 
 MAX_ALLOWED_DOMAINS: Final = 50
-# A lowercase DNS name with at least two labels and an alphabetic TLD; no wildcards.
-_DOMAIN: Final = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 
 # JIT provisioning never mints owners (specs/04 §5 step 4).
 type JitRole = Literal["admin", "developer", "analyst", "billing", "viewer"]
@@ -49,7 +47,7 @@ def normalise_domains(values: list[str]) -> list[str]:
     result: list[str] = []
     for raw in values:
         domain = raw.strip().lower()
-        if not _DOMAIN.fullmatch(domain):
+        if not is_dns_domain(domain):
             msg = f"{raw!r} is not a valid domain name"
             raise ValueError(msg)
         if domain not in result:

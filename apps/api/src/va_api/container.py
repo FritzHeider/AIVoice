@@ -16,6 +16,7 @@ from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
 from va_api.auth.oidc_discovery import DISCOVERY_TIMEOUT_S, OidcDiscovery, discovery_for
 from va_api.auth.sessions import SessionManager
+from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
@@ -58,6 +59,7 @@ class Container:
     email_sender: EmailSender
     resend_limiter: ResendLimiter
     oidc_discovery: OidcDiscovery
+    sso_states: SsoStateStore
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -76,7 +78,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
     session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
-    the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout).
+    the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
+    state store.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -125,4 +128,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             email_sender=email_sender_for(settings, clock),
             resend_limiter=ResendLimiter(redis),
             oidc_discovery=discovery_for(settings, oidc_http),
+            sso_states=SsoStateStore(redis),
         )

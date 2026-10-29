@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793272997-3347
+> SSO tests: tests/support/fake_oidc.py FakeOidcProvider(now=container.clock.now) + mocked_idp(provider) + sso_app(container) + configure_sso(client, identity, container) + sso_login(client, provider, email); redirect-only routes listed in test_openapi.REDIRECT_OPERATIONS
+<!-- tags: api, auth, testing | created: 2026-10-29 -->
+
 ### mem-1793271457-e7c7
 > va_api: outbound fetches to admin URLs use va_api.auth.oidc_discovery.OidcDiscovery (no redirects, 5s, 256KiB, is_global check unless VA_ENV local/test); tests stub IdPs with respx.mock (patches httpcore only, ASGI client untouched); after make openapi also run 'corepack pnpm gen:api' in sdks/typescript and apps/dashboard (schema.test.ts compares)
 <!-- tags: api, testing, openapi | created: 2026-10-29 -->
@@ -89,6 +93,14 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793273041-6642
+> Ralph build.done backpressure: every gate must be 'key: pass' with a colon (tests:, lint:, typecheck:, audit:, coverage:, complexity: <number>, duplication:, specs:); 'tests pass' / 'cov 99%' / 'jscpd 0 clones' converts to build.blocked (P02-T07b)
+<!-- tags: tooling, ralph | created: 2026-10-29 -->
+
+### mem-1793272997-f20d
+> authlib 1.9: importing authlib.integrations.httpx_client (AsyncOAuth2Client) warns AuthlibDeprecationWarning (wants httpx2) -> error under filterwarnings; use authlib.oauth2 rfc6749/rfc7636 primitives via va_api.auth.oidc_client + OidcDiscovery.post_form, joserfc for JWTs; mypy override authlib.* ignore_missing_imports
+<!-- tags: api, auth, tooling | created: 2026-10-29 -->
 
 ### mem-1793269824-fe85
 > Ralph build.done backpressure needs a NUMERIC complexity value: 'complexity: 3.17' (radon cc -s -a average). 'complexity: A' or 'complexity: pass (...)' converts to build.blocked even in a plain-string payload (P00-FIX-1, P02-T06b)

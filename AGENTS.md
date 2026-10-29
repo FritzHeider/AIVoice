@@ -489,3 +489,18 @@ Grafana 3001
   with `respx.mock` (it patches httpcore, so the ASGI test client is untouched). Integration modules share one
   database: use per-test unique values (domains, issuers) for anything with cross-org uniqueness.
   `session_app(container, oidc_enabled=True)` turns SSO on.
+- 2026-10-29 (P02-T07b): the OIDC login is `va_api/routers/auth_sso.py` (side-effect import in `main.py`):
+  `GET /internal/auth/sso/start|callback` answer **302 only** (`RedirectResponse`, failures go to
+  `{DASHBOARD_BASE_URL}/login?sso_error=<reason>`; `REASONS` lists them). Never import `authlib.jose` or
+  `authlib.integrations.httpx_client` (both warn, and warnings are errors): use authlib's RFC 6749/7636 primitives
+  through `va_api.auth.oidc_client` and joserfc for ID tokens (`va_api.auth.oidc_tokens.validate_id_token`).
+  authlib has no type information: `[[tool.mypy.overrides]] authlib.*` ignores missing imports, so wrap its return
+  values in typed functions. Provider requests (discovery, JWKS `fetch_json`, token `post_form`) all go through
+  `OidcDiscovery`. Login state: `va_api.auth.sso_state.SsoStateStore` (`sso:state:{state}`, `SET NX EX 600`,
+  `GETDEL`) plus the `va_sso` cookie (`Path=/internal/auth/sso`). `routers.auth.revoke_presented` and
+  `set_session_cookies` are public for other login flows; `SessionManager.start_in(..., mfa_passed=True)` also
+  sets `mfa_passed_at`. Tests: `tests/support/fake_oidc.py` (`FakeOidcProvider(now=container.clock.now)`
+  `.install(respx_router)`, `.authorize(location)` records the authorization request, `.claims` overrides the next
+  ID token, `None` removes a claim; `configure_sso(client, identity, container, enforce=..)` creates an org with a
+  connection via `PUT /v1/org/sso` and clears cookies; `sso_login(client, provider, email)`). RSA test keys are
+  generated once at import. OpenAPI redirect operations are listed in `test_openapi.REDIRECT_OPERATIONS`.

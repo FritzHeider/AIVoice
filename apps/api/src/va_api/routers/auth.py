@@ -3,8 +3,10 @@
 Envelope format, excluded from the public OpenAPI document and emitted to ``openapi/internal.json`` (specs/26
 §1), and marked ``x-public: session-flow``: they authenticate with the session cookie themselves instead of
 ``require_scope``. Signup and resend send the verification email after the response (a background task).
-The password routes live in :mod:`va_api.routers.auth_password` and the MFA routes in
-:mod:`va_api.routers.auth_mfa`; both attach to the same router.
+The password routes live in :mod:`va_api.routers.auth_password`, the MFA routes in
+:mod:`va_api.routers.auth_mfa`, and the OIDC login in :mod:`va_api.routers.auth_sso`; all attach to the same
+router. With ``OIDC_ENABLED=true`` a password login for an email whose domain's SSO connection enforces SSO
+answers ``SSO_REQUIRED`` (specs/04 §5 step 6).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from va_api.auth.session_auth import (
     settings_of,
 )
 from va_api.auth.sessions import SESSION_INVALID, ActiveSession
+from va_api.auth.sso_urls import email_domain, sso_start_url
 from va_api.auth.verification import TOKEN_INVALID_MESSAGE, send_verification
 from va_api.envelopes import envelope_router
 from va_api.responses import DataResponse
@@ -63,18 +66,22 @@ from va_common.errors import AppError
 from va_common.ids import new_id
 from va_db.models import User
 from va_db.provisioning import ProvisionedOrg
-from va_db.repositories import EMAIL_VERIFY_TTL, IdentityRepo, NewUser
+from va_db.repositories import EMAIL_VERIFY_TTL, IdentityRepo, NewUser, SsoConnectionLookupRepo
 
 __all__ = [
     "INVALID_CREDENTIALS_MESSAGE",
     "PUBLIC_MARKER",
+    "SSO_REQUIRED_MESSAGE",
     "CurrentSession",
     "OptionalEmptyBody",
     "internal_auth_router",
+    "revoke_presented",
+    "set_session_cookies",
 ]
 
 INVALID_CREDENTIALS_MESSAGE: Final = "Invalid email or password."
 PUBLIC_MARKER: Final[dict[str, Any]] = {"x-public": "session-flow"}
+SSO_REQUIRED_MESSAGE: Final = "Your organization requires single sign-on."
 
 internal_auth_router = envelope_router(prefix="/internal/auth", tags=["Auth"], include_in_schema=False)
 
@@ -104,7 +111,7 @@ async def _authenticate(request: Request, body: LoginRequest, ip: str | None) ->
     return user
 
 
-async def _revoke_presented(request: Request) -> None:
+async def revoke_presented(request: Request) -> None:
     """Revoke the session of the ``va_session`` cookie the request carries, if valid (fixation defence)."""
     sessions = sessions_of(request)
     presented = request.cookies.get(SESSION_COOKIE)
@@ -113,15 +120,32 @@ async def _revoke_presented(request: Request) -> None:
         await sessions.revoke(previous)
 
 
-def _set_session_cookies(request: Request, response: Response, token: str) -> None:
+def set_session_cookies(request: Request, response: Response, token: str) -> None:
+    """Set ``va_session`` to ``token`` and a fresh ``va_csrf``."""
     policy = cookie_policy_of(request)
     set_session_cookie(response, policy, token)
     set_csrf_cookie(response, policy, generate_token())
 
 
+async def _check_sso_enforced(request: Request, email: str) -> None:
+    """``SSO_REQUIRED`` (with the SSO start URL) when the email's domain has an enforcing connection."""
+    settings = settings_of(request)
+    domain = email_domain(email)
+    if not settings.oidc_enabled or domain is None:
+        return
+    # specs/03-data-model.md §2: SsoConnectionLookupRepo is a system-scope repository.
+    async with database_of(request).system_session() as session:
+        connection = await SsoConnectionLookupRepo(session).for_domain(domain)
+        enforced = connection is not None and connection.enforce
+    if enforced:
+        raise AppError(
+            "SSO_REQUIRED", SSO_REQUIRED_MESSAGE, details={"sso_url": sso_start_url(settings, email)}
+        )
+
+
 async def _issue(request: Request, response: Response, user: User, ip: str | None) -> LoginResult:
     """Start a fresh session (revoking the one presented, if any) and set both cookies."""
-    await _revoke_presented(request)
+    await revoke_presented(request)
     records = await memberships_of_user(request, user.id)
     token, _ = await sessions_of(request).start(
         user_id=user.id,
@@ -129,7 +153,7 @@ async def _issue(request: Request, response: Response, user: User, ip: str | Non
         ip=ip,
         user_agent=request.headers.get("user-agent"),
     )
-    _set_session_cookies(request, response, token)
+    set_session_cookies(request, response, token)
     return LoginResult(mfa_required=user.mfa_enabled, user=SessionUser.of(user))
 
 
@@ -196,8 +220,8 @@ async def signup(
         request, body, password_hash, client_ip(request)
     )
     await sessions_of(request).remember(active)
-    await _revoke_presented(request)
-    _set_session_cookies(request, response, token)
+    await revoke_presented(request)
+    set_session_cookies(request, response, token)
     _queue_verification(request, background, to=result.user.email, name=result.user.name, token=email_token)
     return DataResponse(data=result)
 
@@ -246,11 +270,13 @@ async def resend_verification(
 
 @internal_auth_router.post("/login", operation_id="auth_login", openapi_extra=PUBLIC_MARKER)
 async def login(body: LoginRequest, request: Request, response: Response) -> DataResponse[LoginResult]:
-    """Password login: throttled per email and IP, rejects foreign origins, issues a new session."""
+    """Password login: throttled per email and IP, rejects foreign origins and emails of SSO-enforcing
+    domains, issues a new session."""
     check_dashboard_origin(request)
     ip = client_ip(request)
     throttle = login_throttle_of(request)
     await throttle.check(body.email, ip)
+    await _check_sso_enforced(request, body.email)
     user = await _authenticate(request, body, ip)
     await throttle.clear(body.email)
     return DataResponse(data=await _issue(request, response, user, ip))

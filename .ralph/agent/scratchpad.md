@@ -2352,3 +2352,248 @@ repo (spec-cited); tenant repo filters org_id inside tenant_session; no nested s
 DNS rebinding until safe_client (specs/28 §6.4); concurrent PUTs from two orgs can race the domain check (no DB
 constraint) — acceptable for admin-only config, revisit if T07b lookup needs a hard guarantee.
 Next: P02-T07b.
+
+## 2026-10-29 Planner: P02-T07a approved → next P02-T07b
+
+## Plan P02-T07b — SSO login: start, callback, JIT provisioning, enforce mode (specs/04 §4.1, §5 steps 2–6, §13, §14; specs/03 §11; specs/31 SSO_REQUIRED)
+
+### Facts found while planning
+- `authlib==1.9.1` + `joserfc==1.7.7` resolve; `from authlib.integrations.httpx_client import AsyncOAuth2Client` imports
+  cleanly under `-W error`. **Do not import `authlib.jose`** (deprecated in favour of joserfc; it warns, and warnings
+  are errors). Use authlib `AsyncOAuth2Client` for the PKCE authorization URL + code exchange, joserfc for the ID token.
+  `create_authorization_url(url, state=, nonce=, code_verifier=, login_hint=)` → `(url, state)`; with
+  `code_challenge_method="S256"` it adds `code_challenge`. `fetch_token(url, code=, code_verifier=)` (client_secret_basic
+  default) raises `authlib.integrations.base_client.OAuthError`/`authlib.oauth2.OAuth2Error` on an error body.
+- `SessionManager.start_in` has no `mfa_passed`; `IdentityRepo.create_session` has `mfa_passed` but no `mfa_passed_at`.
+- `_revoke_presented` / `_set_session_cookies` are private in `routers/auth.py`; SSO needs both.
+- `SsoConnectionLookupRepo.for_domain(domain)` (system session) and `SsoConnectionRepo(session, org_id).get()` exist;
+  `decrypt_client_secret(envelope, row)` lives in `routers/org_sso.py`.
+- `sso:state:{state}` is in specs/04 §5 but missing from the specs/03 §11 table. Redis key builders live next to their
+  users (`session_cache_key` in auth/sessions.py, `mfa_last_key` in auth/mfa_guard.py).
+- `test_org_sso_integration.py` defines `new_domain()`, `discovery_document(issuer)` and an `idp` respx fixture: move
+  the two helpers into the new `tests/support/fake_oidc.py` and import them there (jscpd).
+- `AppError(code, message, details=..., field=...)` supports `details`. `generate_token()` = 43 base64url chars
+  (valid PKCE verifier length 43–128).
+
+### Decisions to record (specs/04 §5, same commit, `> Decision (2026-10-29):`)
+**SSO login flow.**
+1. **Browser-facing errors.** `sso/start` and `sso/callback` are top-level navigations, so every failure answers
+   **302** to `{DASHBOARD_BASE_URL}/login?sso_error=<reason>` (never a JSON envelope) and logs `sso_login_failed`
+   with `reason` (never the email/claims). Reasons: `disabled` (`OIDC_ENABLED=false`), `invalid_email`,
+   `not_configured` (no connection for the domain, or the state's connection was deleted/replaced),
+   `provider_unavailable` (discovery/JWKS fetch failed or Redis unavailable), `invalid_state` (missing, malformed,
+   unknown, expired, reused, or not bound to this browser), `provider_error` (IdP `error` param, missing `code`, token
+   exchange failure, no `id_token`), `invalid_token` (signature, alg, `iss`, `aud`/`azp`, `exp`, `iat`, `nonce`),
+   `email_not_verified`, `email_domain_mismatch`, `account_disabled`.
+2. **start** `GET /internal/auth/sso/start?email=` (3–320 chars after strip, one `@`, domain part lowercased must pass
+   the `allowed_domains` DNS rule): `for_domain` lookup (system session) → discovery fetch of the connection's issuer
+   → `state`, `nonce`, `code_verifier` = three `generate_token()` → Redis `SET sso:state:{state} <json> EX 600 NX`
+   with `{connection_id, org_id, nonce, code_verifier, issuer (provider spelling), token_endpoint, jwks_uri}` →
+   302 to the authorization URL (`response_type=code`, `scope="openid email profile"`, `state`, `nonce`,
+   `code_challenge` S256, `login_hint=<email>`, `redirect_uri={PUBLIC_API_BASE_URL}/internal/auth/sso/callback`) and
+   sets cookie **`va_sso`** = state (HttpOnly, SameSite=Lax, Secure as the session cookie, `Path=/internal/auth/sso`,
+   `Max-Age=600`, `SESSION_COOKIE_DOMAIN`). The cookie binds the flow to the browser (login-CSRF defence).
+3. **callback** `GET /internal/auth/sso/callback?state=&code=&error=`: `va_sso` cookie is cleared on every outcome;
+   `state` must look like a token and equal the cookie (`tokens_equal`) → `GETDEL sso:state:{state}` (single use) →
+   IdP `error`/missing `code` → `provider_error` → connection re-read in `tenant_session(org_id)`; its id must equal
+   the state's `connection_id` → secret decrypted → token/JWKS endpoints re-checked by the discovery guard (scheme,
+   global address outside local/test) → code exchange through authlib (5 s, no redirects, `code_verifier`) → JWKS
+   fetched through the discovery guard (5 s, 256 KiB, no redirects) → ID token validated: JWS algs `RS256 RS384 RS512
+   PS256 PS384 PS512 ES256 ES384 ES512` only (never `none`/`HS*`), key chosen by `kid`; `iss` exactly the provider's
+   discovery spelling; `aud` equals `client_id` or is a list containing it, and a multi-audience token needs
+   `azp == client_id`; `exp` and `iat` required, `exp > now − 60 s`, `iat ≤ now + 60 s`; `nonce` equal
+   (constant time); `email` a string.
+4. **Email rule.** The email's domain (lowercased) must be in the connection's `allowed_domains` in every case (domains
+   are unique across orgs, so an IdP can never assert an address another org owns); `email_verified` false (bool or
+   the string `"false"`) is refused; a missing claim counts as verified because the domain matched.
+5. **JIT** in one `tenant_session(org_id)`: user by email (citext) → none: create (no password, name = `name` claim or
+   `""` cut to 200, `email_verified_at=now`); existing user not `active` → `account_disabled`; existing unverified user
+   is marked verified (the IdP proved the address). Membership: none → `default_role`; existing keeps its role. Then a
+   session (14 d sliding, active org = the connection's org, `mfa_passed=true`, `mfa_passed_at=now`, `last_login_at`).
+   After the commit: `sess:` cache, presented `va_session` revoked (fixation defence), both auth cookies set, 302 to
+   `{DASHBOARD_BASE_URL}/`. Logged `sso_login` with `user_id`, `org_id`, `user_created`, `membership_created`. Audit
+   `auth.sso_login` is written once the audit writer exists (P02-T11).
+6. **Enforcement.** With `OIDC_ENABLED=true`, `POST /internal/auth/login` for an email whose domain's connection has
+   `enforce=true` answers `SSO_REQUIRED` 403 "Your organization requires single sign-on." with
+   `details.sso_url = {PUBLIC_API_BASE_URL}/internal/auth/sso/start?email=<url-encoded email>`, checked after the
+   throttle check and before password verification (no failure counted). With `OIDC_ENABLED=false` nothing is enforced
+   (SSO would be unusable). Existing sessions, password reset, and API keys are unaffected.
+specs/03 §11 — new row: `sso:state:{state}` | string JSON (`connection_id`, `org_id`, `nonce`, `code_verifier`,
+  `issuer`, `token_endpoint`, `jwks_uri`) | 600 s | OIDC login state, single use via `GETDEL` (specs/04 §5).
+
+### Files
+**apps/api/pyproject.toml** — add `authlib>=1.9.1`, `joserfc>=1.7.7`; `uv lock`. If a Redis-keys/env test compares
+  the specs/03 §11 table to code, update it.
+**apps/api/src/va_api/auth/oidc_discovery.py** — refactor: public `async def check_url(url: str) -> None` (scheme via
+  `_secure` → `DiscoveryError(f"insecure endpoint")`-style reason `INSECURE_URL = "insecure url"`; host check unless
+  `allow_insecure`), `async def fetch_json(url: str) -> dict[str, Any]` (check_url + `_download` + `_json_object`);
+  `fetch(issuer)` keeps its exact reasons (issuer → `INSECURE_ISSUER`) and reuses `_download`/`_json_object`. Export the
+  new names. Existing tests must still pass unchanged.
+**apps/api/src/va_api/auth/oidc_tokens.py** (new):
+  - `ALLOWED_ALGORITHMS: Final = ("RS256","RS384","RS512","PS256","PS384","PS512","ES256","ES384","ES512")`,
+    `CLOCK_SKEW: Final = timedelta(seconds=60)`.
+  - `@dataclass(frozen=True, slots=True) class IdTokenClaims: subject: str; email: str; email_verified: bool | None;
+    name: str`.
+  - `class IdTokenError(Exception)` with `reason: str` (internal detail for logs; route maps to `invalid_token`).
+  - `def validate_id_token(id_token: str, *, jwks: Mapping[str, Any], issuer: str, client_id: str, nonce: str,
+    now: datetime) -> IdTokenClaims` — `KeySet.import_key_set(jwks)` (ValueError/JoseError → IdTokenError("jwks")),
+    `joserfc.jwt.decode(id_token, key_set, algorithms=list(ALLOWED_ALGORITHMS))` (any `JoseError`/ValueError →
+    IdTokenError("signature")), then small private checkers `_check_issuer`, `_check_audience`, `_check_times`,
+    `_check_nonce` (hmac.compare_digest), `_email_verified(value) -> bool | None` (True/"true" → True, False/"false" →
+    False, absent → None, anything else → IdTokenError("email_verified")). Keep each function radon A/B.
+**apps/api/src/va_api/auth/sso_state.py** (new):
+  - `SSO_STATE_TTL_S: Final = 600`, `def sso_state_key(state: str) -> str` (`f"sso:state:{state}"`).
+  - `@dataclass(frozen=True, slots=True) class SsoState: connection_id: uuid.UUID; org_id: uuid.UUID; nonce: str =
+    field(repr=False); code_verifier: str = field(repr=False); issuer: str; token_endpoint: str; jwks_uri: str` with
+    `to_json() -> str` / `from_json(raw: str | bytes) -> SsoState`.
+  - `class SsoStateUnavailable(Exception)`; `class SsoStateStore(redis: Redis)`: `async def put(state: str, value:
+    SsoState) -> None` (SET NX EX; Redis/OSError → SsoStateUnavailable; NX collision → SsoStateUnavailable),
+    `async def take(state: str) -> SsoState | None` (`GETDEL`; RedisError/OSError → SsoStateUnavailable; malformed
+    JSON → None).
+**apps/api/src/va_api/auth/cookies.py** — `SSO_STATE_COOKIE: Final = "va_sso"`, `SSO_COOKIE_PATH = "/internal/auth/sso"`,
+  `set_sso_state_cookie(response, policy, state)`, `clear_sso_state_cookie(response, policy)` (Max-Age 0, same path).
+**apps/api/src/va_api/auth/sessions.py** — `start_in(..., mfa_passed: bool = False)`; passes `mfa_passed` and
+  `mfa_passed_at=now if mfa_passed else None` to the repo. **packages/va_db/src/va_db/repositories/identity.py** —
+  `create_session(..., mfa_passed_at: datetime | None = None)` sets the column.
+**apps/api/src/va_api/auth/session_auth.py** — `sso_states_of(request) -> SsoStateStore` accessor (+ `__all__`).
+**apps/api/src/va_api/container.py** + `apps/api/tests/support/session_helpers.py::SessionContainer` — field
+  `sso_states: SsoStateStore` built from the container's redis (SessionContainer in `__post_init__`).
+**apps/api/src/va_api/routers/auth.py** — rename `_revoke_presented` → `revoke_presented`, `_set_session_cookies` →
+  `set_session_cookies` (public, in `__all__`), update callers. `login`: after `throttle.check`, `await
+  _check_sso_enforced(request, body.email)` (system session `for_domain`, only when `oidc_enabled`), raising
+  `SSO_REQUIRED` with `details={"sso_url": sso_start_url(settings, email)}`; `SSO_REQUIRED_MESSAGE` constant.
+  Put `sso_start_url(settings, email) -> str` and `email_domain(email) -> str | None` in `routers/auth_sso.py`? No —
+  avoid an import cycle: put both in **apps/api/src/va_api/auth/sso_urls.py** (new, tiny): `CALLBACK_PATH`,
+  `START_PATH`, `email_domain(email)` (reuses the `_DOMAIN` regex — move `_DOMAIN`/a `is_dns_domain(value)` helper
+  from `routers/org_sso_schemas.py` into this module and import it there), `sso_start_url(settings, email)`,
+  `callback_url(settings)`, `login_error_url(settings, reason)`, `dashboard_home_url(settings)`.
+**apps/api/src/va_api/routers/auth_sso.py** (new; attaches to `internal_auth_router`, side-effect import in
+  `va_api/main.py` like `auth_password`/`auth_mfa`):
+  - `class SsoFailure(Exception)` with `reason`; `REASONS` frozenset of the 11 reasons (tests assert each is reachable
+    or at least in the decision list).
+  - `GET /sso/start` (`operation_id="auth_sso_start"`, `openapi_extra=PUBLIC_MARKER`, query `email: str = ""`) →
+    `RedirectResponse(status_code=302)`; `GET /sso/callback` (`auth_sso_callback`, query `state`, `code`, `error`
+    optional strings). Each route: `try: ... except SsoFailure as exc: log + redirect to login_error_url`; callback
+    clears `va_sso` on both paths.
+  - Private helpers (radon ≤ B each): `_ensure_enabled`, `_connection_for(request, email)`, `_metadata(request, issuer)`
+    (DiscoveryError → `provider_unavailable`), `_authorize_url(...)` (`async with AsyncOAuth2Client(client_id=...,
+    scope="openid email profile", redirect_uri=..., code_challenge_method="S256") as oauth`), `_take_state(request,
+    state)`, `_exchange(request, connection, record, code) -> str` (id_token; `check_url(token_endpoint)`; `async with
+    AsyncOAuth2Client(client_id, client_secret, redirect_uri, timeout=5.0, follow_redirects=False)`; catch
+    `OAuthError`, `OAuth2Error`, `httpx.HTTPError`, `ValueError` → `provider_error`), `_claims(...)` (fetch_json(jwks)
+    → `provider_unavailable`; IdTokenError → `invalid_token`, log `detail=exc.reason`), `_check_email(claims,
+    connection)`, `_provision(request, connection, claims, ip) -> tuple[str, ActiveSession, bool, bool]` (one
+    tenant_session; AppError CONFLICT from a concurrent create → `provider_unavailable`).
+  - Reuse `decrypt_client_secret` from `routers/org_sso.py`; `revoke_presented`/`set_session_cookies` from
+    `routers/auth.py`.
+**specs/04 §5, specs/03 §11** — decisions above. **AGENTS.md** — SSO flow, `va_sso` cookie, `fake_oidc` test helper,
+  "never import authlib.jose (use joserfc)". `openapi/internal.json` regenerated (`make openapi`; the two new internal
+  operations appear there; `openapi.json` unchanged) and check `test_openapi.py` internal operation lists.
+
+### Tests
+**apps/api/tests/support/fake_oidc.py** (new): module-level RSA key generated once (`joserfc.jwk.RSAKey.generate_key(2048,
+  parameters={"kid": "test-key"})`, plus a second "other" key for bad-signature); `new_domain()`, `discovery_document(issuer)`
+  moved here from test_org_sso_integration.py; `@dataclass class FakeOidcProvider(issuer, client_id, client_secret)`:
+  `install(router: respx.MockRouter)` registers discovery, `/jwks`, `/token` routes; the token route checks Basic auth,
+  `grant_type`, `code` and that `sha256(code_verifier)` matches the `code_challenge` captured from the authorization URL,
+  and answers `{"access_token", "token_type": "Bearer", "id_token": provider.next_id_token}`; `id_token(*, nonce, now,
+  key=None, alg="RS256", **claim_overrides) -> str` (defaults iss/aud/sub/email/email_verified/iat/exp=now+300).
+  Helpers `start_sso(client, email) -> (response, query_params)` and `callback(client, state, code="code-1", **extra)`.
+**apps/api/tests/test_oidc_tokens.py** (no DB): valid token → claims; wrong signature key; unknown kid; `alg` HS256 and
+  `none` refused; wrong iss (incl. trailing-slash variant); wrong aud; aud list without azp; aud list with azp; expired
+  (exp < now − 60); exp within skew accepted; iat in future; missing exp/iat; bad nonce; missing email;
+  `email_verified` "true"/"false"/absent/invalid; malformed JWKS.
+**apps/api/tests/test_sso_state.py** (fakeredis): put/take round trip; take twice → None; TTL 600; NX collision →
+  SsoStateUnavailable; disconnected server (mem-1793264176-ecbf) → SsoStateUnavailable on put and take; malformed → None.
+**apps/api/tests/test_oidc_discovery.py** — add `fetch_json`/`check_url` cases (insecure url, private address, non-object).
+**apps/api/tests/test_sso_login_integration.py** (client fixture, `oidc_enabled=True`, respx `FakeOidcProvider`;
+  connection created through `PUT /v1/org/sso` by a signed-in owner, then a fresh client for the SSO user):
+  - start: 302 to the IdP authorize URL with `response_type=code`, `scope`, `state`, `nonce`, S256 `code_challenge`,
+    `login_hint`, `redirect_uri`; `va_sso` cookie set with path/HttpOnly; Redis key `sso:state:{state}` TTL ≤ 600.
+  - start failures → 302 `/login?sso_error=`: `disabled`, `invalid_email` (parametrize "", "nope", "a@b"),
+    `not_configured`, `provider_unavailable` (discovery 500).
+  - callback happy path, new user: 302 to dashboard `/`, session cookie works on `GET /internal/auth/session` with
+    `mfa_passed: true`, membership role = connection `default_role`, user has no password and `email_verified`.
+  - existing user without membership → membership with default_role; existing member keeps role (owner stays owner);
+    existing unverified user becomes verified; disabled user → `account_disabled`.
+  - user with MFA enabled lands with `mfa_passed: true` and passes the gate.
+  - bad state (unknown), reused state (second callback with the same state/cookie), missing/mismatched `va_sso` cookie,
+    IdP `error=access_denied`, missing code, token endpoint 400 → `provider_error`; bad nonce, wrong issuer, wrong
+    audience, expired token, bad signature → `invalid_token`; `email_verified: false` → `email_not_verified`; missing
+    claim with matching domain → success; email outside allowed_domains → `email_domain_mismatch`; connection deleted
+    between start and callback → `not_configured`. Assert no session cookie and no user row in failures.
+  - `va_sso` cleared (Max-Age=0) on success and failure; fixation: a presented `va_session` is revoked.
+  - enforce: `enforce=true` → password login of a domain user → 403 `SSO_REQUIRED` with `details.sso_url` ending in
+    `/internal/auth/sso/start?email=...`, failure counter untouched; `enforce=false` → normal login; `OIDC_ENABLED=false`
+    with an enforced connection row → normal login; an org API key still authenticates on a scoped route
+    (`probe_read`/existing helper) while enforce is on.
+  Keep the file < ~400 lines; split enforce tests into `test_sso_enforce_integration.py` if needed. Reuse conftest
+  fixtures (`container`, `client`, `identity`), `session_helpers.error_of`, `make_member`, `signup`/`login`.
+**apps/api/tests/test_session_lifetime.py / identity repo tests** — `start_in(mfa_passed=True)` sets `mfa_passed_at`.
+**apps/api/tests/test_org_sso_integration.py** — import moved helpers from `fake_oidc`.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make test-ts` (internal schema types if generated from internal.json);
+`make openapi` + `uv run python scripts/check_openapi_drift.py`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) + average;
+pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`; `uv run pre-commit run gitleaks --all-files`. build.done as a
+PLAIN STRING with numeric complexity (mem-1793269824-fe85).
+
+### Risks
+- `authlib.jose` import anywhere (incl. transitively via `authlib.integrations.starlette_client`) warns → tests error.
+  Use only `authlib.integrations.httpx_client` and joserfc.
+- respx must intercept authlib's own `AsyncOAuth2Client` (it is an `httpx.AsyncClient`; respx patches httpcore, so OK)
+  — create it inside the request, never at import.
+- RSA key generation is slow: generate once per test session in `fake_oidc` (module global), not per test.
+- RedirectResponse: set cookies on the returned response object, not an injected `Response` param.
+- Pool size 1 per role: system-session lookup, tenant reads, and the JIT transaction never overlap; the code exchange
+  and JWKS fetch happen with no DB session open.
+- fakeredis `GETDEL` support (Redis ≥ 6.2): if missing, use a `MULTI` of GET + DEL.
+- Login CSRF/fixation: callback must clear `va_sso` and revoke a presented session before setting new cookies.
+
+## 2026-10-29 Builder: P02-T07b build notes
+- **Deviation from plan (recorded in specs/04 §5 decision item 2):** `authlib.integrations.httpx_client` emits
+  `AuthlibDeprecationWarning` ("httpx module is deprecated; please use httpx2") on import → error under
+  `filterwarnings=error`. Used authlib's RFC 6749/7636 primitives (`prepare_grant_uri`, `create_s256_code_challenge`,
+  `prepare_token_request`, `ClientAuth("client_secret_basic")`) in new `va_api/auth/oidc_client.py`; the token POST
+  goes through `OidcDiscovery.post_form` (same guards as discovery). mypy override `authlib.*`
+  ignore_missing_imports (authlib has no py.typed).
+- `OidcDiscovery`: `_download` → `_send(method, url, body, headers)`; new `check_url`, `fetch_json`, `post_form`,
+  reason `INSECURE_URL = "insecure url"`; `fetch` reasons unchanged (existing tests untouched and green).
+- New: `auth/oidc_tokens.py` (joserfc), `auth/sso_state.py` (`SsoStateStore`, `SsoStateUnavailableError` - ruff N818
+  wants the Error suffix), `auth/sso_urls.py` (`is_dns_domain` moved from org_sso_schemas), `routers/auth_sso.py`
+  (`SsoLoginError` instead of plan's `SsoFailure`, same N818 reason; `REASONS` 10 reasons).
+- `routers/auth.py`: `revoke_presented`/`set_session_cookies` public; `_check_sso_enforced` after throttle check.
+- `SessionManager.start_in(mfa_passed=)`, `IdentityRepo.create_session(mfa_passed_at=)`; container +
+  SessionContainer `sso_states`.
+- OpenAPI: two 302-only internal operations; `test_openapi` shared check accepts `REDIRECT_OPERATIONS` (302, no
+  body, no 2xx). `openapi/internal.json` regenerated; TS schema gen unchanged (built from openapi.json only).
+- Tests: support `fake_oidc.py` (provider + `configure_sso` + `sso_login`), `test_oidc_tokens.py` (32),
+  `test_sso_state.py` (21: store, URLs, authlib requests), discovery +2, `test_sso_login_integration.py` (20),
+  `test_sso_enforce_integration.py` (4). `test_org_sso_integration.py` imports moved helpers.
+- Gates: make fmt/lint/typecheck/placeholders pass; make test 2579 passed (99.05% cov) before a test-only jscpd
+  refactor (fake_oidc `mocked_idp`/`sso_app`), after which ruff/mypy pass, jscpd 0 clones, and the 3 SSO
+  integration modules re-run green (47 passed). radon no C+ (avg 1.95); spec refs 0; openapi drift current;
+  pip-audit + pnpm audit clean; gitleaks passed. No TS changes (schema gen output unchanged).
+
+## 2026-10-29 Planner: P02-T07b build.blocked (payload format only) → re-plan same task
+Cause, from the events log: the T07b build.done payload wrote `tests pass`, `lint pass`, `audit pass`, `cov 99.05%`,
+`jscpd 0 clones` (no `key: value` colons, no `coverage:`/`duplication:`/`specs:` keys). Every accepted build.done uses
+the exact `key: pass` form (e.g. P02-T07a). The build notes above show all gates green; no code or design problem.
+The "abandoned" event is the 3-in-a-row block counter for the format issue (T06b twice + this), not a design blocker.
+Plan P02-T07b is unchanged; do not split.
+Builder, this activation: do not redesign. Re-run the gates on the current tree (`make fmt lint typecheck placeholders
+test`, `make openapi` + `uv run python scripts/check_openapi_drift.py`, `uv run python scripts/check_spec_refs.py`,
+`npx jscpd@4`, radon, pip-audit per mem-1793267153-9b68, `corepack pnpm audit`, gitleaks), fix anything red, compute
+`uvx radon cc -s -a packages/va_common/src packages/va_db/src apps/api/src | tail -1`, and emit a PLAIN STRING exactly
+in this shape (no extra prose before the keys; put the authlib deviation note at the very end if at all):
+`ralph emit "build.done" "P02-T07b tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+## 2026-10-29 Builder: P02-T07b gate re-run (no code changes)
+make fmt/lint/typecheck/placeholders exit 0; make test 2579 passed, coverage 99.05%; openapi drift current (both
+docs); spec refs 0; jscpd 0 clones; radon no C+ (avg 1.95); pip-audit + pnpm audit clean; gitleaks passed.
+
+## Review P02-T07b (2026-10-29): approved
+Re-ran make lint/typecheck/placeholders (exit 0), make test 2579 passed 99.05%, openapi drift current, spec refs 0,
+jscpd 0 clones, radon no C+. Diff checked against specs/04 §5 decision (reasons, state/cookie, ID-token checks, email
+rule, JIT, enforcement), specs/31 SSO_REQUIRED 403, specs/03 §11 `sso:state:{state}`. No findings.
