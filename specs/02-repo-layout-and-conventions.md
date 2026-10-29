@@ -132,7 +132,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `make setup` | `uv sync --all-packages`, `pnpm install`, `scripts/fetch_models.sh`, `python scripts/generate_audio_assets.py` |
 | `make up` / `make down` | `docker compose up -d` infra (+ `--profile apps` to also run services) / down |
 | `make migrate` | `uv run alembic -c packages/va_db/alembic.ini upgrade head` |
-| `make seed` | `uv run python scripts/seed_dev.py` |
+| `make seed` | `uv run python scripts/seed_dev.py` (`make seed ARGS=--json` passes options through) |
 | `make fmt` | `uv run ruff format . && pnpm -r format` |
 | `make lint` | `uv run ruff check . && uv run ruff format --check . && pnpm -r lint` |
 | `make typecheck` | `uv run mypy` (strict, configured in root `pyproject.toml` for all packages) `&& pnpm -r typecheck` |
@@ -154,6 +154,26 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 > Decision (2026-10-25): `make setup` runs the preflight as `check_toolchain.py --search-path "$$PATH"`: `uv run
 > --python 3.12` prepends the interpreter's directory to PATH, which can shadow the shell's node/pnpm/uv/docker, so the
 > preflight resolves tools against the caller's PATH instead.
+>
+> Decision (2026-10-29): Dev seed (P02-T14). `make seed` runs `scripts/seed_dev.py $(ARGS)`; the logic is
+> `va_api.dev_seed`. (a) Scope now: one dev org, its owner, starting credit, and API keys; voices and the sample
+> pathway are added to the seed by the phases that own those tables, and `PLATFORM_POOL_ORG_ID` by specs/16's phase.
+> (b) It exits 2 with "seed_dev.py only runs with VA_ENV=local or test." for any other `VA_ENV` (it prints secrets).
+> (c) The owner is `dev@voiceagents.test` (`--email` overrides; validated without deliverability checks; the reserved `.test` domain because
+> `email_validator` rejects the special-use `.local`), the org is
+> named `VoiceAgents Dev` on plan `build`, `kyc_level` 0, sparse settings `{}`. The existing seed is the org with that
+> name in which the user is `owner`; a user without one gets a new org with that user as owner. (d) A created owner
+> gets a generated 24-character password (argon2id, email verified); the password is printed only when the user is
+> created or `--reset-password` is given, otherwise it is `null` / "unchanged". (e) Credit: one `grant` ledger row of
+> $50 (`reference_type` `manual`, idempotency key `seed:dev-credits`) under the org row lock, never added twice.
+> (f) Keys roll on every run: the org's active keys named `dev-seed live` / `dev-seed test` are revoked
+> (`api_key.revoke` audit rows) and one new all-scope (`["*"]`) key per environment is minted (`api_key.create`
+> rows, actor `system`, `created_by` = owner, no expiry), in one transaction; afterwards the revoked prefixes'
+> `apikey:` cache entries are dropped (a Redis failure is a stderr warning: the entries expire within 60 s). Raw keys
+> are never stored, so rolling is the only way a re-run prints working keys. (g) Output: text by default; `--json`
+> prints exactly one object `{"created", "org": {"id", "name", "slug", "plan_id", "credits_balance_micros"},
+> "owner": {"id", "email", "password"}, "api_keys": {"live": {"id", "prefix", "key"}, "test": {…}}}` on stdout (the Makefile
+> recipe is `@`-prefixed so make does not echo it); logs and warnings go to stderr. Exit 1 on invalid settings or a seed failure.
 
 ## 4. Python conventions
 

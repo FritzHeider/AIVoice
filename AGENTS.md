@@ -12,7 +12,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Start infra + simulators | `make up` (apps too: `make up PROFILE=apps`) |
 | Stop | `make down` |
 | Migrate DB | `make migrate` (SQL only: `uv run alembic -c packages/va_db/alembic.ini upgrade head --sql`; back out: `... downgrade base`) |
-| Seed dev data | `make seed` (prints dev API key `va_test_…` and dashboard login) |
+| Seed dev data | `make seed` (prints dev keys `va_live_…`/`va_test_…`, dashboard login, a curl line; `make seed ARGS="--json"`, `--email`, `--reset-password`; needs `make up && make migrate`) |
 | Format | `make fmt` |
 | All gates | `make check` |
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
@@ -631,3 +631,7 @@ Grafana 3001
   → write with `keepttl=True`; `WatchError` means another change won. Tests: `link_token(outbox, email,
   "agent_key_request")`; `make_member` users are **unverified** (set `users.email_verified_at` when a flow needs it);
   an unhandled exception inside a route answers 500 through the app handler (assert the status, not a raise).
+- 2026-10-29 (P02-T14): re-running `make seed` rolls the two `dev-seed` keys (old ones revoked) because raw keys are never
+  stored; the owner password is printed only on first creation or with `ARGS=--reset-password`. Credit is granted once
+  (`va_db.repositories.grant_credits`, idempotency key `seed:dev-credits`). The seed refuses any `VA_ENV` other than
+  local/test. Manual smoke: `make seed` then `curl -H "Authorization: <test key>" localhost:8000/v1/me`.

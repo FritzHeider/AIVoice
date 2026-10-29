@@ -3,9 +3,10 @@
 :class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4) with :class:`MfaRepo` (MFA
 enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OIDC connection; specs/04 §5),
 :class:`InvitationRepo` (an org's invitations; specs/04 §6), :class:`CreditTransferRepo` (parent and
-sub-account credit moves; specs/04 §8.4), the envelope's :class:`OrgDataKeyStore` (specs/28
-§3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1), the tenant :class:`ApiKeyRepo`, the
-tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), and the system-scope ones.
+sub-account credit moves; specs/04 §8.4) and :func:`grant_credits` (manual grants), the envelope's
+:class:`OrgDataKeyStore` (specs/28 §3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1),
+the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), and
+the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -29,9 +30,11 @@ from va_db.repositories.billing_reconcile import BalanceDrift, BillingReconcileR
 from va_db.repositories.credits import (
     DUPLICATE_TRANSFER_MESSAGE,
     INSUFFICIENT_TRANSFER_MESSAGE,
+    MANUAL_REFERENCE,
     SUB_ACCOUNT_REFERENCE,
     CreditTransfer,
     CreditTransferRepo,
+    grant_credits,
 )
 from va_db.repositories.data_keys import OrgDataKeyRepo, OrgDataKeyStore
 from va_db.repositories.idempotency import (
@@ -87,6 +90,7 @@ __all__ = [
     "INVITATION_TTL",
     "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
+    "MANUAL_REFERENCE",
     "NOT_OWNER_MESSAGE",
     "PARENT_ACCESS_ROLES",
     "PASSWORD_RESET_TTL",
@@ -139,6 +143,7 @@ __all__ = [
     "TelnyxEventRepo",
     "TenantRepository",
     "conflict_savepoint",
+    "grant_credits",
     "is_unique_violation",
     "require_positive",
     "resolve_existing",

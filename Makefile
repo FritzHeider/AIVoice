@@ -29,7 +29,7 @@ migrate: ## Apply database migrations
 	uv run alembic -c packages/va_db/alembic.ini upgrade head
 
 seed: ## Seed development data
-	uv run python scripts/seed_dev.py
+	@uv run python scripts/seed_dev.py $(ARGS)
 
 fmt: ## Format Python and TypeScript
 	uv run ruff format .

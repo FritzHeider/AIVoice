@@ -4832,3 +4832,146 @@ A (2.75).
   keys), approve CAS + claim hand-back, test env / agent:<name> / 30 d / audit api_key.create with after.agent_name.
 - Accepted residual (documented in build notes d): a Redis failure after the key commit leaves the request in
   `approving` (polls read pending until the 24 h TTL) and an undelivered key that expires in 30 d.
+
+## 2026-10-29 Planner: P02-T13 approved → next P02-T14 (deps P02-T10, P01-T11 ticked)
+
+## Plan P02-T14 — Dev seed script (specs/02 layout `scripts/seed_dev.py`, `make seed`; specs/04 §4.1 provisioning Decision; specs/24 §2 plans)
+
+### Facts found while planning
+- `make seed` already runs `uv run python scripts/seed_dev.py` (Makefile:31); the file does not exist. AGENTS.md:15 already
+  promises "prints dev API key `va_test_…` and dashboard login".
+- `va_db.provisioning.OrgProvisioner.provision(name=, owner=NewUser(...), plan_id="build")` creates the org, data key,
+  webhook secret, user, and owner membership atomically. `settings` is stored sparse `{}` (= every default).
+- Keys: `va_api.auth.api_keys.mint_api_key(hasher, env)` → MintedKey; `ApiKeyRepo(session, org).add/revoke/list_keys`;
+  cache drop: `va_api.auth.invalidate_api_key_cache(redis, prefix)`.
+- Credits: `credit_ledger` UNIQUE(org_id, idempotency_key); the grant pattern lives in tests/support/session_helpers.fund
+  (lock org row, bump `credits_balance_micros`, ledger `grant` row, `reference_type="manual"`).
+- Users: `IdentityRepo.get_user_by_email`, `set_password_hash`; org lookup via `MembershipLookupRepo(system).for_user`.
+- Settings/infra: `ApiSettings()` (DB, Redis, pepper, KMS); `settings.api_key_hasher()`; `open_kms_provider(settings)`;
+  `Envelope(kms, OrgDataKeyStore(database))`; `Database.from_settings(settings)`; `PasswordHasher()` (build via
+  `asyncio.to_thread`, its ctor computes a dummy hash).
+- Audit: `va_db.audit.record(session, AuditActor(org_id, "system", None), "api_key.create"|"api_key.revoke", "api_key", id,
+  after=/before=)`; actor types include `system`.
+- Tests: `apps/api/tests/conftest.py` `identity` fixture (fresh migrated DB per module, local-KMS Envelope); `scripts`
+  is on pytest pythonpath and mypy_path, so tests can `import seed_dev`.
+
+### Decisions to record (specs/02, next to the `seed_dev.py` layout line, one `> Decision (2026-10-29):` block "Dev seed
+(P02-T14)"; AGENTS.md row 15 + gotcha)
+1. **Scope now:** dev org + owner + credits + keys only. Voices and the sample pathway in the specs/02 layout comment are
+   added by the phases that own those tables (the seed grows with them); `PLATFORM_POOL_ORG_ID` by specs/16's phase.
+2. **Refuses outside local/test:** `VA_ENV` not in {local, test} → exit 2 with "seed_dev.py only runs with VA_ENV=local
+   or test." (it prints secrets).
+3. **Identity of the seed:** owner email `dev@voiceagents.local` (`--email` override), org name `VoiceAgents Dev`
+   (constant `DEV_ORG_NAME`), plan `build`, kyc_level 0. Existing seed = the user with that email that holds an `owner`
+   membership in an org named `DEV_ORG_NAME`. User exists but no such org → provision the org with the existing user id
+   as owner. Emails validated with `email_validator.validate_email(check_deliverability=False, test_environment=True)`
+   (`.local` passes; mem-ea3a).
+4. **Password:** generated `secrets.token_urlsafe(18)` (24 chars), argon2id via PasswordHasher, `email_verified_at=now`;
+   printed only when the user is created, or when `--reset-password` is given (re-hash + `set_password_hash`); otherwise
+   `password: null` and the text output says "unchanged (use --reset-password)".
+5. **Credits:** one `grant` ledger row of $50 (50_000_000 micros) with `idempotency_key="seed:dev-credits"`,
+   `reference_type="manual"`, description "Dev seed credits", balance bumped under the org row lock — inserted only
+   when that key is absent, so a re-run never adds credits.
+6. **Keys (roll on every run):** scopes `["*"]`, names `dev-seed live` / `dev-seed test`, `created_by` = owner,
+   no expiry. Each run revokes the org's non-revoked keys with exactly those names (+ audit `api_key.revoke`,
+   `before`/`after` key view with revoked_at) and mints one new key per environment (+ audit `api_key.create`), all in
+   one `tenant_session(org_id)` transaction; after commit, the revoked prefixes are dropped from the `apikey:` cache
+   (Redis failure → warning on stderr, not fatal; the cache TTL is 60 s). Result: exactly one active key per
+   environment and the printed keys always work. Raw keys are never stored, so re-printing old ones is impossible —
+   rolling is the only way a re-run can print working keys.
+7. **Output:** default human text (org id, slug, plan, credits, owner email, password line, both keys, curl hint
+   `curl -H "Authorization: <test key>" localhost:8000/v1/me`); `--json` prints exactly one JSON object on stdout:
+   `{"created": bool, "org": {"id", "name", "slug", "plan_id", "credits_balance_micros"}, "owner": {"id", "email",
+   "password": str|null}, "api_keys": {"live": {"id","prefix","key"}, "test": {...}}}`. Logs go to stderr.
+
+### Files
+- **apps/api/src/va_api/dev_seed.py** (new; logic importable and testable, the script is a thin CLI):
+  constants `DEV_EMAIL`, `DEV_ORG_NAME`, `DEV_PLAN_ID = "build"`, `DEV_CREDITS_MICROS = 50_000_000`,
+  `CREDITS_IDEMPOTENCY_KEY = "seed:dev-credits"`, `KEY_NAMES: Mapping[KeyEnvironment, str]`, `SEED_ENVIRONMENTS`;
+  `@dataclass(frozen) SeededKey(id, prefix, key=field(repr=False))`; `@dataclass(frozen) SeedResult(created, org_id,
+  org_name, slug, plan_id, credits_balance_micros, owner_id, owner_email, password (repr=False) | None, keys:
+  dict[env, SeededKey], revoked_prefixes: list[str])` + `to_json() -> dict`;
+  `class DevSeeder(database, provisioner, api_key_hasher, password_hasher, clock)` with
+  `async def seed(*, email: str = DEV_EMAIL, reset_password: bool = False) -> SeedResult` and private steps
+  `_owner_and_org` (lookup/create; never nest sessions: system/global lookups first, then provision, then
+  `tenant_session`), `_grant_credits(session, org_id)`, `_roll_keys(session, org_id, owner_id)`;
+  `async def drop_cached_prefixes(redis, prefixes) -> list[str]` (returns failures for the warning);
+  `def render_text(result) -> str`; `def check_seed_environment(env: Environment) -> None` (raises `SeedRefused`).
+  Credit logic: reuse/extract nothing from tests (test helper stays); if a jscpd clone with session_helpers.fund appears,
+  make session_helpers.fund call a new `va_db.repositories.credits.grant_credits(session, org_id, micros, *,
+  idempotency_key, description) -> bool` and use it from both (preferred: add `grant_credits` to va_db credits repo
+  up front, returning False when the key exists, and switch `fund` to it).
+- **scripts/seed_dev.py** (new): argparse `--json`, `--email`, `--reset-password`; `main(argv) -> int` builds
+  ApiSettings, checks env, opens KMS/Database/Redis (dispose all in an AsyncExitStack), runs DevSeeder, drops cache,
+  prints; `if __name__ == "__main__": raise SystemExit(main())`. `AppError` → stderr message, exit 1.
+- **packages/va_db/src/va_db/repositories/credits.py**: `grant_credits` (above), exported from repositories `__init__`.
+- **apps/api/tests/support/session_helpers.py**: `fund` uses `grant_credits`.
+- **specs/02** Decision block; **AGENTS.md**: row 15 text (`make seed` / `make seed ARGS=--json` if Makefile passes
+  `$(ARGS)`; add `$(ARGS)` to the seed target), gotcha "re-running rolls the dev-seed keys".
+
+### Tests
+- **packages/va_db/tests/test_credits_grant.py** (or existing credits test module): grant writes ledger + balance;
+  same idempotency key twice → second returns False, balance unchanged.
+- **apps/api/tests/test_dev_seed.py** (`identity` fixture, FrozenClock, fakeredis):
+  - first run: created True; org plan `build`, name, credits 50_000_000 with one `grant` ledger row; owner membership
+    role owner; user email verified; password verifies with PasswordHasher; settings `{}`; two keys env live/test,
+    scopes `["*"]`, created_by owner; both plaintexts authenticate (hasher.verify against stored hash / prefix match);
+    audit rows `api_key.create` ×2 actor_type system.
+  - second run: created False, password None; `row_counts` orgs/users/memberships/data_keys unchanged; ledger still one
+    row, balance unchanged; old keys revoked, exactly one active key per env, new prefixes differ; audit
+    `api_key.revoke` ×2; `revoked_prefixes` = the first run's prefixes.
+  - `--reset-password` path: new password verifies, old does not.
+  - existing user without the dev org → org provisioned with that user as owner, created True, password None.
+  - `drop_cached_prefixes` deletes `apikey:{prefix}` entries; broken Redis (`FakeServer(connected=False)`) returns
+    failures without raising.
+  - `to_json` shape exact keys; `render_text` contains both keys and the curl line; `SeedResult` repr hides secrets.
+  - `check_seed_environment(PRODUCTION/STAGING)` raises; local/test pass.
+- **scripts/tests/test_seed_dev.py**: `main(["--json"])` with monkeypatched seeding entry (inject a fake runner via a
+  module-level `run_seed` coroutine function patched in the test) → stdout is one parseable JSON object, exit 0;
+  `VA_ENV=production` → exit 2 and message on stderr, nothing on stdout; AppError → exit 1. Keep main's I/O wiring
+  covered without Postgres; the real DB path is covered by apps/api/tests/test_dev_seed.py (also add one end-to-end
+  `main` run against the `identity` DB if the settings can point at `migrated_url` — optional, only if cheap).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make test-ts` (unchanged), `uv run python scripts/check_spec_refs.py`,
+`npx jscpd@4` 0 clones, radon `-n C` none in changed src. Manual: `make up && make migrate && make seed` twice, then
+`curl -H "Authorization: <test key>" localhost:8000/v1/me` returns the org (record the output in build notes; if the
+stack cannot be started, say so explicitly instead of claiming it). build.done PLAIN STRING.
+
+### Risks
+- Pool size 1 per role: do lookups (system/global) and provisioning sequentially; never open a tenant session inside
+  another session.
+- `check_no_placeholders` flags `example.com` in production docstrings (mem-920d); use `voiceagents.local`.
+- Printing secrets: only stdout, never through structlog; repr of dataclasses hides key/password.
+- Ledger + balance must be written under `SELECT … FOR UPDATE` on the org row (tenant session can lock its own org).
+
+## 2026-10-29 Builder: P02-T14 build notes
+- New: `va_api/dev_seed.py` (DevSeeder, SeedResult/SeededKey with secrets hidden from repr, render_text,
+  check_seed_environment/SeedRefusedError), `scripts/seed_dev.py` (argparse `--json/--email/--reset-password`,
+  `run_seed` opens KMS/Database/Redis, logs to stderr), `va_db.repositories.grant_credits` + `MANUAL_REFERENCE`
+  (session_helpers.fund now uses it), `va_api.auth.api_keys.drop_cached_keys(redis, prefixes) -> failed`
+  (invalidate_cached_keys delegates to it). Makefile seed recipe `@uv run python scripts/seed_dev.py $(ARGS)`.
+- Deviations from plan: (a) default owner email is `dev@voiceagents.test`, not `.local`: email_validator rejects the
+  special-use `.local` even with test_environment=True (found by the manual smoke; memory mem-ea3a was wrong on this).
+  Login accepts plain str, so `.test` logs in. (b) `SeedRefused` renamed `SeedRefusedError` (ruff N818). (c) main checks
+  VA_ENV via BaseServiceSettings before building ApiSettings (ApiSettings refuses local KMS in production, which would
+  otherwise mask the refusal); ValidationError → exit 1. (d) Seed recipe is `@`-prefixed: make echoed the command into
+  stdout and broke `--json`.
+- Tests: apps/api/tests/test_dev_seed.py (16, incl. /v1/me through the app with the seeded keys, revoked keys 401,
+  run_seed end-to-end on its own engines with unreachable Redis reported), scripts/tests/test_seed_dev.py (8),
+  packages/va_db/tests/test_credit_grant_integration.py (3).
+- Manual smoke (real stack, `make up && make migrate`): `make seed` → created, $50.00, both keys; `make seed
+  ARGS=--json` → created false, same org 01a188a5-…, password null, credits 50000000. api on host port 8010 (8000 is
+  held by an unrelated `python3 -m http.server -d site 8000`, left alone): test key and live key `/v1/me` → 200,
+  principal api_key, org VoiceAgents Dev, scopes ["*"]; first-run (revoked) test key → 401 AUTH_FAILURE.
+- Gates: fmt/lint/typecheck pass, placeholders 0, check_spec_refs 0, jscpd 0 clones, radon -n C none (avg A 2.33),
+  pip-audit + pnpm audit no known vulnerabilities. TS unchanged (test-ts not run). make test 3423 passed, 97.72%
+  (logs/p02-t14-test.log).
+
+## Review P02-T14 (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass, 0 findings), make test 3423 passed 97.72% (logs/p02-t14-review-test.log).
+- Checked against the specs/02 Dev seed Decision block: env refusal (exit 2), owner/org identity, password only on create/reset,
+  one-time $50 grant under org row lock, key rolling with revoke/create audit rows matching the api_keys route, JSON shape,
+  stderr logging, secrets hidden from repr.
+- Non-blocking notes: text output says "previous dev-seed keys were revoked" even on a first run; DB connection errors in
+  main surface as a traceback (still exit 1).

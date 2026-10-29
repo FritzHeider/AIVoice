@@ -1,4 +1,4 @@
-"""Credit transfers between a parent org and its sub-account (specs/04 §8.4; specs/24 §9).
+"""Credit transfers between a parent org and its sub-account (specs/04 §8.4; specs/24 §9); manual grants.
 
 A transfer runs inside the caller's ``va_app`` transaction (a ``tenant_session`` of either org). Both org rows
 are locked ``FOR UPDATE`` in id order, so two transfers touching the same pair never deadlock and a concurrent
@@ -6,6 +6,9 @@ debit of the sender waits for this one. The sender may give away its balance min
 ``credit_limit_micros`` is borrowed credit and cannot be transferred. Each ``credit_ledger`` row is written
 with ``app.org_id`` switched to its own org (:func:`va_db.session.use_org`), so row-level security checks both
 rows and no ``va_system`` session is needed.
+
+:func:`grant_credits` adds a ``grant`` ledger row (``reference_type="manual"``) once per idempotency key,
+under the org row lock; the dev seed (specs/02 ``scripts/seed_dev.py``) grants its starting credit this way.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.errors import AppError
@@ -26,14 +29,17 @@ from va_db.session import use_org
 __all__ = [
     "DUPLICATE_TRANSFER_MESSAGE",
     "INSUFFICIENT_TRANSFER_MESSAGE",
+    "MANUAL_REFERENCE",
     "SUB_ACCOUNT_REFERENCE",
     "CreditTransfer",
     "CreditTransferRepo",
+    "grant_credits",
 ]
 
 INSUFFICIENT_TRANSFER_MESSAGE: Final = "Insufficient credits for this transfer."
 DUPLICATE_TRANSFER_MESSAGE: Final = "This credit transfer was already recorded."
 SUB_ACCOUNT_REFERENCE: Final = "sub_account"
+MANUAL_REFERENCE: Final = "manual"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,3 +148,47 @@ class CreditTransferRepo:
                 self.session.add(entry)
             await self.session.refresh(entry)
         return entry
+
+
+async def grant_credits(
+    session: AsyncSession,
+    org_id: uuid.UUID,
+    amount_micros: int,
+    *,
+    idempotency_key: str,
+    description: str = "",
+) -> bool:
+    """Grant ``amount_micros`` to ``org_id``: a ``grant`` ledger row and the matching balance increase.
+
+    Runs in the caller's transaction (``tenant_session(org_id)`` or the system session). The org row is locked
+    ``FOR UPDATE`` first, so a concurrent grant with the same key waits and then sees this one. Returns
+    ``False`` without writing when the org already has a ledger row with ``idempotency_key``. ``NOT_FOUND``
+    when the org does not exist; ``ValueError`` for a non-positive amount.
+    """
+    require_positive("amount_micros", amount_micros)
+    statement = (
+        select(Org).where(Org.id == org_id).with_for_update().execution_options(populate_existing=True)
+    )
+    org = await session.scalar(statement)
+    if org is None:
+        raise AppError("NOT_FOUND", "Organization not found.")
+    recorded = await session.scalar(
+        select(exists().where(CreditLedger.org_id == org_id, CreditLedger.idempotency_key == idempotency_key))
+    )
+    if recorded:
+        return False
+    org.credits_balance_micros += amount_micros
+    session.add(
+        CreditLedger(
+            id=new_id(),
+            org_id=org_id,
+            entry_type="grant",
+            amount_micros=amount_micros,
+            balance_after_micros=org.credits_balance_micros,
+            reference_type=MANUAL_REFERENCE,
+            description=description,
+            idempotency_key=idempotency_key,
+        )
+    )
+    await session.flush()
+    return True

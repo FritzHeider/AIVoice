@@ -138,6 +138,10 @@
 
 ## Fixes
 
+### mem-1793294019-7281
+> email_validator.validate_email(check_deliverability=False, test_environment=True) accepts the reserved .test domain but REJECTS special-use .local (and dotless hosts); dev seed owner is dev@voiceagents.test. make recipes echo their command to stdout - prefix with @ when stdout must be machine-readable (make seed ARGS=--json)
+<!-- tags: api, tooling | created: 2026-10-29 -->
+
 ### mem-1793288415-240d
 > pip-audit on uv export fails installing workspace packages; use 'uv export --no-hashes --no-emit-workspace --format requirements-txt' then 'uvx pip-audit --no-deps --disable-pip -r file'
 <!-- tags: tooling | created: 2026-10-29 -->

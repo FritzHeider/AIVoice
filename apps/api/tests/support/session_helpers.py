@@ -56,7 +56,6 @@ from va_db.models import (
     AuditLog,
     CreditHold,
     CreditHoldStatus,
-    CreditLedger,
     MemberRole,
     Membership,
     Org,
@@ -65,7 +64,7 @@ from va_db.models import (
 )
 from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
-from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser
+from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
 
 __all__ = [
@@ -327,22 +326,13 @@ async def store_api_key(
 
 async def fund(container: SessionContainer, org_id: uuid.UUID, dollars: str) -> None:
     """Grant ``dollars`` of credit to ``org_id``: a ``grant`` ledger row and the matching balance."""
-    micros = dollars_to_micros(dollars)
     async with container.database.system_session() as session:
-        org = await session.get(Org, org_id, with_for_update=True)
-        assert org is not None
-        org.credits_balance_micros += micros
-        session.add(
-            CreditLedger(
-                id=new_id(),
-                org_id=org_id,
-                entry_type="grant",
-                amount_micros=micros,
-                balance_after_micros=org.credits_balance_micros,
-                reference_type="manual",
-                description="test grant",
-                idempotency_key=f"grant:{new_id()}",
-            )
+        await grant_credits(
+            session,
+            org_id,
+            dollars_to_micros(dollars),
+            idempotency_key=f"grant:{new_id()}",
+            description="test grant",
         )
 
 

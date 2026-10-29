@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Final
 
 from fastapi import Request
+from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +44,7 @@ __all__ = [
     "check_grantable",
     "check_manages",
     "creating_user_id",
+    "drop_cached_keys",
     "grantable_scopes",
     "invalidate_cached_keys",
     "mint_api_key",
@@ -156,11 +158,18 @@ def check_manages(ctx: RequestContext, key: ApiKey) -> None:
         raise AppError("FORBIDDEN", NOT_OWN_KEY_MESSAGE)
 
 
-async def invalidate_cached_keys(request: Request, prefixes: Iterable[str]) -> None:
-    """Drop the cached lookups of ``prefixes``; a Redis failure is logged, never raised."""
-    redis = redis_of(request)
+async def drop_cached_keys(redis: Redis, prefixes: Iterable[str]) -> list[str]:
+    """Drop the cached lookups of ``prefixes``; the prefixes Redis failed on (logged, never raised)."""
+    failed: list[str] = []
     for prefix in prefixes:
         try:
             await invalidate_api_key_cache(redis, prefix)
         except (RedisError, OSError) as exc:
             _log.warning("api_key_cache_unavailable", key_prefix=prefix, error=type(exc).__name__)
+            failed.append(prefix)
+    return failed
+
+
+async def invalidate_cached_keys(request: Request, prefixes: Iterable[str]) -> None:
+    """Drop the cached lookups of ``prefixes``; a Redis failure is logged, never raised."""
+    await drop_cached_keys(redis_of(request), prefixes)

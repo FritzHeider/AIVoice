@@ -186,7 +186,7 @@
   - Deliverables: `POST /v1/agent-onboarding/keys` flow (email verification, scoped test keys, limits)
   - Acceptance: tests for the full flow and abuse limits.
 
-- [ ] P02-T14 Dev seed script
+- [x] P02-T14 Dev seed script — make seed + --json/--email/--reset-password, idempotent org/owner/credit, rolled keys; 3423 passed 97.72%, lint/typecheck/placeholders pass; manual smoke /v1/me 200, revoked key 401
   - Spec refs: specs/02-repo-layout-and-conventions.md (`scripts/seed_dev.py`)
   - Depends on: P02-T10, P01-T11
   - Deliverables: idempotent seeding of a dev org (build plan, $50 credits), owner user (`dev@voiceagents.local` / generated password printed once), live+test API keys printed, default org settings
