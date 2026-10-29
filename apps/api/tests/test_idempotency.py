@@ -31,6 +31,7 @@ from va_api.idempotency import (
     is_storable_status,
     request_hash,
     validate_key,
+    withheld_body,
 )
 from va_api.main import CORS_EXPOSE_HEADERS
 from va_common.errors import AppError
@@ -126,6 +127,28 @@ async def test_replay_returns_identical_status_and_body(prefix: str) -> None:
     assert second.headers["content-type"] == "application/json"
     assert container.hits["status"] == 1
     assert _replays(app) == 1.0
+
+
+@pytest.mark.parametrize("prefix", PREFIXES)
+async def test_withheld_fields_are_never_stored_and_replay_as_null(prefix: str) -> None:
+    container = IdempotencyContainer()
+    headers = _auth(container, key="mint-1")
+    async with make_client(idempotency_app(container)) as client:
+        first = await client.post(f"{prefix}/secret", headers=headers)
+        second = await client.post(f"{prefix}/secret", headers=headers)
+    assert first.json() == {"n": 1, "secret": "shown-once-1", "data": {"key": "nested-1", "name": "kept"}}
+    assert second.headers[REPLAYED] == "true"
+    assert second.json() == {"n": 1, "secret": None, "data": {"key": None, "name": "kept"}}
+    (stored,) = container.idempotency.rows.values()
+    assert "shown-once" not in json.dumps(stored.response_body)
+    assert "nested-1" not in json.dumps(stored.response_body)
+    assert container.hits["secret"] == 1
+
+
+def test_withheld_body_ignores_absent_paths_and_non_objects() -> None:
+    assert withheld_body({"a": {"b": 1}}, ("a.c", "x.y", "a.b.c")) == {"a": {"b": 1}}
+    assert withheld_body([{"a": 1}], ("a",)) == [{"a": 1}]
+    assert withheld_body({"a": 1, "b": 2}, ("a",)) == {"a": None, "b": 2}
 
 
 @pytest.mark.parametrize("prefix", PREFIXES)

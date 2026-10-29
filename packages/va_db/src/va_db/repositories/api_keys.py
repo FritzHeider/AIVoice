@@ -17,7 +17,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_db.models import ApiKey, Org
+from va_common.ids import new_id
+from va_db.models import ApiKey, ApiKeyEnvironment, Org
 from va_db.repositories.base import SystemRepository
 
 __all__ = ["ApiKeyLookupRepo", "ApiKeyRecord", "ApiKeyRepo", "rate_per_sec_override"]
@@ -134,3 +135,36 @@ class ApiKeyRepo:
         """The org's key ``key_id`` (revoked or not), or ``None`` (also for another org's key)."""
         statement = select(ApiKey).where(ApiKey.org_id == self.org_id, ApiKey.id == key_id)
         return await self.session.scalar(statement)
+
+    async def add(  # noqa: PLR0913 - keyword-only key attributes
+        self,
+        *,
+        name: str,
+        prefix: str,
+        secret_hash: str,
+        pepper_version: int,
+        scopes: list[str],
+        environment: ApiKeyEnvironment,
+        created_by: uuid.UUID | None,
+    ) -> ApiKey:
+        """Insert a key of this org (only its hash is stored) and return the row with server defaults."""
+        key = ApiKey(
+            id=new_id(),
+            org_id=self.org_id,
+            name=name,
+            prefix=prefix,
+            secret_hash=secret_hash,
+            pepper_version=pepper_version,
+            scopes=scopes,
+            environment=environment,
+            created_by=created_by,
+        )
+        self.session.add(key)
+        await self.session.flush()
+        await self.session.refresh(key)
+        return key
+
+    async def prefixes(self) -> list[str]:
+        """The prefixes of every key of this org, revoked or not (for ``apikey:{prefix}`` invalidation)."""
+        statement = select(ApiKey.prefix).where(ApiKey.org_id == self.org_id).order_by(ApiKey.prefix)
+        return list((await self.session.scalars(statement)).all())

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from va_api.auth import rate_limit, require_scope
 from va_api.envelopes import envelope_router, legacy_router
+from va_api.idempotency import withhold_on_replay
 
 __all__ = ["IDEM_ENVELOPE_PREFIX", "IDEM_LEGACY_PREFIX", "IdempotencyContainer", "idempotency_app"]
 
@@ -82,6 +83,15 @@ def _idempotency_routes(router: APIRouter, family: str) -> APIRouter:
         container = _container(request)
         container.hits["send"] += 1
         return {"n": container.hits["send"]}
+
+    @router.post("/secret", operation_id=f"idem_{family}_secret", dependencies=write)
+    async def secret(request: Request) -> dict[str, object]:
+        withhold_on_replay(request, "secret")
+        withhold_on_replay(request, "data.key", "data.absent", "missing.key")
+        container = _container(request)
+        container.hits["secret"] += 1
+        n = container.hits["secret"]
+        return {"n": n, "secret": f"shown-once-{n}", "data": {"key": f"nested-{n}", "name": "kept"}}
 
     return router
 

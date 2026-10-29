@@ -99,6 +99,11 @@ class AuthContainer(FakeChecks):
         return self.store.authenticator(self.redis, self.clock)
 
     @property
+    def api_key_hasher(self) -> ApiKeyHasher:
+        """The hasher the authenticator verifies with (keys minted by routes use it too)."""
+        return self.store.hasher
+
+    @property
     def rate_limiter(self) -> RateLimiter:
         return RateLimiter(self.redis, self.clock)
 

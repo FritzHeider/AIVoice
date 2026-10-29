@@ -14,6 +14,7 @@ import uuid
 from typing import Final
 
 from fastapi import Request
+from redis.asyncio import Redis
 
 from va_api.auth.api_key_auth import ORG_SUSPENDED_MESSAGE, READ_METHODS
 from va_api.auth.context import RequestContext
@@ -28,7 +29,7 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.middleware import request_id_of
 from va_api.settings import ApiSettings
-from va_common.auth import PasswordHasher
+from va_common.auth import ApiKeyHasher, PasswordHasher
 from va_common.crypto import Envelope
 from va_common.email import EmailSender
 from va_common.errors import AppError
@@ -42,6 +43,7 @@ __all__ = [
     "NO_MEMBERSHIP_MESSAGE",
     "ORG_CLOSED_MESSAGE",
     "active_membership",
+    "api_key_hasher_of",
     "authenticate_session",
     "check_dashboard_origin",
     "client_ip",
@@ -62,6 +64,7 @@ __all__ = [
     "password_hasher_of",
     "pick_active",
     "provisioner_of",
+    "redis_of",
     "resend_limiter_of",
     "session_principal",
     "sessions_of",
@@ -143,6 +146,16 @@ def oidc_discovery_of(request: Request) -> OidcDiscovery:
 def sso_states_of(request: Request) -> SsoStateStore:
     states: SsoStateStore = request.app.state.container.sso_states
     return states
+
+
+def api_key_hasher_of(request: Request) -> ApiKeyHasher:
+    hasher: ApiKeyHasher = request.app.state.container.api_key_hasher
+    return hasher
+
+
+def redis_of(request: Request) -> Redis:
+    redis: Redis = request.app.state.container.redis
+    return redis
 
 
 def client_ip(request: Request) -> str | None:

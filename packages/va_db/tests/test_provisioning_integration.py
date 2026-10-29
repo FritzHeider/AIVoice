@@ -115,9 +115,10 @@ async def test_provision_existing_owner_and_parent(identity_db: IdentityDb) -> N
     parent = await _provision_new_owner(identity_db, "Parent")
     assert parent.owner is not None
     child = await identity_db.provisioner.provision(
-        name="Child", owner=parent.owner.id, parent_org_id=parent.org.id
+        name="Child", owner=parent.owner.id, parent_org_id=parent.org.id, kyc_level=2
     )
     assert child.org.parent_org_id == parent.org.id
+    assert (child.org.kyc_level, parent.org.kyc_level) == (2, 0)
     assert child.owner is not None
     assert child.owner.id == parent.owner.id
     assert child.membership is not None

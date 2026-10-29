@@ -3,7 +3,8 @@
 ``orgs`` is a global identity table without ``org_id`` RLS, so :class:`OrgRepo` runs on
 ``Database.global_session()``. Nothing in the database confines it to one org: callers must pass the org id of
 the request context, never an id taken from the request. ``plans`` (system scope, no RLS, readable by
-``va_app``) is joined for the effective limits.
+``va_app``) is joined for the effective limits. Sub-account reads (specs/04 §8.2) take the caller's org as the
+parent and match ``parent_org_id`` against it, so an id from the request only ever finds a direct child.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_db.models import Org, Plan
+from va_db.models import Org, OrgStatus, Plan
 
 __all__ = ["OrgOverview", "OrgRepo"]
 
@@ -75,6 +76,36 @@ class OrgRepo:
             update(Org)
             .where(Org.id == org_id)
             .values(**values)
+            .returning(Org)
+            .execution_options(populate_existing=True)
+        )
+        return await self.session.scalar(statement)
+
+    async def children(self, parent_id: uuid.UUID) -> list[Org]:
+        """The direct sub-accounts of ``parent_id``, oldest first (``created_at``, then ``id``)."""
+        statement = (
+            select(Org)
+            .where(Org.parent_org_id == parent_id)
+            .order_by(Org.created_at, Org.id)
+            .execution_options(populate_existing=True)
+        )
+        return list((await self.session.scalars(statement)).all())
+
+    async def child(self, parent_id: uuid.UUID, child_id: uuid.UUID) -> Org | None:
+        """The org ``child_id`` when it is a direct sub-account of ``parent_id``, else ``None``."""
+        statement = (
+            select(Org)
+            .where(Org.id == child_id, Org.parent_org_id == parent_id)
+            .execution_options(populate_existing=True)
+        )
+        return await self.session.scalar(statement)
+
+    async def set_status(self, org_id: uuid.UUID, status: OrgStatus) -> Org | None:
+        """Set the org's ``status``; the updated org, or ``None`` when it does not exist."""
+        statement = (
+            update(Org)
+            .where(Org.id == org_id)
+            .values(status=status)
             .returning(Org)
             .execution_options(populate_existing=True)
         )

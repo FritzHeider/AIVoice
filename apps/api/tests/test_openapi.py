@@ -307,3 +307,19 @@ def test_member_operations_declare_scopes_and_permissions() -> None:
     for (path, method), expected in operations.items():
         operation = paths[path][method]
         assert (operation["operationId"], operation["x-scope"], operation.get("x-permission")) == expected
+
+
+def test_sub_account_operations_are_legacy_with_scopes_and_permission() -> None:
+    paths = create_app(make_settings(), init_observability=False).openapi()["paths"]
+    operations = {
+        ("/v1/orgs/create", "post"): ("orgs_create", "org:write"),
+        ("/v1/orgs", "get"): ("orgs_list", "org:read"),
+        ("/v1/orgs/{org_id}", "get"): ("orgs_get", "org:read"),
+        ("/v1/orgs/{org_id}/suspend", "post"): ("orgs_suspend", "org:write"),
+        ("/v1/orgs/{org_id}/reactivate", "post"): ("orgs_reactivate", "org:write"),
+    }
+    for (path, method), (operation_id, scope) in operations.items():
+        operation = paths[path][method]
+        assert (operation["operationId"], operation["x-scope"]) == (operation_id, scope)
+        assert (operation["x-envelope"], operation["x-permission"]) == ("legacy", "subaccounts.manage")
+        assert "200" in operation["responses"]

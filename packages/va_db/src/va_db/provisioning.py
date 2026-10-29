@@ -101,12 +101,19 @@ class OrgProvisioner:
         owner: uuid.UUID | NewUser | None,
         plan_id: str = "start",
         parent_org_id: uuid.UUID | None = None,
+        kyc_level: int = 0,
     ) -> ProvisionedOrg:
         """Provision a new org in its own ``tenant_session``; nothing persists when any step fails."""
         org_id = new_id()
         async with self._database.tenant_session(org_id) as session:
             return await self.provision_in(
-                session, org_id, name=name, owner=owner, plan_id=plan_id, parent_org_id=parent_org_id
+                session,
+                org_id,
+                name=name,
+                owner=owner,
+                plan_id=plan_id,
+                parent_org_id=parent_org_id,
+                kyc_level=kyc_level,
             )
 
     async def provision_in(  # noqa: PLR0913 - keyword-only org attributes
@@ -118,6 +125,7 @@ class OrgProvisioner:
         owner: uuid.UUID | NewUser | None,
         plan_id: str = "start",
         parent_org_id: uuid.UUID | None = None,
+        kyc_level: int = 0,
     ) -> ProvisionedOrg:
         """Provision org ``org_id`` inside the caller's ``session``, which must be ``tenant_session(org_id)``.
 
@@ -142,6 +150,7 @@ class OrgProvisioner:
                 slug=slug,
                 plan_id=plan_id,
                 parent_org_id=parent_org_id,
+                kyc_level=kyc_level,
                 webhook_signing_secret_enc=secret_enc,
             ),
         )

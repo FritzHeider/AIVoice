@@ -35,6 +35,7 @@ from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
 from va_api.routers.org_sso import org_router
+from va_api.routers.orgs import orgs_router
 from va_api.settings import ApiSettings
 from va_common.metrics import Service, build_metrics
 from va_common.service import ProbeState, container_checks, service_scope
@@ -64,6 +65,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     public_router,
     me_router,
     org_router,
+    orgs_router,
     internal_auth_router,
     probe_router,
 )

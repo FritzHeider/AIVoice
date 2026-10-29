@@ -202,6 +202,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Orgs List
+         * @description Every direct sub-account of this org, oldest first.
+         */
+        get: operations["orgs_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/orgs/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Orgs Create
+         * @description Create a sub-account with its own API key, optionally funded from this org's available credits.
+         */
+        post: operations["orgs_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/orgs/{org_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Orgs Get
+         * @description One direct sub-account of this org.
+         */
+        get: operations["orgs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/orgs/{org_id}/reactivate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Orgs Reactivate
+         * @description Reactivate a suspended sub-account.
+         */
+        post: operations["orgs_reactivate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/orgs/{org_id}/suspend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Orgs Suspend
+         * @description Suspend a sub-account: its keys and members may only read until it is reactivated.
+         */
+        post: operations["orgs_suspend"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1103,6 +1203,174 @@ export interface components {
             updated_at: string;
         };
         /**
+         * SubAccountCreate
+         * @description ``POST /v1/orgs/create``: the sub-account's name, optional plan, and credits moved from the parent.
+         * @example {
+         *       "initial_credits": 10,
+         *       "org_display_name": "Acme Dental - Austin",
+         *       "org_plan": "build"
+         *     }
+         */
+        SubAccountCreate: {
+            /**
+             * Initial Credits
+             * @description Dollars moved from the parent's available balance (at most 6 decimals).
+             */
+            initial_credits?: number | null;
+            /**
+             * Org Display Name
+             * @description Name of the sub-account (1-200 characters).
+             */
+            org_display_name: string;
+            /**
+             * Org Plan
+             * @description Plan of the sub-account; default: the parent's.
+             */
+            org_plan?: ("start" | "build" | "scale") | null;
+        };
+        /**
+         * SubAccountCreated
+         * @description ``POST /v1/orgs/create`` result; ``api_key`` is the sub-account's key, shown only in this response.
+         * @example {
+         *       "api_key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "credits": 10,
+         *       "kyc_level": 1,
+         *       "org_display_name": "Acme Dental - Austin",
+         *       "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+         *       "org_plan": "build",
+         *       "status": "success"
+         *     }
+         */
+        SubAccountCreated: {
+            /**
+             * Api Key
+             * @description API key with every scope for the sub-account, shown only in this response; store it now. null on an Idempotency-Key replay: the key is never stored, so a lost key must be rolled.
+             */
+            api_key: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Credits
+             * @description Credit balance of the sub-account in dollars.
+             */
+            credits: number;
+            /** Kyc Level */
+            kyc_level: number;
+            /** Org Display Name */
+            org_display_name: string;
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
+            /** Org Plan */
+            org_plan: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * SubAccountItem
+         * @description A sub-account of the calling org.
+         * @example {
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "credits": 10,
+         *       "kyc_level": 1,
+         *       "org_display_name": "Acme Dental - Austin",
+         *       "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+         *       "org_plan": "build",
+         *       "status": "active"
+         *     }
+         */
+        SubAccountItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Credits
+             * @description Credit balance in dollars.
+             */
+            credits: number;
+            /** Kyc Level */
+            kyc_level: number;
+            /** Org Display Name */
+            org_display_name: string;
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
+            /** Org Plan */
+            org_plan: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "active" | "suspended" | "closed";
+        };
+        /**
+         * SubAccountList
+         * @description ``GET /v1/orgs`` result: every direct sub-account, oldest first.
+         * @example {
+         *       "orgs": [
+         *         {
+         *           "created_at": "2026-10-29T14:03:11Z",
+         *           "credits": 10,
+         *           "kyc_level": 1,
+         *           "org_display_name": "Acme Dental - Austin",
+         *           "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+         *           "org_plan": "build",
+         *           "status": "active"
+         *         }
+         *       ],
+         *       "status": "success"
+         *     }
+         */
+        SubAccountList: {
+            /** Orgs */
+            orgs: components["schemas"]["SubAccountItem"][];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * SubAccountResult
+         * @description One sub-account (``GET /v1/orgs/{org_id}``, ``suspend``, ``reactivate``).
+         * @example {
+         *       "org": {
+         *         "created_at": "2026-10-29T14:03:11Z",
+         *         "credits": 10,
+         *         "kyc_level": 1,
+         *         "org_display_name": "Acme Dental - Austin",
+         *         "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+         *         "org_plan": "build",
+         *         "status": "active"
+         *       },
+         *       "status": "success"
+         *     }
+         */
+        SubAccountResult: {
+            org: components["schemas"]["SubAccountItem"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
          * TransferOwnershipRequest
          * @description ``POST /v1/org/transfer-ownership``: the member who becomes an owner.
          * @example {
@@ -1616,6 +1884,197 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    orgs_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubAccountList"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    orgs_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubAccountCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubAccountCreated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    orgs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubAccountResult"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    orgs_reactivate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubAccountResult"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    orgs_suspend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubAccountResult"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
                 };
             };
         };

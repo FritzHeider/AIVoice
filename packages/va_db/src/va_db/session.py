@@ -4,16 +4,19 @@ Every tenant query runs inside :func:`tenant_session`, which opens a transaction
 sets ``app.org_id`` transaction-locally so row-level security confines it to one org. The setting ends with
 the transaction, so a pooled connection never carries it into the next session. :func:`global_session` reaches
 the identity tables without ``org_id`` (``orgs``, ``users``, ``sessions``, ``email_tokens``; specs/03 §2).
+:func:`use_org` switches ``app.org_id`` for part of one transaction, so a ``va_app`` transaction that moves
+credit between a parent and its sub-account writes each org's rows under that org's RLS context.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Self
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from va_common.settings import DatabaseSettings
@@ -26,9 +29,11 @@ __all__ = [
     "global_session",
     "system_session",
     "tenant_session",
+    "use_org",
 ]
 
 _SET_ORG_ID = text("SELECT set_config('app.org_id', :org_id, true)")
+_CURRENT_ORG_ID = text("SELECT current_setting('app.org_id', true)")
 
 
 class Database:
@@ -115,3 +120,23 @@ async def system_session() -> AsyncIterator[AsyncSession]:
     """:meth:`Database.system_session` of the process-wide database (specs/03-data-model.md §2 only)."""
     async with get_database().system_session() as session:
         yield session
+
+
+@asynccontextmanager
+async def use_org(session: AsyncSession, org_id: uuid.UUID) -> AsyncIterator[None]:
+    """Run the block with ``app.org_id`` set to ``org_id`` inside the caller's transaction.
+
+    The previous value (``''`` when unset) is restored on exit, also after an exception, so the rest of the
+    transaction keeps its RLS context. The setting stays transaction-local; only ``va_app`` sessions need it.
+    """
+    previous = await session.scalar(_CURRENT_ORG_ID)
+    restore = {"org_id": previous or ""}
+    await session.execute(_SET_ORG_ID, {"org_id": str(org_id)})
+    try:
+        yield
+    except BaseException:
+        # A failed statement leaves the transaction aborted; it rolls back as a whole, setting included.
+        with suppress(SQLAlchemyError):
+            await session.execute(_SET_ORG_ID, restore)
+        raise
+    await session.execute(_SET_ORG_ID, restore)

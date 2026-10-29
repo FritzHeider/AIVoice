@@ -3143,3 +3143,230 @@ three are). Org settings validation (`OrgSettings`, `settings` in `PATCH /v1/org
   InvitationRepo query; system lookup cites specs/03 §2; token hashed (sha256), conditional UPDATE consume; CSRF/Origin
   via optional_session on signed-in accept, check_dashboard_origin on new-user accept; owner_guard on create/revoke;
   failure paths covered by tests. P02-T08 parent ticked (T08a/b/c all done).
+
+## 2026-10-29 Planner: P02-T08c approved → P02-T09 split into T09a/T09b
+- T09 mixes two independent concerns: sub-account management endpoints (legacy `/v1/orgs*`, a cross-org credit
+  move) and the parent-access path through `get_principal` + `switch-org`. Split in plan/phase-02.md.
+- Credit transfer endpoint itself is P15-T07; T09a builds only the reusable `CreditTransferRepo` it needs for
+  `initial_credits`, so P15-T07 adds the route on top.
+
+### T09b design carried forward (do not build in T09a)
+- `get_principal`: after the principal is built, a non-blank `X-VA-Org-Id` (uuid else `INVALID_INPUT` field
+  `X-VA-Org-Id`) equal to ctx.org_id is a no-op; else the caller must be an API key with `org:write`/`*` or a
+  session with role owner/admin (`FORBIDDEN` otherwise); the target must be a direct child
+  (`parent_org_id == ctx.org_id`, else `FORBIDDEN` "Organization is not a sub-account of the caller."); the new ctx
+  = `dataclasses.replace(ctx, org_id=child, acting_parent_org_id=parent, plan_id=child.plan_id)`; child
+  status gates (closed → ORG_SUSPENDED, suspended → writes refused); rate bucket stays the principal's.
+- `switch-org {org_id}`: membership, or owner/admin membership of the target's parent; session row stores the
+  child as `active_org_id`; `session_principal` must then resolve a child active org via the parent membership
+  (role preserved, `acting_parent_org_id` set). `GET /internal/auth/session` memberships gain nothing; children
+  come from `GET /v1/orgs`.
+
+## Plan P02-T09a — Sub-account management (specs/04 §8.2, §8.4, §3.2; specs/24 §5, §9; specs/03 §2, §3)
+
+### Facts found while planning
+- `orgs` has `parent_org_id`, `kyc_level` (0-3), `credits_balance_micros`, `credit_limit_micros`; no RLS (global).
+  `credit_ledger` and `credit_holds` are RLS tenant tables (model `CreditLedger`, `CreditHold`, entry types incl.
+  `transfer_in`/`transfer_out`, reference_type `sub_account`, `UNIQUE(org_id, idempotency_key)`).
+- `OrgProvisioner.provision_in(session, org_id, name=, owner=, plan_id=, parent_org_id=)` already supports a parent;
+  it has no `kyc_level` arg. Its docstring says the session must be `tenant_session(org_id)`.
+- `tenant_session` sets `app.org_id` with `set_config(..., true)` (transaction-local), so a transaction can switch
+  the RLS org mid-way by calling set_config again: this is how one transaction writes both orgs' ledger rows
+  without `va_system`.
+- No legacy resource router exists yet (only health). `/v1/orgs*` is classified legacy in `va_api.envelopes`.
+  Legacy success body: `{"status":"success", ...fields}`; legacy errors handled by `va_api.errors`.
+- `ApiKeyHasher` is held only inside the authenticator; the container has no hasher field. `generate_api_key`,
+  `api_key_prefix`, `hasher.hash()`, `hasher.current_version` exist in `va_common.auth`.
+- `invalidate_api_key_cache(redis, prefix)` exists in `va_api.auth.api_key_auth`.
+- `org_invitations._inviter_of` resolves a user from a session or a key's `created_by`.
+- `va_common.money.dollars_to_micros` / `micros_to_dollars` exist. `INSUFFICIENT_CREDITS` is 402 in specs/31.
+- Tests: `AuthContainer.store` (in-memory `KeyStore`) authenticates keys; a key minted into the DB would not
+  authenticate unless the test container also looks up the DB.
+
+### Decisions to record (specs/04 §8.2, same commit, `> Decision (2026-10-29):`; specs/03 §2 note for the repo)
+1. **Create** `POST /v1/orgs/create` (legacy, `org:write` + `subaccounts.manage`, operation `orgs_create`): body
+   `{org_display_name (1-200, trimmed; empty → INVALID_INPUT field org_display_name), org_plan? ("start"|"build"|
+   "scale"), initial_credits? (number ≥ 0, ≤ 1 000 000, at most 6 decimals)}`; unknown fields are ignored (Bland
+   compatibility, unlike envelope routes). The caller's org having a `parent_org_id` → `FORBIDDEN` "Sub-accounts
+   cannot create sub-accounts." (max depth 1). The caller org must exist (`NOT_FOUND` "Organization not found.").
+   `plan_id = org_plan or parent.plan_id`, `kyc_level = parent.kyc_level`. One `tenant_session(child_id)`
+   transaction: provisioning (no owner, no members), the child key, then the credit transfer when
+   `initial_credits > 0`; any failure (e.g. `INSUFFICIENT_CREDITS`) leaves nothing. The child key: name
+   "Sub-account key", scopes `["*"]`, environment = the caller's `ctx.environment`, `created_by` = session user or
+   the calling key's `created_by` (null allowed), current pepper version. Response **200** `{"status":"success",
+   org_id, org_display_name, org_plan, kyc_level, api_key, credits, created_at}` (`credits` = child balance in
+   dollars as a JSON number). Idempotency via the existing `require_scope` claim (replay returns the same body,
+   including the key — the stored response is how Idempotency-Key behaves for every create; note it in the decision).
+2. **Credit transfer primitive** `CreditTransferRepo(session).transfer(from_org_id, to_org_id, amount_micros,
+   idempotency_key, description) -> CreditTransfer(out_entry, in_entry)`: inside the caller's transaction (a
+   `tenant_session` of either org); locks both org rows `FOR UPDATE` ordered by id; parent available =
+   `credits_balance_micros − Σ credit_holds.amount_micros WHERE status='held'` (no `credit_limit`: borrowed credit
+   cannot be given away); `amount > available` → `INSUFFICIENT_CREDITS` 402 "Insufficient credits for this
+   transfer."; amount ≤ 0 → `ValueError` (programming error; the route validates); writes `transfer_out`
+   (−amount, parent, `reference_type='sub_account'`, `reference_id=str(child)`) and `transfer_in` (+amount,
+   child, `reference_id=str(parent)`), both with the same `idempotency_key` (`xfer:{uuid}` for sub-account
+   creation; P15-T07 passes `xfer:{Idempotency-Key}`), and updates both `credits_balance_micros`; each ledger
+   row is written with `app.org_id` switched to its org via `va_db.session.use_org(session, org_id)` (an async
+   context manager that `set_config`s the org transaction-locally and restores the previous value on exit),
+   so RLS still checks every row. Not a `SystemRepository` (runs as `va_app`).
+3. **List** `GET /v1/orgs` (`org:read` + `subaccounts.manage`, `orgs_list`): direct children of `ctx.org_id`
+   ordered `created_at`, `id`, unpaginated (Bland shape): `{"status":"success","orgs":[{org_id,
+   org_display_name, org_plan, kyc_level, credits, status, created_at}]}`.
+4. **Get** `GET /v1/orgs/{org_id}` (`org:read` + `subaccounts.manage`, `orgs_get`, uuid path): `{"status":
+   "success", ...the list item}`; an org that is not a direct child of the caller (sibling, parent, self, other
+   tenant, unknown) → `NOT_FOUND` "Sub-account not found.".
+5. **Suspend / reactivate** `POST /v1/orgs/{org_id}/suspend|reactivate` (`org:write` + `subaccounts.manage`,
+   `orgs_suspend`, `orgs_reactivate`): non-child → `NOT_FOUND`; a `closed` child → `CONFLICT` "A closed
+   sub-account cannot be changed."; otherwise sets `status` (`suspended` / `active`; repeating is a no-op) and
+   returns the item. After the commit the child's `apikey:{prefix}` cache entries are deleted (Redis errors
+   logged as `api_key_cache_unavailable`, never raised) so a suspension applies to keys at once; sessions read
+   the org status per request already. Audit rows (`subaccount.*`) arrive with P02-T11.
+
+### Files
+**packages/va_db/src/va_db/session.py**: `use_org(session, org_id) -> AsyncContextManager[None]` (reads
+  `current_setting('app.org_id', true)`, sets the new one with `set_config(..., true)`, restores the previous
+  value — `''` when unset — in `finally`); export in `__all__`.
+**packages/va_db/src/va_db/repositories/credits.py** (new; export from `repositories/__init__.py`):
+  `@dataclass(frozen=True, slots=True) CreditTransfer(out_entry: CreditLedger, in_entry: CreditLedger)`,
+  `INSUFFICIENT_TRANSFER_MESSAGE`, `class CreditTransferRepo` per decision 2 (`_lock(ids)` ordered select
+  `FOR UPDATE`, `_held(org_id)` sum under `use_org`, `_entry(...)`). Uses `new_id()` for ledger ids.
+**packages/va_db/src/va_db/repositories/orgs.py**: `OrgRepo.children(parent_id) -> list[Org]`,
+  `OrgRepo.child(parent_id, child_id) -> Org | None`, `OrgRepo.set_status(org_id, status) -> Org | None`.
+**packages/va_db/src/va_db/repositories/api_keys.py**: `ApiKeyRepo.add(*, name, prefix, secret_hash,
+  pepper_version, scopes, environment, created_by) -> ApiKey` (flush + refresh), `ApiKeyRepo.prefixes() ->
+  list[str]`.
+**packages/va_db/src/va_db/provisioning.py**: `kyc_level: int = 0` keyword on `provision` / `provision_in`, set
+  on the `Org`.
+**apps/api/src/va_api/auth/api_keys.py** (new; P02-T10 reuses): `@dataclass(frozen=True) MintedKey(plaintext
+  (repr=False), prefix, secret_hash, pepper_version)`; `mint_api_key(hasher, environment) -> MintedKey`;
+  `async def creating_user_id(ctx, session) -> uuid.UUID | None` (session user or the key's `created_by`) — make
+  `org_invitations._inviter_of` call it (no duplicate lookup code).
+**apps/api/src/va_api/container.py**: `api_key_hasher: ApiKeyHasher` field filled from `settings.api_key_hasher()`
+  (the same instance the authenticator gets); **session_auth.py** `api_key_hasher_of(request)` + `redis_of(request)`
+  if no accessor exists yet (check `va_api.rate_limit`/idempotency for an existing one first).
+**apps/api/src/va_api/routers/orgs.py** + **orgs_schemas.py** (new): `orgs_router = legacy_router(prefix="/v1/orgs",
+  tags=["Org"])`, five operations with `openapi_extra={"x-scope": ..., "x-permission": "subaccounts.manage"}`
+  (match how org_members declares them), `Depends(require_permission("subaccounts.manage"))`. Schemas:
+  `SubAccountCreate` (extra="ignore", `initial_credits: Decimal | None` constrained, `org_plan: Literal[...]`),
+  `SubAccountItem`, `SubAccountCreated`, `SubAccountList`, `SubAccountView` — all `status: Literal["success"]`
+  bodies with examples (no None values). Keep functions < radon C. Add to `ROUTERS` in main.py.
+**specs/04 §8.2** decisions 1, 3-5; **specs/04 §8.4** decision 2 (or specs/24 §9 cross-ref); **specs/03 §2** one line
+  noting `use_org` for cross-org transactions that stay `va_app`. **AGENTS.md** entry (routes, `use_org`,
+  `CreditTransferRepo`, test helpers).
+**openapi/openapi.json** regenerated; `corepack pnpm gen:api` in sdks/typescript and apps/dashboard.
+
+### Tests
+**packages/va_db/tests/test_credit_transfer.py** (identity_db): transfer writes both rows with the shared key,
+  `balance_after` and both org balances correct, ledger sum == balance per org; amount > balance − held →
+  `INSUFFICIENT_CREDITS` and nothing written; a `held` hold reduces available, `captured`/`released` do not;
+  `credit_limit` does not count; amount 0 → ValueError; duplicate idempotency key → CONFLICT/IntegrityError surfaces
+  (document which); concurrent two transfers from one parent whose sum exceeds balance → exactly one succeeds
+  (gather on two sessions — pool size 1 per role: use the identity_db helpers that build a second Database, or
+  skip concurrency here and cover it in the API test with sequential calls; Builder picks what the pool allows and
+  notes it). `use_org` restores the previous `app.org_id` (also after an exception).
+**packages/va_db/tests/test_org_repo*.py**: `children` ordering/only direct children, `child` None for non-child,
+  `set_status`; `ApiKeyRepo.add/prefixes` org-filtered; provisioner `kyc_level`.
+**apps/api/tests/test_orgs_integration.py**: owner/admin session and `*` key create (200 body shape, child
+  `parent_org_id`, plan default = parent, `org_plan` override, kyc_level copied, `api_key` authenticates and
+  `GET /v1/me` with it returns the child org, key row hashed with prefix, `created_by`); initial_credits 10.5 with
+  parent balance 50 → child credits 10.5, parent 39.5, two ledger rows; insufficient → 402 INSUFFICIENT_CREDITS and
+  no child org row / no key; a held hold counted; validation (empty name, bad plan, negative / too many decimals
+  credits → 400 legacy error body with field), unknown field ignored; child key creating a sub-account → 403;
+  developer/analyst/billing/viewer sessions → 403; `org:read` key → 403 on create; list (two children ordered,
+  other parent's children absent, child's own list empty); get (child ok; sibling/parent/self/unknown → 404 legacy
+  body); suspend → child key POST → ORG_SUSPENDED immediately (cache invalidated), GET still works; reactivate →
+  writes work; closed child → 409; non-child suspend → 404; Idempotency-Key replay of create returns the same
+  org_id and creates one org.
+  Test container: give `SessionContainer` an authenticator whose lookup tries the KeyStore then
+  `db_lookup(self.database)` and expose `api_key_hasher` = `store.hasher` on `AuthContainer`, so DB-minted keys
+  authenticate. Helper to set a parent balance: write a `grant` ledger row + balance via a support function
+  (`fund(container, org_id, dollars)`), shared in session_helpers.
+**apps/api/tests/test_openapi.py**: the five operation ids with `x-envelope: legacy`, x-scope, x-permission.
+**apps/api/tests/test_container.py**: container exposes the hasher used by the authenticator.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1`; pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done as a PLAIN STRING with numeric complexity:
+`ralph emit "build.done" "P02-T09a tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: the create route reads the parent org (global session) first, closes it, then opens the
+  single `tenant_session(child)`; `use_org` keeps everything on one connection. Never open a system session inside.
+- RLS on `credit_ledger`/`credit_holds`/`org_data_keys`/`api_keys` with `app.org_id` switching: verify with the
+  RLS-on test database (no superuser shortcut); `use_org` must restore the child id before provisioning writes
+  continue, so do the transfer last.
+- Legacy validation errors: confirm the 400 body shape for a legacy route via `va_api.errors` (first legacy
+  resource route); `Decimal` with `decimal_places=6` and `extra="ignore"` must still render examples.
+- The minted plaintext must never be logged; `MintedKey.plaintext` repr=False; gitleaks may flag example keys in
+  schema examples — use an obviously fake example and check gitleaks.
+- Response `credits` float from `micros_to_dollars` Decimal.
+
+## 2026-10-29 Builder: P02-T09a build notes
+- Built per plan. Deviation (recorded in specs/04 §8.2 decision): `GET /v1/orgs/{org_id}`, suspend and reactivate
+  return `{"status":"success","org":{...item}}` (nested) because the item's own `status` (org status) collides with
+  the legacy `status: "success"`. `initial_credits` is a `float` field (OpenAPI `number`) with a ≤6-decimal validator,
+  not `Decimal` (which renders as number|string).
+- `use_org` restores `app.org_id` on exit; on an exception it restores best-effort (suppresses SQLAlchemyError since an
+  aborted transaction rolls back anyway). `CreditTransferRepo` refreshes each ledger row inside its own `use_org`
+  (refresh after leaving would SELECT under the other org and miss the row). Duplicate idempotency key → `CONFLICT`
+  via `conflict_savepoint` (documented in specs/04 §8.4 decision).
+- Concurrency: covered sequentially (two transfers whose sum exceeds the balance → second INSUFFICIENT_CREDITS); the
+  pool has one connection per role so no gather test.
+- `set_org`/`stored_org` moved from test_org_integration.py into session_helpers (jscpd).
+- Incident: a `ruff check --fix --select RUF022,RUF100 .` stripped valid noqa comments repo-wide (RUF100 treats
+  noqa of unselected rules as unused). Restored: unrelated files via `git checkout --`, my files by re-adding the
+  HEAD noqa lines; `git diff | grep '^-.*noqa'` = 0.
+- Gates: fmt/lint/typecheck pass; placeholders 0 findings; make test 2808 passed, coverage 98.45% (orgs.py 81%
+  line report is the async-ASGI coverage artifact also seen on org_invitations.py 68%); make openapi + drift current;
+  gen:api in sdks/typescript + apps/dashboard; make test-ts pass (22 + 52 + 48); check_spec_refs 0; jscpd 0 clones;
+  radon no C+, avg 1.955; pip-audit + pnpm audit clean; gitleaks pass.
+
+## Review P02-T09a (2026-10-29): rejected (1 finding)
+Gates re-run by Reviewer: make lint pass, make typecheck pass, make placeholders 0 findings, make test 2808 passed
+(coverage 98.45%). Code otherwise matches specs/04 §8.2/§8.4 (access, depth 1, non-child NOT_FOUND, lock order,
+held holds, use_org restore, cache invalidation, legacy bodies). One spec violation:
+
+1. **Plaintext sub-account API key is persisted and re-retrievable via Idempotency-Key replay.**
+   `apps/api/src/va_api/routers/orgs.py` `orgs_create` returns `api_key=minted.plaintext`; with an
+   `Idempotency-Key` header the capture middleware (`va_api/idempotency.py` `_settle` → `complete(..., body=...)`)
+   stores the whole JSON body in `idempotency_keys.response_body` (plain `jsonb`, kept 24 h) and replays it.
+   The test `apps/api/tests/test_orgs_integration.py:393` exercises exactly this path. This violates
+   specs/04 §2.1 line 48 "Plaintext is returned exactly once at creation. It is never logged, stored, or
+   retrievable." and the phase constraint "Never store raw keys or tokens". The new decision text in specs/04
+   §8.2 ("a replay returns the stored body, plaintext key included, like every create") contradicts the normative
+   line silently instead of resolving it. Required: the plaintext must never reach `idempotency_keys` (or any
+   table) unencrypted. Acceptable fixes (Planner picks, records a `> Decision` reconciling §2.1 and §12, and the
+   same mechanism must serve P02-T10 `/v1/api_keys` create/roll):
+   a) a route-level marker (e.g. a `request.state` flag or `x-idempotency-secret-fields: ["api_key"]`) so the
+      middleware stores the body with secret fields removed, and a replay returns the stored body with
+      `api_key` withheld (schema/doc says so; the caller rolls the key if it lost the first response); or
+   b) envelope-encrypt the stored response body for such routes (`Envelope.encrypt(org_id, ..., aad=
+      "idempotency:{org_id}:{key}")`, store `{"sealed": "<b64>"}`), decrypt on replay — and amend §2.1 to say
+      the plaintext is stored only envelope-encrypted for the 24 h idempotency window.
+   Add tests: after an idempotent create, `SELECT response_body::text FROM idempotency_keys` does not contain
+   the plaintext key; replay behaviour per the chosen option; key from the first response still authenticates.
+
+## 2026-10-29 Builder: P02-T09a fix for review finding 1
+- Chose option (a): `va_api.idempotency.withhold_on_replay(request, *dotted_paths)` records paths in the ASGI
+  scope (`WITHHELD_SCOPE_KEY`); `_Capture._settle` runs `withheld_body` on the parsed copy before `complete`, so
+  `idempotency_keys.response_body` holds `null` there and replays return `null`; the live response bytes are
+  untouched. Dotted paths (`"data.key"`) cover envelope bodies for P02-T10 `/v1/api_keys` create/roll.
+- `orgs_create` calls `withhold_on_replay(request, "api_key")`; `SubAccountCreated.api_key` is `str | None` with
+  the replay behaviour documented (OpenAPI + TS schemas regenerated).
+- Decisions: specs/04 §2.1 (never stored includes idempotency rows; mechanism), §8.2 create text amended, §12
+  stored-bullet amended. AGENTS.md updated.
+- Tests: test_idempotency `/secret` route (both families: top-level + nested withheld, absent paths ignored,
+  stored row free of the secret); test_orgs_integration idempotent create now uses `DbIdempotencyStore` via
+  monkeypatch, asserts `SELECT response_body::text FROM idempotency_keys` lacks the key/prefix, replay `api_key`
+  null, first key authenticates `/v1/me` for the child. Verified the org test fails with the route call removed.
+- Gates: fmt/lint/typecheck pass; placeholders 0; make test 2811 passed, coverage 98.45%; openapi drift current; gen:api both; test-ts 22+52+48; spec refs 0; jscpd 0; radon no C+, avg 1.96; pip-audit + pnpm audit clean; gitleaks pass.
+
+## Review P02-T09a re-review (2026-10-29): approved
+Finding 1 resolved: `withhold_on_replay(request, "api_key")` + `_Capture._settle` → `withheld_body` nulls the field
+before `complete`; live response untouched; specs/04 §2.1/§8.2/§12 decisions reconcile "never stored". Tests cover
+stored row free of the key (DbIdempotencyStore), replay null, first key authenticates. Reviewer gates: lint,
+typecheck, placeholders 0, make test 2811 passed (98%), openapi drift current, spec refs 0, jscpd 0, radon no C+
+(avg 1.96), gitleaks pass.

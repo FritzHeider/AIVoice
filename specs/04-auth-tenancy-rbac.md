@@ -46,6 +46,13 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 - `secret_hash`: `sha256(API_KEY_PEPPER || plaintext)` hex, where `API_KEY_PEPPER` is a 32-byte secret env var
   (added to `02` §6, see shared-contract additions). Comparison with `hmac.compare_digest`.
 - Plaintext is returned exactly once at creation. It is never logged, stored, or retrievable.
+
+> Decision (2026-10-29): "never stored" includes `idempotency_keys.response_body` (§12). A route that returns a
+> plaintext key (sub-account create §8.2; `/v1/api_keys` create and roll) calls
+> `va_api.idempotency.withhold_on_replay(request, "<dotted path>")`: the capture middleware stores the response with
+> those fields set to `null`, so an `Idempotency-Key` replay returns the original body with the key as `null`
+> (the OpenAPI field is nullable and says so). The plaintext reaches the client only in the first response; a
+> caller that lost it rolls the key.
 - `environment=test` keys: calls are routed to the simulator stack only when `VA_ENV in (local,test)`; in staging and
   production, test keys may create/read configuration resources but `POST /v1/calls`, `/v2/batches/create`,
   `/v1/sms/send`, `/numbers/purchase` return `FORBIDDEN` with message "Test keys cannot place live calls, send SMS, or purchase numbers."
@@ -835,6 +842,32 @@ Additional: `GET /v1/orgs` (list children: `{"status":"success","orgs":[{org_id,
 `GET /v1/orgs/{org_id}`, `POST /v1/orgs/{org_id}/suspend`, `POST /v1/orgs/{org_id}/reactivate`.
 Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
 
+> Decision (2026-10-29): sub-account details. Implementation: `va_api.routers.orgs` (legacy router `/v1/orgs`),
+> `va_db.repositories.OrgRepo.children/child/set_status`, `ApiKeyRepo.add/prefixes`, `CreditTransferRepo` (§8.4).
+> - **Access.** Every route needs `subaccounts.manage` (owner/admin sessions; API keys with `*`) next to its scope:
+>   `org:write` for create/suspend/reactivate, `org:read` for the reads. Developer/analyst/billing/viewer sessions
+>   and keys without `*` (also `org:read`/`org:write` keys) get `FORBIDDEN`.
+> - **Create body.** `org_display_name` trimmed, 1–200 characters (else `INVALID_INPUT` field `org_display_name`);
+>   `org_plan` one of `start`/`build`/`scale`; `initial_credits` a number 0–1 000 000 with at most 6 decimals.
+>   Unknown fields are ignored (Bland compatibility; envelope routes forbid them). Validation errors use the legacy
+>   error body. A caller org with a `parent_org_id` → `FORBIDDEN` "Sub-accounts cannot create sub-accounts.".
+> - **Create effects.** One `tenant_session(child)` transaction: provisioning (data key, webhook secret, no owner and
+>   no members), the child key (name `Sub-account key`, scopes `["*"]`, environment = the caller's environment —
+>   `live` for sessions —, `created_by` = the session user or the calling key's `created_by`, current pepper), then
+>   the `initial_credits` transfer when > 0 (idempotency key `xfer:{uuid}`). Any failure, such as
+>   `INSUFFICIENT_CREDITS` (402), leaves no org, key, or ledger row. Response 200 with the body above; `credits`
+>   is the child balance in dollars. With `Idempotency-Key` a replay returns the stored body with
+>   `"api_key": null` (the plaintext is never stored, §2.1 decision); the sub-account is not created twice.
+> - **List/get.** `GET /v1/orgs` lists direct children ordered by `created_at`, `id`, unpaginated (Bland shape).
+>   `GET /v1/orgs/{org_id}` returns `{"status":"success","org":{org_id, org_display_name, org_plan, kyc_level,
+>   credits, status, created_at}}` — nested, because the item's own `status` would collide with the legacy
+>   `status: "success"`. An org that is not a direct child of the caller (sibling, parent, itself, another tenant,
+>   unknown) → `NOT_FOUND` "Sub-account not found.".
+> - **Suspend/reactivate.** Same body as get. A `closed` child → `CONFLICT` "A closed sub-account cannot be
+>   changed."; repeating is a no-op. After the commit the child's `apikey:{prefix}` cache entries are deleted (a
+>   Redis error is logged as `api_key_cache_unavailable`, never raised) so the suspension applies to its keys at
+>   once; sessions read the org status per request. `subaccount.*` audit rows arrive with the audit writer (P02-T11).
+
 ### 8.3 Parent access rules
 
 - Parent-org principals with role owner/admin (or API keys with `org:write`) may act on any child org by sending
@@ -851,6 +884,18 @@ Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
 transaction writes `credit_ledger` `transfer_out` (parent) and `transfer_in` (child) with shared idempotency key
 `xfer:{request Idempotency-Key or uuid}`; updates both balances with `SELECT … FOR UPDATE` on both org rows ordered
 by id to avoid deadlocks. Also allowed child → parent by parent principals (`direction: "to_parent"`).
+
+> Decision (2026-10-29): the transfer primitive is `va_db.repositories.CreditTransferRepo(session).transfer(from_org_id,
+> to_org_id, amount_micros, idempotency_key=, description=)`, used by sub-account creation (§8.2) and this endpoint.
+> It runs inside the caller's `va_app` transaction (a `tenant_session` of either org), locks both org rows
+> `FOR UPDATE` ordered by id, and refuses with `INSUFFICIENT_CREDITS` (402, "Insufficient credits for this
+> transfer.") when the amount exceeds the sender's `credits_balance_micros` minus its `held` `credit_holds`
+> (`credit_limit_micros` is borrowed credit and cannot be given away). It writes `transfer_out` (−amount, sender) and
+> `transfer_in` (+amount, receiver) with `reference_type = 'sub_account'`, `reference_id` = the other org's id, the
+> same idempotency key, and `balance_after_micros`, and updates both balances. Each ledger row is written with
+> `app.org_id` switched to its own org by `va_db.session.use_org`, so RLS checks both rows. A ledger row with the
+> same idempotency key in either org → `CONFLICT`; a non-positive amount or the same org twice is a programming
+> error (`ValueError`; routes validate first).
 
 ## 9. API key endpoints (envelope)
 
@@ -944,7 +989,9 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
 >   cleared). Released (row deleted, the retry runs again): 5xx, unhandled exceptions, **429** (a throttle such as
 >   `calls_send` after the claim must stay retryable per its `Retry-After`), and empty or non-JSON bodies (not
 >   replayable faithfully). A failure writing the response is logged as `idempotency_store_failed` (org and
->   status only, never the key), the claim is released, and the response is still delivered. A cancelled request
+>   status only, never the key), the claim is released, and the response is still delivered.
+>   Fields a route marks with `withhold_on_replay` (one-time secrets, §2.1 decision) are stored as `null`; the
+>   live response is sent unchanged. A cancelled request
 >   (client disconnect) leaves its lock to expire.
 > - **Replay.** Stored status and JSON body (JSON-equal, not byte-equal: `jsonb` normalises key order),
 >   `Content-Type: application/json`, `Idempotent-Replayed: true`; the body keeps the original `request_id` while

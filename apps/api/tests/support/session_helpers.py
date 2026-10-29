@@ -11,7 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Self
 
 import httpx
@@ -26,7 +26,8 @@ from pg_container import running_postgres
 from service_helpers import make_client
 from sqlalchemy import update
 
-from va_api.auth import RequestContext, require_scope
+from va_api.auth import ApiKeyAuthenticator, RequestContext, require_scope
+from va_api.auth.api_key_auth import db_lookup
 from va_api.auth.cookies import CSRF_COOKIE
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
@@ -39,9 +40,21 @@ from va_api.settings import ApiSettings
 from va_common.auth import Argon2Params, PasswordHasher, api_key_prefix, totp_code, totp_counter
 from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
-from va_db.models import ApiKey, MemberRole, Membership, Org, OrgStatus, User
+from va_common.ids import new_id
+from va_common.money import dollars_to_micros
+from va_db.models import (
+    ApiKey,
+    CreditHold,
+    CreditHoldStatus,
+    CreditLedger,
+    MemberRole,
+    Membership,
+    Org,
+    OrgStatus,
+    User,
+)
 from va_db.provisioning import OrgProvisioner
-from va_db.repositories import IdentityRepo, MembershipRepo, NewUser
+from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser
 from va_db.session import Database
 
 __all__ = [
@@ -61,6 +74,8 @@ __all__ = [
     "add_member",
     "enrol_mfa",
     "error_of",
+    "fund",
+    "hold",
     "invite",
     "link_token",
     "login",
@@ -69,9 +84,11 @@ __all__ = [
     "migrated_postgres",
     "session_app",
     "session_client",
+    "set_org",
     "signed_in",
     "signup",
     "store_api_key",
+    "stored_org",
     "write_headers",
 ]
 
@@ -136,6 +153,22 @@ class SessionContainer(AuthContainer):
         async with super().__call__(settings) as opened, httpx.AsyncClient() as http:
             self.oidc_discovery = discovery_for(settings, http)
             yield opened
+
+    @property
+    def authenticator(self) -> ApiKeyAuthenticator:
+        """Keys of the in-memory store first, then keys minted into ``api_keys`` (system-session lookup)."""
+        from_db = db_lookup(self.database)
+
+        async def lookup(prefix: str) -> ApiKeyRecord | None:
+            return await self.store.lookup(prefix) or await from_db(prefix)
+
+        return ApiKeyAuthenticator(
+            redis=self.redis,
+            hasher=self.store.hasher,
+            lookup=lookup,
+            toucher=self.store.touch,
+            clock=self.clock,
+        )
 
     @property
     def outbox(self) -> InMemoryEmailSender:
@@ -266,6 +299,59 @@ async def store_api_key(
     async with container.database.system_session() as session:
         session.add(row)
     return plaintext, row
+
+
+async def fund(container: SessionContainer, org_id: uuid.UUID, dollars: str) -> None:
+    """Grant ``dollars`` of credit to ``org_id``: a ``grant`` ledger row and the matching balance."""
+    micros = dollars_to_micros(dollars)
+    async with container.database.system_session() as session:
+        org = await session.get(Org, org_id, with_for_update=True)
+        assert org is not None
+        org.credits_balance_micros += micros
+        session.add(
+            CreditLedger(
+                id=new_id(),
+                org_id=org_id,
+                entry_type="grant",
+                amount_micros=micros,
+                balance_after_micros=org.credits_balance_micros,
+                reference_type="manual",
+                description="test grant",
+                idempotency_key=f"grant:{new_id()}",
+            )
+        )
+
+
+async def hold(
+    container: SessionContainer, org_id: uuid.UUID, dollars: str, status: CreditHoldStatus = "held"
+) -> None:
+    """A ``credit_holds`` row of ``dollars`` with ``status`` for ``org_id``."""
+    async with container.database.system_session() as session:
+        session.add(
+            CreditHold(
+                id=new_id(),
+                org_id=org_id,
+                reference_type="call",
+                reference_id=str(new_id()),
+                amount_micros=dollars_to_micros(dollars),
+                status=status,
+                expires_at=container.clock.now() + timedelta(hours=1),
+            )
+        )
+
+
+async def set_org(identity: IdentityDb, org_id: uuid.UUID, **values: Any) -> None:
+    """Update columns of the ``orgs`` row ``org_id`` directly (test setup)."""
+    async with identity.database.system_session() as session:
+        await session.execute(update(Org).where(Org.id == org_id).values(**values))
+
+
+async def stored_org(identity: IdentityDb, org_id: uuid.UUID) -> Org:
+    """The ``orgs`` row ``org_id`` as stored."""
+    async with identity.database.system_session() as session:
+        org = await session.get(Org, org_id)
+    assert org is not None
+    return org
 
 
 def error_of(response: httpx.Response) -> tuple[int, str, str | None]:

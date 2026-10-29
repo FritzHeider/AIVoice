@@ -2,7 +2,8 @@
 :class:`IdempotencyRepo` (specs/04 §12), :class:`MembershipRepo` and :class:`OrgDataKeyRepo`, the identity
 :class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4) with :class:`MfaRepo` (MFA
 enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OIDC connection; specs/04 §5),
-:class:`InvitationRepo` (an org's invitations; specs/04 §6), the envelope's :class:`OrgDataKeyStore` (specs/28
+:class:`InvitationRepo` (an org's invitations; specs/04 §6), :class:`CreditTransferRepo` (parent and
+sub-account credit moves; specs/04 §8.4), the envelope's :class:`OrgDataKeyStore` (specs/28
 §3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1), the tenant :class:`ApiKeyRepo`, and the
 system-scope ones.
 
@@ -24,6 +25,13 @@ from va_db.repositories.base import (
     require_positive,
 )
 from va_db.repositories.billing_reconcile import BalanceDrift, BillingReconcileRepo
+from va_db.repositories.credits import (
+    DUPLICATE_TRANSFER_MESSAGE,
+    INSUFFICIENT_TRANSFER_MESSAGE,
+    SUB_ACCOUNT_REFERENCE,
+    CreditTransfer,
+    CreditTransferRepo,
+)
 from va_db.repositories.data_keys import OrgDataKeyRepo, OrgDataKeyStore
 from va_db.repositories.idempotency import (
     LOCK_TTL,
@@ -70,8 +78,10 @@ from va_db.repositories.telnyx_events import NewTelnyxEvent, TelnyxEventRepo
 __all__ = [
     "CLAIM_LIMIT",
     "DEFAULT_LEASE",
+    "DUPLICATE_TRANSFER_MESSAGE",
     "EMAIL_VERIFY_TTL",
     "IMMUTABLE_COLUMNS",
+    "INSUFFICIENT_TRANSFER_MESSAGE",
     "INVITATION_TTL",
     "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
@@ -79,12 +89,15 @@ __all__ = [
     "PASSWORD_RESET_TTL",
     "PURGE_RULES",
     "REPLAY_WINDOW",
+    "SUB_ACCOUNT_REFERENCE",
     "ApiKeyLookupRepo",
     "ApiKeyRecord",
     "ApiKeyRepo",
     "BalanceDrift",
     "BillingReconcileRepo",
     "ClaimOutcome",
+    "CreditTransfer",
+    "CreditTransferRepo",
     "IdempotencyClaim",
     "IdempotencyConflict",
     "IdempotencyReplay",

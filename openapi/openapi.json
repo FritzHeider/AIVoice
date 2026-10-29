@@ -1565,6 +1565,269 @@
         "title": "SsoConnectionView",
         "type": "object"
       },
+      "SubAccountCreate": {
+        "description": "``POST /v1/orgs/create``: the sub-account's name, optional plan, and credits moved from the parent.",
+        "examples": [
+          {
+            "initial_credits": 10,
+            "org_display_name": "Acme Dental - Austin",
+            "org_plan": "build"
+          }
+        ],
+        "properties": {
+          "initial_credits": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Dollars moved from the parent's available balance (at most 6 decimals).",
+            "title": "Initial Credits"
+          },
+          "org_display_name": {
+            "description": "Name of the sub-account (1-200 characters).",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Org Display Name",
+            "type": "string"
+          },
+          "org_plan": {
+            "anyOf": [
+              {
+                "enum": [
+                  "start",
+                  "build",
+                  "scale"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Plan of the sub-account; default: the parent's.",
+            "title": "Org Plan"
+          }
+        },
+        "required": [
+          "org_display_name"
+        ],
+        "title": "SubAccountCreate",
+        "type": "object"
+      },
+      "SubAccountCreated": {
+        "description": "``POST /v1/orgs/create`` result; ``api_key`` is the sub-account's key, shown only in this response.",
+        "examples": [
+          {
+            "api_key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+            "created_at": "2026-10-29T14:03:11Z",
+            "credits": 10.0,
+            "kyc_level": 1,
+            "org_display_name": "Acme Dental - Austin",
+            "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+            "org_plan": "build",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "API key with every scope for the sub-account, shown only in this response; store it now. null on an Idempotency-Key replay: the key is never stored, so a lost key must be rolled.",
+            "title": "Api Key"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "credits": {
+            "description": "Credit balance of the sub-account in dollars.",
+            "title": "Credits",
+            "type": "number"
+          },
+          "kyc_level": {
+            "title": "Kyc Level",
+            "type": "integer"
+          },
+          "org_display_name": {
+            "title": "Org Display Name",
+            "type": "string"
+          },
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "org_plan": {
+            "title": "Org Plan",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id",
+          "org_display_name",
+          "org_plan",
+          "kyc_level",
+          "api_key",
+          "credits",
+          "created_at"
+        ],
+        "title": "SubAccountCreated",
+        "type": "object"
+      },
+      "SubAccountItem": {
+        "description": "A sub-account of the calling org.",
+        "examples": [
+          {
+            "created_at": "2026-10-29T14:03:11Z",
+            "credits": 10.0,
+            "kyc_level": 1,
+            "org_display_name": "Acme Dental - Austin",
+            "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+            "org_plan": "build",
+            "status": "active"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "credits": {
+            "description": "Credit balance in dollars.",
+            "title": "Credits",
+            "type": "number"
+          },
+          "kyc_level": {
+            "title": "Kyc Level",
+            "type": "integer"
+          },
+          "org_display_name": {
+            "title": "Org Display Name",
+            "type": "string"
+          },
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "org_plan": {
+            "title": "Org Plan",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "suspended",
+              "closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id",
+          "org_display_name",
+          "org_plan",
+          "kyc_level",
+          "credits",
+          "status",
+          "created_at"
+        ],
+        "title": "SubAccountItem",
+        "type": "object"
+      },
+      "SubAccountList": {
+        "description": "``GET /v1/orgs`` result: every direct sub-account, oldest first.",
+        "examples": [
+          {
+            "orgs": [
+              {
+                "created_at": "2026-10-29T14:03:11Z",
+                "credits": 10.0,
+                "kyc_level": 1,
+                "org_display_name": "Acme Dental - Austin",
+                "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+                "org_plan": "build",
+                "status": "active"
+              }
+            ],
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "orgs": {
+            "items": {
+              "$ref": "#/components/schemas/SubAccountItem"
+            },
+            "title": "Orgs",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "orgs"
+        ],
+        "title": "SubAccountList",
+        "type": "object"
+      },
+      "SubAccountResult": {
+        "description": "One sub-account (``GET /v1/orgs/{org_id}``, ``suspend``, ``reactivate``).",
+        "examples": [
+          {
+            "org": {
+              "created_at": "2026-10-29T14:03:11Z",
+              "credits": 10.0,
+              "kyc_level": 1,
+              "org_display_name": "Acme Dental - Austin",
+              "org_id": "0192f3a4-b5c6-7d8e-9f0a-1b2c3d4e5f60",
+              "org_plan": "build",
+              "status": "active"
+            },
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "org": {
+            "$ref": "#/components/schemas/SubAccountItem"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org"
+        ],
+        "title": "SubAccountResult",
+        "type": "object"
+      },
       "TransferOwnershipRequest": {
         "additionalProperties": false,
         "description": "``POST /v1/org/transfer-ownership``: the member who becomes an owner.",
@@ -2235,6 +2498,267 @@
         ],
         "x-envelope": "envelope",
         "x-permission": "org.owner_transfer",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "description": "Every direct sub-account of this org, oldest first.",
+        "operationId": "orgs_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubAccountList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Orgs List",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "subaccounts.manage",
+        "x-scope": "org:read"
+      }
+    },
+    "/v1/orgs/create": {
+      "post": {
+        "description": "Create a sub-account with its own API key, optionally funded from this org's available credits.",
+        "operationId": "orgs_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubAccountCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubAccountCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Orgs Create",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "subaccounts.manage",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/orgs/{org_id}": {
+      "get": {
+        "description": "One direct sub-account of this org.",
+        "operationId": "orgs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubAccountResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Orgs Get",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "subaccounts.manage",
+        "x-scope": "org:read"
+      }
+    },
+    "/v1/orgs/{org_id}/reactivate": {
+      "post": {
+        "description": "Reactivate a suspended sub-account.",
+        "operationId": "orgs_reactivate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubAccountResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Orgs Reactivate",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "subaccounts.manage",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/orgs/{org_id}/suspend": {
+      "post": {
+        "description": "Suspend a sub-account: its keys and members may only read until it is reactivated.",
+        "operationId": "orgs_suspend",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "org_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Org Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubAccountResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Orgs Suspend",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "subaccounts.manage",
         "x-scope": "org:write"
       }
     }

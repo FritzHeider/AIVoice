@@ -403,6 +403,11 @@ Grafana 3001
   route-level tests use `idempotency_helpers.idempotency_app` (counts endpoint runs in `container.hits`, `/gate` held
   by `container.gate`). An api test needing Postgres boots its own module-scoped container with the va_db support
   helpers (`running_postgres` + `fresh_database` + `upgrade`; see `apps/api/tests/test_idempotency_db.py`).
+  Routes returning a one-time secret (minted API keys) must call
+  `va_api.idempotency.withhold_on_replay(request, "api_key")` (dotted paths such as `"data.key"` for envelope
+  bodies): the stored body and every replay carry `null` there (specs/04 §2.1 decision). To assert on the real
+  `idempotency_keys` table from a session test, `monkeypatch.setattr(container, "idempotency",
+  DbIdempotencyStore(identity.database, container.clock))` (see `test_orgs_integration.py`).
 - 2026-10-29 (P02-T04a): `va_common.auth` is a package (`api_keys`, `passwords`, `tokens`); `from va_common.auth import …`
   still exports everything. Passwords: one `PasswordHasher()` per process (construction runs one argon2 hash for the
   dummy), use `hash_async`/`verify_async`/`check_password_policy_async` in handlers; tests use cheap
@@ -541,3 +546,14 @@ Grafana 3001
   on the attribute instead. Tests: `session_helpers.invite(client, container, email, role) -> token`
   (`link_token(..., "invitation")`), `INVITATIONS`, `ACCEPT_INVITATION`; switch users on one client with
   `client.cookies.clear()` + `login(...)`.
+- 2026-10-29 (P02-T09a): sub-accounts. Legacy `orgs_router` (`routers/orgs.py`, in `main.ROUTERS`): `POST
+  /v1/orgs/create`, `GET /v1/orgs`, `GET /v1/orgs/{org_id}` (body `{"status":"success","org":{...}}`, not flat:
+  the item's own `status` field would collide), `POST .../suspend|reactivate`; all need `subaccounts.manage`.
+  Create = one `tenant_session(child_id)`: `provision_in(..., kyc_level=)` + `ApiKeyRepo.add` + optional
+  `va_db.repositories.CreditTransferRepo.transfer(from, to, micros, idempotency_key=)` (locks both org rows in id
+  order; available = balance − `held` holds; reused by P15-T07). Cross-org rows inside one `va_app` transaction:
+  `va_db.session.use_org(session, org_id)` switches `app.org_id` and restores it (RLS still checks every row; no
+  `va_system`). Key minting: `va_api.auth.api_keys.mint_api_key(hasher, env)` (`MintedKey.plaintext` repr-hidden)
+  and `creating_user_id(ctx, session)`; `Container.api_key_hasher` / `session_auth.api_key_hasher_of`, `redis_of`.
+  Tests: `SessionContainer.authenticator` falls back to the DB lookup, so route-minted keys authenticate;
+  `session_helpers.fund(container, org_id, "50")` (grant row + balance) and `hold(container, org_id, "15", status)`.

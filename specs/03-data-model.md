@@ -114,6 +114,11 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > which first deletes an open invitation of the same email; `list_open`; `get_open`; `revoke`, a `DELETE`; and
 > `consume`, one conditional `UPDATE … SET accepted_at` of an open, unexpired row).
 
+> Decision (2026-10-29): a `va_app` transaction that must write tenant rows of two orgs (a parent and its sub-account:
+> `CreditTransferRepo`, specs/04 §8.4) stays on `va_app` and switches the RLS org per statement with
+> `va_db.session.use_org(session, org_id)`, which sets `app.org_id` transaction-locally and restores the previous
+> value on exit. RLS still checks every row; this is not a `va_system` use.
+
 ## 3. Tenancy, identity, access
 
 ```sql

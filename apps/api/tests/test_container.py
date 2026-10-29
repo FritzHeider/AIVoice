@@ -38,6 +38,9 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert set(container.readiness_checks()) == {"postgres", "redis", "temporal"}
         assert container.database.app_engine.pool.size() == 3  # type: ignore[attr-defined]
         assert isinstance(container.authenticator, ApiKeyAuthenticator)
+        assert container.authenticator._hasher is container.api_key_hasher
+        minted = container.api_key_hasher.hash("va_live_" + "a" * 32)
+        assert len(minted) == 64
         assert isinstance(container.rate_limiter, RateLimiter)
         assert isinstance(container.idempotency, DbIdempotencyStore)
         assert isinstance(container.envelope, Envelope)

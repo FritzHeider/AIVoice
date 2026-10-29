@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793281395-6e00
+> va_api: routes returning one-time secrets call va_api.idempotency.withhold_on_replay(request, 'api_key' | 'data.key'); stored idempotency body and replays get null. Session tests asserting idempotency_keys rows: monkeypatch container.idempotency = DbIdempotencyStore(identity.database, container.clock)
+<!-- tags: api, testing, auth | created: 2026-10-29 -->
+
+### mem-1793280879-041b
+> va_api sub-accounts: va_db.session.use_org(session, org_id) switches RLS org inside one va_app transaction (CreditTransferRepo writes parent+child ledger rows); SessionContainer.authenticator falls back to DB lookup so route-minted keys authenticate; session_helpers.fund/hold/set_org/stored_org
+<!-- tags: api, database, testing | created: 2026-10-29 -->
+
 ### mem-1793279423-eb1e
 > va_api tests: idp (FakeOidcProvider on container clock) and sso (OIDC_ENABLED client) fixtures live in apps/api/tests/conftest.py; invitation helpers session_helpers.invite(client, container, email, role)->token, INVITATIONS, ACCEPT_INVITATION; session_auth.optional_session for routes that work with or without a session
 <!-- tags: api, testing, auth | created: 2026-10-29 -->
@@ -101,6 +109,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793280879-cb08
+> Never run 'ruff check --fix --select RUF100' (or any --select incl. RUF100) on the repo: noqa for unselected rules count as unused and get stripped repo-wide (P02-T09a). Run plain 'make lint' / ruff --fix without --select
+<!-- tags: tooling, ruff | created: 2026-10-29 -->
 
 ### mem-1793279423-b07e
 > pydantic: Field(repr=False) inside an Annotated alias used as 'Alias | None' raises UnsupportedFieldAttributeWarning (error under filterwarnings) at app build; put Field(default=None, min_length=..., repr=False) on the attribute instead (P02-T08c AcceptInvitationRequest.password)

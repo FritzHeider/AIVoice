@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any, get_args
 
 import httpx
@@ -13,30 +12,19 @@ from session_helpers import (
     SessionContainer,
     error_of,
     make_member,
+    set_org,
     signed_in,
     store_api_key,
+    stored_org,
     write_headers,
 )
-from sqlalchemy import update
 
 from va_api.auth.rbac import ROLE_SCOPES
-from va_db.models import MemberRole, Org, Plan
+from va_db.models import MemberRole, Plan
 
 ME = "/v1/me"
 ORG = "/v1/org"
 ROLES = get_args(MemberRole)
-
-
-async def set_org(identity: IdentityDb, org_id: uuid.UUID, **values: Any) -> None:
-    async with identity.database.system_session() as session:
-        await session.execute(update(Org).where(Org.id == org_id).values(**values))
-
-
-async def stored_org(identity: IdentityDb, org_id: uuid.UUID) -> Org:
-    async with identity.database.system_session() as session:
-        org = await session.get(Org, org_id)
-    assert org is not None
-    return org
 
 
 async def patch(client: httpx.AsyncClient, body: dict[str, Any], **headers: str) -> httpx.Response:

@@ -6,6 +6,9 @@ request is answered from the stored response by raising :class:`IdempotentReplay
 :func:`install_idempotency` registers. :class:`IdempotencyMiddleware` sees the claim in the ASGI scope and,
 before the last body chunk leaves, stores the response (2xx and 4xx JSON except 429) or releases the claim
 (5xx, 429, non-JSON bodies, unhandled exceptions), so a retry after a failure runs the request again.
+A route that returns a secret shown only once (a minted API key) calls :func:`withhold_on_replay`; those
+fields are stored as ``null``, so the plaintext never reaches ``idempotency_keys`` and a replay carries
+``null``.
 
 This module must not import ``va_api.auth`` at runtime (``va_api.auth.dependencies`` imports it).
 """
@@ -40,6 +43,7 @@ __all__ = [
     "IDEMPOTENCY_SCOPE_KEY",
     "MAX_KEY_LENGTH",
     "REPLAYED_HEADER",
+    "WITHHELD_SCOPE_KEY",
     "ActiveClaim",
     "DbIdempotencyStore",
     "IdempotencyMiddleware",
@@ -53,11 +57,14 @@ __all__ = [
     "render_replay",
     "request_hash",
     "validate_key",
+    "withheld_body",
+    "withhold_on_replay",
 ]
 
 IDEMPOTENCY_HEADER: Final = "idempotency-key"
 REPLAYED_HEADER: Final = "Idempotent-Replayed"
 IDEMPOTENCY_SCOPE_KEY: Final = "va.idempotency"
+WITHHELD_SCOPE_KEY: Final = "va.idempotency.withheld"
 MAX_KEY_LENGTH: Final = 255
 INVALID_KEY_MESSAGE: Final = "Idempotency-Key must be 1-255 printable ASCII characters."
 CONFLICT_MESSAGES: Final = {
@@ -204,6 +211,29 @@ async def claim_idempotency(request: Request, ctx: RequestContext) -> None:
     request.scope[IDEMPOTENCY_SCOPE_KEY] = ActiveClaim(ctx.org_id, key, store)
 
 
+def withhold_on_replay(request: Request, *paths: str) -> None:
+    """Store the response with the fields at the dotted ``paths`` (``"api_key"``, ``"data.key"``) as ``null``.
+
+    For secrets returned exactly once (specs/04 §2.1): the stored body, and so every replay, never holds them.
+    """
+    withheld: tuple[str, ...] = request.scope.get(WITHHELD_SCOPE_KEY, ())
+    request.scope[WITHHELD_SCOPE_KEY] = (*withheld, *paths)
+
+
+def _blank(body: Any, path: list[str]) -> None:
+    for name in path[:-1]:
+        body = body.get(name) if isinstance(body, dict) else None
+    if isinstance(body, dict) and path[-1] in body:
+        body[path[-1]] = None
+
+
+def withheld_body(body: Any, paths: tuple[str, ...]) -> Any:
+    """``body`` with every present field at the dotted ``paths`` set to ``None`` (changed in place)."""
+    for path in paths:
+        _blank(body, path.split("."))
+    return body
+
+
 def is_storable_status(status: int) -> bool:
     """2xx and 4xx responses are stored, except 429 (a throttle the client must be able to retry)."""
     return (200 <= status < 300 or 400 <= status < 500) and status != _TOO_MANY_REQUESTS  # noqa: PLR2004
@@ -254,6 +284,7 @@ class _Capture:
         if not parsed:
             await self._release(claim)
             return
+        body = withheld_body(body, tuple(self.scope.get(WITHHELD_SCOPE_KEY, ())))
         try:
             await claim.store.complete(claim.org_id, claim.key, status=self.status, body=body)
         except _STORE_ERRORS as exc:

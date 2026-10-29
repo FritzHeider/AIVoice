@@ -15,6 +15,7 @@ from typing import Final
 from fastapi import BackgroundTasks, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from va_api.auth.api_keys import creating_user_id
 from va_api.auth.context import RequestContext
 from va_api.auth.invitations import send_invitation
 from va_api.auth.permissions import require_permission
@@ -30,7 +31,7 @@ from va_api.routers.org_members import owner_guard
 from va_api.routers.org_sso import ReadOrg, WriteOrg, org_router
 from va_common.errors import AppError
 from va_db.models import Org, User
-from va_db.repositories import ApiKeyRepo, IdentityRepo, InvitationRepo, MembershipRepo
+from va_db.repositories import IdentityRepo, InvitationRepo, MembershipRepo
 
 __all__ = [
     "ALREADY_MEMBER_EMAIL_MESSAGE",
@@ -46,15 +47,11 @@ ALREADY_MEMBER_EMAIL_MESSAGE: Final = "This person is already a member of the or
 NO_KEY_CREATOR_MESSAGE: Final = "This API key has no creating user to send invitations as."
 _MANAGE: Final = "members.manage"
 _MANAGE_EXTRA: Final = {"x-permission": _MANAGE}
-_USER_PRINCIPALS: Final = frozenset({"user", "platform_admin"})
 
 
 async def _inviter_of(ctx: RequestContext, session: AsyncSession) -> User:
     """The session's user, or the user who created the calling API key; ``FORBIDDEN`` without one."""
-    user_id: uuid.UUID | None = ctx.principal_id if ctx.principal_type in _USER_PRINCIPALS else None
-    if ctx.principal_type == "api_key":
-        key = await ApiKeyRepo(session, ctx.org_id).get(ctx.principal_id)
-        user_id = key.created_by if key is not None else None
+    user_id = await creating_user_id(ctx, session)
     user = await IdentityRepo(session).get_user(user_id) if user_id is not None else None
     if user is None:
         raise AppError("FORBIDDEN", NO_KEY_CREATOR_MESSAGE)

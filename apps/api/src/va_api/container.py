@@ -21,7 +21,7 @@ from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.settings import ApiSettings
-from va_common.auth import PasswordHasher
+from va_common.auth import ApiKeyHasher, PasswordHasher
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import Envelope, open_kms_provider
 from va_common.email import EmailSender, InMemoryEmailSender, SmtpEmailSender
@@ -47,6 +47,7 @@ class Container:
     dependencies: Dependencies
     database: Database
     authenticator: ApiKeyAuthenticator
+    api_key_hasher: ApiKeyHasher
     rate_limiter: RateLimiter
     idempotency: IdempotencyStore
     envelope: Envelope
@@ -75,7 +76,8 @@ def email_sender_for(settings: ApiSettings, clock: Clock) -> EmailSender:
 
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
-    """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
+    """Create the engines, Redis, Temporal connector, authenticator (its API key hasher is also exposed for
+    minting keys), rate limiter, idempotency store, the
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
     session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
     the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
@@ -116,6 +118,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             dependencies=deps,
             database=database,
             authenticator=authenticator,
+            api_key_hasher=hasher,
             rate_limiter=rate_limiter,
             idempotency=idempotency,
             envelope=envelope,
