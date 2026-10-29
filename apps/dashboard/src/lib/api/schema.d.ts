@@ -166,8 +166,9 @@ export interface paths {
         head?: never;
         /**
          * Org Update
-         * @description Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the
-         *     `org.compliance` permission.
+         * @description Rename the org, change its retention, or change settings (as `PATCH /v1/org/settings`);
+         *     `retention_days`, `recording_retention_days`, and compliance settings also need the `org.compliance`
+         *     permission.
          */
         patch: operations["org_update"];
         trace?: never;
@@ -258,6 +259,33 @@ export interface paths {
          * @description Change a member's role; owners can be made or demoted only by owners, and the last owner stays.
          */
         patch: operations["org_members_update"];
+        trace?: never;
+    };
+    "/v1/org/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Org Settings Get
+         * @description Every org setting, defaults filled for the ones never set.
+         */
+        get: operations["org_settings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Org Settings Update
+         * @description Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.
+         *
+         *     Compliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform
+         *     administrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan.
+         */
+        patch: operations["org_settings_update"];
         trace?: never;
     };
     "/v1/org/sso": {
@@ -414,6 +442,23 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AnalysisSettings
+         * @description Post-call analysis switches (specs/18-post-call-analysis.md).
+         */
+        AnalysisSettings: {
+            /**
+             * Retranscribe
+             * @description Diarized re-transcription after the call; null means on whenever the call is recorded.
+             */
+            retranscribe?: boolean | null;
+            /**
+             * Sentiment
+             * @description Run sentiment analysis on connected calls.
+             * @default true
+             */
+            sentiment: boolean;
+        };
         /**
          * ApiKeyCreate
          * @description ``POST /v1/api_keys``: name, scopes (default every scope), environment, and an optional expiry.
@@ -664,6 +709,82 @@ export interface components {
             user_agent: string | null;
         };
         /**
+         * CallingWindow
+         * @description One daily window, local to the callee. Overnight windows are split into two windows.
+         */
+        CallingWindow: {
+            /**
+             * Days
+             * @description Days the window applies to; at least one, no repeats.
+             */
+            days: components["schemas"]["Weekday"][];
+            /**
+             * End
+             * @description Closing time, "HH:MM" 24 h, later than `start`.
+             */
+            end: string;
+            /**
+             * Start
+             * @description Opening time, "HH:MM" 24 h.
+             */
+            start: string;
+        };
+        /**
+         * ComplianceSettings
+         * @description Calling hours, DNC inheritance, and disclosure policies (specs/23-guardrails-and-compliance.md §2).
+         */
+        ComplianceSettings: {
+            /**
+             * Ai Disclosure Policy
+             * @description When the AI-disclosure guard rail is added to calls.
+             * @default always
+             * @enum {string}
+             */
+            ai_disclosure_policy: "always" | "auto" | "never";
+            /**
+             * Calling Hours
+             * @description Windows in the callee's local timezone; windows of one day must not overlap.
+             */
+            calling_hours?: components["schemas"]["CallingWindow"][];
+            /**
+             * Dnc Inherit From Parent
+             * @description A sub-account also honors its parent's do-not-call list.
+             * @default true
+             */
+            dnc_inherit_from_parent: boolean;
+            /**
+             * Enforce Calling Hours
+             * @description Apply `calling_hours` to non-batch API calls as well as batches.
+             * @default false
+             */
+            enforce_calling_hours: boolean;
+            /**
+             * Max Attempts Per Number Per Day
+             * @description Outbound attempts per number per day; 0 means unlimited.
+             * @default 0
+             */
+            max_attempts_per_number_per_day: number;
+            /**
+             * Recording Disclosure Policy
+             * @description When the recording-disclosure guard rail is added to recorded calls.
+             * @default auto
+             * @enum {string}
+             */
+            recording_disclosure_policy: "always" | "auto" | "never";
+            /**
+             * Require Consent Attestation
+             * @description Batches must carry `global_props.consent_attestation=true`.
+             * @default true
+             */
+            require_consent_attestation: boolean;
+            /**
+             * State Quiet Hours
+             * @description Apply stricter state-specific calling hours on top of `calling_hours`.
+             * @default true
+             */
+            state_quiet_hours: boolean;
+        };
+        /**
          * DataResponse[ApiKeyCreated]
          * @example {
          *       "data": {
@@ -813,6 +934,23 @@ export interface components {
             errors?: null;
         };
         /**
+         * DataResponse[OrgSettings]
+         * @example {
+         *       "data": {
+         *         "compliance": {
+         *           "state_quiet_hours": true
+         *         },
+         *         "default_record": true,
+         *         "timezone": "America/New_York"
+         *       }
+         *     }
+         */
+        DataResponse_OrgSettings_: {
+            data: components["schemas"]["OrgSettings"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[OrgView]
          * @example {
          *       "data": {
@@ -835,7 +973,10 @@ export interface components {
          *         "plan_id": "build",
          *         "recording_retention_days": 90,
          *         "retention_days": 365,
-         *         "settings": {},
+         *         "settings": {
+         *           "default_record": true,
+         *           "timezone": "America/New_York"
+         *         },
          *         "slug": "acme-dental-k3q9",
          *         "status": "active",
          *         "updated_at": "2026-10-29T14:03:11Z"
@@ -987,6 +1128,30 @@ export interface components {
             errors?: null;
         };
         /**
+         * EngineSettings
+         * @description Dialogue engine behaviour.
+         */
+        EngineSettings: {
+            /**
+             * Allow Callbacks
+             * @description The agent may schedule callback calls.
+             * @default false
+             */
+            allow_callbacks: boolean;
+            /**
+             * Speculative
+             * @description Generate the dialogue reply in parallel with pathway routing.
+             * @default true
+             */
+            speculative: boolean;
+            /**
+             * Tool Fillers
+             * @description Speak tool filler phrases while tools run.
+             * @default true
+             */
+            tool_fillers: boolean;
+        };
+        /**
          * ErrorEnvelope
          * @description Error body of envelope endpoints.
          * @example {
@@ -1070,6 +1235,32 @@ export interface components {
              * @constant
              */
             status: "error";
+        };
+        /**
+         * ExperimentsSettings
+         * @description Experiment arm assignment.
+         */
+        ExperimentsSettings: {
+            /**
+             * Sticky By Contact
+             * @description Hash arm assignment by contact instead of by call id.
+             * @default false
+             */
+            sticky_by_contact: boolean;
+        };
+        /**
+         * GuardRailConfig
+         * @description A default guard rail (specs/23-guardrails-and-compliance.md §1.1); other keys are kept as sent.
+         */
+        GuardRailConfig: {
+            /**
+             * Type
+             * @description Guard rail type.
+             * @enum {string}
+             */
+            type: "tcpa:ai_disclosure" | "tcpa:self_introduction" | "tcpa:recording_disclosure" | "tcpa:opt_out" | "custom";
+        } & {
+            [key: string]: unknown;
         };
         /**
          * HealthStatus
@@ -1172,6 +1363,60 @@ export interface components {
         };
         /** @enum {string} */
         JitRole: "admin" | "developer" | "analyst" | "billing" | "viewer";
+        JsonValue: unknown;
+        /**
+         * LlmSettings
+         * @description Per-org LLM override and dialogue limits (specs/10-llm-gateway.md).
+         */
+        LlmSettings: {
+            /**
+             * Allow Model Override
+             * @description Allow per-call `model` values outside the platform model allowlist.
+             * @default false
+             */
+            allow_model_override: boolean;
+            /**
+             * Analysis Model
+             * @description Model for post-call analysis.
+             */
+            analysis_model?: string | null;
+            /**
+             * Api Key Ref
+             * @description Name of the org secret (`PUT /v1/org/secrets/{name}`) holding the API key.
+             */
+            api_key_ref?: string | null;
+            /**
+             * Base Url
+             * @description OpenAI-compatible base URL replacing the platform's.
+             */
+            base_url?: string | null;
+            /**
+             * Context Budget Tokens
+             * @description Max prompt tokens for dialogue context assembly.
+             * @default 6000
+             */
+            context_budget_tokens: number;
+            /**
+             * Dialogue Model
+             * @description Model for dialogue turns.
+             */
+            dialogue_model?: string | null;
+            /**
+             * Fallback Model
+             * @description Model used when the primary fails.
+             */
+            fallback_model?: string | null;
+            /**
+             * Router Model
+             * @description Model for pathway routing.
+             */
+            router_model?: string | null;
+            /**
+             * Temperature Default
+             * @description Default sampling temperature.
+             */
+            temperature_default?: number | null;
+        };
         /**
          * MeApiKey
          * @description The API key making the request (its prefix only, never the secret).
@@ -1336,6 +1581,18 @@ export interface components {
             user_id: string;
         };
         /**
+         * MemorySettings
+         * @description Cross-channel memory defaults.
+         */
+        MemorySettings: {
+            /**
+             * Default Enabled
+             * @description Memory on for calls and personas that do not specify it.
+             * @default false
+             */
+            default_enabled: boolean;
+        };
+        /**
          * OrgLimits
          * @description Effective limits: the plan's rates and caps overlaid by the org's overrides; null caps: unlimited.
          * @example {
@@ -1387,7 +1644,10 @@ export interface components {
          * @description ``PATCH /v1/org``: omitted fields stay unchanged; the retention fields need ``org.compliance``.
          * @example {
          *       "name": "Acme Dental West",
-         *       "retention_days": 180
+         *       "retention_days": 180,
+         *       "settings": {
+         *         "timezone": "America/Denver"
+         *       }
          *     }
          */
         OrgPatch: {
@@ -1403,6 +1663,322 @@ export interface components {
              * @description Days call data is kept (needs `org.compliance`).
              */
             retention_days?: number | null;
+            /** @description Partial OrgSettings; omitted keys stay unchanged; compliance settings need `org.compliance` (as `PATCH /v1/org/settings`). */
+            settings?: components["schemas"]["OrgSettings"];
+        };
+        /**
+         * OrgSettings
+         * @description Every org setting with its default; `orgs.settings` stores only the keys that were set explicitly.
+         * @example {
+         *       "compliance": {
+         *         "state_quiet_hours": true
+         *       },
+         *       "default_record": true,
+         *       "timezone": "America/New_York"
+         *     }
+         */
+        OrgSettings: {
+            /**
+             * Ai Disclosure Required
+             * @description Forces the `tcpa:ai_disclosure` guard rail whatever the policy.
+             * @default false
+             */
+            ai_disclosure_required: boolean;
+            /**
+             * Allow Insecure Webhooks
+             * @description Permit `http://` webhook URLs in production.
+             * @default false
+             */
+            allow_insecure_webhooks: boolean;
+            /**
+             * Allowed Countries
+             * @description Destinations allowed when international calling is enabled.
+             */
+            allowed_countries?: string[];
+            /**
+             * Amd Default
+             * @description Default AMD mode.
+             * @default premium
+             * @enum {string}
+             */
+            amd_default: "off" | "premium";
+            /** @description Post-call analysis. */
+            analysis?: components["schemas"]["AnalysisSettings"];
+            /**
+             * Baa Signed At
+             * @description When the BAA was signed; set by platform administrators.
+             */
+            baa_signed_at?: string | null;
+            /**
+             * Background Track Default
+             * @description Default background track.
+             * @default phone_static
+             * @enum {string}
+             */
+            background_track_default: "none" | "office" | "cafe" | "restaurant" | "phone_static";
+            /**
+             * Batch Concurrency Share
+             * @description Share of the org concurrency pool batches may use.
+             * @default 1
+             */
+            batch_concurrency_share: number;
+            /**
+             * Blocked Prefixes
+             * @description Extra E.164 prefixes blocked.
+             */
+            blocked_prefixes?: string[];
+            /**
+             * Call Defaults
+             * @description Org-wide Send Call defaults below agent and persona defaults.
+             */
+            call_defaults?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Cnam Display Name
+             * @description Caller name registered for new numbers.
+             */
+            cnam_display_name?: string | null;
+            /** @description Compliance controls. */
+            compliance?: components["schemas"]["ComplianceSettings"];
+            /**
+             * Data Export Enabled
+             * @description CSV exports in the dashboard.
+             * @default true
+             */
+            data_export_enabled: boolean;
+            /**
+             * Default Country
+             * @description Region used to parse non-E.164 numbers.
+             * @default US
+             */
+            default_country: string;
+            /**
+             * Default From Number
+             * @description Default caller ID when `from` is absent.
+             */
+            default_from_number?: string | null;
+            /**
+             * Default Guard Rails
+             * @description Guard rails applied to every call unless overridden.
+             */
+            default_guard_rails?: components["schemas"]["GuardRailConfig"][];
+            /**
+             * Default Language
+             * @description Default call `language`.
+             * @default en
+             */
+            default_language: string;
+            /**
+             * Default Max Duration Min
+             * @description Default `max_duration` (minutes).
+             * @default 30
+             */
+            default_max_duration_min: number;
+            /**
+             * Default Record
+             * @description Default `record`.
+             * @default false
+             */
+            default_record: boolean;
+            /**
+             * Default Voice
+             * @description Default `voice` (voice name or id).
+             * @default Karen
+             */
+            default_voice: string;
+            /**
+             * Default Voice Id
+             * @description Default voice by id; takes precedence over `default_voice`.
+             */
+            default_voice_id?: string | null;
+            /**
+             * Default Webhook
+             * @description Applied when a call omits `webhook`.
+             */
+            default_webhook?: string | null;
+            /**
+             * Default Webhook Events
+             * @description Default `webhook_events`.
+             */
+            default_webhook_events?: string[];
+            /**
+             * Delete Carrier Recordings
+             * @description Delete the carrier's recording copy once stored.
+             * @default true
+             */
+            delete_carrier_recordings: boolean;
+            /**
+             * Dial Timeout S
+             * @description Seconds to ring before giving up.
+             * @default 45
+             */
+            dial_timeout_s: number;
+            /**
+             * Dispositions Default
+             * @description Default dispositions.
+             */
+            dispositions_default?: string[];
+            /** @description Dialogue engine. */
+            engine?: components["schemas"]["EngineSettings"];
+            /** @description Experiment assignment. */
+            experiments?: components["schemas"]["ExperimentsSettings"];
+            /**
+             * Hipaa Mode
+             * @description HIPAA handling; requires `baa_signed_at`.
+             * @default false
+             */
+            hipaa_mode: boolean;
+            /**
+             * Honor Opt Out
+             * @description Opt-out phrases write do-not-call entries.
+             * @default true
+             */
+            honor_opt_out: boolean;
+            /**
+             * International Enabled
+             * @description International calling; also requires plan and KYC.
+             * @default false
+             */
+            international_enabled: boolean;
+            /**
+             * Ip Allowlist
+             * @description When non-empty, API keys and sessions are accepted only from these networks.
+             */
+            ip_allowlist?: string[];
+            /** @description Per-org LLM override. */
+            llm?: components["schemas"]["LlmSettings"];
+            /**
+             * Low Balance Threshold Micros
+             * @description Balance (micro-dollars) that triggers `billing.low_balance`.
+             * @default 5000000
+             */
+            low_balance_threshold_micros: number;
+            /**
+             * Max Duration Message
+             * @description Spoken before the `max_duration` hangup.
+             * @default I'm sorry, we've reached the time limit for this call. Goodbye.
+             */
+            max_duration_message: string;
+            /** @description Memory defaults. */
+            memory?: components["schemas"]["MemorySettings"];
+            /**
+             * Mfa Required
+             * @description Members must enrol MFA.
+             * @default false
+             */
+            mfa_required: boolean;
+            /**
+             * No Input Goodbye
+             * @description Spoken after repeated no-input timeouts.
+             * @default I haven't heard anything, so I'll end the call now. Goodbye.
+             */
+            no_input_goodbye: string;
+            /**
+             * Noise Cancellation Default
+             * @description Default noise cancellation.
+             * @default true
+             */
+            noise_cancellation_default: boolean;
+            /**
+             * Notification Emails
+             * @description Billing and security notifications besides owners.
+             */
+            notification_emails?: string[];
+            /**
+             * Onboarding Completed At
+             * @description Set by the dashboard onboarding wizard.
+             */
+            onboarding_completed_at?: string | null;
+            /**
+             * Pathway Version Fallback
+             * @description A missing numeric pathway version falls back to production.
+             * @default true
+             */
+            pathway_version_fallback: boolean;
+            /**
+             * Pii Redaction
+             * @description Post-call redaction.
+             * @default off
+             * @enum {string}
+             */
+            pii_redaction: "off" | "transcripts" | "transcripts_and_recordings";
+            /**
+             * Pii Redaction Entities
+             * @description Scribe entity categories to redact.
+             */
+            pii_redaction_entities?: string[];
+            /**
+             * Post Call Eval Setup Id
+             * @description Eval run on every call.
+             */
+            post_call_eval_setup_id?: string | null;
+            /** @description Privacy controls. */
+            privacy?: components["schemas"]["PrivacySettings"];
+            /**
+             * Recording Disclosure Required
+             * @description Forces `tcpa:recording_disclosure` on recorded calls.
+             * @default true
+             */
+            recording_disclosure_required: boolean;
+            /** @description Real-time redaction. */
+            redaction?: components["schemas"]["RedactionSettings"];
+            /**
+             * Session Max Age Days
+             * @description Dashboard session sliding expiry window (days).
+             * @default 14
+             */
+            session_max_age_days: number;
+            /** @description SMS encoding. */
+            sms?: components["schemas"]["SmsSettings"];
+            /**
+             * Summary Prompt Default
+             * @description Default summary prompt.
+             */
+            summary_prompt_default?: string | null;
+            /**
+             * Timezone
+             * @description Default timezone for calls and calling windows.
+             * @default America/Los_Angeles
+             */
+            timezone: string;
+            /** @description Built-in tools. */
+            tools?: components["schemas"]["ToolsSettings"];
+            /**
+             * Transfer Caller Id Mode
+             * @description Caller ID presented to transfer targets.
+             * @default agent_number
+             * @enum {string}
+             */
+            transfer_caller_id_mode: "agent_number" | "original_caller";
+            /**
+             * Transfer Failed Message
+             * @description Spoken when a transfer leg fails.
+             * @default I'm sorry, I wasn't able to connect you. Is there anything else I can help with?
+             */
+            transfer_failed_message: string;
+            /**
+             * Viewers Can See Pii
+             * @description Viewers see unmasked PII.
+             * @default false
+             */
+            viewers_can_see_pii: boolean;
+            /**
+             * Voice Overrides
+             * @description Org-level voice settings per voice id.
+             */
+            voice_overrides?: {
+                [key: string]: components["schemas"]["VoiceSettings"];
+            };
+            /** @description Voice resolution. */
+            voices?: components["schemas"]["VoicesSettings"];
+            /**
+             * Webhook Format
+             * @description Default format for per-call webhooks.
+             * @default bland
+             * @enum {string}
+             */
+            webhook_format: "bland" | "envelope";
         };
         /**
          * OrgSummary
@@ -1453,7 +2029,10 @@ export interface components {
          *       "plan_id": "build",
          *       "recording_retention_days": 90,
          *       "retention_days": 365,
-         *       "settings": {},
+         *       "settings": {
+         *         "default_record": true,
+         *         "timezone": "America/New_York"
+         *       },
          *       "slug": "acme-dental-k3q9",
          *       "status": "active",
          *       "updated_at": "2026-10-29T14:03:11Z"
@@ -1490,10 +2069,8 @@ export interface components {
             recording_retention_days: number;
             /** Retention Days */
             retention_days: number;
-            /** Settings */
-            settings: {
-                [key: string]: unknown;
-            };
+            /** @description Every org setting, defaults filled (specs/04 §7). */
+            settings: components["schemas"]["OrgSettings"];
             /** Slug */
             slug: string;
             /** Status */
@@ -1587,6 +2164,54 @@ export interface components {
         };
         /** @enum {string} */
         PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
+        /**
+         * PrivacySettings
+         * @description Transcript redaction shorthand and vendor zero retention.
+         */
+        PrivacySettings: {
+            /**
+             * Redact Transcripts
+             * @description Forces `pii_redaction` to at least `transcripts`.
+             * @default false
+             */
+            redact_transcripts: boolean;
+            /**
+             * Zero Retention
+             * @description Vendor calls use zero-retention options; requires the enterprise plan.
+             * @default false
+             */
+            zero_retention: boolean;
+        };
+        /**
+         * RedactionSettings
+         * @description Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).
+         */
+        RedactionSettings: {
+            /**
+             * Enabled
+             * @description Redact entity spans in stored transcripts in real time.
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Redact Llm Context
+             * @description Also replace redacted spans in the live LLM context.
+             * @default false
+             */
+            redact_llm_context: boolean;
+        };
+        /**
+         * SmsSettings
+         * @description Outbound SMS encoding (specs/21-messaging-sms.md).
+         */
+        SmsSettings: {
+            /**
+             * Smart Encoding
+             * @description Replace curly quotes, dashes, and ellipses so messages stay GSM-7.
+             * @default true
+             */
+            smart_encoding: boolean;
+        };
         /**
          * SsoConnectionDeleted
          * @description ``DELETE /v1/org/sso`` result.
@@ -1863,6 +2488,24 @@ export interface components {
             status: "success";
         };
         /**
+         * ToolsSettings
+         * @description Built-in tools allowed in calls.
+         */
+        ToolsSettings: {
+            /**
+             * Allow Schedule Callback
+             * @description Built-in schedule-callback tool allowed.
+             * @default false
+             */
+            allow_schedule_callback: boolean;
+            /**
+             * Allow Send Sms
+             * @description Built-in SMS tool and node allowed.
+             * @default true
+             */
+            allow_send_sms: boolean;
+        };
+        /**
          * TransferOwnershipRequest
          * @description ``POST /v1/org/transfer-ownership``: the member who becomes an owner.
          * @example {
@@ -1876,6 +2519,56 @@ export interface components {
              */
             user_id: string;
         };
+        /**
+         * VoiceSettings
+         * @description ElevenLabs voice settings; every field has the model default, so a partial object is valid.
+         */
+        VoiceSettings: {
+            /**
+             * Similarity Boost
+             * @description How closely the output follows the original voice.
+             * @default 0.75
+             */
+            similarity_boost: number;
+            /**
+             * Speed
+             * @description Speaking rate multiplier.
+             * @default 1
+             */
+            speed: number;
+            /**
+             * Stability
+             * @description Lower values give a more varied delivery.
+             * @default 0.5
+             */
+            stability: number;
+            /**
+             * Style
+             * @description Style exaggeration of the speaker.
+             * @default 0
+             */
+            style: number;
+            /**
+             * Use Speaker Boost
+             * @description Boost similarity to the original speaker.
+             * @default true
+             */
+            use_speaker_boost: boolean;
+        };
+        /**
+         * VoicesSettings
+         * @description Voice resolution rules.
+         */
+        VoicesSettings: {
+            /**
+             * Allow Raw Provider Ids
+             * @description `voice` may be a raw ElevenLabs voice_id that is not in the catalog.
+             * @default false
+             */
+            allow_raw_provider_ids: boolean;
+        };
+        /** @enum {string} */
+        Weekday: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
     };
     responses: never;
     parameters: never;
@@ -2470,6 +3163,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DataResponse_MemberView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_OrgSettings_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_settings_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrgSettings"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_OrgSettings_"];
                 };
             };
             /** @description Invalid input */

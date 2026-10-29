@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "va-common",
     "va-db",
+    "va-domain",
 ]
 
 [build-system]
@@ -26,3 +27,4 @@ build-backend = "uv_build"
 [tool.uv.sources]
 va-common = { workspace = true }
 va-db = { workspace = true }
+va-domain = { workspace = true }

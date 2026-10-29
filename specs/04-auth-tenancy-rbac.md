@@ -885,12 +885,45 @@ see shared-contract additions); `GET /v1/org/secrets` lists names only.
 > (the plan number caps live in `va_billing`, which takes over the merge when it lands); every override present in
 > `orgs.limits` with the right type (`bool` for `international_enabled`, a non-bool integer for the rest) replaces
 > the plan value, anything else is ignored. `settings` is the stored object until `OrgSettings` (P02-T12) returns it
-> with defaults. **`PATCH /v1/org`** (`org:write`) accepts `{name? (1-200 chars, trimmed), retention_days?
+> with defaults (superseded by the "Org settings endpoints (P02-T12b)" decision below). **`PATCH /v1/org`** (`org:write`) accepts `{name? (1-200 chars, trimmed), retention_days?
 > (1-3650), recording_retention_days? (0-3650)}` with unknown fields `INVALID_INPUT`; setting either retention field
 > also needs `org.compliance` (`FORBIDDEN` "Missing required permission 'org.compliance'."); an empty body changes
 > nothing and returns the org. `settings` joins this body with P02-T12; the `org.update` audit entry is in the §13 decision.
 > `orgs` has no RLS, so both routes read and write it through `OrgRepo` on the global session with the context's org
 > id only.
+
+> Decision (2026-10-29): **Org settings endpoints (P02-T12b).**
+> 1. **Routes.** `GET /v1/org/settings` (`org:read`, operation `org_settings_get`) and `PATCH /v1/org/settings`
+>    (`org:write`, `org_settings_update`, audited `org.update`) return `{data: OrgSettings}` with every field, defaults
+>    filled. `PATCH /v1/org` accepts `settings?: partial OrgSettings` with the same semantics (`settings: null` is
+>    `INVALID_INPUT` field `settings`); `GET /v1/org` and `PATCH /v1/org` return `settings` with defaults filled. Both
+>    PATCH bodies are parsed as `OrgSettings` and only the sent keys (`exclude_unset`) are applied; an empty settings
+>    body (or an empty group object) changes nothing and the response is the current settings.
+> 2. **Merge and storage.** As §7 Decision item 5: groups merge key by key, everything else is replaced, `null` only on
+>    nullable fields. `orgs.settings` stores `sparse_settings(OrgSettings.model_validate(merge_settings(stored,
+>    sent)))`. The org row is locked (`SELECT … FOR UPDATE`, `OrgRepo.lock`) for the read-merge-write, so concurrent
+>    PATCHes never lose keys; the row is written only when the sparse object changes.
+> 3. **Permissions.** Sending any path whose first segment is in `COMPLIANCE_PATHS` (and `retention_days` /
+>    `recording_retention_days`, as before) needs `org.compliance` → `FORBIDDEN` "Missing required permission
+>    'org.compliance'.". Sending `baa_signed_at` (any value, `null` included) as anything but a `platform_admin`
+>    principal → `FORBIDDEN` "Only platform administrators can set 'baa_signed_at'." with field `baa_signed_at`
+>    (`settings.baa_signed_at` under `PATCH /v1/org`); on `/v1/*` that is every caller until the admin console lands.
+>    Both checks run on what was sent, before any write.
+> 4. **Cross-field rules**, checked on the merged object and only when the body sends one of the rule's paths (an
+>    unrelated PATCH never fails because of state set elsewhere): `hipaa_mode` true with `baa_signed_at` null →
+>    `INVALID_INPUT` "hipaa_mode requires a signed BAA ('baa_signed_at')." field `hipaa_mode`;
+>    `privacy.zero_retention` true when the context's plan (`ctx.plan_id`, the child's plan while a parent acts on a
+>    sub-account) is not `enterprise` → `FEATURE_NOT_IN_PLAN` (403) "Zero retention requires the enterprise plan."
+>    field `privacy.zero_retention`. Under `PATCH /v1/org` every settings field carries the `settings.` prefix.
+> 5. **Field paths.** Every `INVALID_INPUT` `field` in the API uses `va_domain.org.field_path`: dotted keys, `[i]` list
+>    indices, no pydantic `[key]` segment, after dropping the location (specs/31 §2 note).
+> 6. **Accessor.** `va_db.org_settings.OrgSettingsReader(database, redis)`: `get(org_id) -> OrgSettings | None` reads
+>    Redis `orgsettings:{org_id}` (string JSON of the stored sparse object, `EX 60`, specs/03 §11), then the database
+>    (`OrgRepo.get` on its own global session), and caches on a miss; a missing org is `None` and never cached. Redis
+>    errors (`org_settings_cache_unavailable`) and unreadable cached values (`org_settings_cache_invalid`) are logged
+>    and the database answers. `invalidate(org_id)` deletes the key (Redis errors logged, not raised) and runs after
+>    every settings write commits. Services read settings through this reader; `GET /v1/org/settings` does too.
+> 7. **Audit.** One `org.update` row per PATCH that changes something (§13).
 
 ### 8.2 Bland-compatible sub-account creation (legacy envelope)
 
@@ -1183,6 +1216,11 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
 > 8. **Rows of the phase 02 routes** (resource_type / resource_id: before → after). A request that changes
 >    nothing writes no row.
 >    - `PATCH /v1/org` → `org.update`, `org`/org id: the changed fields' old → new values.
+>    - `PATCH /v1/org/settings` and the `settings` member of `PATCH /v1/org` (P02-T12b) → the same `org.update` row
+>      (one per request): `before`/`after` keyed by `name`, `retention_days`, `recording_retention_days` and
+>      `settings.<dotted path>` for every sent settings path whose effective value (defaults filled, JSON mode)
+>      changed; whole-replaced values are logged at their own path (`settings.compliance.calling_hours`,
+>      `settings.voice_overrides`). No row when nothing changed.
 >    - `PATCH /v1/org/members/{id}` → `member.role_change`, `membership`/user id: `{role}` → `{role}`;
 >      `DELETE` → `member.remove`, `{user_id, email, role}` → null; `transfer-ownership` →
 >      `org.ownership_transfer`, `org`/org id: `{owner_user_id}` → `{owner_user_id}`.

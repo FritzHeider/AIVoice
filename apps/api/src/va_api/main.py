@@ -31,6 +31,7 @@ from va_api.routers import (
     auth_switch_org,  # noqa: F401  (registers POST /switch-org on internal_auth_router)
     org_invitations,  # noqa: F401  (registers the /v1/org/members/invitations routes on org_router)
     org_members,  # noqa: F401  (registers the /v1/org/members routes on org_router)
+    org_settings,  # noqa: F401  (registers the /v1/org/settings routes on org_router)
 )
 from va_api.routers.api_keys import api_keys_router
 from va_api.routers.audit_logs import audit_logs_router

@@ -22,6 +22,7 @@ from session_helpers import (
 from va_api.auth.rbac import ROLE_SCOPES
 from va_api.auth.sub_accounts import NOT_A_CHILD_MESSAGE
 from va_db.models import MemberRole, Plan
+from va_domain.org import load_settings
 
 ME = "/v1/me"
 ORG = "/v1/org"
@@ -123,7 +124,7 @@ async def test_every_role_reads_the_org(
     assert (data["status"], data["data_region"], data["parent_org_id"]) == ("active", "us", None)
     assert (data["retention_days"], data["recording_retention_days"]) == (365, 90)
     assert data["credits_balance"] == 12.5
-    assert data["settings"] == {"timezone": "America/Chicago"}
+    assert data["settings"] == load_settings({"timezone": "America/Chicago"}).model_dump(mode="json")
     limits = data["limits"]
     assert limits["concurrency"] == 7
     assert limits["daily_calls"] == plan.daily_call_cap
@@ -195,7 +196,8 @@ async def test_api_keys_need_org_compliance_for_retention(
         ({"retention_days": 0}, "retention_days"),
         ({"retention_days": 4000}, "retention_days"),
         ({"recording_retention_days": -1}, "recording_retention_days"),
-        ({"settings": {"timezone": "UTC"}}, "settings"),
+        ({"settings": None}, "settings"),
+        ({"settings": {"timezone": "Mars/Olympus_Mons"}}, "settings.timezone"),
     ],
 )
 async def test_invalid_patch_bodies(

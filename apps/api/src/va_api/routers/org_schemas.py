@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from va_api.auth.context import PrincipalType
 from va_db.models import MemberRole, Plan
+from va_domain.org import OrgSettings
 
 __all__ = [
     "BOOL_OVERRIDE_KEYS",
@@ -74,7 +75,7 @@ _ORG_EXAMPLE: Final[dict[str, JsonValue]] = {
     "recording_retention_days": 90,
     "credits_balance": 12.5,
     "limits": _LIMITS_EXAMPLE,
-    "settings": {},
+    "settings": {"timezone": "America/New_York", "default_record": True},
     "created_at": "2026-10-29T14:03:11Z",
     "updated_at": "2026-10-29T14:03:11Z",
 }
@@ -176,7 +177,7 @@ class OrgView(BaseModel):
     recording_retention_days: int
     credits_balance: float = Field(description="Prepaid balance in dollars.")
     limits: OrgLimits
-    settings: dict[str, Any]
+    settings: OrgSettings = Field(description="Every org setting, defaults filled (specs/04 §7).")
     created_at: datetime
     updated_at: datetime
 
@@ -186,7 +187,15 @@ class OrgPatch(BaseModel):
 
     model_config = ConfigDict(
         extra="forbid",
-        json_schema_extra={"examples": [{"name": "Acme Dental West", "retention_days": 180}]},
+        json_schema_extra={
+            "examples": [
+                {
+                    "name": "Acme Dental West",
+                    "retention_days": 180,
+                    "settings": {"timezone": "America/Denver"},
+                }
+            ]
+        },
     )
 
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None
@@ -196,6 +205,11 @@ class OrgPatch(BaseModel):
     recording_retention_days: Annotated[
         int | None, Field(ge=0, le=3650, description="Days recordings are kept (needs `org.compliance`).")
     ] = None
+    settings: OrgSettings = Field(
+        default_factory=OrgSettings,
+        description="Partial OrgSettings; omitted keys stay unchanged; compliance settings need "
+        "`org.compliance` (as `PATCH /v1/org/settings`).",
+    )
 
 
 def _int_override(value: object) -> int | None:

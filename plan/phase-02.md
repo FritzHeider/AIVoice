@@ -168,7 +168,7 @@
   - Deliverables: `packages/va_domain` (workspace member) with `va_domain.org.OrgSettings` and its eleven sub-models, `va_domain.voices.VoiceSettings`, `va_domain.scheduling.CallingWindow`; merge (`merge_settings`), sparse-storage, and compliance-field helpers; cross-spec field inventory reconciled in a specs/04 §7 Decision
   - Acceptance: every field of §7 (as amended) has its default asserted by a test that parses the §7 tables; invalid values rejected with dotted field paths; `OrgSettings().model_dump()` round-trips.
 
-- [ ] P02-T12b `GET/PATCH /v1/org/settings`, `settings` on `PATCH /v1/org`, cached settings accessor
+- [x] P02-T12b `GET/PATCH /v1/org/settings`, `settings` on `PATCH /v1/org`, cached settings accessor — reviewed 2026-10-29: make lint/typecheck/placeholders pass, make test 3279 passed (coverage 97.69%), make test-ts pass, openapi regenerated with no drift, check_spec_refs 0
   - Spec refs: specs/04-auth-tenancy-rbac.md §3.2, §7, §8.1, §13; specs/03-data-model.md §11
   - Depends on: P02-T12a, P02-T11b
   - Deliverables: both routes and `settings` on `PATCH /v1/org` (deep merge, sparse storage, `org.compliance` for compliance fields, platform-only `baa_signed_at`, cross-field rules), `GET /v1/org` settings with defaults, `va_db.org_settings.OrgSettingsReader` with `orgsettings:{org_id}` Redis cache (60 s) dropped on every update, `org.update` audit rows

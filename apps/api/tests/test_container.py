@@ -20,6 +20,7 @@ from va_common.auth import SPEC_ARGON2_PARAMS, PasswordHasher
 from va_common.crypto import Envelope
 from va_common.email import InMemoryEmailSender, SmtpEmailSender
 from va_common.time import SystemClock
+from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 
 UNREACHABLE_PG = "postgresql+asyncpg://va:va@127.0.0.1:1/va"
@@ -55,6 +56,7 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(container.resend_limiter, ResendLimiter)
         assert isinstance(container.oidc_discovery, OidcDiscovery)
         assert container.oidc_discovery.allow_insecure  # VA_ENV=local
+        assert isinstance(container.org_settings, OrgSettingsReader)
         assert closed == []
     # The OIDC discovery client, the va_app and va_system engines, then the dependency stack in reverse order.
     assert closed == ["http", "engine", "engine", "redis", "engine"]

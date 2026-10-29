@@ -231,12 +231,16 @@ def test_validation_items_field_paths() -> None:
             {"type": "missing", "loc": ("body", "items", 0, "name"), "msg": "Field required"},
             {"type": "missing", "loc": ("body",), "msg": "Field required"},
             {"type": "value_error", "loc": ("custom", "x"), "msg": "Value error, bad"},
+            {"type": "uuid_parsing", "loc": ("body", "voice_overrides", "abc", "[key]"), "msg": "bad id"},
+            {"type": "missing", "loc": ("query", "ids", 2), "msg": "Field required"},
         ]
     )
     assert validation_items(exc) == [
-        {"error": "INVALID_INPUT", "message": "Field required", "field": "items.0.name"},
+        {"error": "INVALID_INPUT", "message": "Field required", "field": "items[0].name"},
         {"error": "INVALID_INPUT", "message": "Field required"},
         {"error": "INVALID_INPUT", "message": "bad", "field": "custom.x"},
+        {"error": "INVALID_INPUT", "message": "bad id", "field": "voice_overrides.abc"},
+        {"error": "INVALID_INPUT", "message": "Field required", "field": "ids[2]"},
     ]
     assert validation_items(RequestValidationError([])) == [
         {"error": "INVALID_INPUT", "message": "Invalid input"}

@@ -13,6 +13,7 @@ from va_domain.org import (
     COMPLIANCE_PATHS,
     SETTINGS_GROUPS,
     OrgSettings,
+    effective_values,
     load_settings,
     merge_settings,
     needs_compliance,
@@ -150,3 +151,26 @@ def test_a_patch_body_parsed_with_the_model_yields_what_was_sent() -> None:
     sent = OrgSettings.model_validate(body).model_dump(mode="json", exclude_unset=True)
     assert sent == body
     assert sent_paths(sent) == ["timezone", "llm.temperature_default"]
+
+
+def test_effective_values_read_defaults_and_set_values_in_json_mode() -> None:
+    settings = load_settings(
+        {"timezone": "America/Chicago", "llm": {"temperature_default": 0.2}, "voice_overrides": {VOICE_A: {}}}
+    )
+    paths = [
+        "timezone",
+        "default_record",
+        "llm.temperature_default",
+        "compliance.calling_hours",
+        "voice_overrides",
+    ]
+    values = effective_values(settings, paths)
+    assert list(values) == paths
+    assert values["timezone"] == "America/Chicago"
+    assert values["default_record"] is False
+    assert values["llm.temperature_default"] == 0.2
+    assert values["compliance.calling_hours"] == [
+        {"days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "08:00", "end": "21:00"}
+    ]
+    assert list(values["voice_overrides"]) == [VOICE_A]
+    assert effective_values(OrgSettings(), []) == {}

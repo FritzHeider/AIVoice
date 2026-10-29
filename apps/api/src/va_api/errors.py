@@ -20,6 +20,7 @@ from va_api.envelopes import Envelope, route_envelope
 from va_api.middleware import REQUEST_ID_HEADER, SECURITY_HEADERS, request_id_of, route_label
 from va_common.errors import AppError
 from va_common.logging import get_logger
+from va_domain.org import field_path
 
 __all__ = [
     "HTTP_STATUS_CODES",
@@ -148,7 +149,7 @@ def _field(loc: Sequence[str | int]) -> str | None:
     parts = list(loc)
     if parts and parts[0] in _LOCATIONS:
         parts = parts[1:]
-    return ".".join(str(part) for part in parts) or None
+    return field_path(tuple(parts)) or None
 
 
 def _validation_item(error: Mapping[str, Any]) -> dict[str, Any]:
@@ -161,7 +162,11 @@ def _validation_item(error: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validation_items(exc: RequestValidationError) -> list[dict[str, Any]]:
-    """One ``INVALID_INPUT`` item per validation error, ``field`` as a dotted path without the location."""
+    """One ``INVALID_INPUT`` item per validation error, ``field`` as a dotted path without the location.
+
+    List indices render as ``[i]`` and pydantic's ``[key]`` segment of dict-key errors is dropped:
+    ``items[0].name``, ``compliance.calling_hours[0].end`` (specs/31-error-catalog.md).
+    """
     items = [_validation_item(error) for error in exc.errors()]
     return items or [{"error": "INVALID_INPUT", "message": "Invalid input"}]
 

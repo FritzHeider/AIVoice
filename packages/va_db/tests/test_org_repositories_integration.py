@@ -167,3 +167,25 @@ async def test_api_key_repo_add_and_prefixes(identity_db: IdentityDb) -> None:
         assert await ApiKeyRepo(session, org_id).prefixes() == prefixes
     async with identity_db.database.tenant_session(other_id) as session:
         assert await ApiKeyRepo(session, other_id).prefixes() == []
+
+
+async def test_update_replaces_the_settings_object(identity_db: IdentityDb) -> None:
+    org_id = await new_org(identity_db, settings={"timezone": "America/Chicago", "default_record": True})
+    async with identity_db.database.global_session() as session:
+        updated = await OrgRepo(session).update(org_id, settings={"llm": {"temperature_default": 0.2}})
+    assert updated is not None
+    assert updated.settings == {"llm": {"temperature_default": 0.2}}
+    async with identity_db.database.global_session() as session:
+        updated = await OrgRepo(session).update(org_id, settings={})
+    assert updated is not None
+    assert updated.settings == {}
+
+
+async def test_lock_returns_the_row_or_none(identity_db: IdentityDb) -> None:
+    org_id = await new_org(identity_db, settings={"timezone": "America/Chicago"})
+    async with identity_db.database.global_session() as session:
+        repo = OrgRepo(session)
+        locked = await repo.lock(org_id)
+        assert await repo.lock(new_id()) is None
+    assert locked is not None
+    assert (locked.id, locked.settings) == (org_id, {"timezone": "America/Chicago"})

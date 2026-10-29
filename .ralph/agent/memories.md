@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793289699-6a26
+> va_api org settings: write via routers.org_settings.check_settings_permissions + apply_settings_patch (locks org row, merges, validates, audit diff keyed settings.<path>), then OrgSettingsReader.invalidate after commit; tests swap container.org_settings to inject broken Redis; INVALID_INPUT field format is field_path (items[0].name)
+<!-- tags: api, settings, testing | created: 2026-10-29 -->
+
 ### mem-1793288415-ea3a
 > va_domain.org.OrgSettings: orgs.settings stored sparse (load_settings/sparse_settings); PATCH body parsed with OrgSettings + exclude_unset, merge_settings (groups key-wise), needs_compliance, field_path(loc). pydantic EmailStr rejects .test domains used in fixtures - use email_validator.validate_email(check_deliverability=False, test_environment=True)
 <!-- tags: api, pydantic, settings | created: 2026-10-29 -->

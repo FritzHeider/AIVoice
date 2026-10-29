@@ -29,6 +29,7 @@ from va_common.health import CheckFn
 from va_common.service import ReadinessSource
 from va_common.settings import Environment
 from va_common.time import Clock, SystemClock
+from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
@@ -61,6 +62,7 @@ class Container:
     resend_limiter: ResendLimiter
     oidc_discovery: OidcDiscovery
     sso_states: SsoStateStore
+    org_settings: OrgSettingsReader
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -81,7 +83,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
     session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
     the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
-    state store.
+    state store, and the cached org settings reader.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -132,4 +134,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             resend_limiter=ResendLimiter(redis),
             oidc_discovery=discovery_for(settings, oidc_http),
             sso_states=SsoStateStore(redis),
+            org_settings=OrgSettingsReader(database, redis),
         )

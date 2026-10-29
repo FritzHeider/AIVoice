@@ -607,3 +607,11 @@ Grafana 3001
   `field_path(error["loc"])` for `INVALID_INPUT` fields. Never add cross-group model validators to `OrgSettings`.
   `pydantic.EmailStr` rejects `.test` domains (used by every fixture and the dev seed); validate emails with
   `email_validator.validate_email(..., check_deliverability=False, test_environment=True)` as `va_domain.org` does.
+- 2026-10-29 (P02-T12b): read org settings outside the API through `va_db.org_settings.OrgSettingsReader(database,
+  redis).get(org_id)` (Redis `orgsettings:{org_id}`, 60 s, DB fallback; it opens its own global session, so never call
+  it while another session of the pool is open). Any code that writes `orgs.settings` must take `OrgRepo.lock(org_id)`
+  in its transaction and call `reader.invalidate(org_id)` after the commit. API writes go through
+  `va_api.routers.org_settings.check_settings_permissions` + `apply_settings_patch(session, ctx, sent, prefix)` (both
+  `PATCH /v1/org/settings` and `PATCH /v1/org` use them). The container exposes the reader as `org_settings`
+  (`session_auth.org_settings_of(request)`; `SessionContainer.org_settings` in tests: replace it to inject a broken
+  Redis). `INVALID_INPUT` `field` everywhere is `va_domain.org.field_path` format: `items[0].name`, not `items.0.name`.

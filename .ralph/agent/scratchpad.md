@@ -4306,3 +4306,190 @@ src); pip-audit (uv export --no-emit-workspace, --no-deps --disable-pip) + pnpm 
   VoiceSettings vs specs/15 §5, CallingWindow vs specs/17 §3; Decision block covers all conflicts and additions.
 - Spot checks: invalid timezone / overlapping windows / bad dict key / bad CIDR / null group produce the expected
   field paths; CIDR + email normalization in sparse_settings; full dump round-trips through load_settings.
+
+## 2026-10-29 Planner: P02-T12a approved → next P02-T12b
+
+## Plan P02-T12b — `GET/PATCH /v1/org/settings`, `settings` on `PATCH /v1/org`, `OrgSettingsReader` (specs/04 §3.2, §7, §8.1, §13; specs/03 §11; specs/31)
+
+### Facts found while planning
+- `apps/api/src/va_api/routers/org.py`: `org_get`/`org_update` on `org_router` (from `org_sso`), `ReadOrg`/`WriteOrg`
+  aliases, `_COMPLIANCE_FIELDS` check via `holds_permission(ctx, "org.compliance")`, audit via `changed(before, after)`
+  + `audit(session, ctx, "org.update", "org", ctx.org_id, before=, after=)` inside the global session.
+  `OrgView.settings: dict[str, Any]` (org_schemas.py:179) returns `dict(org.settings)`; `OrgPatch` has `name`,
+  `retention_days`, `recording_retention_days`, `extra="forbid"`.
+- `OrgRepo.update(org_id, *, name, retention_days, recording_retention_days)` (va_db/repositories/orgs.py) — no
+  settings argument, no row lock. `MembershipRepo.lock_org()` shows the `select(Org.id)...with_for_update()` pattern.
+- RBAC: `org:write` = owner, admin only (developer lacks it); `org.compliance` = owner, admin; API keys hold it only
+  with `*`. Viewer/analyst/billing/developer hold `org:read`.
+- Session principals are always `principal_type="user"` (session_auth.py:312); `platform_admin` exists only for
+  `/internal/admin/*` (specs/04 §1). So on `/v1/*` nobody can set `baa_signed_at` today; tests seed it with
+  `session_helpers.set_org(identity, org_id, settings={...})`.
+- `ctx.plan_id` is the child's plan when a parent acts on a sub-account (P02-T09b).
+- Request-validation `field` today is `".".join(loc)` (errors.py `_field`) → `compliance.calling_hours.0.end`, while
+  `va_domain.org.field_path` renders `compliance.calling_hours[0].end` and drops pydantic's `[key]` segment.
+- va_db depends on `va-common` (which depends on `redis>=5.1`) but not on `redis` or `va-domain` directly.
+- `test_openapi.py` requires `examples` on every request-body and response model schema (line 84, 257-263).
+- Redis cache precedent: `ApiKeyAuthenticator._cached/_store` (api_key_auth.py:186-204): `(RedisError, OSError)` →
+  structlog warning + DB fallback; bad cached JSON → warning + DB.
+
+### Decisions to record (specs/04 §8.1, one `> Decision (2026-10-29):` block "Org settings endpoints (P02-T12b)";
+specs/03 §11 key row; specs/31 note on field path format; §13 note on the audit shape)
+1. **Routes.** `GET /v1/org/settings` (`org:read`, `operation_id="org_settings_get"`) and `PATCH /v1/org/settings`
+   (`org:write`, `org_settings_update`, `audited("org.update")`) return `{data: OrgSettings}` with every field
+   (defaults filled). `PATCH /v1/org` accepts `settings?: partial OrgSettings` with the same semantics; `GET /v1/org`
+   and `PATCH /v1/org` return `settings` with defaults filled. Both PATCH bodies are parsed as `OrgSettings` and only
+   the sent keys (`exclude_unset`) are applied; the response of an empty settings body is the current settings.
+2. **Merge and storage.** As specs/04 §7 Decision 5: groups merge key by key, everything else is replaced, `null` only
+   on nullable fields; `orgs.settings` stores `sparse_settings(OrgSettings.model_validate(merge_settings(stored,
+   sent)))`. The org row is locked (`SELECT … FOR UPDATE`) for the read-merge-write so concurrent PATCHes never lose
+   keys.
+3. **Permissions.** Sending any path whose first segment is in `COMPLIANCE_PATHS` (and `retention_days` /
+   `recording_retention_days` as before) needs `org.compliance` → `FORBIDDEN` "Missing required permission
+   'org.compliance'." Sending `baa_signed_at` (any value) as anything but a `platform_admin` principal → `FORBIDDEN`
+   "Only platform administrators can set 'baa_signed_at'." (field `baa_signed_at` / `settings.baa_signed_at`); on
+   `/v1/*` that is every caller until the admin console lands. Checks run on what is sent, before any write.
+4. **Cross-field rules**, checked on the merged object, and only when the body sends one of the rule's paths (so an
+   unrelated PATCH never fails because of state set elsewhere): `hipaa_mode` true with `baa_signed_at` null →
+   `INVALID_INPUT` "hipaa_mode requires a signed BAA ('baa_signed_at')." field `hipaa_mode`; `privacy.zero_retention`
+   true on a plan other than `enterprise` (`ctx.plan_id`) → `FEATURE_NOT_IN_PLAN` (403) "Zero retention requires the
+   enterprise plan." field `privacy.zero_retention`. Under `PATCH /v1/org` fields get the `settings.` prefix.
+5. **Field paths.** One format for every `INVALID_INPUT` `field` in the API: `va_domain.org.field_path` (dotted keys,
+   `[i]` list indices, no `[key]` segment), after dropping the location (`body`, `query`, …). specs/31 gets a note.
+6. **Accessor.** `va_db.org_settings.OrgSettingsReader(database, redis)`: `get(org_id) -> OrgSettings | None` reads
+   Redis `orgsettings:{org_id}` (string JSON of the stored sparse object, `EX 60`) then the DB (`OrgRepo.get` on the
+   global session), stores on miss, never caches a missing org; Redis errors and invalid cached JSON are logged
+   (`org_settings_cache_unavailable` / `org_settings_cache_invalid`) and fall back to the DB; `invalidate(org_id)`
+   deletes the key (Redis errors logged, not raised) and is called by every settings write after its transaction
+   commits. Other services use this reader; the API's `GET /v1/org/settings` reads through it.
+7. **Audit.** One `org.update` row per PATCH that changes something: `before`/`after` keyed by `name`,
+   `retention_days`, `recording_retention_days` and `settings.<dotted path>` for each sent settings path whose
+   effective value (defaults filled, JSON mode) changed; group-level paths for whole-replaced values
+   (`settings.compliance.calling_hours`, `settings.voice_overrides`). No row when nothing changed.
+
+### Files
+- **packages/va_db/pyproject.toml**: add deps `va-domain`, `redis>=5.1` (+ `[tool.uv.sources] va-domain = {workspace
+  = true}`); `uv lock`.
+- **packages/va_db/src/va_db/org_settings.py** (new): `CACHE_TTL_S: Final = 60`, `settings_cache_key(org_id: uuid.UUID)
+  -> str` (`orgsettings:{org_id}`), `class OrgSettingsReader` with `__init__(self, database: Database, redis: Redis)`,
+  `async get(org_id) -> OrgSettings | None`, `async invalidate(org_id) -> None`, private `_cached/_store` (follow the
+  ApiKeyAuthenticator shape; do not copy its body verbatim — jscpd). Export from `va_db.__init__` only if the package
+  re-exports similar classes; otherwise import from the module.
+- **packages/va_db/src/va_db/repositories/orgs.py**: `OrgRepo.lock(org_id) -> Org | None` (`select(Org)...
+  with_for_update()`, populate_existing) and `update(..., settings: Mapping[str, Any] | None = None)` (sets the jsonb
+  column when not None).
+- **packages/va_domain/src/va_domain/org.py**: `OrgSettings.model_config` gains `json_schema_extra={"examples":
+  [{"timezone": "America/New_York", "default_record": True, "compliance": {"state_quiet_hours": True}}]}` (OpenAPI
+  example requirement); keep `extra="forbid"`. Add helper `effective_values(settings: OrgSettings, paths:
+  Iterable[str]) -> dict[str, Any]` (JSON-mode value at each dotted path) for the audit diff, with tests in
+  `packages/va_domain/tests/test_org_settings_merge.py`.
+- **apps/api/pyproject.toml**: add `va-domain` dependency + source if not already transitive-declared.
+- **apps/api/src/va_api/container.py**: `org_settings: OrgSettingsReader` built from `database`, `redis`; plus
+  accessor `org_settings_of(request)` next to `database_of` in `auth/session_auth.py` (or wherever the `*_of` helpers
+  live). Update `test_container.py` expectations and SessionContainer in tests/support.
+- **apps/api/src/va_api/routers/org_settings.py** (new, routes on `org_router`; import-for-side-effect in
+  `va_api/main.py`): `SettingsPatchResult` dataclass (`settings: OrgSettings`, `before: dict`, `after: dict`);
+  `check_settings_permissions(ctx, sent: Mapping[str, Any], prefix: str) -> None`;
+  `async apply_settings_patch(session, ctx, sent, prefix) -> SettingsPatchResult` (lock → load → merge → validate
+  (ValidationError → `AppError("INVALID_INPUT", msg, field=prefix + field_path(loc))`) → cross-field → `OrgRepo.update(
+  settings=sparse)` → diff); routes `org_settings_get`, `org_settings_update` (after the session closes:
+  `await reader.invalidate(ctx.org_id)`). Keep each function radon A/B.
+- **apps/api/src/va_api/routers/org.py**: `org_update` passes `body.settings.model_dump(mode="json",
+  exclude_unset=True)` (when `"settings" in body.model_fields_set`) through `check_settings_permissions` and
+  `apply_settings_patch(prefix="settings.")` inside its existing session; merge its before/after into the one audit
+  row; invalidate after commit; `_org_view` uses `load_settings(org.settings).model_dump(mode="json")`.
+- **apps/api/src/va_api/routers/org_schemas.py**: `OrgView.settings: OrgSettings`; `OrgPatch.settings: OrgSettings |
+  None = None` (description: "Partial OrgSettings; omitted keys stay unchanged; compliance fields need
+  `org.compliance`."); update `_ORG_EXAMPLE` (settings with defaults would be huge — keep the example minimal but valid
+  against the schema; the contract test only checks presence).
+- **apps/api/src/va_api/errors.py**: `_field` → strip location, then `va_domain.org.field_path(tuple(parts))`. Grep
+  tests for `.0.`-style expected fields and update them.
+- **openapi/**: `make openapi`; then `corepack pnpm gen:api` in `sdks/typescript` and `apps/dashboard`.
+- **specs/04 §8.1** Decision block (items 1–7), amend the earlier §8.1 decision sentence "`settings` is the stored
+  object until OrgSettings (P02-T12) …" by a pointer to the new block (do not delete history: add "Superseded by the
+  P02-T12b decision below"); **§13** one-line note on settings audit keys; **specs/03 §11** new row:
+  `orgsettings:{org_id}` | string JSON (stored sparse `orgs.settings`) | 60 s | Org settings cache (specs/04 §7);
+  deleted on every settings write. **specs/31** note: `field` format.
+- **AGENTS.md**: `OrgSettingsReader` usage (read settings through it outside the API; call `invalidate` after any
+  write commits); field path format.
+
+### Tests
+- **packages/va_db/tests/test_org_settings_reader.py** (identity_db fixture + `fakeredis.FakeAsyncRedis`): miss reads
+  DB, returns defaults-filled model for `{}` and stores the sparse JSON with TTL 60 (`ttl` ≤ 60, > 0); hit returns
+  cached even after a direct DB change; `invalidate` → next `get` sees the DB value; Redis down
+  (`FakeServer(); server.connected=False`) → `get` reads DB, `invalidate` does not raise, warning logged; invalid cached
+  JSON / invalid cached settings → DB fallback + warning; unknown org → `None` and nothing cached.
+- **packages/va_db/tests/test_repositories.py** (or orgs test module): `OrgRepo.update(settings=…)` writes jsonb,
+  `lock` returns the row / None.
+- **apps/api/tests/test_org_settings_integration.py** (conftest `client/identity/container`, `session_helpers.
+  signed_in`, `error_of`, `set_org`, `stored_org`):
+  - GET on a fresh org == `OrgSettings().model_dump(mode="json")`; GET `/v1/org` `settings` same.
+  - PATCH `{"timezone": "America/New_York"}` → 200 full settings; `stored_org(...).settings == {"timezone": …}`.
+  - group merge key-wise (two PATCHes to `llm.*`), list replace (`default_webhook_events`), `voice_overrides` replace,
+    `default_from_number: null` accepted, `timezone: null` → 400 field `timezone`.
+  - invalid values → 400 `INVALID_INPUT` with fields: `timezone`, `compliance.calling_hours[0].end`, `ip_allowlist[0]`;
+    same through `PATCH /v1/org` with `settings.` prefix; unknown key → field `bogus` / `llm.bogus`.
+  - normalization stored (CIDR `10.0.0.1/8` → `10.0.0.0/8`).
+  - permission matrix (parametrized roles): GET allowed for all six roles; PATCH general field: owner/admin 200,
+    developer/analyst/billing/viewer 403; compliance field (`mfa_required`, `compliance.state_quiet_hours`): owner/admin
+    200; API key with `org:write` only → 403 "Missing required permission 'org.compliance'."; key with `*` → 200.
+  - `baa_signed_at` sent by owner → 403 FORBIDDEN with the message; `hipaa_mode: true` without BAA → 400 field
+    `hipaa_mode`; with `baa_signed_at` seeded via `set_org` → 200; unrelated PATCH with hipaa on and BAA removed still
+    200.
+  - `privacy.zero_retention: true` on build plan → 403 `FEATURE_NOT_IN_PLAN` field `privacy.zero_retention`; on
+    enterprise (`set_org(plan_id="enterprise")`) → 200.
+  - audit: one `org.update` row with `before={"settings.timezone": "America/Los_Angeles"}`, `after={…}`; PATCH /v1/org
+    with name + settings → one row with both keys; no-op PATCH → no row.
+  - cache: GET (populates `orgsettings:{id}`), PATCH, GET returns new value and key was deleted/refreshed; Redis
+    connection failure on the container (fakeredis disconnected server) → PATCH and GET still 200.
+  - sub-account: parent acting via `X-VA-Org-Id` updates the child's settings, parent unchanged.
+  - existing readers keep working: PATCH `{"mfa_required": true}` → stored raw `true` → `MembershipLookupRepo`
+    reports `mfa_required` (reuse an existing MFA-gate assertion helper).
+- **apps/api/tests/test_errors.py**: list index rendered `items[0].name`, dict `[key]` dropped, location stripped.
+- **test_openapi / test_audit_markers / test_operations_contract** pass with the new routes (x-scope, audited marker,
+  examples).
+
+### Gates
+`make fmt lint typecheck placeholders test` (+ `make test-ts` after `pnpm gen:api`); `make openapi` + drift check;
+`uv run python scripts/check_spec_refs.py`; `npx jscpd@4` 0 clones; radon `-n C` none in changed src; pip-audit per
+mem-1793288415-240d; gitleaks. build.done PLAIN STRING: `ralph emit "build.done" "P02-T12b tests: pass (N passed),
+lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Changing `errors._field` changes every route's list-index format: grep `apps/api/tests` for `"\.[0-9]+\.` field
+  expectations and update; mention in specs/31.
+- Pool size 1 per role: never open the reader's global session while the route's global session is open (call
+  `invalidate` only, not `get`, inside/after writes; `get` opens its own session).
+- `OrgView.settings: OrgSettings` makes `GET /v1/org` fail loudly if a stored row is invalid — seed/fixtures that write
+  arbitrary settings (grep `settings=` in tests) must use valid keys.
+- OpenAPI schema grows a lot (OrgSettings + sub-models); regenerate TS types or `schema.test.ts` fails.
+- Do not put the cross-field rules in model validators (partial bodies share the model).
+
+## 2026-10-29 Builder: P02-T12b build notes
+- Implemented per plan. New: `va_db.org_settings.OrgSettingsReader` (+ `settings_cache_key`, `CACHE_TTL_S`),
+  `OrgRepo.lock` + `update(settings=)`, `va_api.routers.org_settings` (GET/PATCH `/v1/org/settings`,
+  `check_settings_permissions`, `apply_settings_patch`, `SettingsPatchResult`), `session_auth.org_settings_of`,
+  `Container.org_settings`, `va_domain.org.effective_values` + OrgSettings OpenAPI example, `errors._field` via
+  `field_path`. `PATCH /v1/org` takes `settings` (`OrgSettings = default_factory`, so `settings: null` → 400 field
+  `settings`); `OrgView.settings: OrgSettings`. `ORG_NOT_FOUND_MESSAGE` now lives in `org_settings` (re-exported by org.py).
+- Deviation found by tests: stored settings that no longer validate made the audit "before" diff raise (500). Fixed with
+  `_previous_values` (raw stored value / default per path); the PATCH reports the bad stored field as INVALID_INPUT unless
+  it sends a valid replacement, which repairs it (test_invalid_stored_settings_are_reported_and_repaired_by_a_patch).
+- An empty group object (`{"privacy": {}}`) sends nothing: no permission check, no write (recorded in Decision item 1).
+- Specs: 04 §8.1 Decision "Org settings endpoints (P02-T12b)" items 1-7 + supersede pointer; §13 audit sub-bullet;
+  03 §11 `orgsettings:{org_id}` row; 31 Decision "Validation field format". AGENTS.md entry.
+- Coverage note: lines after `await repo.lock(...)` in apply_settings_patch report uncovered (same greenlet tracing
+  artefact as org.py 178-180); they are exercised (storage + audit assertions depend on them).
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 3279 passed, coverage 97.69% (logs/p02-t12b-test.log);
+make test-ts pass; openapi regenerated (+ gen:api in sdks/typescript, apps/dashboard), drift re-run unchanged;
+check_spec_refs 0; jscpd 0 clones; radon -n C none in changed src, avg 2.0173 (apps+packages src); pip-audit + pnpm
+audit no vulns; gitleaks (pre-commit) passed.
+
+## Review P02-T12b (2026-10-29): approved
+- Re-ran: lint, typecheck, placeholders (0), make test 3279 passed / 97.69%, make test-ts pass, make openapi stable
+  (no drift on re-run), check_spec_refs 0.
+- Diff checked against specs/04 §7 (hipaa_mode needs baa_signed_at; baa set by platform admin; zero_retention
+  enterprise-only → FEATURE_NOT_IN_PLAN 403 per specs/31), §8.1 decision, §13 audit keys, specs/03 §11 key row.
+  Row lock for read-merge-write, invalidate after commit, Redis failures logged with DB fallback, tests cover
+  permission matrix, cross-field rules, audit, cache, sub-account, invalid stored repair.
+- Note (not blocking): a stored row that fails OrgSettings validation would 500 on GET via the reader/OrgView; writes
+  always validate, so only out-of-band DB edits can produce one.

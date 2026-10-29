@@ -8,7 +8,9 @@ dependencies = [
     "asyncpg>=0.32.0",
     "pgvector>=0.5.1",
     "sqlalchemy[asyncio]>=2.0.35",
+    "redis>=5.1",
     "va-common",
+    "va-domain",
 ]
 
 [build-system]
@@ -17,3 +19,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-domain = { workspace = true }

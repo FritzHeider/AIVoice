@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import ipaddress
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Annotated, Any, Final, Literal
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -47,6 +47,7 @@ __all__ = [
     "SmsSettings",
     "ToolsSettings",
     "VoicesSettings",
+    "effective_values",
     "field_path",
     "load_settings",
     "merge_settings",
@@ -302,7 +303,18 @@ class GuardRailConfig(BaseModel):
 class OrgSettings(BaseModel):
     """Every org setting with its default; `orgs.settings` stores only the keys that were set explicitly."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "timezone": "America/New_York",
+                    "default_record": True,
+                    "compliance": {"state_quiet_hours": True},
+                }
+            ]
+        },
+    )
 
     timezone: Timezone = Field(
         default="America/Los_Angeles", description="Default timezone for calls and calling windows."
@@ -535,6 +547,21 @@ def load_settings(stored: Mapping[str, Any]) -> OrgSettings:
 def sparse_settings(settings: OrgSettings) -> dict[str, Any]:
     """The JSON to store: explicitly set keys only, with validated (normalized) values."""
     return settings.model_dump(mode="json", exclude_unset=True)
+
+
+def effective_values(settings: OrgSettings, paths: Iterable[str]) -> dict[str, Any]:
+    """The JSON value at each dotted path of `paths` (defaults filled), e.g. for an audit diff.
+
+    Paths come from `sent_paths`: a top-level field or `group.field`.
+    """
+    dumped = settings.model_dump(mode="json")
+    values: dict[str, Any] = {}
+    for path in paths:
+        value: Any = dumped
+        for part in path.split("."):
+            value = value[part]
+        values[path] = value
+    return values
 
 
 def field_path(loc: tuple[int | str, ...]) -> str:

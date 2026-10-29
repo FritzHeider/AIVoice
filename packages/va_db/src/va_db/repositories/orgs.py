@@ -10,6 +10,7 @@ parent and match ``parent_org_id`` against it, so an id from the request only ev
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +49,17 @@ class OrgRepo:
         org, plan = row
         return OrgOverview(org=org, plan=plan)
 
+    async def lock(self, org_id: uuid.UUID) -> Org | None:
+        """The org ``org_id`` locked ``FOR UPDATE`` until the transaction ends, or ``None``.
+
+        Read-merge-write updates of ``orgs.settings`` take this lock first so concurrent writers never lose
+        each other's keys.
+        """
+        statement = (
+            select(Org).where(Org.id == org_id).with_for_update().execution_options(populate_existing=True)
+        )
+        return await self.session.scalar(statement)
+
     async def update(
         self,
         org_id: uuid.UUID,
@@ -55,9 +67,11 @@ class OrgRepo:
         name: str | None = None,
         retention_days: int | None = None,
         recording_retention_days: int | None = None,
+        settings: Mapping[str, Any] | None = None,
     ) -> Org | None:
         """Set the given columns (``None`` leaves a column unchanged); the updated org or ``None``.
 
+        ``settings`` replaces the whole ``orgs.settings`` object (callers pass the merged sparse settings).
         The ``set_updated_at()`` trigger maintains ``updated_at``; with nothing to set the org is returned
         untouched.
         """
@@ -67,6 +81,7 @@ class OrgRepo:
                 ("name", name),
                 ("retention_days", retention_days),
                 ("recording_retention_days", recording_retention_days),
+                ("settings", None if settings is None else dict(settings)),
             )
             if value is not None
         }

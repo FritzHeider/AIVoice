@@ -2419,6 +2419,7 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "va-common" },
     { name = "va-db" },
+    { name = "va-domain" },
 ]
 
 [package.metadata]
@@ -2436,6 +2437,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
 ]
 
 [[package]]
@@ -2507,8 +2509,10 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "pgvector" },
+    { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "va-common" },
+    { name = "va-domain" },
 ]
 
 [package.metadata]
@@ -2516,8 +2520,10 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
     { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "pgvector", specifier = ">=0.5.1" },
+    { name = "redis", specifier = ">=5.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
 ]
 
 [[package]]

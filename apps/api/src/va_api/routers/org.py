@@ -1,5 +1,8 @@
 """``GET /v1/me``, ``GET /v1/org`` and ``PATCH /v1/org`` (specs/04-auth-tenancy-rbac.md §8.1).
 
+``PATCH /v1/org`` applies its ``settings`` member like ``PATCH /v1/org/settings`` (:mod:`va_api.routers.
+org_settings`), in the same transaction and audit row as the column changes.
+
 ``orgs`` is a global table without RLS: every read and write goes through ``OrgRepo`` on the global session
 with the request context's org id, never an id from the request. The pool holds one connection per role, so
 the sessions of one request are opened one after another, never nested.
@@ -8,7 +11,7 @@ the sessions of one request are opened one after another, never nested.
 from __future__ import annotations
 
 import uuid
-from typing import Final
+from typing import Any, Final
 
 from fastapi import Request
 
@@ -16,7 +19,7 @@ from va_api.audit import audit, audited, changed
 from va_api.auth.api_key_auth import INVALID_API_KEY
 from va_api.auth.context import RequestContext
 from va_api.auth.permissions import holds_permission
-from va_api.auth.session_auth import database_of
+from va_api.auth.session_auth import database_of, org_settings_of
 from va_api.auth.sessions import SESSION_INVALID
 from va_api.envelopes import envelope_router
 from va_api.responses import DataResponse
@@ -29,16 +32,23 @@ from va_api.routers.org_schemas import (
     OrgView,
     effective_limits,
 )
+from va_api.routers.org_settings import (
+    COMPLIANCE_PERMISSION,
+    ORG_NOT_FOUND_MESSAGE,
+    SettingsPatchResult,
+    apply_settings_patch,
+    check_settings_permissions,
+)
 from va_api.routers.org_sso import ReadOrg, WriteOrg, org_router
 from va_common.errors import AppError
 from va_common.money import micros_to_dollars
 from va_db.models import Org
 from va_db.repositories import ApiKeyRepo, IdentityRepo, OrgOverview, OrgRepo
+from va_domain.org import load_settings
 
 __all__ = ["ORG_NOT_FOUND_MESSAGE", "me_get", "me_router", "org_get", "org_update"]
 
-ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."
-_COMPLIANCE: Final = "org.compliance"
+_SETTINGS_PREFIX: Final = "settings."
 _COMPLIANCE_FIELDS: Final = ("retention_days", "recording_retention_days")
 _PATCH_FIELDS: Final = ("name", *_COMPLIANCE_FIELDS)
 
@@ -71,7 +81,7 @@ def _org_view(overview: OrgOverview) -> OrgView:
         recording_retention_days=org.recording_retention_days,
         credits_balance=float(micros_to_dollars(org.credits_balance_micros)),
         limits=effective_limits(overview.plan, org.limits),
-        settings=dict(org.settings),
+        settings=load_settings(org.settings),
         created_at=org.created_at,
         updated_at=org.updated_at,
     )
@@ -129,32 +139,49 @@ async def org_get(request: Request, ctx: ReadOrg) -> DataResponse[OrgView]:
     return DataResponse(data=_org_view(await _overview(request, ctx.org_id)))
 
 
+async def _patch_columns(
+    repo: OrgRepo, ctx: RequestContext, body: OrgPatch
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Update the columns ``body`` sets; the changed values before and after, by column name."""
+    before = _patched(await repo.get(ctx.org_id), body)
+    after = _patched(
+        await repo.update(
+            ctx.org_id,
+            name=body.name,
+            retention_days=body.retention_days,
+            recording_retention_days=body.recording_retention_days,
+        ),
+        body,
+    )
+    return changed(before, after)
+
+
 @org_router.patch(
     "", operation_id="org_update", openapi_extra={"x-scope": "org:write", **audited("org.update")}
 )
 async def org_update(body: OrgPatch, request: Request, ctx: WriteOrg) -> DataResponse[OrgView]:
-    """Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the
-    `org.compliance` permission."""
+    """Rename the org, change its retention, or change settings (as `PATCH /v1/org/settings`);
+    `retention_days`, `recording_retention_days`, and compliance settings also need the `org.compliance`
+    permission."""
     if any(getattr(body, name) is not None for name in _COMPLIANCE_FIELDS) and not holds_permission(
-        ctx, _COMPLIANCE
+        ctx, COMPLIANCE_PERMISSION
     ):
-        raise AppError("FORBIDDEN", f"Missing required permission '{_COMPLIANCE}'.")
+        raise AppError("FORBIDDEN", f"Missing required permission '{COMPLIANCE_PERMISSION}'.")
+    sent = body.settings.model_dump(mode="json", exclude_unset=True)
+    check_settings_permissions(ctx, sent, _SETTINGS_PREFIX)
+    settings: SettingsPatchResult | None = None
     async with database_of(request).global_session() as session:
         repo = OrgRepo(session)
-        before = _patched(await repo.get(ctx.org_id), body)
-        after = _patched(
-            await repo.update(
-                ctx.org_id,
-                name=body.name,
-                retention_days=body.retention_days,
-                recording_retention_days=body.recording_retention_days,
-            ),
-            body,
-        )
-        old, new = changed(before, after)
+        if sent:
+            settings = await apply_settings_patch(session, ctx, sent, _SETTINGS_PREFIX)
+        old, new = await _patch_columns(repo, ctx, body)
+        if settings is not None:
+            old, new = old | settings.before, new | settings.after
         if new:
             await audit(session, ctx, "org.update", "org", ctx.org_id, before=old, after=new)
         overview = await repo.overview(ctx.org_id)
+    if settings is not None and settings.written:
+        await org_settings_of(request).invalidate(ctx.org_id)
     if overview is None:
         raise AppError("NOT_FOUND", ORG_NOT_FOUND_MESSAGE)
     return DataResponse(data=_org_view(overview))

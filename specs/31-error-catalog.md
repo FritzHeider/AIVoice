@@ -135,7 +135,14 @@ Some errors carry finer-grained codes in `errors[].details.code` while the top-l
 > `INVALID_INPUT` (405 keeps status 405, message "Method not allowed.", and its `Allow` header), any other 5xx
 > `INTERNAL_ERROR`; the status and exception headers (`Allow`, `Retry-After`) are preserved. Unhandled exceptions
 > render 500 `INTERNAL_ERROR` "Internal server error" with no exception text. Validation `field`: the leading location
-> segment (`body`, `query`, `path`, `header`, `cookie`) is dropped, list indexes stay (`items.0.name`), the field is
+> segment (`body`, `query`, `path`, `header`, `cookie`) is dropped, list indexes stay (`items.0.name`, superseded
+> below by `items[0].name`), the field is
 > omitted for invalid JSON or an empty path, and Pydantic's `Value error, ` message prefix is stripped. `request_id`
 > (body and `X-Request-Id`) echoes a well-formed incoming `X-Request-Id` (`[A-Za-z0-9._:-]{1,128}`), otherwise it is
 > `req_` + the 32 hex digits of a UUIDv7 (the `05-calls-api.md` example format).
+
+> Decision (2026-10-29): **Validation field format** (P02-T12b, specs/04 §8.1 "Org settings endpoints" item 5). Every
+> `INVALID_INPUT` `field`, from request validation and from routes that validate merged objects themselves, is
+> rendered by `va_domain.org.field_path`: dotted keys, list indices as `[i]`, and pydantic's `[key]` segment (an
+> invalid dictionary key) dropped, so the field names the key: `items[0].name`, `compliance.calling_hours[0].end`,
+> `voice_overrides.<key>`. The leading location segment is still dropped first.

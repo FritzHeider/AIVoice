@@ -37,6 +37,7 @@ from va_common.email import EmailSender
 from va_common.errors import AppError
 from va_common.time import Clock
 from va_db.models import OrgStatus
+from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import IdentityRepo, MembershipLookupRepo, MembershipRecord
 from va_db.session import Database
@@ -65,6 +66,7 @@ __all__ = [
     "mfa_guard_of",
     "oidc_discovery_of",
     "optional_session",
+    "org_settings_of",
     "password_hasher_of",
     "pick_active",
     "provisioner_of",
@@ -156,6 +158,11 @@ def sso_states_of(request: Request) -> SsoStateStore:
 def api_key_hasher_of(request: Request) -> ApiKeyHasher:
     hasher: ApiKeyHasher = request.app.state.container.api_key_hasher
     return hasher
+
+
+def org_settings_of(request: Request) -> OrgSettingsReader:
+    reader: OrgSettingsReader = request.app.state.container.org_settings
+    return reader
 
 
 def redis_of(request: Request) -> Redis:

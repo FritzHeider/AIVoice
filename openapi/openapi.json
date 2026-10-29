@@ -1,6 +1,32 @@
 {
   "components": {
     "schemas": {
+      "AnalysisSettings": {
+        "additionalProperties": false,
+        "description": "Post-call analysis switches (specs/18-post-call-analysis.md).",
+        "properties": {
+          "retranscribe": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Diarized re-transcription after the call; null means on whenever the call is recorded.",
+            "title": "Retranscribe"
+          },
+          "sentiment": {
+            "default": true,
+            "description": "Run sentiment analysis on connected calls.",
+            "title": "Sentiment",
+            "type": "boolean"
+          }
+        },
+        "title": "AnalysisSettings",
+        "type": "object"
+      },
       "ApiKeyCreate": {
         "additionalProperties": false,
         "description": "``POST /v1/api_keys``: name, scopes (default every scope), environment, and an optional expiry.",
@@ -489,6 +515,113 @@
         "title": "AuditLogView",
         "type": "object"
       },
+      "CallingWindow": {
+        "additionalProperties": false,
+        "description": "One daily window, local to the callee. Overnight windows are split into two windows.",
+        "properties": {
+          "days": {
+            "description": "Days the window applies to; at least one, no repeats.",
+            "items": {
+              "$ref": "#/components/schemas/Weekday"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "title": "Days",
+            "type": "array"
+          },
+          "end": {
+            "description": "Closing time, \"HH:MM\" 24 h, later than `start`.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "description": "Opening time, \"HH:MM\" 24 h.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "days",
+          "start",
+          "end"
+        ],
+        "title": "CallingWindow",
+        "type": "object"
+      },
+      "ComplianceSettings": {
+        "additionalProperties": false,
+        "description": "Calling hours, DNC inheritance, and disclosure policies (specs/23-guardrails-and-compliance.md §2).",
+        "properties": {
+          "ai_disclosure_policy": {
+            "default": "always",
+            "description": "When the AI-disclosure guard rail is added to calls.",
+            "enum": [
+              "always",
+              "auto",
+              "never"
+            ],
+            "title": "Ai Disclosure Policy",
+            "type": "string"
+          },
+          "calling_hours": {
+            "description": "Windows in the callee's local timezone; windows of one day must not overlap.",
+            "items": {
+              "$ref": "#/components/schemas/CallingWindow"
+            },
+            "maxItems": 14,
+            "minItems": 1,
+            "title": "Calling Hours",
+            "type": "array"
+          },
+          "dnc_inherit_from_parent": {
+            "default": true,
+            "description": "A sub-account also honors its parent's do-not-call list.",
+            "title": "Dnc Inherit From Parent",
+            "type": "boolean"
+          },
+          "enforce_calling_hours": {
+            "default": false,
+            "description": "Apply `calling_hours` to non-batch API calls as well as batches.",
+            "title": "Enforce Calling Hours",
+            "type": "boolean"
+          },
+          "max_attempts_per_number_per_day": {
+            "default": 0,
+            "description": "Outbound attempts per number per day; 0 means unlimited.",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Max Attempts Per Number Per Day",
+            "type": "integer"
+          },
+          "recording_disclosure_policy": {
+            "default": "auto",
+            "description": "When the recording-disclosure guard rail is added to recorded calls.",
+            "enum": [
+              "always",
+              "auto",
+              "never"
+            ],
+            "title": "Recording Disclosure Policy",
+            "type": "string"
+          },
+          "require_consent_attestation": {
+            "default": true,
+            "description": "Batches must carry `global_props.consent_attestation=true`.",
+            "title": "Require Consent Attestation",
+            "type": "boolean"
+          },
+          "state_quiet_hours": {
+            "default": true,
+            "description": "Apply stricter state-specific calling hours on top of `calling_hours`.",
+            "title": "State Quiet Hours",
+            "type": "boolean"
+          }
+        },
+        "title": "ComplianceSettings",
+        "type": "object"
+      },
       "DataResponse_ApiKeyCreated_": {
         "examples": [
           {
@@ -708,6 +841,33 @@
         "title": "DataResponse[MemberView]",
         "type": "object"
       },
+      "DataResponse_OrgSettings_": {
+        "examples": [
+          {
+            "data": {
+              "compliance": {
+                "state_quiet_hours": true
+              },
+              "default_record": true,
+              "timezone": "America/New_York"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OrgSettings"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[OrgSettings]",
+        "type": "object"
+      },
       "DataResponse_OrgView_": {
         "examples": [
           {
@@ -731,7 +891,10 @@
               "plan_id": "build",
               "recording_retention_days": 90,
               "retention_days": 365,
-              "settings": {},
+              "settings": {
+                "default_record": true,
+                "timezone": "America/New_York"
+              },
               "slug": "acme-dental-k3q9",
               "status": "active",
               "updated_at": "2026-10-29T14:03:11Z"
@@ -961,6 +1124,32 @@
         "title": "DataResponse[list[MemberView]]",
         "type": "object"
       },
+      "EngineSettings": {
+        "additionalProperties": false,
+        "description": "Dialogue engine behaviour.",
+        "properties": {
+          "allow_callbacks": {
+            "default": false,
+            "description": "The agent may schedule callback calls.",
+            "title": "Allow Callbacks",
+            "type": "boolean"
+          },
+          "speculative": {
+            "default": true,
+            "description": "Generate the dialogue reply in parallel with pathway routing.",
+            "title": "Speculative",
+            "type": "boolean"
+          },
+          "tool_fillers": {
+            "default": true,
+            "description": "Speak tool filler phrases while tools run.",
+            "title": "Tool Fillers",
+            "type": "boolean"
+          }
+        },
+        "title": "EngineSettings",
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "description": "Error body of envelope endpoints.",
         "examples": [
@@ -1099,6 +1288,43 @@
           "request_id"
         ],
         "title": "ErrorLegacy",
+        "type": "object"
+      },
+      "ExperimentsSettings": {
+        "additionalProperties": false,
+        "description": "Experiment arm assignment.",
+        "properties": {
+          "sticky_by_contact": {
+            "default": false,
+            "description": "Hash arm assignment by contact instead of by call id.",
+            "title": "Sticky By Contact",
+            "type": "boolean"
+          }
+        },
+        "title": "ExperimentsSettings",
+        "type": "object"
+      },
+      "GuardRailConfig": {
+        "additionalProperties": true,
+        "description": "A default guard rail (specs/23-guardrails-and-compliance.md §1.1); other keys are kept as sent.",
+        "properties": {
+          "type": {
+            "description": "Guard rail type.",
+            "enum": [
+              "tcpa:ai_disclosure",
+              "tcpa:self_introduction",
+              "tcpa:recording_disclosure",
+              "tcpa:opt_out",
+              "custom"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "GuardRailConfig",
         "type": "object"
       },
       "HealthStatus": {
@@ -1268,6 +1494,125 @@
           "viewer"
         ],
         "type": "string"
+      },
+      "JsonValue": {},
+      "LlmSettings": {
+        "additionalProperties": false,
+        "description": "Per-org LLM override and dialogue limits (specs/10-llm-gateway.md).",
+        "properties": {
+          "allow_model_override": {
+            "default": false,
+            "description": "Allow per-call `model` values outside the platform model allowlist.",
+            "title": "Allow Model Override",
+            "type": "boolean"
+          },
+          "analysis_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model for post-call analysis.",
+            "title": "Analysis Model"
+          },
+          "api_key_ref": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9_-]{1,64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Name of the org secret (`PUT /v1/org/secrets/{name}`) holding the API key.",
+            "title": "Api Key Ref"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "OpenAI-compatible base URL replacing the platform's.",
+            "title": "Base Url"
+          },
+          "context_budget_tokens": {
+            "default": 6000,
+            "description": "Max prompt tokens for dialogue context assembly.",
+            "maximum": 32000.0,
+            "minimum": 1000.0,
+            "title": "Context Budget Tokens",
+            "type": "integer"
+          },
+          "dialogue_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model for dialogue turns.",
+            "title": "Dialogue Model"
+          },
+          "fallback_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model used when the primary fails.",
+            "title": "Fallback Model"
+          },
+          "router_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model for pathway routing.",
+            "title": "Router Model"
+          },
+          "temperature_default": {
+            "anyOf": [
+              {
+                "maximum": 2.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default sampling temperature.",
+            "title": "Temperature Default"
+          }
+        },
+        "title": "LlmSettings",
+        "type": "object"
       },
       "MeApiKey": {
         "description": "The API key making the request (its prefix only, never the secret).",
@@ -1572,6 +1917,20 @@
         "title": "MemberView",
         "type": "object"
       },
+      "MemorySettings": {
+        "additionalProperties": false,
+        "description": "Cross-channel memory defaults.",
+        "properties": {
+          "default_enabled": {
+            "default": false,
+            "description": "Memory on for calls and personas that do not specify it.",
+            "title": "Default Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "MemorySettings",
+        "type": "object"
+      },
       "OrgLimits": {
         "description": "Effective limits: the plan's rates and caps overlaid by the org's overrides; null caps: unlimited.",
         "examples": [
@@ -1734,7 +2093,10 @@
         "examples": [
           {
             "name": "Acme Dental West",
-            "retention_days": 180
+            "retention_days": 180,
+            "settings": {
+              "timezone": "America/Denver"
+            }
           }
         ],
         "properties": {
@@ -1778,9 +2140,505 @@
             ],
             "description": "Days call data is kept (needs `org.compliance`).",
             "title": "Retention Days"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/OrgSettings",
+            "description": "Partial OrgSettings; omitted keys stay unchanged; compliance settings need `org.compliance` (as `PATCH /v1/org/settings`)."
           }
         },
         "title": "OrgPatch",
+        "type": "object"
+      },
+      "OrgSettings": {
+        "additionalProperties": false,
+        "description": "Every org setting with its default; `orgs.settings` stores only the keys that were set explicitly.",
+        "examples": [
+          {
+            "compliance": {
+              "state_quiet_hours": true
+            },
+            "default_record": true,
+            "timezone": "America/New_York"
+          }
+        ],
+        "properties": {
+          "ai_disclosure_required": {
+            "default": false,
+            "description": "Forces the `tcpa:ai_disclosure` guard rail whatever the policy.",
+            "title": "Ai Disclosure Required",
+            "type": "boolean"
+          },
+          "allow_insecure_webhooks": {
+            "default": false,
+            "description": "Permit `http://` webhook URLs in production.",
+            "title": "Allow Insecure Webhooks",
+            "type": "boolean"
+          },
+          "allowed_countries": {
+            "description": "Destinations allowed when international calling is enabled.",
+            "items": {
+              "pattern": "^[A-Z]{2}$",
+              "type": "string"
+            },
+            "maxItems": 250,
+            "title": "Allowed Countries",
+            "type": "array"
+          },
+          "amd_default": {
+            "default": "premium",
+            "description": "Default AMD mode.",
+            "enum": [
+              "off",
+              "premium"
+            ],
+            "title": "Amd Default",
+            "type": "string"
+          },
+          "analysis": {
+            "$ref": "#/components/schemas/AnalysisSettings",
+            "description": "Post-call analysis."
+          },
+          "baa_signed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the BAA was signed; set by platform administrators.",
+            "title": "Baa Signed At"
+          },
+          "background_track_default": {
+            "default": "phone_static",
+            "description": "Default background track.",
+            "enum": [
+              "none",
+              "office",
+              "cafe",
+              "restaurant",
+              "phone_static"
+            ],
+            "title": "Background Track Default",
+            "type": "string"
+          },
+          "batch_concurrency_share": {
+            "default": 1.0,
+            "description": "Share of the org concurrency pool batches may use.",
+            "maximum": 1.0,
+            "minimum": 0.1,
+            "title": "Batch Concurrency Share",
+            "type": "number"
+          },
+          "blocked_prefixes": {
+            "description": "Extra E.164 prefixes blocked.",
+            "items": {
+              "pattern": "^\\+[0-9]{1,15}$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Blocked Prefixes",
+            "type": "array"
+          },
+          "call_defaults": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Org-wide Send Call defaults below agent and persona defaults.",
+            "title": "Call Defaults",
+            "type": "object"
+          },
+          "cnam_display_name": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9 ]{1,15}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Caller name registered for new numbers.",
+            "title": "Cnam Display Name"
+          },
+          "compliance": {
+            "$ref": "#/components/schemas/ComplianceSettings",
+            "description": "Compliance controls."
+          },
+          "data_export_enabled": {
+            "default": true,
+            "description": "CSV exports in the dashboard.",
+            "title": "Data Export Enabled",
+            "type": "boolean"
+          },
+          "default_country": {
+            "default": "US",
+            "description": "Region used to parse non-E.164 numbers.",
+            "pattern": "^[A-Z]{2}$",
+            "title": "Default Country",
+            "type": "string"
+          },
+          "default_from_number": {
+            "anyOf": [
+              {
+                "pattern": "^\\+[1-9][0-9]{1,14}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default caller ID when `from` is absent.",
+            "title": "Default From Number"
+          },
+          "default_guard_rails": {
+            "description": "Guard rails applied to every call unless overridden.",
+            "items": {
+              "$ref": "#/components/schemas/GuardRailConfig"
+            },
+            "maxItems": 10,
+            "title": "Default Guard Rails",
+            "type": "array"
+          },
+          "default_language": {
+            "default": "en",
+            "description": "Default call `language`.",
+            "pattern": "^[A-Za-z0-9-]{1,16}$",
+            "title": "Default Language",
+            "type": "string"
+          },
+          "default_max_duration_min": {
+            "default": 30,
+            "description": "Default `max_duration` (minutes).",
+            "maximum": 240.0,
+            "minimum": 1.0,
+            "title": "Default Max Duration Min",
+            "type": "integer"
+          },
+          "default_record": {
+            "default": false,
+            "description": "Default `record`.",
+            "title": "Default Record",
+            "type": "boolean"
+          },
+          "default_voice": {
+            "default": "Karen",
+            "description": "Default `voice` (voice name or id).",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Default Voice",
+            "type": "string"
+          },
+          "default_voice_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default voice by id; takes precedence over `default_voice`.",
+            "title": "Default Voice Id"
+          },
+          "default_webhook": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Applied when a call omits `webhook`.",
+            "title": "Default Webhook"
+          },
+          "default_webhook_events": {
+            "description": "Default `webhook_events`.",
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Default Webhook Events",
+            "type": "array"
+          },
+          "delete_carrier_recordings": {
+            "default": true,
+            "description": "Delete the carrier's recording copy once stored.",
+            "title": "Delete Carrier Recordings",
+            "type": "boolean"
+          },
+          "dial_timeout_s": {
+            "default": 45,
+            "description": "Seconds to ring before giving up.",
+            "maximum": 120.0,
+            "minimum": 5.0,
+            "title": "Dial Timeout S",
+            "type": "integer"
+          },
+          "dispositions_default": {
+            "description": "Default dispositions.",
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Dispositions Default",
+            "type": "array"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/EngineSettings",
+            "description": "Dialogue engine."
+          },
+          "experiments": {
+            "$ref": "#/components/schemas/ExperimentsSettings",
+            "description": "Experiment assignment."
+          },
+          "hipaa_mode": {
+            "default": false,
+            "description": "HIPAA handling; requires `baa_signed_at`.",
+            "title": "Hipaa Mode",
+            "type": "boolean"
+          },
+          "honor_opt_out": {
+            "default": true,
+            "description": "Opt-out phrases write do-not-call entries.",
+            "title": "Honor Opt Out",
+            "type": "boolean"
+          },
+          "international_enabled": {
+            "default": false,
+            "description": "International calling; also requires plan and KYC.",
+            "title": "International Enabled",
+            "type": "boolean"
+          },
+          "ip_allowlist": {
+            "description": "When non-empty, API keys and sessions are accepted only from these networks.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Ip Allowlist",
+            "type": "array"
+          },
+          "llm": {
+            "$ref": "#/components/schemas/LlmSettings",
+            "description": "Per-org LLM override."
+          },
+          "low_balance_threshold_micros": {
+            "default": 5000000,
+            "description": "Balance (micro-dollars) that triggers `billing.low_balance`.",
+            "minimum": 0.0,
+            "title": "Low Balance Threshold Micros",
+            "type": "integer"
+          },
+          "max_duration_message": {
+            "default": "I'm sorry, we've reached the time limit for this call. Goodbye.",
+            "description": "Spoken before the `max_duration` hangup.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Max Duration Message",
+            "type": "string"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemorySettings",
+            "description": "Memory defaults."
+          },
+          "mfa_required": {
+            "default": false,
+            "description": "Members must enrol MFA.",
+            "title": "Mfa Required",
+            "type": "boolean"
+          },
+          "no_input_goodbye": {
+            "default": "I haven't heard anything, so I'll end the call now. Goodbye.",
+            "description": "Spoken after repeated no-input timeouts.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "No Input Goodbye",
+            "type": "string"
+          },
+          "noise_cancellation_default": {
+            "default": true,
+            "description": "Default noise cancellation.",
+            "title": "Noise Cancellation Default",
+            "type": "boolean"
+          },
+          "notification_emails": {
+            "description": "Billing and security notifications besides owners.",
+            "items": {
+              "maxLength": 320,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Notification Emails",
+            "type": "array"
+          },
+          "onboarding_completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set by the dashboard onboarding wizard.",
+            "title": "Onboarding Completed At"
+          },
+          "pathway_version_fallback": {
+            "default": true,
+            "description": "A missing numeric pathway version falls back to production.",
+            "title": "Pathway Version Fallback",
+            "type": "boolean"
+          },
+          "pii_redaction": {
+            "default": "off",
+            "description": "Post-call redaction.",
+            "enum": [
+              "off",
+              "transcripts",
+              "transcripts_and_recordings"
+            ],
+            "title": "Pii Redaction",
+            "type": "string"
+          },
+          "pii_redaction_entities": {
+            "description": "Scribe entity categories to redact.",
+            "items": {
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Pii Redaction Entities",
+            "type": "array"
+          },
+          "post_call_eval_setup_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Eval run on every call.",
+            "title": "Post Call Eval Setup Id"
+          },
+          "privacy": {
+            "$ref": "#/components/schemas/PrivacySettings",
+            "description": "Privacy controls."
+          },
+          "recording_disclosure_required": {
+            "default": true,
+            "description": "Forces `tcpa:recording_disclosure` on recorded calls.",
+            "title": "Recording Disclosure Required",
+            "type": "boolean"
+          },
+          "redaction": {
+            "$ref": "#/components/schemas/RedactionSettings",
+            "description": "Real-time redaction."
+          },
+          "session_max_age_days": {
+            "default": 14,
+            "description": "Dashboard session sliding expiry window (days).",
+            "maximum": 90.0,
+            "minimum": 1.0,
+            "title": "Session Max Age Days",
+            "type": "integer"
+          },
+          "sms": {
+            "$ref": "#/components/schemas/SmsSettings",
+            "description": "SMS encoding."
+          },
+          "summary_prompt_default": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default summary prompt.",
+            "title": "Summary Prompt Default"
+          },
+          "timezone": {
+            "default": "America/Los_Angeles",
+            "description": "Default timezone for calls and calling windows.",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/ToolsSettings",
+            "description": "Built-in tools."
+          },
+          "transfer_caller_id_mode": {
+            "default": "agent_number",
+            "description": "Caller ID presented to transfer targets.",
+            "enum": [
+              "agent_number",
+              "original_caller"
+            ],
+            "title": "Transfer Caller Id Mode",
+            "type": "string"
+          },
+          "transfer_failed_message": {
+            "default": "I'm sorry, I wasn't able to connect you. Is there anything else I can help with?",
+            "description": "Spoken when a transfer leg fails.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Transfer Failed Message",
+            "type": "string"
+          },
+          "viewers_can_see_pii": {
+            "default": false,
+            "description": "Viewers see unmasked PII.",
+            "title": "Viewers Can See Pii",
+            "type": "boolean"
+          },
+          "voice_overrides": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/VoiceSettings"
+            },
+            "description": "Org-level voice settings per voice id.",
+            "maxProperties": 200,
+            "propertyNames": {
+              "format": "uuid"
+            },
+            "title": "Voice Overrides",
+            "type": "object"
+          },
+          "voices": {
+            "$ref": "#/components/schemas/VoicesSettings",
+            "description": "Voice resolution."
+          },
+          "webhook_format": {
+            "default": "bland",
+            "description": "Default format for per-call webhooks.",
+            "enum": [
+              "bland",
+              "envelope"
+            ],
+            "title": "Webhook Format",
+            "type": "string"
+          }
+        },
+        "title": "OrgSettings",
         "type": "object"
       },
       "OrgSummary": {
@@ -1850,7 +2708,10 @@
             "plan_id": "build",
             "recording_retention_days": 90,
             "retention_days": 365,
-            "settings": {},
+            "settings": {
+              "default_record": true,
+              "timezone": "America/New_York"
+            },
             "slug": "acme-dental-k3q9",
             "status": "active",
             "updated_at": "2026-10-29T14:03:11Z"
@@ -1912,9 +2773,8 @@
             "type": "integer"
           },
           "settings": {
-            "additionalProperties": true,
-            "title": "Settings",
-            "type": "object"
+            "$ref": "#/components/schemas/OrgSettings",
+            "description": "Every org setting, defaults filled (specs/04 §7)."
           },
           "slug": {
             "title": "Slug",
@@ -2078,6 +2938,60 @@
           "platform_admin"
         ],
         "type": "string"
+      },
+      "PrivacySettings": {
+        "additionalProperties": false,
+        "description": "Transcript redaction shorthand and vendor zero retention.",
+        "properties": {
+          "redact_transcripts": {
+            "default": false,
+            "description": "Forces `pii_redaction` to at least `transcripts`.",
+            "title": "Redact Transcripts",
+            "type": "boolean"
+          },
+          "zero_retention": {
+            "default": false,
+            "description": "Vendor calls use zero-retention options; requires the enterprise plan.",
+            "title": "Zero Retention",
+            "type": "boolean"
+          }
+        },
+        "title": "PrivacySettings",
+        "type": "object"
+      },
+      "RedactionSettings": {
+        "additionalProperties": false,
+        "description": "Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "description": "Redact entity spans in stored transcripts in real time.",
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "redact_llm_context": {
+            "default": false,
+            "description": "Also replace redacted spans in the live LLM context.",
+            "title": "Redact Llm Context",
+            "type": "boolean"
+          }
+        },
+        "title": "RedactionSettings",
+        "type": "object"
+      },
+      "SmsSettings": {
+        "additionalProperties": false,
+        "description": "Outbound SMS encoding (specs/21-messaging-sms.md).",
+        "properties": {
+          "smart_encoding": {
+            "default": true,
+            "description": "Replace curly quotes, dashes, and ellipses so messages stay GSM-7.",
+            "title": "Smart Encoding",
+            "type": "boolean"
+          }
+        },
+        "title": "SmsSettings",
+        "type": "object"
       },
       "SsoConnectionDeleted": {
         "description": "``DELETE /v1/org/sso`` result.",
@@ -2521,6 +3435,26 @@
         "title": "SubAccountResult",
         "type": "object"
       },
+      "ToolsSettings": {
+        "additionalProperties": false,
+        "description": "Built-in tools allowed in calls.",
+        "properties": {
+          "allow_schedule_callback": {
+            "default": false,
+            "description": "Built-in schedule-callback tool allowed.",
+            "title": "Allow Schedule Callback",
+            "type": "boolean"
+          },
+          "allow_send_sms": {
+            "default": true,
+            "description": "Built-in SMS tool and node allowed.",
+            "title": "Allow Send Sms",
+            "type": "boolean"
+          }
+        },
+        "title": "ToolsSettings",
+        "type": "object"
+      },
       "TransferOwnershipRequest": {
         "additionalProperties": false,
         "description": "``POST /v1/org/transfer-ownership``: the member who becomes an owner.",
@@ -2541,6 +3475,78 @@
         ],
         "title": "TransferOwnershipRequest",
         "type": "object"
+      },
+      "VoiceSettings": {
+        "additionalProperties": false,
+        "description": "ElevenLabs voice settings; every field has the model default, so a partial object is valid.",
+        "properties": {
+          "similarity_boost": {
+            "default": 0.75,
+            "description": "How closely the output follows the original voice.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Similarity Boost",
+            "type": "number"
+          },
+          "speed": {
+            "default": 1.0,
+            "description": "Speaking rate multiplier.",
+            "maximum": 1.2,
+            "minimum": 0.7,
+            "title": "Speed",
+            "type": "number"
+          },
+          "stability": {
+            "default": 0.5,
+            "description": "Lower values give a more varied delivery.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Stability",
+            "type": "number"
+          },
+          "style": {
+            "default": 0.0,
+            "description": "Style exaggeration of the speaker.",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Style",
+            "type": "number"
+          },
+          "use_speaker_boost": {
+            "default": true,
+            "description": "Boost similarity to the original speaker.",
+            "title": "Use Speaker Boost",
+            "type": "boolean"
+          }
+        },
+        "title": "VoiceSettings",
+        "type": "object"
+      },
+      "VoicesSettings": {
+        "additionalProperties": false,
+        "description": "Voice resolution rules.",
+        "properties": {
+          "allow_raw_provider_ids": {
+            "default": false,
+            "description": "`voice` may be a raw ElevenLabs voice_id that is not in the catalog.",
+            "title": "Allow Raw Provider Ids",
+            "type": "boolean"
+          }
+        },
+        "title": "VoicesSettings",
+        "type": "object"
+      },
+      "Weekday": {
+        "enum": [
+          "mon",
+          "tue",
+          "wed",
+          "thu",
+          "fri",
+          "sat",
+          "sun"
+        ],
+        "type": "string"
       }
     },
     "securitySchemes": {
@@ -3139,7 +4145,7 @@
         "x-scope": "org:read"
       },
       "patch": {
-        "description": "Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the\n`org.compliance` permission.",
+        "description": "Rename the org, change its retention, or change settings (as `PATCH /v1/org/settings`);\n`retention_days`, `recording_retention_days`, and compliance settings also need the `org.compliance`\npermission.",
         "operationId": "org_update",
         "requestBody": {
           "content": {
@@ -3504,6 +4510,95 @@
         ],
         "x-envelope": "envelope",
         "x-permission": "members.manage",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/org/settings": {
+      "get": {
+        "description": "Every org setting, defaults filled for the ones never set.",
+        "operationId": "org_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_OrgSettings_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Settings Get",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "org:read"
+      },
+      "patch": {
+        "description": "Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.\n\nCompliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform\nadministrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan.",
+        "operationId": "org_settings_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_OrgSettings_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Settings Update",
+        "tags": [
+          "Org"
+        ],
+        "x-audit": [
+          "org.update"
+        ],
+        "x-envelope": "envelope",
         "x-scope": "org:write"
       }
     },

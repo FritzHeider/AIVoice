@@ -61,6 +61,7 @@ from va_db.models import (
     OrgStatus,
     User,
 )
+from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser
 from va_db.session import Database
@@ -130,8 +131,8 @@ def migrated_postgres() -> Iterator[str]:
 class SessionContainer(AuthContainer):
     """The fake api container plus a real database, envelope, and provisioner, cheap password hasher,
     sessions, login throttle, MFA guard, an in-memory email sender, the verification resend limiter, the OIDC
-    login state store, and the OIDC discovery client built from the app settings when the app opens it
-    (intercept it with respx)."""
+    login state store, the cached org settings reader, and the OIDC discovery client built from the app
+    settings when the app opens it (intercept it with respx)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -145,6 +146,7 @@ class SessionContainer(AuthContainer):
     resend_limiter: ResendLimiter = field(init=False)
     oidc_discovery: OidcDiscovery = field(init=False)
     sso_states: SsoStateStore = field(init=False)
+    org_settings: OrgSettingsReader = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -156,6 +158,7 @@ class SessionContainer(AuthContainer):
         self.mfa_guard = MfaGuard(self.redis)
         self.resend_limiter = ResendLimiter(self.redis)
         self.sso_states = SsoStateStore(self.redis)
+        self.org_settings = OrgSettingsReader(self.database, self.redis)
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
