@@ -168,8 +168,11 @@ class IdentityRepo:
             update(Session).where(Session.id == session_id).values(active_org_id=org_id)
         )
 
-    async def set_mfa_passed(self, session_id: uuid.UUID) -> None:
-        await self.session.execute(update(Session).where(Session.id == session_id).values(mfa_passed=True))
+    async def set_mfa_passed(self, session_id: uuid.UUID, now: datetime) -> None:
+        """Mark the session as having passed MFA at ``now`` (recent auth counts from it)."""
+        await self.session.execute(
+            update(Session).where(Session.id == session_id).values(mfa_passed=True, mfa_passed_at=now)
+        )
 
     async def revoke_session(self, session_id: uuid.UUID, now: datetime) -> bool:
         """Revoke an unrevoked session; whether a row changed."""

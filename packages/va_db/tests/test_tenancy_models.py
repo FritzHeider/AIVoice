@@ -126,6 +126,7 @@ _COLUMNS: dict[str, list[tuple[str, bool]]] = {
         ("revoked_at", True),
         ("created_at", False),
         ("updated_at", False),
+        ("mfa_passed_at", True),
     ],
     "email_tokens": [
         ("id", False),
@@ -370,6 +371,7 @@ def test_indexes() -> None:
         ("orgs", "status", Text),
         ("sso_connections", "default_role", Text),
         ("sessions", "expires_at", DateTime),
+        ("sessions", "mfa_passed_at", DateTime),
     ],
 )
 def test_column_types(table: str, column: str, sql_type: type[Any]) -> None:

@@ -460,3 +460,10 @@ Grafana 3001
   after the commit. Recent auth for change = session `created_at` younger than 10 min. Emails share one layout in
   `va_common.email.templates._Copy`; senders go through `va_api.auth.verification.deliver(..., failure_event=)`.
   Tests: `link_token(container.outbox, email, "password_reset")`.
+- 2026-10-29 (P02-T06a): MFA primitives are `va_common.auth.mfa` (TOTP `match_totp(secret, code, now) -> counter |
+  None`, `otpauth_uri`, `qr_svg` via `segno`, recovery codes `new_recovery_codes` / `hash_recovery_codes` /
+  `match_recovery_code`); DB writes are `va_db.repositories.MfaRepo` (conditional UPDATEs returning bool). Users
+  have no org, so the TOTP secret uses `Envelope.platform_encrypt_str` (a fresh nil-org KMS data key per blob,
+  specs/28 §3 (j)). A column added by `ALTER TABLE ... ADD COLUMN` lands last, and `test_schema_matches_spec`
+  compares attnum: list it LAST in the specs/03 DDL (as `sessions.mfa_passed_at`, migration 0003). Offline
+  migration SQL in tests: `migration_helpers.offline_sql(action, revision)`.

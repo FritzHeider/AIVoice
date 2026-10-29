@@ -183,6 +183,9 @@ class Session(IdMixin, TimestampMixin, Base):
     mfa_passed: Mapped[bool] = bool_column(default=False)
     expires_at: Mapped[datetime] = mapped_column(tz(), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(tz())
+    # When the session passed MFA (NULL until then). Migration 0003 appended it, so it sorts after the
+    # TimestampMixin columns like the database column (specs/03 §3 Decision 2026-10-29).
+    mfa_passed_at: Mapped[datetime | None] = mapped_column(tz(), sort_order=1)
 
 
 class EmailToken(IdMixin, TimestampMixin, Base):

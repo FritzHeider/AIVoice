@@ -188,14 +188,44 @@ async def test_decrypt_str_rejects_invalid_utf8(harness: Harness) -> None:
         await harness.envelope.decrypt_str(harness.org, blob, AAD)
 
 
+PLATFORM_AAD = column_aad("users", "mfa_totp_secret_enc", ROW_A)
+
+
 async def test_platform_secrets_use_nil_org(harness: Harness) -> None:
-    await harness.rotate(NIL_ORG_ID)
-    aad = column_aad("platform_secrets", "value_enc", "stripe")
-    blob = await harness.envelope.platform_encrypt(b"platform", aad)
-    assert await harness.envelope.platform_decrypt(blob, aad) == b"platform"
-    assert await harness.envelope.decrypt(NIL_ORG_ID, blob, aad) == b"platform"
+    blob = await harness.envelope.platform_encrypt(b"platform", PLATFORM_AAD)
+    assert await harness.envelope.platform_decrypt(blob, PLATFORM_AAD) == b"platform"
+    assert await harness.envelope.decrypt(NIL_ORG_ID, blob, PLATFORM_AAD) == b"platform"
     with pytest.raises(DecryptionError):
-        await fresh_envelope(harness).decrypt(harness.org, blob, aad)
+        await fresh_envelope(harness).decrypt(harness.org, blob, PLATFORM_AAD)
+
+
+async def test_platform_encrypt_needs_no_stored_key(harness: Harness) -> None:
+    assert await harness.store.active_data_key(NIL_ORG_ID) is None
+    before = harness.provider.generated
+    first = EncryptedBlob.from_bytes(await harness.envelope.platform_encrypt(b"a", PLATFORM_AAD))
+    second = EncryptedBlob.from_bytes(await harness.envelope.platform_encrypt(b"a", PLATFORM_AAD))
+    assert harness.provider.generated == before + 2
+    assert first.encrypted_data_key != second.encrypted_data_key
+
+
+async def test_platform_decrypt_from_the_blob_alone(harness: Harness) -> None:
+    blob = await harness.envelope.platform_encrypt(b"platform", PLATFORM_AAD)
+    fresh = fresh_envelope(harness)
+    decrypted = harness.provider.decrypted
+    assert await fresh.platform_decrypt(blob, PLATFORM_AAD) == b"platform"
+    assert harness.provider.decrypted == decrypted + 1
+    assert await harness.envelope.platform_decrypt(blob, PLATFORM_AAD) == b"platform"
+    assert harness.provider.decrypted == decrypted + 1
+    with pytest.raises(DecryptionError):
+        await fresh.platform_decrypt(blob, column_aad("users", "mfa_totp_secret_enc", ROW_B))
+
+
+async def test_platform_str_round_trip(harness: Harness) -> None:
+    blob = await harness.envelope.platform_encrypt_str("JBSWY3DPEHPK3PXP", PLATFORM_AAD)
+    assert await harness.envelope.platform_decrypt_str(blob, PLATFORM_AAD) == "JBSWY3DPEHPK3PXP"
+    invalid = await harness.envelope.platform_encrypt(b"\xff\xfe", PLATFORM_AAD)
+    with pytest.raises(DecryptionError, match="UTF-8"):
+        await harness.envelope.platform_decrypt_str(invalid, PLATFORM_AAD)
 
 
 async def test_cache_avoids_repeated_unwraps(harness: Harness) -> None:

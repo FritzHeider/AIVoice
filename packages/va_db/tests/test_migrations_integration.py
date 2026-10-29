@@ -65,7 +65,7 @@ def test_upgrade_creates_every_model_table(migrated_url: str) -> None:
     assert _names(migrated_url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'") == {
         "set_updated_at"
     }
-    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0002"
+    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0003"
 
 
 def test_every_model_index_exists(migrated_url: str) -> None:

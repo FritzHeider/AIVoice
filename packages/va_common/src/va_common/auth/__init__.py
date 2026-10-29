@@ -1,6 +1,7 @@
 """Authentication primitives shared by services; pure functions plus thread-offloaded hashing, no network I/O.
 
 - :mod:`va_common.auth.api_keys`: API key format and peppered hashing (specs/04-auth-tenancy-rbac.md §2.1).
+- :mod:`va_common.auth.mfa`: TOTP codes, QR provisioning, and recovery codes (specs/04 §4.5).
 - :mod:`va_common.auth.passwords`: argon2id password hashing and the password policy (specs/04 §4.2).
 - :mod:`va_common.auth.tokens`: opaque session, CSRF, and email-link tokens (specs/04 §4.3, §4.4).
 """
@@ -21,6 +22,25 @@ from va_common.auth.api_keys import (
     generate_api_key,
     looks_like_api_key,
     sha256_hex,
+)
+from va_common.auth.mfa import (
+    RECOVERY_CODE_ALPHABET,
+    RECOVERY_CODE_COUNT,
+    TOTP_DIGITS,
+    TOTP_INTERVAL_S,
+    TOTP_ISSUER,
+    TOTP_SECRET_LENGTH,
+    TOTP_VALID_WINDOW,
+    hash_recovery_codes,
+    match_recovery_code,
+    match_totp,
+    new_recovery_codes,
+    new_totp_secret,
+    normalise_recovery_code,
+    otpauth_uri,
+    qr_svg,
+    totp_code,
+    totp_counter,
 )
 from va_common.auth.passwords import (
     MAX_PASSWORD_LENGTH,
@@ -50,9 +70,16 @@ __all__ = [
     "BASE62",
     "MAX_PASSWORD_LENGTH",
     "MIN_PASSWORD_LENGTH",
+    "RECOVERY_CODE_ALPHABET",
+    "RECOVERY_CODE_COUNT",
     "SPEC_ARGON2_PARAMS",
     "TOKEN_BYTES",
     "TOKEN_LENGTH",
+    "TOTP_DIGITS",
+    "TOTP_INTERVAL_S",
+    "TOTP_ISSUER",
+    "TOTP_SECRET_LENGTH",
+    "TOTP_VALID_WINDOW",
     "ApiKeyHasher",
     "Argon2Params",
     "IssuedToken",
@@ -65,10 +92,20 @@ __all__ = [
     "environment_of",
     "generate_api_key",
     "generate_token",
+    "hash_recovery_codes",
     "issue_token",
     "looks_like_api_key",
     "looks_like_token",
+    "match_recovery_code",
+    "match_totp",
+    "new_recovery_codes",
+    "new_totp_secret",
+    "normalise_recovery_code",
+    "otpauth_uri",
     "password_policy_violation",
+    "qr_svg",
     "sha256_hex",
     "tokens_equal",
+    "totp_code",
+    "totp_counter",
 ]

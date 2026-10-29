@@ -182,14 +182,16 @@ async def test_extend_and_set_active_org_and_mfa(identity_db: IdentityDb) -> Non
         repo = IdentityRepo(session)
         await repo.extend_session(row.id, _NOW + timedelta(days=7))
         await repo.set_active_org(row.id, org.id)
-        await repo.set_mfa_passed(row.id)
+        await repo.set_mfa_passed(row.id, _NOW + timedelta(minutes=3))
     async with identity_db.database.global_session() as session:
         found = await IdentityRepo(session).get_active_session(token, _NOW + timedelta(days=6))
     assert found is not None
-    assert (found.expires_at, found.active_org_id, found.mfa_passed) == (
+    assert row.mfa_passed_at is None
+    assert (found.expires_at, found.active_org_id, found.mfa_passed, found.mfa_passed_at) == (
         _NOW + timedelta(days=7),
         org.id,
         True,
+        _NOW + timedelta(minutes=3),
     )
 
 

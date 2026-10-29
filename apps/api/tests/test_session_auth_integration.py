@@ -457,7 +457,7 @@ async def test_mfa_required_gate(
 
     row = await _only_session(identity, member.user.id)
     async with identity.database.global_session() as session:
-        await IdentityRepo(session).set_mfa_passed(row.id)
+        await IdentityRepo(session).set_mfa_passed(row.id, container.clock.now())
     await _drop_cache(container, client)
     assert (await client.get(SESSION_PROBE_PATH)).status_code == 200
     assert (await client.get(_SESSION)).json()["data"]["mfa_required"] is False

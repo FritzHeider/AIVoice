@@ -54,11 +54,23 @@
   - Deliverables: request/confirm endpoints, single-use hashed tokens with expiry, session revocation on reset
   - Acceptance: token reuse rejected; all sessions revoked after reset.
 
-- [ ] P02-T06 TOTP MFA and recovery codes
+- [ ] P02-T06 TOTP MFA and recovery codes (split by the planner on 2026-10-29 into T06a/T06b below; tick when both are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (MFA)
   - Depends on: P02-T04
   - Deliverables: enroll (secret encrypted with va_common.crypto, otpauth URI), verify, disable, recovery codes (10, hashed), `MFA_REQUIRED` enforcement when org `mfa_required`
   - Acceptance: pyotp-based tests with frozen clock; recovery code single-use.
+
+- [x] P02-T06a MFA primitives: TOTP, recovery codes, platform-key encryption, session MFA time — reviewed 2026-10-29: make lint/typecheck/placeholders 0, make test 2365 passed (99.39 %), spec refs 0, jscpd 0 clones
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.5; specs/28-security.md §3; specs/03-data-model.md §3 (`users`, `sessions`)
+  - Depends on: P02-T04
+  - Deliverables: `va_common.auth.mfa` (pyotp TOTP secret/URI/±1-step matching counter, segno QR SVG, `xxxx-xxxx-xxxx` recovery code generation/normalisation, argon2id hashing/matching off the event loop); `Envelope.platform_encrypt` with a fresh KMS data key per blob (the nil org has no `org_data_keys` row); migration 0003 adding `sessions.mfa_passed_at`; `IdentityRepo` MFA writes (setup, enable, disable, atomic recovery-code consumption, `set_mfa_passed(session_id, now)`)
+  - Acceptance: frozen-clock TOTP tests at window edges; recovery code consumed at most once under concurrency (conditional `array_remove`); platform blob round-trips and is bound to its AAD; migrated schema equals the spec-applied schema.
+
+- [ ] P02-T06b MFA endpoints and enforcement
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (`mfa/*` rows), §4.3, §4.5; specs/03-data-model.md §11; specs/31
+  - Depends on: P02-T06a
+  - Deliverables: `POST /internal/auth/mfa/setup|enable|verify|disable`, TOTP replay guard `mfa:last:<user_id>`, per-user MFA failure lock, `MFA_REQUIRED` gate for org `mfa_required` and for users with MFA enabled, MFA verification refreshing recent auth for password change, `GET /session` reporting it
+  - Acceptance: pyotp-based tests with frozen clock; replayed code rejected; recovery code single-use; disable refused when any org of the user requires MFA.
 
 - [ ] P02-T07 OIDC SSO
   - Spec refs: specs/04-auth-tenancy-rbac.md (OIDC SSO)

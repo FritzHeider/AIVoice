@@ -179,7 +179,8 @@ CREATE TABLE sessions (
   expires_at   timestamptz NOT NULL,
   revoked_at   timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now(),
-  updated_at   timestamptz NOT NULL DEFAULT now()
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  mfa_passed_at timestamptz                          -- when MFA was passed; NULL until then (migration 0003)
 );
 CREATE INDEX sessions_user_idx ON sessions(user_id);
 
@@ -257,6 +258,13 @@ CREATE TABLE idempotency_keys (
   PRIMARY KEY (org_id, key)
 );
 ```
+
+> Decision (2026-10-29): `sessions.mfa_passed_at timestamptz` (NULL until the session passes MFA; OIDC SSO sets it at
+> login because the IdP is trusted for MFA) is added by migration `0003_session_mfa_passed_at`, so "recent auth"
+> (specs/04-auth-tenancy-rbac.md §4.1 `password/change`) can count from MFA verification as well as from login.
+> `ALTER TABLE ... ADD COLUMN` appends the column, and the schema conformance test compares column positions, so the
+> DDL above lists it last; `0001_initial` keeps its original `sessions` text. Columns added by later migrations follow
+> the same rule.
 
 ## 4. Telephony: carrier accounts, numbers, pools
 

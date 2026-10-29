@@ -3,21 +3,13 @@
 from __future__ import annotations
 
 import re
-from io import StringIO
 from types import ModuleType
 from typing import Final
 
-from alembic import command
-from migration_helpers import alembic_config, load_revision
+from migration_helpers import load_revision, offline_sql
 from plan_catalog import CAP_COLUMNS, paragraph_values, parse_spec_plans, table_cells, table_prices
 
 SEED: Final[ModuleType] = load_revision("0002_seed_plans.py")
-
-
-def _offline(action: str, revision: str) -> str:
-    output = StringIO()
-    getattr(command, action)(alembic_config(output), revision, sql=True)
-    return output.getvalue()
 
 
 def test_spec_lists_the_four_plans_in_seed_order() -> None:
@@ -77,7 +69,7 @@ def test_spec_table_rows_have_every_column() -> None:
 
 
 def test_offline_upgrade_inserts_the_plans_after_the_schema() -> None:
-    sql = _offline("upgrade", "0001:0002")
+    sql = offline_sql("upgrade", "0001:0002")
     assert sql.count("INSERT INTO plans (") == 1
     assert "UPDATE alembic_version SET version_num='0002' WHERE alembic_version.version_num = '0001'" in sql
     assert "CREATE TABLE" not in sql
@@ -86,7 +78,7 @@ def test_offline_upgrade_inserts_the_plans_after_the_schema() -> None:
 
 
 def test_offline_downgrade_deletes_exactly_the_seeded_plans() -> None:
-    sql = _offline("downgrade", "0002:0001")
+    sql = offline_sql("downgrade", "0002:0001")
     assert "DELETE FROM plans WHERE id IN ('start', 'build', 'scale', 'enterprise')" in sql
     assert "DROP" not in sql
     assert "UPDATE alembic_version SET version_num='0001' WHERE alembic_version.version_num = '0002'" in sql

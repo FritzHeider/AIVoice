@@ -16,6 +16,15 @@ from va_common.crypto.kms import NIL_ORG_ID, KmsProvider, WrappedDataKey
 __all__ = ["DataKeyStore", "Envelope"]
 
 
+def _utf8(plaintext: bytes) -> str:
+    """``plaintext`` decoded as UTF-8; :class:`DecryptionError` when it is not valid UTF-8."""
+    try:
+        return plaintext.decode()
+    except UnicodeDecodeError:
+        msg = "decrypted value is not valid UTF-8"
+        raise DecryptionError(msg) from None
+
+
 class DataKeyStore(Protocol):
     """Source of each org's active wrapped data key (backed by ``org_data_keys`` with ``status='active'``)."""
 
@@ -96,19 +105,26 @@ class Envelope:
         return await self.encrypt(org_id, plaintext.encode(), aad)
 
     async def decrypt_str(self, org_id: UUID, blob: bytes, aad: str) -> str:
-        plaintext = await self.decrypt(org_id, blob, aad)
-        try:
-            return plaintext.decode()
-        except UnicodeDecodeError:
-            msg = "decrypted value is not valid UTF-8"
-            raise DecryptionError(msg) from None
+        return _utf8(await self.decrypt(org_id, blob, aad))
 
     async def platform_encrypt(self, plaintext: bytes, aad: str) -> bytes:
-        """Encrypt a platform-level secret (org id = nil UUID)."""
-        return await self.encrypt(NIL_ORG_ID, plaintext, aad)
+        """Encrypt a platform-level secret (org id = nil UUID) under a fresh data key embedded in the blob.
+
+        The platform has no stored data key (``org_data_keys`` rows belong to orgs), so each blob gets its own
+        KMS data key bound to the nil org; :meth:`platform_decrypt` needs only the blob (specs/28 §3 (j)).
+        """
+        data_key = await self._provider.generate_data_key(NIL_ORG_ID)
+        self._cache.put(NIL_ORG_ID, data_key.wrapped, data_key.plaintext)
+        return await self._seal(NIL_ORG_ID, data_key.wrapped, plaintext, aad)
 
     async def platform_decrypt(self, blob: bytes, aad: str) -> bytes:
         return await self.decrypt(NIL_ORG_ID, blob, aad)
+
+    async def platform_encrypt_str(self, plaintext: str, aad: str) -> bytes:
+        return await self.platform_encrypt(plaintext.encode(), aad)
+
+    async def platform_decrypt_str(self, blob: bytes, aad: str) -> str:
+        return _utf8(await self.platform_decrypt(blob, aad))
 
     async def rewrap(self, org_id: UUID, blob: bytes, aad: str) -> bytes:
         """Re-encrypt ``blob`` under the org's active data key; return it unchanged if already current."""

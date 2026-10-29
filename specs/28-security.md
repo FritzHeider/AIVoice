@@ -91,12 +91,19 @@
 > (`status='active'`) on a `tenant_session(org_id)`; `Envelope.encrypt_with_key(org_id, wrapped, plaintext, aad)`
 > seals under an explicit wrapped key so a transaction that has just created a data key (org provisioning,
 > specs/04-auth-tenancy-rbac.md §4.1) can encrypt before committing. The platform (nil org) key has no
-> `org_data_keys` row (its FK points at `orgs`), so `OrgDataKeyStore` returns `None` for it and `platform_encrypt`
-> stays unused until a later task introduces a platform key source.
+> `org_data_keys` row (its FK points at `orgs`), so `OrgDataKeyStore` returns `None` for it; `platform_encrypt`
+> therefore does not use the store (see (j)).
 > (i) `LOCAL_MASTER_KEY` may be empty at settings construction (so the api imports without environment, like
 > `API_KEY_PEPPER`); a non-empty value must be 64 hex characters, production still refuses `local`, and
 > `open_kms_provider` raises `RuntimeError("LOCAL_MASTER_KEY is not configured")` before opening anything when it is
 > empty.
+> (j) The platform (nil org) has no stored data key. `platform_encrypt` generates a fresh KMS data key per blob
+> (`provider.generate_data_key(NIL_ORG_ID)`: local wrapping AAD `org_id=00000000-0000-0000-0000-000000000000`, AWS
+> encryption context with the nil org id) and embeds it as every blob does, so `platform_decrypt` works from the blob
+> alone; unwrapped keys go through the same cache. `platform_encrypt_str`/`platform_decrypt_str` are the UTF-8
+> variants. `users.mfa_totp_secret_enc` uses it with AAD `users.mfa_totp_secret_enc:<user_id>`
+> (`column_aad("users", "mfa_totp_secret_enc", user_id)`), because users belong to no single org and a user leaving
+> an org must keep MFA.
 
 ## 4. Transport security
 

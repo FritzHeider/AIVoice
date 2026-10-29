@@ -28,6 +28,7 @@ __all__ = [
     "downgrade",
     "fresh_database",
     "load_revision",
+    "offline_sql",
     "query",
     "query_many",
     "upgrade",
@@ -43,6 +44,13 @@ def alembic_config(output: StringIO | None = None, *, configure_logger: bool = F
     config = Config(str(ALEMBIC_INI), output_buffer=output)
     config.attributes["configure_logger"] = configure_logger
     return config
+
+
+def offline_sql(action: str, revision: str) -> str:
+    """The SQL ``alembic <action> <revision> --sql`` renders (``action`` is ``upgrade`` or ``downgrade``)."""
+    output = StringIO()
+    getattr(command, action)(alembic_config(output), revision, sql=True)
+    return output.getvalue()
 
 
 def load_revision(filename: str) -> ModuleType:

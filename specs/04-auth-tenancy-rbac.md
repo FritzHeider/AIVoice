@@ -425,6 +425,24 @@ session must send header `X-CSRF-Token` equal to the cookie, compared constant-t
 in Redis `mfa:last:{user_id}` (TTL 90 s). Recovery codes: 10 codes of format `xxxx-xxxx-xxxx` (base32 lowercase),
 stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code removed.
 
+> Decision (2026-10-29): `va_common.auth.mfa` implements the primitives. **TOTP**: the secret is
+> `pyotp.random_base32(32)` (160 bits); `otpauth_uri` is `pyotp.TOTP(secret).provisioning_uri(name=<email>,
+> issuer_name="VoiceAgents")`; a submitted code has all whitespace removed and must then be exactly 6 ASCII digits
+> (anything else never matches); matching compares it in constant time (`hmac.compare_digest`) with the codes of time
+> steps `T-1`, `T`, `T+1` at the injected clock's `now` (all three, no early return; negative steps skipped) and
+> returns the matched step counter, which the replay guard stores. **QR**: `qr_svg` is an inline SVG (no XML
+> declaration) of the otpauth URI made with `segno` (pure Python, error level M, scale 4), added as a dependency
+> because pyotp has no renderer. **Recovery codes**: 10 distinct codes of 12 characters from the lowercase RFC 4648
+> base32 alphabet (`a-z2-7`, `secrets.choice`, 60 bits), shown as `xxxx-xxxx-xxxx`; input is normalised by removing
+> whitespace and `-` and casefolding, must then be 12 base32 characters, and is re-hyphenated; the argon2id hashes
+> (§4.2 parameters) are of that canonical form; hashing and matching run sequentially in one worker thread (each
+> argon2id call takes about 64 MiB). Consumption is one conditional `UPDATE users SET mfa_recovery_codes_hash =
+> array_remove(mfa_recovery_codes_hash, :hash) WHERE id = :id AND mfa_enabled AND :hash = ANY(...)`
+> (`va_db.repositories.MfaRepo.consume_recovery_code`), so a code is accepted at most once even under concurrent
+> requests. `MfaRepo.enable` applies only while the stored pending secret is the blob the code was verified against,
+> so a concurrent `setup` that replaced the secret makes it fail. The TOTP secret is encrypted with
+> `Envelope.platform_encrypt_str` and AAD `users.mfa_totp_secret_enc:<user_id>` (specs/28-security.md §3 (j)).
+
 ## 5. OIDC SSO (enterprise, `OIDC_ENABLED=true`)
 
 1. Admin configures `sso_connections` (issuer, client_id, client_secret, allowed_domains, default_role, enforce) via

@@ -1702,3 +1702,193 @@ check_spec_refs 0; radon -n C none; jscpd@4 0 clones. Diff checked against specs
 REAUTH_REQUIRED 401, INVALID_CREDENTIALS 401, PASSWORD_TOO_WEAK 400). Addresses never logged; tokens hash-only;
 session revocation in the write txn with cache forget after commit (pool size 1 respected). Tests cover reuse, expiry,
 purpose, race-free consume, retire, lock clearing, CSRF/MFA/origin. No findings.
+
+## 2026-10-29 Planner: P02-T05 approved → P02-T06 split into T06a/T06b
+T06 needs a platform key source (users have no org; specs/28 (h) says `platform_encrypt` is unused until one
+exists), a schema change (recent auth "since login or MFA" needs an MFA time on the session), new deps (pyotp in the
+specs/02 list; segno for `qr_svg` is new), and four endpoints plus a gate change. Split: T06a primitives + data
+layer, T06b endpoints + enforcement. Design for both is below so T06b's planner inherits it.
+
+### T06b design carried forward (do not build in T06a)
+- Routes in new `routers/auth_mfa.py` on `internal_auth_router` (import for side effect in main.py like
+  auth_password), all session-authenticated (`CurrentSession`: CSRF + Origin), NOT MFA-gated (§4.3 exempts
+  `/internal/auth/mfa/*`). setup `{}` → CONFLICT if `mfa_enabled`; new secret replaces any pending one; returns
+  `{secret_base32, otpauth_uri, qr_svg}`. enable `{code}` → CONFLICT without a pending secret / when enabled; verify
+  TOTP; 10 codes hashed; conditional enable (secret blob unchanged); marks the current session MFA-passed; returns
+  `{mfa_enabled:true, recovery_codes:[10]}`. verify `{code}` xor `{recovery_code}` (both/neither INVALID_INPUT);
+  CONFLICT "Multi-factor authentication is not enabled." when not enrolled; success `set_mfa_passed(now)` +
+  `remember` the updated ActiveSession; returns `{mfa_passed:true, recovery_codes_remaining:int}`. disable `{code}`
+  (TOTP only, per spec) → FORBIDDEN when ANY org of the user has `mfa_required`; clears secret/codes/flag.
+- Wrong code → INVALID_MFA_CODE 401 "Invalid or expired code." field `code`/`recovery_code`. Brute force: separate
+  per-user counter `auth:fail:mfa:<user_id>` 10 failures / 15 min → AUTH_LOCKED with Retry-After (NOT the email
+  counter, because a successful password login clears that and would allow unlimited MFA guesses); cleared on MFA
+  success. Generalise LoginThrottle's counter logic rather than copying it (jscpd).
+- Replay: `mfa:last:<user_id>` (no braces, like auth:verify:resend) TTL 90 s, Lua compare-and-set "accept only a
+  counter greater than the stored one"; Redis down → log `mfa_replay_guard_unavailable`, accept (consistent with
+  the other Redis-degraded paths; documented). Add both keys to specs/03 §11.
+- Gate: `enforce_mfa` fires when `(org.mfa_required OR user.mfa_enabled) AND NOT session.mfa_passed` (otherwise a
+  personally enabled MFA protects nothing: login only *tells* the dashboard to prompt). Needs
+  `MembershipRecord.user_mfa_enabled` (join users in `_joined`). `/session.mfa_required` uses the same rule.
+- Recent auth: `now - max(created_at, mfa_passed_at) < 10 min`; ActiveSession + cache JSON gain `mfa_passed_at`
+  (missing key in an old cache entry → treat as None via `.get`). Update the specs/04 §4.1 change decision text.
+- Audit `auth.mfa_enabled`/`auth.mfa_disabled` wired by P02-T11 (say so in the decision).
+
+## Plan P02-T06a — MFA primitives (specs/04 §4.5, specs/28 §3, specs/03 §3)
+
+### Facts found while planning
+- `users.mfa_totp_secret_enc bytea`, `mfa_enabled bool`, `mfa_recovery_codes_hash text[] DEFAULT '{}'` already exist
+  (model `va_db.models.tenancy.User`); `sessions.mfa_passed bool` exists; `IdentityRepo.set_mfa_passed(session_id)`
+  exists and is unused outside tests (grep before changing; update its tests).
+- `Envelope.platform_encrypt/decrypt` use org `NIL_ORG_ID`; `OrgDataKeyStore.active_data_key(NIL)` returns None so
+  `platform_encrypt` currently raises CryptoError. Decryption only needs the blob's embedded wrapped key.
+- `schema_catalog` compares columns including `attnum`: a column added by `ALTER TABLE ... ADD COLUMN` lands last,
+  so the specs/03 `CREATE TABLE sessions` must list the new column LAST (after `updated_at`).
+- `test_migrations.py` pins 0001/0002 offline SQL; spec blocks must hold only CREATE statements (fine).
+- `PasswordHasher` (va_common.auth.passwords) has sync `hash`/`verify` and `*_async` via to_thread; one argon2 call
+  is ~64 MiB, so never run 10 in parallel threads.
+- pyotp is in the specs/02 dependency list; segno is not.
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/04 §4.5 — **TOTP**: secret = `pyotp.random_base32(32)` (160 bits); `otpauth_uri` =
+   `pyotp.TOTP(secret).provisioning_uri(name=<email>, issuer_name="VoiceAgents")`; a submitted code is stripped of
+   whitespace and must be exactly 6 ASCII digits (else no match); matching compares (constant time,
+   `hmac.compare_digest`) against the codes of time steps `T-1, T, T+1` at the injected clock's `now` and returns
+   the matched step counter (the replay guard in T06b stores it). **QR**: `qr_svg` is an inline SVG of the
+   otpauth URI made with `segno` (pure Python, no native deps; error level M, scale 4, no XML declaration), added as
+   a dependency because pyotp has no renderer. **Recovery codes**: 10 distinct codes, 12 characters from the
+   lowercase RFC 4648 base32 alphabet (`a-z2-7`, `secrets.choice`, 60 bits) shown as `xxxx-xxxx-xxxx`; input is
+   normalised by casefolding and dropping whitespace and `-`, must then be 12 base32 characters, and is re-hyphenated
+   before hashing/verifying; stored as argon2id hashes (§4.2 params) of the canonical hyphenated form; hashing and
+   matching run sequentially in one worker thread; consumption is one conditional
+   `UPDATE users SET mfa_recovery_codes_hash = array_remove(..., :hash) WHERE id = :id AND mfa_enabled AND :hash =
+   ANY(...)` so a code is accepted at most once even under concurrent requests.
+2. specs/28 §3 — continues the list: **(j)** the platform (nil org) has no stored data key; `platform_encrypt`
+   generates a fresh KMS data key per blob (`provider.generate_data_key(NIL_ORG_ID)`, local: AAD
+   `org_id=00000000-…`, AWS: encryption context with the nil org id) and embeds it, so `platform_decrypt` works
+   from the blob alone (unwrapped keys go through the same cache). `users.mfa_totp_secret_enc` uses it with AAD
+   `users.mfa_totp_secret_enc:<user_id>` (users belong to no single org, and a user leaving an org must not lose
+   MFA). Amend (h)'s last sentence to point at (j).
+3. specs/03 §3 — `sessions.mfa_passed_at timestamptz` (NULL until MFA is passed; SSO in P02-T07 sets it at login),
+   added by migration `0003_session_mfa_passed_at`; it lets "recent auth" (specs/04 §4.1 change) count from MFA
+   verification.
+
+### Files
+**pyproject (packages/va_common/pyproject.toml)** — `uv add --package va-common pyotp segno` (current releases);
+  lock updated. Check `mypy --strict`: pyotp ships no stubs? If not typed, add a mypy override
+  `ignore_missing_imports` for `pyotp` only in the existing mypy config section (or `types-` package if one exists);
+  segno is typed (`py.typed`). Wrap untyped returns with explicit `str(...)`/typed locals.
+**packages/va_common/src/va_common/auth/mfa.py** (new):
+  - `TOTP_DIGITS: Final = 6`, `TOTP_INTERVAL_S: Final = 30`, `TOTP_VALID_WINDOW: Final = 1`,
+    `TOTP_ISSUER: Final = "VoiceAgents"`, `RECOVERY_CODE_COUNT: Final = 10`, `RECOVERY_CODE_ALPHABET: Final =
+    "abcdefghijklmnopqrstuvwxyz234567"`.
+  - `def new_totp_secret() -> str`
+  - `def otpauth_uri(secret: str, account: str) -> str`
+  - `def qr_svg(data: str) -> str`
+  - `def totp_counter(now: datetime) -> int` (`int(now.timestamp()) // 30`; aware datetimes only, ValueError on naive)
+  - `def totp_code(secret: str, counter: int) -> str` (pyotp `generate_otp(counter)`; used by tests and matching)
+  - `def match_totp(secret: str, code: str, now: datetime) -> int | None` — the matched counter or None; checks all
+    three steps (no early return on the first comparison) to keep timing flat.
+  - `def new_recovery_codes() -> list[str]` (10 distinct, hyphenated)
+  - `def normalise_recovery_code(raw: str) -> str | None`
+  - `async def hash_recovery_codes(hasher: PasswordHasher, codes: Sequence[str]) -> list[str]` (one
+    `asyncio.to_thread` running `hasher.hash` sequentially)
+  - `async def match_recovery_code(hasher: PasswordHasher, hashes: Sequence[str], raw: str) -> str | None` — the
+    stored hash the normalised code matches (one to_thread, sequential `hasher.verify`), None when malformed or no
+    match (a malformed input still costs nothing; that is fine — the format is public).
+  Export from `va_common.auth.__init__` (`__all__` sorted).
+**packages/va_common/src/va_common/crypto/envelope.py** — `platform_encrypt`: `data_key = await
+  self._provider.generate_data_key(NIL_ORG_ID)`; cache put; `_seal(NIL_ORG_ID, data_key.wrapped, ...)`. Add
+  `platform_encrypt_str`/`platform_decrypt_str` only if T06b needs them — it does (secret is text): add both,
+  sharing the UTF-8 decode with `decrypt_str` via a private `_utf8(plaintext)` helper (jscpd). Docstrings say why.
+**packages/va_db/migrations/versions/0003_session_mfa_passed_at.py** — revision "0003", down "0002"; upgrade
+  `op.execute(sa.text("ALTER TABLE sessions ADD COLUMN mfa_passed_at timestamptz"))`; downgrade drops it. No
+  grants needed (existing table; column privileges follow the table grant).
+**specs/03-data-model.md** — `sessions` DDL: add `mfa_passed_at timestamptz` as the LAST column with a short
+  comment; decision note (3).
+**packages/va_db/src/va_db/models/tenancy.py** — `Session.mfa_passed_at: Mapped[datetime | None] =
+  mapped_column(DateTime(timezone=True))` (match existing timestamp column style; autogenerate parity must stay []).
+**packages/va_db/src/va_db/repositories/identity.py** (watch file length; split MFA writes into
+  `repositories/identity_mfa.py` class `MfaRepo(session)` if identity.py would pass ~330 lines — preferred):
+  - `set_mfa_passed(session_id, now) -> None` sets `mfa_passed=True, mfa_passed_at=now` (move/keep in IdentityRepo).
+  - `MfaRepo.begin_setup(user_id, secret_enc: bytes) -> bool` — UPDATE users SET secret=:enc WHERE id AND NOT
+    mfa_enabled; rowcount==1.
+  - `MfaRepo.enable(user_id, secret_enc: bytes, code_hashes: list[str]) -> bool` — UPDATE SET mfa_enabled=true,
+    mfa_recovery_codes_hash=:hashes WHERE id AND NOT mfa_enabled AND mfa_totp_secret_enc = :enc.
+  - `MfaRepo.disable(user_id) -> bool` — UPDATE SET mfa_enabled=false, secret NULL, hashes '{}' WHERE id AND
+    mfa_enabled.
+  - `MfaRepo.consume_recovery_code(user_id, code_hash: str) -> bool` — the array_remove conditional UPDATE.
+  - `MfaRepo.replace_recovery_codes(user_id, code_hashes) -> bool` is NOT needed (no regenerate endpoint in spec);
+    don't add it.
+  Export `MfaRepo` from `va_db.repositories`. It is not a system repo (users are global, `global_session`), so the
+  specs/03 §2 `va_system` list is unchanged.
+**specs/04** §4.5 decision (1); **specs/28** §3 decision (2); **AGENTS.md** — mfa module, platform_encrypt per-blob
+  key, migration 0003 column-last rule (attnum), segno dep.
+
+### Tests
+packages/va_common/tests/test_mfa.py:
+- `test_new_totp_secret_is_32_base32_chars_and_unique`.
+- `test_otpauth_uri` (parse with urllib: scheme otpauth, host totp, label `VoiceAgents:<email>` url-encoded,
+  `secret`, `issuer=VoiceAgents`; pyotp.parse_uri round-trip gives same secret/digits 6/interval 30).
+- `test_qr_svg_is_svg` (starts with `<svg`, no `<?xml`, contains `path`; deterministic for same input).
+- `test_match_totp_window` parametrized at a fixed aware datetime: code of T-1, T, T+1 → that counter; T-2, T+2 →
+  None; boundary second (timestamp exactly at a step start and step_start-1).
+- `test_match_totp_rejects_malformed` ("", "12345", "1234567", "12a456", full-width digits "１２３４５６") → None;
+  `" 123 456 "` whitespace stripped matches when it is the right code.
+- `test_totp_counter_requires_aware_datetime`.
+- `test_new_recovery_codes_format_and_distinct` (regex `^[a-z2-7]{4}-[a-z2-7]{4}-[a-z2-7]{4}$`, len 10, set len 10).
+- `test_normalise_recovery_code` (upper-case, spaces, no hyphens → canonical; wrong length / `0`/`1`/`8` chars → None).
+- `test_hash_and_match_recovery_codes` with a cheap `Argon2Params` hasher (existing test helper/fixture if one
+  exists in test_passwords.py — reuse it): matching returns the right stored hash; wrong code None; malformed None;
+  hashes are argon2id strings and never contain the code.
+packages/va_common/tests/test_crypto_envelope.py: `platform_encrypt` round-trips with a store that has no keys
+  (existing fake); two encryptions embed different wrapped keys; wrong AAD → DecryptionError; decrypt with an
+  envelope whose cache is empty (fresh Envelope over same provider) works; `platform_*_str` round-trip and
+  invalid UTF-8 → DecryptionError (reuse existing str test style).
+packages/va_db tests:
+- migration: offline upgrade SQL contains `ALTER TABLE sessions ADD COLUMN mfa_passed_at timestamptz` and the
+  `0003` alembic_version update; downgrade 0003→0002 drops it (offline SQL); existing schema-vs-spec and autogenerate
+  parity tests cover the rest (run them).
+- `test_identity_mfa.py` (identity_db fixture): begin_setup on a non-enrolled user stores the blob, refuses when
+  enabled; enable needs the same blob (a replaced secret → False) and sets hashes; disable clears all three and
+  returns False when not enabled; consume_recovery_code true once then false; concurrent consumption of one hash
+  from two sessions sequentially-committed (pool size 1 → do two transactions back to back, second False; also
+  assert other hashes survive); consume when MFA disabled → False; `set_mfa_passed` sets both columns.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run python scripts/check_spec_refs.py`; `npx jscpd@4` (0 clones);
+`uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none); pip-audit per memory
+mem-1793267153-9b68 (new deps!); `corepack pnpm audit`; `uv run pre-commit run gitleaks --all-files`;
+`make openapi` + drift check (should be unchanged). build.done payload keys: tests, lint, typecheck, audit,
+coverage, complexity, duplication, specs.
+
+### Risks
+- pyotp typing under mypy --strict (override narrowly; don't blanket-ignore).
+- segno API: verify `segno.make(data, error="m").svg_inline(scale=4)` exists in the installed version; otherwise
+  `save(BytesIO, kind="svg", xmldecl=False, svgns=True, scale=4)`.
+- Column order: new column must be last in the spec DDL or test_schema_matches_spec fails on attnum.
+- `test_offline_upgrade_creates_every_model_table` etc. must still pass with head 0003 (only CREATE TABLEs from 0001).
+- Don't change verify behaviour of `Envelope.encrypt` for real orgs; only the nil-org path.
+- Pool size 1 per role: never nest sessions in the repo tests.
+
+## 2026-10-29 Builder: P02-T06a build notes
+Implemented per plan. Files: `va_common/auth/mfa.py` (new; exported from `va_common.auth`), `crypto/envelope.py`
+(`platform_encrypt` = fresh nil-org data key per blob, `platform_encrypt_str`/`platform_decrypt_str`, shared `_utf8`),
+pyotp 2.10.0 + segno 1.6.6 (both ship py.typed, no mypy override needed), migration `0003_session_mfa_passed_at`,
+`Session.mfa_passed_at` (`sort_order=1` so the model order matches the DB/spec: column after updated_at),
+`IdentityRepo.set_mfa_passed(session_id, now)` (callers updated: va_db + api session test), new
+`repositories/identity_mfa.py` `MfaRepo` (begin_setup/enable/disable/consume_recovery_code; `:hash = ANY(...)` via
+`literal(h, Text) == any_(col)` because `Mapped[list[str]].any()` fails mypy). Specs: 04 §4.5 Decision, 28 §3 (h)
+amended + (j), 03 §3 DDL column + Decision, 02 dependency list gains `segno`. Tests: test_mfa.py, envelope platform
+tests, test_identity_mfa_integration.py, test_session_mfa_migration.py, tenancy model column list, migrations head
+0003. Added `migration_helpers.offline_sql` and switched test_seed_plans to it (no copied `_offline`).
+Gates: make fmt 0; lint 0; typecheck 0; placeholders 0 findings; make test 0 (2365 passed, 99.39 %); spec refs 0;
+openapi drift current; jscpd 0 clones; radon -n C none (avg A 1.77 on auth+repos); pip-audit + pnpm audit clean;
+gitleaks passed.
+
+## Review P02-T06a (2026-10-29): approved
+Re-ran: make lint/typecheck/placeholders exit 0; make test 2365 passed, 99.39 %; check_spec_refs 0; jscpd 0 clones.
+Diff checked against specs/04 §4.5, specs/28 §3 (h)/(j), specs/03 §3: TOTP ±1 step constant-time no-early-return,
+recovery code format/normalisation/argon2id sequential in one thread, conditional UPDATEs (enable bound to verified
+blob; array_remove consumption is safe under READ COMMITTED re-evaluation), platform_encrypt per-blob nil-org key
+(DataKeyCache bounded at 10k entries, so per-blob puts cannot grow it without limit), migration 0003 column-last.
+Recovery-code concurrency is tested sequentially (pool size 1). T06b design is carried forward above.

@@ -1,7 +1,8 @@
 """Repositories (specs/03-data-model.md §2): the generic :class:`TenantRepository`, the tenant-scoped
 :class:`IdempotencyRepo` (specs/04 §12), :class:`MembershipRepo` and :class:`OrgDataKeyRepo`, the identity
-:class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4), the envelope's
-:class:`OrgDataKeyStore` (specs/28 §3), and the system-scope ones.
+:class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4) with :class:`MfaRepo` (MFA
+enrolment on ``users``; specs/04 §4.5), the envelope's :class:`OrgDataKeyStore` (specs/28 §3), and the
+system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -41,6 +42,7 @@ from va_db.repositories.identity import (
     IssuedSession,
     NewUser,
 )
+from va_db.repositories.identity_mfa import MfaRepo
 from va_db.repositories.memberships import MembershipLookupRepo, MembershipRecord, MembershipRepo
 from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxRepo
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
@@ -71,6 +73,7 @@ __all__ = [
     "MembershipLookupRepo",
     "MembershipRecord",
     "MembershipRepo",
+    "MfaRepo",
     "NewTelnyxEvent",
     "NewUser",
     "NotFoundError",

@@ -117,7 +117,7 @@ Core Python dependencies (declared in the package that uses them): `fastapi`, `u
 `jsonschema`, `jinja2` (only for internal prompt templates; customer templating uses our own `{{var}}` engine),
 `openai>=1.50` (OpenAI-compatible client), `tiktoken`, `pypdf`, `python-docx`, `selectolax` (HTML parsing),
 `trafilatura` (main-content extraction), `phonenumbers`, `python-dateutil`, `tzdata`, `croniter`, `stripe`,
-`mcp>=1.2`, `typer`, `rich`, `authlib` (OIDC SSO), `pyotp` (TOTP MFA), `email-validator`, `sentry-sdk`, `aiosmtplib`
+`mcp>=1.2`, `typer`, `rich`, `authlib` (OIDC SSO), `pyotp` (TOTP MFA), `segno` (MFA QR code SVG), `email-validator`, `sentry-sdk`, `aiosmtplib`
 (transactional email), `mutagen` (voice sample duration), `soundfile` (recording duration/analysis), `reportlab`
 (invoice PDFs), `aiohttp` is not used (httpx + websockets only).
 

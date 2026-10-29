@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793268366-7e50
+> SQLAlchemy model column added by a later ALTER TABLE ADD COLUMN: give it mapped_column(..., sort_order=1) so it sorts after TimestampMixin created_at/updated_at like the DB attnum (test_tenancy_models column-order lists); Mapped[list[str]] .any(x) fails mypy, use literal(x, Text) == any_(col)
+<!-- tags: database, sqlalchemy | created: 2026-10-29 -->
+
 ### mem-1793267153-d5f5
 > va_api: routes added to an existing router from a second module (routers/auth_password.py on internal_auth_router) need an import-for-side-effect in va_api/main.py; shared test helper session_helpers.error_of(response) -> (status, code, field) - don't redefine _error per module (jscpd)
 <!-- tags: api, testing | created: 2026-10-29 -->
