@@ -12,11 +12,10 @@ import uuid
 from typing import Final
 
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from va_api.auth.login_throttle import seconds_phrase
+from va_api.auth.window_counter import hit_window
 from va_common.email import EmailDeliveryError, EmailMessage, EmailSender, verify_email
-from va_common.errors import AppError
 from va_common.logging import get_logger
 
 __all__ = [
@@ -81,20 +80,11 @@ class ResendLimiter:
 
     async def hit(self, user_id: uuid.UUID) -> None:
         """Count one resend; ``RATE_LIMITED`` (with ``Retry-After``) beyond 3 in the current window."""
-        key = resend_key(user_id)
-        try:
-            async with self._redis.pipeline(transaction=True) as pipe:
-                pipe.incr(key)
-                pipe.expire(key, RESEND_WINDOW_S, nx=True)
-                pipe.ttl(key)
-                count, _, ttl = await pipe.execute()
-        except (RedisError, OSError) as exc:
-            _log.warning("resend_limit_unavailable", error=type(exc).__name__)
-            return
-        if int(count) > RESEND_LIMIT:
-            retry_after = int(ttl) if int(ttl) > 0 else RESEND_WINDOW_S
-            raise AppError(
-                "RATE_LIMITED",
-                resend_limited_message(retry_after),
-                headers={"Retry-After": str(retry_after)},
-            )
+        await hit_window(
+            self._redis,
+            resend_key(user_id),
+            limit=RESEND_LIMIT,
+            window_s=RESEND_WINDOW_S,
+            message=resend_limited_message,
+            unavailable_event="resend_limit_unavailable",
+        )

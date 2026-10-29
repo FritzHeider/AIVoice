@@ -4647,3 +4647,188 @@ Gates: fmt; lint pass; typecheck pass; placeholders 0; make test 3328 passed, co
 - Note (not blocking): an org whose stored settings fail validation is re-loaded from the DB on every gated request
   (get raises before caching the lenient value); only out-of-band edits produce this, and a PATCH repairs it.
 - P02-T12 parent ticked (T12a/b/c all done).
+
+## 2026-10-29 Planner: P02-T12c approved → next P02-T13 (deps P02-T10 ticked)
+
+## Plan P02-T13 — Agent onboarding API (specs/04 §10, §2.4 public allowlist, §13, §14 "Agent onboarding"; specs/03 §11; specs/25 `/agent-onboarding/[token]`; specs/31)
+
+### Facts found while planning
+- §10 only names `POST /v1/agent-onboarding/keys` and `GET /v1/agent-onboarding/keys/{request_id}`; the dashboard page
+  `/agent-onboarding/[token]` (specs/25, session) needs server routes to read/approve/deny → add them under
+  `/internal/auth/agent-onboarding/*` (envelope, `PUBLIC_MARKER` x-public session-flow like invitations), using
+  `current_session` (CSRF + Origin already enforced for writes there).
+- Public `/v1` routes carry `openapi_extra={"x-scope": "public"}` (health) and no `require_scope`, so no per-key rate
+  limit/idempotency applies; test_openapi requires `x-scope` and examples on every 2xx and request body model.
+- Fixed-window counter pattern exists in `ResendLimiter.hit` (auth/verification.py); opaque tokens via
+  `va_common.auth.issue_token/looks_like_token/tokens_equal/sha256_hex`; emails via `va_common.email.templates`
+  (`_Copy`, `TEMPLATES`) + `verification.deliver/dashboard_link`; key minting via `auth.api_keys.mint_api_key`,
+  `ApiKeyRepo.add`; org-key encryption `Envelope.encrypt_str/decrypt_str(org_id, …, aad)`; audit via
+  `va_api.audit.audit(session, ctx, …)` with a user `RequestContext`; `memberships_of_user`, `scopes_for_role`.
+- Redis key style: SSO state store (auth/sso_state.py) — dataclass `to_json/from_json`, store class raising an
+  `…UnavailableError` on RedisError.
+
+### Decisions to record (specs/04 §10, one `> Decision (2026-10-29):` block "Agent onboarding flow (P02-T13)"; new
+rows in specs/03 §11; `api_key.create` note in §13 if the §13 decision lists sources)
+1. **Routes.** Public: `POST /v1/agent-onboarding/keys` (201) and `GET /v1/agent-onboarding/keys/{request_id}`
+   (tag: same family the public doc uses for API keys, "API Keys"; `x-scope: public`, envelope). Dashboard (session):
+   `GET /internal/auth/agent-onboarding/{token}`, `POST /internal/auth/agent-onboarding/{token}/approve`,
+   `POST /internal/auth/agent-onboarding/{token}/deny`. Add the GET poll to the §2.4 public allowlist text.
+2. **Create body** `{email (EmailStr-like validated via email_validator test_environment=True per mem-ea3a),
+   agent_name 1–100 (stripped, non-empty), requested_scopes 1–N strings, purpose 0–500}`; `requested_scopes` must be
+   known scopes excluding `*`, `billing:read`, `billing:write`, and `api_keys:write` (an agent key must not mint
+   keys) → `INVALID_INPUT` field `requested_scopes`; normalized with `normalize_scopes` (dedupe, sort). Response
+   `{data:{request_id (UUIDv7), status:"pending_verification", poll_url, poll_secret, expires_at}}`. `expires_at` =
+   now + **1 h**: the approval deadline; afterwards a pending request reads `expired` and the link is refused.
+   Same response whether or not an account exists for the email (no enumeration).
+3. **Limits.** Fixed one-hour windows: 5 per client IP (`agentonb:ip:{ip}`; a request without a client IP counts under
+   `agentonb:ip:unknown`), 3 per email (`agentonb:email:{sha256(casefolded email)}`); rejected attempts count; the
+   IP is checked before the email; `RATE_LIMITED` with `Retry-After` (seconds to window end). Redis unavailable →
+   `SERVICE_UNAVAILABLE` (the request state lives in Redis, so the flow cannot work anyway; fail closed).
+4. **State.** `agentreq:{request_id}` JSON, TTL 24 h from creation: `{email_hash, agent_name, purpose, scopes,
+   poll_secret_hash, token_hash, status, created_at, expires_at, approver_user_id, org_id, key_id}`;
+   `agentreq:token:{token_hash}` → request_id, TTL 1 h (the link lifetime). Statuses: `pending_verification`,
+   `approved`, `delivered`, `denied`, `expired` (`expired` is computed: pending past `expires_at`, or `approved` whose
+   `agentkey:` entry is gone). Transitions are compare-and-set (WATCH/MULTI on `agentreq:{id}` or a Lua script) so two
+   approvals / approve+deny race to exactly one winner; the loser gets `TOKEN_EXPIRED`.
+5. **Poll.** Header `X-Poll-Secret` required (missing → `AUTH_FAILURE` "X-Poll-Secret header required."); unknown
+   request id, malformed id, or wrong secret (constant-time compare of sha256) → `NOT_FOUND` "Agent key request not
+   found." (no oracle). Response `{data:{request_id, status, expires_at, scopes, org_id|null, key|null}}`. When
+   `approved`: `GETDEL agentkey:{id}`, decrypt, return `status:"approved"` with `key`, then set status `delivered`;
+   later polls → `delivered`, `key:null`. Poll responses `Cache-Control: no-store`.
+6. **Approval link** `{DASHBOARD_BASE_URL}/agent-onboarding/{token}` (opaque token, only its hash stored). Token
+   unknown/used/past deadline → `TOKEN_EXPIRED` "Agent key request link is invalid or has expired.". The signed-in
+   user must own the addressed mailbox: `sha256(casefold(user.email)) == email_hash` and the email verified, else
+   `FORBIDDEN` "This request was sent to a different email address." (EMAIL_NOT_VERIFIED if unverified).
+   Details: `{request_id, agent_name, purpose, requested_scopes, expires_at, orgs:[{org_id, name, role}]}` where
+   orgs = the user's memberships (`memberships_of_user`) with role in owner/admin/developer and gate status `active`.
+7. **Approve** body `{org_id, scopes?: string[]}` (default = requested; must be a non-empty subset of requested →
+   `INVALID_INPUT` field `scopes`). Org must be one of the eligible orgs → else `FORBIDDEN`; MFA gate as
+   `gated_membership` for that org's record (`mfa_due(...)` → `MFA_REQUIRED`); org `ip_allowlist` enforced with
+   `ip_allowed(client_ip, settings.ip_allowlist)` via `org_settings_of(request).get_lenient`; developer approvers
+   may grant only scopes of their role (`check_grantable` with a user ctx for that org). Effects: CAS pending →
+   approving claim; key minted `environment="test"`, `name="agent:<agent_name>"`, `expires_at=now+30 d`,
+   `created_by=user_id` in `tenant_session(org_id)` + audit `api_key.create` (actor user, `after` = key view +
+   `agent_name`) in the same transaction; then `SET agentkey:{id}` (org-envelope-encrypted, aad
+   `agentkey:{request_id}`, base64, TTL 15 min) and state → `approved` (approver_user_id, org_id, key_id); delete the
+   token index. On DB failure the claim is rolled back to pending. Response `{data:{request_id, status:"approved",
+   org_id, key_id, scopes, expires_at}}` (never the plaintext). Marker `audited("api_key.create")`.
+8. **Deny** → state `denied`, token index deleted; `{data:{request_id, status:"denied"}}`;
+   `audit_exempt("no org is chosen; the request lives only in Redis")`.
+9. Email template `agent_key_request` (agent name, purpose, scope list, link, 1-hour validity) — never includes
+   the poll secret.
+
+### Files
+- **packages/va_common/src/va_common/email/templates.py**: `AGENT_REQUEST_MINUTES: Final = 60`, `_AGENT_REQUEST` copy,
+  `agent_key_request(*, agent_name, purpose, scopes: Sequence[str], link, to) -> EmailMessage`; add to `TEMPLATES`;
+  export in `va_common.email.__init__`. Tests in packages/va_common/tests (existing template test module): text+HTML
+  contain agent name, each scope, link; HTML escapes `<script>` in agent_name/purpose.
+- **apps/api/src/va_api/auth/window_counter.py** (new) — extract the fixed-window logic from `ResendLimiter.hit` into
+  `async def hit_window(redis, key, *, limit, window_s, message: Callable[[int], str], fail_open: bool) -> None`
+  (fail_open True → log + return on RedisError; False → `AppError("SERVICE_UNAVAILABLE", …)`); `ResendLimiter.hit`
+  calls it (behaviour unchanged; existing tests stay green). Avoids jscpd.
+- **apps/api/src/va_api/auth/agent_onboarding.py** (new): constants (`APPROVAL_WINDOW = timedelta(hours=1)`,
+  `REQUEST_TTL_S = 86400`, `KEY_TTL_S = 900`, `AGENT_KEY_LIFETIME = timedelta(days=30)`, `IP_LIMIT=5`,
+  `EMAIL_LIMIT=3`, `WINDOW_S=3600`, `EXCLUDED_SCOPES = frozenset({"*", "billing:read", "billing:write",
+  "api_keys:write"})`, messages), key builders `agent_request_key`, `agent_token_key`, `agent_key_key`,
+  `agent_ip_key`, `agent_email_key`; `@dataclass AgentRequest` (+ `to_json/from_json`, `effective_status(now,
+  key_present)`); `class AgentRequestStore(redis, clock)` with `create(...)`, `get(request_id)`, `by_token(token)`,
+  `transition(request_id, from_status, update: Callable[[AgentRequest], AgentRequest]) -> bool` (WATCH/MULTI,
+  keeps remaining TTL via `SET … KEEPTTL`), `put_key(request_id, blob)`, `take_key(request_id) -> bytes | None`
+  (GETDEL), `drop_token(token_hash)`; RedisError → `AppError("SERVICE_UNAVAILABLE", …)`;
+  `check_requested_scopes(scopes) -> list[str]`; `approval_link(base, token)`;
+  `async def send_agent_request(sender, *, to, request, token, dashboard_base_url)` (via `deliver`, failure event
+  `agent_request_email_failed`); `OnboardingLimiter.hit(ip, email)`.
+- **apps/api/src/va_api/routers/agent_onboarding_schemas.py** + **routers/agent_onboarding.py** (public router,
+  `envelope_router(prefix="/v1/agent-onboarding", tags=[<API keys tag>])`): create (email goes out after the
+  response via BackgroundTasks like signup/verification), poll. Markers: create `{"x-scope": "public",
+  **audit_exempt("no org exists yet; the request lives only in Redis")}`; poll `{"x-scope": "public"}`.
+- **apps/api/src/va_api/routers/auth_agent_onboarding.py** (+ schemas in the same `_schemas` module): the three
+  internal routes on `internal_auth_router` (import-for-side-effect in main.py per mem-6e00... see mem `routers added
+  to an existing router from a second module`). Register the public router in main.py/app.state.routers.
+- **apps/api/src/va_api/container.py**: `agent_requests: AgentRequestStore`, `onboarding_limiter`; accessors
+  `agent_requests_of(request)`, `onboarding_limiter_of(request)` in session_auth.py; add to test containers
+  (`tests/support/session_helpers.py` SessionContainer, `auth_helpers` AuthContainer if it must satisfy a Protocol).
+- **openapi**: `make openapi` + `corepack pnpm gen:api` in sdks/typescript and apps/dashboard (mem-7e50); add the
+  new internal paths to test_openapi `INTERNAL_PATHS` if that set is enumerated.
+- **specs/04 §10** Decision block, §2.4 allowlist line (+ GET poll), **specs/03 §11** rows: `agentreq:{request_id}`
+  (24 h), `agentreq:token:{token_hash}` (1 h), `agentkey:{request_id}` (15 min, encrypted), `agentonb:ip:{ip}`,
+  `agentonb:email:{sha256(email)}` (3600 s). **AGENTS.md**: test helper + flow summary.
+
+### Tests
+- **packages/va_common** template test (above).
+- **apps/api/tests/test_agent_onboarding_unit.py**: scope check (excluded each → INVALID_INPUT field
+  requested_scopes, unknown scope, dedupe/sort, empty list rejected by schema); `AgentRequest` json round trip and
+  `effective_status` (pending before/after deadline, approved with/without key); window counter: 5 IP hits ok, 6th
+  RATE_LIMITED with Retry-After, fail_open vs fail-closed with `fakeredis.FakeServer(connected=False)` (mem-ea3a…264176);
+  ResendLimiter behaviour unchanged.
+- **apps/api/tests/test_agent_onboarding_integration.py** (conftest session fixtures; FrozenClock; InMemoryEmailSender):
+  - create → 201 body shape, status pending, poll_url, expires_at = now+1 h; email sent to address with link
+    containing the token, no poll secret in email; same response for unknown email.
+  - full approve flow: signed-in owner (email = request email) GET details lists eligible orgs (not viewer orgs);
+    approve with reduced scopes → 200; DB key row env test, name `agent:<name>`, expires now+30 d, created_by user,
+    scopes reduced; audit `api_key.create` row actor user with `after.agent_name`; first poll → approved + key that
+    authenticates `GET /v1/me` (scope org:read requested) ; second poll → delivered, key null.
+  - deny flow → poll denied; approve after deny → TOKEN_EXPIRED.
+  - expire: advance clock 1 h + 1 s → poll `expired`, details/approve → TOKEN_EXPIRED; approved but key not fetched
+    within 15 min (delete/expire `agentkey:` via fakeredis TTL or clock-independent: delete key) → `expired`.
+  - poll secret: missing → 401 AUTH_FAILURE; wrong → 404; unknown id → 404.
+  - single retrieval under concurrency: two concurrent polls (asyncio.gather) → exactly one carries the key.
+  - double approval race (gather two approves) → one 200, one TOKEN_EXPIRED, one key row.
+  - approver mismatch: different email user → FORBIDDEN; logged out → AUTH_FAILURE; approve without CSRF → FORBIDDEN;
+    viewer/billing-only org id → FORBIDDEN; developer approver requesting a scope outside developer scopes → FORBIDDEN;
+    org with mfa_required and session without MFA → MFA_REQUIRED; org ip_allowlist excluding 127.0.0.1 (set via
+    session_helpers.set_org settings) → FORBIDDEN.
+  - scopes on approve not subset → INVALID_INPUT field scopes.
+  - abuse limits: 6th create from one IP within the hour → 429 RATE_LIMITED + Retry-After; 4th for one email (from
+    different peers via PeerSwitch) → 429; window reset after clock/TTL advance (fakeredis TTL: use real counter
+    deletion or `redis.expire` check—assert `ttl` ≤ 3600 instead of sleeping).
+  - Redis down on create → 503 SERVICE_UNAVAILABLE.
+- test_audit_markers / test_openapi pass with the new routes (x-scope, examples, x-public).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make test-ts`, `make openapi` (+ gen:api both TS packages; re-run
+shows no drift), `uv run python scripts/check_spec_refs.py`, `npx jscpd@4` 0 clones, radon `-n C` none in changed
+src. build.done PLAIN STRING: `ralph emit "build.done" "P02-T13 tests: pass (N passed), lint: pass, typecheck: pass,
+audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: approval reads memberships (system_session) and settings (reader global session) BEFORE
+  opening `tenant_session(org_id)`; never nest.
+- WATCH/MULTI in fakeredis async works; if not, use a small Lua CAS script (fakeredis supports Lua with lupa — check
+  it is installed, token_bucket already uses Lua so it is).
+- The api key used in the poll test must pass ip_allowlist / org status gates; the new key's org has default
+  settings.
+- Background email after response: tests read InMemoryEmailSender after the response returns (httpx ASGI runs
+  background tasks before returning).
+
+## 2026-10-29 Builder: P02-T13 build notes
+- New: `va_api/auth/agent_onboarding.py` (AgentRequest, AgentRequestStore with WATCH/MULTI `transition` and atomic
+  `take_key` watching both `agentreq:` and `agentkey:` so concurrent polls deliver once, OnboardingLimiter fail-closed),
+  `auth/window_counter.py` (`hit_window`, ResendLimiter now uses it, `resend_limit_unavailable` event kept),
+  `routers/agent_onboarding.py` (+ `_schemas`), `routers/auth_agent_onboarding.py` (details/approve/deny on
+  internal_auth_router). Email template `agent_key_request` in va_common. Container + SessionContainer fields
+  `agent_requests`, `onboarding_limiter`; accessors in session_auth.
+- Deviations from plan: (a) added stored status `approving` (claim during mint; polls report pending) and
+  `key_expires_at` (clock-based 15-min expiry so FrozenClock tests work; Redis TTL is the backstop);
+  (b) poll after a lost `take_key` reports `expired` if the record still says approved (key TTL ran out);
+  (c) extracted `session_auth.mfa_checked_user` (shared with auth_invitations._accept_signed_in) to clear a jscpd
+  clone; (d) a Redis failure after the DB commit (put_key) leaves a minted-but-undeliverable key that expires in
+  30 d - accepted, documented here.
+- Spec: specs/04 §10 Decision block + §2.4 allowlist line; specs/03 §11 five rows; AGENTS.md entry.
+- (e) Full-suite run found test_envelopes failing: `/v1/agent-onboarding` was not in the specs/31 §1 envelope matrix
+  (legacy by default). Added `/v1/agent-onboarding*` to the matrix with a `> Decision (2026-10-29)` note, to
+  `va_api.envelopes.FAMILIES`, and bumped the family count to 32.
+
+Gates: fmt; lint pass; typecheck pass; placeholders 0; make test 3397 passed, coverage 97.74%
+(logs/p02-t13-test.log); make test-ts pass (22 + 52 + 48); make openapi + gen:api both TS packages, no drift on
+re-run; check_spec_refs 0; jscpd 0 clones (api src/tests, va_common src); radon -n C none in changed src, average
+A (2.75).
+
+## Review P02-T13 (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass, 0 findings), make test 3397 passed 97.74%, make test-ts (22+52+48),
+  make openapi (no drift vs builder output).
+- Checked against specs/04 §10 steps 1-5 + Decision block, specs/03 §11 rows, specs/31 envelope matrix: routes,
+  limits (5/IP, 3/email, fail closed), poll secret hashing + constant-time compare, single delivery (WATCH on both
+  keys), approve CAS + claim hand-back, test env / agent:<name> / 30 d / audit api_key.create with after.agent_name.
+- Accepted residual (documented in build notes d): a Redis failure after the key commit leaves the request in
+  `approving` (polls read pending until the 24 h TTL) and an undelivered key that expires in 30 d.

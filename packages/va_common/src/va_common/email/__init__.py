@@ -12,7 +12,7 @@ from va_common.email.sender import (
     SmtpEmailSender,
 )
 from va_common.email.settings import EmailSettings
-from va_common.email.templates import TEMPLATES, invitation, password_reset, verify_email
+from va_common.email.templates import TEMPLATES, agent_key_request, invitation, password_reset, verify_email
 
 __all__ = [
     "SMTP_TIMEOUT_S",
@@ -24,6 +24,7 @@ __all__ = [
     "InMemoryEmailSender",
     "SmtpConfig",
     "SmtpEmailSender",
+    "agent_key_request",
     "invitation",
     "parse_smtp_url",
     "password_reset",

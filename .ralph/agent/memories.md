@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793292824-0b49
+> va_api: a new /v1 route family must be added to specs/31 §1 envelope matrix AND va_api.envelopes.FAMILIES (test_envelopes compares them verbatim and counts them), otherwise the path classifies as legacy; Redis CAS pattern: pipe.watch -> read -> pipe.multi() (type: ignore[no-untyped-call]) -> set(keepttl=True), WatchError = lost race
+<!-- tags: api, redis, testing | created: 2026-10-29 -->
+
 ### mem-1793291061-0ce1
 > va_api request gates read org settings via OrgSettingsReader.get_lenient (invalid stored keys -> defaults); get_principal enforces ip_allowlist after auth; tests vary the client address with tests/support/peer.py PeerSwitch(session_app(c)) + session_client; DB-less AuthContainer has MemoryOrgSettings; settings PATCH with non-empty ip_allowlist must include caller 127.0.0.1
 <!-- tags: api, auth, testing | created: 2026-10-29 -->

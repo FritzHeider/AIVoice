@@ -134,7 +134,8 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 - A test (`apps/api/tests/test_scope_coverage.py`) iterates `app.routes` and asserts every route under `/v1`, `/v2`,
   `/numbers` has exactly one `require_scope` dependency or is in the explicit public allowlist:
   `GET /v1/health`, `GET /openapi.json`, `GET /widget/v1/widget.js`, `/internal/auth/*` (session-flow endpoints),
-  `POST /v1/agent-onboarding/*`, `/v1/billing/stripe/webhook`, `/v1/widget/public/*` (widget visitor auth).
+  `POST /v1/agent-onboarding/*`, `GET /v1/agent-onboarding/keys/{request_id}` (poll secret instead of a key),
+  `/v1/billing/stripe/webhook`, `/v1/widget/public/*` (widget visitor auth).
 
 ## 3. RBAC
 
@@ -1118,6 +1119,46 @@ Purpose: let an autonomous coding agent obtain a scoped **test** key for a human
    `X-Poll-Secret`) → `pending_verification` | `approved` (with `key` once, then `delivered`) | `denied` | `expired`.
 4. State kept in Redis `agentreq:{request_id}` (TTL 24 h): `{email_hash, agent_name, scopes, poll_secret_hash, status, approver_user_id?, org_id?}`.
 5. Audit log `api_key.create` with `actor_type=user` (approver) and `changes.after.agent_name`.
+
+> Decision (2026-10-29): Agent onboarding flow (P02-T13).
+> - **Routes.** Public (`x-scope: public`, tag "API Keys", envelope): `POST /v1/agent-onboarding/keys` (201) and
+>   `GET /v1/agent-onboarding/keys/{request_id}`. Dashboard (session, CSRF and Origin on writes, `x-public:
+>   session-flow`, `/internal`): `GET /internal/auth/agent-onboarding/{token}` (details),
+>   `POST …/{token}/approve`, `POST …/{token}/deny`.
+> - **Create.** `email` (trimmed, `local@domain.tld` shape, ≤ 320), `agent_name` 1–100 (trimmed), `requested_scopes`
+>   1–50 known scopes excluding `*`, `billing:read`, `billing:write`, and `api_keys:write` (an agent key never
+>   pays or mints keys) → else `INVALID_INPUT` field `requested_scopes`; deduplicated and sorted. `purpose` ≤ 500,
+>   default `""`. The response also carries `poll_secret` (43-char opaque token, shown once; only its sha256 is
+>   stored). `expires_at` = now + **1 h**: the approval deadline and the link lifetime. The response is the same
+>   whether or not the email has an account. The email (template `agent_key_request`: agent name, purpose, scopes,
+>   link, 60-minute validity; never the poll secret) is sent after the response.
+> - **Limits.** Fixed one-hour windows, IP checked before email, rejected attempts count: 5 per client IP
+>   (`unknown` when the peer is not an IP), 3 per case-folded email → `RATE_LIMITED` with `Retry-After`. Redis
+>   unavailable → `SERVICE_UNAVAILABLE` (the request state lives only in Redis; fail closed).
+> - **Statuses.** Stored: `pending_verification`, `approving` (an approval holding the claim, reported as
+>   `pending_verification`), `approved`, `delivered`, `denied`. A poll reports `expired` for a pending request past
+>   `expires_at` and for an approved one whose key was not fetched within 15 min. After 24 h the request is gone
+>   (`NOT_FOUND`). Every change is compare-and-set, so concurrent approvals, or approve racing deny, have one
+>   winner; the loser gets `TOKEN_EXPIRED`.
+> - **Poll.** `X-Poll-Secret` missing → `AUTH_FAILURE` "X-Poll-Secret header required."; malformed or unknown id or
+>   wrong secret (constant-time compare of hashes) → `NOT_FOUND` "Agent key request not found.". Body
+>   `{request_id, status, expires_at, scopes, org_id, key}`; `Cache-Control: no-store`. The first poll after
+>   approval atomically marks the request `delivered` and deletes `agentkey:` (`WATCH` on both keys), returning
+>   `status:"approved"` with the plaintext `key`; every later poll reads `delivered`, `key:null`.
+> - **Approval link** `{DASHBOARD_BASE_URL}/agent-onboarding/{token}`: unknown, used, malformed, or past-deadline
+>   tokens → `TOKEN_EXPIRED` "Agent key request link is invalid or has expired." (field `token`). The signed-in user
+>   must have passed MFA when enabled, own the address (case-folded sha256 equal, else `FORBIDDEN` "This request
+>   was sent to a different email address."), and have verified it (`EMAIL_NOT_VERIFIED`). Details list the
+>   user's direct memberships with role owner/admin/developer in `active` orgs (`orgs:[{org_id, name, role}]`).
+> - **Approve** `{org_id, scopes?}`: `scopes` defaults to the requested ones and must be a non-empty subset
+>   (`INVALID_INPUT` field `scopes`). The org must be one of the listed ones (`FORBIDDEN` otherwise), its MFA
+>   requirement and `ip_allowlist` apply, and a developer grants only its role's scopes (`check_grantable`). The
+>   key is minted `environment="test"`, `name="agent:<agent_name>"`, `expires_at=now+30 d`, `created_by` the
+>   approver, with the `api_key.create` row (actor the user, `after` = key view + `agent_name`) in the same
+>   transaction; then it is stored encrypted under the org's data key for 15 min and the link is dropped. A
+>   failure before the commit returns the claim to `pending_verification`. Response `{request_id,
+>   status:"approved", org_id, key_id, scopes, expires_at}` (never the plaintext).
+> - **Deny** → `denied`, link dropped, `{request_id, status:"denied"}`; no audit row (no org is chosen).
 
 ## 11. Request rate limiting per API key
 

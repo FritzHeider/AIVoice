@@ -10,7 +10,7 @@ which are substituted raw in the text body and escaped in the HTML body.
 from __future__ import annotations
 
 import html
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from string import Template
 from typing import Final
@@ -18,10 +18,12 @@ from typing import Final
 from va_common.email.message import EmailMessage
 
 __all__ = [
+    "AGENT_REQUEST_MINUTES",
     "EMAIL_VERIFICATION_HOURS",
     "INVITATION_DAYS",
     "PASSWORD_RESET_MINUTES",
     "TEMPLATES",
+    "agent_key_request",
     "invitation",
     "password_reset",
     "verify_email",
@@ -30,6 +32,7 @@ __all__ = [
 EMAIL_VERIFICATION_HOURS: Final = 24
 PASSWORD_RESET_MINUTES: Final = 60
 INVITATION_DAYS: Final = 7
+AGENT_REQUEST_MINUTES: Final = 60
 
 _TEXT_LAYOUT: Final = Template(
     """Hi $name,
@@ -155,7 +158,31 @@ _INVITATION: Final = _Copy(
     ),
 )
 
-TEMPLATES: Final[frozenset[str]] = frozenset({_VERIFY.template, _RESET.template, _INVITATION.template})
+_AGENT_REQUEST: Final = _Copy(
+    template="agent_key_request",
+    subject="An AI agent asked for a VoiceAgents API key",
+    button="Review request",
+    text_intro=(
+        "The AI agent $agent asked for a VoiceAgents test API key with the scopes $scopes$purpose. "
+        "Approve or deny the\nrequest here"
+    ),
+    html_intro=(
+        "The AI agent $agent asked for a VoiceAgents test API key with the scopes $scopes$purpose.\n"
+        "Approve or deny the request here"
+    ),
+    text_notice=(
+        f"The link expires in {AGENT_REQUEST_MINUTES} minutes. If you did not ask an agent to set up "
+        "VoiceAgents, you can\nignore this email; no key is created unless you approve it."
+    ),
+    html_notice=(
+        f"The link expires in {AGENT_REQUEST_MINUTES} minutes. If you did not ask an agent to set up\n"
+        "VoiceAgents, you can ignore this email; no key is created unless you approve it."
+    ),
+)
+
+TEMPLATES: Final[frozenset[str]] = frozenset(
+    {_VERIFY.template, _RESET.template, _INVITATION.template, _AGENT_REQUEST.template}
+)
 
 
 def verify_email(*, name: str, link: str, to: str) -> EmailMessage:
@@ -172,4 +199,20 @@ def invitation(*, org_name: str, inviter_name: str, role: str, link: str, to: st
     """The org invitation email; ``link`` carries the one-time token and expires after 7 days."""
     return _INVITATION.render(
         name="there", link=link, to=to, values={"org": org_name, "inviter": inviter_name, "role": role}
+    )
+
+
+def agent_key_request(
+    *, agent_name: str, purpose: str, scopes: Sequence[str], link: str, to: str
+) -> EmailMessage:
+    """The agent onboarding approval email; ``link`` carries the one-time token and expires after 60 minutes.
+
+    An empty ``purpose`` is left out; the scopes are listed comma-separated in the given order.
+    """
+    stated = f" (purpose: {purpose})" if purpose else ""
+    return _AGENT_REQUEST.render(
+        name="there",
+        link=link,
+        to=to,
+        values={"agent": agent_name, "scopes": ", ".join(scopes), "purpose": stated},
     )

@@ -11,6 +11,7 @@ import httpx
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from va_api.auth.agent_onboarding import AgentRequestStore, OnboardingLimiter
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
@@ -63,6 +64,8 @@ class Container:
     oidc_discovery: OidcDiscovery
     sso_states: SsoStateStore
     org_settings: OrgSettingsReader
+    agent_requests: AgentRequestStore
+    onboarding_limiter: OnboardingLimiter
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -83,7 +86,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
     session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
     the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
-    state store, and the cached org settings reader.
+    state store, the cached org settings reader, and the agent onboarding request store and limiter.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -136,4 +139,6 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             oidc_discovery=discovery_for(settings, oidc_http),
             sso_states=SsoStateStore(redis),
             org_settings=org_settings,
+            agent_requests=AgentRequestStore(redis, clock),
+            onboarding_limiter=OnboardingLimiter(redis),
         )

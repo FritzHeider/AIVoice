@@ -18,6 +18,7 @@ from typing import Final
 from fastapi import Request
 from redis.asyncio import Redis
 
+from va_api.auth.agent_onboarding import AgentRequestStore, OnboardingLimiter
 from va_api.auth.api_key_auth import ORG_SUSPENDED_MESSAGE, READ_METHODS
 from va_api.auth.context import RequestContext
 from va_api.auth.cookies import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, CookiePolicy
@@ -36,7 +37,7 @@ from va_common.crypto import Envelope
 from va_common.email import EmailSender
 from va_common.errors import AppError
 from va_common.time import Clock
-from va_db.models import OrgStatus
+from va_db.models import OrgStatus, User
 from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import IdentityRepo, MembershipLookupRepo, MembershipRecord
@@ -47,6 +48,7 @@ __all__ = [
     "NO_MEMBERSHIP_MESSAGE",
     "ORG_CLOSED_MESSAGE",
     "active_membership",
+    "agent_requests_of",
     "api_key_hasher_of",
     "authenticate_session",
     "check_dashboard_origin",
@@ -62,9 +64,11 @@ __all__ = [
     "has_session_cookie",
     "login_throttle_of",
     "memberships_of_user",
+    "mfa_checked_user",
     "mfa_due",
     "mfa_guard_of",
     "oidc_discovery_of",
+    "onboarding_limiter_of",
     "optional_session",
     "org_settings_of",
     "password_hasher_of",
@@ -163,6 +167,16 @@ def api_key_hasher_of(request: Request) -> ApiKeyHasher:
 def org_settings_of(request: Request) -> OrgSettingsReader:
     reader: OrgSettingsReader = request.app.state.container.org_settings
     return reader
+
+
+def agent_requests_of(request: Request) -> AgentRequestStore:
+    store: AgentRequestStore = request.app.state.container.agent_requests
+    return store
+
+
+def onboarding_limiter_of(request: Request) -> OnboardingLimiter:
+    limiter: OnboardingLimiter = request.app.state.container.onboarding_limiter
+    return limiter
 
 
 def redis_of(request: Request) -> Redis:
@@ -280,6 +294,18 @@ async def user_mfa_enabled(request: Request, active: ActiveSession) -> bool:
     if user is None:
         raise AppError("AUTH_FAILURE", SESSION_INVALID)
     return user.mfa_enabled
+
+
+async def mfa_checked_user(request: Request, active: ActiveSession) -> User:
+    """The session's user (``AUTH_FAILURE`` when gone) after its own MFA gate: a user who enabled MFA must
+    have passed it in this session (``MFA_REQUIRED``)."""
+    async with database_of(request).global_session() as session:
+        user = await IdentityRepo(session).get_user(active.user_id)
+    if user is None:
+        raise AppError("AUTH_FAILURE", SESSION_INVALID)
+    if mfa_due(org_requires=False, user_enabled=user.mfa_enabled, passed=active.mfa_passed):
+        raise AppError("MFA_REQUIRED", MFA_REQUIRED_MESSAGE)
+    return user
 
 
 async def gated_membership(

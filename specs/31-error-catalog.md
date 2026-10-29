@@ -7,7 +7,10 @@ Two response envelopes exist for Bland compatibility. Which one an endpoint uses
 | Family | Success body | Error body |
 |---|---|---|
 | **Legacy** — `/v1/calls*`, `/v1/inbound*`, `/numbers/*`, `/v1/pathway*`, `/v1/tools*`, `/v1/voices*`, `/v1/accounts*`, `/v1/orgs*`, `/v1/prompts*`, `/v2/batches*` | `{"status":"success", ...resource fields...}` (exact shapes per endpoint spec) | `{"status":"error","message":"<human message>","errors":[{"error":"<CODE>","message":"…","field":"…"?}]}` |
-| **Envelope** — `/v1/knowledge*`, `/v1/sms*`, `/v1/widget*`, `/v1/memory*`, `/v1/personas*`, `/v1/agents*`, `/v1/citation_schemas*`, `/v1/evals*`, `/v1/webhooks*`, `/v1/dispositions*`, `/v1/usage*`, `/v1/billing*`, `/v1/dnc*`, `/v1/contacts*`, `/v1/number_pools*`, `/v1/experiments*`, `/v1/me`, `/v1/org*`, `/v1/api_keys*`, `/v1/audit_logs*`, dashboard-only `/internal/*` | `{"data": <resource or list>, "errors": null, "pagination"?: {...}}` | `{"data": null, "errors":[{"error":"<CODE>","message":"…","field":"…"?,"details"?:{…}}]}` |
+| **Envelope** — `/v1/knowledge*`, `/v1/sms*`, `/v1/widget*`, `/v1/memory*`, `/v1/personas*`, `/v1/agents*`, `/v1/citation_schemas*`, `/v1/evals*`, `/v1/webhooks*`, `/v1/dispositions*`, `/v1/usage*`, `/v1/billing*`, `/v1/dnc*`, `/v1/contacts*`, `/v1/number_pools*`, `/v1/experiments*`, `/v1/me`, `/v1/org*`, `/v1/api_keys*`, `/v1/audit_logs*`, `/v1/agent-onboarding*`, dashboard-only `/internal/*` | `{"data": <resource or list>, "errors": null, "pagination"?: {...}}` | `{"data": null, "errors":[{"error":"<CODE>","message":"…","field":"…"?,"details"?:{…}}]}` |
+
+> Decision (2026-10-29): `/v1/agent-onboarding*` (specs/04 §10, P02-T13) is an envelope family: §10 already shows its
+> bodies as `{data:{…}}`, and it is a VoiceAgents-only API with no Bland shape to keep.
 
 Every error response also carries header `X-Request-Id` and the body field `request_id` at top level.
 

@@ -24,6 +24,7 @@ from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_internal_openapi, build_openapi
 from va_api.rate_limit import RateLimitHeadersMiddleware
 from va_api.routers import (
+    auth_agent_onboarding,  # noqa: F401  (registers the agent key approval routes on internal_auth_router)
     auth_invitations,  # noqa: F401  (registers the invitation routes on internal_auth_router)
     auth_mfa,  # noqa: F401  (registers the MFA routes on internal_auth_router)
     auth_password,  # noqa: F401  (registers the password routes on internal_auth_router)
@@ -33,6 +34,7 @@ from va_api.routers import (
     org_members,  # noqa: F401  (registers the /v1/org/members routes on org_router)
     org_settings,  # noqa: F401  (registers the /v1/org/settings routes on org_router)
 )
+from va_api.routers.agent_onboarding import agent_onboarding_router
 from va_api.routers.api_keys import api_keys_router
 from va_api.routers.audit_logs import audit_logs_router
 from va_api.routers.auth import internal_auth_router
@@ -71,6 +73,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     org_router,
     orgs_router,
     api_keys_router,
+    agent_onboarding_router,
     audit_logs_router,
     internal_auth_router,
     probe_router,

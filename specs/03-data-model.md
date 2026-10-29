@@ -1461,6 +1461,11 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `mfa:last:{user_id}` | string (TOTP step counter) | 90 s | Last accepted TOTP time step, replay guard (specs/04 §4.5) |
 | `sso:state:{state}` | string JSON (`connection_id`, `org_id`, `nonce`, `code_verifier`, `issuer`, `token_endpoint`, `jwks_uri`) | 600 s | OIDC login state, single use via `GETDEL` (specs/04 §5) |
 | `orgsettings:{org_id}` | string JSON (the stored sparse `orgs.settings`) | 60 s | Org settings cache read through `va_db.org_settings.OrgSettingsReader` (specs/04 §7, §8.1); deleted after every settings write commits |
+| `agentreq:{request_id}` | string JSON (`request_id`, `email_hash`, `agent_name`, `purpose`, `scopes`, `poll_secret_hash`, `token_hash`, `status`, `created_at`, `expires_at`, `approver_user_id`, `org_id`, `key_id`, `key_expires_at`) | 86400 s | Agent onboarding request; status changes are compare-and-set (`WATCH`/`MULTI`) and keep the TTL (specs/04 §10) |
+| `agentreq:token:{token_hash}` | string (request id) | 3600 s | Approval link index (sha256 of the emailed token); deleted on approve or deny (specs/04 §10) |
+| `agentkey:{request_id}` | string (base64 of the org-envelope-encrypted key, AAD `agentkey:{request_id}`) | 900 s | Approved agent key, removed in the same transaction that marks the request `delivered` (specs/04 §10) |
+| `agentonb:ip:{ip}` | counter | 3600 s (set on the first request of the window) | Agent key requests per client IP (`unknown` without one), at most 5 per hour (specs/04 §10) |
+| `agentonb:email:{sha256(email)}` | counter | 3600 s (set on the first request of the window) | Agent key requests per case-folded email, at most 3 per hour (specs/04 §10) |
 | `call:{id}:seq` | counter | 48 h | Per-call event sequence (`19` §1) |
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |

@@ -38,6 +38,9 @@ INTERNAL_PATHS = {
     "/internal/auth/sso/callback",
     "/internal/auth/invitations/{token}",
     "/internal/auth/invitations/accept",
+    "/internal/auth/agent-onboarding/{token}",
+    "/internal/auth/agent-onboarding/{token}/approve",
+    "/internal/auth/agent-onboarding/{token}/deny",
 }
 REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")

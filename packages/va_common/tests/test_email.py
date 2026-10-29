@@ -27,6 +27,7 @@ from va_common.email import (
     InMemoryEmailSender,
     SmtpConfig,
     SmtpEmailSender,
+    agent_key_request,
     invitation,
     parse_smtp_url,
     password_reset,
@@ -146,7 +147,7 @@ def test_password_reset_template() -> None:
     message = password_reset(name="<b>Ravi</b>", link=link, to="ravi@example.com")
     assert message.template == "password_reset"
     assert message.template in TEMPLATES
-    assert {"verify_email", "password_reset", "invitation"} == TEMPLATES
+    assert {"verify_email", "password_reset", "invitation", "agent_key_request"} == TEMPLATES
     assert message.subject == "Reset your VoiceAgents password"
     assert message.to == "ravi@example.com"
     assert "<b>Ravi</b>" not in message.html
@@ -192,6 +193,47 @@ def test_invitation_template() -> None:
         assert "nothing changes until you accept it." in body
         assert "$inviter" not in body
         assert "$role" not in body
+
+
+def test_agent_key_request_template() -> None:
+    link = "https://app.voiceagents.local/agent-onboarding/abc_DEF-123?x=1&y=2"
+    message = agent_key_request(
+        agent_name='<script>alert("x")</script>',
+        purpose="Build <b>support</b> line $agent",
+        scopes=["calls:read", "calls:write"],
+        link=link,
+        to="ravi@example.com",
+    )
+    assert message.template == "agent_key_request"
+    assert message.template in TEMPLATES
+    assert message.subject == "An AI agent asked for a VoiceAgents API key"
+    assert message.to == "ravi@example.com"
+    assert message.text.startswith("Hi there,\n")
+    assert (
+        '<script>alert("x")</script> asked for a VoiceAgents test API key with the scopes calls:read, '
+        "calls:write (purpose: Build <b>support</b> line $agent)."
+    ) in message.text
+    assert "<script>" not in message.html
+    assert "<b>" not in message.html
+    assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; asked for" in message.html
+    assert "(purpose: Build &lt;b&gt;support&lt;/b&gt; line $agent)." in message.html
+    assert link in message.text
+    assert 'href="https://app.voiceagents.local/agent-onboarding/abc_DEF-123?x=1&amp;y=2"' in message.html
+    assert ">Review request</a>" in message.html
+    for body in (message.text, message.html):
+        assert "calls:read, calls:write" in body
+        assert "expires in 60 minutes" in body
+        assert "no key is created unless you approve it." in body
+        assert "$scopes" not in body
+
+
+def test_agent_key_request_template_without_purpose() -> None:
+    message = agent_key_request(
+        agent_name="Builder", purpose="", scopes=["org:read"], link=LINK, to="ravi@example.com"
+    )
+    assert "with the scopes org:read. Approve or deny" in message.text
+    assert "purpose" not in message.text
+    assert "$" not in message.text
 
 
 def test_to_mime_multipart_alternative() -> None:

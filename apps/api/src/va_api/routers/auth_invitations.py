@@ -22,12 +22,12 @@ from va_api.audit import audited, user_actor
 from va_api.auth.api_key_auth import ORG_SUSPENDED_MESSAGE
 from va_api.auth.invitations import ALREADY_MEMBER_MESSAGE, INVITATION_INVALID_MESSAGE
 from va_api.auth.session_auth import (
-    MFA_REQUIRED_MESSAGE,
     ORG_CLOSED_MESSAGE,
     check_dashboard_origin,
     client_ip,
     clock_of,
     database_of,
+    mfa_checked_user,
     optional_session,
     password_hasher_of,
     sessions_of,
@@ -131,12 +131,7 @@ async def _accept_signed_in(
     request: Request, found: InvitationLookup, active: ActiveSession
 ) -> InvitationAccepted:
     """The signed-in user (MFA passed when enabled, same email) joins; the org becomes the active one."""
-    async with database_of(request).global_session() as session:
-        user = await IdentityRepo(session).get_user(active.user_id)
-    if user is None:
-        raise AppError("AUTH_FAILURE", SESSION_INVALID)
-    if user.mfa_enabled and not active.mfa_passed:
-        raise AppError("MFA_REQUIRED", MFA_REQUIRED_MESSAGE)
+    user = await mfa_checked_user(request, active)
     if user.email.casefold() != found.email.casefold():
         raise AppError("FORBIDDEN", OTHER_EMAIL_MESSAGE)
     now = clock_of(request).now()

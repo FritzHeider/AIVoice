@@ -28,6 +28,7 @@ from sqlalchemy import select, update
 from starlette.types import ASGIApp
 
 from va_api.auth import ApiKeyAuthenticator, RequestContext, require_scope
+from va_api.auth.agent_onboarding import AgentRequestStore, OnboardingLimiter
 from va_api.auth.api_key_auth import db_lookup
 from va_api.auth.cookies import CSRF_COOKIE
 from va_api.auth.login_throttle import LoginThrottle
@@ -132,8 +133,8 @@ def migrated_postgres() -> Iterator[str]:
 class SessionContainer(AuthContainer):
     """The fake api container plus a real database, envelope, and provisioner, cheap password hasher,
     sessions, login throttle, MFA guard, an in-memory email sender, the verification resend limiter, the OIDC
-    login state store, the cached org settings reader, and the OIDC discovery client built from the app
-    settings when the app opens it (intercept it with respx)."""
+    login state store, the cached org settings reader, the agent onboarding request store and limiter, and the
+    OIDC discovery client built from the app settings when the app opens it (intercept it with respx)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -148,6 +149,8 @@ class SessionContainer(AuthContainer):
     oidc_discovery: OidcDiscovery = field(init=False)
     sso_states: SsoStateStore = field(init=False)
     org_settings: OrgSettingsReader = field(init=False)
+    agent_requests: AgentRequestStore = field(init=False)
+    onboarding_limiter: OnboardingLimiter = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -162,6 +165,8 @@ class SessionContainer(AuthContainer):
         self.mfa_guard = MfaGuard(self.redis)
         self.resend_limiter = ResendLimiter(self.redis)
         self.sso_states = SsoStateStore(self.redis)
+        self.agent_requests = AgentRequestStore(self.redis, self.clock)
+        self.onboarding_limiter = OnboardingLimiter(self.redis)
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
@@ -448,7 +453,12 @@ async def signup(  # noqa: PLR0913 - keyword-only signup fields
     )
 
 
-_PAGES = {"verify_email": "verify-email", "password_reset": "reset-password", "invitation": "invite"}
+_PAGES = {
+    "verify_email": "verify-email",
+    "password_reset": "reset-password",
+    "invitation": "invite",
+    "agent_key_request": "agent-onboarding",
+}
 
 
 def link_token(sender: InMemoryEmailSender, email: str, template: str = "verify_email") -> str:

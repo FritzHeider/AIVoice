@@ -180,7 +180,7 @@
   - Deliverables: API keys and sessions of an org with a non-empty `ip_allowlist` rejected from other addresses; `session_max_age_days` caps the sliding session expiry of sessions acting in that org
   - Acceptance: integration tests for allowed, denied, and empty-list cases and for the shortened session window.
 
-- [ ] P02-T13 Agent onboarding API
+- [x] P02-T13 Agent onboarding API — public create/poll + dashboard details/approve/deny, Redis CAS state, 5/IP 3/email hourly limits; make test 3397 passed (97.74%), lint/typecheck/placeholders pass, test-ts 22+52+48, openapi no drift
   - Spec refs: specs/04-auth-tenancy-rbac.md (agent onboarding API)
   - Depends on: P02-T10
   - Deliverables: `POST /v1/agent-onboarding/keys` flow (email verification, scoped test keys, limits)

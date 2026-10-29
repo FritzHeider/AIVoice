@@ -69,6 +69,7 @@ FAMILIES: Final[tuple[tuple[str, Envelope], ...]] = (
     ("/v1/org*", Envelope.ENVELOPE),
     ("/v1/api_keys*", Envelope.ENVELOPE),
     ("/v1/audit_logs*", Envelope.ENVELOPE),
+    ("/v1/agent-onboarding*", Envelope.ENVELOPE),
     ("/internal/*", Envelope.ENVELOPE),
 )
 

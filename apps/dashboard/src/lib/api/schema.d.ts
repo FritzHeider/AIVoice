@@ -4,6 +4,48 @@
  */
 
 export interface paths {
+    "/v1/agent-onboarding/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Agent Requests Create
+         * @description Ask the human at ``email`` to approve a scoped test key; poll ``poll_url`` for the outcome.
+         */
+        post: operations["agent_onboarding_keys_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/agent-onboarding/keys/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Agent Requests Poll
+         * @description The request's status; the first poll after approval also carries the plaintext ``key``.
+         *
+         *     Never cached (``Cache-Control: no-store``).
+         */
+        get: operations["agent_onboarding_keys_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/api_keys": {
         parameters: {
             query?: never;
@@ -444,6 +486,133 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * AgentKeyPoll
+         * @description The state of a request; ``key`` is set in exactly one ``approved`` response, then the status reads
+         *     ``delivered``.
+         * @example {
+         *       "expires_at": "2026-10-29T15:03:11Z",
+         *       "key": "va_test_7HcQ2nLpR4vB9mZx1dKf8sWq3yJa6eTg",
+         *       "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *       "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *       "scopes": [
+         *         "calls:read",
+         *         "calls:write"
+         *       ],
+         *       "status": "approved"
+         *     }
+         * @example {
+         *       "expires_at": "2026-10-29T15:03:11Z",
+         *       "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *       "scopes": [
+         *         "calls:read",
+         *         "calls:write",
+         *         "pathways:write"
+         *       ],
+         *       "status": "pending_verification"
+         *     }
+         */
+        AgentKeyPoll: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /**
+             * Key
+             * @description The plaintext test key, in the delivering response only.
+             */
+            key: string | null;
+            /**
+             * Org Id
+             * @description The org the key belongs to, once approved.
+             */
+            org_id: string | null;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Scopes
+             * @description Requested scopes, or the granted ones once approved.
+             */
+            scopes: string[];
+            status: components["schemas"]["PollStatus"];
+        };
+        /**
+         * AgentKeyRequestCreate
+         * @description ``POST /v1/agent-onboarding/keys``: whose approval to ask for, and what for.
+         * @example {
+         *       "agent_name": "Claude Code",
+         *       "email": "jane@acme-dental.test",
+         *       "purpose": "Build the appointment reminder pathway for Acme Dental.",
+         *       "requested_scopes": [
+         *         "calls:read",
+         *         "calls:write",
+         *         "pathways:write"
+         *       ]
+         *     }
+         */
+        AgentKeyRequestCreate: {
+            /**
+             * Agent Name
+             * @description Name of the agent, shown in the email (1-100 characters).
+             */
+            agent_name: string;
+            /**
+             * Email
+             * @description Address of the human who approves the key.
+             */
+            email: string;
+            /**
+             * Purpose
+             * @description Why the agent needs the key (at most 500 characters).
+             * @default
+             */
+            purpose: string;
+            /**
+             * Requested Scopes
+             * @description Scopes the key should hold (specs/04 §2.3), excluding `*`, `billing:read`, `billing:write`, and `api_keys:write`.
+             */
+            requested_scopes: string[];
+        };
+        /**
+         * AgentKeyRequestCreated
+         * @description A new request: poll ``poll_url`` with the ``poll_secret`` (shown only here) as ``X-Poll-Secret``.
+         * @example {
+         *       "expires_at": "2026-10-29T15:03:11Z",
+         *       "poll_secret": "Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE",
+         *       "poll_url": "/v1/agent-onboarding/keys/0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *       "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *       "status": "pending_verification"
+         *     }
+         */
+        AgentKeyRequestCreated: {
+            /**
+             * Expires At
+             * Format: date-time
+             * @description Deadline for the human's approval (one hour).
+             */
+            expires_at: string;
+            /**
+             * Poll Secret
+             * @description Send as `X-Poll-Secret` when polling; returned only once.
+             */
+            poll_secret: string;
+            /** Poll Url */
+            poll_url: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "pending_verification";
+        };
+        /**
          * AnalysisSettings
          * @description Post-call analysis switches (specs/18-post-call-analysis.md).
          */
@@ -784,6 +953,56 @@ export interface components {
              * @default true
              */
             state_quiet_hours: boolean;
+        };
+        /**
+         * DataResponse[AgentKeyPoll]
+         * @example {
+         *       "data": {
+         *         "expires_at": "2026-10-29T15:03:11Z",
+         *         "key": "va_test_7HcQ2nLpR4vB9mZx1dKf8sWq3yJa6eTg",
+         *         "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *         "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *         "scopes": [
+         *           "calls:read",
+         *           "calls:write"
+         *         ],
+         *         "status": "approved"
+         *       }
+         *     }
+         * @example {
+         *       "data": {
+         *         "expires_at": "2026-10-29T15:03:11Z",
+         *         "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *         "scopes": [
+         *           "calls:read",
+         *           "calls:write",
+         *           "pathways:write"
+         *         ],
+         *         "status": "pending_verification"
+         *       }
+         *     }
+         */
+        DataResponse_AgentKeyPoll_: {
+            data: components["schemas"]["AgentKeyPoll"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[AgentKeyRequestCreated]
+         * @example {
+         *       "data": {
+         *         "expires_at": "2026-10-29T15:03:11Z",
+         *         "poll_secret": "Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE",
+         *         "poll_url": "/v1/agent-onboarding/keys/0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *         "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+         *         "status": "pending_verification"
+         *       }
+         *     }
+         */
+        DataResponse_AgentKeyRequestCreated_: {
+            data: components["schemas"]["AgentKeyRequestCreated"];
+            /** Errors */
+            errors?: null;
         };
         /**
          * DataResponse[ApiKeyCreated]
@@ -2164,6 +2383,8 @@ export interface components {
             next_cursor: string | null;
         };
         /** @enum {string} */
+        PollStatus: "pending_verification" | "approved" | "delivered" | "denied" | "expired";
+        /** @enum {string} */
         PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
         /**
          * PrivacySettings
@@ -2579,6 +2800,90 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    agent_onboarding_keys_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentKeyRequestCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_AgentKeyRequestCreated_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    agent_onboarding_keys_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-Poll-Secret"?: string | null;
+            };
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_AgentKeyPoll_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     api_keys_list: {
         parameters: {
             query?: never;

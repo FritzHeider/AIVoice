@@ -54,6 +54,244 @@
         "title": "AcceptInvitationRequest",
         "type": "object"
       },
+      "AgentApproval": {
+        "description": "An approved request; the key itself goes only to the polling agent.",
+        "examples": [
+          {
+            "expires_at": "2026-11-28T14:10:00Z",
+            "key_id": "0192f5c9-4d1e-7a2b-9c3d-e4f5a6b7c8d9",
+            "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ],
+            "status": "approved"
+          }
+        ],
+        "properties": {
+          "expires_at": {
+            "description": "When the key stops working (30 days after approval).",
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "key_id": {
+            "format": "uuid",
+            "title": "Key Id",
+            "type": "string"
+          },
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "status": {
+            "const": "approved",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "status",
+          "org_id",
+          "key_id",
+          "scopes",
+          "expires_at"
+        ],
+        "title": "AgentApproval",
+        "type": "object"
+      },
+      "AgentApproveRequest": {
+        "additionalProperties": false,
+        "description": "``POST …/approve``: the org to create the key in and, optionally, fewer scopes.",
+        "examples": [
+          {
+            "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ]
+          }
+        ],
+        "properties": {
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "scopes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A non-empty subset of the requested scopes; default: all of them.",
+            "title": "Scopes"
+          }
+        },
+        "required": [
+          "org_id"
+        ],
+        "title": "AgentApproveRequest",
+        "type": "object"
+      },
+      "AgentDenial": {
+        "description": "A denied request.",
+        "examples": [
+          {
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "status": "denied"
+          }
+        ],
+        "properties": {
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "denied",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "status"
+        ],
+        "title": "AgentDenial",
+        "type": "object"
+      },
+      "AgentRequestDetails": {
+        "description": "What the approval page shows.",
+        "examples": [
+          {
+            "agent_name": "Claude Code",
+            "expires_at": "2026-10-29T15:03:11Z",
+            "orgs": [
+              {
+                "name": "Acme Dental",
+                "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+                "role": "owner"
+              }
+            ],
+            "purpose": "Build the appointment reminder pathway for Acme Dental.",
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "requested_scopes": [
+              "calls:read",
+              "calls:write",
+              "pathways:write"
+            ]
+          }
+        ],
+        "properties": {
+          "agent_name": {
+            "title": "Agent Name",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "orgs": {
+            "description": "Active orgs where the user is owner, admin, or developer.",
+            "items": {
+              "$ref": "#/components/schemas/AgentRequestOrg"
+            },
+            "title": "Orgs",
+            "type": "array"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "requested_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "request_id",
+          "agent_name",
+          "purpose",
+          "requested_scopes",
+          "expires_at",
+          "orgs"
+        ],
+        "title": "AgentRequestDetails",
+        "type": "object"
+      },
+      "AgentRequestOrg": {
+        "description": "An org the signed-in user may approve the key into.",
+        "examples": [
+          {
+            "name": "Acme Dental",
+            "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "role": "owner"
+          }
+        ],
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id",
+          "name",
+          "role"
+        ],
+        "title": "AgentRequestOrg",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "additionalProperties": false,
         "examples": [
@@ -81,6 +319,99 @@
           "new_password"
         ],
         "title": "ChangePasswordRequest",
+        "type": "object"
+      },
+      "DataResponse_AgentApproval_": {
+        "examples": [
+          {
+            "data": {
+              "expires_at": "2026-11-28T14:10:00Z",
+              "key_id": "0192f5c9-4d1e-7a2b-9c3d-e4f5a6b7c8d9",
+              "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "scopes": [
+                "calls:read",
+                "calls:write"
+              ],
+              "status": "approved"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentApproval"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[AgentApproval]",
+        "type": "object"
+      },
+      "DataResponse_AgentDenial_": {
+        "examples": [
+          {
+            "data": {
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "status": "denied"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentDenial"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[AgentDenial]",
+        "type": "object"
+      },
+      "DataResponse_AgentRequestDetails_": {
+        "examples": [
+          {
+            "data": {
+              "agent_name": "Claude Code",
+              "expires_at": "2026-10-29T15:03:11Z",
+              "orgs": [
+                {
+                  "name": "Acme Dental",
+                  "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+                  "role": "owner"
+                }
+              ],
+              "purpose": "Build the appointment reminder pathway for Acme Dental.",
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "requested_scopes": [
+                "calls:read",
+                "calls:write",
+                "pathways:write"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentRequestDetails"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[AgentRequestDetails]",
         "type": "object"
       },
       "DataResponse_ForgotPasswordResult_": {
@@ -1533,6 +1864,202 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/auth/agent-onboarding/{token}": {
+      "get": {
+        "description": "The agent, its purpose and scopes, and the orgs the signed-in user may approve the key into.",
+        "operationId": "auth_agent_request_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_AgentRequestDetails_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Agent Request Details",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/agent-onboarding/{token}/approve": {
+      "post": {
+        "description": "Create the agent's test key in ``org_id``; the agent receives it on its next poll.",
+        "operationId": "auth_agent_request_approve",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentApproveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_AgentApproval_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Agent Request Approve",
+        "tags": [
+          "Auth"
+        ],
+        "x-audit": [
+          "api_key.create"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/agent-onboarding/{token}/deny": {
+      "post": {
+        "description": "Refuse the request; the agent's next poll reads ``denied``.",
+        "operationId": "auth_agent_request_deny",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EmptyBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": " Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_AgentDenial_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Agent Request Deny",
+        "tags": [
+          "Auth"
+        ],
+        "x-audit-exempt": "no org is chosen; the request lives only in Redis",
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
     "/internal/auth/invitations/accept": {
       "post": {
         "description": "Accept an invitation as the signed-in user, or create the account when the email has none.",

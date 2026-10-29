@@ -622,3 +622,12 @@ Grafana 3001
   (set `peer.host` between requests; `"testclient"` imitates a non-IP peer). A settings PATCH sending a non-empty
   `ip_allowlist` must include the caller (httpx ASGI peer `127.0.0.1`). `SessionManager(..., org_settings=reader)`
   takes the sliding window from the active org's `session_max_age_days`; build the reader first and share it.
+- 2026-10-29 (P02-T13): agent onboarding (specs/04 §10) lives in Redis only: `va_api.auth.agent_onboarding`
+  (`AgentRequestStore` with compare-and-set `transition(...)` and atomic `take_key`, `OnboardingLimiter`),
+  public routes in `routers/agent_onboarding.py`, approval routes in `routers/auth_agent_onboarding.py` (on
+  `internal_auth_router`, imported for side effect in `main.py`). Fixed-window counters go through
+  `va_api.auth.window_counter.hit_window(..., unavailable_event=<event> | None)` (`None` = fail closed with
+  `SERVICE_UNAVAILABLE`). Redis compare-and-set: `pipe.watch(key)` → read → `pipe.multi()  # type: ignore[no-untyped-call]`
+  → write with `keepttl=True`; `WatchError` means another change won. Tests: `link_token(outbox, email,
+  "agent_key_request")`; `make_member` users are **unverified** (set `users.email_verified_at` when a flow needs it);
+  an unhandled exception inside a route answers 500 through the app handler (assert the status, not a raise).

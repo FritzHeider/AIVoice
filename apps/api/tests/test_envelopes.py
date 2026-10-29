@@ -47,7 +47,7 @@ def sample_paths(pattern: str) -> list[str]:
 
 def test_families_mirror_spec_table() -> None:
     assert list(FAMILIES) == spec_families()
-    assert len(FAMILIES) == 31
+    assert len(FAMILIES) == 32
 
 
 @pytest.mark.parametrize(("pattern", "envelope"), spec_families())

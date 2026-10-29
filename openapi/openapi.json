@@ -1,6 +1,195 @@
 {
   "components": {
     "schemas": {
+      "AgentKeyPoll": {
+        "description": "The state of a request; ``key`` is set in exactly one ``approved`` response, then the status reads\n``delivered``.",
+        "examples": [
+          {
+            "expires_at": "2026-10-29T15:03:11Z",
+            "key": "va_test_7HcQ2nLpR4vB9mZx1dKf8sWq3yJa6eTg",
+            "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ],
+            "status": "approved"
+          },
+          {
+            "expires_at": "2026-10-29T15:03:11Z",
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "scopes": [
+              "calls:read",
+              "calls:write",
+              "pathways:write"
+            ],
+            "status": "pending_verification"
+          }
+        ],
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plaintext test key, in the delivering response only.",
+            "title": "Key"
+          },
+          "org_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The org the key belongs to, once approved.",
+            "title": "Org Id"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "Requested scopes, or the granted ones once approved.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PollStatus"
+          }
+        },
+        "required": [
+          "request_id",
+          "status",
+          "expires_at",
+          "scopes",
+          "org_id",
+          "key"
+        ],
+        "title": "AgentKeyPoll",
+        "type": "object"
+      },
+      "AgentKeyRequestCreate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/agent-onboarding/keys``: whose approval to ask for, and what for.",
+        "examples": [
+          {
+            "agent_name": "Claude Code",
+            "email": "jane@acme-dental.test",
+            "purpose": "Build the appointment reminder pathway for Acme Dental.",
+            "requested_scopes": [
+              "calls:read",
+              "calls:write",
+              "pathways:write"
+            ]
+          }
+        ],
+        "properties": {
+          "agent_name": {
+            "description": "Name of the agent, shown in the email (1-100 characters).",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Agent Name",
+            "type": "string"
+          },
+          "email": {
+            "description": "Address of the human who approves the key.",
+            "maxLength": 320,
+            "minLength": 3,
+            "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+            "title": "Email",
+            "type": "string"
+          },
+          "purpose": {
+            "default": "",
+            "description": "Why the agent needs the key (at most 500 characters).",
+            "maxLength": 500,
+            "title": "Purpose",
+            "type": "string"
+          },
+          "requested_scopes": {
+            "description": "Scopes the key should hold (specs/04 §2.3), excluding `*`, `billing:read`, `billing:write`, and `api_keys:write`.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Requested Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "email",
+          "agent_name",
+          "requested_scopes"
+        ],
+        "title": "AgentKeyRequestCreate",
+        "type": "object"
+      },
+      "AgentKeyRequestCreated": {
+        "description": "A new request: poll ``poll_url`` with the ``poll_secret`` (shown only here) as ``X-Poll-Secret``.",
+        "examples": [
+          {
+            "expires_at": "2026-10-29T15:03:11Z",
+            "poll_secret": "Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE",
+            "poll_url": "/v1/agent-onboarding/keys/0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+            "status": "pending_verification"
+          }
+        ],
+        "properties": {
+          "expires_at": {
+            "description": "Deadline for the human's approval (one hour).",
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "poll_secret": {
+            "description": "Send as `X-Poll-Secret` when polling; returned only once.",
+            "title": "Poll Secret",
+            "type": "string"
+          },
+          "poll_url": {
+            "title": "Poll Url",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "pending_verification",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "status",
+          "poll_url",
+          "poll_secret",
+          "expires_at"
+        ],
+        "title": "AgentKeyRequestCreated",
+        "type": "object"
+      },
       "AnalysisSettings": {
         "additionalProperties": false,
         "description": "Post-call analysis switches (specs/18-post-call-analysis.md).",
@@ -620,6 +809,76 @@
           }
         },
         "title": "ComplianceSettings",
+        "type": "object"
+      },
+      "DataResponse_AgentKeyPoll_": {
+        "examples": [
+          {
+            "data": {
+              "expires_at": "2026-10-29T15:03:11Z",
+              "key": "va_test_7HcQ2nLpR4vB9mZx1dKf8sWq3yJa6eTg",
+              "org_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "scopes": [
+                "calls:read",
+                "calls:write"
+              ],
+              "status": "approved"
+            }
+          },
+          {
+            "data": {
+              "expires_at": "2026-10-29T15:03:11Z",
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "scopes": [
+                "calls:read",
+                "calls:write",
+                "pathways:write"
+              ],
+              "status": "pending_verification"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentKeyPoll"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[AgentKeyPoll]",
+        "type": "object"
+      },
+      "DataResponse_AgentKeyRequestCreated_": {
+        "examples": [
+          {
+            "data": {
+              "expires_at": "2026-10-29T15:03:11Z",
+              "poll_secret": "Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE",
+              "poll_url": "/v1/agent-onboarding/keys/0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "request_id": "0192f5c3-1b2d-7e4f-8a90-b1c2d3e4f5a6",
+              "status": "pending_verification"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentKeyRequestCreated"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[AgentKeyRequestCreated]",
         "type": "object"
       },
       "DataResponse_ApiKeyCreated_": {
@@ -2930,6 +3189,16 @@
         "title": "Pagination",
         "type": "object"
       },
+      "PollStatus": {
+        "enum": [
+          "pending_verification",
+          "approved",
+          "delivered",
+          "denied",
+          "expired"
+        ],
+        "type": "string"
+      },
       "PrincipalType": {
         "enum": [
           "api_key",
@@ -3570,6 +3839,132 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/agent-onboarding/keys": {
+      "post": {
+        "description": "Ask the human at ``email`` to approve a scoped test key; poll ``poll_url`` for the outcome.",
+        "operationId": "agent_onboarding_keys_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentKeyRequestCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_AgentKeyRequestCreated_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Agent Requests Create",
+        "tags": [
+          "API Keys"
+        ],
+        "x-audit-exempt": "no org is chosen yet; the request lives only in Redis",
+        "x-envelope": "envelope",
+        "x-scope": "public"
+      }
+    },
+    "/v1/agent-onboarding/keys/{request_id}": {
+      "get": {
+        "description": "The request's status; the first poll after approval also carries the plaintext ``key``.\n\nNever cached (``Cache-Control: no-store``).",
+        "operationId": "agent_onboarding_keys_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Poll-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Poll-Secret"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_AgentKeyPoll_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Agent Requests Poll",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "public"
+      }
+    },
     "/v1/api_keys": {
       "get": {
         "description": "Every API key of the org by prefix, revoked and expired ones included, oldest first.",
