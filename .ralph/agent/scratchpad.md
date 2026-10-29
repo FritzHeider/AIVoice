@@ -5141,3 +5141,11 @@ build.done PLAIN STRING.
   is reported; CSRF 403 can't count as a refusal; owner control runs through A's key; the negative test catches both leaks.
 - Non-blocking notes: /internal/auth/* (including switch-org) are outside the suite via session-flow and are covered by
   their own tests; marker matching uses substrings, which is fine because the markers are UUIDs, unique emails, and key prefixes.
+
+## 2026-10-29 Planner: P02-T15 approved → all phase-02 tasks ticked → exit gate
+- `make check` exit 0 (logs/p02-exit-check.log): lint, typecheck, placeholders, pytest, test-ts (widget/dashboard/sdk),
+  openapi drift current (openapi.json + internal.json), check_spec_refs 0.
+- Seeded key smoke: `make seed ARGS="--json"` exit 0 (org "VoiceAgents Dev", build plan, $50); fresh
+  `uvicorn va_api.main:app --port 8765` (port 8000 was held by an unrelated process returning 404 on /v1/health);
+  `curl -H "Authorization: <test key>" /v1/me` → 200 with the seeded org; bogus key → 401. Seed JSON with raw keys deleted.
+- README build status row 02 → complete (2026-10-29, a64df23). Phase 02 done.
