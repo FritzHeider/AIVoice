@@ -1,6 +1,58 @@
 {
   "components": {
     "schemas": {
+      "ChangePasswordRequest": {
+        "additionalProperties": false,
+        "examples": [
+          {
+            "current_password": "correct horse battery",
+            "new_password": "quiet harbor lantern 7"
+          }
+        ],
+        "properties": {
+          "current_password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Current Password",
+            "type": "string"
+          },
+          "new_password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "title": "ChangePasswordRequest",
+        "type": "object"
+      },
+      "DataResponse_ForgotPasswordResult_": {
+        "examples": [
+          {
+            "data": {
+              "accepted": true
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ForgotPasswordResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[ForgotPasswordResult]",
+        "type": "object"
+      },
       "DataResponse_LoginResult_": {
         "examples": [
           {
@@ -33,29 +85,6 @@
         "title": "DataResponse[LoginResult]",
         "type": "object"
       },
-      "DataResponse_LogoutResult_": {
-        "examples": [
-          {
-            "data": {
-              "revoked_sessions": 1
-            }
-          }
-        ],
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/LogoutResult"
-          },
-          "errors": {
-            "title": "Errors",
-            "type": "null"
-          }
-        },
-        "required": [
-          "data"
-        ],
-        "title": "DataResponse[LogoutResult]",
-        "type": "object"
-      },
       "DataResponse_ResendResult_": {
         "examples": [
           {
@@ -78,6 +107,29 @@
           "data"
         ],
         "title": "DataResponse[ResendResult]",
+        "type": "object"
+      },
+      "DataResponse_RevokedSessionsResult_": {
+        "examples": [
+          {
+            "data": {
+              "revoked_sessions": 1
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RevokedSessionsResult"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[RevokedSessionsResult]",
         "type": "object"
       },
       "DataResponse_SessionInfo_": {
@@ -346,6 +398,45 @@
         "title": "ErrorLegacy",
         "type": "object"
       },
+      "ForgotPasswordRequest": {
+        "additionalProperties": false,
+        "examples": [
+          {
+            "email": "jane@acme-dental.test"
+          }
+        ],
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "ForgotPasswordRequest",
+        "type": "object"
+      },
+      "ForgotPasswordResult": {
+        "examples": [
+          {
+            "accepted": true
+          }
+        ],
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "ForgotPasswordResult",
+        "type": "object"
+      },
       "LoginRequest": {
         "additionalProperties": false,
         "examples": [
@@ -406,24 +497,6 @@
         "title": "LoginResult",
         "type": "object"
       },
-      "LogoutResult": {
-        "examples": [
-          {
-            "revoked_sessions": 1
-          }
-        ],
-        "properties": {
-          "revoked_sessions": {
-            "title": "Revoked Sessions",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "revoked_sessions"
-        ],
-        "title": "LogoutResult",
-        "type": "object"
-      },
       "ResendResult": {
         "examples": [
           {
@@ -446,6 +519,54 @@
           "email_verified"
         ],
         "title": "ResendResult",
+        "type": "object"
+      },
+      "ResetPasswordRequest": {
+        "additionalProperties": false,
+        "examples": [
+          {
+            "password": "quiet harbor lantern 7",
+            "token": "Xb4LZ0c9qkV2mR7tWn1sYe8pHu3aGj6dKf5oQi2NwTs"
+          }
+        ],
+        "properties": {
+          "password": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "password"
+        ],
+        "title": "ResetPasswordRequest",
+        "type": "object"
+      },
+      "RevokedSessionsResult": {
+        "description": "How many sessions a logout or password change revoked.",
+        "examples": [
+          {
+            "revoked_sessions": 1
+          }
+        ],
+        "properties": {
+          "revoked_sessions": {
+            "title": "Revoked Sessions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revoked_sessions"
+        ],
+        "title": "RevokedSessionsResult",
         "type": "object"
       },
       "SessionInfo": {
@@ -947,7 +1068,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DataResponse_LogoutResult_"
+                  "$ref": "#/components/schemas/DataResponse_RevokedSessionsResult_"
                 }
               }
             },
@@ -1008,7 +1129,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DataResponse_LogoutResult_"
+                  "$ref": "#/components/schemas/DataResponse_RevokedSessionsResult_"
                 }
               }
             },
@@ -1036,6 +1157,168 @@
           }
         },
         "summary": "Logout All",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/password/change": {
+      "post": {
+        "description": "Change the password of a recently signed-in user; their other sessions are revoked.",
+        "operationId": "auth_password_change",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_RevokedSessionsResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Password Change",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/password/forgot": {
+      "post": {
+        "description": "Email a password reset link when the account exists and is active (3 per hour); always 200.",
+        "operationId": "auth_password_forgot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgotPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_ForgotPasswordResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Password Forgot",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/password/reset": {
+      "post": {
+        "description": "Set a new password from a reset link, sign the user out everywhere, and clear the login lock.",
+        "operationId": "auth_password_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_RevokedSessionsResult_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Password Reset",
         "tags": [
           "Auth"
         ],

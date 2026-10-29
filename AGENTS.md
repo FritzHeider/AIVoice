@@ -450,3 +450,13 @@ Grafana 3001
   `DataResponse[T]` schemas carry `T`'s examples wrapped in `{data: ...}` (FastAPI drops `None` values from
   examples). Tests: `SessionContainer(identity=identity)` (has `provisioner`, `outbox`, `resend_limiter`),
   `session_helpers.signup(client, email=...)`, `link_token(container.outbox, email)`. `MFA_REQUIRED` is 401.
+- 2026-10-29 (P02-T05): password forgot / reset / change live in `va_api/routers/auth_password.py` and attach to
+  `internal_auth_router`; `va_api/main.py` imports the module for that side effect (`# noqa: F401`), so a new
+  module adding routes to an existing router needs the same import or its routes silently vanish
+  (`test_openapi.INTERNAL_PATHS` catches it). `forgot` always returns 200; the 3/h reset limit counts
+  `email_tokens` rows (`count_issued_since`), no Redis key. Reset peeks the token (`IdentityRepo.peek_email_token`)
+  before the policy check so a weak password does not burn the link, then consumes it in the write transaction.
+  Revoking sessions inside your own transaction: `IdentityRepo.revoke_user_sessions` + `SessionManager.forget(hashes)`
+  after the commit. Recent auth for change = session `created_at` younger than 10 min. Emails share one layout in
+  `va_common.email.templates._Copy`; senders go through `va_api.auth.verification.deliver(..., failure_event=)`.
+  Tests: `link_token(container.outbox, email, "password_reset")`.

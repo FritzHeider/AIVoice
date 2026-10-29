@@ -48,7 +48,7 @@
   - Deliverables: `POST /internal/auth/signup` (policy, provisioning + session + verify token in one transaction, verification email after commit), `/verify-email`, `/resend-verification` (3 per hour), `EmailSender` in the api container (SMTP; in-memory in tests), `openapi/internal.json` export + drift check
   - Acceptance: signup → email → verify → session flow test; weak password, duplicate email, reused/expired token, 4th resend rejected; internal document drift-checked.
 
-- [ ] P02-T05 Password reset and email change
+- [x] P02-T05 Password reset and email change — forgot/reset/change endpoints (email change not in v1, decision in specs/04 §4.1); single-use hashed 1 h tokens peeked then consumed, reuse/expiry/purpose rejected; reset revokes all sessions + sess: keys; 2315 tests pass (99.39 %), lint/typecheck/placeholders/drift/spec-refs/jscpd 0/radon clean
   - Spec refs: specs/04-auth-tenancy-rbac.md (password reset)
   - Depends on: P02-T04
   - Deliverables: request/confirm endpoints, single-use hashed tokens with expiry, session revocation on reset

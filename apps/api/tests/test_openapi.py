@@ -30,6 +30,9 @@ INTERNAL_PATHS = {
     "/internal/auth/logout",
     "/internal/auth/logout-all",
     "/internal/auth/session",
+    "/internal/auth/password/forgot",
+    "/internal/auth/password/reset",
+    "/internal/auth/password/change",
 }
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}

@@ -19,6 +19,7 @@ from session_helpers import (
     SESSION_PROBE_PATH,
     Member,
     SessionContainer,
+    error_of,
     link_token,
     login,
     make_member,
@@ -54,11 +55,6 @@ class FailingSender:
     async def send(self, message: EmailMessage) -> None:
         msg = f"delivery of {message.template!r} failed: SMTPRecipientsRefused"
         raise EmailDeliveryError(msg)
-
-
-def _error(response: httpx.Response) -> tuple[int, str, str | None]:
-    item = response.json()["errors"][0]
-    return response.status_code, item["error"], item.get("field")
 
 
 async def _user(identity: IdentityDb, email: str) -> User:
@@ -132,7 +128,7 @@ async def test_signup_rejects_weak_password(identity: IdentityDb, client: httpx.
     before = await row_counts(identity.database)
     for password in ("short-pw", breached, f"{email.split('@')[0]}-orchard-42"):
         response = await signup(client, email=email, password=password)
-        assert _error(response) == (400, "PASSWORD_TOO_WEAK", "password"), password
+        assert error_of(response) == (400, "PASSWORD_TOO_WEAK", "password"), password
     assert await row_counts(identity.database) == before
     assert SESSION_COOKIE not in client.cookies
 
@@ -146,7 +142,7 @@ async def test_signup_duplicate_email(
     async with session_client(session_app(container)) as other:
         response = await signup(other, email=email.upper())
         assert SESSION_COOKIE not in other.cookies
-    status, code, field = _error(response)
+    status, code, field = error_of(response)
     assert (status, code, field) == (409, "CONFLICT", "email")
     assert response.json()["errors"][0]["message"] == "An account with this email already exists."
     assert await row_counts(identity.database) == before
@@ -223,14 +219,14 @@ async def test_verify_token_reuse_expiry_and_purpose(
     token = link_token(container.outbox, email)
     assert (await client.post(_VERIFY, json={"token": token})).status_code == 200
     reused = await client.post(_VERIFY, json={"token": token})
-    assert _error(reused) == (400, "TOKEN_EXPIRED", "token")
+    assert error_of(reused) == (400, "TOKEN_EXPIRED", "token")
     assert reused.json()["errors"][0]["message"] == TOKEN_INVALID_MESSAGE
-    assert _error(await client.post(_VERIFY, json={"token": "not a token"})) == (
+    assert error_of(await client.post(_VERIFY, json={"token": "not a token"})) == (
         400,
         "TOKEN_EXPIRED",
         "token",
     )
-    assert _error(await client.post(_VERIFY, json={"token": "A" * 43})) == (400, "TOKEN_EXPIRED", "token")
+    assert error_of(await client.post(_VERIFY, json={"token": "A" * 43})) == (400, "TOKEN_EXPIRED", "token")
 
     user = await _user(identity, email)
     async with identity.database.global_session() as session:
@@ -241,9 +237,9 @@ async def test_verify_token_reuse_expiry_and_purpose(
         late = await repo.issue_email_token(
             user_id=user.id, purpose="verify_email", now=container.clock.now(), ttl=EMAIL_VERIFY_TTL
         )
-    assert _error(await client.post(_VERIFY, json={"token": reset.plaintext}))[1] == "TOKEN_EXPIRED"
+    assert error_of(await client.post(_VERIFY, json={"token": reset.plaintext}))[1] == "TOKEN_EXPIRED"
     container.clock.advance(EMAIL_VERIFY_TTL + timedelta(seconds=1))
-    assert _error(await client.post(_VERIFY, json={"token": late.plaintext}))[1] == "TOKEN_EXPIRED"
+    assert error_of(await client.post(_VERIFY, json={"token": late.plaintext}))[1] == "TOKEN_EXPIRED"
 
 
 async def test_verify_keeps_first_verification_time(
@@ -276,7 +272,7 @@ async def test_resend_verification_limit(
         assert response.json()["data"] == {"sent": True, "email_verified": False}
     assert len(container.outbox.to(email)) == RESEND_LIMIT + 1
     limited = await client.post(_RESEND, json={}, headers=write_headers(client))
-    status, code, _ = _error(limited)
+    status, code, _ = error_of(limited)
     assert (status, code) == (429, "RATE_LIMITED")
     assert 0 < int(limited.headers["retry-after"]) <= 3600
     assert limited.json()["errors"][0]["message"].startswith("Too many verification emails; try again in ")
@@ -326,7 +322,7 @@ async def test_resend_is_mfa_gated(
     async with identity.database.system_session() as session:
         await session.execute(update(Org).where(Org.id == org_id).values(settings={"mfa_required": True}))
     response = await client.post(_RESEND, json={}, headers=write_headers(client))
-    assert _error(response)[:2] == (401, "MFA_REQUIRED")
+    assert error_of(response)[:2] == (401, "MFA_REQUIRED")
 
 
 async def test_resend_redis_down_allows(identity: IdentityDb) -> None:

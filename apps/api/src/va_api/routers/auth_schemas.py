@@ -12,11 +12,16 @@ from va_db.models import MemberRole, Org, OrgStatus, User
 from va_db.repositories import MembershipRecord
 
 __all__ = [
+    "ChangePasswordRequest",
+    "EmailLinkToken",
     "EmptyBody",
+    "ForgotPasswordRequest",
+    "ForgotPasswordResult",
     "LoginRequest",
     "LoginResult",
-    "LogoutResult",
     "ResendResult",
+    "ResetPasswordRequest",
+    "RevokedSessionsResult",
     "SessionInfo",
     "SessionMembership",
     "SessionUser",
@@ -30,6 +35,7 @@ __all__ = [
 EmailField = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=320)]
 PasswordField = Annotated[str, Field(min_length=1, max_length=1024, repr=False)]
 DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+EmailLinkToken = Annotated[str, Field(min_length=1, max_length=256, repr=False)]
 
 _USER_EXAMPLE: Final[dict[str, JsonValue]] = {
     "id": "0192f3c4-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
@@ -50,6 +56,7 @@ _ORG_EXAMPLE: Final[dict[str, JsonValue]] = {
     "created_at": "2026-10-29T09:30:00Z",
 }
 _EMAIL_TOKEN_EXAMPLE: Final = "Xb4LZ0c9qkV2mR7tWn1sYe8pHu3aGj6dKf5oQi2NwTs"  # noqa: S105 - documentation example
+_NEW_PASSWORD_EXAMPLE: Final = "quiet harbor lantern 7"  # noqa: S105 - documentation example
 _MEMBERSHIP_EXAMPLE: Final[dict[str, JsonValue]] = {
     "org_id": "0192f3c4-5a6b-7c8d-9e0f-2b3c4d5e6f70",
     "org_name": "Acme Dental",
@@ -105,7 +112,41 @@ class VerifyEmailRequest(BaseModel):
         extra="forbid", json_schema_extra={"examples": [{"token": _EMAIL_TOKEN_EXAMPLE}]}
     )
 
-    token: str = Field(min_length=1, max_length=256, repr=False)
+    token: EmailLinkToken
+
+
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"examples": [{"email": "jane@acme-dental.test"}]}
+    )
+
+    email: EmailField
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"token": _EMAIL_TOKEN_EXAMPLE, "password": "quiet harbor lantern 7"}]
+        },
+    )
+
+    token: EmailLinkToken
+    password: PasswordField
+
+
+class ChangePasswordRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"current_password": "correct horse battery", "new_password": "quiet harbor lantern 7"}
+            ]
+        },
+    )
+
+    current_password: PasswordField
+    new_password: PasswordField
 
 
 class SessionUser(BaseModel):
@@ -165,7 +206,15 @@ class LoginResult(BaseModel):
     user: SessionUser
 
 
-class LogoutResult(BaseModel):
+class ForgotPasswordResult(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"examples": [{"accepted": True}]})
+
+    accepted: bool
+
+
+class RevokedSessionsResult(BaseModel):
+    """How many sessions a logout or password change revoked."""
+
     model_config = ConfigDict(json_schema_extra={"examples": [{"revoked_sessions": 1}]})
 
     revoked_sessions: int

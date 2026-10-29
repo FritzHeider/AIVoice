@@ -39,6 +39,7 @@ __all__ = [
     "ORG_CLOSED_MESSAGE",
     "active_membership",
     "authenticate_session",
+    "check_dashboard_origin",
     "client_ip",
     "clock_of",
     "cookie_policy_of",
@@ -122,6 +123,16 @@ def client_ip(request: Request) -> str | None:
         return str(ipaddress.ip_address(host))
     except ValueError:
         return None
+
+
+def check_dashboard_origin(request: Request) -> None:
+    """Reject a foreign ``Origin``/``Referer`` on a cookie-less auth flow; requests without either pass."""
+    check_origin(
+        request.headers.get("origin"),
+        request.headers.get("referer"),
+        settings_of(request).dashboard_base_url,
+        required=False,
+    )
 
 
 def has_session_cookie(request: Request) -> bool:

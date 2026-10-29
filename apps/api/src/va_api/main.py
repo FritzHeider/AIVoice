@@ -23,6 +23,7 @@ from va_api.idempotency import REPLAYED_HEADER, IdempotencyMiddleware, install_i
 from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_internal_openapi, build_openapi
 from va_api.rate_limit import RateLimitHeadersMiddleware
+from va_api.routers import auth_password  # noqa: F401  (registers the password routes on internal_auth_router)
 from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router
 from va_api.settings import ApiSettings

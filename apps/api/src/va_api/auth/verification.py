@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from va_api.auth.login_throttle import seconds_phrase
-from va_common.email import EmailDeliveryError, EmailSender, verify_email
+from va_common.email import EmailDeliveryError, EmailMessage, EmailSender, verify_email
 from va_common.errors import AppError
 from va_common.logging import get_logger
 
@@ -24,6 +24,8 @@ __all__ = [
     "RESEND_WINDOW_S",
     "TOKEN_INVALID_MESSAGE",
     "ResendLimiter",
+    "dashboard_link",
+    "deliver",
     "resend_key",
     "resend_limited_message",
     "send_verification",
@@ -45,20 +47,30 @@ def resend_limited_message(retry_after_s: int) -> str:
     return f"Too many verification emails; try again in {seconds_phrase(retry_after_s)}."
 
 
+def dashboard_link(dashboard_base_url: str, page: str, token: str) -> str:
+    """``{DASHBOARD_BASE_URL}/{page}/{token}`` without a doubled slash."""
+    return f"{dashboard_base_url.rstrip('/')}/{page}/{token}"
+
+
 def verify_link(dashboard_base_url: str, token: str) -> str:
     """The dashboard page that submits ``token`` to ``POST /internal/auth/verify-email``."""
-    return f"{dashboard_base_url.rstrip('/')}/verify-email/{token}"
+    return dashboard_link(dashboard_base_url, "verify-email", token)
+
+
+async def deliver(sender: EmailSender, message: EmailMessage, *, failure_event: str) -> None:
+    """Send ``message``; a delivery failure is logged as ``failure_event`` (template and error type only)."""
+    try:
+        await sender.send(message)
+    except (EmailDeliveryError, OSError) as exc:
+        _log.warning(failure_event, template=message.template, error_type=type(exc).__name__)
 
 
 async def send_verification(
     sender: EmailSender, *, to: str, name: str, token: str, dashboard_base_url: str
 ) -> None:
-    """Send the ``verify_email`` template; a delivery failure is logged (template and error type only)."""
+    """Send the ``verify_email`` template; failures are logged as ``verification_email_failed``."""
     message = verify_email(name=name, link=verify_link(dashboard_base_url, token), to=to)
-    try:
-        await sender.send(message)
-    except (EmailDeliveryError, OSError) as exc:
-        _log.warning("verification_email_failed", template=message.template, error_type=type(exc).__name__)
+    await deliver(sender, message, failure_event="verification_email_failed")
 
 
 class ResendLimiter:

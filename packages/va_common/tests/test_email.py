@@ -28,6 +28,7 @@ from va_common.email import (
     SmtpConfig,
     SmtpEmailSender,
     parse_smtp_url,
+    password_reset,
     to_mime,
     verify_email,
 )
@@ -137,6 +138,27 @@ def test_verify_email_template() -> None:
     assert "expires in 24 hours" in message.html
     assert "$" not in message.text
     assert "$" not in message.html
+
+
+def test_password_reset_template() -> None:
+    link = "https://app.voiceagents.local/reset-password/abc_DEF-123?x=1&y=2"
+    message = password_reset(name="<b>Ravi</b>", link=link, to="ravi@example.com")
+    assert message.template == "password_reset"
+    assert message.template in TEMPLATES
+    assert {"verify_email", "password_reset"} == TEMPLATES
+    assert message.subject == "Reset your VoiceAgents password"
+    assert message.to == "ravi@example.com"
+    assert "<b>Ravi</b>" not in message.html
+    assert "Hi &lt;b&gt;Ravi&lt;/b&gt;," in message.html
+    assert message.text.startswith("Hi <b>Ravi</b>,\n")
+    assert link in message.text
+    assert 'href="https://app.voiceagents.local/reset-password/abc_DEF-123?x=1&amp;y=2"' in message.html
+    assert ">Choose a new password</a>" in message.html
+    for body in (message.text, message.html):
+        assert "expires in 60 minutes" in body
+        assert "your password stays the same." in body
+        assert "$" not in body
+    assert message.text.rstrip().endswith("The VoiceAgents team")
 
 
 def test_to_mime_multipart_alternative() -> None:

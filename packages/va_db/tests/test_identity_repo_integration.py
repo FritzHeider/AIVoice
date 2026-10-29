@@ -14,7 +14,7 @@ from identity_db import IdentityDb, unique_email
 from model_factories import make_org
 from sqlalchemy import select, text
 
-from va_common.auth import sha256_hex
+from va_common.auth import IssuedToken, sha256_hex
 from va_common.errors import AppError
 from va_db.models import EmailToken, Session, User
 from va_db.repositories import EMAIL_VERIFY_TTL, PASSWORD_RESET_TTL, IdentityRepo, NewUser
@@ -43,6 +43,12 @@ async def _new_session(
             user_agent="ua",
         )
     return issued.token, issued.session
+
+
+async def _reset_token(repo: IdentityRepo, user_id: uuid.UUID) -> IssuedToken:
+    return await repo.issue_email_token(
+        user_id=user_id, purpose="reset_password", now=_NOW, ttl=PASSWORD_RESET_TTL
+    )
 
 
 async def test_ttl_constants_match_spec() -> None:
@@ -223,19 +229,20 @@ async def test_email_token_hash_only_and_single_use(identity_db: IdentityDb) -> 
 
 
 async def test_email_token_expired_or_wrong_purpose_none(identity_db: IdentityDb) -> None:
+    """``peek`` and ``consume`` accept the same tokens; only ``consume`` uses one up."""
     user = await _user(identity_db.database)
+    expiry = _NOW + PASSWORD_RESET_TTL
     async with identity_db.database.global_session() as session:
         repo = IdentityRepo(session)
-        issued = await repo.issue_email_token(
-            user_id=user.id, purpose="reset_password", now=_NOW, ttl=PASSWORD_RESET_TTL
-        )
-        assert await repo.consume_email_token(issued.plaintext, "verify_email", _NOW) is None
-        assert (
-            await repo.consume_email_token(issued.plaintext, "reset_password", _NOW + PASSWORD_RESET_TTL)
-            is None
-        )
-        assert await repo.consume_email_token("unknown", "reset_password", _NOW) is None
+        issued = await _reset_token(repo, user.id)
+        for check in (repo.peek_email_token, repo.consume_email_token):
+            assert await check(issued.plaintext, "verify_email", _NOW) is None
+            assert await check(issued.plaintext, "reset_password", expiry) is None
+            assert await check("unknown", "reset_password", _NOW) is None
+        assert await repo.peek_email_token(issued.plaintext, "reset_password", _NOW) == user.id
+        assert await repo.peek_email_token(issued.plaintext, "reset_password", _NOW) == user.id
         assert await repo.consume_email_token(issued.plaintext, "reset_password", _NOW) == user.id
+        assert await repo.peek_email_token(issued.plaintext, "reset_password", _NOW) is None
 
 
 async def test_count_issued_since(identity_db: IdentityDb) -> None:
@@ -249,10 +256,33 @@ async def test_count_issued_since(identity_db: IdentityDb) -> None:
                 now=_NOW + timedelta(minutes=minutes),
                 ttl=EMAIL_VERIFY_TTL,
             )
-        await repo.issue_email_token(
-            user_id=user.id, purpose="reset_password", now=_NOW, ttl=PASSWORD_RESET_TTL
-        )
+        await _reset_token(repo, user.id)
         since = _NOW + timedelta(minutes=30)
         assert await repo.count_issued_since(user.id, "verify_email", since) == 2
         assert await repo.count_issued_since(user.id, "verify_email", _NOW) == 3
         assert await repo.count_issued_since(user.id, "reset_password", since) == 0
+
+
+async def test_retire_email_tokens_only_unused_of_user_and_purpose(identity_db: IdentityDb) -> None:
+    user = await _user(identity_db.database)
+    other = await _user(identity_db.database)
+    later = _NOW + timedelta(minutes=5)
+    async with identity_db.database.global_session() as session:
+        repo = IdentityRepo(session)
+        used = await _reset_token(repo, user.id)
+        await repo.consume_email_token(used.plaintext, "reset_password", _NOW)
+        resets = [await _reset_token(repo, user.id) for _ in range(2)]
+        verify = await repo.issue_email_token(
+            user_id=user.id, purpose="verify_email", now=_NOW, ttl=EMAIL_VERIFY_TTL
+        )
+        foreign = await _reset_token(repo, other.id)
+        assert await repo.retire_email_tokens(user.id, "reset_password", later) == len(resets)
+        assert await repo.retire_email_tokens(user.id, "reset_password", later) == 0
+        for issued in resets:
+            assert await repo.peek_email_token(issued.plaintext, "reset_password", later) is None
+        assert await repo.peek_email_token(verify.plaintext, "verify_email", later) == user.id
+        assert await repo.peek_email_token(foreign.plaintext, "reset_password", later) == other.id
+        used_at = await session.scalar(
+            select(EmailToken.used_at).where(EmailToken.token_hash == sha256_hex(used.plaintext))
+        )
+    assert used_at == _NOW

@@ -12,7 +12,7 @@ from va_common.email.sender import (
     SmtpEmailSender,
 )
 from va_common.email.settings import EmailSettings
-from va_common.email.templates import TEMPLATES, verify_email
+from va_common.email.templates import TEMPLATES, password_reset, verify_email
 
 __all__ = [
     "SMTP_TIMEOUT_S",
@@ -25,6 +25,7 @@ __all__ = [
     "SmtpConfig",
     "SmtpEmailSender",
     "parse_smtp_url",
+    "password_reset",
     "to_mime",
     "verify_email",
 ]

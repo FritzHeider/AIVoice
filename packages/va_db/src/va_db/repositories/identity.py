@@ -58,6 +58,18 @@ def _active_session(token: str, now: datetime) -> tuple[ColumnElement[bool], ...
     return (Session.token_hash == sha256_hex(token), Session.revoked_at.is_(None), Session.expires_at > now)
 
 
+def _usable_email_token(
+    token: str, purpose: EmailTokenPurpose, now: datetime
+) -> tuple[ColumnElement[bool], ...]:
+    """Conditions matching the unused, unexpired ``purpose`` email token whose plaintext is ``token``."""
+    return (
+        EmailToken.token_hash == sha256_hex(token),
+        EmailToken.purpose == purpose,
+        EmailToken.used_at.is_(None),
+        EmailToken.expires_at > now,
+    )
+
+
 class IdentityRepo:
     """Data access for ``users``, ``sessions``, and ``email_tokens``."""
 
@@ -200,6 +212,18 @@ class IdentityRepo:
         await self.session.flush()
         return issued
 
+    async def peek_email_token(
+        self, token: str, purpose: EmailTokenPurpose, now: datetime
+    ) -> uuid.UUID | None:
+        """The user of a token :meth:`consume_email_token` would accept now, without using it up.
+
+        Lets a caller validate the rest of a request first, so a rejected request does not burn the link.
+        """
+        user_id: uuid.UUID | None = await self.session.scalar(
+            select(EmailToken.user_id).where(*_usable_email_token(token, purpose, now))
+        )
+        return user_id
+
     async def consume_email_token(
         self, token: str, purpose: EmailTokenPurpose, now: datetime
     ) -> uuid.UUID | None:
@@ -209,17 +233,22 @@ class IdentityRepo:
         """
         result = await self.session.execute(
             update(EmailToken)
-            .where(
-                EmailToken.token_hash == sha256_hex(token),
-                EmailToken.purpose == purpose,
-                EmailToken.used_at.is_(None),
-                EmailToken.expires_at > now,
-            )
+            .where(*_usable_email_token(token, purpose, now))
             .values(used_at=now)
             .returning(EmailToken.user_id)
         )
         user_id: uuid.UUID | None = result.scalar_one_or_none()
         return user_id
+
+    async def retire_email_tokens(self, user_id: uuid.UUID, purpose: EmailTokenPurpose, now: datetime) -> int:
+        """Mark every unused ``purpose`` token of the user used at ``now``; how many were retired."""
+        result = await self.session.execute(
+            update(EmailToken)
+            .where(EmailToken.user_id == user_id, EmailToken.purpose == purpose, EmailToken.used_at.is_(None))
+            .values(used_at=now)
+            .returning(EmailToken.id)
+        )
+        return len(result.scalars().all())
 
     async def count_issued_since(
         self, user_id: uuid.UUID, purpose: EmailTokenPurpose, since: datetime

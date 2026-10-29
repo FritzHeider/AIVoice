@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793267153-d5f5
+> va_api: routes added to an existing router from a second module (routers/auth_password.py on internal_auth_router) need an import-for-side-effect in va_api/main.py; shared test helper session_helpers.error_of(response) -> (status, code, field) - don't redefine _error per module (jscpd)
+<!-- tags: api, testing | created: 2026-10-29 -->
+
 ### mem-1793265656-71f0
 > va_api session integration fixtures (migrated_url module-scope, identity, container=SessionContainer(identity=...), client) live in apps/api/tests/conftest.py; modules only add extras (member). Copying them per module trips jscpd. FastAPI drops None values from OpenAPI examples; MFA_REQUIRED is HTTP 401
 <!-- tags: api, testing | created: 2026-10-29 -->
@@ -73,6 +77,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793267153-9b68
+> pip-audit on this uv workspace: uv export --no-hashes --no-emit-workspace --format requirements-txt > logs/req.txt && uvx pip-audit --strict --no-deps --disable-pip -r logs/req.txt (plain export includes -e workspace pkgs and pip install --dry-run fails)
+<!-- tags: tooling, audit | created: 2026-10-29 -->
 
 ### mem-1793262412-b2f5
 > ApiSettings includes CryptoSettings: settings tests with va_env=production must also pass kms_provider=aws + aws_kms_key_id, otherwise 'KMS_PROVIDER=local is refused' fires before the validator under test

@@ -298,6 +298,36 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > signup email does not count toward the 3. The api sends through `SmtpEmailSender` (`SMTP_URL`, `EMAIL_FROM`) except
 > under `VA_ENV=test`, where it uses `InMemoryEmailSender`.
 
+> Decision (2026-10-29): **password forgot / reset / change** (envelope, `x-public: "session-flow"`).
+> **Email change** is not offered in v1: specs/25 shows the profile email read-only and `email_tokens.purpose` has no
+> email-change purpose; support tooling may add one later with a new token purpose.
+> **forgot** body `{email (3-320, trimmed)}`, unknown fields `INVALID_INPUT`, foreign `Origin`/`Referer` rejected as
+> for login. Always **200** `{data:{accepted:true}}`. A `password_reset` email (link
+> `{DASHBOARD_BASE_URL}/reset-password/{token}`, the specs/25 route; 1 h single-use token) is sent after the response
+> only when the user exists, is `active`, and fewer than 3 `reset_password` tokens were issued to them in the last
+> hour (counted from `email_tokens`, no Redis key). Otherwise nothing is sent and `password_reset_suppressed` is
+> logged with `reason` `unknown_user` | `disabled` | `limit`, never the address. Users without a password (SSO-only)
+> may use it to set one. Delivery failures log `password_reset_email_failed` (template and error type only).
+> **reset** body `{token (1-256), password (1-1024)}`, same `Origin` rule, no session needed. A malformed, unknown,
+> used, expired, or other-purpose token, or one whose user is not `active`, is `TOKEN_EXPIRED` 400 "Reset link is
+> invalid or has expired." with `field: "token"`. The token is first checked read-only, then the §4.2 policy runs
+> (`PASSWORD_TOO_WEAK` field `password`; the link stays usable), then one transaction consumes the token (losing a
+> race is `TOKEN_EXPIRED`), sets the hash, marks the email verified (the link proves the address; the first
+> verification time is kept), retires the user's other unused reset tokens, and revokes **every** session of the
+> user. After the commit the `sess:` entries are deleted, the email's login failure counter is cleared, both cookies
+> are cleared, and the response is 200 `{data:{revoked_sessions:int}}`. No session is issued.
+> **change** body `{current_password (1-1024), new_password (1-1024)}`; session-authenticated (CSRF and `Origin`),
+> MFA-gated like logout-all. **Recent auth** means the session was created less than 10 minutes ago (sessions are
+> created only by login and signup; MFA verification refreshing recency is decided with MFA), else `REAUTH_REQUIRED`
+> 401 "Sign in again to change your password.". The login throttle applies (`AUTH_LOCKED` when the email or IP is
+> locked); a wrong current password (including users without a password) counts as a login failure and is
+> `INVALID_CREDENTIALS` 401 "Current password is incorrect." with `field: "current_password"`; success clears the
+> email's failure counter. The policy failure on the new password is `PASSWORD_TOO_WEAK` with
+> `field: "new_password"` (the body field). One transaction sets the hash, retires unused reset tokens, and revokes
+> the user's **other** sessions; the current session stays valid; 200 `{data:{revoked_sessions:int}}`.
+> The audit actions `auth.password_reset` and `auth.password_changed` (§13) are written by these endpoints once the
+> audit writer exists (P02-T11).
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,

@@ -210,14 +210,14 @@ class SessionManager:
         """Revoke one session; how many rows were revoked (0 or 1)."""
         async with self._database.global_session() as session:
             revoked = await IdentityRepo(session).revoke_session(active.session_id, self._clock.now())
-        await self._forget([active.token_hash])
+        await self.forget([active.token_hash])
         return int(revoked)
 
     async def revoke_all(self, user_id: uuid.UUID) -> int:
         """Revoke every session of the user; how many were revoked."""
         async with self._database.global_session() as session:
             hashes = await IdentityRepo(session).revoke_user_sessions(user_id, self._clock.now())
-        await self._forget(hashes)
+        await self.forget(hashes)
         return len(hashes)
 
     async def _load(self, token: str, now: datetime) -> ActiveSession | None:
@@ -244,7 +244,8 @@ class SessionManager:
             _log.warning("session_cache_invalid")
             return None
 
-    async def _forget(self, token_hashes: list[str]) -> None:
+    async def forget(self, token_hashes: list[str]) -> None:
+        """Drop the cache entries of sessions revoked in the caller's own transaction (after it commits)."""
         if not token_hashes:
             return
         try:

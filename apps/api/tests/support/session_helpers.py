@@ -45,6 +45,7 @@ __all__ = [
     "SESSION_PROBE_PATH",
     "Member",
     "SessionContainer",
+    "error_of",
     "link_token",
     "login",
     "make_member",
@@ -185,6 +186,12 @@ async def make_member(  # noqa: PLR0913 - keyword-only member attributes
     return Member(user=provisioned.owner, org=org)
 
 
+def error_of(response: httpx.Response) -> tuple[int, str, str | None]:
+    """The status, error code, and field of the response's first envelope error."""
+    item = response.json()["errors"][0]
+    return response.status_code, item["error"], item.get("field")
+
+
 def write_headers(client: httpx.AsyncClient, *, origin: str | None = DASHBOARD_URL) -> dict[str, str]:
     """``X-CSRF-Token`` from the client's ``va_csrf`` cookie plus the dashboard ``Origin``."""
     headers = {"X-CSRF-Token": client.cookies.get(CSRF_COOKIE) or ""}
@@ -220,13 +227,14 @@ async def signup(  # noqa: PLR0913 - keyword-only signup fields
     )
 
 
-_LINK = re.compile(re.escape(DASHBOARD_URL) + r"/verify-email/([A-Za-z0-9_-]+)")
+_PAGES = {"verify_email": "verify-email", "password_reset": "reset-password"}
 
 
-def link_token(sender: InMemoryEmailSender, email: str) -> str:
-    """The token of the newest verification link sent to ``email``."""
-    messages = [message for message in sender.to(email) if message.template == "verify_email"]
-    assert messages, f"no verification email to {email}"
-    match = _LINK.search(messages[-1].text)
+def link_token(sender: InMemoryEmailSender, email: str, template: str = "verify_email") -> str:
+    """The token of the newest ``template`` link (verification by default) sent to ``email``."""
+    messages = [message for message in sender.to(email) if message.template == template]
+    assert messages, f"no {template} email to {email}"
+    link = re.compile(re.escape(f"{DASHBOARD_URL}/{_PAGES[template]}/") + r"([A-Za-z0-9_-]+)")
+    match = link.search(messages[-1].text)
     assert match is not None, messages[-1].text
     return match.group(1)

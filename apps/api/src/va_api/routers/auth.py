@@ -3,6 +3,7 @@
 Envelope format, excluded from the public OpenAPI document and emitted to ``openapi/internal.json`` (specs/26
 §1), and marked ``x-public: session-flow``: they authenticate with the session cookie themselves instead of
 ``require_scope``. Signup and resend send the verification email after the response (a background task).
+The password routes live in :mod:`va_api.routers.auth_password` and attach to the same router.
 """
 
 from __future__ import annotations
@@ -18,9 +19,9 @@ from va_api.auth.cookies import (
     set_csrf_cookie,
     set_session_cookie,
 )
-from va_api.auth.csrf import check_origin
 from va_api.auth.session_auth import (
     active_membership,
+    check_dashboard_origin,
     client_ip,
     clock_of,
     cookie_policy_of,
@@ -45,8 +46,8 @@ from va_api.routers.auth_schemas import (
     EmptyBody,
     LoginRequest,
     LoginResult,
-    LogoutResult,
     ResendResult,
+    RevokedSessionsResult,
     SessionInfo,
     SessionMembership,
     SessionUser,
@@ -63,7 +64,7 @@ from va_db.models import User
 from va_db.provisioning import ProvisionedOrg
 from va_db.repositories import EMAIL_VERIFY_TTL, IdentityRepo, NewUser
 
-__all__ = ["INVALID_CREDENTIALS_MESSAGE", "PUBLIC_MARKER", "internal_auth_router"]
+__all__ = ["INVALID_CREDENTIALS_MESSAGE", "PUBLIC_MARKER", "CurrentSession", "internal_auth_router"]
 
 INVALID_CREDENTIALS_MESSAGE: Final = "Invalid email or password."
 PUBLIC_MARKER: Final[dict[str, Any]] = {"x-public": "session-flow"}
@@ -94,16 +95,6 @@ async def _authenticate(request: Request, body: LoginRequest, ip: str | None) ->
         async with database.global_session() as session:
             await IdentityRepo(session).set_password_hash(user.id, new_hash)
     return user
-
-
-def _check_dashboard_origin(request: Request) -> None:
-    """Reject a foreign ``Origin``/``Referer``; requests without either (CLI, tests) pass."""
-    check_origin(
-        request.headers.get("origin"),
-        request.headers.get("referer"),
-        settings_of(request).dashboard_base_url,
-        required=False,
-    )
 
 
 async def _revoke_presented(request: Request) -> None:
@@ -191,7 +182,7 @@ async def signup(
     body: SignupRequest, request: Request, response: Response, background: BackgroundTasks
 ) -> DataResponse[SignupResult]:
     """Create the owner user (unverified), their org, and a session; email the verification link."""
-    _check_dashboard_origin(request)
+    check_dashboard_origin(request)
     await check_password_policy_async(body.password, email=body.email)
     password_hash = await password_hasher_of(request).hash_async(body.password)
     token, active, result, email_token = await _create_account(
@@ -207,7 +198,7 @@ async def signup(
 @internal_auth_router.post("/verify-email", operation_id="auth_verify_email", openapi_extra=PUBLIC_MARKER)
 async def verify_email(body: VerifyEmailRequest, request: Request) -> DataResponse[VerifyEmailResult]:
     """Consume a verification token (no session needed) and mark the user's email verified."""
-    _check_dashboard_origin(request)
+    check_dashboard_origin(request)
     if not looks_like_token(body.token):
         raise AppError("TOKEN_EXPIRED", TOKEN_INVALID_MESSAGE, field="token")
     now = clock_of(request).now()
@@ -250,7 +241,7 @@ async def resend_verification(
 @internal_auth_router.post("/login", operation_id="auth_login", openapi_extra=PUBLIC_MARKER)
 async def login(body: LoginRequest, request: Request, response: Response) -> DataResponse[LoginResult]:
     """Password login: throttled per email and IP, rejects foreign origins, issues a new session."""
-    _check_dashboard_origin(request)
+    check_dashboard_origin(request)
     ip = client_ip(request)
     throttle = login_throttle_of(request)
     await throttle.check(body.email, ip)
@@ -262,23 +253,23 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Dat
 @internal_auth_router.post("/logout", operation_id="auth_logout", openapi_extra=PUBLIC_MARKER)
 async def logout(
     request: Request, response: Response, active: CurrentSession, _body: OptionalEmptyBody = None
-) -> DataResponse[LogoutResult]:
+) -> DataResponse[RevokedSessionsResult]:
     """Revoke the current session and clear the cookies."""
     revoked = await sessions_of(request).revoke(active)
     clear_auth_cookies(response, cookie_policy_of(request))
-    return DataResponse(data=LogoutResult(revoked_sessions=revoked))
+    return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
 
 
 @internal_auth_router.post("/logout-all", operation_id="auth_logout_all", openapi_extra=PUBLIC_MARKER)
 async def logout_all(
     request: Request, response: Response, active: CurrentSession, _body: OptionalEmptyBody = None
-) -> DataResponse[LogoutResult]:
+) -> DataResponse[RevokedSessionsResult]:
     """Revoke every session of the user (MFA-gated like any other endpoint) and clear the cookies."""
     active, record = await active_membership(request, active)
     enforce_mfa(record, active)
     revoked = await sessions_of(request).revoke_all(active.user_id)
     clear_auth_cookies(response, cookie_policy_of(request))
-    return DataResponse(data=LogoutResult(revoked_sessions=revoked))
+    return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
 
 
 @internal_auth_router.get("/session", operation_id="auth_session_get", openapi_extra=PUBLIC_MARKER)

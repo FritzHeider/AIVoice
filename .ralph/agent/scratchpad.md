@@ -1528,3 +1528,177 @@ decision: CONFLICT field email, 24 h verify token, single-use consume), §4.2 (p
 check_password_policy_async), specs/26 §1 internal document decision, specs/03 §11 resend key row. Signup txn keeps
 everything in one tenant_session; cache write + presented-session revoke after commit; email failures logged without
 address; resend MFA-gated, counter before token issue, Redis down allows. P02-T04 parent ticked (T04a–d all done).
+
+## 2026-10-29 Planner: P02-T04d approved → next P02-T05
+P02-T04 parent ticked. First unticked task with ticked deps: P02-T05 Password reset and email change (depends on T04).
+
+## Plan P02-T05 — Password forgot / reset / change (specs/04 §4.1 rows `password/forgot|reset|change`, §4.2, §13; specs/31 TOKEN_EXPIRED, REAUTH_REQUIRED; specs/25 `/forgot-password`, `/reset-password/[token]`)
+
+### Facts found while planning
+- specs/04 §4.1 has no email-change endpoint, specs/03 `email_tokens.purpose` allows only `verify_email`/`reset_password`,
+  and specs/25 §21 profile lists "email (verified)" as display-only + "password change". The plan title's "email
+  change" is therefore covered by `POST /internal/auth/password/change` (the only "change" row), and changing a user's
+  email address is not a v1 self-service feature. Record this (below) instead of inventing a migration.
+- `IdentityRepo` already has `issue_email_token`, `consume_email_token` (single conditional UPDATE), `count_issued_since`,
+  `set_password_hash`, `mark_email_verified` (first wins), `revoke_user_sessions(user_id, now, except_session_id=)` →
+  token hashes; `PASSWORD_RESET_TTL` (1 h) exists in va_db.repositories.identity (check it is exported in
+  `va_db.repositories.__init__`; add if not).
+- `SessionManager._forget(hashes)` is private; reset/change revoke inside their own transaction and need it public.
+- Pool size 1 per role: never open `global_session` inside another session; `sessions_of(...).revoke_all` opens its
+  own, so reset/change use `IdentityRepo.revoke_user_sessions` in their transaction + `SessionManager.forget` after.
+- `routers/auth.py` is 310 lines → put the three routes in a new module `routers/auth_password.py` registering on the
+  same `internal_auth_router` (import it in `main.py` for side effects? No: better, make it explicit — see Files).
+
+### Decisions to record (specs/04 §4.1, same commit, `> Decision (2026-10-29):`)
+1. **Email change**: not offered in v1. Users cannot change their own address (specs/25 shows it read-only); the
+   plan's "email change" maps to `password/change`. Support/admin tooling may change it later with a new token purpose.
+2. **forgot** body `{email (3-320, trimmed)}`, unknown fields INVALID_INPUT; foreign Origin/Referer rejected as login
+   (neither header passes). Always **200** `{data:{accepted:true}}` whatever the outcome. A reset email (template
+   `password_reset`, link `{DASHBOARD_BASE_URL}/reset-password/{token}`, 1 h token) is queued as a background task only
+   when the user exists, is `active`, and has had fewer than 3 `reset_password` tokens issued in the last hour
+   (`count_issued_since(user, "reset_password", now - 1 h)`, DB-backed, no Redis key). Otherwise nothing is sent and
+   `password_reset_suppressed` is logged with `reason` (`unknown_user` | `disabled` | `limit`) and never the address.
+   Users without a password (SSO-only) may use it to set one. Delivery failures log `password_reset_email_failed`
+   (template + error type only), as verification does.
+3. **reset** body `{token (1-256), password (1-1024)}`, same Origin rule, no session needed. A malformed / unknown / used
+   / expired / other-purpose token, or one whose user is not `active`, is `TOKEN_EXPIRED` 400 "Reset link is invalid or
+   has expired." `field: "token"`. Order: `looks_like_token` → `peek_email_token` (read-only, so a policy failure does
+   not burn the link) → user active → password policy with the user's email (`PASSWORD_TOO_WEAK` field `password`) →
+   argon2 hash → ONE `global_session` txn: `consume_email_token` (None → TOKEN_EXPIRED, race loser), `set_password_hash`,
+   `mark_email_verified(now)` (the link proves the address), `retire_email_tokens(user, "reset_password", now)` (other
+   unused reset links die), `revoke_user_sessions(user, now)` (every session, including the caller's). After commit:
+   `sessions.forget(hashes)`, `login_throttle.clear(user.email)`, clear both cookies (`clear_auth_cookies`), 200
+   `{data:{revoked_sessions:int}}`. No session is issued (the user logs in with the new password).
+4. **change** body `{current_password (1-1024), new_password (1-1024)}`. Session-authenticated (`current_session`:
+   CSRF + Origin), MFA-gated (`active_membership` + `enforce_mfa`). **Recent auth** = `now - session.created_at <
+   10 min` (a session is created only by login/signup; P02-T06 decides how MFA verification refreshes recency) else
+   `REAUTH_REQUIRED` 401 "Sign in again to change your password." Then `login_throttle.check(user.email, ip)`
+   (AUTH_LOCKED applies) → one `verify_async(user.password_hash, current_password)` (dummy hash for SSO-only) → wrong:
+   `record_failure(email, ip)` + `INVALID_CREDENTIALS` 401 "Current password is incorrect." `field: "current_password"`
+   → policy on `new_password` with the user's email (field `password` per §4.2 helper — keep the helper's field; note it)
+   → hash → one `global_session` txn: `set_password_hash` + `revoke_user_sessions(user, now, except_session_id=current)`
+   + `retire_email_tokens(user, "reset_password", now)` → after commit `forget(hashes)`; 200
+   `{data:{revoked_sessions:int}}` (other sessions only; current cookie stays valid).
+5. Audit actions `auth.password_reset` / `auth.password_changed` (§13) are written when the audit writer lands
+   (P02-T11); the decision says so explicitly so T11 wires them.
+
+### Files
+**packages/va_db/src/va_db/repositories/identity.py** — add
+  `async def peek_email_token(self, token: str, purpose: EmailTokenPurpose, now: datetime) -> uuid.UUID | None`
+  (SELECT user_id with the same predicate as consume, no update) and
+  `async def retire_email_tokens(self, user_id: uuid.UUID, purpose: EmailTokenPurpose, now: datetime) -> int`
+  (UPDATE unused rows of that user/purpose SET used_at=now; rowcount). Share the predicate between peek/consume via a
+  private `_usable_token(token, purpose, now) -> tuple[ColumnElement[bool], ...]` (jscpd). Export `PASSWORD_RESET_TTL`
+  from `va_db.repositories` if missing.
+**packages/va_common/src/va_common/email/templates.py** — `PASSWORD_RESET_MINUTES: Final = 60`, `password_reset(*,
+  name, link, to) -> EmailMessage` (template `"password_reset"`, subject "Reset your VoiceAgents password", text + HTML
+  with the same layout as verify_email: "Someone asked to reset the password … expires in 60 minutes … if it wasn't
+  you, ignore this email; your password stays the same."). Factor the shared HTML shell into a private
+  `_html_shell(greeting, paragraph, button_label, link, footer)` (or a `Template` with $body slots) so the two
+  templates don't trip jscpd; `TEMPLATES` gains `"password_reset"`; export from `va_common.email`.
+**apps/api/src/va_api/auth/sessions.py** — rename `_forget` → public `forget(token_hashes)` (update callers).
+**apps/api/src/va_api/auth/password_reset.py** (new) — `RESET_HOURLY_LIMIT: Final = 3`, `RESET_LIMIT_WINDOW: Final =
+  timedelta(hours=1)`, `REAUTH_WINDOW: Final = timedelta(minutes=10)`, `RESET_TOKEN_INVALID_MESSAGE`,
+  `REAUTH_MESSAGE`, `CURRENT_PASSWORD_MESSAGE`, `reset_link(dashboard_base_url, token) -> str`,
+  `async def send_password_reset(sender, *, to, name, token, dashboard_base_url) -> None`, `def require_recent_auth(
+  active: ActiveSession, now: datetime) -> None`. Generalise verification's sender: move the try/log body into one
+  helper (e.g. `va_api.auth.verification.deliver(sender, message, event: str)`) and have both senders call it (jscpd);
+  likewise `verify_link`/`reset_link` via a shared `dashboard_link(base, path, token)`.
+**apps/api/src/va_api/routers/auth_schemas.py** — `ForgotPasswordRequest{email: EmailField}`, `ForgotPasswordResult
+  {accepted: bool}`, `ResetPasswordRequest{token, password: PasswordField}`, `ChangePasswordRequest{current_password:
+  PasswordField, new_password: PasswordField}`; responses reuse `LogoutResult` (`{revoked_sessions}`) — rename it to
+  `RevokedSessionsResult` only if the OpenAPI component name stays sensible; otherwise keep `LogoutResult`. Examples
+  via json_schema_extra on every new model (internal.json requires examples). Token field type shared with
+  VerifyEmailRequest (`EmailLinkToken` Annotated alias).
+**apps/api/src/va_api/routers/auth_password.py** (new) — routes on `internal_auth_router`:
+  `POST /password/forgot` (`auth_password_forgot`), `POST /password/reset` (`auth_password_reset`),
+  `POST /password/change` (`auth_password_change`), all `openapi_extra=PUBLIC_MARKER`. Reuse `_check_dashboard_origin`
+  by making it public in auth.py (`check_dashboard_origin`) or moving it to `va_api/auth/csrf.py`. Keep each handler
+  radon ≤ B: split reset into `_reset_target(request, token) -> User` and `_apply_reset(request, token, user, hash)
+  -> list[str]`; change into `_verify_current(...)`.
+  Registration: `main.py` imports `va_api.routers.auth_password` so the routes attach before `include_router` (module
+  import order matters: auth_password imports internal_auth_router from auth). Prefer an explicit
+  `import va_api.routers.auth_password  # noqa: F401  (registers routes on internal_auth_router)` in
+  `va_api/routers/auth.py`'s bottom? No — circular. Put it in main.py next to the auth import, with the reason comment.
+  Test `test_internal_routes_registered` asserts the three paths are in `app.state.internal_openapi()`.
+**openapi/internal.json** — regenerate with `make openapi`; openapi.json unchanged.
+**specs/04** §4.1 decision (above). **specs/31** no new codes. **AGENTS.md** — reset/change notes (forgot always 200,
+  recency from session created_at, auth_password module registration import).
+
+### Tests
+apps/api/tests/test_password_integration.py (conftest session fixtures: migrated Postgres, fakeredis, FrozenClock,
+https client, `session_helpers.signup/login/link_token`; generalise `link_token(sender, email, template=...)` if it
+assumes verify):
+- `test_forgot_then_reset_flow`: forgot → 200 accepted; one `password_reset` email whose link starts with
+  DASHBOARD_URL + `/reset-password/`; reset with new password → 200 revoked_sessions ≥ 1, cookies cleared; old session
+  cookie → 401 on `/session`; login with old password 401, new password 200; `email_verified_at` set.
+- `test_forgot_unknown_and_disabled_users`: 200 accepted, no email, log `password_reset_suppressed` reason, no address
+  in logs.
+- `test_forgot_hourly_limit`: 3 emails, 4th request 200 but no email (reason limit); clock +1 h → sent again.
+- `test_reset_token_reuse_rejected`: second use → 400 TOKEN_EXPIRED field token; expired (clock +1 h +1 s) → expired;
+  verify_email-purpose token rejected; garbage → expired.
+- `test_reset_weak_password_keeps_token`: PASSWORD_TOO_WEAK (contains local part / short) then the same token works.
+- `test_reset_retires_other_links`: two forgot emails; using the second kills the first.
+- `test_reset_revokes_all_sessions`: two logins (two clients) → both invalid after reset; `sess:` keys gone.
+- `test_reset_clears_login_lock`: lock the email with failures → reset → login succeeds.
+- `test_change_password`: fresh login → change → 200 revoked_sessions == other sessions count; current session still
+  works; other client 401; login with new password ok.
+- `test_change_requires_recent_auth`: clock + 10 min + 1 s → 401 REAUTH_REQUIRED (and unchanged password).
+- `test_change_wrong_current_password`: 401 INVALID_CREDENTIALS field current_password, counts toward the email lock
+  (after limit → 429 AUTH_LOCKED).
+- `test_change_requires_session_and_csrf` (no cookie 401, no CSRF 403), `test_change_mfa_gated` (org mfa_required →
+  MFA_REQUIRED), `test_change_weak_new_password` (400 PASSWORD_TOO_WEAK).
+- `test_password_routes_foreign_origin` (forgot/reset 403 with foreign Origin; no Origin ok).
+packages/va_db tests (identity repo module): `peek_email_token` returns user without consuming, respects
+  purpose/expiry/used; `retire_email_tokens` marks only unused rows of that user+purpose and returns the count.
+packages/va_common tests: `password_reset` template renders text+HTML, escapes name, link present, template name, in
+  TEMPLATES; verify_email output unchanged (snapshot equality against prior strings if a test exists).
+apps/api/tests/test_password_reset.py (unit): reset_link joining, `require_recent_auth` boundary (exactly 10 min →
+  reject? choose `>=` 10 min rejects; test both sides), send_password_reset logs on EmailDeliveryError.
+apps/api/tests/test_openapi.py: internal document lists the three new paths with examples (existing generic checks
+  should cover; add paths to the expected set).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` then `uv run python scripts/check_openapi_drift.py`;
+`uv run python scripts/check_spec_refs.py` (or the make target); `npx jscpd@4` (0 clones); `uvx radon cc -n C
+apps/api/src packages/va_db/src packages/va_common/src` (none); `uvx pip-audit --strict`; `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done payload MUST use the keys: tests, lint, typecheck, audit,
+coverage, complexity, duplication, specs.
+
+### Risks
+- Route registration via a second module: if main.py doesn't import auth_password the routes silently vanish — test
+  asserts the paths. Check the OpenAPI drift script loads the same app (it does via main).
+- Pool size 1: reset txn must not call `sessions_of(...).revoke_all` or `throttle` inside the `global_session` block.
+- `peek` then `consume` race: consume returns None for the loser → TOKEN_EXPIRED; hash computed already (fine).
+- Forgot timing: the existing-user path does an extra DB write; acceptable (email itself is background). Do not
+  return different status/body.
+- Template refactor must not change verify_email output (existing tests compare it).
+- policy helper raises with `field: "password"`; for change the field name stays `password` (document in decision) —
+  or pass a field override if `check_password_policy_async` supports it; do not fork the policy.
+
+## 2026-10-29 Builder: P02-T05 build notes
+Implemented per plan. Files: va_db identity repo (`peek_email_token`, `retire_email_tokens`, shared
+`_usable_email_token` predicate); va_common email templates refactored to one layout (`_Copy.render`), new
+`password_reset` template (verify_email output verified byte-identical against a pre-change snapshot); va_api
+`auth/password_reset.py` (limits, messages, `reset_link`, `send_password_reset`, `require_recent_auth`),
+`auth/verification.py` (`dashboard_link`, `deliver(..., failure_event=)`), `SessionManager.forget` public,
+`session_auth.check_dashboard_origin` (moved from routers/auth.py), `routers/auth_password.py` (3 routes, imported in
+main.py for registration), `auth_schemas` (`EmailLinkToken`, Forgot/Reset/Change requests, `ForgotPasswordResult`,
+`LogoutResult` renamed `RevokedSessionsResult`), openapi/internal.json regenerated, specs/04 §4.1 decision, AGENTS.md.
+Deviation from plan (recorded in the decision): change's policy failure reports `field: "new_password"` (the body
+field) by re-raising the policy AppError, instead of the helper's `password`. Successful change also clears the
+email's login failure counter (as login does). Test helper `session_helpers.error_of` replaces per-module `_error`
+(jscpd), `link_token(..., template="password_reset")`.
+Gates: make fmt 0; make lint 0; make typecheck 0; make placeholders 0 (0 findings); make test 0 (2315 passed, 99.39 %);
+check_openapi_drift both current; check_spec_refs 0; jscpd@4 0 clones; radon -n C none (avg A 1.91);
+pip-audit --strict (uv export --no-emit-workspace, --no-deps --disable-pip) no known vulnerabilities; corepack pnpm
+audit clean; pre-commit gitleaks passed. Coverage report shows partial lines in routers/auth_password.py (87 %) that
+the integration tests do execute (same tracing artifact as routers/auth.py at 91 %).
+
+## Review P02-T05 (2026-10-29): approved
+Re-ran: make lint/typecheck/placeholders 0; make test 0 (2315 passed, 99.39 %); check_openapi_drift both current;
+check_spec_refs 0; radon -n C none; jscpd@4 0 clones. Diff checked against specs/04 §4.1 rows (forgot always 200,
+1 h token; reset revokes all sessions; change < 10 min recent auth) and specs/31 statuses (TOKEN_EXPIRED 400,
+REAUTH_REQUIRED 401, INVALID_CREDENTIALS 401, PASSWORD_TOO_WEAK 400). Addresses never logged; tokens hash-only;
+session revocation in the write txn with cache forget after commit (pool size 1 respected). Tests cover reuse, expiry,
+purpose, race-free consume, retire, lock clearing, CSRF/MFA/origin. No findings.
