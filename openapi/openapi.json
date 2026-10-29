@@ -3891,6 +3891,7 @@
         ],
         "x-audit-exempt": "no org is chosen yet; the request lives only in Redis",
         "x-envelope": "envelope",
+        "x-public": "poll-secret",
         "x-scope": "public"
       }
     },
@@ -3962,6 +3963,7 @@
           "API Keys"
         ],
         "x-envelope": "envelope",
+        "x-public": "poll-secret",
         "x-scope": "public"
       }
     },
@@ -4469,6 +4471,7 @@
           "Health"
         ],
         "x-envelope": "legacy",
+        "x-public": "health",
         "x-scope": "public"
       }
     },

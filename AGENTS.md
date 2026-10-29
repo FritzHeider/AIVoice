@@ -36,6 +36,11 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 - Public ID prefixes: tools `TL-`, knowledge bases `KB-`, prompts `PT-` (`va_common.ids`).
 - Money in micro-dollars (`int`). Time via injectable `va_common.time.Clock`.
 - Plan ticks: `- [x] P05-T03 <title> — <evidence>`; commits: Conventional Commits + `Task: P05-T03` footer.
+- Cross-tenant suite (`apps/api/tests/test_cross_tenant_routes.py`, specs/04 §14): every route is probed unless it
+  carries `openapi_extra={"x-public": "<reason>"}` (also required on `x-scope: public` routes). A new path parameter
+  needs a factory in `apps/api/tests/support/cross_tenant_factories.py`; request bodies come from the body model's
+  first `examples` entry or `REGISTRY.register_request(op, json=..., params=...)`; required query params need a
+  registered request. A non-2xx owner control is declared with `REGISTRY.register_owner_status(op, status)`.
 
 ## Ports (local)
 
@@ -635,3 +640,6 @@ Grafana 3001
   stored; the owner password is printed only on first creation or with `ARGS=--reset-password`. Credit is granted once
   (`va_db.repositories.grant_credits`, idempotency key `seed:dev-credits`). The seed refuses any `VA_ENV` other than
   local/test. Manual smoke: `make seed` then `curl -H "Authorization: <test key>" localhost:8000/v1/me`.
+- 2026-10-29 (P02-T15): `tests/support/cross_tenant.app_routes(app)` is the shared route enumerator (test_audit_markers
+  uses it); `session_app(container, extra_routers=(...))` mounts test-only routers. The suite clears `rl:*` before each
+  call instead of advancing the clock. FastAPI 0.13x has no `get_flat_dependant`; walk `dependant.dependencies`.

@@ -11,7 +11,8 @@ from collections.abc import Iterable, Mapping
 from typing import Final
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from cross_tenant import app_routes
+from fastapi import APIRouter
 from fastapi.routing import APIRoute
 
 from va_api.audit import AUDIT_EXEMPT_KEY, AUDIT_KEY, audit_exempt, audited
@@ -85,10 +86,6 @@ def marker_problems(routes: Iterable[APIRoute]) -> list[str]:
         if reason is not None and (not isinstance(reason, str) or not reason.strip()):
             problems.append(f"{name}: {AUDIT_EXEMPT_KEY} needs a reason")
     return problems
-
-
-def app_routes(app: FastAPI) -> list[APIRoute]:
-    return [route for router in app.state.routers for route in router.routes if isinstance(route, APIRoute)]
 
 
 @pytest.fixture(scope="module")

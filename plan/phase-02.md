@@ -192,7 +192,7 @@
   - Deliverables: idempotent seeding of a dev org (build plan, $50 credits), owner user (`dev@voiceagents.local` / generated password printed once), live+test API keys printed, default org settings
   - Acceptance: running twice does not duplicate; output parsable (JSON with `--json`).
 
-- [ ] P02-T15 Cross-tenant route fuzz suite
+- [x] P02-T15 Cross-tenant route fuzz suite — auto-enumerated routes, x-public opt-out only, foreign-id/owner-control/foreign-org-header/list-leak checks for API key and session, leaky-router negative test; make check green (3433 passed, 97.72%), jscpd 0, spec refs 0
   - Spec refs: specs/00-overview.md (Non-negotiable rule 7); specs/04-auth-tenancy-rbac.md (tenant isolation tests)
   - Depends on: P02-T09
   - Deliverables: `apps/api/tests/test_cross_tenant_routes.py` enumerating routes, creating resources as org A via registered factories, calling every route with org B credentials, asserting 404/403; registry API `register_resource_factory(path_param, factory)` for later phases

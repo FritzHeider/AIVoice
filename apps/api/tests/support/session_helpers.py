@@ -19,7 +19,7 @@ import pytest
 from api_helpers import make_settings
 from auth_helpers import AuthContainer
 from docker_probe import docker_available
-from fastapi import Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
 from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
@@ -228,8 +228,11 @@ async def probe_write(request: Request) -> dict[str, Any]:
     return _echo(request.state.ctx)
 
 
-def session_app(container: SessionContainer, **settings_overrides: Any) -> FastAPI:
-    """The production app plus the probe router; ``VA_ENV=test`` (Secure cookies) unless overridden."""
+def session_app(
+    container: SessionContainer, *, extra_routers: tuple[APIRouter, ...] = (), **settings_overrides: Any
+) -> FastAPI:
+    """The production app plus the probe router and ``extra_routers``; ``VA_ENV=test`` (Secure cookies)
+    unless overridden."""
     from va_api.main import ROUTERS, create_app  # noqa: PLC0415 - mirrors auth_helpers.auth_app
 
     overrides = {"va_env": "test", "dashboard_base_url": DASHBOARD_URL, **settings_overrides}
@@ -237,7 +240,7 @@ def session_app(container: SessionContainer, **settings_overrides: Any) -> FastA
         make_settings(**overrides),
         container_factory=container,
         init_observability=False,
-        routers=(*ROUTERS, _probe),
+        routers=(*ROUTERS, _probe, *extra_routers),
     )
 
 

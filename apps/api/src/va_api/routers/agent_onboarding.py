@@ -58,7 +58,7 @@ __all__ = [
 POLL_SECRET_HEADER: Final = "X-Poll-Secret"  # noqa: S105 - a header name
 POLL_SECRET_REQUIRED_MESSAGE: Final = "X-Poll-Secret header required."  # noqa: S105 - error text
 _PREFIX: Final = "/v1/agent-onboarding/keys"
-_PUBLIC: Final = {"x-scope": "public"}
+_PUBLIC: Final = {"x-scope": "public", "x-public": "poll-secret"}
 _CREATE_EXTRA: Final = {**_PUBLIC, **audit_exempt("no org is chosen yet; the request lives only in Redis")}
 
 agent_onboarding_router = envelope_router(prefix=_PREFIX, tags=["API Keys"])

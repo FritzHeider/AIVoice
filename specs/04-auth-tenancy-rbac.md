@@ -137,6 +137,13 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
   `POST /v1/agent-onboarding/*`, `GET /v1/agent-onboarding/keys/{request_id}` (poll secret instead of a key),
   `/v1/billing/stripe/webhook`, `/v1/widget/public/*` (widget visitor auth).
 
+> Decision (2026-10-29): a public route says so with `openapi_extra["x-public"] = "<reason>"` (a non-empty string);
+> that marker is the only way out of the cross-tenant route suite (§14), and every `x-scope: public` route carries it
+> too (test-enforced). Values in use: `session-flow` (`/internal/auth/*`), `health` (`GET /v1/health`), `probe`
+> (`/healthz`, `/readyz`, `/metrics`), `poll-secret` (`POST /v1/agent-onboarding/keys`,
+> `GET /v1/agent-onboarding/keys/{request_id}`). The Stripe webhook and the widget's public routes and `widget.js`
+> get their own values when they are added.
+
 ## 3. RBAC
 
 ### 3.1 Roles
@@ -1365,6 +1372,31 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
 - Idempotency: replay, in-progress, reuse with different body, 5xx not stored.
 - Agent onboarding: full approve/deny/expire flows, poll secret required, single retrieval.
 - Audit redaction.
+
+> Decision (2026-10-29): **Cross-tenant route suite (P02-T15).** `apps/api/tests/test_cross_tenant_routes.py`
+> enumerates every route of the app's routers (`app.state.routers`), so later routers are covered without editing
+> it; only routes with `x-public` (§2.4) are skipped. Org A is an owner with a `*` key; org B is a second owner with
+> its own `*` key and a signed-in dashboard session, and every check runs for B as `api_key` and as `session`
+> (writes send the CSRF token and the dashboard `Origin`). Checks per tenant route:
+> 1. **Foreign id** (route with path parameters): fresh A resources fill the path (factories run left to right,
+>    later ones see the earlier ids); B must get `404 NOT_FOUND` or `403 FORBIDDEN` (not a CSRF/Origin refusal) and
+>    the body must not contain any A marker other than the ids it was asked for. Then the **owner control**: A's
+>    key calls the same route with the same ids and must get a 2xx (or the status registered for the operation),
+>    proving the ids were real and B's calls changed nothing.
+> 2. **Foreign org header** (every tenant route): B with `X-VA-Org-Id: <A's org id>` gets `403 FORBIDDEN`
+>    "Organization is not a sub-account of the caller."
+> 3. **List leak** (GET routes without path parameters): B's response contains no A marker. Markers are A's org
+>    id, owner id and email, key prefix, and the ids of a world of A resources (one per distinct factory chain)
+>    built before the checks.
+>
+> Parameterless writes act on the caller's own org, so there is no foreign id to address; they are covered by
+> check 2. Path parameters are filled by factories registered per parameter name (optionally per path prefix,
+> the longest prefix wins) in `apps/api/tests/support/cross_tenant_factories.py`; request bodies are the body
+> model's first JSON-schema example unless a request is registered for the operation. A path parameter without a
+> factory, a required body without an example, or a required query parameter without a registered request is
+> reported as a failure, so a new router cannot slip through unprobed. Rate-limit buckets are cleared before every
+> call. A negative test mounts a router that reads keys through the system session and asserts the suite reports
+> it. This suite is the "every resource router" tenant-isolation test above; the RLS raw-SQL test is separate.
 
 ## 15. Acceptance criteria
 

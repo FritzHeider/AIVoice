@@ -4975,3 +4975,169 @@ stack cannot be started, say so explicitly instead of claiming it). build.done P
   stderr logging, secrets hidden from repr.
 - Non-blocking notes: text output says "previous dev-seed keys were revoked" even on a first run; DB connection errors in
   main surface as a traceback (still exit 1).
+
+## 2026-10-29 Planner: P02-T14 approved → next P02-T15 (last unticked task; deps P02-T09 ticked)
+
+## Plan P02-T15 — Cross-tenant route suite (specs/00 rule 7; specs/04 §14 tenant isolation, §2.4 public allowlist, §8.3 X-VA-Org-Id decision)
+
+### Facts found while planning
+- Routes are enumerated from `app.state.routers` (see test_audit_markers.app_routes). Today's non-public routes with path
+  params: `{user_id}` (PATCH/DELETE /v1/org/members/{user_id}), `{invitation_id}` (DELETE
+  /v1/org/members/invitations/{invitation_id}), `{org_id}` (GET /v1/orgs/{org_id}, POST …/suspend, …/reactivate),
+  `{key_id}` (PATCH /v1/api_keys/{key_id}, POST …/revoke, …/roll). All raise `NOT_FOUND` for a foreign id.
+- Opt-out markers today: `/internal/auth/*` carry `x-public: session-flow`; `GET /v1/health` and both
+  `/v1/agent-onboarding/keys*` routes only carry `x-scope: public`; `/healthz`, `/readyz`, `/metrics` (probe_router,
+  `include_in_schema=False`) carry nothing. The phase constraint says opt-out is ONLY via `x-public`, so these get one.
+- `X-VA-Org-Id` (specs/04 §8.3 decision) applies to API keys AND session principals; another tenant's org id →
+  `FORBIDDEN` "Organization is not a sub-account of the caller." before scopes/body handling.
+- Request body models carry `json_schema_extra={"examples": [...]}` (ApiKeyPatch, ApiKeyRoll, MemberRolePatch,
+  OrgPatch…), so a valid body can be derived automatically from `route.body_field` → model JSON schema `examples[0]`.
+- Rate limiting is per principal (`rl:key:{id}:*` / `rl:user:{id}:*`, burst 2×rate) on the FrozenClock: the suite
+  will make >100 calls with one B principal, so it deletes `rl:*` keys from `container.redis` before each call
+  (helper `reset_rate_limits(container)`), instead of advancing the clock.
+- Fixtures: conftest `identity`, `container` (SessionContainer), `client`; helpers `signed_in`, `make_member`,
+  `add_member`, `store_api_key(container, org_id)`, `sub_account(client, **headers)`, `invite(...)`,
+  `write_headers(client)`, `session_app(container, routers?)` (currently fixed to `(*ROUTERS, _probe)`),
+  `session_client(app)`, `error_of`.
+
+### Decisions to record (specs/04 §14, one `> Decision (2026-10-29):` block "Cross-tenant route suite (P02-T15)";
+specs/04 §2.4: append the `x-public` values sentence)
+1. **Opt-out** = `openapi_extra["x-public"]` with a non-empty reason string; nothing else (not `x-scope: public`, not
+   path prefixes). Values used now: `session-flow` (internal auth), `health` (`GET /v1/health`), `probe`
+   (`/healthz`, `/readyz`, `/metrics`), `poll-secret` (`POST /v1/agent-onboarding/keys`,
+   `GET /v1/agent-onboarding/keys/{request_id}`). Every route with `x-scope: public` must also carry `x-public`
+   (test-enforced). Later: Stripe webhook, widget public routes, widget.js get their own values.
+2. **Org A / org B**: A = owner (`make_member`) + `*` key (`store_api_key`); B = a separate owner with its own `*`
+   key and a signed-in session client. Every check runs for B as `api_key` and as `session` (writes send
+   `write_headers`).
+3. **Checks per tenant route** (all non-`x-public` routes):
+   a. **Foreign id** (route has path params): fresh A resources from the factories (left to right, later factories see
+      earlier ids) → B call → status must be 404 `NOT_FOUND` or 403 `FORBIDDEN`, and the body must not contain any A
+      marker. Then the **owner control**: A's key calls the same route with the same ids → must be 2xx (or the status
+      registered with `expect_owner_status`), proving the ids were real and B's call did not consume them.
+   b. **Foreign org header** (every tenant route): B with `X-VA-Org-Id: <A org id>` → 403 `FORBIDDEN`. Path-param
+      routes use the ids from (a); parameterless mutating routes send their derived body.
+   c. **List/singleton leak** (GET routes without path params): B's 2xx response must contain no A marker. A markers =
+      A org id, A owner id + email, A key prefix, every id produced by a "world" built once per test (one resource per
+      registered factory, created before the checks).
+   Parameterless mutating routes are only exercised by (b) (they act on the caller's own org; there is no foreign id
+   to address) — stated in the decision.
+4. **Request derivation**: registered `register_request(operation_id, json=..., params=...)` wins; else the body
+   model's first JSON-schema example; a route with a body and neither → problem "no request body for <op>"; a route
+   with a required query param and nothing registered → problem. A path param with no factory → problem
+   "no resource factory for {param} (<method> <path>)". So a later router that forgets registration fails the suite.
+5. **Registry**: `register_resource_factory(path_param, factory, *, path_prefix="/")`; the most specific
+   (longest) matching `path_prefix` wins; registering the same (param, prefix) twice → `ValueError`. Phase-02
+   factories live in `tests/support/cross_tenant_factories.py`; later phases add theirs there (or a module imported
+   from it).
+
+### Files
+- **apps/api/tests/support/cross_tenant.py** (new, registry + checker; no phase-specific factories):
+  - `@dataclass(frozen=True, slots=True) Tenant(org_id: uuid.UUID, owner: Member, api_key: str, session: httpx.AsyncClient)`
+  - `@dataclass(frozen=True, slots=True) FactoryContext(client: httpx.AsyncClient, container: SessionContainer,
+    identity: IdentityDb, tenant: Tenant, params: Mapping[str, str])` (client = an unauthenticated client to the
+    same app; factories pass `Authorization: tenant.api_key` themselves or write via DB).
+  - `ResourceFactory = Callable[[FactoryContext], Awaitable[str]]`
+  - `register_resource_factory(path_param: str, factory: ResourceFactory, *, path_prefix: str = "/") -> None`
+  - `factory_for(path: str, param: str) -> ResourceFactory | None`
+  - `register_request(operation_id: str, *, json: Mapping[str, Any] | None = None, params: Mapping[str, str] | None = None) -> None`
+  - `register_owner_status(operation_id: str, status: int) -> None` (only if a phase-02 owner control is not 2xx;
+    otherwise keep it, it is part of the API for later phases, and unit-test it)
+  - `PUBLIC_KEY: Final = "x-public"`; `is_public(route) -> bool`; `public_marker_problems(routes) -> list[str]`
+    (empty/blank x-public; `x-scope: public` without `x-public`)
+  - `tenant_routes(routes: Iterable[APIRoute]) -> list[APIRoute]`
+  - `request_for(route) -> tuple[dict | None, dict[str, str]] | str` (body, query) or a problem string
+  - `reset_rate_limits(container) -> Awaitable[None]` (scan_iter `rl:*` + delete)
+  - `class CrossTenantProbe` (holds app client, container, identity, a: Tenant, b: Tenant, markers: set[str]) with
+    `async def problems(routes) -> list[str]` running checks a–c for both B principals; each problem string is
+    `"<check> <principal> <METHOD> <path>: <status> <body excerpt ≤200 chars>"`.
+  - `async def make_tenant(app, identity, container, name) -> Tenant` (make_member with a unique org name + store_api_key
+    + session client logged in; caller closes the session client via an AsyncExitStack).
+- **apps/api/tests/support/cross_tenant_factories.py** (new): registrations for `user_id` (add_member developer to A
+  → str(user.id)), `invitation_id` (POST /v1/org/members/invitations as A's key with a unique email, role developer →
+  id), `key_id` (store_api_key for A → str(row.id)), `org_id` (sub_account(client, Authorization=A key) → str(id)).
+- **apps/api/tests/support/session_helpers.py**: `session_app(container, *, extra_routers: tuple[APIRouter, ...] = (),
+  **settings_overrides)` so the negative test can mount the leaky router (keep `_probe`).
+- **apps/api/tests/test_cross_tenant_routes.py** (new):
+  - `test_every_tenant_route_is_isolated` (DB): builds A, B, world; `problems(tenant_routes(app_routes))` == [];
+    also asserts the tenant route list is non-empty and includes every phase-02 path-param operation
+    (`org_members_update`, `org_members_remove`, `org_invitations_revoke`, `orgs_get`, `orgs_suspend`,
+    `orgs_reactivate`, `api_keys_update`, `api_keys_revoke`, `api_keys_roll`).
+  - `test_an_unscoped_route_is_caught` (DB): test-only `leaky_router` (defined in the test module, prefix
+    `/v1/cross-tenant-leak`, `require_scope("api_keys:write")`): `GET /{key_id}` reads `ApiKey` by id through
+    `container.database.system_session()` ignoring org and returns `{"id","org_id","prefix"}`; `GET ""` returns every
+    key's prefix across orgs. Probe over only those two routes → exactly the expected problems (foreign-id 2xx for both
+    principals on `/{key_id}`, list leak for both principals on `""`); the header check still passes (403) — assert
+    the exact problem prefixes.
+  - `test_a_missing_factory_is_reported`, `test_a_body_without_example_is_reported`,
+    `test_a_required_query_without_registration_is_reported` (pure: synthetic APIRoutes like
+    test_audit_markers._route; call the request/factory resolution functions, no DB).
+  - `test_public_markers` (pure): real routes → `public_marker_problems == []`; the opted-out set equals exactly
+    {internal auth ops, health_get, the three probes, the two agent-onboarding ops}; synthetic routes with blank
+    `x-public` and with `x-scope: public` only are reported.
+  - Registry unit tests: longest prefix wins, duplicate registration raises, `register_request` overrides the example,
+    `register_owner_status` used by the control (synthetic).
+- **apps/api/src/va_api/routers/health.py**: `openapi_extra={"x-scope": "public", "x-public": "health"}` on
+  `/v1/health`; `openapi_extra={"x-public": "probe"}` on the three probe routes.
+- **apps/api/src/va_api/routers/agent_onboarding.py**: add `"x-public": "poll-secret"` to `_PUBLIC` (keep `x-scope`).
+- **openapi/openapi.json** via `make openapi`; then `corepack pnpm gen:api` in `sdks/typescript` and `apps/dashboard`
+  (schema.test.ts compares; mem-7e50).
+- **specs/04** decision block + §2.4 sentence; **AGENTS.md**: "Cross-tenant suite" convention: new routes with path
+  params need a factory in `tests/support/cross_tenant_factories.py`; bodies come from model examples or
+  `register_request`; public routes need `x-public: <reason>`.
+
+### Tests (assertions summary)
+Above. Expected B statuses today: all path-param routes 404 NOT_FOUND; header check 403 FORBIDDEN for both principals.
+If any real route fails a check, that is a real isolation bug: fix the route (not the suite) and note it in build notes.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make openapi` + both `gen:api` (no drift on re-run), `make test-ts`,
+`uv run python scripts/check_spec_refs.py`, `npx jscpd@4` 0 clones (the leaky router must not copy api_keys code),
+radon `-n C` none in changed src. Then — since this is the last phase-02 task — also run `make check` once and record
+its result (the Planner runs the exit gate after approval, but a red `make check` should be caught now).
+build.done PLAIN STRING.
+
+### Risks
+- Pool size 1 per role: factories that write via DB must not run inside an open session; build the world sequentially.
+- Session principal writes need CSRF + Origin (`write_headers`); missing them gives 403 CSRF which would falsely
+  "pass" the foreign-id check → the probe must assert the error code is NOT_FOUND/FORBIDDEN with the expected message
+  family, and run the owner control through the API key only. Also assert, once, that B's session can do a
+  CSRF-protected write on its own org (e.g. PATCH /v1/org/settings `{}` → 200) so the session path is live.
+- Owner controls mutate A (revoke, suspend, remove member): fresh resources per route keep them independent.
+- `/v1/orgs/{org_id}/reactivate` on an active child may not be 2xx; check, and use `register_owner_status` or suspend
+  the child in the factory chain via a prefix-specific factory (`path_prefix="/v1/orgs/{org_id}/reactivate"` won't
+  match since prefixes are literal — prefer register_owner_status with the real status, documented).
+- Probes `/metrics` etc. return non-JSON; they are public anyway.
+
+## 2026-10-29 Builder: P02-T15 build notes
+- New: `apps/api/tests/support/cross_tenant.py` (CrossTenantRegistry + module `REGISTRY`: register_resource_factory with
+  longest-prefix factory_for, register_request, register_owner_status/owner_status_ok, request_for, resources_for;
+  Tenant, FactoryContext, RouteRequest, path_params, app_routes, is_public, public_marker_problems, tenant_routes,
+  reset_rate_limits, make_tenant, CrossTenantProbe with foreign-id/owner-control, foreign-org-header, list-leak checks),
+  `tests/support/cross_tenant_factories.py` (user_id, invitation_id, key_id, org_id), `tests/test_cross_tenant_routes.py`
+  (10 tests: full-app suite, leaky router negative test, registry/derivation unit tests, x-public marker test).
+- Route markers: `GET /v1/health` `x-public: health`; `/healthz` `/readyz` `/metrics` `x-public: probe`; both agent
+  onboarding routes `x-public: poll-secret`. openapi.json +3 lines (`make openapi`); both `gen:api` re-run, no TS diff.
+- `session_app(container, *, extra_routers=())`; `app_routes` moved from test_audit_markers into cross_tenant (shared).
+- Deviations from plan: (a) the registry is a class with a module-level `REGISTRY` instance (unit tests use fresh
+  instances so the global one is never mutated); (b) the invitation factory writes via `InvitationRepo` in a tenant session
+  (store_api_key keys have no `created_by`, so an API-key invite has no inviter); (c) foreign-id leak check ignores the ids
+  the request itself names (a 404 echoing the requested id leaks nothing); (d) the header check also requires the exact
+  "Organization is not a sub-account of the caller." message, so a CSRF 403 can never count as a pass; (e) FastAPI has
+  no `get_flat_dependant` here, so query params are collected by walking `dependant.dependencies`.
+- No real isolation bug found: all 9 path-param ops 404 for B (both principals), every tenant route 403 on the header,
+  owner controls all 2xx (reactivate on an active child is 200, so no register_owner_status needed).
+- Mutation check: temporarily replacing the child lookup in `orgs_get` with `session.get(Org, id)` made the suite report
+  `foreign-id api_key GET /v1/orgs/{org_id}: 200 ...` (and session); the change was reverted.
+- Gates: make check exit 0 (lint, typecheck, placeholders 0, 3433 passed 97.72%, test-ts widget 22 / dashboard 52 /
+  sdk 48, openapi drift current, check_spec_refs 0) — logs/p02-t15-check.log. jscpd 0 clones; radon -n C none (avg A
+  2.31); pip-audit and pnpm audit no known vulnerabilities.
+
+## Review P02-T15 (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass, 0 findings), make test 3433 passed 97.72% (logs/p02-t15-review-test.log),
+  make test-ts pass, check_spec_refs 0, jscpd 0 clones.
+- Checked against the specs/04 §2.4 and §14 Decision blocks: routes enumerated from app.state.routers; x-public is the
+  only opt-out, and test_public_markers pins the opted-out set; a missing factory, body example, or query registration
+  is reported; CSRF 403 can't count as a refusal; owner control runs through A's key; the negative test catches both leaks.
+- Non-blocking notes: /internal/auth/* (including switch-org) are outside the suite via session-flow and are covered by
+  their own tests; marker matching uses substrings, which is fine because the markers are UUIDs, unique emails, and key prefixes.
