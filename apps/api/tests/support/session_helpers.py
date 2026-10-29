@@ -25,6 +25,7 @@ from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
 from service_helpers import make_client
 from sqlalchemy import select, update
+from starlette.types import ASGIApp
 
 from va_api.auth import ApiKeyAuthenticator, RequestContext, require_scope
 from va_api.auth.api_key_auth import db_lookup
@@ -153,12 +154,14 @@ class SessionContainer(AuthContainer):
         self.database = self.identity.database
         self.envelope = self.identity.envelope
         self.provisioner = self.identity.provisioner
-        self.sessions = SessionManager(database=self.database, redis=self.redis, clock=self.clock)
+        self.org_settings = OrgSettingsReader(self.database, self.redis)
+        self.sessions = SessionManager(
+            database=self.database, redis=self.redis, clock=self.clock, org_settings=self.org_settings
+        )
         self.login_throttle = LoginThrottle(self.redis)
         self.mfa_guard = MfaGuard(self.redis)
         self.resend_limiter = ResendLimiter(self.redis)
         self.sso_states = SsoStateStore(self.redis)
-        self.org_settings = OrgSettingsReader(self.database, self.redis)
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
@@ -235,7 +238,7 @@ def session_app(container: SessionContainer, **settings_overrides: Any) -> FastA
 
 
 @asynccontextmanager
-async def session_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def session_client(app: ASGIApp) -> AsyncIterator[httpx.AsyncClient]:
     async with make_client(app, base_url=API_BASE_URL) as client:
         yield client
 

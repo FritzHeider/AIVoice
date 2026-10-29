@@ -156,7 +156,7 @@
   - Deliverables: `auth.*` and `invitation.accept` rows from the dashboard auth routes; an `x-audit` / `x-audit-exempt` OpenAPI marker on every mutating route; a test enumerating every non-GET route (now and in later phases) that fails when one is unmarked or names an unknown action
   - Acceptance: every mutating endpoint added in this phase is marked and its audited action is asserted by an integration test.
 
-- [ ] P02-T12 Org settings (split by the planner on 2026-10-29 into T12a/T12b/T12c below; tick when all three are ticked)
+- [x] P02-T12 Org settings (split by the planner on 2026-10-29 into T12a/T12b/T12c below; tick when all three are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (OrgSettings model)
   - Depends on: P02-T08
   - Deliverables: `OrgSettings` pydantic model (every field), `GET/PATCH /v1/org/settings` with validation and role checks, accessor used by other services with Redis caching (60 s) and invalidation on update
@@ -174,7 +174,7 @@
   - Deliverables: both routes and `settings` on `PATCH /v1/org` (deep merge, sparse storage, `org.compliance` for compliance fields, platform-only `baa_signed_at`, cross-field rules), `GET /v1/org` settings with defaults, `va_db.org_settings.OrgSettingsReader` with `orgsettings:{org_id}` Redis cache (60 s) dropped on every update, `org.update` audit rows
   - Acceptance: defaults returned for an empty org; invalid values `INVALID_INPUT` with field paths; role/permission matrix tests; cache hit, miss, invalidation and Redis-down fallback tests.
 
-- [ ] P02-T12c Enforce `ip_allowlist` and `session_max_age_days`
+- [x] P02-T12c Enforce `ip_allowlist` and `session_max_age_days` — reviewed 2026-10-29: make lint/typecheck/placeholders pass, make test 3328 passed (coverage 97.75%), make test-ts pass, openapi no drift, check_spec_refs 0, jscpd 0 clones
   - Spec refs: specs/04-auth-tenancy-rbac.md §2.2, §4.3, §7
   - Depends on: P02-T12b
   - Deliverables: API keys and sessions of an org with a non-empty `ip_allowlist` rejected from other addresses; `session_max_age_days` caps the sliding session expiry of sessions acting in that org

@@ -4493,3 +4493,157 @@ audit no vulns; gitleaks (pre-commit) passed.
   permission matrix, cross-field rules, audit, cache, sub-account, invalid stored repair.
 - Note (not blocking): a stored row that fails OrgSettings validation would 500 on GET via the reader/OrgView; writes
   always validate, so only out-of-band DB edits can produce one.
+
+## 2026-10-29 Planner: P02-T12b approved → next P02-T12c
+
+## Plan P02-T12c — Enforce `ip_allowlist` and `session_max_age_days` (specs/04 §2.2, §4.3, §7)
+
+### Facts found while planning
+- `get_principal` (auth/dependencies.py) = API key (`_api_key_principal`, which schedules `touch_if_due` before any
+  further check) or `authenticate_session` → `act_on_sub_account` → rate limit. `_api_key_principal` passes the raw
+  `request.client.host` as `ctx.ip`; sessions/audit use `session_auth.client_ip` (None for non-IP peers).
+- `SessionManager.resolve` applies `next_expiry` (fixed 14 d window) before the active org is known; it is built in
+  `container.py:130` and `tests/support/session_helpers.py:156` (SessionContainer, before `org_settings` is set).
+- `OrgSettingsReader.get(org_id)` (Redis `orgsettings:{id}` 60 s, invalidated on every settings write) opens its own
+  global session on a miss; `OrgSettings.ip_allowlist` is normalized CIDR strings, `session_max_age_days` int 1–90.
+- uvicorn (`va_common.service.run_server`) runs with uvicorn's default `proxy_headers=True`, trusting
+  `X-Forwarded-For` only from `FORWARDED_ALLOW_IPS` (uvicorn env, default 127.0.0.1); so `request.client.host` is the
+  real client once the deployment trusts its load balancer. No new app env var.
+- No IP-specific code in specs/31 → reuse `FORBIDDEN` (403).
+- httpx `ASGITransport` peer is fixed ("127.0.0.1", 123); tests need a way to vary it.
+
+### Decisions to record (specs/04 §7, one `> Decision (2026-10-29):` block "Enforcing ip_allowlist and
+session_max_age_days (P02-T12c)"; a one-line pointer under §2.2 and §4.3)
+1. **Client address**: the ASGI peer (`session_auth.client_ip`); uvicorn rewrites it from `X-Forwarded-For` only for
+   proxies listed in uvicorn's `FORWARDED_ALLOW_IPS` (the Helm chart sets it to the load balancer ranges). An
+   IPv4-mapped IPv6 peer (`::ffff:a.b.c.d`) is matched as IPv4. A peer that is not an IP address never matches a
+   non-empty list (fail closed). `ctx.ip` of API-key principals uses `client_ip` too.
+2. **Where**: in `get_principal`, i.e. every route authenticated by API key or session (all `/v1/*`). Checked right
+   after authentication (before `X-VA-Org-Id`, rate limiting, scopes, idempotency, and before the API key's
+   `last_used_at` touch is scheduled), against the allowlist of every org in `{ctx.org_id, ctx.acting_parent_org_id}`
+   (a session acting in a child through a parent: both); after `X-VA-Org-Id` switches to a child, the child's list is
+   checked too. Denial: `FORBIDDEN` "Requests from this IP address are not allowed for this organization."; warning log
+   `ip_not_allowed` (org_id, ip). `/internal/auth/*` session routes (session, logout, switch-org, MFA, password) are not
+   gated so a user can still see their memberships, switch to another org, or log out.
+3. **Self-lockout guard**: a settings PATCH (`/v1/org/settings` or `settings` on `PATCH /v1/org`) that sends a
+   non-empty `ip_allowlist` not containing the caller's address → `INVALID_INPUT` "ip_allowlist must include the
+   address of this request (<ip>)." field `ip_allowlist` / `settings.ip_allowlist` (caller address unknown → message
+   "ip_allowlist cannot be set from a request without a client address."). Applies only when acting directly in the org
+   (not when a parent acts on a child via `X-VA-Org-Id` / parent session: then the parent's own access is unaffected
+   unless the child's list excludes it, which is the point of a child list — guard still applies there too for
+   simplicity: always checked against the caller address). Keep: always check.
+4. **Session window**: the sliding window of a session is `session_max_age_days` of `sessions.active_org_id`
+   (14 d when NULL, the org is gone, or no reader). On each resolve the target is `min(now + window, created_at +
+   90 d)`; it is written when it is more than 1 h past `expires_at` (extend) **or** earlier than `expires_at`
+   (a shorter window, e.g. a lowered setting or switching into a stricter org: the session then expires `window` after
+   this request). Expiry is checked against the stored `expires_at` before the new window applies, so a lowered window
+   takes effect from the session's next request (no last-activity column exists to expire idle sessions
+   retroactively). Login keeps `now + 14 d` (the first request in the org applies its window). A session acting in a
+   child through a parent uses the child's setting (the active org).
+
+### Files
+- **apps/api/src/va_api/auth/ip_allowlist.py** (new): `IP_NOT_ALLOWED_MESSAGE: Final`, `def ip_allowed(ip: str | None,
+  networks: Sequence[str]) -> bool` (empty → True; None → False; `ipaddress.ip_address`, unwrap `ipv4_mapped`;
+  `any(addr in ip_network(n) for n in networks)`), `async def enforce_ip_allowlist(request: Request, ctx:
+  RequestContext) -> None` (orgs `dict.fromkeys(o for o in (ctx.org_id, ctx.acting_parent_org_id) if o)`; settings via
+  `session_auth.org_settings_of(request).get(org_id)`; None settings → skip). Keep radon A/B.
+- **apps/api/src/va_api/auth/dependencies.py**: `_api_key_principal` returns `(ctx, rate_per_sec, key_id)` without
+  scheduling the touch and uses `client_ip(request)` for `ip`; `get_principal`: authenticate → `enforce_ip_allowlist`
+  → schedule touch (API key only) → `act_on_sub_account` → if `acting.org_id != ctx.org_id`: `enforce_ip_allowlist`
+  again → bind log vars → rate limit. Update the docstring. Do NOT import va_api.auth from rate_limit (mem-...a730 rule).
+- **apps/api/src/va_api/auth/sessions.py**: `next_expiry(*, created_at, expires_at, now, window: timedelta =
+  SLIDING_TTL)` (extend or shorten per Decision 4; update module docstring); `SessionManager.__init__(..., org_settings:
+  OrgSettingsReader | None = None)`; `async def _window(self, org_id: uuid.UUID | None) -> timedelta`; `resolve`
+  passes `await self._window(active.active_org_id)` (only after the expiry check; never inside an open DB session —
+  pool size 1).
+- **apps/api/src/va_api/container.py**: build the reader once and pass it to `SessionManager(..., org_settings=reader)`
+  and `org_settings=reader`. **tests/support/session_helpers.py** SessionContainer: create `org_settings` before
+  `sessions` and pass it.
+- **apps/api/src/va_api/routers/org_settings.py**: in `check_settings_permissions` (or a new small
+  `check_ip_allowlist_keeps_caller(request_ip, sent, prefix)` called next to it from both routes) the self-lockout guard
+  (Decision 3); use the normalized value (`Cidr` normalization — validate through `OrgSettings.model_validate(
+  {"ip_allowlist": sent["ip_allowlist"]})` or reuse the merged object's `ip_allowlist` after validation in
+  `apply_settings_patch`; simplest: do it in `apply_settings_patch` on the validated merged settings when
+  `"ip_allowlist" in sent`, with `ip` passed in). Wire through `routers/org.py` too.
+- **apps/api/tests/support/peer.py** (new): `class PeerSwitch` — ASGI wrapper `(app)` with mutable `host: str |
+  None`; for `http` scopes with `host` set it passes `{**scope, "client": (host, 50000)}`; lifespan passes through.
+  `session_client` accepts any ASGI app (widen the type) so `session_client(PeerSwitch(session_app(container)))` works.
+  Export via session_helpers if that is the pattern.
+- **specs/04** §7 Decision block + pointers in §2.2/§4.3; **AGENTS.md**: PeerSwitch test helper; client IP is the
+  ASGI peer (uvicorn `FORWARDED_ALLOW_IPS` behind a proxy); `SessionManager` window from OrgSettingsReader.
+
+### Tests
+- **apps/api/tests/test_ip_allowlist.py** (unit): empty list allows anything incl. None; IPv4 inside/outside `/24`;
+  `/32` host entry; IPv6 inside/outside `2001:db8::/32`; `::ffff:203.0.113.7` matches `203.0.113.0/24`; v4 address vs
+  v6-only list → False; None or non-IP with non-empty list → False.
+- **apps/api/tests/test_sessions_window.py** or extend `test_session_lifetime.py`: `next_expiry` with window 1 d
+  shortens a 14 d expiry to now+1 d; window 30 d extends past 14 d; within-1 h no write for both; 90 d cap still wins;
+  default arg == old behaviour (existing tests unchanged).
+- **apps/api/tests/test_ip_allowlist_integration.py** (conftest fixtures + PeerSwitch client fixture in the module):
+  - API key: org list `["203.0.113.0/24"]` (via `set_org(settings=...)` + reader invalidate, or PATCH from an allowed
+    peer): `GET /v1/me` from 203.0.113.7 → 200, from 198.51.100.9 → 403 FORBIDDEN with the message; empty list → 200
+    from any peer; non-IP peer (`testclient`) with a list → 403; denied request does not set
+    `apikey:{<id>}:touched` (touch not scheduled) and leaves no idempotency row for a POST with Idempotency-Key.
+  - session: allowed 200 / denied 403 on `/v1/me`; `GET /internal/auth/session` and `POST /internal/auth/logout`
+    still 200 from the denied peer.
+  - IPv6 peer allowed by an IPv6 network.
+  - PATCH `/v1/org/settings` changing the list takes effect on the next request (cache invalidated).
+  - self-lockout: PATCH list excluding the caller → 400 INVALID_INPUT field `ip_allowlist`; same via `PATCH /v1/org`
+    → field `settings.ip_allowlist`; list including caller → 200; `[]` always 200.
+  - sub-accounts: parent key + `X-VA-Org-Id` child whose list excludes the peer → 403; parent list excludes peer →
+    403 before the header is looked at (even for a non-child id); session acting in child via parent where parent list
+    excludes → 403.
+- **apps/api/tests/test_session_window_integration.py**: org `session_max_age_days=1` (set_org settings): login,
+  advance FrozenClock 2 h, `GET /v1/me` → stored `sessions.expires_at == now + 1 d` and `sess:` cache entry matches;
+  advance 1 d + 1 s → 401 AUTH_FAILURE; org with 30: activity after 2 h → `now + 30 d`, advance 29 d → 200; default
+  org stays 14 d; lowering 14 → 1 via PATCH then next request → expires now+1 d; switch-org from a 14 d org into a 1 d
+  org applies 1 d on the next request; absolute 90 d cap still enforced with 90-day window.
+- Existing suites (`test_session_lifetime`, session/MFA/sub-account integration, test_container) keep passing.
+
+### Gates
+`make fmt lint typecheck placeholders test` (+ `make test-ts` only if openapi changes — it should not); `make openapi`
+drift check (no change expected); `uv run python scripts/check_spec_refs.py`; `npx jscpd@4` 0 clones; radon `-n C`
+none in changed src; gitleaks. build.done PLAIN STRING: `ralph emit "build.done" "P02-T12c tests: pass (N passed),
+lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: `_window` / `enforce_ip_allowlist` call `reader.get`, which opens a global session on a miss;
+  never call them while a route/session-manager DB session is open (grep callers of `sessions.resolve` /
+  `current_session` inside `async with ...session()` blocks).
+- An existing test fixture writing `settings` with a non-empty `ip_allowlist` or small `session_max_age_days` would now
+  be enforced — grep tests for both keys.
+- Rate-limit/idempotency ordering tests (`test_dependencies*`) may assert touch scheduling order; adapt, don't weaken.
+- `next_expiry` shortening must not fire for the 90 d cap (target == cap ≥ expires_at always) — unit test it.
+
+## 2026-10-29 Builder: P02-T12c build notes
+- Implemented per plan: `va_api.auth.ip_allowlist` (`ip_allowed`, `enforce_ip_allowlist`, `IP_NOT_ALLOWED_MESSAGE`);
+  `get_principal` checks the allowlist after authentication, before scheduling the API key touch, and again for the
+  child after `X-VA-Org-Id`; API-key `ctx.ip` now `client_ip(request)`. `next_expiry(..., window=)` extends or
+  shortens; `SessionManager(org_settings=)` + `_window`; container/SessionContainer share one reader. Self-lockout
+  guard `_check_keeps_caller` in `apply_settings_patch(..., ip=)` (both PATCH routes), `IP_ALLOWLIST_NO_CLIENT_MESSAGE`.
+- Deviation found by the full suite: stored settings that fail validation made every authenticated request of the org
+  500 (the reader raises), including the repair PATCH. Added `OrgSettingsReader.get_lenient` + `va_db.org_settings.
+  valid_part` (drops invalid top-level keys, warning `org_settings_invalid` with key names); both gates use it, so a
+  valid allowlist stays enforced and a corrupt org can still be repaired (tests in va_db reader suite +
+  test_ip_allowlist_integration). Recorded in the module docstring; spec Decision item 2 says "a stored list that no
+  longer validates reads as empty" via the code docstring (spec text: orgs that no longer exist skipped).
+- Test support: `tests/support/peer.py` PeerSwitch; `auth_helpers.MemoryOrgSettings` + `OrgSettingsSource` Protocol on
+  the DB-less AuthContainer (orgs read as gone → gate skipped). test_org_settings_integration normalization test now
+  includes 127.0.0.1 (self-lockout guard).
+- OpenAPI regenerated (org_settings_update description) + gen:api in sdks/typescript and apps/dashboard.
+Gates: fmt; lint pass; typecheck pass; placeholders 0; make test 3328 passed, coverage 97.75%
+(logs/p02-t12c-test.log; only docstring wording changed after it, reader suite re-run 15 passed); make test-ts pass
+(52 + 48); make openapi stable on re-run; check_spec_refs 0; jscpd 0 clones; radon -n C none in changed src, avg
+2.0324; gitleaks not installed locally (pre-commit runs it at commit).
+
+## Review P02-T12c (2026-10-29): approved
+- Re-ran: lint, typecheck, placeholders (0), make test 3328 passed / 97.75%, make test-ts pass, make openapi no drift,
+  check_spec_refs 0, jscpd 0 clones (api src/tests, va_db src).
+- Diff checked against plan Decisions 1-4 and specs/04 §2.2/§4.3/§7: allowlist checked after auth and before touch,
+  X-VA-Org-Id, rate limit, idempotency; child re-checked after switch; parent checked for acting sessions; FORBIDDEN
+  per specs/31; self-lockout guard on both PATCH routes with correct field prefix; next_expiry shortens/extends and the
+  90 d cap cannot trigger a shorten; reader shared by SessionManager and container; no nested DB sessions (reader opens
+  its own global session only outside resolve's sessions).
+- Note (not blocking): an org whose stored settings fail validation is re-loaded from the DB on every gated request
+  (get raises before caching the lenient value); only out-of-band edits produce this, and a PATCH repairs it.
+- P02-T12 parent ticked (T12a/b/c all done).

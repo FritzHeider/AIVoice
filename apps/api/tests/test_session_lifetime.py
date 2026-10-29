@@ -48,6 +48,41 @@ def test_capped_at_absolute_lifetime() -> None:
     assert next_expiry(created_at=CREATED, expires_at=cap - timedelta(minutes=30), now=now) is None
 
 
+def test_a_shorter_window_shortens_the_expiry() -> None:
+    now = CREATED + timedelta(minutes=10)
+    window = timedelta(days=1)
+    assert next_expiry(created_at=CREATED, expires_at=FIRST_EXPIRY, now=now, window=window) == now + window
+
+
+def test_a_longer_window_extends_past_the_default() -> None:
+    now = CREATED + timedelta(hours=2)
+    window = timedelta(days=30)
+    assert next_expiry(created_at=CREATED, expires_at=FIRST_EXPIRY, now=now, window=window) == now + window
+
+
+@pytest.mark.parametrize("days", [1, 30])
+def test_no_write_within_an_hour_of_the_windowed_expiry(days: int) -> None:
+    window = timedelta(days=days)
+    expires_at = CREATED + window
+    now = CREATED + timedelta(minutes=45)
+    assert next_expiry(created_at=CREATED, expires_at=expires_at, now=now, window=window) is None
+
+
+def test_the_absolute_cap_wins_over_a_long_window_and_never_shortens() -> None:
+    cap = CREATED + ABSOLUTE_TTL
+    now = cap - timedelta(days=10)
+    window = timedelta(days=90)
+    assert next_expiry(created_at=CREATED, expires_at=now, now=now, window=window) == cap
+    assert next_expiry(created_at=CREATED, expires_at=cap, now=now, window=window) is None
+
+
+def test_the_default_window_is_the_sliding_ttl() -> None:
+    now = CREATED + timedelta(hours=3)
+    assert next_expiry(created_at=CREATED, expires_at=FIRST_EXPIRY, now=now) == next_expiry(
+        created_at=CREATED, expires_at=FIRST_EXPIRY, now=now, window=SLIDING_TTL
+    )
+
+
 @pytest.mark.parametrize(
     ("remaining", "expected"),
     [

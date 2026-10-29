@@ -4547,7 +4547,7 @@
         "x-scope": "org:read"
       },
       "patch": {
-        "description": "Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.\n\nCompliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform\nadministrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan.",
+        "description": "Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.\n\nCompliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform\nadministrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan. A\nnon-empty `ip_allowlist` must include the address of the request that sets it.",
         "operationId": "org_settings_update",
         "requestBody": {
           "content": {

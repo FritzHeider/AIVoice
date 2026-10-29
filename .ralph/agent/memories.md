@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793291061-0ce1
+> va_api request gates read org settings via OrgSettingsReader.get_lenient (invalid stored keys -> defaults); get_principal enforces ip_allowlist after auth; tests vary the client address with tests/support/peer.py PeerSwitch(session_app(c)) + session_client; DB-less AuthContainer has MemoryOrgSettings; settings PATCH with non-empty ip_allowlist must include caller 127.0.0.1
+<!-- tags: api, auth, testing | created: 2026-10-29 -->
+
 ### mem-1793289699-6a26
 > va_api org settings: write via routers.org_settings.check_settings_permissions + apply_settings_patch (locks org row, merges, validates, audit diff keyed settings.<path>), then OrgSettingsReader.invalidate after commit; tests swap container.org_settings to inject broken Redis; INVALID_INPUT field format is field_path (items[0].name)
 <!-- tags: api, settings, testing | created: 2026-10-29 -->

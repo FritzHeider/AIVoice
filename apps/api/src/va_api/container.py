@@ -110,6 +110,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         rate_limiter = RateLimiter(redis, clock)
         idempotency = DbIdempotencyStore(database, clock)
         envelope = Envelope(kms_provider, OrgDataKeyStore(database))
+        org_settings = OrgSettingsReader(database, redis)
         oidc_http = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT_S, follow_redirects=False)
         stack.push_async_callback(oidc_http.aclose)
         yield Container(
@@ -127,12 +128,12 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             provisioner=OrgProvisioner(database, envelope),
             clock=clock,
             password_hasher=password_hasher,
-            sessions=SessionManager(database=database, redis=redis, clock=clock),
+            sessions=SessionManager(database=database, redis=redis, clock=clock, org_settings=org_settings),
             login_throttle=LoginThrottle(redis),
             mfa_guard=MfaGuard(redis),
             email_sender=email_sender_for(settings, clock),
             resend_limiter=ResendLimiter(redis),
             oidc_discovery=discovery_for(settings, oidc_http),
             sso_states=SsoStateStore(redis),
-            org_settings=OrgSettingsReader(database, redis),
+            org_settings=org_settings,
         )

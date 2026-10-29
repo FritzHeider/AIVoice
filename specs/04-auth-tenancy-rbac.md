@@ -91,6 +91,9 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 > request. The `last_used_at` write runs as a FastAPI background task after the response; its failures are logged
 > (`api_key_touch_failed`, key id only) and swallowed.
 
+> Decision (2026-10-29): an org's non-empty `ip_allowlist` is checked right after authentication and before the
+> `last_used_at` touch is scheduled (§7 Decision "Enforcing ip_allowlist and session_max_age_days (P02-T12c)").
+
 ### 2.3 Scopes (complete list)
 
 | Scope | Grants |
@@ -488,6 +491,9 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > /internal/auth/session` resolves the active org the same way and gains `acting_parent_org_id` (uuid | null);
 > `memberships[]` lists only the user's own memberships (children come from `GET /v1/orgs`).
 
+> Decision (2026-10-29): the 14-day sliding window is the active org's `session_max_age_days` (default 14); a shorter
+> window also shortens `expires_at` (§7 Decision "Enforcing ip_allowlist and session_max_age_days (P02-T12c)").
+
 ### 4.4 CSRF
 
 Double-submit: on session creation and on `GET /internal/auth/session`, the API sets cookie `va_csrf` (random 32
@@ -851,6 +857,36 @@ override fields `base_url`, `api_key_ref`, `dialogue_model`, `router_model`, `an
 >    `allowed_countries`, `blocked_prefixes`. Cross-field rules are checked on the merged object at write time, not in
 >    the model (a partial body is parsed with the same model): `hipaa_mode=true` needs `baa_signed_at`;
 >    `privacy.zero_retention=true` needs the enterprise plan.
+
+> Decision (2026-10-29): Enforcing ip_allowlist and session_max_age_days (P02-T12c).
+> 1. Client address: the ASGI peer (`va_api.auth.session_auth.client_ip`). Behind a load balancer uvicorn rewrites it
+>    from `X-Forwarded-For` only for the proxies listed in uvicorn's `FORWARDED_ALLOW_IPS` (the deployment sets it to
+>    the load balancer ranges; no application env var). An IPv4-mapped IPv6 peer (`::ffff:a.b.c.d`) matches as IPv4. A
+>    peer that is not an IP address never matches a non-empty list (fail closed). The `ip` of API-key principals uses the
+>    same address.
+> 2. Where: `va_api.auth.get_principal`, i.e. every route authenticated by an API key or a session (all `/v1/*`),
+>    right after authentication: before `X-VA-Org-Id`, rate limiting, scopes, idempotency, and before the API key's
+>    `last_used_at` touch is scheduled. The lists of the org acted in and, while a session acts in a sub-account
+>    through its parent, of the parent too are checked; after `X-VA-Org-Id` switches to a child, the child's list is
+>    checked as well. Orgs that no longer exist are skipped; stored settings keys that no longer validate (an
+>    out-of-band edit) read as their defaults for this check and the session window (`OrgSettingsReader.get_lenient`,
+>    warning `org_settings_invalid`), so the org is not locked out and a PATCH can repair them. Denial: `FORBIDDEN` "Requests from this IP address are not
+>    allowed for this organization." plus a warning log `ip_not_allowed` (org_id, ip). `/internal/auth/*` routes
+>    (session, logout, switch-org, MFA, password) are not gated, so a user can still see their memberships, switch to
+>    another org, or log out.
+> 3. Self-lockout guard: a settings write (`PATCH /v1/org/settings`, or `settings` on `PATCH /v1/org`) that sends a
+>    non-empty `ip_allowlist` not admitting the request's own address fails with `INVALID_INPUT` "ip_allowlist must
+>    include the address of this request (<ip>)." (field `ip_allowlist` / `settings.ip_allowlist`); without a client
+>    address the message is "ip_allowlist cannot be set from a request without a client address.". The guard applies
+>    to every caller, a parent acting on a child included. Sending `[]` always succeeds.
+> 4. Session window: a session's sliding window is `session_max_age_days` of `sessions.active_org_id` (14 days when it
+>    is NULL or the org is gone). On each request the target is `min(now + window, created_at + 90 d)`; it is written
+>    when it is more than 1 h past `expires_at` (extend) or earlier than `expires_at` (a shorter window: a lowered
+>    setting, or a switch into a stricter org; the session then expires `window` after this request). Expiry is checked
+>    against the stored `expires_at` before the new window applies, so a lowered window takes effect from the session's
+>    next request (there is no last-activity column to expire idle sessions retroactively). Login keeps `now + 14 d`;
+>    the first request in the org applies its window. A session acting in a child through a parent uses the child's
+>    setting (its active org).
 
 Org secrets: `PUT /v1/org/secrets/{name}` `{value}` stores envelope-encrypted values in `org_secrets` (new table,
 see shared-contract additions); `GET /v1/org/secrets` lists names only.

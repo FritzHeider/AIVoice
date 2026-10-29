@@ -615,3 +615,10 @@ Grafana 3001
   `PATCH /v1/org/settings` and `PATCH /v1/org` use them). The container exposes the reader as `org_settings`
   (`session_auth.org_settings_of(request)`; `SessionContainer.org_settings` in tests: replace it to inject a broken
   Redis). `INVALID_INPUT` `field` everywhere is `va_domain.org.field_path` format: `items[0].name`, not `items.0.name`.
+- 2026-10-29 (P02-T12c): `get_principal` enforces org `ip_allowlist` (`va_api.auth.ip_allowlist`) right after
+  authentication; the client address everywhere is `session_auth.client_ip(request)` (the ASGI peer; behind a proxy
+  uvicorn rewrites it from `X-Forwarded-For` for `FORWARDED_ALLOW_IPS` only). Tests that need another peer wrap the app
+  in `tests/support/peer.py` `PeerSwitch(session_app(container), host="203.0.113.7")` and pass it to `session_client`
+  (set `peer.host` between requests; `"testclient"` imitates a non-IP peer). A settings PATCH sending a non-empty
+  `ip_allowlist` must include the caller (httpx ASGI peer `127.0.0.1`). `SessionManager(..., org_settings=reader)`
+  takes the sliding window from the active org's `session_max_age_days`; build the reader first and share it.

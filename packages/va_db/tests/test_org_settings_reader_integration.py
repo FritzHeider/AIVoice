@@ -15,7 +15,7 @@ from va_common import json
 from va_common.ids import new_id
 from va_db import org_settings as org_settings_module
 from va_db.models import Org
-from va_db.org_settings import CACHE_TTL_S, OrgSettingsReader, settings_cache_key
+from va_db.org_settings import CACHE_TTL_S, OrgSettingsReader, settings_cache_key, valid_part
 from va_domain.org import OrgSettings, load_settings
 
 pytestmark = pytest.mark.integration
@@ -138,3 +138,39 @@ async def test_an_unreadable_cached_value_falls_back_to_the_database(
     assert settings.timezone == "America/Chicago"
     assert log.warnings == [("org_settings_cache_invalid", {"org_id": str(org_id)})]
     assert await cached_json(redis, org_id) == {"timezone": "America/Chicago"}
+
+
+async def test_lenient_reads_drop_only_the_keys_that_no_longer_validate(
+    identity_db: IdentityDb, log: RecordingLog
+) -> None:
+    stored = {"timezone": "Mars/Olympus_Mons", "bogus": 1, "ip_allowlist": ["203.0.113.0/24"]}
+    org_id = await new_org(identity_db, stored)
+    reader = OrgSettingsReader(identity_db.database, fakeredis.FakeAsyncRedis())
+    with pytest.raises(ValueError, match="timezone"):
+        await reader.get(org_id)
+    settings = await reader.get_lenient(org_id)
+    assert settings == load_settings({"ip_allowlist": ["203.0.113.0/24"]})
+    assert log.warnings == [("org_settings_invalid", {"org_id": str(org_id), "keys": ["bogus", "timezone"]})]
+
+
+async def test_lenient_reads_of_valid_and_unknown_orgs_match_get(identity_db: IdentityDb) -> None:
+    org_id = await new_org(identity_db, {"session_max_age_days": 3})
+    reader = OrgSettingsReader(identity_db.database, fakeredis.FakeAsyncRedis())
+    assert await reader.get_lenient(org_id) == await reader.get(org_id)
+    assert await reader.get_lenient(new_id()) is None
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected", "dropped"),
+    [
+        ({}, {}, []),
+        (
+            {"privacy": {"zero_retention": "maybe"}, "default_record": True},
+            {"default_record": True},
+            ["privacy"],
+        ),
+        ({"session_max_age_days": 0, "dial_timeout_s": 500}, {}, ["dial_timeout_s", "session_max_age_days"]),
+    ],
+)
+def test_valid_part(stored: dict[str, Any], expected: dict[str, Any], dropped: list[str]) -> None:
+    assert valid_part(stored) == (load_settings(expected), dropped)

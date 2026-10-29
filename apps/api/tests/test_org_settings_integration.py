@@ -122,9 +122,11 @@ async def test_values_are_stored_normalized(
     client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
 ) -> None:
     member = await signed_in(client, identity, container)
-    data = await patched(client, {"ip_allowlist": ["10.0.0.1/8", "2001:db8::1/32"]})
-    assert data["ip_allowlist"] == ["10.0.0.0/8", "2001:db8::/32"]
-    assert await stored_settings(identity, member.org.id) == {"ip_allowlist": ["10.0.0.0/8", "2001:db8::/32"]}
+    # 127.0.0.1 is the test transport's peer: an allowlist must admit the request setting it.
+    data = await patched(client, {"ip_allowlist": ["127.0.0.1", "10.0.0.1/8", "2001:db8::1/32"]})
+    normalized = ["127.0.0.1/32", "10.0.0.0/8", "2001:db8::/32"]
+    assert data["ip_allowlist"] == normalized
+    assert await stored_settings(identity, member.org.id) == {"ip_allowlist": normalized}
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,5 @@
-"""API key auth test doubles: an in-memory key store, a fake-Redis authenticator, and auth test routers."""
+"""API key auth test doubles: an in-memory key store, a fake-Redis authenticator, in-memory org settings, and
+auth test routers."""
 
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ import secrets
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 import fakeredis
 from api_helpers import FakeChecks, make_settings
@@ -21,12 +22,15 @@ from va_common.auth import ApiKeyHasher, KeyEnvironment, Pepper, api_key_prefix,
 from va_common.ids import new_id
 from va_common.time import FrozenClock
 from va_db.repositories import ApiKeyRecord
+from va_domain.org import OrgSettings
 
 __all__ = [
     "AUTH_ENVELOPE_PREFIX",
     "AUTH_LEGACY_PREFIX",
     "AuthContainer",
     "KeyStore",
+    "MemoryOrgSettings",
+    "OrgSettingsSource",
     "auth_app",
     "make_hasher",
 ]
@@ -37,6 +41,32 @@ AUTH_ENVELOPE_PREFIX = "/v1/knowledge/_auth"
 
 def make_hasher(version: int = 1) -> ApiKeyHasher:
     return ApiKeyHasher(Pepper(secrets.token_bytes(32), version))
+
+
+class OrgSettingsSource(Protocol):
+    """What the api reads org settings through (``va_db.org_settings.OrgSettingsReader`` in production)."""
+
+    async def get(self, org_id: uuid.UUID) -> OrgSettings | None: ...
+
+    async def get_lenient(self, org_id: uuid.UUID) -> OrgSettings | None: ...
+
+    async def invalidate(self, org_id: uuid.UUID) -> None: ...
+
+
+@dataclass
+class MemoryOrgSettings:
+    """Org settings by org id standing in for ``OrgSettingsReader``; orgs without an entry read as gone."""
+
+    settings: dict[uuid.UUID, OrgSettings] = field(default_factory=dict)
+
+    async def get(self, org_id: uuid.UUID) -> OrgSettings | None:
+        return self.settings.get(org_id)
+
+    async def get_lenient(self, org_id: uuid.UUID) -> OrgSettings | None:
+        return self.settings.get(org_id)
+
+    async def invalidate(self, org_id: uuid.UUID) -> None:
+        self.settings.pop(org_id, None)
 
 
 @dataclass
@@ -84,11 +114,13 @@ class KeyStore:
 
 @dataclass
 class AuthContainer(FakeChecks):
-    """The fake api container: a :class:`KeyStore` authenticator, fake Redis, a memory idempotency store."""
+    """The fake api container: a :class:`KeyStore` authenticator, fake Redis, a memory idempotency store, and
+    :class:`MemoryOrgSettings` (no org has settings, so the IP allowlist gate passes)."""
 
     store: KeyStore = field(default_factory=KeyStore)
     redis: Redis = field(default_factory=fakeredis.FakeAsyncRedis)
     clock: FrozenClock = field(default_factory=FrozenClock)
+    org_settings: OrgSettingsSource = field(default_factory=MemoryOrgSettings)
     idempotency: MemoryIdempotencyStore = field(init=False)
 
     def __post_init__(self) -> None:

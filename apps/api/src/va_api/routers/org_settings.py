@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_api.audit import audit, audited, changed
 from va_api.auth.context import RequestContext
+from va_api.auth.ip_allowlist import ip_allowed
 from va_api.auth.permissions import holds_permission
-from va_api.auth.session_auth import database_of, org_settings_of
+from va_api.auth.session_auth import client_ip, database_of, org_settings_of
 from va_api.responses import DataResponse
 from va_api.routers.org_sso import ReadOrg, WriteOrg, org_router
 from va_common.errors import AppError
@@ -40,6 +41,7 @@ __all__ = [
     "BAA_ADMIN_ONLY_MESSAGE",
     "COMPLIANCE_PERMISSION",
     "HIPAA_NEEDS_BAA_MESSAGE",
+    "IP_ALLOWLIST_NO_CLIENT_MESSAGE",
     "ORG_NOT_FOUND_MESSAGE",
     "ZERO_RETENTION_PLAN_MESSAGE",
     "SettingsPatchResult",
@@ -54,6 +56,7 @@ ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."
 BAA_ADMIN_ONLY_MESSAGE: Final = "Only platform administrators can set 'baa_signed_at'."
 HIPAA_NEEDS_BAA_MESSAGE: Final = "hipaa_mode requires a signed BAA ('baa_signed_at')."
 ZERO_RETENTION_PLAN_MESSAGE: Final = "Zero retention requires the enterprise plan."
+IP_ALLOWLIST_NO_CLIENT_MESSAGE: Final = "ip_allowlist cannot be set from a request without a client address."
 _ZERO_RETENTION_PLAN: Final = "enterprise"
 _HIPAA_PATHS: Final = frozenset({"hipaa_mode", "baa_signed_at"})
 _ZERO_RETENTION_PATHS: Final = frozenset({"privacy", "privacy.zero_retention"})
@@ -109,6 +112,18 @@ def _check_cross_field(ctx: RequestContext, settings: OrgSettings, paths: set[st
         )
 
 
+def _check_keeps_caller(settings: OrgSettings, paths: set[str], ip: str | None, prefix: str) -> None:
+    """A sent non-empty ``ip_allowlist`` must admit the address of the request setting it (no lockout)."""
+    if "ip_allowlist" not in paths or ip_allowed(ip, settings.ip_allowlist):
+        return
+    message = (
+        IP_ALLOWLIST_NO_CLIENT_MESSAGE
+        if ip is None
+        else f"ip_allowlist must include the address of this request ({ip})."
+    )
+    raise AppError("INVALID_INPUT", message, field=f"{prefix}ip_allowlist")
+
+
 def _stored_at(stored: Mapping[str, Any], path: str, fallback: Any) -> Any:
     value: Any = stored
     for part in path.split("."):
@@ -131,12 +146,13 @@ def _previous_values(stored: Mapping[str, Any], paths: list[str]) -> dict[str, A
 
 
 async def apply_settings_patch(
-    session: AsyncSession, ctx: RequestContext, sent: Mapping[str, Any], prefix: str
+    session: AsyncSession, ctx: RequestContext, sent: Mapping[str, Any], prefix: str, *, ip: str | None
 ) -> SettingsPatchResult:
     """Lock the org row of ``ctx``, merge ``sent`` into its stored settings, validate, and store the result.
 
     Runs in the caller's global session; the caller writes the audit row and invalidates the cache after
-    commit. ``NOT_FOUND`` when the org is gone, ``INVALID_INPUT`` / ``FEATURE_NOT_IN_PLAN`` on rule failures.
+    commit. ``NOT_FOUND`` when the org is gone, ``INVALID_INPUT`` / ``FEATURE_NOT_IN_PLAN`` on rule failures,
+    including a sent ``ip_allowlist`` that would reject ``ip`` (the client address of the request).
     """
     repo = OrgRepo(session)
     org = await repo.lock(ctx.org_id)
@@ -146,6 +162,7 @@ async def apply_settings_patch(
     settings = _validated(merge_settings(stored, sent), prefix)
     paths = sent_paths(sent)
     _check_cross_field(ctx, settings, set(paths), prefix)
+    _check_keeps_caller(settings, set(paths), ip, prefix)
     sparse = sparse_settings(settings)
     written = sparse != stored
     if written:
@@ -179,12 +196,13 @@ async def org_settings_update(
     """Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.
 
     Compliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform
-    administrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan.
+    administrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan. A
+    non-empty `ip_allowlist` must include the address of the request that sets it.
     """
     sent = body.model_dump(mode="json", exclude_unset=True)
     check_settings_permissions(ctx, sent, "")
     async with database_of(request).global_session() as session:
-        result = await apply_settings_patch(session, ctx, sent, "")
+        result = await apply_settings_patch(session, ctx, sent, "", ip=client_ip(request))
         if result.after:
             await audit(
                 session, ctx, "org.update", "org", ctx.org_id, before=result.before, after=result.after

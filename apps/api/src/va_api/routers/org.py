@@ -19,7 +19,7 @@ from va_api.audit import audit, audited, changed
 from va_api.auth.api_key_auth import INVALID_API_KEY
 from va_api.auth.context import RequestContext
 from va_api.auth.permissions import holds_permission
-from va_api.auth.session_auth import database_of, org_settings_of
+from va_api.auth.session_auth import client_ip, database_of, org_settings_of
 from va_api.auth.sessions import SESSION_INVALID
 from va_api.envelopes import envelope_router
 from va_api.responses import DataResponse
@@ -173,7 +173,7 @@ async def org_update(body: OrgPatch, request: Request, ctx: WriteOrg) -> DataRes
     async with database_of(request).global_session() as session:
         repo = OrgRepo(session)
         if sent:
-            settings = await apply_settings_patch(session, ctx, sent, _SETTINGS_PREFIX)
+            settings = await apply_settings_patch(session, ctx, sent, _SETTINGS_PREFIX, ip=client_ip(request))
         old, new = await _patch_columns(repo, ctx, body)
         if settings is not None:
             old, new = old | settings.before, new | settings.after

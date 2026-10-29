@@ -283,7 +283,8 @@ export interface paths {
          * @description Change org settings: omitted keys stay unchanged, groups merge key by key, other values are replaced.
          *
          *     Compliance settings need the `org.compliance` permission; `baa_signed_at` is set by platform
-         *     administrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan.
+         *     administrators only; `hipaa_mode` needs a signed BAA and `privacy.zero_retention` the enterprise plan. A
+         *     non-empty `ip_allowlist` must include the address of the request that sets it.
          */
         patch: operations["org_settings_update"];
         trace?: never;

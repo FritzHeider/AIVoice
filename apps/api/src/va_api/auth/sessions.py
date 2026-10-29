@@ -1,11 +1,14 @@
 """Dashboard sessions: creation, resolution with sliding expiry, revocation (specs/04 §4.3).
 
-A session lives 14 days after its last extension and at most 90 days after creation. A request extends it to
-``min(now + 14 d, created_at + 90 d)`` when that is more than an hour past the current ``expires_at``, so the
-row is written at most hourly and the absolute cap needs no separate check. Resolved sessions are cached at
-``sess:{token_hash}`` for at most 5 minutes (never past ``expires_at``); revocation through this manager
-deletes the entry. Redis being unavailable never fails a request: the database answers. Only the token hash
-is stored or cached; the plaintext token exists in the cookie alone.
+A session lives one window after its last extension and at most 90 days after creation. The window is
+the ``session_max_age_days`` setting of the session's active org (14 days by default, specs/04 §7). A
+request moves ``expires_at`` to ``min(now + window, created_at + 90 d)`` when that is more than an hour past
+the current ``expires_at`` (so the row is written at most hourly) or earlier than it (a shorter window: a
+lowered setting or a switch into a stricter org); the absolute cap needs no separate check. Expiry is checked
+against the stored ``expires_at`` first, so a shortened window applies from the session's next request.
+Resolved sessions are cached at ``sess:{token_hash}`` for at most 5 minutes (never past ``expires_at``);
+revocation through this manager deletes the entry. Redis being unavailable never fails a request: the
+database answers. Only the token hash is stored or cached; the plaintext token exists in the cookie alone.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from va_common.auth import looks_like_token, sha256_hex
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_db.models import Session
+from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import IdentityRepo
 from va_db.session import Database
 
@@ -54,10 +58,13 @@ def session_cache_key(token_hash: str) -> str:
     return f"sess:{{{token_hash}}}"
 
 
-def next_expiry(*, created_at: datetime, expires_at: datetime, now: datetime) -> datetime | None:
-    """The extended ``expires_at`` for a request at ``now``, or ``None`` when no write is due."""
-    target = min(now + SLIDING_TTL, created_at + ABSOLUTE_TTL)
-    return target if target - expires_at > EXTEND_AFTER else None
+def next_expiry(
+    *, created_at: datetime, expires_at: datetime, now: datetime, window: timedelta = SLIDING_TTL
+) -> datetime | None:
+    """The new ``expires_at`` for a request at ``now`` with a sliding ``window``, or ``None`` when no write is
+    due: extended when more than an hour later than ``expires_at``, shortened whenever earlier."""
+    target = min(now + window, created_at + ABSOLUTE_TTL)
+    return target if target - expires_at > EXTEND_AFTER or target < expires_at else None
 
 
 def cache_ttl_s(expires_at: datetime, now: datetime) -> int:
@@ -127,10 +134,18 @@ class ActiveSession:
 class SessionManager:
     """Creates, resolves, and revokes sessions through ``global_session`` plus the ``sess:`` cache."""
 
-    def __init__(self, *, database: Database, redis: Redis, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        database: Database,
+        redis: Redis,
+        clock: Clock,
+        org_settings: OrgSettingsReader | None = None,
+    ) -> None:
         self._database = database
         self._redis = redis
         self._clock = clock
+        self._org_settings = org_settings
 
     async def start(
         self,
@@ -187,9 +202,10 @@ class SessionManager:
             _log.warning("session_cache_unavailable", error=type(exc).__name__)
 
     async def resolve(self, token: str) -> ActiveSession | None:
-        """The session of cookie ``token`` (extended when due), or ``None`` when invalid or expired.
+        """The session of cookie ``token`` (its expiry moved when due), or ``None`` when invalid or expired.
 
-        A disabled user's session is rejected when it is loaded from the database.
+        A disabled user's session is rejected when it is loaded from the database. The sliding window comes
+        from the active org's settings (opens its own global session on a settings cache miss).
         """
         if not looks_like_token(token):
             return None
@@ -201,7 +217,12 @@ class SessionManager:
             active = await self._load(token, now)
         if active is None or active.expires_at <= now:
             return None
-        expiry = next_expiry(created_at=active.created_at, expires_at=active.expires_at, now=now)
+        expiry = next_expiry(
+            created_at=active.created_at,
+            expires_at=active.expires_at,
+            now=now,
+            window=await self._window(active.active_org_id),
+        )
         if expiry is not None:
             async with self._database.global_session() as session:
                 await IdentityRepo(session).extend_session(active.session_id, expiry)
@@ -209,6 +230,13 @@ class SessionManager:
         if loaded or expiry is not None:
             await self.remember(active)
         return active
+
+    async def _window(self, org_id: uuid.UUID | None) -> timedelta:
+        """``session_max_age_days`` of ``org_id``; 14 days without an org or reader, or when it is gone."""
+        if org_id is None or self._org_settings is None:
+            return SLIDING_TTL
+        settings = await self._org_settings.get_lenient(org_id)
+        return SLIDING_TTL if settings is None else timedelta(days=settings.session_max_age_days)
 
     async def set_active_org(self, active: ActiveSession, org_id: uuid.UUID) -> ActiveSession:
         """Persist ``org_id`` as the session's active org."""
