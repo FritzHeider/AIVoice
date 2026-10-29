@@ -4123,3 +4123,186 @@ make test-ts pass; openapi drift current; spec refs 0; jscpd 0 clones; radon -n 
   read before the va_app session, login_failed committed before raising, unknown email / AUTH_LOCKED /
   SSO_REQUIRED write nothing, markers on all 31 mutating routes, marker checker proven to bite.
 - P02-T11 parent ticked (T11a + T11b done).
+
+## 2026-10-29 Planner: P02-T11b approved → P02-T12 split into T12a/T12b/T12c
+- T12 needs a new package (`va_domain` does not exist yet), a ~60-field model whose fields are spread over nine specs
+  with four conflicts, two routes plus a cache, and enforcement of two security settings. Split: T12a model + package +
+  spec reconciliation (no routes); T12b routes, accessor, cache, audit; T12c `ip_allowlist` / `session_max_age_days`
+  enforcement (otherwise those two settings would be dead fields).
+
+### T12b design carried forward (do not build in T12a)
+- Routes: `GET /v1/org/settings` (`org:read`, `operation_id="org_settings_get"`) and `PATCH /v1/org/settings`
+  (`org:write`, `org_settings_update`, `audited("org.update")`), both `DataResponse[OrgSettings]` (full object with
+  defaults); `PATCH /v1/org` gains `settings: OrgSettings | None` (same merge). The phase plan names
+  `/v1/org/settings`, specs/04 §8.1 only `PATCH /v1/org {settings?}`: build both, record in §8.1.
+- PATCH body is parsed as `OrgSettings` itself: every field has a default, so `body.model_dump(mode="json",
+  exclude_unset=True)` is exactly what the client sent (recursive for sub-models), field errors come out with real
+  paths, and the OpenAPI schema is the model. Then `merge_settings(stored, sent)` → `OrgSettings.model_validate` →
+  `check_cross_field(merged, plan_id)` → store `sparse(merged-input)`.
+- Permissions: any sent path in `COMPLIANCE_PATHS` → `org.compliance`; `baa_signed_at` sent by a non
+  `platform_admin` → `FORBIDDEN` "Only platform administrators can set 'baa_signed_at'."; `hipaa_mode` true with
+  `baa_signed_at` null → `INVALID_INPUT` field `hipaa_mode`; `privacy.zero_retention` true on a plan other than
+  `enterprise` → `FEATURE_NOT_IN_PLAN` field `privacy.zero_retention`. Field paths: `settings.<path>` under
+  `PATCH /v1/org`, `<path>` under `/v1/org/settings`.
+- `va_db.org_settings.OrgSettingsReader(database, redis)`: `get(org_id) -> OrgSettings | None`, Redis
+  `orgsettings:{org_id}` string JSON (the stored sparse object) EX 60, Redis errors logged and fall back to the DB
+  (same pattern as `ApiKeyAuthenticator._cached/_store`), `invalidate(org_id)` = DEL after the write commits; add the
+  key to specs/03 §11. `GET /v1/org` returns `OrgSettings.model_validate(org.settings)` dumped with defaults.
+- Audit: one `org.update` row, before/after keyed by dotted setting path (`settings.timezone`), only changed paths.
+
+## Plan P02-T12a — `va_domain` package and `OrgSettings` (specs/04 §7; specs/02 layout; specs/15 §5; specs/17 §3, §7; specs/23)
+
+### Facts found while planning
+- `packages/va_domain` does not exist; specs/02 lists it ("Pydantic API/domain schemas and enums shared across
+  services"); specs/04 §7 names `va_domain.org.OrgSettings` (`extra="forbid"`, all fields defaulted).
+- Package scaffolding precedent: commit 879b2e0 (va_events) — `pyproject.toml` (uv_build), `src/<pkg>/__init__.py`
+  with `__version__ = version("va-domain")`, `py.typed`, `tests/`; root `pyproject.toml`: dev group `"va-domain"`,
+  `[tool.uv.sources] va-domain = { workspace = true }`, mypy `mypy_path` + `files` (`packages/va_domain/src`,
+  `packages/va_domain/tests`); `uv lock`. Coverage source already covers `packages`.
+- Stored org settings today are free JSON; `orgs.settings.mfa_required` is read as raw JSON `true` by
+  `MembershipLookupRepo` (SQL) and `auth/sub_accounts.py:73`. Storage must stay sparse (only explicitly set keys)
+  so those readers keep working and later default changes take effect — helpers here, storage in T12b.
+- Org-setting fields referenced outside §7 (all must be in the model): specs/23 §2 `compliance.dnc_inherit_from_parent`
+  (true), §3 `compliance.calling_hours` ([CallingWindow], 08:00–21:00 all days), `compliance.state_quiet_hours` (true),
+  `compliance.max_attempts_per_number_per_day` (int, 0 = unlimited), §4 `compliance.recording_disclosure_policy`
+  (`always|auto|never`, `auto`), §5 `compliance.ai_disclosure_policy` (`always|auto|never`, `always`),
+  `compliance.require_consent_attestation` (true), §6 `compliance.redaction.enabled` / `redact_llm_context`;
+  specs/18 `analysis.sentiment` (true), `delete_carrier_recordings` (true); specs/16 `cnam_display_name` (≤ 15 letters,
+  digits, space); specs/17 `batch_concurrency_share` (0.1–1.0, 1.0); specs/21 `sms.smart_encoding` (true);
+  specs/07 `call_defaults.no_input_timeout_ms` (inside the free-form `call_defaults`).
+- Conflicts: (a) §7 top-level `calling_hours {start,end,days:int[]}` vs specs/17/23 `compliance.calling_hours:
+  [CallingWindow]` with day names; (b) §7 `redaction.enabled` vs specs/23 `compliance.redaction.*`; (c) §7
+  `analysis.retranscribe` default false vs specs/08 "default true when record=true"; (d) §7
+  `llm.context_budget_tokens` max 64 000 vs specs/10 max 32 000.
+- `GuardRail` (specs/23 §1.1, `va_compliance`) and `SendCallRequest` (specs/05, phase 03+) do not exist yet.
+- `email-validator` is already an api dependency (pydantic `EmailStr`). No E.164 helper in va_common.
+
+### Decisions to record (specs/04 §7, one `> Decision (2026-10-29):` block "OrgSettings fields (P02-T12a)";
+pointer notes in specs/23 §3 and §6, specs/08 (retranscribe line), specs/10 (budget line))
+1. **Conflicts**: (a) one calling-hours setting, `compliance.calling_hours: list[CallingWindow]` (specs/17 §3 shape,
+   1–14 windows, default one window all seven days 08:00–21:00); the §7 top-level `calling_hours` row is replaced by it
+   (more specs consume the compliance form and it shares the batch model). (b) `redaction` stays a top-level group
+   (§7 Python layout) with `enabled` (false) and `redact_llm_context` (false); specs/23 §6 `compliance.redaction.*`
+   reads as `redaction.*`. (c) `analysis.retranscribe: bool | None = None`, null = "on when the call is recorded"
+   (specs/08), true/false overrides. (d) `llm.context_budget_tokens` 1 000–32 000 (the consumer's max), default 6 000.
+2. **Additions** (from the other specs, defaults as there): `compliance.dnc_inherit_from_parent` true,
+   `compliance.state_quiet_hours` true, `compliance.max_attempts_per_number_per_day` int 0–100 default 0,
+   `compliance.recording_disclosure_policy` `auto`, `compliance.ai_disclosure_policy` `always`,
+   `compliance.require_consent_attestation` true, `analysis.sentiment` true, top-level `delete_carrier_recordings` true,
+   `cnam_display_name` `^[A-Za-z0-9 ]{1,15}$` | null, `batch_concurrency_share` 0.1–1.0 default 1.0, group
+   `sms: SmsSettings` with `smart_encoding` true. `ai_disclosure_required=true` forces the rail whatever the policy.
+3. **Free-form until their owners land**: `call_defaults` is `dict[str, JsonValue]` (validated against
+   `SendCallRequest` when the calls API lands); `default_guard_rails` items are `GuardRailConfig` with `type` ∈ the five
+   specs/23 §1.1 types and other keys kept (`extra="allow"`), ≤ 10 items, until `va_compliance.guard_rails.GuardRail`
+   replaces it.
+4. **Value rules**: `timezone` must load with `zoneinfo.ZoneInfo` (package depends on `tzdata`); `default_language`
+   1–16 chars `^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})*$|^babel$`… keep it simple: 1–16 chars of letters, digits, `-`;
+   `default_voice` 1–100 chars; E.164 `^\+[1-9][0-9]{1,14}$` (`default_from_number`); `blocked_prefixes` items
+   `^\+[0-9]{1,15}$` (≤ 200); countries `^[A-Z]{2}$` (`allowed_countries` ≤ 250, unique); URLs http(s) ≤ 2 048 stored
+   as strings (`default_webhook`; scheme policy stays at webhook-send time, specs/19); `llm.base_url` https only;
+   `llm.api_key_ref` `^[a-z0-9_-]{1,64}$`; model names 1–200 chars; `llm.temperature_default` 0–2;
+   `default_webhook_events` ≤ 50 unique strings 1–64 chars; `pii_redaction_entities` ≤ 20 unique `^[a-z][a-z0-9_]*$`;
+   `ip_allowlist` ≤ 100 CIDRs normalized by `ipaddress.ip_network(strict=False)` to their string form;
+   `notification_emails` ≤ 20 `EmailStr`; `dispositions_default` ≤ 50 strings 1–100 chars; messages ≤ 500; summary
+   prompt ≤ 2 000; `low_balance_threshold_micros` ≥ 0; datetimes `AwareDatetime`; `voice_overrides`
+   `dict[uuid.UUID, VoiceSettings]` ≤ 200 entries; `CallingWindow.end > start`, `HH:MM` 00:00–23:59, days unique,
+   ≥ 1; windows of one day must not overlap (specs/17 §3).
+5. **Merge and storage**: groups (the 12 sub-model fields) merge key by key, every other field (maps and lists
+   included, e.g. `voice_overrides`, `compliance.calling_hours`, and the nested `redaction` dict) is replaced whole;
+   `null` sets a nullable field to null and is invalid elsewhere. Stored `orgs.settings` holds only explicitly set
+   keys. Compliance paths (need `org.compliance`, T12b): every key under `compliance`, `privacy`, `redaction`, plus
+   `hipaa_mode`, `baa_signed_at`, `pii_redaction`, `pii_redaction_entities`, `viewers_can_see_pii`, `mfa_required`,
+   `session_max_age_days`, `ip_allowlist`, `ai_disclosure_required`, `recording_disclosure_required`,
+   `honor_opt_out`, `allow_insecure_webhooks`, `international_enabled`, `allowed_countries`, `blocked_prefixes`.
+   Cross-field rules (T12b, checked on the merged object, not in model validators because a partial body is parsed
+   with the same model): `hipaa_mode` needs `baa_signed_at`; `privacy.zero_retention` needs plan `enterprise`.
+
+Builder: drop the "keep it simple" wording above from the spec text — record the final `default_language` rule as
+"1–16 characters of letters, digits and `-`".
+
+### Files
+- **packages/va_domain/pyproject.toml** (`va-domain`, deps `pydantic>=2.9`, `email-validator>=2.3.0`,
+  `tzdata>=2025.2`), **src/va_domain/__init__.py**, **py.typed**.
+- **src/va_domain/voices.py**: `VoiceSettings` exactly as specs/15 §5 (`extra="forbid"`).
+- **src/va_domain/scheduling.py**: `CallingWindow` (specs/17 §3: `days: list[Literal["mon",…,"sun"]]`, `start`,
+  `end`, validators), `Weekday` alias, `windows_overlap(windows) -> bool` helper used by the settings validator (specs/17
+  batches will reuse it).
+- **src/va_domain/org.py**: `OrgSettings` + sub-models `ComplianceSettings`, `LlmSettings`, `PrivacySettings`,
+  `RedactionSettings`, `AnalysisSettings`, `MemorySettings`, `ToolsSettings`, `EngineSettings`, `VoicesSettings`,
+  `ExperimentsSettings`, `SmsSettings`, plus `GuardRailConfig`; all `extra="forbid"` (except GuardRailConfig
+  `extra="allow"`), every field `Field(default=…, description=…)`. Module constants and helpers:
+  - `SETTINGS_GROUPS: Final[frozenset[str]]` (the 12 group field names),
+  - `COMPLIANCE_PATHS: Final[frozenset[str]]` (top-level names and group names from Decision 5),
+  - `merge_settings(stored: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]` (pure; groups merged
+    key-wise, rest replaced; never mutates inputs),
+  - `sent_paths(patch: Mapping[str, Any]) -> list[str]` (dotted paths: `timezone`, `compliance.calling_hours`),
+  - `needs_compliance(patch) -> bool` (any sent path whose first segment is in `COMPLIANCE_PATHS`),
+  - `load_settings(stored: Mapping[str, Any]) -> OrgSettings` (validate stored sparse JSON),
+  - `field_path(loc: tuple[int | str, ...]) -> str` (pydantic loc → `compliance.calling_hours[0].end`; used by T12b to
+    build `INVALID_INPUT` fields),
+  - `__all__`.
+- **tests/** in packages/va_domain: `test_org_settings_defaults.py` parses specs/04 §7 (both tables, plus the
+  Decision 2 additions listed in a pinned dict) and asserts each default equals `OrgSettings()` at that path (table
+  `Default` column text mapped by a small parser: `true/false/null/[]/{}`, numbers incl. `5 000 000`, quoted strings,
+  backticked enums); the replaced `calling_hours` row must be gone from the table; every model path appears in the
+  table or the pinned additions and vice versa. `test_org_settings_validation.py`: parametrized invalid values for each
+  rule of Decision 4 → `ValidationError` with the expected `field_path`; extra keys rejected at top level and in each
+  group; `GuardRailConfig` unknown type rejected, extra keys kept; `ip_allowlist` normalization; timezone; overlap.
+  `test_org_settings_merge.py`: merge semantics (groups key-wise, lists/maps replaced, null, inputs unmutated),
+  `sent_paths`, `needs_compliance` true/false cases, `OrgSettings().model_dump(mode="json")` round-trips through
+  `load_settings`, a sparse stored `{"mfa_required": true}` loads with all other defaults.
+  `test_voices.py` / `test_scheduling.py` for `VoiceSettings` bounds and `CallingWindow`.
+  Reuse a markdown-table parser if one exists (apps/api/tests test_rbac_matrix / test_permissions parse spec tables —
+  move a shared helper to `scripts/` or va_common test support instead of copying; jscpd).
+- **Root pyproject.toml**: dev group, sources, mypy paths/files; `uv lock`.
+- **specs/04 §7**: replace the `calling_hours` row, add the Decision block; pointer notes in specs/23 §3/§6, specs/08,
+  specs/10; specs/02 nothing (package already listed).
+- **AGENTS.md**: `va_domain` exists; org settings stored sparse; parse PATCH bodies with `OrgSettings` +
+  `exclude_unset`.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run python scripts/check_spec_refs.py`; `npx jscpd@4` (0 clones);
+radon `-n C` none on `packages/va_domain/src`; `pip-audit` (tzdata/email-validator) + gitleaks. No openapi change
+expected (no route touches the model yet) — run `make openapi` + drift check to confirm. build.done PLAIN STRING:
+`ralph emit "build.done" "P02-T12a tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Coverage gate is per run (`--cov-fail-under=85` overall) but the master prompt wants ≥ 85 % per package — aim for
+  ~100 % in va_domain.
+- The §7 default-parser test is brittle on prose cells (`Karen` with a parenthetical, the long quoted messages, the
+  `5 000 000` thin spaces): parse only the leading backticked/quoted token and keep a small explicit override map for
+  the few prose cells rather than loosening the comparison.
+- `tzdata` must be a runtime dependency (slim containers lack /usr/share/zoneinfo).
+- Do not add model validators that compare two fields across groups — a partial PATCH body is parsed with the same
+  model in T12b. `CallingWindow` (single object) and the windows-overlap check (single field) are fine.
+
+## 2026-10-29 Builder: P02-T12a build notes
+- New `packages/va_domain` (dist `va-domain`; deps pydantic, email-validator, tzdata): `voices.VoiceSettings`
+  (specs/15 §5), `scheduling.CallingWindow` / `Weekday` / `ALL_DAYS` / `windows_overlap` / `unique_items`,
+  `org.OrgSettings` + 11 group sub-models + `GuardRailConfig`, `SETTINGS_GROUPS`, `COMPLIANCE_PATHS`, `merge_settings`,
+  `sent_paths`, `needs_compliance`, `load_settings`, `sparse_settings` (added: `model_dump(mode="json",
+  exclude_unset=True)` = normalized sparse form to store), `field_path` (drops pydantic's `[key]` segment).
+- Deviations from the plan, recorded in the specs/04 §7 Decision:
+  - Groups are 11, not 12 (compliance, llm, privacy, redaction, analysis, memory, tools, engine, voices, experiments,
+    sms); the test derives the set from the model.
+  - `notification_emails` does not use `EmailStr`: it rejects `.test` domains, which every fixture and the dev seed use.
+    Uses `email_validator.validate_email(check_deliverability=False, test_environment=True).normalized` instead.
+  - Spoken messages and `summary_prompt_default` need ≥ 1 character; `max_attempts_per_number_per_day` capped at 100.
+- specs/04 §7: top-level `calling_hours` row removed, `compliance.calling_hours` row added (JSON default),
+  `analysis.retranscribe` row → `bool | null`/null, `llm.context_budget_tokens` → 1 000–32 000, `sms: SmsSettings` in
+  the Python layout, Decision block "OrgSettings fields (P02-T12a)" items 1–5. Pointer Decisions in specs/08 §8,
+  specs/10 §6, specs/23 §3 and §6. AGENTS.md entry.
+- Tests (236, 100 % coverage of va_domain): defaults parsed from both §7 tables (+ pinned additions, each must be named
+  in §7), model paths == spec paths, every field has a description; 80+ invalid cases with expected `field_path`;
+  extra keys per group; merge/sparse/compliance helpers; COMPLIANCE_PATHS compared with the Decision text.
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 3231 passed, coverage 97.87% (logs/p02-t12a-test.log);
+spec refs 0; openapi drift current (no change); jscpd 0 clones; radon -n C none in va_domain, avg 2.0037 (apps+packages
+src); pip-audit (uv export --no-emit-workspace, --no-deps --disable-pip) + pnpm audit no vulns; gitleaks passed.
+
+## Review P02-T12a (2026-10-29): approved
+- Gates re-run: make lint typecheck placeholders pass (0 findings); make test 3231 passed, coverage 97.86% (va_domain
+  100%) (logs/review-t12a-test.log); check_spec_refs 0; jscpd 0 clones; radon -n C none in va_domain.
+- Checked OrgSettings against specs/04 §7 tables row by row (defaults test parses both tables + pinned additions),
+  VoiceSettings vs specs/15 §5, CallingWindow vs specs/17 §3; Decision block covers all conflicts and additions.
+- Spot checks: invalid timezone / overlapping windows / bad dict key / bad CIDR / null group produce the expected
+  field paths; CIDR + email normalization in sparse_settings; full dump round-trips through load_settings.

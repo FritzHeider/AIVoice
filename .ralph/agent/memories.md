@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793288415-ea3a
+> va_domain.org.OrgSettings: orgs.settings stored sparse (load_settings/sparse_settings); PATCH body parsed with OrgSettings + exclude_unset, merge_settings (groups key-wise), needs_compliance, field_path(loc). pydantic EmailStr rejects .test domains used in fixtures - use email_validator.validate_email(check_deliverability=False, test_environment=True)
+<!-- tags: api, pydantic, settings | created: 2026-10-29 -->
+
 ### mem-1793287252-a730
 > va_api audit markers: every POST/PUT/PATCH/DELETE route needs openapi_extra {**audited('<action>',...)} or {**audit_exempt('<reason>')} (test_audit_markers walks app.state.routers). Dashboard auth rows use va_api.audit.audit_user(session, request, org_ids, user_id, action) - one row per membership org; signing in now writes auth.login rows, so tests listing a whole org log must filter auth.* or remove them via system_session
 <!-- tags: api, audit, testing | created: 2026-10-29 -->
@@ -121,6 +125,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793288415-240d
+> pip-audit on uv export fails installing workspace packages; use 'uv export --no-hashes --no-emit-workspace --format requirements-txt' then 'uvx pip-audit --no-deps --disable-pip -r file'
+<!-- tags: tooling | created: 2026-10-29 -->
 
 ### mem-1793280879-cb08
 > Never run 'ruff check --fix --select RUF100' (or any --select incl. RUF100) on the repo: noqa for unselected rules count as unused and get stripped repo-wide (P02-T09a). Run plain 'make lint' / ruff --fix without --select

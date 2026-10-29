@@ -749,7 +749,6 @@ defaults; `PATCH /v1/org` merges.
 | `no_input_goodbye` | string ≤ 500 | `"I haven't heard anything, so I'll end the call now. Goodbye."` | Spoken after repeated no-input timeouts |
 | `pathway_version_fallback` | bool | true | Missing numeric pathway version falls back to production instead of `PATHWAY_VERSION_NOT_FOUND` |
 | `voice_overrides` | map voice_id(uuid) → VoiceSettings `{stability, similarity_boost, style, use_speaker_boost, speed}` | `{}` | Org-level per-voice setting overrides |
-| `calling_hours` | `{start: "HH:MM", end: "HH:MM", days: int[] (0=Mon)}` | `{start:"08:00", end:"21:00", days:[0,1,2,3,4,5,6]}` | Evaluated in callee local timezone (`23-guardrails-and-compliance.md`) |
 | `default_guard_rails` | GuardRail[] | `[]` | Applied to every call unless call overrides (`23`) |
 | `ai_disclosure_required` | bool | false | Forces `tcpa:ai_disclosure` guard rail |
 | `recording_disclosure_required` | bool | true | Forces `tcpa:recording_disclosure` when `record=true` |
@@ -783,13 +782,14 @@ Nested groups (each a Pydantic sub-model with `extra="forbid"`; `PATCH /v1/org` 
 
 | Path | Type | Default | Meaning |
 |---|---|---|---|
-| `compliance.enforce_calling_hours` | bool | false | Apply `calling_hours` to non-batch API calls (`23`) |
+| `compliance.enforce_calling_hours` | bool | false | Apply `compliance.calling_hours` to non-batch API calls (`23`) |
+| `compliance.calling_hours` | CallingWindow[] (`17-batches-and-scheduling.md` §3), 1–14, non-overlapping per day | `[{"days":["mon","tue","wed","thu","fri","sat","sun"],"start":"08:00","end":"21:00"}]` | Evaluated in callee local timezone (`23-guardrails-and-compliance.md`) |
 | `llm.allow_model_override` | bool | false | Allow per-call `model` values outside the platform model allowlist |
-| `llm.context_budget_tokens` | int 1 000–64 000 | 6 000 | Max prompt tokens for dialogue context assembly (`10`) |
+| `llm.context_budget_tokens` | int 1 000–32 000 | 6 000 | Max prompt tokens for dialogue context assembly (`10`) |
 | `privacy.redact_transcripts` | bool | false | Shorthand that forces `pii_redaction` ≥ `transcripts` |
 | `privacy.zero_retention` | bool | false | Vendor calls use zero-retention options (`enable_logging=false` for ElevenLabs); requires enterprise |
 | `redaction.enabled` | bool | false | Real-time PCI redaction before text reaches the LLM (`28` §7) |
-| `analysis.retranscribe` | bool | false | Post-call diarized re-transcription with ElevenLabs batch STT (`18`) |
+| `analysis.retranscribe` | bool \| null | null | Post-call diarized re-transcription with ElevenLabs batch STT (`18`); null = on when the call is recorded |
 | `memory.default_enabled` | bool | false | Memory on for calls/personas that do not specify (`20`) |
 | `tools.allow_send_sms` | bool | true | Built-in SMS tool/node allowed (`13`, `21`) |
 | `tools.allow_schedule_callback` | bool | false | Built-in schedule-callback tool allowed |
@@ -803,7 +803,54 @@ Python layout: `OrgSettings` contains fields `compliance: ComplianceSettings`, `
 override fields `base_url`, `api_key_ref`, `dialogue_model`, `router_model`, `analysis_model`, `fallback_model`,
 `temperature_default` listed above), `privacy: PrivacySettings`, `redaction: RedactionSettings`,
 `analysis: AnalysisSettings`, `memory: MemorySettings`, `tools: ToolsSettings`, `engine: EngineSettings`,
-`voices: VoicesSettings`, `experiments: ExperimentsSettings`, each defaulting to its own defaults.
+`voices: VoicesSettings`, `experiments: ExperimentsSettings`, `sms: SmsSettings`, each defaulting to its own defaults.
+
+> Decision (2026-10-29): OrgSettings fields (P02-T12a). `va_domain.org.OrgSettings` holds every org setting named in any
+> spec, with these rules:
+> 1. Conflicts. (a) One calling-hours setting, `compliance.calling_hours: list[CallingWindow]` (`17` §3 shape, 1–14
+>    windows, default one window on all seven days 08:00–21:00); it replaces the former top-level `calling_hours`
+>    `{start, end, days: int[]}` row, because `17` and `23` consume the compliance form and it shares the batch model.
+>    (b) `redaction` stays a top-level group with `redaction.enabled` (false) and `redaction.redact_llm_context`
+>    (false); the `compliance.redaction.*` names in `23` §6 read as `redaction.*`. (c) `analysis.retranscribe` is `bool | null`,
+>    default null = "on when the call is recorded" (`08` §8); true/false override it. (d) `llm.context_budget_tokens`
+>    is 1 000–32 000 (the maximum `10` enforces), default 6 000.
+> 2. Additions (defaults from the spec that reads them): `compliance.dnc_inherit_from_parent` true,
+>    `compliance.state_quiet_hours` true, `compliance.max_attempts_per_number_per_day` int 0–100 default 0 (unlimited),
+>    `compliance.recording_disclosure_policy` `always|auto|never` default `auto`, `compliance.ai_disclosure_policy`
+>    `always|auto|never` default `always`, `compliance.require_consent_attestation` true (all `23`);
+>    `analysis.sentiment` true and top-level `delete_carrier_recordings` true (`18`); `cnam_display_name`
+>    `^[A-Za-z0-9 ]{1,15}$` or null (`16`); `batch_concurrency_share` 0.1–1.0 default 1.0 (`17`); group
+>    `sms: SmsSettings` with `sms.smart_encoding` true (`21`). `ai_disclosure_required=true` forces the AI-disclosure rail
+>    whatever `compliance.ai_disclosure_policy` says.
+> 3. Free-form until their owners land: `call_defaults` is a JSON object (validated against `SendCallRequest` when the
+>    calls API lands; `07` reads `call_defaults.no_input_timeout_ms`); `default_guard_rails` items are
+>    `GuardRailConfig` (`type` one of the five `23` §1.1 types, other keys kept as sent), at most 10, until
+>    `va_compliance.guard_rails.GuardRail` replaces it.
+> 4. Value rules: `timezone` must load with `zoneinfo.ZoneInfo` (the package ships `tzdata`); `default_language` 1–16
+>    characters of letters, digits and `-`; `default_voice` 1–100 characters; `default_from_number` E.164
+>    `^\+[1-9][0-9]{1,14}$`; `blocked_prefixes` items `^\+[0-9]{1,15}$`, at most 200; country codes `^[A-Z]{2}$`
+>    (`allowed_countries` at most 250, unique); `default_webhook` an absolute http(s) URL of at most 2 048 characters,
+>    stored as sent (the scheme policy stays at webhook-send time, `19`); `llm.base_url` https only; `llm.api_key_ref`
+>    `^[a-z0-9_-]{1,64}$`; model names 1–200 characters; `llm.temperature_default` 0–2; `default_webhook_events` at
+>    most 50 unique names of 1–64 characters; `pii_redaction_entities` at most 20 unique `^[a-z][a-z0-9_]*$`;
+>    `ip_allowlist` at most 100 IPv4/IPv6 networks, stored normalized (`10.1.2.3/8` → `10.0.0.0/8`, a bare address
+>    becomes `/32` or `/128`); `notification_emails` at most 20 addresses
+>    (syntax-checked without DNS, domain lower-cased, `.test` domains accepted for development); `dispositions_default`
+>    at most 50 strings of 1–100 characters; the three spoken messages 1–500 characters; `summary_prompt_default`
+>    1–2 000 characters;
+>    `low_balance_threshold_micros` ≥ 0; datetimes carry a UTC offset; `voice_overrides` at most 200 entries;
+>    `CallingWindow` times `HH:MM` 00:00–23:59 with `end > start`, days unique and at least one.
+> 5. Merge and storage. A group (the 11 sub-model fields) sent as an object merges into the stored group key by key;
+>    every other field, lists and maps included (`voice_overrides`, `compliance.calling_hours`), is replaced whole.
+>    `null` sets a nullable field to null and is invalid elsewhere. `orgs.settings` stores only explicitly set keys
+>    (normalized), and reads fill the rest from the model defaults, so a default change reaches every org that never set
+>    the key. Compliance settings (writing any of them needs `org.compliance`): every key under `compliance`,
+>    `privacy`, and `redaction`, plus `hipaa_mode`, `baa_signed_at`, `pii_redaction`, `pii_redaction_entities`,
+>    `viewers_can_see_pii`, `mfa_required`, `session_max_age_days`, `ip_allowlist`, `ai_disclosure_required`,
+>    `recording_disclosure_required`, `honor_opt_out`, `allow_insecure_webhooks`, `international_enabled`,
+>    `allowed_countries`, `blocked_prefixes`. Cross-field rules are checked on the merged object at write time, not in
+>    the model (a partial body is parsed with the same model): `hipaa_mode=true` needs `baa_signed_at`;
+>    `privacy.zero_retention=true` needs the enterprise plan.
 
 Org secrets: `PUT /v1/org/secrets/{name}` `{value}` stores envelope-encrypted values in `org_secrets` (new table,
 see shared-contract additions); `GET /v1/org/secrets` lists names only.

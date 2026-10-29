@@ -598,3 +598,12 @@ Grafana 3001
   request, org_ids, user_id, action, after=...)` (one row per org of the user). Fetch `memberships_of_user`
   (system pool) **before** opening the va_app session that writes the row. Logout-style writes use
   `SessionManager.revoke_in` / `revoke_all_in` in the caller's transaction, then `forget(hashes)` after commit.
+- 2026-10-29 (P02-T12a): `packages/va_domain` (dist `va-domain`, deps pydantic, email-validator, tzdata) holds shared
+  Pydantic domain models: `va_domain.org.OrgSettings` (every org setting, specs/04 §7), `va_domain.voices.VoiceSettings`,
+  `va_domain.scheduling.CallingWindow` + `windows_overlap`. `orgs.settings` is stored **sparse** (only explicitly set
+  keys): read with `load_settings(stored)`, write `sparse_settings(model)`. Parse PATCH bodies with `OrgSettings` itself
+  and read `model_dump(mode="json", exclude_unset=True)` (exactly what was sent), then `merge_settings(stored, sent)`
+  (groups key-wise, everything else replaced), `needs_compliance(sent)` for the `org.compliance` permission, and
+  `field_path(error["loc"])` for `INVALID_INPUT` fields. Never add cross-group model validators to `OrgSettings`.
+  `pydantic.EmailStr` rejects `.test` domains (used by every fixture and the dev seed); validate emails with
+  `email_validator.validate_email(..., check_deliverability=False, test_environment=True)` as `va_domain.org` does.

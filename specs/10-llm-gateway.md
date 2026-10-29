@@ -162,6 +162,9 @@ Placeholder rendering rules (all produced by `va_llm.prompts.render_voice_system
   window; system prompt and examples are not trimmed but are measured — if system + examples exceed 60 % of the
   model's configured `max_context` (default 128 000), KB chunks are reduced first (drop lowest-ranked), then memory
   context truncated to 800 tokens.
+
+> Decision (2026-10-29): the org setting's accepted range is 1 000–32 000 (specs/04 §7 now uses this spec's maximum).
+
 - Trimming: drop the oldest complete turns (user+assistant pairs and their tool messages together) until within
   budget; always keep the opener assistant message; insert `system` `"(Earlier parts of the conversation are omitted.)"`
   at the cut.

@@ -191,6 +191,9 @@ pathway), the agent's own name and company from persona config, and the voice na
 Used by `PostCallWorkflow` when the org setting `analysis.retranscribe` is true (default true when `record=true`) to
 produce a higher-accuracy transcript aligned to the recording for citations, evals, and the dashboard player.
 
+> Decision (2026-10-29): `analysis.retranscribe` is `bool | null` with default null, meaning "on when the call is
+> recorded"; true or false overrides that (specs/04 §7, Decision "OrgSettings fields (P02-T12a)").
+
 - `POST {ELEVENLABS_API_BASE}/v1/speech-to-text` multipart:
   `model_id=ELEVENLABS_BATCH_STT_MODEL` (`scribe_v2`), `file=<raw.wav from S3>`, `use_multi_channel=true` (dual-channel
   recording: channel 0 caller, channel 1 agent — verified by `test_recording_channel_order`),

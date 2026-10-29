@@ -7,6 +7,7 @@ members = [
     "va-api",
     "va-common",
     "va-db",
+    "va-domain",
     "va-events",
     "va-events-sink",
     "va-media-worker",
@@ -2520,6 +2521,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-domain"
+version = "0.1.0"
+source = { editable = "packages/va_domain" }
+dependencies = [
+    { name = "email-validator" },
+    { name = "pydantic" },
+    { name = "tzdata" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "email-validator", specifier = ">=2.3.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "tzdata", specifier = ">=2025.2" },
+]
+
+[[package]]
 name = "va-events"
 version = "0.1.0"
 source = { editable = "packages/va_events" }
@@ -2683,6 +2701,7 @@ dev = [
     { name = "va-api" },
     { name = "va-common" },
     { name = "va-db" },
+    { name = "va-domain" },
     { name = "va-events" },
     { name = "va-events-sink" },
     { name = "va-media-worker" },
@@ -2722,6 +2741,7 @@ dev = [
     { name = "va-api", editable = "apps/api" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-media-worker", editable = "apps/media_worker" },

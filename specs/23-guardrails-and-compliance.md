@@ -137,6 +137,9 @@ Defined in `17-batches-and-scheduling.md` §7 (windows, state rules, frequency c
 `compliance.enforce_calling_hours` (bool, default false), `compliance.calling_hours` (`[CallingWindow]`, default 08:00–21:00 daily),
 `compliance.state_quiet_hours` (bool, default true), `compliance.max_attempts_per_number_per_day` (int, default 0 = unlimited).
 
+> Decision (2026-10-29): `compliance.calling_hours` is the only calling-hours setting (the former top-level
+> `calling_hours` of specs/04 §7 was replaced by it); `max_attempts_per_number_per_day` accepts 0–100.
+
 ## 4. Recording consent policy
 
 - All-party consent jurisdictions table `va_compliance.consent.ALL_PARTY_CONSENT_STATES` (US) =
@@ -174,6 +177,9 @@ ElevenLabs `entity_detection=["pii","pci","phi"]` (`08-stt-elevenlabs.md`). `com
 character spans; the stored `call_turns.text` replaces each span with `[REDACTED:<entity_type>]`. The **unredacted** text is
 used in memory only for the live LLM context of the current call (needed for the conversation) unless
 `compliance.redaction.redact_llm_context=true`, which replaces spans before the LLM too.
+
+> Decision (2026-10-29): these two settings live in the top-level `redaction` group of `OrgSettings` and are read as
+> `redaction.enabled` and `redaction.redact_llm_context` (specs/04 §7, Decision "OrgSettings fields (P02-T12a)").
 
 ### 6.2 Regex fallback (always applied to stored transcripts, summaries, analysis results, webhook payloads when redaction enabled)
 
