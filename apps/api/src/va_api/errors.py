@@ -191,7 +191,7 @@ def _handler[E: Exception](kind: type[E], render: _Render[E]) -> _Handler:
 
 
 def _render_app_error(request: Request, exc: AppError) -> JSONResponse:
-    return error_response(request, exc.http_status, [exc.to_error_item()])
+    return error_response(request, exc.http_status, [exc.to_error_item()], exc.headers or None)
 
 
 def _render_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:

@@ -30,6 +30,8 @@ class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettin
     public_api_base_url: str = "http://localhost:8000"
     dashboard_base_url: str = "http://localhost:3000"
     openapi_public_server_url: str = "http://localhost:8000"
+    # Parent domain of the dashboard/api session cookies; empty keeps them host-only (specs/04 §4.3).
+    session_cookie_domain: str = ""
     api_key_pepper: SecretStr = SecretStr("")
     api_key_pepper_previous: SecretStr = SecretStr("")
     api_key_pepper_version: int = Field(default=1, ge=1)

@@ -60,6 +60,13 @@ def test_app_error_defaults_status_from_catalog() -> None:
     assert error.message == "Slow down"
     assert error.field is None
     assert error.details == {}
+    assert error.headers == {}
+
+
+def test_app_error_headers_are_not_in_the_error_item() -> None:
+    error = AppError("AUTH_LOCKED", "Locked", headers={"Retry-After": "30"})
+    assert error.headers == {"Retry-After": "30"}
+    assert error.to_error_item() == {"error": "AUTH_LOCKED", "message": "Locked"}
 
 
 def test_app_error_accepts_alternate_status() -> None:

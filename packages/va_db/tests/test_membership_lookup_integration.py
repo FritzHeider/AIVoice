@@ -70,3 +70,37 @@ async def test_membership_repo_add_duplicate_conflict_and_get(identity_db: Ident
     async with database.tenant_session(other_org.id) as session:
         assert await MembershipRepo(session, other_org.id).get_for_user(user.id) is None
         assert await MembershipRepo(session, org.id).get_for_user(user.id) is None
+
+
+@pytest.mark.parametrize(
+    ("settings", "limits", "mfa_required", "rate_per_sec"),
+    [
+        ({"mfa_required": True}, {"rate_per_sec": 40}, True, 40),
+        ({"mfa_required": "true"}, {"rate_per_sec": 0}, False, None),
+        ({}, {"rate_per_sec": True}, False, None),
+    ],
+)
+async def test_for_user_in_org_reads_mfa_and_rate_override(
+    identity_db: IdentityDb,
+    settings: dict[str, object],
+    limits: dict[str, object],
+    mfa_required: bool,
+    rate_per_sec: int | None,
+) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        org = await make_org(session, settings=settings, limits=limits)
+        other_org = await make_org(session)
+        user = await make_user(session, unique_email())
+    async with database.tenant_session(org.id) as session:
+        added = await MembershipRepo(session, org.id).add(user.id, "analyst")
+    async with database.system_session() as session:
+        repo = MembershipLookupRepo(session)
+        record = await repo.for_user_in_org(user.id, org.id)
+        assert await repo.for_user_in_org(user.id, other_org.id) is None
+        assert await repo.for_user_in_org(uuid.uuid4(), org.id) is None
+        listed = await repo.for_user(user.id)
+    assert record is not None
+    assert (record.membership_id, record.role, record.org_id) == (added.id, "analyst", org.id)
+    assert (record.mfa_required, record.rate_per_sec) == (mfa_required, rate_per_sec)
+    assert listed == [record]

@@ -203,6 +203,16 @@ plan change, member management, ownership) use `require_permission("<permission>
 except `org.delete`, `org.owner_transfer`, `sso.manage` (session-only). A test renders this matrix from code and
 compares it to the table in §3.2 (parsed from this markdown file).
 
+> Decision (2026-10-29): **role → scope derivation**. A role holds `<resource>:read` when any §3.2 row of that
+> resource family is `R`/`R*`/`W`/`X` for it, and `<resource>:write` when any row is `W`/`W(own)`/`X`; finer actions
+> stay behind `require_permission` (e.g. `calls.operate` gates send/stop/live so analysts may analyze but not send).
+> Sessions never hold `*` or `mcp`. The sets (exact, asserted by `apps/api/tests/test_rbac.py`): **owner, admin**:
+> every `<r>:read` and `<r>:write` of the 18 read/write resources of §2.3 plus `api_keys:write` and `analytics:read`;
+> **developer**: the same minus `billing:write` and `org:write`; **analyst**: every `<r>:read` plus `calls:write`,
+> `pathways:write`, `analysis:write`, `analytics:read`; **billing**: `billing:read`, `billing:write`, `org:read`,
+> `analytics:read`; **viewer**: every `<r>:read` except `billing:read`, plus `analytics:read`. The permission matrix
+> may later derive `ROLE_SCOPES` from its table as long as these sets do not change.
+
 ## 4. Dashboard authentication
 
 ### 4.1 Endpoints (`/internal/auth/*`, envelope format)
@@ -246,6 +256,19 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > (`reset_password`); consuming one is a single conditional `UPDATE` (unused, unexpired, matching purpose), so a
 > token is accepted at most once.
 
+> Decision (2026-10-29): **session endpoint shapes** (envelope `{data, errors: null}`). `login` returns
+> `{mfa_required, user}` where `mfa_required = user.mfa_enabled` (an org requiring MFA from an unenrolled user is
+> handled by the §4.3 gate, the dashboard then sends the user to MFA setup); `logout` and `logout-all` return
+> `{revoked_sessions: int}` and clear both cookies (`Max-Age=0`) and accept an optional `{}` body (unknown fields are
+> `INVALID_INPUT`); `GET /session` returns `{user, memberships[], active_org_id, mfa_passed, mfa_required,
+> csrf_token, expires_at}` with `user = {id, email, name, email_verified, mfa_enabled, is_platform_admin,
+> created_at}`, each membership `{org_id, org_name, org_slug, role, plan_id, org_status, parent_org_id}` (oldest
+> first), `active_org_id` the org the session acts in (`null` without memberships), and `mfa_required` true when that
+> org enforces MFA and the session has not passed it. Login bodies are `{email (3-320 chars, trimmed), password
+> (1-1024 chars)}` with unknown fields rejected. Login always issues a fresh token and revokes the session of any
+> `va_session` cookie it received (fixation defence); its active org is the user's oldest membership. All
+> `/internal/auth/*` routes carry `x-public: "session-flow"` and are excluded from `openapi.json`.
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,
@@ -274,6 +297,19 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > tokens, later invitations and resets) are `secrets.token_bytes(32)` base64url without padding (43 characters),
 > stored as `sha256_hex(token)` and compared with `hmac.compare_digest`.
 
+> Decision (2026-10-29): **login throttling**. Keys `auth:fail:email:<sha256_hex(email.strip().casefold())>` and
+> `auth:fail:ip:<ip>` (single-key commands, no hash tag; the IP key is skipped when the peer address is not an IP).
+> Each failed attempt runs `INCR` + `EXPIRE 900 NX` per key in one transaction; the failure that brings a counter to
+> its limit (10 per email, 50 per IP) runs `EXPIRE 900` again, so the lock lasts 15 minutes from the locking failure.
+> Before verifying, a counter at or above its limit fails with `AUTH_LOCKED` "Too many failed login attempts; try
+> again in N seconds." ("1 second" when N is 1) and `Retry-After: N`, N = the key's remaining TTL (900 when it has
+> none); locked attempts are not counted. A successful login deletes the email counter only. Failures are an unknown
+> email, a wrong password, a user without a password, and a disabled user, all `INVALID_CREDENTIALS` "Invalid email
+> or password." after exactly one argon2 verification (the dummy hash covers the missing-hash cases). Redis errors
+> never block a login (`login_throttle_unavailable` warning). A present `Origin`/`Referer` on `POST /login` must be
+> the dashboard's (`FORBIDDEN` "Request origin is not allowed."); requests with neither (CLI clients) pass.
+> `SSO_REQUIRED` for enforced domains arrives with SSO (§5).
+
 ### 4.3 Sessions
 
 - Cookie `va_session`: 32 random bytes base64url; `HttpOnly; Secure` (not Secure in `local`); `SameSite=Lax`;
@@ -284,6 +320,30 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 - Org with `mfa_required=true`: session without `mfa_passed` gets `MFA_REQUIRED` on every endpoint except
   `/internal/auth/session`, `/internal/auth/mfa/*`, `/internal/auth/logout`.
 
+> Decision (2026-10-29): **session mechanics**. The cookie value is a 43-character opaque token
+> (`va_common.auth.issue_token`); `va_session` is `HttpOnly`, `Secure` unless `VA_ENV=local`, `SameSite=Lax`,
+> `Path=/`, `Domain=SESSION_COOKIE_DOMAIN` (omitted when empty), `Max-Age` 90 days (the server enforces expiry).
+> **Sliding**: a request extends `expires_at` to `min(now + 14 d, created_at + 90 d)` only when that is more than 1 h
+> past the current `expires_at` (creation sets `now + 14 d` with `created_at` from the same clock, so "last
+> extension" is `expires_at - 14 d`); the 90-day cap makes the absolute maximum fall out of the same rule. **Cache**
+> `sess:{token_hash}` (literal braces, the hash tag) holds JSON `{session_id, user_id, active_org_id, mfa_passed,
+> created_at, expires_at}` for min(300 s, seconds until `expires_at`, at least 1 s); it is written on create, extend,
+> and cache miss and deleted on logout, logout-all, and revoke; Redis errors fall back to the database
+> (`session_cache_unavailable` warning). A user's status is checked when the session is loaded from the database, so
+> disabling a user takes effect within 5 minutes unless the writer also revokes its sessions. **Active org**:
+> `sessions.active_org_id`, falling back to the user's oldest membership (persisted on the session) when it is NULL or
+> the membership is gone; with no membership at all principal routes fail with `FORBIDDEN` "You are not a member of
+> any organization." while `/internal/auth/*` still works. **Principal**: `principal_type "user"`,
+> `environment "live"`, `role` from the membership, scopes from `ROLE_SCOPES` (§3.3), rate-limited at
+> `rl:user:{user_id}:<bucket>` with the org's plan and `limits.rate_per_sec`. Org `suspended` rejects writes with
+> `ORG_SUSPENDED` (the API-key message); `closed` rejects every method with `ORG_SUSPENDED` "Organization is
+> closed.". A request with a non-blank `Authorization` header is always API-key authenticated (cookies ignored, no
+> CSRF check); with neither header nor cookie it fails as `AUTH_FAILURE` "Invalid API key."; an invalid, expired, or
+> revoked session fails as `AUTH_FAILURE` "Session is invalid or expired.". **MFA gate**: org
+> `settings.mfa_required` is JSON `true` and the session has not passed MFA → `MFA_REQUIRED` "Multi-factor
+> authentication is required for this organization." on every route except the three above (`logout-all` is
+> gated).
+
 ### 4.4 CSRF
 
 Double-submit: on session creation and on `GET /internal/auth/session`, the API sets cookie `va_csrf` (random 32
@@ -291,6 +351,14 @@ bytes, not HttpOnly, SameSite=Lax) and returns the same value in the body. Every
 session must send header `X-CSRF-Token` equal to the cookie, compared constant-time; otherwise `FORBIDDEN` with message
 "CSRF token missing or invalid." API-key requests are exempt. Additionally `Origin`/`Referer` must match
 `DASHBOARD_BASE_URL` for session-authenticated writes.
+
+> Decision (2026-10-29): **CSRF details**. `va_csrf` is an opaque 43-character token with the `va_session` cookie
+> attributes except `HttpOnly`; it is set at login and on every `GET /internal/auth/session`, which reuses the
+> presented cookie when it is a well-formed token and otherwise issues a new one (the body `csrf_token` always equals
+> the cookie). Session-authenticated methods other than GET/HEAD/OPTIONS need `X-CSRF-Token` equal to the cookie
+> (`tokens_equal`), then an `Origin` (else `Referer`) whose origin (scheme://host[:port], lower-cased, default port
+> dropped) equals that of `DASHBOARD_BASE_URL`; `Origin: null` and missing both headers are rejected. Failures are
+> `FORBIDDEN` "CSRF token missing or invalid." and "Request origin is not allowed." respectively.
 
 ### 4.5 TOTP MFA
 

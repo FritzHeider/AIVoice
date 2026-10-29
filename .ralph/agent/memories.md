@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793264176-ecbf
+> fakeredis connection-failure stub: server=fakeredis.FakeServer(); server.connected=False; FakeAsyncRedis(server=server) raises ConnectionError for commands AND pipelines (overriding execute_command does not cover pipeline.execute)
+<!-- tags: testing, redis | created: 2026-10-29 -->
+
+### mem-1793264176-b270
+> va_api session tests: serve the app over https (make_client(app, base_url='https://...')) - cookies are Secure outside VA_ENV=local and httpx drops Secure cookies on http; httpx ASGITransport peer is 127.0.0.1 but Starlette TestClient's is 'testclient' (not an IP; IdentityRepo.create_session raises ValueError on it, so use session_auth.client_ip)
+<!-- tags: api, auth, testing | created: 2026-10-29 -->
+
 ### mem-1793262412-7bed
 > va_db identity tests: identity_db fixture (conftest, support/identity_db.py) gives Database + local-KMS Envelope + OrgProvisioner; row_counts(db) asserts provisioning atomicity. Pool size is 1 per role, so never nest two app sessions (tenant/global) in one test (it deadlocks on pool checkout)
 <!-- tags: database, testing | created: 2026-10-29 -->

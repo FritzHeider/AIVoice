@@ -104,6 +104,14 @@ def test_operations_contract(with_samples: bool) -> None:
             assert resolve(document, schema).get("examples"), where
 
 
+def test_internal_routes_are_not_in_the_public_document() -> None:
+    app = create_app(make_settings(), init_observability=False)
+    paths = {getattr(route, "path", "") for router in app.state.routers for route in router.routes}
+    internal = {path for path in paths if path.startswith("/internal/")}
+    assert {"/internal/auth/login", "/internal/auth/session"} <= internal
+    assert not [path for path in app.openapi()["paths"] if path.startswith("/internal/")]
+
+
 def test_no_422_and_400_refs_envelope_component() -> None:
     document = sample_app().openapi()
     for path, method, operation in operations(document):

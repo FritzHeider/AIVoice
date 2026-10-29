@@ -147,6 +147,27 @@ async def test_get_active_session_excludes_expired_and_revoked(identity_db: Iden
     assert found.id == live.id
 
 
+async def test_get_active_session_with_user_and_caller_created_at(identity_db: IdentityDb) -> None:
+    user = await _user(identity_db.database)
+    async with identity_db.database.global_session() as session:
+        issued = await IdentityRepo(session).create_session(
+            user_id=user.id,
+            active_org_id=None,
+            expires_at=_NOW + timedelta(days=14),
+            ip=None,
+            user_agent=None,
+            created_at=_NOW,
+        )
+    async with identity_db.database.global_session() as session:
+        repo = IdentityRepo(session)
+        found = await repo.get_active_session_with_user(issued.token, _NOW)
+        assert await repo.get_active_session_with_user(issued.token, _NOW + timedelta(days=14)) is None
+        assert await repo.get_active_session_with_user("unknown-token", _NOW) is None
+    assert found is not None
+    row, owner = found
+    assert (row.id, row.created_at, owner.id, owner.email) == (issued.session.id, _NOW, user.id, user.email)
+
+
 async def test_extend_and_set_active_org_and_mfa(identity_db: IdentityDb) -> None:
     user = await _user(identity_db.database)
     token, row = await _new_session(identity_db.database, user.id, expires_in=timedelta(minutes=1))

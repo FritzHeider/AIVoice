@@ -210,6 +210,15 @@ async def test_bodies_validate_against_models(path: str) -> None:
     ErrorEnvelope.model_validate(envelope)
 
 
+@pytest.mark.parametrize("prefix", [LEGACY_PREFIX, ENVELOPE_PREFIX])
+async def test_app_error_headers_reach_the_response(prefix: str) -> None:
+    status, body, headers = await get_json(f"{prefix}/locked")
+    assert status == 429
+    assert headers["retry-after"] == "42"
+    assert headers["x-request-id"]
+    assert "headers" not in json.dumps(body)
+
+
 async def test_kb_error_alternate_status_rendered() -> None:
     status, body, _ = await get_json(f"{ENVELOPE_PREFIX}/kb_error")
     assert status == 500

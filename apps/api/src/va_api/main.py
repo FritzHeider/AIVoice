@@ -23,6 +23,7 @@ from va_api.idempotency import REPLAYED_HEADER, IdempotencyMiddleware, install_i
 from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_openapi
 from va_api.rate_limit import RateLimitHeadersMiddleware
+from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router
 from va_api.settings import ApiSettings
 from va_common.metrics import Service, build_metrics
@@ -49,7 +50,7 @@ CORS_EXPOSE_HEADERS: Final = [
     REPLAYED_HEADER,
 ]
 # Routers carry their own prefix (route.path_format is then the full template used for metrics labels).
-ROUTERS: Final[tuple[APIRouter, ...]] = (public_router, probe_router)
+ROUTERS: Final[tuple[APIRouter, ...]] = (public_router, internal_auth_router, probe_router)
 
 
 def create_app(

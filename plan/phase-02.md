@@ -18,7 +18,7 @@
   - Deliverables: dependency/middleware storing request hash, lock, response replay for 24 h, cleanup job function
   - Acceptance: replay returns identical status/body; different body → 422 code; concurrent duplicate → 409.
 
-- [ ] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF (split by the planner on 2026-10-29 into T04a–T04c below; tick when all three are ticked)
+- [ ] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF (split by the planner on 2026-10-29 into T04a–T04d below; tick when all four are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (dashboard auth, sessions, CSRF); specs/28-security.md (password hashing, cookies)
   - Depends on: P01-T10
   - Deliverables: `/internal/auth/signup`, `/verify-email`, `/login`, `/logout`, `/session`, argon2id params, session cookie, sliding expiry, CSRF double-submit for cookie-authenticated mutations, `EmailSender` protocol + SMTP + in-memory implementations, email templates
@@ -36,11 +36,17 @@
   - Deliverables: va_db access path for the global identity tables, `org_data_keys`-backed `DataKeyStore`, identity repository (users, sessions, email tokens), org provisioning service (org + active data key + encrypted webhook signing secret + owner membership in one transaction), `Envelope` in the api container
   - Acceptance: provisioning is atomic (failure leaves no rows); webhook secret decrypts with its AAD; session/email-token rows store only hashes; RLS still denies tenant tables without `app.org_id`.
 
-- [ ] P02-T04c Dashboard auth endpoints, session principal, CSRF
-  - Spec refs: specs/04-auth-tenancy-rbac.md §1, §4.1 (signup, verify-email, resend-verification, login, logout, logout-all, session), §4.2 (login throttling), §4.3, §4.4; specs/03-data-model.md §11 (`sess:*`, `rl:user:*`); specs/28-security.md §5
+- [x] P02-T04c Session authentication: login, logout, session endpoint, session principal, CSRF (split by the planner on 2026-10-29; signup/verification moved to T04d) — reviewer 2026-10-29: make lint/typecheck/placeholders 0, make test 2251 passed (99.71 %), openapi drift current, check_spec_refs 0, jscpd 0 clones, radon avg A (1.93)
+  - Spec refs: specs/04-auth-tenancy-rbac.md §1, §3.3 (role → scope derivation), §4.1 (login, logout, logout-all, session), §4.2 (login throttling), §4.3, §4.4; specs/03-data-model.md §11 (`sess:*`, `rl:user:*`); specs/28-security.md §5
   - Depends on: P02-T04b
-  - Deliverables: `/internal/auth/*` routers listed above, session-cookie principal in `get_principal` with sliding expiry, absolute max, `sess:` cache, CSRF double-submit + Origin check, `MFA_REQUIRED` gating, `AUTH_LOCKED` throttling
-  - Acceptance: full flow tests; CSRF missing → 403; expired session → 401.
+  - Deliverables: `va_api.auth.rbac.ROLE_SCOPES`, session manager (create, resolve with 14 d sliding expiry extended at most hourly, 90 d absolute cap, `sess:` cache, revoke), session-cookie principal in `get_principal`, `va_session`/`va_csrf` cookies, CSRF double-submit + Origin/Referer check, `MFA_REQUIRED` gating with the §4.3 exemptions, `AUTH_LOCKED` login throttling, `POST /internal/auth/login`, `/logout`, `/logout-all`, `GET /internal/auth/session`
+  - Acceptance: full login → session → logout flow tests on Postgres; CSRF missing → 403; expired session → 401; sliding/absolute expiry with a frozen clock; lock after 10 failures with `Retry-After`.
+
+- [ ] P02-T04d Signup, email verification, resend, internal OpenAPI document
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (signup, verify-email, resend-verification); specs/26-sdks-cli-mcp-docs.md §1 (`openapi/internal.json`, `SessionCookie` scheme); specs/31-error-catalog.md (`PASSWORD_TOO_WEAK`, `TOKEN_EXPIRED`, `EMAIL_NOT_VERIFIED`)
+  - Depends on: P02-T04c
+  - Deliverables: `POST /internal/auth/signup` (policy, provisioning + session + verify token in one transaction, verification email after commit), `/verify-email`, `/resend-verification` (3 per hour), `EmailSender` in the api container (SMTP; in-memory in tests), `openapi/internal.json` export + drift check
+  - Acceptance: signup → email → verify → session flow test; weak password, duplicate email, reused/expired token, 4th resend rejected; internal document drift-checked.
 
 - [ ] P02-T05 Password reset and email change
   - Spec refs: specs/04-auth-tenancy-rbac.md (password reset)

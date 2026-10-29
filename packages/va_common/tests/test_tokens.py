@@ -5,7 +5,15 @@ from __future__ import annotations
 import base64
 import re
 
-from va_common.auth import TOKEN_BYTES, IssuedToken, generate_token, issue_token, sha256_hex, tokens_equal
+from va_common.auth import (
+    TOKEN_BYTES,
+    IssuedToken,
+    generate_token,
+    issue_token,
+    looks_like_token,
+    sha256_hex,
+    tokens_equal,
+)
 from va_common.auth.tokens import TOKEN_LENGTH
 
 _BASE64URL = re.compile(r"[A-Za-z0-9_-]+")
@@ -43,3 +51,14 @@ def test_tokens_equal() -> None:
     assert not tokens_equal(token, token[:-1])
     assert not tokens_equal("", token)
     assert tokens_equal("é", "é")
+
+
+def test_looks_like_token() -> None:
+    assert looks_like_token(generate_token())
+    assert looks_like_token("-" * 43)
+    assert not looks_like_token(None)
+    assert not looks_like_token("")
+    assert not looks_like_token("a" * 42)
+    assert not looks_like_token("a" * 44)
+    assert not looks_like_token("a" * 42 + "=")
+    assert not looks_like_token("a" * 42 + "\n")

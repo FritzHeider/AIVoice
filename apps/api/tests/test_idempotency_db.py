@@ -6,9 +6,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 
 import pytest
-from docker_probe import docker_available
-from migration_helpers import fresh_database, upgrade
-from pg_container import running_postgres
+from session_helpers import migrated_postgres
 from tenant_rows import OrgFactory, open_database
 
 from va_api.idempotency import DbIdempotencyStore
@@ -23,10 +21,7 @@ _PATH = "/v1/calls"
 
 @pytest.fixture(scope="module")
 def migrated_url() -> Iterator[str]:
-    if not docker_available():
-        pytest.skip("docker unavailable")
-    with running_postgres() as server_url, fresh_database(server_url) as url:
-        upgrade(url)
+    with migrated_postgres() as url:
         yield url
 
 

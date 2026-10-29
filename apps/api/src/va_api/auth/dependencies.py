@@ -1,4 +1,4 @@
-"""FastAPI dependencies: principal, scopes, request rates, idempotency (specs/04 §2.2, §2.4, §11, §12).
+"""FastAPI dependencies: principal, scopes, request rates, idempotency (specs/04 §2.2, §2.4, §4.3, §11, §12).
 
 Routers declare ``dependencies=[Depends(require_scope("<resource>:<read|write>"))]``; the dependency it
 returns carries ``required_scope`` so the route-coverage test can find it on ``route.dependant``. Every
@@ -19,6 +19,7 @@ from fastapi import BackgroundTasks, Depends, Request
 from va_api.auth.api_key_auth import ApiKeyAuthenticator
 from va_api.auth.context import RequestContext
 from va_api.auth.scopes import SCOPES
+from va_api.auth.session_auth import authenticate_session, has_session_cookie
 from va_api.idempotency import claim_idempotency
 from va_api.middleware import request_id_of
 from va_api.rate_limit import enforce, limiter_of, plan_rate_limits
@@ -45,13 +46,9 @@ def authenticator_of(request: Request) -> ApiKeyAuthenticator:
     return authenticator
 
 
-async def get_principal(request: Request, background: BackgroundTasks) -> RequestContext:
-    """Authenticate the ``Authorization`` header; stores the context on ``request.state.ctx``.
-
-    The ``last_used_at`` touch runs as a background task after the response; ``org_id`` is bound to every log
-    line of the request. One token is then taken from the principal's ``default`` rate bucket
-    (``RATE_LIMITED`` when empty), before any scope check.
-    """
+async def _api_key_principal(
+    request: Request, background: BackgroundTasks
+) -> tuple[RequestContext, int | None]:
     authenticator = authenticator_of(request)
     ctx, record = await authenticator.authenticate(
         request.headers.get(_AUTHORIZATION),
@@ -61,9 +58,25 @@ async def get_principal(request: Request, background: BackgroundTasks) -> Reques
         user_agent=request.headers.get(_USER_AGENT),
     )
     background.add_task(authenticator.touch_if_due, record.id)
+    return ctx, record.rate_per_sec
+
+
+async def get_principal(request: Request, background: BackgroundTasks) -> RequestContext:
+    """Authenticate the request; stores the context on ``request.state.ctx``.
+
+    A non-blank ``Authorization`` header is always an API key (cookies ignored, no CSRF check); without one a
+    ``va_session`` cookie authenticates a dashboard user (``va_api.auth.session_auth``); with neither the
+    request fails as an invalid API key. An API key's ``last_used_at`` touch runs as a background task after
+    the response; ``org_id`` is bound to every log line of the request. One token is then taken from the
+    principal's ``default`` rate bucket (``RATE_LIMITED`` when empty), before any scope check.
+    """
+    if (request.headers.get(_AUTHORIZATION) or "").strip() or not has_session_cookie(request):
+        ctx, rate_per_sec = await _api_key_principal(request, background)
+    else:
+        ctx, rate_per_sec = await authenticate_session(request)
     request.state.ctx = ctx
     structlog.contextvars.bind_contextvars(org_id=str(ctx.org_id))
-    limits = plan_rate_limits(ctx.plan_id, record.rate_per_sec)
+    limits = plan_rate_limits(ctx.plan_id, rate_per_sec)
     await enforce(request, limiter_of(request), ctx, "default", limits)
     return ctx
 

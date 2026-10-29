@@ -101,11 +101,14 @@ class FakeContainer:
 
 
 @asynccontextmanager
-async def make_client(app: Any) -> AsyncIterator[httpx.AsyncClient]:
-    """Run the app's lifespan and yield a client; app exceptions become 500 responses, as under uvicorn."""
+async def make_client(app: Any, base_url: str = "http://test") -> AsyncIterator[httpx.AsyncClient]:
+    """Run the app's lifespan and yield a client; app exceptions become 500 responses, as under uvicorn.
+
+    Use an ``https://`` ``base_url`` when the app sets ``Secure`` cookies: httpx never sends them over http.
+    """
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app, raise_app_exceptions=False)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url=base_url) as client:
             yield client
 
 

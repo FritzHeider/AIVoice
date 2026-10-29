@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -10,14 +11,17 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
+from va_api.auth.login_throttle import LoginThrottle
+from va_api.auth.sessions import SessionManager
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.settings import ApiSettings
+from va_common.auth import PasswordHasher
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import Envelope, open_kms_provider
 from va_common.health import CheckFn
 from va_common.service import ReadinessSource
-from va_common.time import SystemClock
+from va_common.time import Clock, SystemClock
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
@@ -40,6 +44,10 @@ class Container:
     idempotency: IdempotencyStore
     envelope: Envelope
     provisioner: OrgProvisioner
+    clock: Clock
+    password_hasher: PasswordHasher
+    sessions: SessionManager
+    login_throttle: LoginThrottle
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -49,12 +57,15 @@ class Container:
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
-    envelope (KMS provider plus ``org_data_keys`` store), and the org provisioner.
+    envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
+    session manager, and the login throttle.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
     """
     hasher = settings.api_key_hasher()
+    # Building the hasher computes its dummy argon2 hash; keep that CPU work off the event loop.
+    password_hasher = await asyncio.to_thread(PasswordHasher)
     async with (
         open_kms_provider(settings) as kms_provider,
         open_dependencies() as deps,
@@ -63,7 +74,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         engine, redis, temporal = deps.postgres(settings), deps.redis(settings), deps.temporal(settings)
         database = Database.from_settings(settings)
         stack.push_async_callback(database.dispose)
-        clock = SystemClock()
+        clock: Clock = SystemClock()
         authenticator = ApiKeyAuthenticator(
             redis=redis,
             hasher=hasher,
@@ -86,4 +97,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             idempotency=idempotency,
             envelope=envelope,
             provisioner=OrgProvisioner(database, envelope),
+            clock=clock,
+            password_hasher=password_hasher,
+            sessions=SessionManager(database=database, redis=redis, clock=clock),
+            login_throttle=LoginThrottle(redis),
         )

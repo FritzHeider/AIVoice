@@ -425,3 +425,16 @@ Grafana 3001
   `API_KEY_PEPPER`; both may be empty at settings construction, `build_container` raises `RuntimeError` before
   opening anything. `apps/api/tests/support/api_helpers.make_settings` fills both with random values. Production
   settings tests must pass `kms_provider="aws", aws_kms_key_id=...` or the local-KMS refusal fires first.
+- 2026-10-29 (P02-T04c): dashboard sessions: `va_api.auth.sessions.SessionManager` (start/resolve/revoke, sliding +
+  absolute expiry, `sess:{hash}` cache), `va_api.auth.session_auth` (cookie → `ActiveSession` with CSRF/Origin for
+  writes, active membership, MFA gate, `RequestContext`), `va_api.auth.rbac.ROLE_SCOPES`, `/internal/auth/*` in
+  `va_api/routers/auth.py` (`include_in_schema=False`, `openapi_extra={"x-public": "session-flow"}`).
+  `get_principal` uses the API key whenever `Authorization` is non-blank, else the `va_session` cookie, else fails as
+  an invalid key. Envelope success bodies use `va_api.responses.DataResponse[T]`. `AppError(..., headers={...})`
+  adds response headers (e.g. `Retry-After` on `AUTH_LOCKED`); they are not part of the error item. Session tests:
+  `apps/api/tests/support/session_helpers.py` (`migrated_postgres()` context manager for a module fixture,
+  `SessionContainer(database=...)` with cheap argon2, `make_member`, `login`, `write_headers`, a
+  `/v1/knowledge/_session/whoami` probe) served over `https://` via `make_client(app, base_url=...)` because cookies
+  are `Secure` outside `VA_ENV=local` and httpx drops `Secure` cookies on http. `httpx.ASGITransport` reports peer
+  `127.0.0.1` (login throttling uses it); Starlette's `TestClient` reports `testclient`, which `client_ip` maps to
+  `None`. `IdentityRepo.create_session(created_at=...)` takes the caller's clock so frozen-clock expiry tests agree.

@@ -7,11 +7,15 @@ from api_helpers import make_settings
 from service_helpers import readiness_of, track_closes
 
 from va_api.auth import ApiKeyAuthenticator
+from va_api.auth.login_throttle import LoginThrottle
+from va_api.auth.sessions import SessionManager
 from va_api.container import Container, build_container
 from va_api.idempotency import DbIdempotencyStore
 from va_api.main import create_app
 from va_api.rate_limit import RateLimiter
+from va_common.auth import SPEC_ARGON2_PARAMS, PasswordHasher
 from va_common.crypto import Envelope
+from va_common.time import SystemClock
 from va_db.provisioning import OrgProvisioner
 
 UNREACHABLE_PG = "postgresql+asyncpg://va:va@127.0.0.1:1/va"
@@ -34,6 +38,11 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(container.idempotency, DbIdempotencyStore)
         assert isinstance(container.envelope, Envelope)
         assert isinstance(container.provisioner, OrgProvisioner)
+        assert isinstance(container.clock, SystemClock)
+        assert isinstance(container.password_hasher, PasswordHasher)
+        assert container.password_hasher.params == SPEC_ARGON2_PARAMS
+        assert isinstance(container.sessions, SessionManager)
+        assert isinstance(container.login_throttle, LoginThrottle)
         assert closed == []
     # The va_app and va_system engines first, then the dependency stack in reverse order.
     assert closed == ["engine", "engine", "redis", "engine"]

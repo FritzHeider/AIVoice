@@ -8,16 +8,26 @@ from __future__ import annotations
 
 import base64
 import hmac
+import re
 import secrets
 from dataclasses import dataclass, field
 from typing import Final
 
 from va_common.auth.api_keys import sha256_hex
 
-__all__ = ["TOKEN_BYTES", "TOKEN_LENGTH", "IssuedToken", "generate_token", "issue_token", "tokens_equal"]
+__all__ = [
+    "TOKEN_BYTES",
+    "TOKEN_LENGTH",
+    "IssuedToken",
+    "generate_token",
+    "issue_token",
+    "looks_like_token",
+    "tokens_equal",
+]
 
 TOKEN_BYTES: Final = 32
 TOKEN_LENGTH: Final = 43
+_TOKEN_RE: Final = re.compile(rf"[A-Za-z0-9_-]{{{TOKEN_LENGTH}}}")
 
 
 def generate_token() -> str:
@@ -37,6 +47,11 @@ def issue_token() -> IssuedToken:
     """A new token together with its stored ``sha256_hex`` hash."""
     plaintext = generate_token()
     return IssuedToken(plaintext=plaintext, token_hash=sha256_hex(plaintext))
+
+
+def looks_like_token(value: str | None) -> bool:
+    """Whether ``value`` has the shape of a token: 43 base64url characters (says nothing about validity)."""
+    return value is not None and _TOKEN_RE.fullmatch(value) is not None
 
 
 def tokens_equal(presented: str, expected: str) -> bool:

@@ -10,18 +10,26 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_db.models import MemberRole, Membership, Org, OrgStatus
+from va_db.repositories.api_keys import rate_per_sec_override
 from va_db.repositories.base import SystemRepository, conflict_savepoint
 
 __all__ = ["MembershipLookupRepo", "MembershipRecord", "MembershipRepo"]
 
 
+MFA_REQUIRED_KEY = "mfa_required"
+
+
 @dataclass(frozen=True, slots=True)
 class MembershipRecord:
-    """One of a user's memberships joined with the org fields the dashboard session needs."""
+    """One of a user's memberships joined with the org fields the dashboard session needs.
+
+    ``mfa_required`` is ``orgs.settings.mfa_required`` (only a JSON ``true`` counts); ``rate_per_sec`` is the
+    org's positive ``limits.rate_per_sec`` override or ``None``.
+    """
 
     membership_id: uuid.UUID
     role: MemberRole
@@ -31,6 +39,27 @@ class MembershipRecord:
     plan_id: str
     org_status: OrgStatus
     parent_org_id: uuid.UUID | None
+    mfa_required: bool = False
+    rate_per_sec: int | None = None
+
+
+def _record(membership: Membership, org: Org) -> MembershipRecord:
+    return MembershipRecord(
+        membership_id=membership.id,
+        role=membership.role,
+        org_id=org.id,
+        org_name=org.name,
+        org_slug=org.slug,
+        plan_id=org.plan_id,
+        org_status=org.status,
+        parent_org_id=org.parent_org_id,
+        mfa_required=org.settings.get(MFA_REQUIRED_KEY) is True,
+        rate_per_sec=rate_per_sec_override(org.limits),
+    )
+
+
+def _joined(user_id: uuid.UUID) -> Select[Membership, Org]:
+    return select(Membership, Org).join(Org, Org.id == Membership.org_id).where(Membership.user_id == user_id)
 
 
 class MembershipLookupRepo(SystemRepository):
@@ -38,28 +67,17 @@ class MembershipLookupRepo(SystemRepository):
 
     async def for_user(self, user_id: uuid.UUID) -> list[MembershipRecord]:
         """The user's memberships, oldest first (membership ``created_at``, then ``id``)."""
-        statement = (
-            select(Membership, Org)
-            .join(Org, Org.id == Membership.org_id)
-            .where(Membership.user_id == user_id)
-            .order_by(Membership.created_at, Membership.id)
-        )
+        statement = _joined(user_id).order_by(Membership.created_at, Membership.id)
         rows = (await self.session.execute(statement)).all()
-        records: list[MembershipRecord] = []
-        for membership, org in rows:
-            records.append(
-                MembershipRecord(
-                    membership_id=membership.id,
-                    role=membership.role,
-                    org_id=org.id,
-                    org_name=org.name,
-                    org_slug=org.slug,
-                    plan_id=org.plan_id,
-                    org_status=org.status,
-                    parent_org_id=org.parent_org_id,
-                )
-            )
-        return records
+        return [_record(membership, org) for membership, org in rows]
+
+    async def for_user_in_org(self, user_id: uuid.UUID, org_id: uuid.UUID) -> MembershipRecord | None:
+        """The user's membership in ``org_id``, or ``None``."""
+        row = (await self.session.execute(_joined(user_id).where(Membership.org_id == org_id))).first()
+        if row is None:
+            return None
+        membership, org = row
+        return _record(membership, org)
 
 
 class MembershipRepo:

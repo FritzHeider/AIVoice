@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.auth import IssuedToken, issue_token, sha256_hex
@@ -51,6 +51,11 @@ def _checked_ip(ip: str | None) -> str | None:
     if ip is not None:
         ipaddress.ip_address(ip)
     return ip
+
+
+def _active_session(token: str, now: datetime) -> tuple[ColumnElement[bool], ...]:
+    """Conditions matching the unrevoked, unexpired session whose cookie token is ``token``."""
+    return (Session.token_hash == sha256_hex(token), Session.revoked_at.is_(None), Session.expires_at > now)
 
 
 class IdentityRepo:
@@ -102,8 +107,13 @@ class IdentityRepo:
         ip: str | None,
         user_agent: str | None,
         mfa_passed: bool = False,
+        created_at: datetime | None = None,
     ) -> IssuedSession:
-        """Insert a session for ``user_id``; ``ValueError`` when ``ip`` is not an IP address."""
+        """Insert a session for ``user_id``; ``ValueError`` when ``ip`` is not an IP address.
+
+        ``created_at`` defaults to the database clock; callers enforcing the absolute session lifetime pass
+        their own clock's time so both bounds come from one clock.
+        """
         issued = issue_token()
         row = Session(
             user_id=user_id,
@@ -114,6 +124,8 @@ class IdentityRepo:
             mfa_passed=mfa_passed,
             expires_at=expires_at,
         )
+        if created_at is not None:
+            row.created_at = created_at
         self.session.add(row)
         await self.session.flush()
         await self.session.refresh(row)
@@ -121,12 +133,18 @@ class IdentityRepo:
 
     async def get_active_session(self, token: str, now: datetime) -> Session | None:
         """The unrevoked, unexpired session whose cookie token is ``token``."""
-        statement = select(Session).where(
-            Session.token_hash == sha256_hex(token),
-            Session.revoked_at.is_(None),
-            Session.expires_at > now,
+        return await self.session.scalar(select(Session).where(*_active_session(token, now)))
+
+    async def get_active_session_with_user(self, token: str, now: datetime) -> tuple[Session, User] | None:
+        """:meth:`get_active_session` joined with its user in one query (any user status)."""
+        statement = (
+            select(Session, User).join(User, User.id == Session.user_id).where(*_active_session(token, now))
         )
-        return await self.session.scalar(statement)
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        session_row, user = row
+        return session_row, user
 
     async def extend_session(self, session_id: uuid.UUID, expires_at: datetime) -> None:
         await self.session.execute(

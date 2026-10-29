@@ -32,7 +32,15 @@ from va_common.auth.passwords import (
     check_password_policy_async,
     password_policy_violation,
 )
-from va_common.auth.tokens import TOKEN_BYTES, IssuedToken, generate_token, issue_token, tokens_equal
+from va_common.auth.tokens import (
+    TOKEN_BYTES,
+    TOKEN_LENGTH,
+    IssuedToken,
+    generate_token,
+    issue_token,
+    looks_like_token,
+    tokens_equal,
+)
 
 __all__ = [
     "API_KEY_LENGTH",
@@ -44,6 +52,7 @@ __all__ = [
     "MIN_PASSWORD_LENGTH",
     "SPEC_ARGON2_PARAMS",
     "TOKEN_BYTES",
+    "TOKEN_LENGTH",
     "ApiKeyHasher",
     "Argon2Params",
     "IssuedToken",
@@ -58,6 +67,7 @@ __all__ = [
     "generate_token",
     "issue_token",
     "looks_like_api_key",
+    "looks_like_token",
     "password_policy_violation",
     "sha256_hex",
     "tokens_equal",

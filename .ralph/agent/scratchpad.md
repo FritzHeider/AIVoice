@@ -1053,3 +1053,273 @@ specs/04 §4.1, specs/03 §2/§3, specs/28 §3: provisioning is one tenant_sessi
 with column AAD, owner + membership), conflict_savepoint only maps unique violations (FK errors propagate, so a bad
 parent_org_id is not misreported as a slug conflict), tokens stored hash-only, consume is one conditional UPDATE,
 container refuses an empty LOCAL_MASTER_KEY before opening anything. Decisions recorded in specs. No findings.
+
+## 2026-10-29 Planner: P02-T04b approved → P02-T04c split into T04c/T04d
+T04c as written (7 endpoints + session principal + CSRF + MFA gate + throttling + internal OpenAPI) is too big for one
+Builder pass. Plan file now: T04c = session authentication (login, logout, logout-all, GET session, session principal,
+CSRF, MFA gate, AUTH_LOCKED, ROLE_SCOPES); T04d = signup, verify-email, resend-verification, EmailSender in the
+container, `openapi/internal.json` + drift. Tests in T04c create users through `OrgProvisioner` (NewUser with a
+password hash), not signup.
+
+## Plan P02-T04c — Session authentication (specs/04 §1, §3.3, §4.1–§4.4; specs/03 §11; specs/28 §5)
+
+### Facts found while planning
+- `get_principal` (va_api/auth/dependencies.py) is API-key only; `rate_limit_key` already handles `principal_type
+  "user"` → `rl:user:{id}:<bucket>`; `plan_rate_limits(plan_id, rate_per_sec)` needs the org override.
+- `MembershipLookupRepo.for_user` (system) returns MembershipRecord without `orgs.settings`/`orgs.limits`; `mfa_required`
+  lives in `orgs.settings` jsonb (OrgSettings model is T12, so read the raw key here); `rate_per_sec_override(limits)` is
+  in va_db/repositories/api_keys.py.
+- `AppError` has no headers; `_render_app_error` (va_api/errors.py:193) calls `error_response(..., headers=None)`.
+- Container builds `SystemClock()` locally and has no password hasher; `PasswordHasher()` construction computes a
+  dummy argon2 hash (CPU, ~0.1 s at spec params).
+- specs/26 §1: `/internal/*` routes are `include_in_schema=False` (public openapi.json unchanged by T04c; internal.json
+  is T04d). test_openapi asserts `x-scope` only for schema operations.
+- Pool size is 1 per role in tests (memory mem-1793262412-7bed): never nest global/tenant sessions; global (va_app) and
+  system (va_system) are different engines but still keep them sequential.
+- Cheap argon2 params already exist in va_common tests (`Argon2Params(time_cost=1, memory_cost=8, parallelism=1,
+  hash_len=16, salt_len=8)`); reuse the same values in api test support.
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/04 §3.3 — **Role → scope derivation**: a role holds `<resource>:read` when any §3.2 row of that resource family
+   is R/R*/W/X for it, `<resource>:write` when any row is W/W(own)/X; finer actions stay behind `require_permission`
+   (T08: e.g. `calls.operate` gates send/stop/live so analysts may analyze but not send). Sessions never get `*` or `mcp`.
+   Resulting sets (exact, asserted by tests):
+   - owner, admin: every `<r>:read` and `<r>:write` of the 18 READ_WRITE_RESOURCES + `api_keys:write` + `analytics:read`.
+   - developer: same minus `billing:write`, `org:write`.
+   - analyst: every `<r>:read` + `calls:write`, `pathways:write`, `analysis:write` + `analytics:read`.
+   - billing: `billing:read`, `billing:write`, `org:read`, `analytics:read`.
+   - viewer: every `<r>:read` except `billing:read` + `analytics:read`.
+   T08 adds permissions and the cell-for-cell matrix parity test and may derive ROLE_SCOPES from its matrix table, as
+   long as these sets do not change.
+2. specs/04 §4.3 — **Session mechanics**: cookie value = 43-char opaque token (`va_common.auth.issue_token`).
+   `va_session`: HttpOnly, `Secure` unless `VA_ENV=local`, SameSite=Lax, Path=/, Domain=`SESSION_COOKIE_DOMAIN` (omitted
+   when empty), Max-Age = 90 d (server enforces expiry). **Sliding**: target = min(now + 14 d, created_at + 90 d); the
+   row is extended to target only when target − expires_at > 1 h (creation sets now + 14 d, so "last extension" =
+   expires_at − 14 d); the 90 d cap makes the absolute maximum fall out of the same rule. **Cache** `sess:{token_hash}`
+   (literal braces = hash tag, like `apikey:{prefix}`) JSON `{session_id, user_id, active_org_id, mfa_passed,
+   expires_at, created_at}`, TTL = min(300 s, seconds until expires_at, ≥1); written on create/extend/miss, deleted on
+   revoke/logout/logout-all; Redis errors fail open to the DB (`session_cache_unavailable` warning). A user's status is
+   checked when the session is loaded from the DB; disabling a user must revoke its sessions (later admin task).
+   **Active org**: `sessions.active_org_id`, falling back to the user's oldest membership (persisted with
+   `set_active_org`) when it is NULL or the membership is gone; no membership at all → `FORBIDDEN` "You are not a member
+   of any organization." on principal routes (auth endpoints still work). Session principals: `principal_type "user"`,
+   `environment "live"`, `role` from the membership, scopes from ROLE_SCOPES. Org `suspended` → writes
+   `ORG_SUSPENDED` (same message as keys); `closed` → `ORG_SUSPENDED` for every method. A request with a non-blank
+   `Authorization` header is always API-key authenticated (cookies ignored, CSRF exempt); with neither header nor
+   cookie it stays `AUTH_FAILURE` "Invalid API key." (current behaviour). Invalid/expired/revoked session →
+   `AUTH_FAILURE` "Session is invalid or expired." **MFA gate**: org `settings.mfa_required is true` and session not
+   `mfa_passed` → `MFA_REQUIRED` "Multi-factor authentication is required for this organization." on every route
+   except `GET /internal/auth/session`, `/internal/auth/mfa/*`, `POST /internal/auth/logout` (logout-all is gated).
+   `login` returns `mfa_required = user.mfa_enabled` (an org requiring MFA from an unenrolled user is handled by the gate
+   and the dashboard sending the user to setup, T06). Login always issues a fresh token and revokes the session of any
+   `va_session` cookie it received (fixation).
+3. specs/04 §4.4 — **CSRF**: `va_csrf` cookie (opaque token, not HttpOnly, SameSite=Lax, same Secure/Domain/Path/Max-Age
+   as `va_session`) set at login and on `GET /internal/auth/session` (the existing cookie value is reused when it is a
+   well-formed 43-char token, otherwise a new one; body `csrf_token` = cookie). Session-authenticated methods other
+   than GET/HEAD/OPTIONS need `X-CSRF-Token` == cookie (`tokens_equal`), then an `Origin` (else `Referer`) whose origin
+   (scheme://host[:port], lower-cased, default port dropped) equals `DASHBOARD_BASE_URL`'s; missing both → reject. Both
+   failures are `FORBIDDEN`: "CSRF token missing or invalid." / "Request origin is not allowed.". `POST /login` (no
+   session yet) rejects a present-but-foreign Origin/Referer only (CLI clients send none).
+4. specs/04 §4.2 — **Login throttling**: keys `auth:fail:email:<sha256_hex(email.strip().casefold())>` and
+   `auth:fail:ip:<ip>` (single-key commands, no hash tag). Each failed attempt: `INCR` + `EXPIRE 900 NX` in one
+   transaction pipeline; when the count reaches the limit (10 email / 50 ip) `EXPIRE 900` again so the lock lasts 15 min
+   from the locking failure. Before verifying, a key at/above its limit → `AUTH_LOCKED` "Too many failed login attempts;
+   try again in N second(s)." + `Retry-After: N` (N = max(1, TTL)); locked attempts do not increment. Success deletes the
+   email key only. Failures = unknown email, wrong password, user without password, disabled user (all
+   `INVALID_CREDENTIALS` "Invalid email or password."; argon2 runs in every case via the dummy hash). Redis errors fail
+   open (`login_throttle_unavailable` warning). SSO_REQUIRED on enforced domains arrives with T07.
+5. specs/04 §4.1 — response shapes (envelope `{data, errors: null}`): login `{mfa_required, user}`; logout / logout-all
+   `{revoked_sessions: int}` and both cookies cleared; session `{user, memberships[], active_org_id, mfa_passed,
+   mfa_required, csrf_token, expires_at}` where `user = {id, email, name, email_verified, mfa_enabled, is_platform_admin,
+   created_at}`, membership = `{org_id, org_name, org_slug, role, plan_id, org_status, parent_org_id}`, and
+   `mfa_required` = active org enforces MFA and the session has not passed it. Routes carry `x-public: "session-flow"`
+   (specs/04 §2.4 allowlist) and operation ids `auth_login`, `auth_logout`, `auth_logout_all`, `auth_session_get`.
+6. specs/03 §11 — update the `sess:{token_hash}` row (fields, TTL rule) and add rows `auth:fail:email:{sha256(email)}`
+   and `auth:fail:ip:{ip}` (counter, 900 s, login throttling, specs/04 §4.2) after the `apikey:*` rows.
+7. specs/31 or errors note not needed: `AppError(headers=...)` is an implementation detail (AGENTS.md bullet).
+
+### Files
+**packages/va_common/src/va_common/errors.py** — `AppError.__init__(..., *, field=None, headers: Mapping[str, str] |
+None = None)` stored as `self.headers: dict[str, str]` (empty dict default; not part of `to_error_item`).
+**apps/api/src/va_api/errors.py** — `_render_app_error` passes `exc.headers or None`.
+
+**packages/va_db/src/va_db/repositories/memberships.py**
+- `MembershipRecord` gains `mfa_required: bool` (`org.settings.get("mfa_required") is True`) and `rate_per_sec: int |
+  None` (`rate_per_sec_override(org.limits)`); factor `_record(membership, org)` used by both queries.
+- `MembershipLookupRepo.for_user_in_org(user_id, org_id) -> MembershipRecord | None` (same join + `org_id` filter).
+**packages/va_db/src/va_db/repositories/identity.py** — no new methods expected; if `get_active_session` + `get_user`
+  need one round trip, add `get_active_session_with_user(token, now) -> tuple[Session, User] | None` (join) and use it.
+
+**apps/api/src/va_api/settings.py** — `session_cookie_domain: str = ""` (spec env var exists; `.env.example` and
+  test_env_example already have it — verify, no row changes).
+
+**apps/api/src/va_api/auth/rbac.py** (new) — `ROLE_SCOPES: Final[Mapping[MemberRole, frozenset[str]]]` built from
+  READ_WRITE_RESOURCES per decision 1 (MappingProxyType), `scopes_for_role(role) -> frozenset[str]`.
+
+**apps/api/src/va_api/auth/cookies.py** (new) — `SESSION_COOKIE: Final = "va_session"`, `CSRF_COOKIE = "va_csrf"`,
+  `CSRF_HEADER = "x-csrf-token"`, `COOKIE_MAX_AGE_S = 90 * 86400`; `@dataclass(frozen=True, slots=True) CookiePolicy:
+  secure: bool; domain: str | None` + `CookiePolicy.from_settings(settings)` (secure = va_env != LOCAL);
+  `set_session_cookie(response, policy, token)`, `set_csrf_cookie(response, policy, token)`,
+  `clear_auth_cookies(response, policy)` (both, same domain/path).
+
+**apps/api/src/va_api/auth/csrf.py** (new) — `CSRF_INVALID: Final = "CSRF token missing or invalid."`,
+  `ORIGIN_NOT_ALLOWED: Final = "Request origin is not allowed."`, `origin_of(url: str) -> str | None`,
+  `check_csrf(header: str | None, cookie: str | None) -> None`, `check_origin(origin: str | None, referer: str | None,
+  allowed: str, *, required: bool) -> None`, `is_well_formed_token(value: str | None) -> bool` (43 chars base64url;
+  put next to `generate_token` in va_common.auth.tokens instead if cleaner — `looks_like_token`), `READ_METHODS` reused
+  from api_key_auth.
+
+**apps/api/src/va_api/auth/sessions.py** (new)
+- Constants `SLIDING_TTL = timedelta(days=14)`, `EXTEND_AFTER = timedelta(hours=1)`, `ABSOLUTE_TTL = timedelta(days=90)`,
+  `SESSION_CACHE_TTL_S = 300`, `SESSION_INVALID: Final = "Session is invalid or expired."`.
+- `session_cache_key(token_hash) -> str` (`sess:{<hash>}`); pure `next_expiry(*, created_at, expires_at, now) ->
+  datetime | None`; pure `cache_ttl_s(expires_at, now) -> int`.
+- `@dataclass(frozen=True, slots=True) ActiveSession: session_id, token_hash, user_id, active_org_id: UUID | None,
+  mfa_passed: bool, created_at, expires_at` + `to_json()` / `from_json()` (ISO datetimes via va_common.json).
+- `class SessionManager:` `__init__(*, database, redis, clock)`;
+  `start(*, user_id, active_org_id, ip, user_agent) -> tuple[str, ActiveSession]` (global_session create_session,
+  expires now+14 d; cache write);
+  `resolve(token: str) -> ActiveSession | None` (malformed → None; cache hit → expiry check; miss → global session
+  load (session + active user), cache; then sliding extension via `next_expiry` → `extend_session` + cache rewrite);
+  `set_active_org(active, org_id) -> ActiveSession`; `revoke(active) -> int` (revoke_session + DEL);
+  `revoke_all(user_id) -> int` (revoke_user_sessions + DEL every returned hash).
+  All Redis calls wrapped: `(RedisError, OSError)` → warning, continue.
+
+**apps/api/src/va_api/auth/login_throttle.py** (new) — `EMAIL_FAILURE_LIMIT = 10`, `IP_FAILURE_LIMIT = 50`,
+  `FAILURE_WINDOW_S = 900`; `email_failure_key(email)`, `ip_failure_key(ip)`; `class LoginThrottle(redis)`:
+  `async check(email, ip) -> None` (raises AUTH_LOCKED with headers), `async record_failure(email, ip) -> None`,
+  `async clear(email) -> None`. `ip=None` skips the ip key.
+
+**apps/api/src/va_api/auth/session_auth.py** (new) — request-level glue:
+- `async def current_session(request) -> ActiveSession` FastAPI dependency: cookie → `SessionManager.resolve` (else
+  AUTH_FAILURE SESSION_INVALID); non-read methods → `check_csrf` + `check_origin(required=True)`; stores
+  `request.state.session`.
+- `async def session_principal(request, active) -> tuple[RequestContext, MembershipRecord]`: membership via system
+  `MembershipLookupRepo.for_user_in_org` or fallback `for_user()[0]` (+ `set_active_org`), FORBIDDEN when none; org
+  status checks; MFA gate (`enforce_mfa(record, active)` helper reused by logout-all); builds RequestContext.
+- `get_principal` in dependencies.py: non-blank Authorization → existing key path; elif `va_session` cookie →
+  `current_session` logic + `session_principal`, bind org_id, `enforce(... "default", plan_rate_limits(record.plan_id,
+  record.rate_per_sec))`, no touch task; else existing key path with None. Keep dependencies.py under radon B: move the
+  key branch into `_api_key_principal(request, background)` and the session branch into session_auth.
+- Accessors `sessions_of(request)`, `login_throttle_of(request)`, `password_hasher_of(request)` from the container.
+
+**apps/api/src/va_api/routers/auth.py** (new) — `internal_auth_router = envelope_router(prefix="/internal/auth",
+  tags=["Auth"], include_in_schema=False)`; routes per decision 5:
+  - `POST /login` (`LoginRequest{email: str (strip, 3–320), password: str (1–1024)}`, extra forbid): origin check
+    (required=False) → throttle.check → global_session `get_user_by_email` (close) → `verify_async` → failure path
+    (record_failure, INVALID_CREDENTIALS) → success: throttle.clear, rehash if `needs_rehash` (`hash_async`), revoke
+    the presented `va_session` if it resolves, `for_user` (system) for the first org, `SessionManager.start`,
+    `record_login`, set both cookies, return LoginResult.
+  - `POST /logout` (current_session) → `revoke`, clear cookies.
+  - `POST /logout-all` (current_session + MFA gate on the active org when one exists) → `revoke_all`, clear cookies.
+  - `GET /session` (current_session) → memberships via `for_user`, active org resolution (same fallback helper), csrf
+    reuse/new, set `va_csrf`, return SessionInfo.
+  Optional `{}` bodies accepted (`EmptyBody` extra forbid, `Body(default=None)`).
+**apps/api/src/va_api/routers/auth_schemas.py** (new) — `DataResponse[T]` generic (`data: T`, `errors: None = None`)
+  — or put `DataResponse` in a new `va_api/responses.py` for reuse by later envelope routers (preferred) — plus
+  LoginRequest, SessionUser, SessionMembership, SessionInfo, LoginResult, LogoutResult with `json_schema_extra`
+  examples (specs/26 §1 requires examples; internal.json comes in T04d).
+**apps/api/src/va_api/main.py** — add `internal_auth_router` to ROUTERS (before probe_router).
+**apps/api/src/va_api/container.py** — fields `clock: Clock`, `password_hasher: PasswordHasher` (built with
+  `await asyncio.to_thread(PasswordHasher)`), `sessions: SessionManager`, `login_throttle: LoginThrottle`; reuse the
+  single `clock` for authenticator/limiter/idempotency.
+**apps/api/tests/support/session_helpers.py** (new) — `CHEAP_ARGON2`, `SessionTestContainer` dataclass (database,
+  redis=fakeredis, FrozenClock, authenticator with KeyStore, rate_limiter, idempotency MemoryIdempotencyStore,
+  password_hasher cheap, sessions, login_throttle, settings), `session_app(container, *extra_routers)` via
+  `create_app(container_factory=...)`, `make_member(provisioner|database, *, password, role="owner", verified=True,
+  settings=None, status=None) -> (user, org)`, `login(client, email, password) -> csrf`, a test-only envelope router
+  `/v1/knowledge/_session` (GET `knowledge:read`, POST `knowledge:write`) echoing ctx fields. Reuse auth_helpers /
+  api_helpers pieces; do not copy (jscpd).
+**AGENTS.md** — bullets: session principal path + exemptions; `AppError(headers=)`; tests use session_helpers with
+  cheap argon2 and https base_url (Secure cookies are not sent over http by httpx).
+
+### Tests
+apps/api/tests/test_rbac.py: exact sets per decision 1; every value ⊆ SCOPES; no `*`/`mcp`; owner == admin.
+apps/api/tests/test_session_lifetime.py (unit): next_expiry — within 1 h → None; 1 h + 1 s → now + 14 d; near cap →
+  created + 90 d; at cap → None; cache_ttl_s ≤ 300 and ≥ 1; ActiveSession JSON round trip; session_cache_key format.
+apps/api/tests/test_csrf.py (unit): origin_of (case, default ports 80/443 dropped, path/query ignored, garbage → None);
+  check_csrf missing header/cookie/mismatch/match; check_origin Origin match, Referer fallback, mismatch, missing with
+  required True/False, `Origin: null` rejected.
+apps/api/tests/test_login_throttle.py (fakeredis): 9 failures pass check, 10th locks with AUTH_LOCKED + Retry-After ==
+  TTL (≤ 900, > 0) and headers rendered by the app; locked attempts do not increment; lock clears when the key is gone;
+  ip limit 50 across different emails; clear() resets email only; Redis failure (stub raising ConnectionError) → check
+  and record do not raise.
+apps/api/tests/test_errors.py: AppError headers reach the response (existing handler test file).
+packages/va_common/tests: AppError headers default empty and not in to_error_item.
+packages/va_db/tests/test_membership_lookup_integration.py: `for_user_in_org` hit/miss; `mfa_required` true only for
+  JSON `true` (not `"true"`); `rate_per_sec` from limits.
+apps/api/tests/test_session_auth_integration.py (migrated Postgres module fixture like test_idempotency_db, fakeredis,
+  FrozenClock, `TestClient(app, base_url="https://testserver")`):
+- `test_login_sets_cookies_and_stores_hash` (cookie attributes: HttpOnly/SameSite=Lax/Path=/ /Secure; va_csrf not
+  HttpOnly; DB token_hash == sha256_hex(cookie); last_login_at set; mfa_required false; Secure absent when va_env=local).
+- `test_login_invalid_credentials_generic` (unknown email and wrong password → same 401 body; counter keys incremented).
+- `test_login_locks_after_ten_failures` (11th with the right password → 429 AUTH_LOCKED + Retry-After).
+- `test_login_rehashes_old_params`; `test_login_revokes_presented_session`; `test_disabled_user_cannot_login`.
+- `test_login_rejects_foreign_origin` (Origin evil → 403; no Origin → ok).
+- `test_session_endpoint_returns_memberships_and_csrf` (csrf body == cookie; reused on second call).
+- `test_session_principal_reaches_scoped_route` (ctx user/role/scopes; `rl:user:{<id>}:default` exists; X-RateLimit headers).
+- `test_csrf_missing_or_wrong_is_403`, `test_session_write_requires_dashboard_origin` (Origin mismatch, both missing →
+  403; Referer from dashboard ok), `test_api_key_requests_skip_csrf` (Authorization + cookie → key principal).
+- `test_expired_session_is_401` (advance 14 d + 1 s); `test_sliding_extension_hourly` (advance 2 h → DB expires_at =
+  now + 14 d; advance 30 min → unchanged); `test_absolute_lifetime_90_days` (request every 13 d → expires_at capped at
+  created + 90 d, then 401 after it).
+- `test_session_cache_hit_and_revocation` (key JSON fields, TTL ≤ 300; second request with DB row expired-by-SQL still
+  served until cache deleted? — no: assert served from cache by counting DB lookups via a spy, and revoke+DEL → 401).
+- `test_logout_revokes_and_clears_cookies` (Max-Age=0 for both; cache key gone; next request 401; logout without CSRF
+  → 403); `test_logout_all_revokes_every_session` (two logins; both 401; both cache keys gone).
+- `test_mfa_required_gate` (org settings mfa_required true: scoped route 401 MFA_REQUIRED; session 200 with
+  mfa_required true; logout 200; logout-all 401; after set_mfa_passed + cache DEL → 200).
+- `test_suspended_and_closed_org` (suspended GET 200 / POST ORG_SUSPENDED; closed GET ORG_SUSPENDED).
+- `test_active_org_fallback_and_no_membership` (active_org_id NULL → oldest membership persisted; all memberships
+  removed via system session → principal route 403, session endpoint 200 with []).
+- `test_disabled_user_session_rejected_on_cache_miss`.
+apps/api/tests/test_container.py: container exposes clock, PasswordHasher (spec params), SessionManager, LoginThrottle;
+  existing RuntimeError/close-order assertions still hold.
+apps/api/tests/test_openapi.py: public document contains no `/internal/` path (guards include_in_schema=False).
+
+### Gates
+`make fmt lint typecheck placeholders test` + jscpd (session_helpers must reuse auth_helpers/api_helpers/idempotency
+store and the va_db support `OrgFactory`/identity_db helpers — check what apps/api tests already import from
+packages/va_db/tests/support), radon (keep login handler ≤ B: split into `_authenticate(...)` and `_issue(...)`),
+pip-audit, check_spec_refs, `make openapi` must report unchanged (internal routes excluded), gitleaks, test_env_example.
+
+### Risks
+- httpx TestClient drops `Secure` cookies on http → use `base_url="https://testserver"`; Starlette's `delete_cookie`
+  must pass the same domain/path/secure/samesite.
+- FrozenClock vs DB `now()`: sessions rows use caller times (`create_session(expires_at=...)`); `get_active_session`
+  takes `now` from the clock — verify `created_at` is the clock time, not DB default; if `create_session` relies on the
+  server default for `created_at`, pass `created_at=now` explicitly (add a kwarg, as done for email tokens in T04b),
+  otherwise the absolute-lifetime test mixes clocks.
+- fakeredis `EXPIRE ... NX` support: verify; fallback is `SET key 0 EX 900 NX` then `INCR` in the same MULTI.
+- Pool size 1 per role: login touches global → system → global sequentially; never hold one while opening another.
+- Request-level DB cost: one system query per session request (membership); acceptable for dashboard traffic, note
+  in decision.
+- Flaky Docker timeouts (memories): rerun isolated before suspecting code.
+
+## 2026-10-29 Builder: P02-T04c build notes
+Implemented the plan as written. Deviations / details worth reviewing:
+- `SessionManager.start` also stamps `users.last_login_at` in the same global transaction (start == login; signup/SSO
+  will reuse it). `IdentityRepo.create_session(created_at=...)` added (server default otherwise) and
+  `get_active_session_with_user` (join; status checked in the manager, disabled → None on cache miss).
+- `MembershipRecord` gained `mfa_required` / `rate_per_sec` (defaults keep existing constructors valid);
+  `MembershipLookupRepo.for_user_in_org`. `va_common.auth.looks_like_token` (43 base64url) next to `generate_token`.
+- `get_principal`: non-blank Authorization → `_api_key_principal`; else `va_session` cookie → `session_auth.
+  authenticate_session`; else key path (AUTH_FAILURE "Invalid API key."). Both return `(ctx, rate_per_sec)` so the
+  `default` bucket charge is shared.
+- `client_ip(request)` drops non-IP peers (Starlette TestClient's `testclient`); `create_session` would raise on them.
+- Org `closed` message: "Organization is closed." (decision records it). AUTH_LOCKED message pluralises ("1 second").
+- `GET /session` returns `active_org_id: null` when the user has no memberships (not the stale session column).
+- `DataResponse[T]` lives in `va_api/responses.py`. `make_client(app, base_url=...)` gained the param (https tests).
+- `migrated_postgres()` context manager in session_helpers; test_idempotency_db now uses it (jscpd).
+- Decisions added: specs/04 §3.3, §4.1, §4.2, §4.3, §4.4; specs/03 §11 rows for `sess:` (fields/TTL) and
+  `auth:fail:*`.
+Gates (this iteration): make fmt/lint/typecheck/placeholders 0; make test 2251 passed, 99.71 %; openapi drift current;
+check_spec_refs 0; jscpd 0 clones; radon avg A (2.36), nothing ≥ C; pip-audit --strict clean; pnpm audit clean;
+gitleaks hook passed; test_env_example 43 passed.
+
+## Review P02-T04c (2026-10-29): approved
+Re-ran: make lint/typecheck/placeholders exit 0; make test 2251 passed, 99.71 % coverage; check_openapi_drift current;
+check_spec_refs 0; jscpd 0 clones; radon avg A (1.93), worst B (get_session 10). Diff checked against specs/04 §1,
+§3.3, §4.1–§4.4 decisions and specs/03 §11: cookie attributes, sliding/absolute expiry rule, `sess:` cache fields/TTL,
+CSRF double submit + Origin/Referer, MFA gate exemptions (session, logout; logout-all gated), throttle keys/limits/
+Retry-After, one argon2 verify for every failure path, pool-size-1 sessions never nested. No findings.

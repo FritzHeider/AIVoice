@@ -99,7 +99,7 @@ def _allowed_statuses(code: str) -> frozenset[int]:
 class AppError(Exception):
     """A domain error carrying a catalog code; the API layer renders it in the route's envelope."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only field and headers
         self,
         code: str,
         message: str,
@@ -107,6 +107,7 @@ class AppError(Exception):
         details: Mapping[str, Any] | None = None,
         *,
         field: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
         status = status_for(code) if http_status is None else http_status
         if status not in _allowed_statuses(code):
@@ -118,6 +119,8 @@ class AppError(Exception):
         self.http_status = status
         self.field = field
         self.details: dict[str, Any] = dict(details) if details else {}
+        # Extra response headers (e.g. ``Retry-After``); never part of the error body.
+        self.headers: dict[str, str] = dict(headers) if headers else {}
 
     def to_error_item(self) -> dict[str, Any]:
         """One ``errors[]`` item: ``error`` and ``message``, plus ``field``/``details`` when present."""

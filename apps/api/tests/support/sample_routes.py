@@ -57,6 +57,10 @@ def _routes(router: APIRouter, family: str) -> APIRouter:
     async def kb_error() -> SampleOk:
         raise AppError("KB_ERROR", "Embedding failed.", http_status=500)
 
+    @router.get("/locked", operation_id=f"sample_{family}_locked", openapi_extra={"x-scope": "calls:read"})
+    async def locked() -> SampleOk:
+        raise AppError("AUTH_LOCKED", "Locked.", headers={"Retry-After": "42"})
+
     @router.post("/body", operation_id=f"sample_{family}_body", openapi_extra={"x-scope": "calls:write"})
     async def body(payload: SampleBody) -> SampleOk:
         return SampleOk(status="success", limit=len(payload.phone_number))
