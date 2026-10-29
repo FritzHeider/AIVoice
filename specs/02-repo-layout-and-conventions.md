@@ -334,6 +334,13 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 > Standalone comment lines (section headers, preamble) and blank lines are unconstrained. Parity is enforced through
 > `make test` only; §9 deliberately lists no separate env gate.
 
+> Decision (2026-10-29): `SMTP_URL` schemes are `smtp://` (plain; STARTTLS is used when the server offers it;
+> accepted only when `VA_ENV` is `local` or `test`, so staging and production refuse it at settings validation),
+> `smtp+starttls://` (STARTTLS required) and `smtps://` (implicit TLS). Percent-decoded userinfo is the SMTP login;
+> default ports are 25 / 587 / 465. The connect and command timeout is 10 s. `SMTP_URL` is read as a secret
+> (it may carry credentials, `28-security.md` §2). `EMAIL_FROM` must parse to an address with a local part and a
+> domain. Both live in `va_common.email.EmailSettings`, mixed into the api and worker settings.
+
 > Decision (2026-10-25): `NEXT_PUBLIC_API_BASE_URL` (dashboard) is the browser origin of the api. The dashboard
 > calls the api cross-origin with `credentials: "include"`; the api's CORS allow-list is `DASHBOARD_BASE_URL`
 > (`28-security.md` §5). Next inlines `NEXT_PUBLIC_*` values at build time, so a deployed image is built per api origin.

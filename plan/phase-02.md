@@ -18,10 +18,28 @@
   - Deliverables: dependency/middleware storing request hash, lock, response replay for 24 h, cleanup job function
   - Acceptance: replay returns identical status/body; different body → 422 code; concurrent duplicate → 409.
 
-- [ ] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF
+- [ ] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF (split by the planner on 2026-10-29 into T04a–T04c below; tick when all three are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (dashboard auth, sessions, CSRF); specs/28-security.md (password hashing, cookies)
   - Depends on: P01-T10
   - Deliverables: `/internal/auth/signup`, `/verify-email`, `/login`, `/logout`, `/session`, argon2id params, session cookie, sliding expiry, CSRF double-submit for cookie-authenticated mutations, `EmailSender` protocol + SMTP + in-memory implementations, email templates
+  - Acceptance: full flow tests; CSRF missing → 403; expired session → 401.
+
+- [x] P02-T04a Password, token, and email primitives — review 2026-10-29: lint, typecheck (261 files), placeholders 0, make test 2124 passed, coverage 99.81 %; argon2id spec params, breached list (96 517 entries, pinned SecLists sha), opaque tokens, SMTP + in-memory email senders
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.2 (argon2id params, password policy, breached list); specs/02-repo-layout-and-conventions.md §6 (`SMTP_URL`, `EMAIL_FROM`); specs/28-security.md §2
+  - Depends on: P01-T10
+  - Deliverables: `va_common.auth` package (api key module moved, `passwords`, `tokens`, bundled `data/common_passwords.txt.gz`), `scripts/build_password_list.py`, `va_common.email` (`EmailSender` protocol, `SmtpEmailSender` on aiosmtplib with timeouts, `InMemoryEmailSender`, `EmailSettings`, `verify_email` template)
+  - Acceptance: argon2id parameters exactly as specs/04 §4.2 and rehash detection; policy rejects short/long/breached/email-local-part passwords; SMTP sender delivers to an aiosmtpd test server; in-memory sender records messages.
+
+- [ ] P02-T04b Identity repositories and org provisioning
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (signup creates org/user/membership), §4.3; specs/28-security.md §3 (data key on org creation); specs/03-data-model.md §2, §3 (`users`, `sessions`, `email_tokens`, `org_data_keys`)
+  - Depends on: P02-T04a
+  - Deliverables: va_db access path for the global identity tables, `org_data_keys`-backed `DataKeyStore`, identity repository (users, sessions, email tokens), org provisioning service (org + active data key + encrypted webhook signing secret + owner membership in one transaction), `Envelope` in the api container
+  - Acceptance: provisioning is atomic (failure leaves no rows); webhook secret decrypts with its AAD; session/email-token rows store only hashes; RLS still denies tenant tables without `app.org_id`.
+
+- [ ] P02-T04c Dashboard auth endpoints, session principal, CSRF
+  - Spec refs: specs/04-auth-tenancy-rbac.md §1, §4.1 (signup, verify-email, resend-verification, login, logout, logout-all, session), §4.2 (login throttling), §4.3, §4.4; specs/03-data-model.md §11 (`sess:*`, `rl:user:*`); specs/28-security.md §5
+  - Depends on: P02-T04b
+  - Deliverables: `/internal/auth/*` routers listed above, session-cookie principal in `get_principal` with sliding expiry, absolute max, `sess:` cache, CSRF double-submit + Origin check, `MFA_REQUIRED` gating, `AUTH_LOCKED` throttling
   - Acceptance: full flow tests; CSRF missing → 403; expired session → 401.
 
 - [ ] P02-T05 Password reset and email change

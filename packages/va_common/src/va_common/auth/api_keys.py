@@ -1,4 +1,4 @@
-"""API key format and peppered hashing (specs/04-auth-tenancy-rbac.md §2.1; specs/28-security.md §2).
+"""API key module: format and peppered hashing (specs/04-auth-tenancy-rbac.md §2.1; specs/28-security.md §2).
 
 Pure functions, no I/O. A key is ``va_live_`` or ``va_test_`` plus 32 base62 characters; its ``prefix`` (first
 12 characters) is the lookup handle and ``secret_hash`` is ``sha256(pepper || plaintext)`` hex. Peppers are

@@ -243,6 +243,24 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 - Login throttling: per email 10 failures / 15 min → 15 min lock (`AUTH_LOCKED` 429); per IP 50 failures / 15 min.
   Redis keys `auth:fail:email:{sha256(email)}`, `auth:fail:ip:{ip}`.
 
+> Decision (2026-10-29): password primitives live in `va_common.auth.passwords` and `va_common.auth.tokens`.
+> **Breached list source**: SecLists renamed the file; the source is the same xato top-100 000 list at
+> `Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt`, downloaded from
+> `raw.githubusercontent.com/danielmiessler/SecLists/<commit>/…` pinned to commit
+> `c205c36a445bff37f8e58a9ec829105cd4975c58` and verified against a pinned sha256 in the script. **Normalisation**:
+> entries are stripped, NFKC-normalised, casefolded, deduplicated, sorted, blanks dropped, and stored gzipped with
+> `mtime=0` (rebuilds are byte-identical); 96 517 entries remain. The lookup is the candidate's NFKC casefold.
+> **Length** is counted in Unicode code points after NFKC; 12–128 inclusive. **Email local part** = text before the
+> last `@` with any `+tag` removed, casefolded; checked only when it has at least 3 characters. **Rule order and
+> messages** (`PASSWORD_TOO_WEAK`, `field: "password"`, first failing rule wins): "Password must be at least 12
+> characters." / "Password must be at most 128 characters." / "Password is too common; choose a less predictable
+> one." / "Password must not contain your email address." **Hashing runs off the event loop** (`hash_async`,
+> `verify_async` via `asyncio.to_thread`); `verify` returns false for a mismatch, a malformed hash, and a missing hash
+> (SSO-only or unknown user), and the missing-hash case still verifies against a precomputed dummy hash so timing
+> does not reveal it. A malformed stored hash counts as needing a rehash. **Opaque tokens** (sessions, CSRF, email
+> tokens, later invitations and resets) are `secrets.token_bytes(32)` base64url without padding (43 characters),
+> stored as `sha256_hex(token)` and compared with `hmac.compare_digest`.
+
 ### 4.3 Sessions
 
 - Cookie `va_session`: 32 random bytes base64url; `HttpOnly; Secure` (not Secure in `local`); `SameSite=Lax`;

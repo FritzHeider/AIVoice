@@ -1,4 +1,4 @@
-"""Pure masking helpers for phone numbers and secret-bearing keys (specs/27-observability.md §1).
+"""Pure masking helpers for phone numbers, emails, and secret-bearing keys (specs/27-observability.md §1).
 
 No structlog import: the log redaction processor and the Sentry ``before_send`` hook both build on these.
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-__all__ = ["REDACTED", "is_secret_key", "mask_phone", "mask_phones_in_text"]
+__all__ = ["REDACTED", "is_secret_key", "mask_email", "mask_phone", "mask_phones_in_text"]
 
 REDACTED: Final = "[REDACTED]"
 
@@ -77,6 +77,18 @@ def mask_phone(number: str) -> str:
 def mask_phones_in_text(text: str) -> str:
     """Mask every E.164 number embedded in free text (prose, URLs, header values)."""
     return _E164_IN_TEXT.sub(lambda match: mask_phone(match.group(0)), text)
+
+
+def mask_email(address: str) -> str:
+    """Mask an email address for logs: ``jane.doe@acme.io`` -> ``j***@acme.io``.
+
+    The domain stays visible (delivery problems are usually per domain); a value without ``@`` or with an
+    empty local part becomes ``***``.
+    """
+    local, at, domain = address.rpartition("@")
+    if not at or not local:
+        return "***"
+    return f"{local[0]}***@{domain}"
 
 
 def _key_segments(name: str) -> list[str]:

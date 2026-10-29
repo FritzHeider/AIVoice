@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793261328-920d
+> va_common.email.EmailSettings lives in the email package, not va_common.settings: va_common.logging imports va_common.settings, so settings -> email.sender -> logging is a cycle. check_no_placeholders flags example.com in production docstrings
+<!-- tags: email, settings | created: 2026-10-29 -->
+
 ### mem-1793260371-4c41
 > Idempotency decision logic is va_db.repositories.resolve_existing (pure); test MemoryIdempotencyStore reuses it - never re-copy the decision chain (jscpd)
 <!-- tags: api, testing | created: 2026-10-29 -->

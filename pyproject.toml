@@ -39,6 +39,7 @@ dev = [
   "va-events",
   "actionlint-py>=1.7.12.25",
   "pre-commit>=4.7.0",
+  "aiosmtpd>=1.4.6",
 ]
 
 [tool.uv]

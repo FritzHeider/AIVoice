@@ -7,6 +7,7 @@ from typing import ClassVar, Final
 from pydantic import Field, SecretStr, field_validator, model_validator
 
 from va_common.auth import ApiKeyHasher, Pepper
+from va_common.email import EmailSettings
 from va_common.settings import DatabaseSettings, RedisSettings, TemporalSettings
 
 __all__ = ["ApiSettings"]
@@ -16,7 +17,7 @@ _PEPPER_HEX_LEN: Final = 64
 _FIRST_ROTATED_VERSION: Final = 2
 
 
-class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings):
+class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettings):
     """Settings of the public REST API; further secrets (vendors) arrive with their phases.
 
     ``API_KEY_PEPPER`` may be empty at construction so importing ``va_api.main`` needs no environment; the

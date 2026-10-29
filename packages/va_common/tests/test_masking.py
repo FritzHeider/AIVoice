@@ -4,7 +4,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from va_common.masking import REDACTED, is_secret_key, mask_phone, mask_phones_in_text
+from va_common.masking import REDACTED, is_secret_key, mask_email, mask_phone, mask_phones_in_text
 
 
 @pytest.mark.parametrize(
@@ -122,3 +122,18 @@ def test_is_secret_key_true(name: str) -> None:
 )
 def test_is_secret_key_false(name: str) -> None:
     assert not is_secret_key(name)
+
+
+@pytest.mark.parametrize(
+    ("address", "masked"),
+    [
+        ("jane.doe@example.com", "j***@example.com"),
+        ("a@b.io", "a***@b.io"),
+        ("odd@local@example.com", "o***@example.com"),
+        ("no-at-sign", "***"),
+        ("@example.com", "***"),
+        ("", "***"),
+    ],
+)
+def test_mask_email(address: str, masked: str) -> None:
+    assert mask_email(address) == masked

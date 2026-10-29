@@ -403,3 +403,14 @@ Grafana 3001
   route-level tests use `idempotency_helpers.idempotency_app` (counts endpoint runs in `container.hits`, `/gate` held
   by `container.gate`). An api test needing Postgres boots its own module-scoped container with the va_db support
   helpers (`running_postgres` + `fresh_database` + `upgrade`; see `apps/api/tests/test_idempotency_db.py`).
+- 2026-10-29 (P02-T04a): `va_common.auth` is a package (`api_keys`, `passwords`, `tokens`); `from va_common.auth import …`
+  still exports everything. Passwords: one `PasswordHasher()` per process (construction runs one argon2 hash for the
+  dummy), use `hash_async`/`verify_async`/`check_password_policy_async` in handlers; tests use cheap
+  `Argon2Params(time_cost=1, memory_cost=8, parallelism=1, hash_len=16, salt_len=8)`. Rebuild the breached list with
+  `uv run python scripts/build_password_list.py` (pinned SecLists commit + sha256; output is byte-identical). uv_build
+  ships non-`.py` files under the module dir (the `.gz` is in the wheel).
+- 2026-10-29 (P02-T04a): email lives in `va_common.email` (`EmailSettings` mixed into api/worker settings,
+  `SmtpEmailSender`, `InMemoryEmailSender`, `verify_email`). `EmailSettings` sits in the email package, not in
+  `va_common.settings`, because `va_common.logging` imports `va_common.settings` (cycle). Tests with a real SMTP server
+  use `aiosmtpd.controller.Controller` on a free 127.0.0.1 port (`test_email.py`). `check_no_placeholders` flags
+  `example.com` in production code (docstrings too); tests may use it.

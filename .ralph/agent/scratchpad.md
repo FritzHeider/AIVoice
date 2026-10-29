@@ -607,3 +607,201 @@ whose claim was taken over can overwrite or release the newer claim (same hash, 
 valid one; the worst case is a second concurrent run). Revisit if long-running POSTs appear.
 
 ## 2026-10-29 Reviewer: P02-T03 approved → next P02-T04
+
+## 2026-10-29 Planner: P02-T03 approved → P02-T04 split into T04a/T04b/T04c
+
+P02-T04 as written needs: password primitives + breached list, SMTP/in-memory email, identity repos for the global
+tables (users/sessions/email_tokens have no org_id and no RLS; no access path exists yet), an `org_data_keys`
+`DataKeyStore` (none exists, only a test fake) plus `Envelope` in the api container (signup creates an org, whose
+`webhook_signing_secret_enc` is NOT NULL and envelope-encrypted), org provisioning (shared later by T09 sub-accounts
+and T14 seed), and then the endpoints, session principal, CSRF, throttling. Too much for one Builder pass, so the
+plan file now has T04a (primitives), T04b (repos + provisioning + Envelope), T04c (endpoints/session/CSRF).
+T04 parent is ticked once all three are ticked. Plan for T04a below.
+
+## Plan P02-T04a — Password, token, and email primitives (specs/04 §4.2, specs/02 §6, specs/28 §2)
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+In specs/04 §4.2:
+1. **Breached list source**: SecLists renamed the file; the source is
+   `Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt` (same xato top-100 000 list) fetched from
+   `https://raw.githubusercontent.com/danielmiessler/SecLists/<commit sha>/...` pinned to a commit SHA (Builder finds
+   the current SHA via `curl -s https://api.github.com/repos/danielmiessler/SecLists/commits?path=Passwords/Common-Credentials/xato-net-10-million-passwords-100000.txt&per_page=1`)
+   and verified against a pinned sha256 of the downloaded file in the script. (raw.githubusercontent was checked
+   2026-10-29: the old name 404s, the xato name returns 200.)
+2. **List normalisation**: entries are stripped, lower-cased (NFKC), deduplicated, sorted, blank lines dropped; the
+   check is case-insensitive (`password.casefold()` NFKC-normalised in the set). Stored gzipped (`mtime=0` so the
+   build is reproducible) as `packages/va_common/src/va_common/auth/data/common_passwords.txt.gz`, one per line.
+   Loaded lazily once per process (`functools.cache`), parsing done via `asyncio.to_thread` by callers at startup is
+   not required: the loader is sync and called inside `to_thread` by `check_password_policy_async` (see below).
+3. **Length** counted in Unicode code points after NFKC normalisation; 12–128 inclusive.
+4. **Email local-part rule**: local part = text before the last `@`, with any `+tag` suffix removed, casefolded;
+   applied only when it has at least 3 characters (a 1–2 char local part would reject most passwords); a password
+   whose casefold contains it is rejected.
+5. **Rule order and messages** (`AppError("PASSWORD_TOO_WEAK", msg, field="password")`, first failing rule wins):
+   too short "Password must be at least 12 characters." / too long "Password must be at most 128 characters." /
+   breached "Password is too common; choose a less predictable one." / local part "Password must not contain
+   your email address."
+6. **Hashing runs off the event loop**: `PasswordHasher.hash_async/verify_async/` wrap the argon2 calls in
+   `asyncio.to_thread` (64 MiB × t=3 is ~50–100 ms CPU, rule 7). `verify` returns False for mismatch, for a
+   malformed hash, and for `None` hash (SSO-only user) — the `None` case still performs one dummy argon2 verify
+   against a module-level precomputed hash so login timing does not reveal SSO-only/unknown users.
+7. **Opaque tokens** (sessions, CSRF, email tokens, later invitations/reset): `secrets.token_bytes(32)` base64url
+   without padding (43 chars); stored hash = existing `va_common.auth.sha256_hex(token)`.
+In specs/02 §6 (under the table, Decision): `SMTP_URL` schemes — `smtp://` (plain, STARTTLS used when the server
+offers it; allowed only when `VA_ENV` is `local`/`test`), `smtp+starttls://` (STARTTLS required), `smtps://`
+(implicit TLS); userinfo (percent-decoded) are the login credentials; default ports 25 / 587 / 465. Connect and
+command timeout 10 s. Production refuses `smtp://` at settings validation.
+
+### Files
+
+**packages/va_common/src/va_common/auth/** (convert module → package; `git mv auth.py auth/api_keys.py`)
+- `auth/__init__.py`: docstring summarising the package; re-export everything that `va_common.auth` exports today
+  (unchanged names: API_KEY_LENGTH … sha256_hex) plus the new public names below. All existing imports
+  (`from va_common.auth import ApiKeyHasher, KeyEnvironment, Pepper, ...`) keep working; no caller edits needed.
+- `auth/api_keys.py`: the current file verbatim (docstring adjusted to say it is the api-key module).
+- `auth/passwords.py`:
+  - `@dataclass(frozen=True, slots=True) class Argon2Params: time_cost: int; memory_cost: int; parallelism: int;
+    hash_len: int; salt_len: int`
+  - `SPEC_ARGON2_PARAMS: Final = Argon2Params(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16)`
+  - `MIN_PASSWORD_LENGTH: Final = 12`, `MAX_PASSWORD_LENGTH: Final = 128`, `MIN_LOCAL_PART_CHECK: Final = 3`
+  - `class PasswordHasher:` `__init__(self, params: Argon2Params = SPEC_ARGON2_PARAMS)` wrapping
+    `argon2.PasswordHasher(type=Type.ID, ...)`; `params` property; `hash(password) -> str`;
+    `verify(password_hash: str | None, password: str) -> bool` (catches `VerifyMismatchError`,
+    `VerificationError`, `InvalidHashError`; `None` → dummy verify then False); `needs_rehash(password_hash) -> bool`
+    (`check_needs_rehash`; malformed → True); `async hash_async(...)`, `async verify_async(...)` via
+    `asyncio.to_thread`. Dummy hash computed once per hasher instance lazily (`functools.cached_property` is
+    incompatible with slots → plain attribute set in `__init__` from `self._hasher.hash(<random>)`; that costs one
+    hash at construction — acceptable, document it).
+  - `def password_policy_violation(password: str, *, email: str | None) -> str | None` → message or None (pure,
+    loads list via `common_passwords()`).
+  - `def check_password_policy(password: str, *, email: str | None) -> None` → raises the AppError above.
+  - `async def check_password_policy_async(password, *, email)` → `to_thread(check_password_policy, ...)` (first call
+    loads/decompresses the list).
+  - `@functools.cache def common_passwords() -> frozenset[str]` reading the gz via
+    `importlib.resources.files("va_common.auth").joinpath("data/common_passwords.txt.gz")`.
+  - `def normalise_password(value: str) -> str` (NFKC) shared by script + check.
+- `auth/tokens.py`: `TOKEN_BYTES: Final = 32`; `def generate_token() -> str` (base64url, no padding);
+  `@dataclass(frozen=True, slots=True) class IssuedToken: plaintext: str = field(repr=False); token_hash: str`;
+  `def issue_token() -> IssuedToken` (hash = `sha256_hex`); `def tokens_equal(a: str, b: str) -> bool`
+  (`hmac.compare_digest` on UTF-8 bytes; used for CSRF in T04c).
+- `auth/data/common_passwords.txt.gz` (generated, committed). Make sure uv_build includes non-.py package data
+  (check the built wheel or `importlib.resources` in tests — uv_build includes all files under the module dir by
+  default; verify with a test that loads it from the installed package).
+
+**packages/va_common/src/va_common/email/** (new package)
+- `email/__init__.py` re-exports.
+- `email/message.py`: `@dataclass(frozen=True, slots=True) class EmailMessage: to: str; subject: str; text: str;
+  html: str; template: str` + `def to_mime(message, *, sender: str) -> email.message.EmailMessage`
+  (stdlib; multipart/alternative text+html, `Message-ID` via `email.utils.make_msgid(domain=<sender domain>)`,
+  `Date` via `email.utils.format_datetime(clock.now())` — take `now: datetime` param).
+- `email/sender.py`:
+  - `class EmailSender(Protocol): async def send(self, message: EmailMessage) -> None`
+  - `class EmailDeliveryError(Exception)` (message never includes recipient address or body).
+  - `class SmtpEmailSender:` `__init__(self, config: SmtpConfig, *, sender: str, clock: Clock | None = None)`;
+    `send` builds MIME and calls `aiosmtplib.send(mime, hostname=…, port=…, username=…, password=…,
+    use_tls=…, start_tls=…, timeout=SMTP_TIMEOUT_S)`; maps `aiosmtplib.SMTPException`, `OSError`,
+    `TimeoutError` → `EmailDeliveryError`; logs `email_sent` / `email_send_failed` with `template` and masked
+    recipient (`mask_email`, add to `va_common.masking`: first char + `***@` + domain).
+  - `@dataclass(frozen=True, slots=True) class SmtpConfig: hostname; port; username: str | None;
+    password: SecretStr | None (repr hidden); use_tls: bool; start_tls: bool | None` +
+    `def parse_smtp_url(url: str) -> SmtpConfig` (ValueError on unknown scheme / missing host).
+  - `class InMemoryEmailSender:` `sent: list[EmailMessage]`; `send` appends (async); `def to(self, address) ->
+    list[EmailMessage]`; `def clear()`. Lives in production code (spec: "in-memory implementation for tests";
+    used by the api in `VA_ENV=test` later), so it is not test-only scaffolding.
+- `email/templates.py`: no jinja2 (specs/02 §3 limits it to prompt templates). `string.Template` bodies with every
+  substituted value passed through `html.escape` for the HTML part. `def verify_email(*, name: str, link: str,
+  to: str) -> EmailMessage` (subject "Verify your VoiceAgents email address"; text + HTML; states the link expires
+  in 24 hours; template name `"verify_email"`). A `TEMPLATES: Final[frozenset[str]]` listing names for the test.
+  Real copy (no lorem), plain transactional voice.
+- `va_common/settings.py`: `class EmailSettings(BaseServiceSettings)`: `smtp_url: str = "smtp://localhost:1025"`,
+  `email_from: str = "VoiceAgents <no-reply@voiceagents.local>"`; validators: `parse_smtp_url` succeeds; production
+  refuses `smtp://`; `email_from` parses with `email.utils.parseaddr` to an address containing `@`.
+  `def smtp_config(self) -> SmtpConfig`. Export in `__all__`.
+- `apps/api/src/va_api/settings.py`: `ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettings)`
+  (no container wiring yet — T04c wires the sender; keep T04a free of api behaviour changes beyond settings).
+  Check `apps/worker` settings: specs/02 §6 scopes SMTP_URL to api, worker → add `EmailSettings` to the worker
+  settings class too if it exists (grep `class .*Settings` in apps/worker).
+
+**packages/va_common/pyproject.toml**: add `argon2-cffi>=25.1.0`, `aiosmtplib>=<latest>` (uv add); root dev
+group: `aiosmtpd` (test SMTP server). Run `uv lock`; pip-audit must stay clean.
+
+**scripts/build_password_list.py** (new, typer-free plain argparse like other scripts — check `scripts/fetch_models.py`
+style): constants `SOURCE_URL` (pinned SHA), `SOURCE_SHA256`; downloads with httpx (timeout 30 s), verifies sha256,
+normalises (decision 2), writes gz with `gzip.GzipFile(..., mtime=0)`; `--source PATH` option to build from a local
+file (used by its test, no network); `main(argv) -> int`. Prints entry count. Add `make passwords` target? Not
+needed; document the command in AGENTS.md.
+**scripts/tests/test_build_password_list.py**: builds from a small temp source (dupes, case, blanks, NFKC
+fullwidth chars) → asserts content and byte-identical output across two runs; sha mismatch → non-zero exit
+(monkeypatch download fn to return bytes).
+
+### Tests
+packages/va_common/tests/test_passwords.py
+- `test_spec_argon2_params` (encoded hash starts `$argon2id$v=19$m=65536,t=3,p=4$`; salt 16 bytes / hash 32 bytes
+  decoded from the encoded string).
+- `test_hash_verify_roundtrip`, `test_verify_wrong_password_false`, `test_verify_malformed_hash_false`,
+  `test_verify_none_hash_runs_dummy_verify` (spy on inner argon2 verify called once, returns False).
+- `test_needs_rehash_on_param_change` (hash with cheap params, hasher with spec params → True; same → False;
+  malformed → True).
+- `test_async_wrappers_run_in_thread` (patch `asyncio.to_thread` spy or assert thread id differs).
+- Unit tests elsewhere should use cheap `Argon2Params(time_cost=1, memory_cost=8, parallelism=1, ...)` for speed
+  except the spec-param test.
+- policy param table: 11 chars / 12 ok / 128 ok / 129 / "password1234" breached (assert it is in the list) /
+  case variant "PASSWORD1234" breached / contains local part "jane.doe" for jane.doe+x@ex.com / local part of 2
+  chars ignored / message and field asserted; `test_common_passwords_size` (≥ 90 000 entries, all lower-case,
+  sorted file) loaded via importlib.resources.
+packages/va_common/tests/test_tokens.py — length 43, url-safe alphabet, uniqueness over 1 000, hash = sha256_hex,
+  IssuedToken repr hides plaintext, `tokens_equal`.
+packages/va_common/tests/test_email.py
+- `parse_smtp_url` table (smtp/smtps/smtp+starttls, default ports, percent-decoded creds, bad scheme, no host).
+- `EmailSettings` production refuses `smtp://`; bad `EMAIL_FROM` rejected.
+- `verify_email` template: escapes `<script>` in name in HTML, link present in both parts, subject.
+- `to_mime`: multipart/alternative, From/To/Subject/Date/Message-ID.
+- `InMemoryEmailSender` records and filters by recipient.
+- `test_smtp_sender_delivers` — aiosmtpd `Controller` on 127.0.0.1 random port with a handler collecting
+  envelopes (run in a fixture; Controller uses its own thread — fine); asserts recipient, subject, both parts.
+- `test_smtp_sender_auth_and_starttls` only if aiosmtpd TLS setup is cheap; otherwise assert the kwargs passed to
+  `aiosmtplib.send` via monkeypatch for smtps/starttls/credentials.
+- `test_smtp_failure_raises_delivery_error_without_pii` (connection refused port → EmailDeliveryError, message has
+  no address; log line has masked recipient).
+- `mask_email` tests in test_masking.
+apps/api/tests/test_settings_auth.py (or new test) — ApiSettings exposes `smtp_config()`.
+
+### Gates
+`make fmt lint typecheck placeholders test` + jscpd, radon, pip-audit, check_spec_refs, openapi drift (unchanged).
+
+### Risks
+- uv_build package-data: confirm the `.gz` ships (test loads via importlib.resources; also `uv build` the
+  va_common wheel and `unzip -l` once, note result in build notes).
+- Placeholder checker may flag words inside the password list? It scans source files — confirm it skips `.gz`
+  (binary); also gitleaks may flag the list (gz is binary, should be skipped; verify `make check` secret scan).
+- The real argon2 params cost ~64 MiB per hash; with xdist 8 workers keep spec-param hashing to a handful of tests.
+- `va_common.auth` module→package move: stale `__pycache__/auth.cpython-312.pyc` is harmless, but make sure no
+  `auth.py` remains beside `auth/`.
+- Memory mem-1793257682-de8e (env var tests) applies only if specs/02 §6 rows change — they do not (SMTP_URL and
+  EMAIL_FROM already exist); the Decision note is prose only. Re-run scripts/tests/test_env_example.py anyway.
+
+## 2026-10-29 Builder: P02-T04a build notes
+Implemented per plan. Deviations (deliberate):
+- `EmailSettings` lives in `va_common/email/settings.py` (not `va_common/settings.py`): settings → email → sender →
+  va_common.logging → va_common.settings would be an import cycle. Exported from `va_common.email`.
+- `SMTP_URL` is a `SecretStr` (specs/28 §2 lists it as a platform secret; it carries credentials).
+- `SmtpConfig.password` is `str | None` with `field(repr=False)` instead of pydantic SecretStr (plain dataclass);
+  SmtpConfig also carries `scheme` (used by the production `smtp://` refusal).
+- SMTP parsing in `email/config.py`; `EmailDeliveryError` raised `from None` (aiosmtplib messages can contain the
+  recipient) with error type + SMTP code only; log has masked recipient, error_type, smtp_code.
+- `breached_list_entry()` (NFKC + casefold) is shared by the policy check and the build script.
+- Breached list: SecLists commit c205c36a445bff37f8e58a9ec829105cd4975c58, source sha256 1472aafa…388b, 100 000
+  lines → 96 517 normalised entries, gz 253 340 bytes; two builds byte-identical. `uv build` wheel contains
+  `va_common/auth/data/common_passwords.txt.gz` (checked with unzip -l).
+Decisions written: specs/04 §4.2 (`> Decision (2026-10-29)`), specs/02 §6 (SMTP_URL schemes). No env rows changed
+(test_env_example 43 passed). AGENTS.md: two bullets.
+Gates: make fmt 0; make lint 0; make typecheck 0 (261 files); make placeholders 0 findings; make test 2124 passed,
+TOTAL 99.81 % (new modules all 100 %); jscpd 0 clones; radon avg A (2.47); pip-audit + pnpm audit clean;
+check_spec_refs 0 problems; openapi current; gitleaks passed.
+
+## Review P02-T04a (2026-10-29): approved
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, make test 2124 passed (99.81 %).
+Diff checked against specs/04 §4.2 (argon2id t=3/m=65536/p=4/hash 32/salt 16, rehash detection, 12–128, breached
+list path, local-part rule), specs/31 PASSWORD_TOO_WEAK 400 with field, specs/02 §6 SMTP_URL/EMAIL_FROM defaults
+unchanged, specs/28 §2 SMTP_URL as secret. No PII in EmailDeliveryError (raised from None) or logs (mask_email).
+Blocking argon2/list load offloaded via to_thread. No findings. Next: P02-T04b.

@@ -15,6 +15,8 @@ def test_defaults_match_spec() -> None:
     assert (settings.temporal_host, settings.temporal_namespace) == ("localhost:7233", "default")
     assert settings.temporal_task_queue == "va-main"
     assert settings.database_url == "postgresql+asyncpg://va:va@localhost:5432/va"
+    assert settings.smtp_config().port == 1025
+    assert settings.email_from == "VoiceAgents <no-reply@voiceagents.local>"
 
 
 def test_task_queue_names_from_main_queue() -> None:
