@@ -2,4 +2,4 @@
 
 from importlib.metadata import version
 
-__version__ = version("va-sim")
+__version__ = version("va-sim-server")

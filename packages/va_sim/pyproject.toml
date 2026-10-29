@@ -1,0 +1,21 @@
+[project]
+name = "va-sim"
+version = "0.1.0"
+description = "VoiceAgents vendor simulators: scenario DSL, simulator clock and state, /sim control API, in-process runner"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "orjson>=3.13.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.16.1",
+    "pyyaml>=6.0",
+    "starlette>=1.0",
+    "uvicorn[standard]>=0.54.0",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }

@@ -12,10 +12,16 @@ import uvicorn
 from service_helpers import UNREACHABLE, FakeContainer, RecordingServer, make_client, ok_check, settings_of
 
 from va_common.service import StopController, run_server
+from va_sim.server import build_state
+from va_sim.settings import SimName, SimSettings
+from va_sim.state import SimState
 from va_sim_server import __version__
 from va_sim_server import main as sim_main
 from va_sim_server.main import SIMULATORS, build_container, create_app, ports_from, run
-from va_sim_server.settings import SimSettings
+
+
+def _state() -> SimState:
+    return build_state(settings_of(SimSettings, sim_clock="accelerated"))
 
 
 def test_defaults_match_spec() -> None:
@@ -30,7 +36,10 @@ def test_ports_follow_spec_layout() -> None:
 
 
 async def test_probe_app_without_state_redis_is_ready() -> None:
-    async with build_container(settings_of(SimSettings)) as deps, make_client(create_app(deps)) as client:
+    async with (
+        build_container(settings_of(SimSettings)) as deps,
+        make_client(create_app(deps, "telnyx", _state())) as client,
+    ):
         ready = await client.get("/readyz")
         live = await client.get("/healthz")
         metrics = await client.get("/metrics")
@@ -41,10 +50,23 @@ async def test_probe_app_without_state_redis_is_ready() -> None:
 
 async def test_probe_app_checks_state_redis_when_configured() -> None:
     settings = settings_of(SimSettings, sim_state_redis_url=UNREACHABLE["redis_url"])
-    async with build_container(settings) as deps, make_client(create_app(deps)) as client:
+    async with build_container(settings) as deps, make_client(create_app(deps, "llm", _state())) as client:
         response = await client.get("/readyz")
     assert response.status_code == 503
     assert response.json()["failing"] == ["redis"]
+
+
+@pytest.mark.parametrize("sim", SIMULATORS)
+async def test_each_app_serves_the_control_api_next_to_probes(sim: SimName) -> None:
+    async with build_container(settings_of(SimSettings)) as deps:
+        app = create_app(deps, sim, _state())
+        async with make_client(app) as client:
+            clock = await client.get("/sim/clock")
+            ready = await client.get("/readyz")
+            scenarios = await client.get("/sim/telnyx/scenarios")
+    assert clock.json()["mode"] == "accelerated"
+    assert ready.status_code == 200
+    assert scenarios.status_code == (200 if sim == "telnyx" else 404)
 
 
 async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,6 +99,15 @@ async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.Monke
             await asyncio.wait_for(server.ready.wait(), timeout=10)
             response = await client.get(f"{server.url}/readyz")
             assert response.json()["checks"] == {"redis": "ok"}
+        registered = await client.post(
+            f"{servers[0].url}/sim/telnyx/scenarios",
+            content=b"id: shared\nmatch: {to: '+14155550101'}\nanswer: {after_ms: 0}\n",
+            headers={"content-type": "application/yaml"},
+        )
+        assert registered.status_code == 201
+        # All four servers share one SimState.
+        snapshot = await client.get(f"{servers[-1].url}/sim/state")
+        assert snapshot.json()["scenarios"] == ["shared"]
     stop.request("test")
     await asyncio.wait_for(task, timeout=10)
     assert container.closed == 1

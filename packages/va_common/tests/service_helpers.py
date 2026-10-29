@@ -6,7 +6,6 @@ and build settings with :func:`settings_of` so a developer ``.env`` never leaks 
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import logging
@@ -20,7 +19,6 @@ from typing import Any, Final, Self
 import httpx
 import pytest
 import structlog
-import uvicorn
 from asgi_lifespan import LifespanManager
 from pydantic_settings import BaseSettings
 from redis.asyncio import Redis
@@ -28,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_common.health import CheckFn
 from va_common.logging import configure_logging
-from va_common.service import Bind, ManagedServer
+from va_common.service import Bind, ReadyServer
 from va_common.settings import BaseServiceSettings
 
 
@@ -142,22 +140,8 @@ def capture_serve(
     return seen
 
 
-class RecordingServer(ManagedServer):
-    """Signals readiness once uvicorn has bound its socket."""
-
-    def __init__(self, config: uvicorn.Config) -> None:
-        super().__init__(config)
-        self.ready = asyncio.Event()
-
-    async def startup(self, sockets: Any = None) -> None:
-        await super().startup(sockets)
-        if self.started:
-            self.ready.set()
-
-    @property
-    def url(self) -> str:
-        host, port = self.servers[0].sockets[0].getsockname()[:2]
-        return f"http://{host}:{port}"
+# Kept under its historical test name: a ``ManagedServer`` with a ``ready`` event and the bound ``url``.
+RecordingServer = ReadyServer
 
 
 def track_closes(monkeypatch: pytest.MonkeyPatch) -> list[str]:

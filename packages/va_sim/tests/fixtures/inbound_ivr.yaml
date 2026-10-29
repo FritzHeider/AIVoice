@@ -1,0 +1,24 @@
+# Inbound caller navigates an IVR menu, is transferred, and hangs up after the transfer leg greets them.
+id: inbound_ivr
+description: Caller presses 2 for sales and is transferred to a human.
+match:
+  inbound_from: "+14155550199"
+greeting_audio: null
+llm_rules: [rules/inbound_ivr.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 500}
+  - dtmf: {digits: "2", inband: true}
+  - wait_agent_speech: {then_silence_ms: 900, timeout_ms: 12000}
+  - say: {text: "Yes please, put me through.", language: en}
+  - silence: {ms: 3000}
+  - hangup: {}
+transfer_target:
+  answer_after_ms: 1200
+  result: answered
+  steps:
+    - say: {text: "Sales, this is Bob."}
+profile: fast
+assertions:
+  call_status: completed
+  min_turns: 2
+  webhook_events: ["call.completed"]

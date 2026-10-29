@@ -54,6 +54,7 @@ __all__ = [
     "ManagedServer",
     "ProbeState",
     "ReadinessSource",
+    "ReadyServer",
     "ServerStartupError",
     "StopController",
     "Supervisor",
@@ -346,6 +347,24 @@ class ManagedServer(uvicorn.Server):
     @contextlib.contextmanager
     def capture_signals(self) -> Iterator[None]:
         yield
+
+
+class ReadyServer(ManagedServer):
+    """Sets ``ready`` once uvicorn has bound its socket; ``url`` is then the bound address (port 0 too)."""
+
+    def __init__(self, config: uvicorn.Config, ready: asyncio.Event | None = None) -> None:
+        super().__init__(config)
+        self.ready = ready if ready is not None else asyncio.Event()
+
+    async def startup(self, sockets: Any = None) -> None:
+        await super().startup(sockets)
+        if self.started:
+            self.ready.set()
+
+    @property
+    def url(self) -> str:
+        host, port = self.servers[0].sockets[0].getsockname()[:2]
+        return f"http://{host}:{port}"
 
 
 async def _serve(server: uvicorn.Server) -> None:

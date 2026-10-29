@@ -1,9 +1,9 @@
 # Phase 03 — Vendor Clients and Simulators
 
-- [ ] P03-T01 Simulator framework and scenario DSL
+- [x] P03-T01 Simulator framework and scenario DSL — va_sim settings/clocks/scenario DSL (source:line:col errors)/SimState//sim control API/running_sims + apps/sim wiring; lint+typecheck+placeholders clean, 3519 passed, cov 97.72% (va_sim 94-100%)
   - Spec refs: specs/30-testing-and-evals.md (simulators, scenario DSL)
   - Depends on: P00-T12
-  - Deliverables: `va_sim.server` (multi-app runner on ports 9100–9400), `va_sim.scenario` (pydantic models for the YAML DSL, loader, validation errors with line numbers), `va_sim.clock` (real-time and accelerated), control API (`/__sim/scenarios`, `/__sim/calls/{id}/recording`, `/__sim/reset`)
+  - Deliverables: `va_sim.server` (multi-app runner on ports 9100–9400), `va_sim.scenario` (pydantic models for the YAML DSL, loader, validation errors with line numbers), `va_sim.clock` (real-time and accelerated), control API (`/sim/telnyx/scenarios`, `/sim/recordings/{id}.wav`, `/sim/reset`, `/sim/clock`, `/sim/state`, per-sim `/sim/{sim}/config`; specs/30 §3 Decision 2026-10-29)
   - Acceptance: DSL examples from specs/30 load; invalid documents produce precise errors.
 
 - [ ] P03-T02 FakeTelnyx REST and webhook emitter
@@ -87,8 +87,8 @@
 - [ ] P03-T15 Telnyx bootstrap script and sim service wiring
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)
   - Depends on: P03-T08
-  - Deliverables: `scripts/telnyx_bootstrap.py` (idempotent find-or-create by name, prints env lines), compose `sim` service with healthcheck, `.env` integration for sim public key
-  - Acceptance: running twice against the simulator creates resources once.
+  - Deliverables: `scripts/telnyx_bootstrap.py` (idempotent find-or-create by name, prints env lines), compose `sim` service with healthcheck, `.env` integration for sim public key, Redis-backed SimState sharing when `SIM_STATE_REDIS_URL` is set
+  - Acceptance: running twice against the simulator creates resources once; two sim processes see the same registered scenario.
 
 - [ ] P03-T16 Live smoke tests for vendor clients
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)

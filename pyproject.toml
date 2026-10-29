@@ -35,6 +35,7 @@ dev = [
   "va-webhook-dispatcher",
   "va-events-sink",
   "va-sim",
+  "va-sim-server",
   "va-db",
   "va-events",
   "va-domain",
@@ -55,6 +56,7 @@ va-worker = { workspace = true }
 va-webhook-dispatcher = { workspace = true }
 va-events-sink = { workspace = true }
 va-sim = { workspace = true }
+va-sim-server = { workspace = true }
 va-db = { workspace = true }
 va-events = { workspace = true }
 va-domain = { workspace = true }
@@ -90,7 +92,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support"
 files = [
   "scripts",
   "packages/va_common/src",
@@ -116,6 +118,8 @@ files = [
   "apps/events_sink/tests",
   "apps/sim/src",
   "apps/sim/tests",
+  "packages/va_sim/src",
+  "packages/va_sim/tests",
 ]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 
@@ -138,6 +142,7 @@ pythonpath = [
   "apps/media_worker/tests/support",
   "apps/worker/tests/support",
   "apps/events_sink/tests/support",
+  "packages/va_sim/tests/support",
 ]
 timeout = 60
 markers = [

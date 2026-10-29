@@ -2,8 +2,9 @@
 
 One process serves the four simulators of specs/01-architecture.md §1 on consecutive ports (fake Telnyx 9100,
 fake ElevenLabs 9200, fake Telnyx Inference 9300, fake Stripe 9400), each with ``/healthz``, ``/readyz``, and
-``/metrics``. Readiness checks the shared state Redis only when ``SIM_STATE_REDIS_URL`` is set. The vendor
-routes come from ``packages/va_sim`` (specs/30-testing-and-evals.md).
+``/metrics``. Readiness checks the shared state Redis only when ``SIM_STATE_REDIS_URL`` is set. The simulator
+routes (control API under ``/sim/*``, later the vendor APIs) come from ``packages/va_sim``
+(specs/30-testing-and-evals.md §3); all four apps share one ``SimState``.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Final
 
 from starlette.applications import Starlette
 
@@ -30,19 +30,12 @@ from va_common.service import (
     run_server,
     shutdown_signals,
 )
+from va_sim.server import BASE_PORT, SIMULATORS, SimName, build_state, ports_from, simulator_routes
+from va_sim.settings import SimSettings
+from va_sim.state import SimState
 from va_sim_server import __version__
-from va_sim_server.settings import SimSettings
 
 __all__ = ["BASE_PORT", "SIMULATORS", "build_container", "create_app", "main", "ports_from", "run"]
-
-SIMULATORS: Final = ("telnyx", "elevenlabs", "llm", "stripe")
-BASE_PORT: Final = 9100
-PORT_STEP: Final = 100
-
-
-def ports_from(base: int) -> dict[str, int]:
-    """Simulator name → port: ``base``, ``base+100``, ``base+200``, ``base+300``."""
-    return {name: base + index * PORT_STEP for index, name in enumerate(SIMULATORS)}
 
 
 @asynccontextmanager
@@ -54,9 +47,12 @@ async def build_container(settings: SimSettings) -> AsyncIterator[Dependencies]:
         yield deps
 
 
-def create_app(source: ReadinessSource, *, readiness_timeout_s: float = 1.0) -> Starlette:
-    """One simulator's app; ``source`` provides the shared readiness checks."""
+def create_app(
+    source: ReadinessSource, sim: SimName, state: SimState, *, readiness_timeout_s: float = 1.0
+) -> Starlette:
+    """Simulator ``sim``'s app over the shared ``state``; ``source`` provides the shared readiness checks."""
     app = probe_app()
+    app.router.routes.extend(simulator_routes(sim, state))
     app.state.probes = ProbeState(
         __version__,
         new_registry(),
@@ -71,19 +67,20 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
     *,
     stop: StopController,
     host: str,
-    ports: Mapping[str, int],
+    ports: Mapping[SimName, int],
     container_factory: ContainerFactory[SimSettings] = build_container,
     init_observability: bool = True,
     install_signals: bool = True,
 ) -> None:
     """Serve every simulator until ``stop`` is requested; signals are routed once for all servers."""
+    state = build_state(settings)
     with observed(settings.service_name, settings, version=__version__, enabled=init_observability):
         async with container_factory(settings) as source:
             signals = shutdown_signals(stop) if install_signals else contextlib.nullcontext()
             with signals:
                 async with asyncio.TaskGroup() as group:
-                    for port in ports.values():
-                        app = create_app(source)
+                    for sim, port in ports.items():
+                        app = create_app(source, sim, state)
                         group.create_task(
                             run_server(app, host=host, port=port, stop=stop, install_signals=False)
                         )

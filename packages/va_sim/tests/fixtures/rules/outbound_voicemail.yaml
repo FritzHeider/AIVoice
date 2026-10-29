@@ -1,0 +1,7 @@
+rules:
+  - id: voicemail-message
+    priority: 10
+    match:
+      system_contains: ["[[SCENARIO:outbound_voicemail]]"]
+    respond:
+      content: "Hi Sam, this is the clinic calling to confirm tomorrow's appointment. Please call us back."

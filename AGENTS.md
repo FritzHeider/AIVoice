@@ -643,3 +643,20 @@ Grafana 3001
 - 2026-10-29 (P02-T15): `tests/support/cross_tenant.app_routes(app)` is the shared route enumerator (test_audit_markers
   uses it); `session_app(container, extra_routers=(...))` mounts test-only routers. The suite clears `rl:*` before each
   call instead of advancing the clock. FastAPI 0.13x has no `get_flat_dependant`; walk `dependant.dependencies`.
+- 2026-10-29 (P03-T01): simulators: library `packages/va_sim` is distribution `va-sim`; the runner `apps/sim` is
+  `va-sim-server` (module `va_sim_server`). Every sim port serves the control API under `/sim/*` (`POST /sim/reset`
+  with optional `{"seed"}`, `GET /sim/clock`, `GET /sim/state`; FakeTelnyx adds `POST/GET /sim/telnyx/scenarios` and
+  `/sim/recordings/{id}.wav`; `/sim/{elevenlabs|llm}/config` PATCH + `/config/profile`). Add vendor routes in
+  `va_sim.server.simulator_routes(sim, state)`; all four apps share one `SimState`. In tests use
+  `async with running_sims(state) as urls:` (real uvicorn on ephemeral ports, name → base URL) or an
+  `httpx.ASGITransport` over `Starlette(routes=simulator_routes(sim, state))`; builders in
+  `packages/va_sim/tests/support/sim_helpers.py`.
+- 2026-10-29 (P03-T01): `va_sim.clock.AcceleratedClock.sleep` returns without wall delay: virtual time jumps to the
+  earliest pending deadline after a few event-loop turns, so concurrent sleepers wake in deadline order. Work that
+  waits on real I/O does not hold virtual time back; drive accelerated flows through the clock, and use
+  `advance(s)` to move time from a test. `RealtimeClock` is the wall clock.
+- 2026-10-29 (P03-T01): `va_sim.scenario.load_scenario(text, source=..., base_dir=...)` raises `ScenarioError` whose
+  `issues` carry `path` (`steps[2].say.text`), 1-based `line`/`column`, `message`; `str(error)` is one
+  `source:line:col: path: message` line per issue. Step union discriminator tags (`step:<key>`) appear in pydantic
+  `loc` and are stripped from paths. `va_common.service.ReadyServer` (a `ManagedServer` with `ready` and `url`) is
+  the production twin of the test helper `RecordingServer` (now an alias).

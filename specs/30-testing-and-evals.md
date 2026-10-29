@@ -55,9 +55,9 @@ Simulator environment variables (read by `va_sim.settings.SimSettings`; realtime
 | `SIM_LLM_TOKENS_PER_S` | `80` | FakeLLM streaming rate |
 | `SIM_LLM_RULES` | empty | Comma-separated rule file paths (§3.4) |
 | `SIM_ED25519_PRIVATE_KEY` | generated | Base64 Ed25519 private key for Telnyx signatures |
-| `SIM_EDGE_WEBHOOK_URL` | `http://edge:8100/telnyx/voice` | Default voice webhook target |
-| `SIM_MESSAGING_WEBHOOK_URL` | `http://edge:8100/telnyx/messaging` | Messaging webhook target |
-| `SIM_STRIPE_WEBHOOK_URL` | `http://api:8000/v1/billing/stripe/webhook` | Stripe webhook target |
+| `SIM_EDGE_WEBHOOK_URL` | `http://localhost:8100/telnyx/voice` | Default voice webhook target |
+| `SIM_MESSAGING_WEBHOOK_URL` | `http://localhost:8100/telnyx/messaging` | Messaging webhook target |
+| `SIM_STRIPE_WEBHOOK_URL` | `http://localhost:8000/v1/billing/stripe/webhook` | Stripe webhook target |
 | `SIM_STATE_REDIS_URL` | empty | When set, `SimState` is shared via Redis (multi-process sims) |
 | `SIM_WORKERS` | `1` | Worker processes for the sim server (load tests) |
 
@@ -65,6 +65,24 @@ The `fast` profile (default for unit/integration and fast e2e) overrides latenci
 20 ms, 1 000 tokens/s; the `realistic` profile sets STT 40 ms, TTS 250 ms, LLM TTFT 250 ms, 80 tokens/s. Control-API
 config (`/sim/*/config`) overrides env values at runtime; values named elsewhere in this section (`stt_final_ms`,
 `tts_ttfa_ms`, `ttft_ms`, `tokens_per_s`) are these same settings.
+
+> Decision (2026-10-29): the control API lives under `/sim/*` on every simulator port exactly as written in this
+> section (the phase-03 plan's `/__sim/...` paths are superseded). Every simulator serves `POST /sim/reset`
+> (optional JSON body `{"seed": <int>}` reseeds; without it the current seed is reused), `GET /sim/clock`
+> (`{"mode", "now" (ISO-8601 UTC with `Z`), "virtual_ms"}`), and `GET /sim/state` (seed, clock, latencies, scenario
+> ids, recording and utterance counts). `GET`/`PATCH /sim/elevenlabs/config` (`tts_ttfa_ms`, `stt_final_ms`) and
+> `GET`/`PATCH /sim/llm/config` (`ttft_ms`, `tokens_per_s`) plus `POST /sim/{elevenlabs|llm}/config/profile`
+> `{"profile": "fast"|"realistic"}` (applies all four latencies) are served only by the matching simulator; FakeTelnyx
+> alone serves `/sim/telnyx/scenarios` (`POST` with an `application/yaml`/`text/yaml` or `application/json` body →
+> 201 `{"id", "match"}`; `GET` list `{"scenarios": [...]}`; `GET /sim/telnyx/scenarios/{id}`) and
+> `/sim/recordings/{id}.wav`. Errors are `{"error": {"code", "message", "issues"?}}` with codes `invalid_request`
+> (422, `issues: [{path, line, column, message}]`), `not_found` (404), `unsupported_media_type` (415).
+> `SimState` is seeded (`seed` 0 unless reset with another seed) and there is no `SIM_SEED` variable. The webhook
+> URL defaults above are the specs/02 §6 values (the shared contract); the compose `sim` service sets the
+> `edge:`/`api:` hosts (specs/29 §2). The Redis-backed `SimState` (`SIM_STATE_REDIS_URL`) arrives with the compose
+> `sim` wiring (P03-T15); until then the state is in-process and shared by the four apps of one process. The
+> library is the `va-sim` distribution (`packages/va_sim`); the runner `apps/sim` is distribution `va-sim-server`
+> (module `va_sim_server`).
 
 ### 3.1 Synthetic caller speech and utterance markers (`va_sim.audio`)
 
@@ -283,6 +301,19 @@ assertions:                           # evaluated by the e2e harness after the c
 Harness `tests_e2e/harness.py`: registers scenario + rules via control APIs, creates resources through the public API,
 triggers the call, waits for `call.completed` on a local webhook receiver (`tests_e2e/receiver.py`, a Starlette app
 recording deliveries with signature verification), then evaluates `assertions` plus test-specific checks.
+
+> Decision (2026-10-29): `va_sim.scenario` fills the gaps of the schema above. Every mapping rejects unknown keys
+> and duplicate keys. `match` needs exactly one of `to`/`inbound_from` (E.164). `answer.after_ms` is required when
+> `result` is `answered` (the default) and forbidden otherwise; `answered_by` requires an answered call and
+> `beep_at_ms` requires `answered_by: machine`; inbound scenarios must not set `answer` (the platform answers).
+> `transfer_target.answer_after_ms` follows the same rule as `answer.after_ms`. A step is a one-key mapping;
+> defaults: `wait_agent_speech` `min_ms: 0`, `then_silence_ms: 700`, `timeout_ms: 10000`; `say.language: en`;
+> `dtmf.inband: false` with `digits` matching `^[0-9A-D*#w]+$` (`w` = 500 ms pause); `silence.ms` required;
+> `expect_hangup` `by: any` (`agent` | `caller` | `any`), `timeout_ms: 10000`; `hangup: {}`. `profile` defaults to
+> `fast`, `id` matches `^[a-z0-9][a-z0-9_-]{0,63}$`, and relative `llm_rules` resolve against the scenario file's
+> directory. Errors list every issue top to bottom as `<source>:<line>:<column>: <path>: <message>` (1-based; the
+> position of the offending key, or of the deepest existing parent for a missing field), e.g.
+> `scenarios/x.yaml:9:15: steps[3].silence.ms: Input should be greater than or equal to 0`.
 
 ## 4. Unit/integration requirements per package (minimum)
 

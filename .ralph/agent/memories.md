@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793318126-f3a5
+> va_sim: control API /sim/* via va_sim.server.simulator_routes(sim, state); tests use running_sims(state) (real uvicorn, ephemeral ports) or httpx.ASGITransport over Starlette(routes=simulator_routes(...)); sim_helpers (packages/va_sim/tests/support) has new_state/scenario_yaml and the shared autouse isolated_env fixture that both va_sim and apps/sim conftests re-export; dist names va-sim (lib) / va-sim-server (apps/sim)
+<!-- tags: sim, testing | created: 2026-10-29 -->
+
 ### mem-1793292824-0b49
 > va_api: a new /v1 route family must be added to specs/31 §1 envelope matrix AND va_api.envelopes.FAMILIES (test_envelopes compares them verbatim and counts them), otherwise the path classifies as legacy; Redis CAS pattern: pipe.watch -> read -> pipe.multi() (type: ignore[no-untyped-call]) -> set(keepttl=True), WatchError = lost race
 <!-- tags: api, redis, testing | created: 2026-10-29 -->

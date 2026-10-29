@@ -1,0 +1,7 @@
+rules:
+  - id: ivr-sales
+    priority: 10
+    match:
+      system_contains: ["[[SCENARIO:inbound_ivr]]"]
+    respond:
+      content: "Connecting you to sales now."

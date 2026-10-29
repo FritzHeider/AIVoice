@@ -1,0 +1,22 @@
+# Outbound call reaches voicemail: AMD reports a machine, the greeting beeps, the agent leaves a message.
+id: outbound_voicemail
+description: Machine answers after four rings; the agent leaves a voicemail after the beep and hangs up.
+match:
+  to: "+14155550142"
+answer:
+  after_ms: 4000
+  result: answered
+  answered_by: machine
+  beep_at_ms: 5200
+greeting_audio: "Hi, you've reached Sam. Leave a message after the tone."
+llm_rules: [rules/outbound_voicemail.yaml]
+steps:
+  - silence: {ms: 6000}
+  - wait_agent_speech: {min_ms: 1000, then_silence_ms: 1500, timeout_ms: 20000}
+  - expect_hangup: {by: agent, timeout_ms: 5000}
+profile: fast
+assertions:
+  call_status: completed
+  answered_by: machine
+  end_reason: voicemail
+  webhook_events: ["call.completed"]

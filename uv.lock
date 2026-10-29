@@ -12,6 +12,7 @@ members = [
     "va-events-sink",
     "va-media-worker",
     "va-sim",
+    "va-sim-server",
     "va-telephony-edge",
     "va-webhook-dispatcher",
     "va-worker",
@@ -2595,11 +2596,37 @@ requires-dist = [
 [[package]]
 name = "va-sim"
 version = "0.1.0"
+source = { editable = "packages/va_sim" }
+dependencies = [
+    { name = "orjson" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "starlette" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "va-common" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.16.1" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "starlette", specifier = ">=1.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+    { name = "va-common", editable = "packages/va_common" },
+]
+
+[[package]]
+name = "va-sim-server"
+version = "0.1.0"
 source = { editable = "apps/sim" }
 dependencies = [
     { name = "pydantic" },
     { name = "starlette" },
     { name = "va-common" },
+    { name = "va-sim" },
 ]
 
 [package.metadata]
@@ -2607,6 +2634,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "starlette", specifier = ">=1.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-sim", editable = "packages/va_sim" },
 ]
 
 [[package]]
@@ -2712,6 +2740,7 @@ dev = [
     { name = "va-events-sink" },
     { name = "va-media-worker" },
     { name = "va-sim" },
+    { name = "va-sim-server" },
     { name = "va-telephony-edge" },
     { name = "va-webhook-dispatcher" },
     { name = "va-worker" },
@@ -2751,7 +2780,8 @@ dev = [
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-media-worker", editable = "apps/media_worker" },
-    { name = "va-sim", editable = "apps/sim" },
+    { name = "va-sim", editable = "packages/va_sim" },
+    { name = "va-sim-server", editable = "apps/sim" },
     { name = "va-telephony-edge", editable = "apps/telephony_edge" },
     { name = "va-webhook-dispatcher", editable = "apps/webhook_dispatcher" },
     { name = "va-worker", editable = "apps/worker" },
