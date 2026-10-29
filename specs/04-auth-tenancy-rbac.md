@@ -213,6 +213,18 @@ compares it to the table in §3.2 (parsed from this markdown file).
 > `analytics:read`; **viewer**: every `<r>:read` except `billing:read`, plus `analytics:read`. The permission matrix
 > may later derive `ROLE_SCOPES` from its table as long as these sets do not change.
 
+> Decision (2026-10-29): **permissions**. `va_api.auth.permissions.PERMISSIONS` is exactly the 20 names above
+> (`apps/api/tests/test_permissions.py` parses this paragraph). `ROLE_PERMISSIONS` (exact): **owner** all 20; **admin**
+> all except `org.delete`, `org.owner_transfer`, `billing.plan_change`; **developer** `pathways.publish`,
+> `voices.clone`, `experiments.operate`, `calls.operate`; **billing** `billing.plan_change`, `billing.payment`,
+> `billing.credit_transfer`; **analyst** and **viewer** none. `SESSION_ONLY_PERMISSIONS` = `org.delete`,
+> `org.owner_transfer`, `sso.manage`. An API key holds every non-session-only permission when its scopes contain `*`
+> and no permission otherwise; widget principals hold none. `require_permission(name)` raises `ValueError` for an
+> unknown name when the router is defined, carries `required_permission` on the dependency, and fails with
+> `FORBIDDEN` "Missing required permission '<name>'."; the operation also declares `x-permission` (specs/26 §1). The
+> matrix-vs-§3.2 parse test arrives with the members/org routes (P02-T08), which may widen these sets only by
+> amending this note.
+
 ## 4. Dashboard authentication
 
 ### 4.1 Endpoints (`/internal/auth/*`, envelope format)
@@ -501,6 +513,42 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
    its role.
 5. Session created with `mfa_passed=true` (IdP is trusted for MFA).
 6. `enforce=true`: password login for emails in `allowed_domains` returns `SSO_REQUIRED`; API keys still work.
+
+> Decision (2026-10-29): **SSO connection management** (`/v1/org/sso`, envelope, tag `Org`).
+> 1. **One connection per org.** `PUT` upserts the org's single row (a changed `issuer` updates the row in place, same
+>    `id`); `GET` returns it or `NOT_FOUND` "SSO connection not found."; `DELETE` hard-deletes it (the table has no
+>    `deleted_at`) and returns `{data: {id, deleted: true}}`, `NOT_FOUND` when absent.
+> 2. **Access.** `PUT`/`DELETE` need scope `org:write`, `GET` needs `org:read`, and all three need the session-only
+>    permission `sso.manage` (owner, admin), so API keys always get `FORBIDDEN`. Writes pass the session CSRF and
+>    `Origin` checks. With `OIDC_ENABLED=false` (default) every route fails with `FORBIDDEN` "SSO is not enabled on
+>    this deployment." after authentication.
+> 3. **Body** `SsoConnectionInput` (unknown fields refused): `provider` (`"oidc"`, default), `issuer` (1–2048
+>    characters; surrounding whitespace and one trailing `/` removed; an absolute `http(s)` URL with a host and no
+>    credentials, query, fragment, or invalid port), `client_id` (1–255), `client_secret` (1–1024; required when the
+>    org has no connection yet, else `INVALID_INPUT` field `client_secret` "client_secret is required when creating
+>    an SSO connection."; omitted on update keeps the stored secret), `allowed_domains` (1–50 items, each stripped
+>    and lowercased, must be a DNS name of at least two labels with an alphabetic TLD, no wildcards; duplicates
+>    removed keeping the first), `default_role` (`admin|developer|analyst|billing|viewer`, default `viewer`; `owner`
+>    is refused because JIT provisioning never mints owners), `enforce` (default `false`).
+> 4. **Response** `SsoConnectionView`: `id, provider, issuer, client_id, allowed_domains, default_role, enforce,
+>    created_at, updated_at`. The client secret is never returned in any form (specs/28 T8).
+> 5. **Secret storage.** `client_secret_enc = envelope.encrypt_str(org_id, secret, column_aad("sso_connections",
+>    "client_secret_enc", id))`; `va_api.routers.org_sso.decrypt_client_secret(envelope, row)` reverses it.
+> 6. **Discovery validation** before anything is written (`va_api.auth.oidc_discovery.OidcDiscovery`): `GET
+>    {issuer}/.well-known/openid-configuration`, 5 s timeout, redirects never followed, body capped at 256 KiB; the
+>    response must be HTTP 200 with a JSON object whose `issuer` equals the configured issuer (ignoring one trailing
+>    `/` on either side; the provider's own spelling is what later `iss` checks use) and whose
+>    `authorization_endpoint`, `token_endpoint`, `jwks_uri` are non-empty strings. Outside `VA_ENV` `local`/`test`
+>    the issuer and the three endpoints must be `https`, and the issuer host must resolve only to global addresses
+>    (`ipaddress.ip_address(...).is_global`; IP-literal hosts are checked directly). Every failure is
+>    `INVALID_INPUT` field `issuer` "Could not validate the OIDC issuer: <reason>." with reason one of `insecure
+>    issuer`, `unreachable`, `timed out`, `redirect not allowed`, `HTTP <status>`, `response too large`, `not a JSON
+>    object`, `issuer mismatch`, `missing <field>`, `insecure endpoint <field>`, `address not allowed`. Connection-time
+>    DNS pinning arrives with `va_common.http.safe_client` (specs/28 §6.4), which will replace this fetch.
+> 7. **Domains are unique across orgs.** A `PUT` listing a domain that another org's connection lists fails with
+>    `CONFLICT` field `allowed_domains` "Domain <d> is already claimed by another organization's SSO connection."
+>    (checked through the system-scope `SsoConnectionLookupRepo`, specs/03 §2); the org's own domains never conflict.
+> 8. **Audit** `org.sso_update` is written once the audit writer exists (P02-T11).
 
 ## 6. Invitations and members
 

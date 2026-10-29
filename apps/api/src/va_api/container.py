@@ -7,12 +7,14 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
+import httpx
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
+from va_api.auth.oidc_discovery import DISCOVERY_TIMEOUT_S, OidcDiscovery, discovery_for
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
@@ -55,6 +57,7 @@ class Container:
     mfa_guard: MfaGuard
     email_sender: EmailSender
     resend_limiter: ResendLimiter
+    oidc_discovery: OidcDiscovery
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -72,7 +75,8 @@ def email_sender_for(settings: ApiSettings, clock: Clock) -> EmailSender:
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
-    session manager, the login throttle, the MFA guard, the email sender, and the verification resend limiter.
+    session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
+    the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout).
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -99,6 +103,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         rate_limiter = RateLimiter(redis, clock)
         idempotency = DbIdempotencyStore(database, clock)
         envelope = Envelope(kms_provider, OrgDataKeyStore(database))
+        oidc_http = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT_S, follow_redirects=False)
+        stack.push_async_callback(oidc_http.aclose)
         yield Container(
             settings=settings,
             engine=engine,
@@ -118,4 +124,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             mfa_guard=MfaGuard(redis),
             email_sender=email_sender_for(settings, clock),
             resend_limiter=ResendLimiter(redis),
+            oidc_discovery=discovery_for(settings, oidc_http),
         )

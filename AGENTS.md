@@ -478,3 +478,14 @@ Grafana 3001
   Tests: `session_helpers.enrol_mfa(client, container)` (setup + enable, then advances the frozen clock 30 s) and
   `mfa_code(container, secret)`; a code is accepted once per step, so advance the clock 30 s before reusing "the
   current code" across sessions. A pydantic `model_validator` error renders as `INVALID_INPUT` without `field`.
+- 2026-10-29 (P02-T07a): finer-than-scope checks use `va_api.auth.permissions.require_permission("<name>")` next to
+  `require_scope` (route `dependencies=[...]` run before parameter dependencies, so the permission message wins);
+  declare both in `openapi_extra={"x-scope": ..., "x-permission": ...}`. API keys with `*` hold every permission
+  except `org.delete`, `org.owner_transfer`, `sso.manage`. `/v1/org*` routes go on `routers/org_sso.org_router`
+  (already in `ROUTERS`). Outbound fetches to admin-supplied URLs (OIDC discovery) go through
+  `va_api.auth.oidc_discovery.OidcDiscovery` (no redirects, 5 s, 256 KiB cap, global-address check);
+  `allow_insecure` (http + private addresses) is true only for `VA_ENV` `local`/`test` (`discovery_for(settings,
+  http)`). Tests: `SessionContainer` builds `oidc_discovery` from the app settings when the app opens it; stub the IdP
+  with `respx.mock` (it patches httpcore, so the ASGI test client is untouched). Integration modules share one
+  database: use per-test unique values (domains, issuers) for anything with cross-org uniqueness.
+  `session_app(container, oidc_enabled=True)` turns SSO on.

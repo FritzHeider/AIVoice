@@ -1,6 +1,63 @@
 {
   "components": {
     "schemas": {
+      "DataResponse_SsoConnectionDeleted_": {
+        "examples": [
+          {
+            "data": {
+              "deleted": true,
+              "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SsoConnectionDeleted"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[SsoConnectionDeleted]",
+        "type": "object"
+      },
+      "DataResponse_SsoConnectionView_": {
+        "examples": [
+          {
+            "data": {
+              "allowed_domains": [
+                "acme-dental.test"
+              ],
+              "client_id": "voiceagents-dashboard",
+              "created_at": "2026-10-29T14:03:11Z",
+              "default_role": "viewer",
+              "enforce": false,
+              "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+              "issuer": "https://login.acme-dental.test",
+              "provider": "oidc",
+              "updated_at": "2026-10-29T14:03:11Z"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SsoConnectionView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[SsoConnectionView]",
+        "type": "object"
+      },
       "ErrorEnvelope": {
         "description": "Error body of envelope endpoints.",
         "examples": [
@@ -160,6 +217,195 @@
         ],
         "title": "HealthStatus",
         "type": "object"
+      },
+      "JitRole": {
+        "enum": [
+          "admin",
+          "developer",
+          "analyst",
+          "billing",
+          "viewer"
+        ],
+        "type": "string"
+      },
+      "SsoConnectionDeleted": {
+        "description": "``DELETE /v1/org/sso`` result.",
+        "examples": [
+          {
+            "deleted": true,
+            "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+          }
+        ],
+        "properties": {
+          "deleted": {
+            "const": true,
+            "default": true,
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SsoConnectionDeleted",
+        "type": "object"
+      },
+      "SsoConnectionInput": {
+        "additionalProperties": false,
+        "description": "``PUT /v1/org/sso``: the org's OIDC connection. ``client_secret`` may be omitted on update.",
+        "examples": [
+          {
+            "allowed_domains": [
+              "acme-dental.test"
+            ],
+            "client_id": "voiceagents-dashboard",
+            "client_secret": "<client secret from your identity provider>",
+            "default_role": "viewer",
+            "enforce": false,
+            "issuer": "https://login.acme-dental.test"
+          }
+        ],
+        "properties": {
+          "allowed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Allowed Domains",
+            "type": "array"
+          },
+          "client_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Client Id",
+            "type": "string"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "format": "password",
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Secret"
+          },
+          "default_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "default": "viewer"
+          },
+          "enforce": {
+            "default": false,
+            "title": "Enforce",
+            "type": "boolean"
+          },
+          "issuer": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Issuer",
+            "type": "string"
+          },
+          "provider": {
+            "const": "oidc",
+            "default": "oidc",
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "issuer",
+          "client_id",
+          "allowed_domains"
+        ],
+        "title": "SsoConnectionInput",
+        "type": "object"
+      },
+      "SsoConnectionView": {
+        "description": "The org's SSO connection without its client secret.",
+        "examples": [
+          {
+            "allowed_domains": [
+              "acme-dental.test"
+            ],
+            "client_id": "voiceagents-dashboard",
+            "created_at": "2026-10-29T14:03:11Z",
+            "default_role": "viewer",
+            "enforce": false,
+            "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+            "issuer": "https://login.acme-dental.test",
+            "provider": "oidc",
+            "updated_at": "2026-10-29T14:03:11Z"
+          }
+        ],
+        "properties": {
+          "allowed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Domains",
+            "type": "array"
+          },
+          "client_id": {
+            "title": "Client Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "default_role": {
+            "title": "Default Role",
+            "type": "string"
+          },
+          "enforce": {
+            "title": "Enforce",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "issuer": {
+            "title": "Issuer",
+            "type": "string"
+          },
+          "provider": {
+            "const": "oidc",
+            "title": "Provider",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "issuer",
+          "client_id",
+          "allowed_domains",
+          "default_role",
+          "enforce",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SsoConnectionView",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -214,6 +460,127 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "public"
+      }
+    },
+    "/v1/org/sso": {
+      "delete": {
+        "description": "Remove the org's OIDC connection.",
+        "operationId": "org_sso_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SsoConnectionDeleted_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Sso Delete",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "sso.manage",
+        "x-scope": "org:write"
+      },
+      "get": {
+        "description": "The org's OIDC connection (never its client secret).",
+        "operationId": "org_sso_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SsoConnectionView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Sso Get",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "sso.manage",
+        "x-scope": "org:read"
+      },
+      "put": {
+        "description": "Create or replace the org's OIDC connection after validating the issuer's discovery document.",
+        "operationId": "org_sso_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SsoConnectionView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Sso Put",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "sso.manage",
+        "x-scope": "org:write"
       }
     }
   },

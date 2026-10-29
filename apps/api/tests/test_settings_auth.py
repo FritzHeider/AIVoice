@@ -58,3 +58,9 @@ def test_local_master_key_may_be_empty_but_not_malformed() -> None:
     assert make_settings(local_master_key="").local_master_key.get_secret_value() == ""
     with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY must be 64 hex characters"):
         make_settings(local_master_key="ab" * 31)
+
+
+def test_oidc_enabled_defaults_off_and_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert make_settings().oidc_enabled is False
+    monkeypatch.setenv("OIDC_ENABLED", "true")
+    assert make_settings().oidc_enabled is True

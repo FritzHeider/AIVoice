@@ -72,11 +72,23 @@
   - Deliverables: `POST /internal/auth/mfa/setup|enable|verify|disable`, TOTP replay guard `mfa:last:<user_id>`, per-user MFA failure lock, `MFA_REQUIRED` gate for org `mfa_required` and for users with MFA enabled, MFA verification refreshing recent auth for password change, `GET /session` reporting it
   - Acceptance: pyotp-based tests with frozen clock; replayed code rejected; recovery code single-use; disable refused when any org of the user requires MFA.
 
-- [ ] P02-T07 OIDC SSO
+- [ ] P02-T07 OIDC SSO (split by the planner on 2026-10-29 into T07a/T07b below; tick when both are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (OIDC SSO)
   - Depends on: P02-T04
   - Deliverables: SSO connection CRUD (owner/admin), login start/callback with authlib, state/nonce validation, JIT provisioning with `default_role`, domain restriction, enforce mode
   - Acceptance: tests against an in-process fake OIDC provider (JWKS, token, userinfo endpoints) including bad nonce/issuer cases.
+
+- [x] P02-T07a SSO connection management: `/v1/org/sso`, `sso.manage` permission, OIDC discovery validation — reviewed 2026-10-29: lint/typecheck/placeholders 0, make test 2500 passed (99.31% coverage), test-ts pass, openapi drift current, spec refs 0, jscpd 0 clones, gitleaks passed
+  - Spec refs: specs/04-auth-tenancy-rbac.md §3.2 (SSO connection row), §3.3 (`sso.manage`, session-only), §5 step 1, §8.1 (`/v1/org/sso`); specs/03-data-model.md §2 (`va_system` list), §3 `sso_connections`; specs/28-security.md §3 (envelope encryption), §6.4; specs/02 §6 `OIDC_ENABLED`
+  - Depends on: P02-T04
+  - Deliverables: `OIDC_ENABLED` setting; `va_api.auth.permissions` (`require_permission`, role/permission table, session-only permissions); `PUT/GET/DELETE /v1/org/sso` (envelope, owner/admin sessions only) with client secret envelope-encrypted and never returned; issuer discovery fetch (`{issuer}/.well-known/openid-configuration`, https, timeout, size cap, no redirects, non-global address refusal outside local/test); cross-org allowed-domain conflict check through a system-scope `SsoConnectionLookupRepo`; public OpenAPI regenerated
+  - Acceptance: tests with respx-mocked discovery (good, wrong issuer, missing endpoints, non-JSON, timeout, redirect); `*` API key and non-admin roles get `FORBIDDEN`; secret encrypted with the column AAD; domain overlap with another org → `CONFLICT`; with `OIDC_ENABLED=false` every `/v1/org/sso` route fails with `FORBIDDEN` "SSO is not enabled on this deployment." (decision recorded in specs/04 §5).
+
+- [ ] P02-T07b SSO login: start, callback, JIT provisioning, enforce mode
+  - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (`sso/start`, `sso/callback`, login `SSO_REQUIRED`), §4.2 login decision, §5 steps 2–6, §13 `auth.sso_login`, §14 SSO tests; specs/03-data-model.md §11 (`sso:state:{state}`); specs/31 `SSO_REQUIRED`
+  - Depends on: P02-T07a
+  - Deliverables: authlib dependency; `GET /internal/auth/sso/start?email=` (domain lookup, PKCE S256, state/nonce in Redis 10 min, redirect); `GET /internal/auth/sso/callback` (state single-use, code exchange, ID token signature via JWKS, `iss`/`aud`/`exp`/`nonce`, `email_verified` rule, JIT user/membership with `default_role`, session with `mfa_passed=true`, redirect to the dashboard); password login on an enforced domain → `SSO_REQUIRED` with `details.sso_url`
+  - Acceptance: tests against an in-process fake OIDC provider (respx discovery/JWKS/token endpoints, generated RSA key) including bad state, reused state, bad nonce, wrong issuer, wrong audience, expired token, bad signature, unverified email; JIT paths (new user, existing user without membership, existing membership keeps role); enforce blocks password login while API keys still work.
 
 - [ ] P02-T08 Orgs, members, invitations, RBAC matrix
   - Spec refs: specs/04-auth-tenancy-rbac.md (RBAC matrix, endpoints, invitations, org switching)

@@ -1,8 +1,8 @@
 """Repositories (specs/03-data-model.md §2): the generic :class:`TenantRepository`, the tenant-scoped
 :class:`IdempotencyRepo` (specs/04 §12), :class:`MembershipRepo` and :class:`OrgDataKeyRepo`, the identity
 :class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4) with :class:`MfaRepo` (MFA
-enrolment on ``users``; specs/04 §4.5), the envelope's :class:`OrgDataKeyStore` (specs/28 §3), and the
-system-scope ones.
+enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OIDC connection; specs/04 §5),
+the envelope's :class:`OrgDataKeyStore` (specs/28 §3), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -48,6 +48,7 @@ from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxRepo
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
 from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
+from va_db.repositories.sso import SsoConnectionLookupRepo, SsoConnectionRepo, SsoDomainClaim
 from va_db.repositories.telnyx_events import NewTelnyxEvent, TelnyxEventRepo
 
 __all__ = [
@@ -85,6 +86,9 @@ __all__ = [
     "RetentionPolicy",
     "RetentionRepo",
     "SchedulerRepo",
+    "SsoConnectionLookupRepo",
+    "SsoConnectionRepo",
+    "SsoDomainClaim",
     "StoredRow",
     "SystemRepository",
     "Takeover",

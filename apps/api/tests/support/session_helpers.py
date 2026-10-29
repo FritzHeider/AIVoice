@@ -10,7 +10,7 @@ import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import pytest
@@ -28,9 +28,11 @@ from va_api.auth import RequestContext, require_scope
 from va_api.auth.cookies import CSRF_COOKIE
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
+from va_api.auth.oidc_discovery import OidcDiscovery, discovery_for
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
+from va_api.settings import ApiSettings
 from va_common.auth import Argon2Params, PasswordHasher, totp_code, totp_counter
 from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
@@ -88,7 +90,8 @@ def migrated_postgres() -> Iterator[str]:
 @dataclass
 class SessionContainer(AuthContainer):
     """The fake api container plus a real database, envelope, and provisioner, cheap password hasher,
-    sessions, login throttle, MFA guard, an in-memory email sender, and the verification resend limiter."""
+    sessions, login throttle, MFA guard, an in-memory email sender, the verification resend limiter, and the
+    OIDC discovery client built from the app settings when the app opens it (intercept it with respx)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -100,6 +103,7 @@ class SessionContainer(AuthContainer):
     login_throttle: LoginThrottle = field(init=False)
     mfa_guard: MfaGuard = field(init=False)
     resend_limiter: ResendLimiter = field(init=False)
+    oidc_discovery: OidcDiscovery = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -110,6 +114,13 @@ class SessionContainer(AuthContainer):
         self.login_throttle = LoginThrottle(self.redis)
         self.mfa_guard = MfaGuard(self.redis)
         self.resend_limiter = ResendLimiter(self.redis)
+
+    @asynccontextmanager
+    async def __call__(self, settings: object) -> AsyncIterator[Self]:
+        assert isinstance(settings, ApiSettings)
+        async with super().__call__(settings) as opened, httpx.AsyncClient() as http:
+            self.oidc_discovery = discovery_for(settings, http)
+            yield opened
 
     @property
     def outbox(self) -> InMemoryEmailSender:

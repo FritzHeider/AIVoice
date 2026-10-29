@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793271457-e7c7
+> va_api: outbound fetches to admin URLs use va_api.auth.oidc_discovery.OidcDiscovery (no redirects, 5s, 256KiB, is_global check unless VA_ENV local/test); tests stub IdPs with respx.mock (patches httpcore only, ASGI client untouched); after make openapi also run 'corepack pnpm gen:api' in sdks/typescript and apps/dashboard (schema.test.ts compares)
+<!-- tags: api, testing, openapi | created: 2026-10-29 -->
+
 ### mem-1793269535-3669
 > MFA test helpers: session_helpers.enrol_mfa(client, container) + mfa_code(container, secret); MfaGuard replay guard accepts each TOTP step once per user, so advance FrozenClock 30 s before reusing the current code in another session; gate is session_auth.gated_membership (org OR user MFA), counters with lock reuse auth.failure_counter.FailureCounters
 <!-- tags: api, auth, testing | created: 2026-10-29 -->

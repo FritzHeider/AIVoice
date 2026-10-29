@@ -2145,3 +2145,210 @@ CONFLICT/FORBIDDEN/INVALID_MFA_CODE/AUTH_LOCKED/MFA_REQUIRED/REAUTH_REQUIRED per
 requirement before the code; failure lock checked before any comparison; replay guard via Lua CAS; LoginThrottle
 behaviour and log event unchanged (existing tests green). No blocking I/O (QR in to_thread, argon2 in worker), no
 secrets logged. Ticked T06b and parent T06.
+
+## 2026-10-29 Planner: P02-T06b approved → P02-T07 split into T07a/T07b
+T07 (OIDC SSO) is too large for one Builder pass: nothing exists yet (no authlib, no `OIDC_ENABLED` setting, no
+`require_permission`, no `/v1/*` envelope router, no SSO repo, no outbound-URL guard). Split in plan/phase-02.md:
+- **T07a** connection management (`/v1/org/sso`, `sso.manage`, discovery validation, domain-conflict lookup repo).
+- **T07b** login flow (authlib, start/callback, state/nonce/PKCE in Redis, ID token validation, JIT, enforce →
+  `SSO_REQUIRED` on password login). T07b reuses T07a's `fetch_provider_metadata`, `SsoConnectionLookupRepo`, and the
+  decrypt helper.
+
+## Plan P02-T07a — SSO connection management (specs/04 §3.2, §3.3, §5 step 1, §8.1; specs/03 §2, §3; specs/28 §3, §6.4; specs/02 §6)
+
+### Facts found while planning
+- `sso_connections` model exists (`va_db.models.SsoConnection`, tenancy.py): org_id, provider ('oidc'), issuer,
+  client_id, client_secret_enc (bytea NOT NULL), allowed_domains text[], default_role text (no CHECK), enforce,
+  UNIQUE(org_id, issuer). Tenant table with RLS (grants exist in 0001). No migration needed.
+- `OIDC_ENABLED=false` is in specs/02 §6 and `.env.example` already, but NOT in `ApiSettings` (so no env-example test
+  change is needed; check `scripts/tests/test_env_example.py` still passes).
+- No `require_permission` yet (rbac.py has only ROLE_SCOPES); T08 owns the full matrix-vs-markdown parse test.
+- `envelope_router` builds envelope routers; `/v1/org*` classifies as envelope. No `/v1` router exists yet; `ROUTERS`
+  in main.py is `(public_router, internal_auth_router, probe_router)`.
+- `Envelope.encrypt_str/decrypt_str(org_id, ..., aad)` + `va_common.crypto.column_aad`.
+- httpx is a va_common dependency (not declared by va-api); `respx` is a root dev dependency.
+- `va_common.http.safe_client` (specs/28 §6.4) does not exist yet; it belongs to the webhooks/tools phases.
+- Test infra: `SessionContainer` (extends `AuthContainer` with the fake API `KeyStore`), conftest `client`,
+  `make_member(identity, role=..., ...)`, `login`, `write_headers`, `error_of`.
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+specs/04 §5 (after step 6):
+1. **One connection per org.** `PUT /v1/org/sso` upserts the org's single row (changing `issuer` updates the row in
+   place); `GET` returns it or `NOT_FOUND` "SSO connection not found."; `DELETE` removes it (hard delete, table has no
+   `deleted_at`) and returns `{data:{id, deleted:true}}`, `NOT_FOUND` when absent.
+2. **Body** `SsoConnectionInput` (extra forbid): `issuer` (str, 1-2048, no trailing `/` normalisation beyond
+   stripping one trailing slash; must parse as an absolute URL with scheme `https` — `http` accepted only when
+   `VA_ENV` is `local` or `test` — no userinfo, query, or fragment), `client_id` (1-255), `client_secret` (1-1024,
+   `SecretStr`; required when no connection exists yet → `INVALID_INPUT` field `client_secret` "client_secret is
+   required when creating an SSO connection."; omitted on update keeps the stored secret), `allowed_domains`
+   (list, 1-50 items, each lowercased + stripped, must match `^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`,
+   duplicates removed preserving order; wildcards rejected), `default_role` (`admin|developer|analyst|billing|viewer`,
+   default `viewer`; `owner` refused — JIT must never mint owners), `enforce` (bool, default false), `provider`
+   (Literal["oidc"], default "oidc").
+3. **Response** `SsoConnectionView`: `id, provider, issuer, client_id, allowed_domains, default_role, enforce,
+   created_at, updated_at`. The client secret is never returned in any form (specs/28 T8).
+4. **Secret storage**: `client_secret_enc = envelope.encrypt_str(org_id, secret, column_aad("sso_connections",
+   "client_secret_enc", connection_id))`. Helper `decrypt_client_secret(envelope, row)` for T07b.
+5. **Discovery validation** before writing: GET `{issuer}/.well-known/openid-configuration`, timeout 5 s, no
+   redirects (3xx → invalid), body cap 256 KiB, JSON object required with `issuer` exactly equal to the configured
+   issuer and string `authorization_endpoint`, `token_endpoint`, `jwks_uri`; endpoints must satisfy the same scheme
+   rule as the issuer. Outside `local`/`test` the issuer host must resolve only to global addresses
+   (`ipaddress.ip_address(...).is_global`), else invalid. Every failure → `INVALID_INPUT` field `issuer`
+   "Could not validate the OIDC issuer: <reason>." with reasons `unreachable`, `timed out`, `redirect not allowed`,
+   `HTTP <status>`, `response too large`, `not a JSON object`, `issuer mismatch`, `missing <field>`,
+   `insecure endpoint <field>`, `address not allowed`. Full DNS pinning arrives with `va_common.http.safe_client`
+   (specs/28 §6.4) and will replace this fetch.
+6. **Allowed domains are unique across orgs**: a PUT whose domains intersect another org's connection →
+   `CONFLICT` field `allowed_domains` "Domain <d> is already claimed by another organization's SSO connection."
+   (checked through the system-scope `SsoConnectionLookupRepo`; specs/03 §2 list amended).
+7. **Feature flag**: with `OIDC_ENABLED=false` (default) all three routes fail with `FORBIDDEN` "SSO is not enabled
+   on this deployment." after authentication.
+8. **Audit** `org.sso_update` is written when the audit writer lands (P02-T11); not in this task.
+specs/04 §3.3 — **permissions**: `va_api.auth.permissions.PERMISSIONS` = the 20 §3.3 names; `ROLE_PERMISSIONS`
+  (exact): owner = all 20; admin = all except `org.delete`, `org.owner_transfer`, `billing.plan_change`; developer =
+  `pathways.publish`, `voices.clone`, `experiments.operate`, `calls.operate`; analyst = none; billing =
+  `billing.plan_change`, `billing.payment`, `billing.credit_transfer`; viewer = none. `SESSION_ONLY_PERMISSIONS` =
+  `org.delete`, `org.owner_transfer`, `sso.manage`. API keys hold every non-session-only permission when they hold
+  `*`, and none otherwise (per §3.3 text; T08 may widen when it adds the matrix parse test). FORBIDDEN message:
+  "Missing required permission '<name>'." (mirrors the scope message).
+specs/03 §2 — `SsoConnectionLookupRepo` joins the `va_system` list (bullet + the repository Decision): domain lookup
+  spans orgs and runs before any org context (SSO start, T07b) and for the PUT conflict check.
+
+### Files
+**apps/api/pyproject.toml** — add `httpx[http2]>=0.28.1` (direct use); `uv lock` (no new package versions).
+**apps/api/src/va_api/settings.py** — `oidc_enabled: bool = False` (comment: specs/04 §5).
+**apps/api/src/va_api/auth/permissions.py** (new):
+  - `PERMISSIONS: Final[frozenset[str]]`, `ROLE_PERMISSIONS: Final[Mapping[MemberRole, frozenset[str]]]`
+    (MappingProxyType), `SESSION_ONLY_PERMISSIONS: Final[frozenset[str]]`, `REQUIRED_PERMISSION_ATTR = "required_permission"`.
+  - `def holds_permission(ctx: RequestContext, permission: str) -> bool` (user/platform_admin: role table; api_key:
+    `*` and not session-only; widget: False).
+  - `def require_permission(permission: str) -> Callable[..., Awaitable[RequestContext]]` — ValueError for unknown
+    names at definition; dependency `Depends(get_principal)`; FORBIDDEN when not held; sets the attr.
+  - Export from `va_api/auth/__init__.py` if that module re-exports (check its `__all__`).
+**apps/api/src/va_api/auth/oidc_discovery.py** (new; T07b reuses):
+  - `@dataclass(frozen=True, slots=True) class ProviderMetadata: issuer, authorization_endpoint, token_endpoint,
+    jwks_uri: str`.
+  - `class DiscoveryError(Exception)` with `reason: str`.
+  - `type HostResolver = Callable[[str], Awaitable[list[str]]]`; `async def system_resolver(host) -> list[str]`
+    (`asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)`, unique addresses).
+  - `def normalise_issuer(raw: str, *, allow_http: bool) -> str` (ValueError messages used by the schema/route).
+  - `class OidcDiscovery(http: httpx.AsyncClient, *, allow_insecure: bool, resolver: HostResolver = system_resolver)`
+    with `async def fetch(issuer: str) -> ProviderMetadata` (resolve check unless allow_insecure; GET with
+    `follow_redirects=False`; stream and cap at 256 KiB; parse via `json.loads` (small, capped — in-loop OK);
+    validate). `DISCOVERY_TIMEOUT_S = 5.0`, `MAX_DISCOVERY_BYTES = 262_144`.
+  - `allow_insecure` = `settings.va_env in {LOCAL, TEST}` (http scheme + private addresses allowed).
+**apps/api/src/va_api/container.py** — `oidc_http: httpx.AsyncClient` (timeout 5 s, `follow_redirects=False`,
+  closed via `stack.push_async_callback(client.aclose)`), `oidc_discovery: OidcDiscovery`; docstring list.
+  `apps/api/tests/support/*` containers: add `oidc_discovery` field (SessionContainer builds one with a real
+  `httpx.AsyncClient` closed in the fixture, or a field default the respx router intercepts — respx patches the
+  global transport, so a plain `httpx.AsyncClient()` works; make sure it is closed: add `aclose` in the `client`
+  fixture teardown or construct lazily per test).
+**packages/va_db/src/va_db/repositories/sso.py** (new):
+  - `SsoConnectionRepo(session, org_id)` (tenant session): `get() -> SsoConnection | None`,
+    `async def upsert(*, connection_id, issuer, client_id, client_secret_enc: bytes | None, allowed_domains,
+    default_role, enforce, now) -> SsoConnection` (update existing row, keeping the secret when None; create
+    otherwise, provider 'oidc'; flush), `delete() -> uuid.UUID | None`. Use `conflict_savepoint` for the
+    (org_id, issuer) unique path even though one row per org makes it unreachable in practice.
+  - `@dataclass(frozen=True, slots=True) SsoDomainClaim(org_id, connection_id, domain)`.
+  - `class SsoConnectionLookupRepo(SystemRepository)`: `async def claims(domains: Collection[str]) ->
+    list[SsoDomainClaim]` (rows whose `allowed_domains && :domains`, unnest to the matching domains, ordered by
+    connection `created_at`, id), `async def for_domain(domain: str) -> SsoConnection | None` (oldest match; T07b).
+    Use `literal(x, Text) == any_(col)` / `col.overlap(array)` per mem-1793268366-7e50 for mypy.
+  - export both + `SsoDomainClaim` in `repositories/__init__.py`; module docstring of `__init__` mentions them.
+**apps/api/src/va_api/routers/org_sso_schemas.py** (new) — `SsoConnectionInput`, `SsoConnectionView`,
+  `SsoConnectionDeleted` with `json_schema_extra` examples (issuer `https://login.acme-dental.test`, domains
+  `["acme-dental.test"]`; no secret-looking example — check placeholders/gitleaks).
+**apps/api/src/va_api/routers/org_sso.py** (new) — `org_router = envelope_router(prefix="/v1/org", tags=["Org"])`
+  (T08 adds the other `/v1/org` routes to it); routes `PUT/GET/DELETE /sso`, operation ids `org_sso_put|get|delete`,
+  dependencies `require_scope("org:write")` (PUT/DELETE) / `require_scope("org:read")` (GET) **and**
+  `require_permission("sso.manage")`; private helpers `_ensure_enabled(request)`, `_check_domains(request, org_id,
+  domains)` (system session, CONFLICT), `_view(row)`. Flow for PUT: enabled → validate secret presence vs existing
+  (tenant read) → discovery fetch (outside any DB session; DiscoveryError → INVALID_INPUT field issuer) → domain
+  conflict (system session, closed) → encrypt (if secret given) → tenant session upsert. Never hold two sessions at
+  once (pool size 1 per role). Keep functions radon A/B.
+**apps/api/src/va_api/main.py** — add `org_router` to `ROUTERS`.
+**apps/api/src/va_api/auth/session_auth.py** — accessor `oidc_discovery_of(request)` (+ `__all__`).
+**openapi/openapi.json** — `make openapi` (public doc gains the three operations, `x-envelope: envelope`); check
+  `test_openapi.py` expectations (operation lists) and update.
+**specs/04 §3.3, §5; specs/03 §2** — decisions above. **AGENTS.md** — permissions module, `/v1/org` router, discovery
+  guard + `allow_insecure` rule, `oidc_discovery` test seam with respx.
+
+### Tests
+apps/api/tests/test_permissions.py: `PERMISSIONS` equals the 20 names parsed from the specs/04 §3.3 paragraph
+  (regex over backticked names between "permission names:" and "API keys"); exact `ROLE_PERMISSIONS` per role;
+  `require_permission("nope")` → ValueError; dependency attr set; api key with `*` holds `calls.operate` but not
+  `sso.manage`/`org.delete`/`org.owner_transfer`; api key with `calls:write` holds none; widget holds none.
+apps/api/tests/test_oidc_discovery.py (respx, no DB): good document → ProviderMetadata; trailing slash on issuer
+  normalised (fetches `/.well-known/...` once); issuer mismatch; missing each of the 3 endpoints (parametrized);
+  non-JSON; JSON array; HTTP 500; 302 redirect not followed; body > 256 KiB; httpx.ConnectTimeout → "timed out";
+  ConnectError → "unreachable"; `allow_insecure=False`: http issuer refused by `normalise_issuer`, resolver returning
+  `10.0.0.5`/`127.0.0.1`/`169.254.169.254` → "address not allowed", public address passes, http endpoint in a https
+  document → "insecure endpoint token_endpoint"; userinfo/query/fragment refused.
+apps/api/tests/test_org_sso_integration.py (client fixture, `oidc_enabled=True` via session_app overrides, respx):
+  - owner PUT creates (200, view without any secret key — assert `"client_secret" not in json` recursively), DB row's
+    secret decrypts with the column AAD and the ciphertext != plaintext; GET returns it; second PUT without
+    client_secret updates domains/enforce and keeps the secret; PUT changing issuer updates in place (same id).
+  - first PUT without client_secret → INVALID_INPUT field client_secret.
+  - admin allowed; developer/analyst/billing/viewer → FORBIDDEN (parametrized, GET and PUT).
+  - `*` API key → FORBIDDEN "Missing required permission 'sso.manage'." on all three.
+  - CSRF missing on PUT/DELETE → FORBIDDEN; no session → AUTH_FAILURE.
+  - discovery failure → INVALID_INPUT field issuer, nothing written.
+  - another org already claims `acme-dental.test` → CONFLICT field allowed_domains; same org re-PUT with its own
+    domains is fine.
+  - domains normalised (case, whitespace, duplicates); wildcard / invalid / 51 domains → INVALID_INPUT;
+    `default_role: "owner"` → INVALID_INPUT; unknown field → INVALID_INPUT.
+  - DELETE → `{id, deleted: true}`, then GET → NOT_FOUND, DELETE again → NOT_FOUND.
+  - `oidc_enabled=False` (default settings) → FORBIDDEN "SSO is not enabled on this deployment." for the owner.
+  - tenant isolation: org B owner GET → NOT_FOUND while org A has a connection.
+packages/va_db/tests/test_sso_repositories_integration.py (identity_db fixture): upsert create/update keeps secret
+  when None; `delete`; `claims` returns overlapping domains with org ids ordered oldest first; `for_domain` oldest;
+  RLS: tenant repo of org B sees nothing.
+packages/va_db/tests/test_repositories.py: system repo name list includes `SsoConnectionLookupRepo` (update the
+  expected list to match specs/03 §2).
+apps/api/tests/test_settings_auth.py (or nearest): `OIDC_ENABLED` env parses, default false.
+Keep new test files < ~350 lines; reuse conftest fixtures and session_helpers (no copied fixtures — jscpd).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `uv run python scripts/check_spec_refs.py`; `uv run python
+scripts/check_openapi_drift.py` after `make openapi` (openapi.json changes; internal.json unchanged); `npx jscpd@4`
+(0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and the numeric average
+`uvx radon cc -s -a ... | tail -1`; pip-audit per mem-1793267153-9b68 + `corepack pnpm audit`; `uv run pre-commit run
+gitleaks --all-files`. build.done as a PLAIN STRING with numeric complexity (mem-1793269824-fe85), e.g.
+`ralph emit "build.done" "P02-T07a tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`.
+
+### Risks
+- respx must intercept the container's `httpx.AsyncClient`: create the test client inside the respx context or use
+  `respx.mock` as a fixture around the app; never let a test reach the network (assert all routes called).
+- Pool size 1 per role: discovery fetch and the system-session conflict check happen outside the tenant session.
+- `test_openapi.py` / dashboard TS type generation may snapshot the public operation list — regenerate and update
+  expectations; `openapi/internal.json` must not change.
+- The `/v1/org` router is shared with T08: name it `org_router` in `routers/org_sso.py` now; T08 may move it to
+  `routers/org.py` and keep `org_sso` routes attached via side-effect import (mem-1793267153-d5f5 pattern).
+- Example issuer/domain values: `check_no_placeholders` flags `example.com`; use `.test` TLD.
+- Default role column has no CHECK: validate in the schema only.
+
+## 2026-10-29 Builder: P02-T07a build notes
+Implemented per plan, with these deviations (all recorded in the specs/04 §5 Decision):
+- `normalise_issuer(raw)` takes no `allow_http`; it accepts http(s). The scheme rule lives in
+  `OidcDiscovery.fetch` (reason `insecure issuer` outside local/test), so the schema needs no settings.
+- Issuer equality ignores one trailing `/` on either side (`same_issuer`); `ProviderMetadata.issuer` keeps the
+  provider's own spelling (Auth0-style `https://x/`), which T07b must use for the ID token `iss` check.
+- `SsoConnectionRepo.upsert` has no `now` parameter: the `set_updated_at()` trigger maintains `updated_at`.
+- `SessionContainer.__call__` builds `oidc_discovery` from the app settings with an `httpx.AsyncClient` closed on
+  exit; production container closes `oidc_http` via the exit stack (test_container close order now starts "http").
+- Route `dependencies=[require_permission]` resolve before the `require_scope` parameter dependency.
+- Regenerated `openapi/openapi.json` plus both TS `schema.d.ts` files (`pnpm gen:api`); internal.json unchanged.
+Gates (this iteration): make fmt ok; make lint 0; make typecheck 0; make placeholders 0 findings; make test 2500
+passed, coverage 99.31%; make test-ts pass (widget 22, dashboard 52, sdk 48); openapi drift current; spec refs 0;
+jscpd 0 clones; radon no C+, average 1.925; pip-audit + pnpm audit clean; gitleaks passed.
+
+## Review P02-T07a (2026-10-29): approved
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, make test 2500 passed (coverage 99.31%), make
+test-ts pass, check_spec_refs 0, check_openapi_drift current (openapi.json + internal.json), jscpd 0 clones, gitleaks
+passed. Diff checked against specs/04 §3.3/§5/§8.1, specs/03 §2/§3 `sso_connections`, specs/02 §6 `OIDC_ENABLED`:
+secret envelope-encrypted with column AAD and never returned; discovery guard (no redirects, 5 s, 256 KiB, is_global,
+https outside local/test); `sso.manage` session-only so API keys get FORBIDDEN; cross-org domain CONFLICT via system
+repo (spec-cited); tenant repo filters org_id inside tenant_session; no nested sessions. Known, documented limits:
+DNS rebinding until safe_client (specs/28 §6.4); concurrent PUTs from two orgs can race the domain check (no DB
+constraint) — acceptable for admin-only config, revisit if T07b lookup needs a hard guarantee.
+Next: P02-T07b.

@@ -57,7 +57,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
-  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
+  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
 > role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
@@ -98,6 +98,13 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > in the same transaction. `MembershipLookupRepo` joins the `va_system` list because a dashboard user's memberships
 > span orgs and are read before an active org exists: `for_user(user_id)` returns `MembershipRecord`s (membership id,
 > role, org id, name, slug, plan_id, status, parent_org_id) ordered by membership `created_at`, id.
+
+> Decision (2026-10-29): `SsoConnectionLookupRepo` joins the `va_system` list because an email domain is mapped to an
+> SSO connection across orgs before any org context exists (`GET /internal/auth/sso/start`, specs/04 §5 step 2) and
+> because `PUT /v1/org/sso` must refuse domains another org already claims: `claims(domains)` returns
+> `SsoDomainClaim(org_id, connection_id, domain)` for every listed domain of every connection, ordered by connection
+> `created_at`, id, domain; `for_domain(domain)` returns the oldest connection listing `domain`. The org's own row is
+> managed by the tenant-scoped `SsoConnectionRepo` (`get`, `upsert`, `delete`; one connection per org).
 
 ## 3. Tenancy, identity, access
 

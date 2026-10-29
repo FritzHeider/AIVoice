@@ -9,6 +9,7 @@ from service_helpers import readiness_of, track_closes
 from va_api.auth import ApiKeyAuthenticator
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
+from va_api.auth.oidc_discovery import OidcDiscovery
 from va_api.auth.sessions import SessionManager
 from va_api.auth.verification import ResendLimiter
 from va_api.container import Container, build_container, email_sender_for
@@ -49,9 +50,11 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(container.mfa_guard, MfaGuard)
         assert isinstance(container.email_sender, SmtpEmailSender)
         assert isinstance(container.resend_limiter, ResendLimiter)
+        assert isinstance(container.oidc_discovery, OidcDiscovery)
+        assert container.oidc_discovery.allow_insecure  # VA_ENV=local
         assert closed == []
-    # The va_app and va_system engines first, then the dependency stack in reverse order.
-    assert closed == ["engine", "engine", "redis", "engine"]
+    # The OIDC discovery client, the va_app and va_system engines, then the dependency stack in reverse order.
+    assert closed == ["http", "engine", "engine", "redis", "engine"]
 
 
 def test_email_sender_is_in_memory_only_under_test() -> None:

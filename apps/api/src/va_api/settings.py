@@ -35,6 +35,8 @@ class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettin
     api_key_pepper: SecretStr = SecretStr("")
     api_key_pepper_previous: SecretStr = SecretStr("")
     api_key_pepper_version: int = Field(default=1, ge=1)
+    # Enterprise OIDC SSO; the /v1/org/sso routes refuse to work while false (specs/04 §5).
+    oidc_enabled: bool = False
 
     @field_validator("api_key_pepper", "api_key_pepper_previous")
     @classmethod

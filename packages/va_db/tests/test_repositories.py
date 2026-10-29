@@ -105,7 +105,7 @@ def _spec_system_repos() -> set[str]:
 def test_system_repositories_are_exactly_the_spec_list() -> None:
     subclasses = SystemRepository.__subclasses__()
     assert {cls.__name__ for cls in subclasses} == _spec_system_repos()
-    assert len(_spec_system_repos()) == 8
+    assert len(_spec_system_repos()) == 9
     assert all(cls.system_scope for cls in subclasses)
     assert all(name in va_db.repositories.__all__ for name in _spec_system_repos())
 

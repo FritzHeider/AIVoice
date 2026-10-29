@@ -21,6 +21,7 @@ from va_api.auth.cookies import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE, Cookie
 from va_api.auth.csrf import check_csrf, check_origin
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.mfa_guard import MfaGuard
+from va_api.auth.oidc_discovery import OidcDiscovery
 from va_api.auth.rbac import scopes_for_role
 from va_api.auth.sessions import SESSION_INVALID, ActiveSession, SessionManager
 from va_api.auth.verification import ResendLimiter
@@ -55,6 +56,7 @@ __all__ = [
     "memberships_of_user",
     "mfa_due",
     "mfa_guard_of",
+    "oidc_discovery_of",
     "password_hasher_of",
     "pick_active",
     "provisioner_of",
@@ -127,6 +129,11 @@ def envelope_of(request: Request) -> Envelope:
 def mfa_guard_of(request: Request) -> MfaGuard:
     guard: MfaGuard = request.app.state.container.mfa_guard
     return guard
+
+
+def oidc_discovery_of(request: Request) -> OidcDiscovery:
+    discovery: OidcDiscovery = request.app.state.container.oidc_discovery
+    return discovery
 
 
 def client_ip(request: Request) -> str | None:

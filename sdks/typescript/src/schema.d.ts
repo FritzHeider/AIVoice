@@ -21,10 +21,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/org/sso": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Org Sso Get
+         * @description The org's OIDC connection (never its client secret).
+         */
+        get: operations["org_sso_get"];
+        /**
+         * Org Sso Put
+         * @description Create or replace the org's OIDC connection after validating the issuer's discovery document.
+         */
+        put: operations["org_sso_put"];
+        post?: never;
+        /**
+         * Org Sso Delete
+         * @description Remove the org's OIDC connection.
+         */
+        delete: operations["org_sso_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * DataResponse[SsoConnectionDeleted]
+         * @example {
+         *       "data": {
+         *         "deleted": true,
+         *         "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *       }
+         *     }
+         */
+        DataResponse_SsoConnectionDeleted_: {
+            data: components["schemas"]["SsoConnectionDeleted"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[SsoConnectionView]
+         * @example {
+         *       "data": {
+         *         "allowed_domains": [
+         *           "acme-dental.test"
+         *         ],
+         *         "client_id": "voiceagents-dashboard",
+         *         "created_at": "2026-10-29T14:03:11Z",
+         *         "default_role": "viewer",
+         *         "enforce": false,
+         *         "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *         "issuer": "https://login.acme-dental.test",
+         *         "provider": "oidc",
+         *         "updated_at": "2026-10-29T14:03:11Z"
+         *       }
+         *     }
+         */
+        DataResponse_SsoConnectionView_: {
+            data: components["schemas"]["SsoConnectionView"];
+            /** Errors */
+            errors?: null;
+        };
         /**
          * ErrorEnvelope
          * @description Error body of envelope endpoints.
@@ -124,6 +189,115 @@ export interface components {
              */
             status: "ok";
         };
+        /** @enum {string} */
+        JitRole: "admin" | "developer" | "analyst" | "billing" | "viewer";
+        /**
+         * SsoConnectionDeleted
+         * @description ``DELETE /v1/org/sso`` result.
+         * @example {
+         *       "deleted": true,
+         *       "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *     }
+         */
+        SsoConnectionDeleted: {
+            /**
+             * Deleted
+             * @default true
+             * @constant
+             */
+            deleted: true;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+        };
+        /**
+         * SsoConnectionInput
+         * @description ``PUT /v1/org/sso``: the org's OIDC connection. ``client_secret`` may be omitted on update.
+         * @example {
+         *       "allowed_domains": [
+         *         "acme-dental.test"
+         *       ],
+         *       "client_id": "voiceagents-dashboard",
+         *       "client_secret": "<client secret from your identity provider>",
+         *       "default_role": "viewer",
+         *       "enforce": false,
+         *       "issuer": "https://login.acme-dental.test"
+         *     }
+         */
+        SsoConnectionInput: {
+            /** Allowed Domains */
+            allowed_domains: string[];
+            /** Client Id */
+            client_id: string;
+            /** Client Secret */
+            client_secret?: string | null;
+            /** @default viewer */
+            default_role: components["schemas"]["JitRole"];
+            /**
+             * Enforce
+             * @default false
+             */
+            enforce: boolean;
+            /** Issuer */
+            issuer: string;
+            /**
+             * Provider
+             * @default oidc
+             * @constant
+             */
+            provider: "oidc";
+        };
+        /**
+         * SsoConnectionView
+         * @description The org's SSO connection without its client secret.
+         * @example {
+         *       "allowed_domains": [
+         *         "acme-dental.test"
+         *       ],
+         *       "client_id": "voiceagents-dashboard",
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "default_role": "viewer",
+         *       "enforce": false,
+         *       "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *       "issuer": "https://login.acme-dental.test",
+         *       "provider": "oidc",
+         *       "updated_at": "2026-10-29T14:03:11Z"
+         *     }
+         */
+        SsoConnectionView: {
+            /** Allowed Domains */
+            allowed_domains: string[];
+            /** Client Id */
+            client_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Default Role */
+            default_role: string;
+            /** Enforce */
+            enforce: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Issuer */
+            issuer: string;
+            /**
+             * Provider
+             * @constant
+             */
+            provider: "oidc";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -158,6 +332,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    org_sso_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_SsoConnectionView_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_sso_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SsoConnectionInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_SsoConnectionView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_sso_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_SsoConnectionDeleted_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };
