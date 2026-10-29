@@ -45,6 +45,59 @@
         "title": "DataResponse[MeView]",
         "type": "object"
       },
+      "DataResponse_MemberRemoved_": {
+        "examples": [
+          {
+            "data": {
+              "removed": true,
+              "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MemberRemoved"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MemberRemoved]",
+        "type": "object"
+      },
+      "DataResponse_MemberView_": {
+        "examples": [
+          {
+            "data": {
+              "email": "jane.park@acme-dental.test",
+              "joined_at": "2026-03-02T16:45:00Z",
+              "last_login_at": "2026-10-29T09:12:40Z",
+              "mfa_enabled": true,
+              "name": "Jane Park",
+              "role": "admin",
+              "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MemberView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MemberView]",
+        "type": "object"
+      },
       "DataResponse_OrgView_": {
         "examples": [
           {
@@ -88,6 +141,46 @@
           "data"
         ],
         "title": "DataResponse[OrgView]",
+        "type": "object"
+      },
+      "DataResponse_OwnershipTransferred_": {
+        "examples": [
+          {
+            "data": {
+              "owner": {
+                "email": "jane.park@acme-dental.test",
+                "joined_at": "2026-03-02T16:45:00Z",
+                "last_login_at": "2026-10-29T09:12:40Z",
+                "mfa_enabled": true,
+                "name": "Jane Park",
+                "role": "owner",
+                "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+              },
+              "previous_owner": {
+                "email": "omar.haddad@acme-dental.test",
+                "joined_at": "2026-03-02T16:45:00Z",
+                "last_login_at": "2026-10-29T09:12:40Z",
+                "mfa_enabled": true,
+                "name": "Omar Haddad",
+                "role": "admin",
+                "user_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OwnershipTransferred"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[OwnershipTransferred]",
         "type": "object"
       },
       "DataResponse_SsoConnectionDeleted_": {
@@ -145,6 +238,41 @@
           "data"
         ],
         "title": "DataResponse[SsoConnectionView]",
+        "type": "object"
+      },
+      "DataResponse_list_MemberView__": {
+        "examples": [
+          {
+            "data": [
+              {
+                "email": "jane.park@acme-dental.test",
+                "joined_at": "2026-03-02T16:45:00Z",
+                "last_login_at": "2026-10-29T09:12:40Z",
+                "mfa_enabled": true,
+                "name": "Jane Park",
+                "role": "admin",
+                "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/MemberView"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[list[MemberView]]",
         "type": "object"
       },
       "ErrorEnvelope": {
@@ -474,6 +602,136 @@
           "scopes"
         ],
         "title": "MeView",
+        "type": "object"
+      },
+      "MemberRemoved": {
+        "description": "``DELETE /v1/org/members/{user_id}`` result.",
+        "examples": [
+          {
+            "removed": true,
+            "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+          }
+        ],
+        "properties": {
+          "removed": {
+            "const": true,
+            "default": true,
+            "title": "Removed",
+            "type": "boolean"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "MemberRemoved",
+        "type": "object"
+      },
+      "MemberRolePatch": {
+        "additionalProperties": false,
+        "description": "``PATCH /v1/org/members/{user_id}``: the member's new role.",
+        "examples": [
+          {
+            "role": "developer"
+          }
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "MemberRolePatch",
+        "type": "object"
+      },
+      "MemberView": {
+        "description": "A member of the org.",
+        "examples": [
+          {
+            "email": "jane.park@acme-dental.test",
+            "joined_at": "2026-03-02T16:45:00Z",
+            "last_login_at": "2026-10-29T09:12:40Z",
+            "mfa_enabled": true,
+            "name": "Jane Park",
+            "role": "admin",
+            "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+          }
+        ],
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "joined_at": {
+            "description": "When the user became a member of this org.",
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "last_login_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The user's last sign-in; null before the first one.",
+            "title": "Last Login At"
+          },
+          "mfa_enabled": {
+            "title": "Mfa Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "email",
+          "name",
+          "role",
+          "mfa_enabled",
+          "last_login_at",
+          "joined_at"
+        ],
+        "title": "MemberView",
         "type": "object"
       },
       "OrgLimits": {
@@ -854,6 +1112,45 @@
         "title": "OrgView",
         "type": "object"
       },
+      "OwnershipTransferred": {
+        "description": "``POST /v1/org/transfer-ownership`` result: the caller (now an admin) and the new owner.",
+        "examples": [
+          {
+            "owner": {
+              "email": "jane.park@acme-dental.test",
+              "joined_at": "2026-03-02T16:45:00Z",
+              "last_login_at": "2026-10-29T09:12:40Z",
+              "mfa_enabled": true,
+              "name": "Jane Park",
+              "role": "owner",
+              "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+            },
+            "previous_owner": {
+              "email": "omar.haddad@acme-dental.test",
+              "joined_at": "2026-03-02T16:45:00Z",
+              "last_login_at": "2026-10-29T09:12:40Z",
+              "mfa_enabled": true,
+              "name": "Omar Haddad",
+              "role": "admin",
+              "user_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e"
+            }
+          }
+        ],
+        "properties": {
+          "owner": {
+            "$ref": "#/components/schemas/MemberView"
+          },
+          "previous_owner": {
+            "$ref": "#/components/schemas/MemberView"
+          }
+        },
+        "required": [
+          "previous_owner",
+          "owner"
+        ],
+        "title": "OwnershipTransferred",
+        "type": "object"
+      },
       "PrincipalType": {
         "enum": [
           "api_key",
@@ -1041,6 +1338,27 @@
         ],
         "title": "SsoConnectionView",
         "type": "object"
+      },
+      "TransferOwnershipRequest": {
+        "additionalProperties": false,
+        "description": "``POST /v1/org/transfer-ownership``: the member who becomes an owner.",
+        "examples": [
+          {
+            "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+          }
+        ],
+        "properties": {
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "title": "TransferOwnershipRequest",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1217,6 +1535,162 @@
         "x-scope": "org:write"
       }
     },
+    "/v1/org/members": {
+      "get": {
+        "description": "Every member of the org, oldest membership first.",
+        "operationId": "org_members_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_list_MemberView__"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Members List",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "org:read"
+      }
+    },
+    "/v1/org/members/{user_id}": {
+      "delete": {
+        "description": "Remove a member (also oneself); owners can be removed only by owners, and the last owner stays.",
+        "operationId": "org_members_remove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MemberRemoved_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Members Remove",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "members.manage",
+        "x-scope": "org:write"
+      },
+      "patch": {
+        "description": "Change a member's role; owners can be made or demoted only by owners, and the last owner stays.",
+        "operationId": "org_members_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemberRolePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MemberView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Members Update",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "members.manage",
+        "x-scope": "org:write"
+      }
+    },
     "/v1/org/sso": {
       "delete": {
         "description": "Remove the org's OIDC connection.",
@@ -1335,6 +1809,61 @@
         ],
         "x-envelope": "envelope",
         "x-permission": "sso.manage",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/org/transfer-ownership": {
+      "post": {
+        "description": "Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.",
+        "operationId": "org_transfer_ownership",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferOwnershipRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_OwnershipTransferred_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Transfer Ownership",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "org.owner_transfer",
         "x-scope": "org:write"
       }
     }

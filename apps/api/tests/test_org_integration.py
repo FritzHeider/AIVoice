@@ -10,11 +10,10 @@ import pytest
 from identity_db import IdentityDb
 from session_helpers import (
     DASHBOARD_URL,
-    Member,
     SessionContainer,
     error_of,
-    login,
     make_member,
+    signed_in,
     store_api_key,
     write_headers,
 )
@@ -26,14 +25,6 @@ from va_db.models import MemberRole, Org, Plan
 ME = "/v1/me"
 ORG = "/v1/org"
 ROLES = get_args(MemberRole)
-
-
-async def signed_in(
-    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer, role: MemberRole = "owner"
-) -> Member:
-    member = await make_member(identity, container.password_hasher, role=role)
-    await login(client, member.user.email)
-    return member
 
 
 async def set_org(identity: IdentityDb, org_id: uuid.UUID, **values: Any) -> None:

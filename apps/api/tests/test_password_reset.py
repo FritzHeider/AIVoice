@@ -68,6 +68,17 @@ def test_recent_auth_boundary() -> None:
         assert excinfo.value.message == REAUTH_MESSAGE
 
 
+def test_recent_auth_reports_the_caller_message() -> None:
+    with pytest.raises(AppError) as excinfo:
+        require_recent_auth(
+            _session(), CREATED + REAUTH_WINDOW, message="Sign in again to transfer ownership."
+        )
+    assert (excinfo.value.code, excinfo.value.message) == (
+        "REAUTH_REQUIRED",
+        "Sign in again to transfer ownership.",
+    )
+
+
 def test_recent_auth_counts_from_the_last_mfa_verification() -> None:
     verified = CREATED + timedelta(hours=1)
     active = _session(mfa_passed_at=verified)

@@ -66,6 +66,50 @@ export interface paths {
         patch: operations["org_update"];
         trace?: never;
     };
+    "/v1/org/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Org Members List
+         * @description Every member of the org, oldest membership first.
+         */
+        get: operations["org_members_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/org/members/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Org Members Remove
+         * @description Remove a member (also oneself); owners can be removed only by owners, and the last owner stays.
+         */
+        delete: operations["org_members_remove"];
+        options?: never;
+        head?: never;
+        /**
+         * Org Members Update
+         * @description Change a member's role; owners can be made or demoted only by owners, and the last owner stays.
+         */
+        patch: operations["org_members_update"];
+        trace?: never;
+    };
     "/v1/org/sso": {
         parameters: {
             query?: never;
@@ -89,6 +133,26 @@ export interface paths {
          * @description Remove the org's OIDC connection.
          */
         delete: operations["org_sso_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/org/transfer-ownership": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Org Transfer Ownership
+         * @description Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.
+         */
+        post: operations["org_transfer_ownership"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -133,6 +197,39 @@ export interface components {
             errors?: null;
         };
         /**
+         * DataResponse[MemberRemoved]
+         * @example {
+         *       "data": {
+         *         "removed": true,
+         *         "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *       }
+         *     }
+         */
+        DataResponse_MemberRemoved_: {
+            data: components["schemas"]["MemberRemoved"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[MemberView]
+         * @example {
+         *       "data": {
+         *         "email": "jane.park@acme-dental.test",
+         *         "joined_at": "2026-03-02T16:45:00Z",
+         *         "last_login_at": "2026-10-29T09:12:40Z",
+         *         "mfa_enabled": true,
+         *         "name": "Jane Park",
+         *         "role": "admin",
+         *         "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *       }
+         *     }
+         */
+        DataResponse_MemberView_: {
+            data: components["schemas"]["MemberView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[OrgView]
          * @example {
          *       "data": {
@@ -164,6 +261,36 @@ export interface components {
          */
         DataResponse_OrgView_: {
             data: components["schemas"]["OrgView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[OwnershipTransferred]
+         * @example {
+         *       "data": {
+         *         "owner": {
+         *           "email": "jane.park@acme-dental.test",
+         *           "joined_at": "2026-03-02T16:45:00Z",
+         *           "last_login_at": "2026-10-29T09:12:40Z",
+         *           "mfa_enabled": true,
+         *           "name": "Jane Park",
+         *           "role": "owner",
+         *           "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *         },
+         *         "previous_owner": {
+         *           "email": "omar.haddad@acme-dental.test",
+         *           "joined_at": "2026-03-02T16:45:00Z",
+         *           "last_login_at": "2026-10-29T09:12:40Z",
+         *           "mfa_enabled": true,
+         *           "name": "Omar Haddad",
+         *           "role": "admin",
+         *           "user_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e"
+         *         }
+         *       }
+         *     }
+         */
+        DataResponse_OwnershipTransferred_: {
+            data: components["schemas"]["OwnershipTransferred"];
             /** Errors */
             errors?: null;
         };
@@ -201,6 +328,28 @@ export interface components {
          */
         DataResponse_SsoConnectionView_: {
             data: components["schemas"]["SsoConnectionView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[list[MemberView]]
+         * @example {
+         *       "data": [
+         *         {
+         *           "email": "jane.park@acme-dental.test",
+         *           "joined_at": "2026-03-02T16:45:00Z",
+         *           "last_login_at": "2026-10-29T09:12:40Z",
+         *           "mfa_enabled": true,
+         *           "name": "Jane Park",
+         *           "role": "admin",
+         *           "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *         }
+         *       ]
+         *     }
+         */
+        DataResponse_list_MemberView__: {
+            /** Data */
+            data: components["schemas"]["MemberView"][];
             /** Errors */
             errors?: null;
         };
@@ -387,6 +536,83 @@ export interface components {
             user: components["schemas"]["MeUser"] | null;
         };
         /**
+         * MemberRemoved
+         * @description ``DELETE /v1/org/members/{user_id}`` result.
+         * @example {
+         *       "removed": true,
+         *       "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *     }
+         */
+        MemberRemoved: {
+            /**
+             * Removed
+             * @default true
+             * @constant
+             */
+            removed: true;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+        };
+        /**
+         * MemberRolePatch
+         * @description ``PATCH /v1/org/members/{user_id}``: the member's new role.
+         * @example {
+         *       "role": "developer"
+         *     }
+         */
+        MemberRolePatch: {
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "developer" | "analyst" | "billing" | "viewer";
+        };
+        /**
+         * MemberView
+         * @description A member of the org.
+         * @example {
+         *       "email": "jane.park@acme-dental.test",
+         *       "joined_at": "2026-03-02T16:45:00Z",
+         *       "last_login_at": "2026-10-29T09:12:40Z",
+         *       "mfa_enabled": true,
+         *       "name": "Jane Park",
+         *       "role": "admin",
+         *       "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *     }
+         */
+        MemberView: {
+            /** Email */
+            email: string;
+            /**
+             * Joined At
+             * Format: date-time
+             * @description When the user became a member of this org.
+             */
+            joined_at: string;
+            /**
+             * Last Login At
+             * @description The user's last sign-in; null before the first one.
+             */
+            last_login_at: string | null;
+            /** Mfa Enabled */
+            mfa_enabled: boolean;
+            /** Name */
+            name: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "developer" | "analyst" | "billing" | "viewer";
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+        };
+        /**
          * OrgLimits
          * @description Effective limits: the plan's rates and caps overlaid by the org's overrides; null caps: unlimited.
          * @example {
@@ -555,6 +781,34 @@ export interface components {
              */
             updated_at: string;
         };
+        /**
+         * OwnershipTransferred
+         * @description ``POST /v1/org/transfer-ownership`` result: the caller (now an admin) and the new owner.
+         * @example {
+         *       "owner": {
+         *         "email": "jane.park@acme-dental.test",
+         *         "joined_at": "2026-03-02T16:45:00Z",
+         *         "last_login_at": "2026-10-29T09:12:40Z",
+         *         "mfa_enabled": true,
+         *         "name": "Jane Park",
+         *         "role": "owner",
+         *         "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *       },
+         *       "previous_owner": {
+         *         "email": "omar.haddad@acme-dental.test",
+         *         "joined_at": "2026-03-02T16:45:00Z",
+         *         "last_login_at": "2026-10-29T09:12:40Z",
+         *         "mfa_enabled": true,
+         *         "name": "Omar Haddad",
+         *         "role": "admin",
+         *         "user_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e"
+         *       }
+         *     }
+         */
+        OwnershipTransferred: {
+            owner: components["schemas"]["MemberView"];
+            previous_owner: components["schemas"]["MemberView"];
+        };
         /** @enum {string} */
         PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
         /**
@@ -663,6 +917,20 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * TransferOwnershipRequest
+         * @description ``POST /v1/org/transfer-ownership``: the member who becomes an owner.
+         * @example {
+         *       "user_id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
+         *     }
+         */
+        TransferOwnershipRequest: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
         };
     };
     responses: never;
@@ -802,6 +1070,119 @@ export interface operations {
             };
         };
     };
+    org_members_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_list_MemberView__"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_members_remove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_MemberRemoved_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_members_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemberRolePatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_MemberView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     org_sso_get: {
         parameters: {
             query?: never;
@@ -889,6 +1270,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DataResponse_SsoConnectionDeleted_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_transfer_ownership: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransferOwnershipRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_OwnershipTransferred_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Error */

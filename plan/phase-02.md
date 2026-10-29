@@ -102,7 +102,7 @@
   - Deliverables: `va_api.auth.rbac_matrix` (the §3.2 table in code, cell-for-cell, plus each row's scope resource and permissions); `ROLE_SCOPES` and `ROLE_PERMISSIONS` derived from it (sets unchanged); `GET /v1/me` (user and API-key principals); `GET /v1/org` (org, effective limits, credits balance in dollars, stored settings); `PATCH /v1/org` (`name`; `retention_days`/`recording_retention_days` need `org.compliance`)
   - Acceptance: a test parses the §3.2 table from specs/04 and asserts the code matrix matches cell-for-cell; the existing exact role scope/permission tests stay green on the derived sets; `/v1/me` and `/v1/org` integration tests for sessions of every role and for API keys; scope/permission failures answer `FORBIDDEN`.
 
-- [ ] P02-T08b Members: list, change role, remove, transfer ownership
+- [x] P02-T08b Members: list, change role, remove, transfer ownership — 4 routes + org-row-locked last-owner rule; reviewer re-run: lint/typecheck/placeholders pass, make test 2714 passed, coverage 98.91%, openapi drift current, spec refs 0
   - Spec refs: specs/04-auth-tenancy-rbac.md §6 (members, last-owner rule, transfer-ownership), §3.2 (`Members` rows, `Assign owner role / transfer ownership`), §4.3 (reauth)
   - Depends on: P02-T08a
   - Deliverables: `GET /v1/org/members`, `PATCH /v1/org/members/{user_id}`, `DELETE /v1/org/members/{user_id}`, `POST /v1/org/transfer-ownership` (owner session + recent auth); removed members' sessions lose the org

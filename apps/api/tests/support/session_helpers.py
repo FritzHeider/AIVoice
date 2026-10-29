@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Self
 
 import httpx
@@ -40,7 +41,7 @@ from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
 from va_db.models import ApiKey, MemberRole, Membership, Org, OrgStatus, User
 from va_db.provisioning import OrgProvisioner
-from va_db.repositories import NewUser
+from va_db.repositories import IdentityRepo, MembershipRepo, NewUser
 from va_db.session import Database
 
 __all__ = [
@@ -55,6 +56,7 @@ __all__ = [
     "SESSION_PROBE_PATH",
     "Member",
     "SessionContainer",
+    "add_member",
     "enrol_mfa",
     "error_of",
     "link_token",
@@ -64,6 +66,7 @@ __all__ = [
     "migrated_postgres",
     "session_app",
     "session_client",
+    "signed_in",
     "signup",
     "store_api_key",
     "write_headers",
@@ -78,6 +81,7 @@ MFA_SETUP = "/internal/auth/mfa/setup"
 MFA_ENABLE = "/internal/auth/mfa/enable"
 MFA_VERIFY = "/internal/auth/mfa/verify"
 MFA_DISABLE = "/internal/auth/mfa/disable"
+VERIFIED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
 
 @contextmanager
@@ -219,6 +223,27 @@ async def make_member(  # noqa: PLR0913 - keyword-only member attributes
     return Member(user=provisioned.owner, org=org)
 
 
+async def add_member(
+    identity: IdentityDb,
+    hasher: PasswordHasher,
+    org_id: uuid.UUID,
+    role: MemberRole,
+    *,
+    name: str = "Omar Haddad",
+) -> User:
+    """A new verified user with :data:`PASSWORD` and a membership with ``role`` in ``org_id``."""
+    new = NewUser(
+        email=unique_email("member"),
+        name=name,
+        password_hash=hasher.hash(PASSWORD),
+        email_verified_at=VERIFIED_AT,
+    )
+    async with identity.database.tenant_session(org_id) as session:
+        user = await IdentityRepo(session).create_user(new)
+        await MembershipRepo(session, org_id).add(user.id, role)
+    return user
+
+
 async def store_api_key(
     container: SessionContainer, org_id: uuid.UUID, scopes: tuple[str, ...] = ("*",)
 ) -> tuple[str, ApiKey]:
@@ -259,6 +284,15 @@ async def login(client: httpx.AsyncClient, email: str, password: str = PASSWORD)
     )
     assert response.status_code == 200, response.text
     return response
+
+
+async def signed_in(
+    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer, role: MemberRole = "owner"
+) -> Member:
+    """A :func:`make_member` with ``role``, signed in on ``client``."""
+    member = await make_member(identity, container.password_hasher, role=role)
+    await login(client, member.user.email)
+    return member
 
 
 async def signup(  # noqa: PLR0913 - keyword-only signup fields

@@ -515,3 +515,15 @@ Grafana 3001
   org_id).get(key_id)` reads one org's key. Tests: `session_helpers.store_api_key(container, org_id, scopes)` issues
   a key the in-memory store authenticates and inserts its `api_keys` row (for routes that read the key from the DB).
   FastAPI drops `None` members from OpenAPI examples, so response examples with nullable fields render without them.
+- 2026-10-29 (P02-T08b): members routes (`GET /v1/org/members`, `PATCH`/`DELETE /v1/org/members/{user_id}`,
+  `POST /v1/org/transfer-ownership`) live in `routers/org_members.py` on `org_sso.org_router` (imported by
+  `main.py`). Owner safety is `va_db.repositories.MembershipRepo.change_role/remove_member/transfer_ownership`: each
+  locks the org row (`lock_org()`, `SELECT … FOR UPDATE` on `orgs`) before counting owners, so concurrent demotions
+  serialise (`LAST_OWNER_MESSAGE`). Invitations (P02-T08c) must use the literal `/members/invitations` paths; the
+  `{user_id}` routes are `uuid.UUID`-typed and there is no `GET /members/{user_id}`, so they cannot collide. Recent
+  auth for other actions: `password_reset.require_recent_auth(active, now, message=...)` with the session from
+  `request.state.session`. `DataResponse[list[Model]]` wraps each model example as a one-item list in OpenAPI.
+  Tests: `session_helpers.signed_in(client, identity, container, role)` and `add_member(identity, hasher, org_id,
+  role)` (a second user in an existing org; log them in on another `session_client(session_app(container))`).
+  Lock-wait tests: poll `SELECT count(*) FROM pg_locks WHERE NOT granted` on a third `open_database(url)` (bounded
+  loop, no sleeps).

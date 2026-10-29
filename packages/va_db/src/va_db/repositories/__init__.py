@@ -44,7 +44,14 @@ from va_db.repositories.identity import (
     NewUser,
 )
 from va_db.repositories.identity_mfa import MfaRepo
-from va_db.repositories.memberships import MembershipLookupRepo, MembershipRecord, MembershipRepo
+from va_db.repositories.memberships import (
+    LAST_OWNER_MESSAGE,
+    NOT_OWNER_MESSAGE,
+    MemberRecord,
+    MembershipLookupRepo,
+    MembershipRecord,
+    MembershipRepo,
+)
 from va_db.repositories.orgs import OrgOverview, OrgRepo
 from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxRepo
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
@@ -58,7 +65,9 @@ __all__ = [
     "DEFAULT_LEASE",
     "EMAIL_VERIFY_TTL",
     "IMMUTABLE_COLUMNS",
+    "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
+    "NOT_OWNER_MESSAGE",
     "PASSWORD_RESET_TTL",
     "PURGE_RULES",
     "REPLAY_WINDOW",
@@ -74,6 +83,7 @@ __all__ = [
     "IdempotencyRepo",
     "IdentityRepo",
     "IssuedSession",
+    "MemberRecord",
     "MembershipLookupRepo",
     "MembershipRecord",
     "MembershipRepo",

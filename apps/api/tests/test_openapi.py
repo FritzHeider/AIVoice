@@ -17,6 +17,7 @@ from va_api import __version__
 from va_api.main import create_app
 from va_api.openapi import INTERNAL_TAG_NAMES, TAG_NAMES, internal_routes, servers
 from va_api.responses import DataResponse
+from va_api.routers.org_members_schemas import MemberRolePatch
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC_26 = ROOT / "specs" / "26-sdks-cli-mcp-docs.md"
@@ -264,6 +265,12 @@ def test_internal_operations_contract() -> None:
 def test_data_response_wraps_examples_only_for_models() -> None:
     assert "examples" not in DataResponse[int].model_json_schema()
     assert "examples" not in DataResponse[dict[str, int]].model_json_schema()
+    assert "examples" not in DataResponse[list[int]].model_json_schema()
+
+
+def test_data_response_wraps_list_examples_as_one_item_lists() -> None:
+    examples = DataResponse[list[MemberRolePatch]].model_json_schema()["examples"]
+    assert examples == [{"data": [{"role": "developer"}], "errors": None}]
 
 
 def test_committed_internal_document_is_current() -> None:
@@ -278,3 +285,16 @@ def test_org_operations_declare_scopes_and_the_compliance_rule() -> None:
     update = paths["/v1/org"]["patch"]
     assert (update["operationId"], update["x-scope"]) == ("org_update", "org:write")
     assert "`org.compliance`" in update["description"]
+
+
+def test_member_operations_declare_scopes_and_permissions() -> None:
+    paths = create_app(make_settings(), init_observability=False).openapi()["paths"]
+    operations = {
+        ("/v1/org/members", "get"): ("org_members_list", "org:read", None),
+        ("/v1/org/members/{user_id}", "patch"): ("org_members_update", "org:write", "members.manage"),
+        ("/v1/org/members/{user_id}", "delete"): ("org_members_remove", "org:write", "members.manage"),
+        ("/v1/org/transfer-ownership", "post"): ("org_transfer_ownership", "org:write", "org.owner_transfer"),
+    }
+    for (path, method), expected in operations.items():
+        operation = paths[path][method]
+        assert (operation["operationId"], operation["x-scope"], operation.get("x-permission")) == expected

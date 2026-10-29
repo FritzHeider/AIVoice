@@ -2787,3 +2787,179 @@ three are). Org settings validation (`OrgSettings`, `settings` in `PATCH /v1/org
 - Diff checked against specs/04 §3.2/§3.3/§8.1: matrix rows verbatim and parse-tested; derived role sets equal the
   previous exact sets (test_rbac/test_permissions unchanged); /v1/org uses ctx.org_id only on global session;
   retention fields gated by org.compliance; sessions opened sequentially. No findings.
+
+## 2026-10-29 Planner: P02-T08a approved → next P02-T08b
+
+## Plan P02-T08b — Members: list, change role, remove, transfer ownership (specs/04 §6, §3.2 Members rows, §4.1 recent auth)
+
+### Facts found while planning
+- `memberships` is RLS (tenant_session); `users` is a global table readable by `va_app` inside a tenant_session, so
+  list = one tenant_session joining `memberships`→`users`.
+- Session auth re-reads the membership on every request (`active_membership` → `MembershipLookupRepo.for_user_in_org`);
+  a deleted membership makes the session fall back to the user's oldest remaining membership (persisted) or
+  `FORBIDDEN` "You are not a member of any organization.". So "removed members' sessions lose the org" needs no
+  session writes — only a test.
+- `current_session` stores the session on `request.state.session` (set during `get_principal`); the transfer route
+  reads it there for the recent-auth check. `require_recent_auth(active, now)` lives in `auth/password_reset.py` with a
+  password-specific message.
+- Matrix rows: `Members: list` → `org` (org:read); `Members: invite / change role / remove` → `org` +
+  `members.manage` (owner, admin; API keys with `*`); `Assign owner role / transfer ownership` → `org` +
+  `org.owner_transfer` (owner only, session-only → API keys never hold it).
+- Audit (`member.role_change`, `member.remove`, `org.ownership_transfer`) arrives with P02-T11 (it enumerates every
+  mutating endpoint) — do not write audit rows now.
+- Pool size 1 per role: never nest sessions.
+
+### Decisions to record (specs/04 §6, same commit, `> Decision (2026-10-29):`)
+1. **Members list**: `GET /v1/org/members` (`org:read`, every role; API keys need `org:read`/`*`) →
+   `{data:[{user_id, email, name, role, mfa_enabled, last_login_at, joined_at}]}`, `joined_at` = membership
+   `created_at`, ordered `joined_at`, `user_id`; unpaginated (bounded by membership count; the spec's shape has no
+   cursor).
+2. **Change role**: `PATCH /v1/org/members/{user_id}` `{role}` (`extra="forbid"`, role ∈ six roles) needs `org:write` +
+   `members.manage`; additionally `org.owner_transfer` when the new role is `owner` **or** the target currently is an
+   owner (admins and API keys cannot touch owners) → `FORBIDDEN` "Missing required permission 'org.owner_transfer'.".
+   Unknown user id or a user of another org → `NOT_FOUND` "Member not found.". Same role → 200 no-op. Response
+   `{data: <member view>}`.
+3. **Remove**: `DELETE /v1/org/members/{user_id}` same permissions (owner target needs `org.owner_transfer`), returns
+   `{data:{user_id, removed: true}}`. Removing oneself is allowed under the same rules. The removed user's sessions are
+   not revoked: the next request re-reads the membership and falls back to another org (or `FORBIDDEN`).
+4. **Last-owner rule**: any demotion or removal of an owner first locks the org row (`SELECT … FROM orgs WHERE id =
+   :org FOR UPDATE`, inside the same tenant_session), then counts owners; if the change would leave zero owners →
+   `CONFLICT` "An organization must have at least one owner.". The org-row lock serialises concurrent demotions so
+   two owners cannot demote each other at once.
+5. **Transfer ownership**: `POST /v1/org/transfer-ownership` `{user_id}` needs `org:write` + `org.owner_transfer`
+   (owner session) and recent auth (10 min since `max(created_at, mfa_passed_at)`, else `REAUTH_REQUIRED` "Sign in
+   again to transfer ownership."). Target must be a member of the org (`NOT_FOUND` "Member not found." otherwise);
+   target == caller → `INVALID_INPUT` (field `user_id`) "You already own this organization.". Effect, in one
+   transaction under the org-row lock: target → `owner`, caller → `admin` (other owners unchanged). Response
+   `{data:{previous_owner: <member view of caller>, owner: <member view of target>}}`. Not idempotent-key-bound
+   beyond the existing `require_scope` claim.
+
+### Files
+**packages/va_db/src/va_db/repositories/memberships.py** — extend `MembershipRepo`:
+  - `@dataclass(frozen=True, slots=True) class MemberRecord: user_id, email, name, role: MemberRole, mfa_enabled: bool,
+    last_login_at: datetime | None, joined_at: datetime` (export).
+  - `async def list_members(self) -> list[MemberRecord]` (join `User`, filter `Membership.org_id == self.org_id`,
+    order `Membership.created_at, Membership.user_id`).
+  - `async def member(self, user_id) -> MemberRecord | None`.
+  - `async def lock_org(self) -> None` — `select(Org.id).where(Org.id == self.org_id).with_for_update()`.
+  - `async def owner_count(self) -> int`.
+  - `async def set_role(self, user_id, role) -> bool` (UPDATE … SET role, updated_at=now() WHERE org_id, user_id;
+    returns rowcount == 1).
+  - `async def remove(self, user_id) -> bool` (DELETE … WHERE org_id, user_id).
+  - Module-level `LAST_OWNER_MESSAGE: Final = "An organization must have at least one owner."` and a method
+    `async def change_role(self, user_id, role) -> MemberRecord | None` / `async def remove_member(self, user_id) ->
+    bool` that implement decision 4 (lock → load target → if target is owner and new role ≠ owner (or removal) and
+    `owner_count() <= 1` → `AppError("CONFLICT", LAST_OWNER_MESSAGE)`; returns None/False when the target is not a
+    member), and `async def transfer_ownership(self, from_user_id, to_user_id) -> tuple[MemberRecord, MemberRecord] |
+    None` (lock; both must be members; caller must currently be owner else return None → route answers FORBIDDEN is
+    unreachable since permission gate already checked role; set target owner, caller admin). Keep each function under
+    radon C. Docstrings cite specs/04 §6.
+**apps/api/src/va_api/auth/password_reset.py** — `require_recent_auth(active, now, message: str = REAUTH_MESSAGE)`
+  (keyword `message`); add `TRANSFER_REAUTH_MESSAGE: Final = "Sign in again to transfer ownership."` to a better home:
+  put it in the new router module instead (keep password_reset unchanged except the parameter).
+**apps/api/src/va_api/routers/org_members_schemas.py** (new): `MemberView(user_id, email, name, role, mfa_enabled,
+  last_login_at: datetime | None, joined_at)` with `from_record(record)` classmethod or module function;
+  `MemberRolePatch(role: MemberRole)` `extra="forbid"`; `MemberRemoved(user_id, removed: Literal[True])`;
+  `TransferOwnershipRequest(user_id: uuid.UUID)` `extra="forbid"`; `OwnershipTransferred(previous_owner: MemberView,
+  owner: MemberView)`. Field descriptions + examples (no None examples).
+**apps/api/src/va_api/routers/org_members.py** (new) on `org_router` (from `routers/org_sso.py`):
+  - `GET /members` `operation_id="org_members_list"`, `x-scope: org:read`, dep `ReadOrg` → `DataResponse[list[MemberView]]`.
+  - `PATCH /members/{user_id}` `org_members_update`, `x-scope: org:write`, deps `WriteOrg` +
+    `Depends(require_permission("members.manage"))` (use the `dependencies=[...]` list pattern of org_sso `_MANAGE`).
+  - `DELETE /members/{user_id}` `org_members_remove`, same.
+  - `POST /transfer-ownership` `org_transfer_ownership`, `x-scope: org:write`, deps `WriteOrg` +
+    `require_permission("org.owner_transfer")`; reads `request.state.session` (an `ActiveSession`; if absent →
+    `FORBIDDEN` — unreachable for sessions but typed) and calls `require_recent_auth(active, clock_of(request).now(),
+    message=TRANSFER_REAUTH_MESSAGE)` BEFORE opening the DB session.
+  - helper `_owner_guard(ctx, target_role: MemberRole, new_role: MemberRole | None)`: raises FORBIDDEN with the
+    `require_permission` message for `org.owner_transfer` when (new_role == "owner" or target_role == "owner") and not
+    `holds_permission(ctx, "org.owner_transfer")`. Order inside the tenant_session: lock, load target (NOT_FOUND),
+    guard, last-owner check, write. (So the guard needs the target's current role → do it via the repo returning the
+    target first; simplest: route opens `tenant_session(ctx.org_id)`, `repo.lock_org()`, `target = await
+    repo.member(user_id)`, guard, then `repo.change_role/remove_member` which re-checks last owner. Keep the repo
+    methods doing lock+check so they are safe on their own; calling `lock_org` twice in one tx is harmless.)
+  - Import the module for side effects in `va_api/main.py` (pattern of `va_api.routers.org`).
+**specs/04 §6** — decisions 1–5. **AGENTS.md** — members routes live in `routers/org_members.py`; last-owner rule uses
+  the org-row lock in `MembershipRepo`; T08c must define `/members/invitations` routes so they never collide with
+  `/members/{user_id}` (uuid-typed; GET has no `{user_id}` route).
+**openapi/openapi.json** regenerated + `corepack pnpm gen:api` in `sdks/typescript` and `apps/dashboard`.
+
+### Tests
+**packages/va_db/tests/test_membership_repo.py** (identity_db fixture, real DB): list order and fields (two members,
+  `last_login_at` null/value); `member()` none for another org's user (provision two orgs); `change_role` demoting the
+  only owner → CONFLICT, demoting one of two owners → ok; `remove_member` last owner → CONFLICT; `transfer_ownership`
+  swaps roles; **concurrency (deterministic)**: two `Database` instances (`open_database(url)` twice, each with its own
+  pool), org with owners A and B; task 1 opens tenant_session on db1, `change_role(A, "admin")` and then awaits an
+  `asyncio.Event` before committing; task 2 on db2 starts `change_role(B, "admin")`; poll (bounded loop, ≤ 200
+  iterations of `pg_stat_activity` via a system session on a third pool/db1 system engine, checking a backend with
+  `wait_event_type = 'Lock'`) until task 2 is blocked; set the event; assert task 1 succeeded and task 2 raised CONFLICT
+  and one owner remains. Plus an `asyncio.gather` variant asserting exactly one CONFLICT. Use pytest.mark.timeout as
+  other DB tests do; never sleep.
+**apps/api/tests/test_org_members_integration.py** (conftest client fixtures): helper `add_member(identity, hasher,
+  org_id, role, *, email=None) -> User` in `support/session_helpers.py` (create user via IdentityRepo in a
+  `tenant_session(org_id)` + `MembershipRepo.add`), and move `signed_in` from test_org_integration into session_helpers
+  (update that module's import; jscpd).
+  - list: every role (parametrize) sees all members with the documented keys; `*` API key lists; `calls:read` key →
+    403 FORBIDDEN.
+  - change role: owner promotes developer→admin (200, persisted); admin changes developer→viewer (200); admin
+    promoting to owner → 403 FORBIDDEN with `org.owner_transfer` message; admin demoting an owner → 403; owner
+    promotes admin→owner (200, two owners); sole owner demotes self → 409 CONFLICT exact message; developer/analyst/
+    billing/viewer PATCH → 403; `*` API key changes developer→analyst (200) but →owner 403; user id of another org →
+    404 NOT_FOUND "Member not found."; random uuid → 404; invalid role / extra field → 400 INVALID_INPUT field `role`;
+    CSRF missing → 403.
+  - remove: admin removes developer (200 `{user_id, removed: true}`, row gone); removed user's session: log in as the
+    developer in a second client BEFORE removal, then `/v1/me` after removal → 403 FORBIDDEN "You are not a member of
+    any organization." (and with a second membership elsewhere → `/v1/me` reports that other org); admin removing an
+    owner → 403; sole owner removing self → 409; owner removing a co-owner → 200; cross-org id → 404.
+  - transfer: owner (fresh login) transfers to a developer → 200, target owner, caller admin; then the former owner's
+    `/v1/me` role is `admin`; after `container.clock` advances 10 min → 401 REAUTH_REQUIRED "Sign in again to transfer
+    ownership."; MFA verification refreshes recency (reuse `enrol_mfa` + `/internal/auth/mfa/verify` pattern only if
+    cheap; otherwise covered by existing password-change recency tests — skip); admin → 403; `*` API key → 403
+    (session-only permission); target not a member / other org → 404; target == self → 400 INVALID_INPUT field
+    `user_id`; extra field → 400.
+**apps/api/tests/test_password_reset*.py** (whichever covers `require_recent_auth`) — one unit assert that the custom
+  `message` is used.
+**apps/api/tests/test_openapi.py** — assert the four operations' ids and `x-scope` values (pattern of the `/v1/org`
+  assertions at line ~276).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1` for the numeric average; pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done as a PLAIN STRING (mem-1793273041-6642, mem-1793269824-fe85):
+`ralph emit "build.done" "P02-T08b tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- `SELECT … FOR UPDATE` on `orgs` as `va_app` needs UPDATE privilege on `orgs` (it has it: `OrgRepo.update` runs as
+  va_app) — verify in the repo test.
+- Under READ COMMITTED, owner counting must happen AFTER the org-row lock is acquired (fresh snapshot per statement).
+- `request.state.session` is the session as resolved before `set_active_org`; only `created_at`/`mfa_passed_at` are
+  used, which do not change.
+- Route ordering with T08c: keep `{user_id}` typed `uuid.UUID`; FastAPI answers 400 INVALID_INPUT for non-uuid ids
+  (check the existing validation handler) — test one non-uuid id.
+- jscpd: reuse `error_of`, `write_headers`, `login`, `make_member`; parametrize role cases; share the role guard.
+
+## 2026-10-29 Builder: P02-T08b build notes
+- Built per plan: `MembershipRepo` gains `MemberRecord`, `list_members`, `member`, `lock_org` (FOR UPDATE on orgs),
+  `owner_count`, `set_role`/`remove` (RETURNING id), `change_role`/`remove_member`/`transfer_ownership` (lock →
+  load → last-owner check), `LAST_OWNER_MESSAGE`, `NOT_OWNER_MESSAGE` (caller no longer owner under a race → FORBIDDEN).
+  `routers/org_members.py` + `org_members_schemas.py` (4 operations, `x-permission` like org_sso);
+  `require_recent_auth(..., message=)`; specs/04 §6 four decisions; AGENTS.md entry.
+- Extra (needed by test_operations_contract, every 2xx needs examples): `DataResponse[list[M]]` now wraps each
+  example of M as a one-item list (`responses._wrap_examples`), unit-tested in test_openapi.
+- Tests: packages/va_db/tests/test_membership_repo.py (8, incl. deterministic lock-wait via pg_locks polling and a
+  gather variant); apps/api/tests/test_org_members_integration.py (21); `signed_in` moved to session_helpers (+
+  `add_member`); test_openapi operation/scope/permission asserts; test_password_reset custom message.
+- Coverage of org_members.py reports 88% with alternating "missed" lines inside `async with tenant_session` bodies
+  that are executed by passing tests (same greenlet tracing artifact as routers/org.py lines 75/83).
+- Two `make test` runs hit pytest-timeout 60s in Docker exec during migrated_url setup (43 then 18 errors, different
+  modules each run, host load 11–14); isolated reruns green; third full run green.
+- Gates: fmt/lint/typecheck/placeholders pass; make test 2714 passed, coverage 98.91%; make test-ts pass; openapi
+  drift current; check_spec_refs 0; jscpd 0 clones; radon no C+, avg 1.95; pip-audit + pnpm audit clean; gitleaks pass.
+
+## Review P02-T08b (2026-10-29): approved
+- Re-ran lint/typecheck/placeholders (pass), make test (2714 passed, 98.91%), openapi drift current, spec refs 0.
+- Diff checked against specs/04 §3.2 matrix rows (Members list R all roles; change/remove members.manage; owner
+  assignment org.owner_transfer) and §6 (exact CONFLICT message). updated_at covered by set_updated_at trigger.
+  Lock-then-count under the org row; concurrency tests poll pg_locks with no sleeps. No findings.

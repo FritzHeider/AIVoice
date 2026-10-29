@@ -626,6 +626,34 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
 - `GET /v1/org/members/invitations`, `DELETE /v1/org/members/invitations/{id}`.
 - `POST /v1/org/transfer-ownership` `{user_id}` (owner, requires reauth).
 
+> Decision (2026-10-29): `GET /v1/org/members` needs `org:read` (every role; API keys need `org:read` or `*`) and
+> returns `{data:[{user_id, email, name, role, mfa_enabled, last_login_at, joined_at}]}`, `joined_at` being the
+> membership's `created_at`, ordered by `joined_at` then `user_id`, unpaginated (bounded by the member count; the
+> shape above has no cursor).
+
+> Decision (2026-10-29): `PATCH /v1/org/members/{user_id}` `{role}` (no other fields; role ∈ the six roles) and
+> `DELETE /v1/org/members/{user_id}` need `org:write` + `members.manage`; when the new role is `owner` or the target
+> currently is an owner they also need `org.owner_transfer` (`FORBIDDEN` "Missing required permission
+> 'org.owner_transfer'."), so admins and API keys never touch owners. A user who is not a member of the org (unknown,
+> or a member of another org) → `NOT_FOUND` "Member not found.". Setting the current role is a 200 no-op. PATCH
+> returns `{data: <member>}`; DELETE returns `{data:{user_id, removed: true}}`. Members may remove themselves under
+> the same rules. A removed member's sessions are not revoked: every request re-reads the membership, so the next one
+> falls back to the user's oldest remaining membership or answers `FORBIDDEN` "You are not a member of any
+> organization.".
+
+> Decision (2026-10-29): Last-owner rule. Every role change, removal, and ownership transfer first locks the org row
+> (`SELECT id FROM orgs WHERE id = :org FOR UPDATE`) in the request's tenant transaction, then reads the target and
+> counts owners; demoting or removing an owner when it is the only one → `CONFLICT` "An organization must have at
+> least one owner.". The lock serialises concurrent changes, so two owners demoting each other at the same time leave
+> exactly one owner.
+
+> Decision (2026-10-29): `POST /v1/org/transfer-ownership` `{user_id}` needs `org:write` + `org.owner_transfer`
+> (owner sessions only) and a recent sign-in: the later of the session's creation and its last MFA verification within
+> 10 minutes, else `REAUTH_REQUIRED` "Sign in again to transfer ownership.". `user_id` equal to the caller →
+> `INVALID_INPUT` (field `user_id`) "You already own this organization."; not a member of the org → `NOT_FOUND`
+> "Member not found.". In one transaction under the org-row lock the target becomes `owner` and the caller `admin`;
+> other owners keep their role. Returns `{data:{previous_owner: <member>, owner: <member>}}`.
+
 ## 7. OrgSettings model
 
 `orgs.settings` jsonb is validated by `va_domain.org.OrgSettings` (Pydantic, `extra="forbid"`). All fields have

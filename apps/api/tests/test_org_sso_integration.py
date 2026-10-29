@@ -13,10 +13,10 @@ from identity_db import IdentityDb
 from session_helpers import (
     SessionContainer,
     error_of,
-    login,
     make_member,
     session_app,
     session_client,
+    signed_in,
     write_headers,
 )
 from sqlalchemy import select
@@ -57,14 +57,6 @@ def idp() -> Iterator[respx.MockRouter]:
 async def sso_client(container: SessionContainer, idp: respx.MockRouter) -> AsyncIterator[httpx.AsyncClient]:
     async with session_client(session_app(container, oidc_enabled=True)) as http:
         yield http
-
-
-async def signed_in(
-    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer, role: MemberRole = "owner"
-) -> Any:
-    member = await make_member(identity, container.password_hasher, role=role)
-    await login(client, member.user.email)
-    return member
 
 
 async def put(client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:

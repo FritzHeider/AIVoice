@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793275386-bcdb
+> va_api tests: session_helpers.signed_in(client, identity, container, role) + add_member(identity, hasher, org_id, role) for extra members; DataResponse[list[Model]] now wraps model examples (test_operations_contract requires examples on every 2xx)
+<!-- tags: api, testing, openapi | created: 2026-10-29 -->
+
 ### mem-1793272997-3347
 > SSO tests: tests/support/fake_oidc.py FakeOidcProvider(now=container.clock.now) + mocked_idp(provider) + sso_app(container) + configure_sso(client, identity, container) + sso_login(client, provider, email); redirect-only routes listed in test_openapi.REDIRECT_OPERATIONS
 <!-- tags: api, auth, testing | created: 2026-10-29 -->

@@ -50,10 +50,11 @@ async def send_password_reset(
     await deliver(sender, message, failure_event="password_reset_email_failed")
 
 
-def require_recent_auth(active: ActiveSession, now: datetime) -> None:
-    """``REAUTH_REQUIRED`` 10 minutes after the later of the session's creation and its last MFA check."""
+def require_recent_auth(active: ActiveSession, now: datetime, *, message: str = REAUTH_MESSAGE) -> None:
+    """``REAUTH_REQUIRED`` (with ``message``) 10 minutes after the later of the session's creation and its
+    last MFA check."""
     authenticated_at = active.created_at
     if active.mfa_passed_at is not None:
         authenticated_at = max(authenticated_at, active.mfa_passed_at)
     if now - authenticated_at >= REAUTH_WINDOW:
-        raise AppError("REAUTH_REQUIRED", REAUTH_MESSAGE)
+        raise AppError("REAUTH_REQUIRED", message)
