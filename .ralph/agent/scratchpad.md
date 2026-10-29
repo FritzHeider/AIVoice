@@ -3602,3 +3602,159 @@ Gates re-run by Reviewer: make lint, typecheck, placeholders pass; make test 286
 (logs/review-p02-t09b-fix.log). Finding 1 fixed: `MembershipRecord.acting_parent_status` + `gate_status` (stricter of
 child/parent) used by `session_principal`; switch-org refuses a closed parent; specs/04 §8.3 decision 4 bullet added;
 repo test over 5 status combos and switch-org suspended/closed parent integration tests present. P02-T09 ticked.
+
+## 2026-10-29 Planner: P02-T09b approved → next P02-T10
+
+## Plan P02-T10 — API key management endpoints (specs/04 §9, §2.1, §2.2 step 5, §2.3 `api_keys:write`, §3.2 "API keys" rows)
+
+### Facts found while planning
+- `va_api.auth.api_keys` already has `mint_api_key(hasher, environment)`, `MintedKey`, `creating_user_id(ctx, session)`;
+  `va_db.repositories.ApiKeyRepo(session, org_id)` has `get`, `add`, `prefixes`. `invalidate_api_key_cache(redis,
+  prefix)` lives in `auth/api_key_auth.py`; `routers/orgs.py` has a private `_invalidate_keys` (log-and-swallow
+  RedisError/OSError) — move it to `va_api.auth.api_keys.invalidate_cached_keys(request, prefixes)` and use it from
+  both (no copy; jscpd).
+- Envelope family `/v1/api_keys*` = envelope (envelopes.FAMILIES); OpenAPI tag `API Keys` already in TAG_NAMES.
+- §2.3 has no `api_keys:read`. §3.2 "API keys: list" = R for owner/admin/developer only, and exactly those roles hold
+  `api_keys:write` (§3.3 derivation) → GET uses `api_keys:write`.
+- Session principals have `environment="live"` and never hold `*`/`mcp` (§3.3). Default create scopes are `["*"]`, so
+  without a rule an owner session could never create a default key.
+- Audit writer does not exist yet (P02-T11). Planner moved the `api_key.*` audit rows to T11 in plan/phase-02.md.
+- `ApiKeyAuthenticator._check_usable` already rejects revoked/expired keys via the injected clock.
+
+### Decisions to record (specs/04 §9, same commit, `> Decision (2026-10-29):`)
+1. **Scope.** Every `/v1/api_keys` route declares `require_scope("api_keys:write")` (GET too: §2.3 has no read
+   scope and the §3.2 list row matches the `api_keys:write` holders). `x-scope: api_keys:write` on all five.
+2. **Grantable scopes** (`grantable_scopes(ctx) -> frozenset[str]`): API key principal → its scopes, where `*`
+   means every scope in `SCOPES` (incl. `*`); owner/admin session (incl. acting parent) → all of `SCOPES`
+   (incl. `*` and `mcp`: full control per §3.1); other user roles → `ROLE_SCOPES[role]` (developer: W(own) "scopes ⊆
+   developer scopes"); widget → empty. Requested scopes must be ⊆ grantable, else `FORBIDDEN`
+   "Cannot grant scopes you do not hold: <sorted, comma-joined>." (`*` is grantable only when the caller holds `*`
+   or is owner/admin). Validation: 1–50 items, each in `SCOPES` else 400 `INVALID_INPUT` field `scopes` "Unknown
+   scope '<s>'."; duplicates removed; a list containing `*` is stored as `["*"]`; otherwise stored sorted.
+3. **Environment.** Default = the caller's `ctx.environment` (sessions: live). A `test` principal may create/roll
+   only `test` keys → `FORBIDDEN` "Test keys can only manage test keys." (prevents test→live escalation).
+4. **expires_at.** Optional, timezone-aware (naive → 400 INVALID_INPUT field `expires_at`), strictly after
+   `clock.now()` (else 400 field `expires_at` "expires_at must be in the future.").
+5. **Ownership (W(own)).** A `developer` session may PATCH/revoke/roll only keys whose `created_by` is its user id;
+   otherwise `FORBIDDEN` "Developers can only manage API keys they created." Owner/admin sessions and API keys
+   may manage every key of the org. Another org's key / unknown id → `NOT_FOUND` "API key not found." (RLS + filter).
+6. **Revoke.** Sets `revoked_at = now` (already revoked → returned unchanged, 200, `revoked_at` not moved); then
+   `DEL apikey:{prefix}` after commit (Redis failure logged `api_key_cache_unavailable`, not raised). A key may
+   revoke itself.
+7. **Roll.** Refused for a revoked or already-expired key → `CONFLICT` "A revoked or expired API key cannot be
+   rolled.". The new key copies `name`, `scopes`, `environment` from the old one, `expires_at = null`,
+   `created_by = creating_user_id(ctx)`; it is subject to rules 2 and 3 (a narrow key cannot roll a broader key into
+   a plaintext it could not create). Old key `expires_at = min(existing expires_at, now + expire_old_in_hours h)`
+   (0 → expires now). Both in one tenant_session; old prefix cache dropped after commit. Response = the new key
+   with plaintext `key`.
+8. **PATCH** `{name?}` (extra="forbid"; `{}` returns the key unchanged); a revoked key may be renamed. No cache
+   invalidation (name is not cached).
+9. **List** returns every key of the org including revoked/expired ones, oldest first (created_at, id); not
+   paginated (§9 body is `{data:[…]}`, same as members). Never includes `secret_hash`/plaintext.
+10. **One-time secret.** Create and roll call `withhold_on_replay(request, "data.key")`; `key` is
+   `str | None` in the OpenAPI schema with a description saying replays return null.
+11. **Audit.** `api_key.create`/`api_key.revoke`/`api_key.roll` rows are written by P02-T11 (plan moved).
+
+### Files
+**packages/va_db/src/va_db/repositories/api_keys.py** (`ApiKeyRepo`):
+- `add(..., expires_at: datetime | None = None)`.
+- `list(self) -> list[ApiKey]` ordered `created_at, id`, org filter.
+- `rename(key_id, name) -> ApiKey | None`, `revoke(key_id, now) -> ApiKey | None` (only sets when `revoked_at IS
+  NULL`, returns the row either way), `expire(key_id, expires_at) -> ApiKey | None`. Use `update(...).where(org_id,
+  id).returning(ApiKey)` or load+mutate+flush+refresh; keep `updated_at` set (check TimestampMixin onupdate).
+  All filter `ApiKey.org_id == self.org_id`.
+**apps/api/src/va_api/auth/api_keys.py**: add `grantable_scopes(ctx)`, `check_grantable(ctx, scopes)`,
+  `normalize_scopes(scopes) -> list[str]` (or as a pydantic validator in schemas — validation errors must be 400
+  with field `scopes`), `check_environment(ctx, environment)`, `check_manages(ctx, key)` (developer own rule),
+  `invalidate_cached_keys(request, prefixes)` (moved from routers/orgs.py; orgs.py imports it). Messages as
+  `Final` constants exported in `__all__`.
+**apps/api/src/va_api/routers/api_keys_schemas.py** (new): `ApiKeyCreate(name 1–100 stripped, scopes:
+  list[str] = ["*"], environment: Literal["live","test"] | None = None, expires_at: AwareDatetime | None)`,
+  `ApiKeyPatch(name?)`, `ApiKeyRoll(expire_old_in_hours: int 0–168 = 24)`, all extra="forbid";
+  `ApiKeyView` (id, name, prefix, scopes, environment, created_by, last_used_at, expires_at, revoked_at,
+  created_at) + `ApiKeyCreated(ApiKeyView)` with `key: str | None`; `api_key_view(row)`; examples on every model
+  (no None values in examples, mem-1793265656-71f0; use a sample key `va_live_3kQ9…` like orgs_schemas).
+**apps/api/src/va_api/routers/api_keys.py** (new): `api_keys_router = envelope_router(prefix="/v1/api_keys",
+  tags=["API Keys"])`; operations `api_keys_list` (GET ""), `api_keys_create` (POST ""), `api_keys_update`
+  (PATCH "/{key_id}"), `api_keys_revoke` (POST "/{key_id}/revoke"), `api_keys_roll` (POST "/{key_id}/roll");
+  responses `DataResponse[...]`; one `tenant_session(ctx.org_id)` per request (pool size 1: invalidate after the
+  session closes). Create returns 201? — keep 200 like existing creates (orgs_create/invitations) unless the repo
+  convention for envelope creates is 201: Builder checks `org_invitations.py` and matches it.
+**apps/api/src/va_api/routers/__init__.py / main.py**: register `api_keys_router` in the routers tuple (look at how
+  `orgs_router` is listed).
+**apps/api/src/va_api/routers/orgs.py**: use `invalidate_cached_keys`.
+**specs/04 §9**: decisions 1–11 (one `> Decision (2026-10-29):` block with bullets). **AGENTS.md**: api key routes,
+  helpers, test helpers.
+**openapi/openapi.json** regenerated; `corepack pnpm gen:api` in sdks/typescript and apps/dashboard.
+
+### Tests
+**packages/va_db/tests/** (extend the existing api-key repo integration test file, or `test_api_key_repo_integration.py`):
+  list order + org isolation (other org's keys absent, RLS); rename/revoke/expire return None for another org's
+  id; revoke idempotent keeps first `revoked_at`; add stores `expires_at`.
+**apps/api/tests/test_api_keys_unit.py** (pure): `grantable_scopes` for `*` key, narrow key, owner/admin/developer/
+  analyst sessions, widget; `normalize_scopes` (dedupe, sort, `*` collapse, unknown → AppError field scopes);
+  environment rule; developer own rule.
+**apps/api/tests/test_api_keys_integration.py** (conftest `identity/container/client`, `session_helpers.signed_in`,
+  `add_member`, `error_of`, `sub_account`; mint the caller key via the route or existing helpers):
+  - `*` key creates default key → 200, `data.key` matches `va_live_` + 32, `prefix` = first 12, `scopes == ["*"]`,
+    `created_by` = key's creator; the new key authenticates `GET /v1/me`; DB row has hash only (no plaintext column
+    value equal to key); list shows it without `key`/`secret_hash` fields (assert exact field set).
+  - Idempotent replay of create → same id, `data.key` null; roll replay same.
+  - narrow key (`api_keys:write`, `calls:read`) creating `["calls:read"]` ok, `["*"]` / `["calls:write"]` → 403;
+    unknown scope → 400 field scopes; empty list → 400; name "" / 101 chars → 400; extra field → 400;
+    `expires_at` past / naive → 400; future → stored, key stops authenticating after FrozenClock advance.
+  - key without `api_keys:write` → 403 on all five; `GET` with `api_keys:write` only works.
+  - test key: default environment test, `"environment":"live"` → 403; rolling a live key with a test key → 403.
+  - sessions: owner creates default `*` key ok; developer default → 403, developer `["calls:read"]` ok;
+    developer revoke/patch/roll of owner-created key → 403, own → ok; analyst/billing/viewer GET → 403.
+  - revoke → `revoked_at` set, revoked key gets 401 on `/v1/me` immediately even after a successful auth warmed the
+    cache (proves `DEL apikey:{prefix}`); second revoke → same `revoked_at`.
+  - roll → new plaintext authenticates, scopes/name/environment copied; old key `expires_at` = now+24 h, still
+    authenticates; advance clock 24 h → old 401; `expire_old_in_hours: 0` → old 401 at once; 169 → 400; roll of
+    revoked → 409 CONFLICT; narrow key rolling a `*` key → 403.
+  - PATCH rename; `{}` unchanged; other org's key id → 404 on PATCH/revoke/roll; unknown uuid → 404.
+  - acting parent (`X-VA-Org-Id` child): list/create operate on the child's keys (created key's org = child).
+**apps/api/tests/test_openapi.py**: the five operations: envelope, tag `API Keys`, `x-scope` `api_keys:write`,
+  `ApiKeyCreated.key` nullable.
+Existing `test_orgs_integration.py` must stay green after the `_invalidate_keys` move.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1` (numeric); pip-audit per mem-1793267153-9b68 + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files` (sample keys in examples/tests may need the existing allowlist pattern
+used by orgs_schemas). build.done as a PLAIN STRING:
+`ralph emit "build.done" "P02-T10 tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: `creating_user_id` runs inside the same tenant_session; Redis invalidation after it closes.
+- Scope coverage / matrix tests may enumerate routes: GET with `api_keys:write` must not trip a "GET must be :read"
+  assertion — if one exists, the decision-1 note is the justification; adjust the test's override list.
+- Do not run `ruff --select RUF100` (mem-1793280879-cb08).
+- Never log plaintext keys; logs use `key_prefix` only.
+- `/v1/api_keys` must not clash with `/v1/api_keys/{key_id}` validation: `key_id: uuid.UUID` → malformed id gives 400
+  per existing error handler conventions (match orgs_get).
+
+## 2026-10-29 Builder: P02-T10 build notes
+- `routers/api_keys.py` + `api_keys_schemas.py` (envelope, tag API Keys, all `api_keys:write`; create 201, others 200;
+  create/roll `withhold_on_replay(request, "data.key")`). Registered in `main.ROUTERS`.
+- `va_api.auth.api_keys`: `grantable_scopes`, `normalize_scopes`, `check_grantable`, `check_environment`,
+  `check_expires_at`, `check_manages`, `invalidate_cached_keys` (moved from orgs.py `_invalidate_keys`; orgs test now
+  monkeypatches `va_api.auth.api_keys.invalidate_api_key_cache`).
+- `ApiKeyRepo`: `add(expires_at=)`, `list_keys` (not `list`: shadows the builtin in annotations), `rename`, `revoke`
+  (UPDATE ... WHERE revoked_at IS NULL, first time kept), `expire`.
+- specs/04 §9 Decision block (all 11 plan decisions). AGENTS.md entry. openapi + TS schema regenerated.
+- `session_helpers.store_api_key(..., environment=)`.
+- Tests: packages/va_db/tests/test_api_key_repo_integration.py (3), apps/api/tests/test_api_keys_unit.py (15),
+  test_api_keys_integration.py (19), test_openapi api-key operations test.
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 2900 passed, coverage 98.25% (logs/p02-t10-test.log);
+make test-ts pass; openapi drift current; spec refs 0; jscpd 0 clones; radon no C+ (avg 1.9679); pip-audit + pnpm
+audit no vulns; gitleaks pass.
+
+## Review P02-T10 (2026-10-29): approved
+Gates re-run by Reviewer: make lint, typecheck, placeholders pass; make test 2900 passed, coverage 98.25%
+(logs/review-p02-t10-test.log). Diff matches specs/04 §9 table (PATCH `{name?}`, roll 0–168 default 24) and the
+recorded decision block; repo updates filter org_id; cache invalidation after session close; error paths
+(403 scopes/env/own, 400 validation, 404 cross-org, 409 roll revoked) tested. Note for later: test keys may
+revoke/rename live keys (decision limits only create/roll) — acceptable per decision, revisit if specs/28 tightens.

@@ -568,3 +568,14 @@ Grafana 3001
   `main.py`); `routers.auth.session_info(request, response, active)` builds the `GET /session` body. Org status gate:
   `session_auth.check_org_status(status, method)`. Tests: `session_helpers.sub_account(client, name, **headers) ->
   (child_id, key)`; contextvars-bound log fields need `capture_logs(processors=[merge_contextvars])`.
+- 2026-10-29 (P02-T10): API key management. Envelope `api_keys_router` (`routers/api_keys.py`, schemas in
+  `routers/api_keys_schemas.py`, in `main.ROUTERS`): `GET|POST /v1/api_keys`, `PATCH /v1/api_keys/{key_id}`,
+  `POST .../revoke|roll`, all `require_scope("api_keys:write")` (create answers 201). Rules live in
+  `va_api.auth.api_keys`: `grantable_scopes(ctx)`, `normalize_scopes`, `check_grantable`, `check_environment`
+  (test principals manage only test keys), `check_expires_at`, `check_manages` (developer = own keys), and
+  `invalidate_cached_keys(request, prefixes)` (log-and-swallow `apikey:{prefix}` delete; also used by `orgs.py` —
+  monkeypatch `va_api.auth.api_keys.invalidate_api_key_cache` to simulate Redis failures). Redis cache keys use the
+  hash tag form `apikey:{<prefix>}`: build them with `api_key_auth.cache_key(prefix)` in tests. `ApiKeyRepo` gained
+  `list_keys`, `rename`, `revoke` (keeps the first `revoked_at`), `expire`, and `add(..., expires_at=)`. Tests:
+  `store_api_key(container, org_id, scopes, environment="test")` issues test keys; `/v1/me` needs `org:read`, so a
+  narrow key used to probe authentication must hold it.

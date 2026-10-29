@@ -958,6 +958,35 @@ by id to avoid deadlocks. Also allowed child → parent by parent principals (`d
 
 Rule: requested scopes must be a subset of the caller's scopes; otherwise `FORBIDDEN`.
 
+> Decision (2026-10-29): **`/v1/api_keys` rules** (`va_api.routers.api_keys`, helpers in `va_api.auth.api_keys`).
+> - **Scope.** All five routes need `api_keys:write` and declare `x-scope: api_keys:write`, `GET` included: §2.3
+>   has no read scope for keys and the §3.2 "API keys: list" row is held by exactly the roles holding `api_keys:write`.
+> - **Grantable scopes.** An API key grants its own scopes (`*` = every scope of §2.3); an owner or admin session
+>   (also while acting on a sub-account) grants every scope, `*` and `mcp` included (full control, §3.1); any other
+>   role grants its §3.3 role scopes (developer `W(own)`); widgets grant nothing. Otherwise `FORBIDDEN`
+>   "Cannot grant scopes you do not hold: <sorted, comma-joined>.". `scopes` holds 1–50 entries, each in §2.3, else
+>   `INVALID_INPUT` (field `scopes`, "Unknown scope '<s>'."); duplicates are dropped, a list containing `*` is
+>   stored as `["*"]`, any other list sorted.
+> - **Environment.** Default: the caller's environment (sessions are `live`). A `test` principal may create or roll
+>   only `test` keys, else `FORBIDDEN` "Test keys can only manage test keys." (no test → live escalation).
+> - **`expires_at`** must carry a timezone and lie strictly after now, else `INVALID_INPUT` (field `expires_at`).
+> - **Ownership (`W(own)`).** A developer session may rename, revoke, and roll only keys whose `created_by` is
+>   itself, else `FORBIDDEN` "Developers can only manage API keys they created."; owner/admin sessions and API keys
+>   manage every key of the org. A key of another org or an unknown id is `NOT_FOUND` "API key not found.".
+> - **Create** answers `201`; `created_by` is the session's user or the user who created the calling key.
+> - **Revoke** sets `revoked_at` once (revoking again returns the key with the first `revoked_at`); a key may
+>   revoke itself. After commit the `apikey:{prefix}` cache entry is deleted (a Redis failure is logged as
+>   `api_key_cache_unavailable`, not raised), so the next request with the key gets `AUTH_FAILURE`.
+> - **Roll** is refused for a revoked or expired key (`CONFLICT` "A revoked or expired API key cannot be rolled.").
+>   The new key copies `name`, `scopes`, `environment` (`expires_at` null, `created_by` the caller's user) and is
+>   subject to the grantable-scope and environment rules, so a narrow key cannot roll a broader one. The old key's
+>   `expires_at` becomes `min(existing expires_at, now + expire_old_in_hours)` (0 = now); its cache entry is
+>   dropped after commit.
+> - **PATCH** accepts only `name` (`{}` returns the key unchanged); revoked keys may be renamed.
+> - **List** returns every key of the org, revoked and expired ones included, oldest first, unpaginated (`{data:[…]}`),
+>   never `secret_hash` or plaintext. Create and roll withhold `data.key` from idempotent replays (§2.1 decision).
+> - **Audit.** `api_key.create`, `api_key.revoke`, `api_key.roll` audit rows arrive with the audit writer (P02-T11).
+
 ## 10. Agent onboarding API (keys for AI agents)
 
 Purpose: let an autonomous coding agent obtain a scoped **test** key for a human who confirms by email.

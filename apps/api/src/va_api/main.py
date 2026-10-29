@@ -32,6 +32,7 @@ from va_api.routers import (
     org_invitations,  # noqa: F401  (registers the /v1/org/members/invitations routes on org_router)
     org_members,  # noqa: F401  (registers the /v1/org/members routes on org_router)
 )
+from va_api.routers.api_keys import api_keys_router
 from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
@@ -67,6 +68,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     me_router,
     org_router,
     orgs_router,
+    api_keys_router,
     internal_auth_router,
     probe_router,
 )

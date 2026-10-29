@@ -132,17 +132,17 @@
   - Deliverables: `X-VA-Org-Id` handling in `get_principal` for API keys (`org:write` or `*`) and sessions (owner/admin) that rebuilds the `RequestContext` for a direct child (`acting_parent_org_id` set, scopes and role kept, child plan and status gates); `POST /internal/auth/switch-org` (membership, or owner/admin of the child's parent); the session's active org may be a child of a parent membership
   - Acceptance: parent can act on child; child cannot act on parent or sibling; a non-child id → `FORBIDDEN`; RLS still enforced (the session uses the child org id); suspended child refuses writes.
 
-- [ ] P02-T10 API key management endpoints
+- [x] P02-T10 API key management endpoints — list/create(201)/PATCH/revoke/roll under `/v1/api_keys` (api_keys:write), grantable-scope, test-env and developer-own rules, cache drop on revoke/roll, plaintext withheld on replay; 2900 passed, coverage 98.25%
   - Spec refs: specs/04-auth-tenancy-rbac.md (endpoints: /v1/api_keys)
   - Depends on: P02-T08
   - Deliverables: create (secret shown once), list (prefix only), update name/scopes, revoke, rotate
-  - Acceptance: secret never returned after creation; audit entries written.
+  - Acceptance: secret never returned after creation; audit entries written (planner 2026-10-29: the `api_key.create`/`api_key.revoke`/`api_key.roll` rows are written by P02-T11, whose enumeration test covers these routes; T10 records the decision in specs/04 §9).
 
 - [ ] P02-T11 Audit logging
   - Spec refs: specs/04-auth-tenancy-rbac.md (audit logging rules); specs/28-security.md (audit)
   - Depends on: P02-T08
   - Deliverables: `AuditWriter` with redaction of secret fields, decorator/helper for mutating endpoints, `/v1/audit_logs` with filters and pagination
-  - Acceptance: every mutating endpoint added in this phase produces an audit row (test enumerates them).
+  - Acceptance: every mutating endpoint added in this phase produces an audit row (test enumerates them), including `/v1/api_keys` create/revoke/roll (deferred from P02-T10).
 
 - [ ] P02-T12 Org settings
   - Spec refs: specs/04-auth-tenancy-rbac.md (OrgSettings model)

@@ -26,8 +26,8 @@ from session_helpers import (
 from sqlalchemy import func, select, text
 from structlog.testing import capture_logs
 
+from va_api.auth import api_keys as api_keys_module
 from va_api.idempotency import DbIdempotencyStore
-from va_api.routers import orgs as orgs_module
 from va_api.routers.orgs import (
     CLOSED_SUB_ACCOUNT_MESSAGE,
     NESTED_SUB_ACCOUNT_MESSAGE,
@@ -382,7 +382,7 @@ async def test_cache_invalidation_failure_is_logged(
     async def unavailable(redis: object, prefix: str) -> None:
         raise RedisConnectionError(prefix)
 
-    monkeypatch.setattr(orgs_module, "invalidate_api_key_cache", unavailable)
+    monkeypatch.setattr(api_keys_module, "invalidate_api_key_cache", unavailable)
     with capture_logs() as logs:
         response = await client.post(f"{ORGS}/{child['org_id']}/suspend", headers=write_headers(client))
     assert response.status_code == 200, response.text

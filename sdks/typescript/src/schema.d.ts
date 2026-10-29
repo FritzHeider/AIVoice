@@ -4,6 +4,91 @@
  */
 
 export interface paths {
+    "/v1/api_keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Keys List
+         * @description Every API key of the org by prefix, revoked and expired ones included, oldest first.
+         */
+        get: operations["api_keys_list"];
+        put?: never;
+        /**
+         * Api Keys Create
+         * @description Create a key with scopes the caller holds; its plaintext ``key`` is returned only in this response.
+         */
+        post: operations["api_keys_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/api_keys/{key_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Api Keys Update
+         * @description Rename a key (revoked keys too); an empty body returns the key unchanged.
+         */
+        patch: operations["api_keys_update"];
+        trace?: never;
+    };
+    "/v1/api_keys/{key_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Keys Revoke
+         * @description Revoke a key at once; revoking it again returns it with its first ``revoked_at``.
+         */
+        post: operations["api_keys_revoke"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/api_keys/{key_id}/roll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Keys Roll
+         * @description Replace a key: a new key with the same name, scopes, and environment (plaintext only in this response);
+         *     the old key expires after ``expire_old_in_hours`` unless it already expires sooner.
+         */
+        post: operations["api_keys_roll"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -310,6 +395,235 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * ApiKeyCreate
+         * @description ``POST /v1/api_keys``: name, scopes (default every scope), environment, and an optional expiry.
+         * @example {
+         *       "environment": "live",
+         *       "expires_at": "2027-04-29T00:00:00Z",
+         *       "name": "Zapier integration",
+         *       "scopes": [
+         *         "calls:read",
+         *         "calls:write"
+         *       ]
+         *     }
+         */
+        ApiKeyCreate: {
+            /**
+             * Environment
+             * @description `live` or `test`; default: the caller's environment.
+             */
+            environment?: ("live" | "test") | null;
+            /**
+             * Expires At
+             * @description When the key stops working (with a timezone, in the future); default: never.
+             */
+            expires_at?: string | null;
+            /**
+             * Name
+             * @description Label shown in the dashboard (1-100 characters).
+             */
+            name: string;
+            /**
+             * Scopes
+             * @description Scopes of the new key (specs/04 §2.3); each must be one the caller holds. A list containing "*" is stored as ["*"].
+             */
+            scopes?: string[];
+        };
+        /**
+         * ApiKeyCreated
+         * @description A key just created or rolled, with its plaintext ``key`` shown only in this response.
+         * @example {
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *       "environment": "live",
+         *       "expires_at": "2027-04-29T00:00:00Z",
+         *       "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+         *       "key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+         *       "name": "Zapier integration",
+         *       "prefix": "va_live_3kQ9",
+         *       "scopes": [
+         *         "calls:read",
+         *         "calls:write"
+         *       ]
+         *     }
+         */
+        ApiKeyCreated: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Created By
+             * @description The user who created the key, when known.
+             */
+            created_by: string | null;
+            /**
+             * Environment
+             * @enum {string}
+             */
+            environment: "live" | "test";
+            /** Expires At */
+            expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Key
+             * @description The API key, shown only in this response; store it now. null on an Idempotency-Key replay: the key is never stored, so a lost key must be rolled.
+             */
+            key: string | null;
+            /** Last Used At */
+            last_used_at: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Prefix
+             * @description First 12 characters of the key, e.g. `va_live_3kQ9`.
+             */
+            prefix: string;
+            /** Revoked At */
+            revoked_at: string | null;
+            /** Scopes */
+            scopes: string[];
+        };
+        /**
+         * ApiKeyPatch
+         * @description ``PATCH /v1/api_keys/{key_id}``: a new name; an empty body changes nothing.
+         * @example {
+         *       "name": "Zapier (prod)"
+         *     }
+         */
+        ApiKeyPatch: {
+            /**
+             * Name
+             * @description New label (1-100 characters).
+             */
+            name?: string | null;
+        };
+        /**
+         * ApiKeyRoll
+         * @description ``POST /v1/api_keys/{key_id}/roll``: how long the old key keeps working.
+         * @example {
+         *       "expire_old_in_hours": 24
+         *     }
+         */
+        ApiKeyRoll: {
+            /**
+             * Expire Old In Hours
+             * @description Hours until the old key expires (0 = at once); an earlier existing expiry is kept.
+             * @default 24
+             */
+            expire_old_in_hours: number;
+        };
+        /**
+         * ApiKeyView
+         * @description An API key as listed: its prefix, never its hash or plaintext.
+         * @example {
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *       "environment": "live",
+         *       "expires_at": "2027-04-29T00:00:00Z",
+         *       "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+         *       "last_used_at": "2026-10-29T15:42:08Z",
+         *       "name": "Zapier integration",
+         *       "prefix": "va_live_3kQ9",
+         *       "revoked_at": "2026-10-30T08:15:00Z",
+         *       "scopes": [
+         *         "calls:read",
+         *         "calls:write"
+         *       ]
+         *     }
+         */
+        ApiKeyView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Created By
+             * @description The user who created the key, when known.
+             */
+            created_by: string | null;
+            /**
+             * Environment
+             * @enum {string}
+             */
+            environment: "live" | "test";
+            /** Expires At */
+            expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Used At */
+            last_used_at: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Prefix
+             * @description First 12 characters of the key, e.g. `va_live_3kQ9`.
+             */
+            prefix: string;
+            /** Revoked At */
+            revoked_at: string | null;
+            /** Scopes */
+            scopes: string[];
+        };
+        /**
+         * DataResponse[ApiKeyCreated]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-10-29T14:03:11Z",
+         *         "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *         "environment": "live",
+         *         "expires_at": "2027-04-29T00:00:00Z",
+         *         "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+         *         "key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+         *         "name": "Zapier integration",
+         *         "prefix": "va_live_3kQ9",
+         *         "scopes": [
+         *           "calls:read",
+         *           "calls:write"
+         *         ]
+         *       }
+         *     }
+         */
+        DataResponse_ApiKeyCreated_: {
+            data: components["schemas"]["ApiKeyCreated"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[ApiKeyView]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-10-29T14:03:11Z",
+         *         "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *         "environment": "live",
+         *         "expires_at": "2027-04-29T00:00:00Z",
+         *         "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+         *         "last_used_at": "2026-10-29T15:42:08Z",
+         *         "name": "Zapier integration",
+         *         "prefix": "va_live_3kQ9",
+         *         "revoked_at": "2026-10-30T08:15:00Z",
+         *         "scopes": [
+         *           "calls:read",
+         *           "calls:write"
+         *         ]
+         *       }
+         *     }
+         */
+        DataResponse_ApiKeyView_: {
+            data: components["schemas"]["ApiKeyView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[InvitationRevoked]
          * @example {
          *       "data": {
@@ -508,6 +822,34 @@ export interface components {
          */
         DataResponse_SsoConnectionView_: {
             data: components["schemas"]["SsoConnectionView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[list[ApiKeyView]]
+         * @example {
+         *       "data": [
+         *         {
+         *           "created_at": "2026-10-29T14:03:11Z",
+         *           "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *           "environment": "live",
+         *           "expires_at": "2027-04-29T00:00:00Z",
+         *           "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+         *           "last_used_at": "2026-10-29T15:42:08Z",
+         *           "name": "Zapier integration",
+         *           "prefix": "va_live_3kQ9",
+         *           "revoked_at": "2026-10-30T08:15:00Z",
+         *           "scopes": [
+         *             "calls:read",
+         *             "calls:write"
+         *           ]
+         *         }
+         *       ]
+         *     }
+         */
+        DataResponse_list_ApiKeyView__: {
+            /** Data */
+            data: components["schemas"]["ApiKeyView"][];
             /** Errors */
             errors?: null;
         };
@@ -1401,6 +1743,205 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    api_keys_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_list_ApiKeyView__"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_keys_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApiKeyCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_ApiKeyCreated_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_keys_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApiKeyPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_ApiKeyView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_keys_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_ApiKeyView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_keys_roll: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApiKeyRoll"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_ApiKeyCreated_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     health_get: {
         parameters: {
             query?: never;

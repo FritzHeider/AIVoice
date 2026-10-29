@@ -323,3 +323,25 @@ def test_sub_account_operations_are_legacy_with_scopes_and_permission() -> None:
         assert (operation["operationId"], operation["x-scope"]) == (operation_id, scope)
         assert (operation["x-envelope"], operation["x-permission"]) == ("legacy", "subaccounts.manage")
         assert "200" in operation["responses"]
+
+
+def test_api_key_operations_are_envelope_with_the_write_scope() -> None:
+    document = create_app(make_settings(), init_observability=False).openapi()
+    paths = document["paths"]
+    operations = {
+        ("/v1/api_keys", "get"): ("api_keys_list", "200"),
+        ("/v1/api_keys", "post"): ("api_keys_create", "201"),
+        ("/v1/api_keys/{key_id}", "patch"): ("api_keys_update", "200"),
+        ("/v1/api_keys/{key_id}/revoke", "post"): ("api_keys_revoke", "200"),
+        ("/v1/api_keys/{key_id}/roll", "post"): ("api_keys_roll", "200"),
+    }
+    for (path, method), (operation_id, status) in operations.items():
+        operation = paths[path][method]
+        assert (operation["operationId"], operation["x-scope"]) == (operation_id, "api_keys:write")
+        assert (operation["x-envelope"], operation["tags"]) == ("envelope", ["API Keys"])
+        assert status in operation["responses"]
+    created = document["components"]["schemas"]["ApiKeyCreated"]
+    assert {"type": "null"} in created["properties"]["key"]["anyOf"]
+    assert "Idempotency-Key replay" in created["properties"]["key"]["description"]
+    assert "key" not in document["components"]["schemas"]["ApiKeyView"]["properties"]
+    assert "secret_hash" not in document["components"]["schemas"]["ApiKeyView"]["properties"]

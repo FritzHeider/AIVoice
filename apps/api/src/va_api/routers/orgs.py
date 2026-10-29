@@ -21,14 +21,12 @@ from dataclasses import dataclass
 from typing import Annotated, Final
 
 from fastapi import Depends, Request
-from redis.exceptions import RedisError
 
-from va_api.auth.api_key_auth import invalidate_api_key_cache
-from va_api.auth.api_keys import creating_user_id, mint_api_key
+from va_api.auth.api_keys import creating_user_id, invalidate_cached_keys, mint_api_key
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
 from va_api.auth.permissions import require_permission
-from va_api.auth.session_auth import api_key_hasher_of, database_of, provisioner_of, redis_of
+from va_api.auth.session_auth import api_key_hasher_of, database_of, provisioner_of
 from va_api.envelopes import legacy_router
 from va_api.idempotency import withhold_on_replay
 from va_api.routers.orgs_schemas import (
@@ -40,7 +38,6 @@ from va_api.routers.orgs_schemas import (
 )
 from va_common.errors import AppError
 from va_common.ids import new_id
-from va_common.logging import get_logger
 from va_common.money import dollars_to_micros
 from va_db.models import Org, OrgStatus
 from va_db.repositories import ApiKeyRepo, CreditTransferRepo, OrgRepo
@@ -71,8 +68,6 @@ orgs_router = legacy_router(prefix="/v1/orgs", tags=["Org"])
 ReadOrgs = Annotated[RequestContext, Depends(require_scope("org:read"))]
 WriteOrgs = Annotated[RequestContext, Depends(require_scope("org:write"))]
 _DEPENDENCIES: Final = [Depends(require_permission(_MANAGE))]
-
-_log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,16 +171,6 @@ async def orgs_get(org_id: uuid.UUID, request: Request, ctx: ReadOrgs) -> SubAcc
     return SubAccountResult(org=sub_account_item(child))
 
 
-async def _invalidate_keys(request: Request, prefixes: list[str]) -> None:
-    """Drop the cached lookups of the sub-account's keys; a Redis failure is logged, never raised."""
-    redis = redis_of(request)
-    for prefix in prefixes:
-        try:
-            await invalidate_api_key_cache(redis, prefix)
-        except (RedisError, OSError) as exc:
-            _log.warning("api_key_cache_unavailable", key_prefix=prefix, error=type(exc).__name__)
-
-
 async def _set_status(request: Request, ctx: RequestContext, org_id: uuid.UUID, status: OrgStatus) -> Org:
     """Set a direct sub-account's status (``NOT_FOUND``; ``CONFLICT`` when closed); drop its key cache."""
     async with database_of(request).tenant_session(org_id) as session:
@@ -197,7 +182,7 @@ async def _set_status(request: Request, ctx: RequestContext, org_id: uuid.UUID, 
             raise AppError("CONFLICT", CLOSED_SUB_ACCOUNT_MESSAGE)
         updated = await repo.set_status(org_id, status) if child.status != status else child
         prefixes = await ApiKeyRepo(session, org_id).prefixes()
-    await _invalidate_keys(request, prefixes)
+    await invalidate_cached_keys(request, prefixes)
     return updated or child
 
 

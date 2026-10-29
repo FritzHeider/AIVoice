@@ -37,7 +37,14 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
 from va_api.settings import ApiSettings
-from va_common.auth import Argon2Params, PasswordHasher, api_key_prefix, totp_code, totp_counter
+from va_common.auth import (
+    Argon2Params,
+    KeyEnvironment,
+    PasswordHasher,
+    api_key_prefix,
+    totp_code,
+    totp_counter,
+)
 from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
 from va_common.ids import new_id
@@ -285,10 +292,13 @@ async def add_member(
 
 
 async def store_api_key(
-    container: SessionContainer, org_id: uuid.UUID, scopes: tuple[str, ...] = ("*",)
+    container: SessionContainer,
+    org_id: uuid.UUID,
+    scopes: tuple[str, ...] = ("*",),
+    environment: KeyEnvironment = "live",
 ) -> tuple[str, ApiKey]:
     """A key the in-memory store authenticates for ``org_id``, also stored as an ``api_keys`` row."""
-    plaintext, record = container.store.issue(org_id=org_id, scopes=scopes)
+    plaintext, record = container.store.issue(org_id=org_id, scopes=scopes, environment=environment)
     row = ApiKey(
         id=record.id,
         org_id=org_id,

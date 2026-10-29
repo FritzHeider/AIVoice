@@ -1,6 +1,441 @@
 {
   "components": {
     "schemas": {
+      "ApiKeyCreate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/api_keys``: name, scopes (default every scope), environment, and an optional expiry.",
+        "examples": [
+          {
+            "environment": "live",
+            "expires_at": "2027-04-29T00:00:00Z",
+            "name": "Zapier integration",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ]
+          }
+        ],
+        "properties": {
+          "environment": {
+            "anyOf": [
+              {
+                "enum": [
+                  "live",
+                  "test"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`live` or `test`; default: the caller's environment.",
+            "title": "Environment"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the key stops working (with a timezone, in the future); default: never.",
+            "title": "Expires At"
+          },
+          "name": {
+            "description": "Label shown in the dashboard (1-100 characters).",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "Scopes of the new key (specs/04 §2.3); each must be one the caller holds. A list containing \"*\" is stored as [\"*\"].",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ApiKeyCreate",
+        "type": "object"
+      },
+      "ApiKeyCreated": {
+        "description": "A key just created or rolled, with its plaintext ``key`` shown only in this response.",
+        "examples": [
+          {
+            "created_at": "2026-10-29T14:03:11Z",
+            "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "environment": "live",
+            "expires_at": "2027-04-29T00:00:00Z",
+            "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+            "key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+            "name": "Zapier integration",
+            "prefix": "va_live_3kQ9",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ]
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The user who created the key, when known.",
+            "title": "Created By"
+          },
+          "environment": {
+            "enum": [
+              "live",
+              "test"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The API key, shown only in this response; store it now. null on an Idempotency-Key replay: the key is never stored, so a lost key must be rolled.",
+            "title": "Key"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "First 12 characters of the key, e.g. `va_live_3kQ9`.",
+            "title": "Prefix",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "scopes",
+          "environment",
+          "created_by",
+          "last_used_at",
+          "expires_at",
+          "revoked_at",
+          "created_at",
+          "key"
+        ],
+        "title": "ApiKeyCreated",
+        "type": "object"
+      },
+      "ApiKeyPatch": {
+        "additionalProperties": false,
+        "description": "``PATCH /v1/api_keys/{key_id}``: a new name; an empty body changes nothing.",
+        "examples": [
+          {
+            "name": "Zapier (prod)"
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New label (1-100 characters).",
+            "title": "Name"
+          }
+        },
+        "title": "ApiKeyPatch",
+        "type": "object"
+      },
+      "ApiKeyRoll": {
+        "additionalProperties": false,
+        "description": "``POST /v1/api_keys/{key_id}/roll``: how long the old key keeps working.",
+        "examples": [
+          {
+            "expire_old_in_hours": 24
+          }
+        ],
+        "properties": {
+          "expire_old_in_hours": {
+            "default": 24,
+            "description": "Hours until the old key expires (0 = at once); an earlier existing expiry is kept.",
+            "maximum": 168.0,
+            "minimum": 0.0,
+            "title": "Expire Old In Hours",
+            "type": "integer"
+          }
+        },
+        "title": "ApiKeyRoll",
+        "type": "object"
+      },
+      "ApiKeyView": {
+        "description": "An API key as listed: its prefix, never its hash or plaintext.",
+        "examples": [
+          {
+            "created_at": "2026-10-29T14:03:11Z",
+            "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "environment": "live",
+            "expires_at": "2027-04-29T00:00:00Z",
+            "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+            "last_used_at": "2026-10-29T15:42:08Z",
+            "name": "Zapier integration",
+            "prefix": "va_live_3kQ9",
+            "revoked_at": "2026-10-30T08:15:00Z",
+            "scopes": [
+              "calls:read",
+              "calls:write"
+            ]
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The user who created the key, when known.",
+            "title": "Created By"
+          },
+          "environment": {
+            "enum": [
+              "live",
+              "test"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "First 12 characters of the key, e.g. `va_live_3kQ9`.",
+            "title": "Prefix",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "scopes",
+          "environment",
+          "created_by",
+          "last_used_at",
+          "expires_at",
+          "revoked_at",
+          "created_at"
+        ],
+        "title": "ApiKeyView",
+        "type": "object"
+      },
+      "DataResponse_ApiKeyCreated_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-10-29T14:03:11Z",
+              "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+              "environment": "live",
+              "expires_at": "2027-04-29T00:00:00Z",
+              "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+              "key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+              "name": "Zapier integration",
+              "prefix": "va_live_3kQ9",
+              "scopes": [
+                "calls:read",
+                "calls:write"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApiKeyCreated"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[ApiKeyCreated]",
+        "type": "object"
+      },
+      "DataResponse_ApiKeyView_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-10-29T14:03:11Z",
+              "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+              "environment": "live",
+              "expires_at": "2027-04-29T00:00:00Z",
+              "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+              "last_used_at": "2026-10-29T15:42:08Z",
+              "name": "Zapier integration",
+              "prefix": "va_live_3kQ9",
+              "revoked_at": "2026-10-30T08:15:00Z",
+              "scopes": [
+                "calls:read",
+                "calls:write"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApiKeyView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[ApiKeyView]",
+        "type": "object"
+      },
       "DataResponse_InvitationRevoked_": {
         "examples": [
           {
@@ -291,6 +726,47 @@
           "data"
         ],
         "title": "DataResponse[SsoConnectionView]",
+        "type": "object"
+      },
+      "DataResponse_list_ApiKeyView__": {
+        "examples": [
+          {
+            "data": [
+              {
+                "created_at": "2026-10-29T14:03:11Z",
+                "created_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+                "environment": "live",
+                "expires_at": "2027-04-29T00:00:00Z",
+                "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+                "last_used_at": "2026-10-29T15:42:08Z",
+                "name": "Zapier integration",
+                "prefix": "va_live_3kQ9",
+                "revoked_at": "2026-10-30T08:15:00Z",
+                "scopes": [
+                  "calls:read",
+                  "calls:write"
+                ]
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ApiKeyView"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[list[ApiKeyView]]",
         "type": "object"
       },
       "DataResponse_list_InvitationView__": {
@@ -1885,6 +2361,280 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/api_keys": {
+      "get": {
+        "description": "Every API key of the org by prefix, revoked and expired ones included, oldest first.",
+        "operationId": "api_keys_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_list_ApiKeyView__"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Api Keys List",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "api_keys:write"
+      },
+      "post": {
+        "description": "Create a key with scopes the caller holds; its plaintext ``key`` is returned only in this response.",
+        "operationId": "api_keys_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_ApiKeyCreated_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Api Keys Create",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "api_keys:write"
+      }
+    },
+    "/v1/api_keys/{key_id}": {
+      "patch": {
+        "description": "Rename a key (revoked keys too); an empty body returns the key unchanged.",
+        "operationId": "api_keys_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_ApiKeyView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Api Keys Update",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "api_keys:write"
+      }
+    },
+    "/v1/api_keys/{key_id}/revoke": {
+      "post": {
+        "description": "Revoke a key at once; revoking it again returns it with its first ``revoked_at``.",
+        "operationId": "api_keys_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_ApiKeyView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Api Keys Revoke",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "api_keys:write"
+      }
+    },
+    "/v1/api_keys/{key_id}/roll": {
+      "post": {
+        "description": "Replace a key: a new key with the same name, scopes, and environment (plaintext only in this response);\nthe old key expires after ``expire_old_in_hours`` unless it already expires sooner.",
+        "operationId": "api_keys_roll",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Key Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyRoll"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_ApiKeyCreated_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Api Keys Roll",
+        "tags": [
+          "API Keys"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "api_keys:write"
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health_get",
