@@ -36,6 +36,8 @@ INTERNAL_PATHS = {
     "/internal/auth/password/change",
     "/internal/auth/sso/start",
     "/internal/auth/sso/callback",
+    "/internal/auth/invitations/{token}",
+    "/internal/auth/invitations/accept",
 }
 REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
@@ -294,6 +296,13 @@ def test_member_operations_declare_scopes_and_permissions() -> None:
         ("/v1/org/members/{user_id}", "patch"): ("org_members_update", "org:write", "members.manage"),
         ("/v1/org/members/{user_id}", "delete"): ("org_members_remove", "org:write", "members.manage"),
         ("/v1/org/transfer-ownership", "post"): ("org_transfer_ownership", "org:write", "org.owner_transfer"),
+        ("/v1/org/members/invitations", "post"): ("org_invitations_create", "org:write", "members.manage"),
+        ("/v1/org/members/invitations", "get"): ("org_invitations_list", "org:read", "members.manage"),
+        ("/v1/org/members/invitations/{invitation_id}", "delete"): (
+            "org_invitations_revoke",
+            "org:write",
+            "members.manage",
+        ),
     }
     for (path, method), expected in operations.items():
         operation = paths[path][method]

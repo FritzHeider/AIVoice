@@ -57,7 +57,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
-  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
+  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, `InvitationLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
 > role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
@@ -105,6 +105,14 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > `SsoDomainClaim(org_id, connection_id, domain)` for every listed domain of every connection, ordered by connection
 > `created_at`, id, domain; `for_domain(domain)` returns the oldest connection listing `domain`. The org's own row is
 > managed by the tenant-scoped `SsoConnectionRepo` (`get`, `upsert`, `delete`; one connection per org).
+
+> Decision (2026-10-29): `InvitationLookupRepo` joins the `va_system` list because an invitation token arrives before
+> any org context exists (`GET /internal/auth/invitations/{token}`, `POST /internal/auth/invitations/accept`, specs/04
+> §6): `by_token(token)` hashes the token (sha256 hex, like email tokens) and returns an `InvitationLookup` (invitation
+> id, org id, org name and status, email, role, `expires_at`, `accepted_at`, inviter name, and whether a user with the
+> email exists), or `None`. The org's own invitations are managed by the tenant-scoped `InvitationRepo` (`create`,
+> which first deletes an open invitation of the same email; `list_open`; `get_open`; `revoke`, a `DELETE`; and
+> `consume`, one conditional `UPDATE … SET accepted_at` of an open, unexpired row).
 
 ## 3. Tenancy, identity, access
 

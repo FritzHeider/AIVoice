@@ -42,6 +42,7 @@ __all__ = [
     "org_members_remove",
     "org_members_update",
     "org_transfer_ownership",
+    "owner_guard",
 ]
 
 MEMBER_NOT_FOUND_MESSAGE: Final = "Member not found."
@@ -57,8 +58,9 @@ def _found[T](value: T | None) -> T:
     return value
 
 
-def _owner_guard(ctx: RequestContext, target_role: MemberRole, new_role: MemberRole | None) -> None:
-    """``FORBIDDEN`` when the change touches an owner and the principal lacks ``org.owner_transfer``."""
+def owner_guard(ctx: RequestContext, target_role: MemberRole, new_role: MemberRole | None = None) -> None:
+    """``FORBIDDEN`` when the change touches an owner (``target_role`` or ``new_role``) and the principal
+    lacks ``org.owner_transfer``; invitations pass the invited role as ``target_role``."""
     if "owner" in {target_role, new_role} and not holds_permission(ctx, _OWNER_TRANSFER):
         raise AppError("FORBIDDEN", f"Missing required permission '{_OWNER_TRANSFER}'.")
 
@@ -90,7 +92,7 @@ async def org_members_update(
     async with database_of(request).tenant_session(ctx.org_id) as session:
         repo = MembershipRepo(session, ctx.org_id)
         target = await _locked_target(repo, user_id)
-        _owner_guard(ctx, target.role, body.role)
+        owner_guard(ctx, target.role, body.role)
         updated = _found(await repo.change_role(user_id, body.role))
     return DataResponse(data=member_view(updated))
 
@@ -108,7 +110,7 @@ async def org_members_remove(
     async with database_of(request).tenant_session(ctx.org_id) as session:
         repo = MembershipRepo(session, ctx.org_id)
         target = await _locked_target(repo, user_id)
-        _owner_guard(ctx, target.role, None)
+        owner_guard(ctx, target.role)
         if not await repo.remove_member(user_id):
             raise AppError("NOT_FOUND", MEMBER_NOT_FOUND_MESSAGE)
     return DataResponse(data=MemberRemoved(user_id=user_id))

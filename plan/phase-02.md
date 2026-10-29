@@ -90,7 +90,7 @@
   - Deliverables: authlib dependency; `GET /internal/auth/sso/start?email=` (domain lookup, PKCE S256, state/nonce in Redis 10 min, redirect); `GET /internal/auth/sso/callback` (state single-use, code exchange, ID token signature via JWKS, `iss`/`aud`/`exp`/`nonce`, `email_verified` rule, JIT user/membership with `default_role`, session with `mfa_passed=true`, redirect to the dashboard); password login on an enforced domain → `SSO_REQUIRED` with `details.sso_url`
   - Acceptance: tests against an in-process fake OIDC provider (respx discovery/JWKS/token endpoints, generated RSA key) including bad state, reused state, bad nonce, wrong issuer, wrong audience, expired token, bad signature, unverified email; JIT paths (new user, existing user without membership, existing membership keeps role); enforce blocks password login while API keys still work.
 
-- [ ] P02-T08 Orgs, members, invitations, RBAC matrix (split by the planner on 2026-10-29 into T08a/T08b/T08c below; tick when all three are ticked)
+- [x] P02-T08 Orgs, members, invitations, RBAC matrix (split by the planner on 2026-10-29 into T08a/T08b/T08c below; tick when all three are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (RBAC matrix, endpoints, invitations, org switching)
   - Depends on: P02-T01, P02-T04
   - Deliverables: `/v1/me`, `/v1/org` (GET/PATCH), `/v1/org/members` (list, change role, remove), invitations (create, list, revoke, accept), `require_permission(resource, action)` driven by a single matrix table in code that is tested against the spec matrix
@@ -108,7 +108,7 @@
   - Deliverables: `GET /v1/org/members`, `PATCH /v1/org/members/{user_id}`, `DELETE /v1/org/members/{user_id}`, `POST /v1/org/transfer-ownership` (owner session + recent auth); removed members' sessions lose the org
   - Acceptance: last-owner protection (`CONFLICT` "An organization must have at least one owner.") including concurrent demotions; only owners assign `owner`; admins cannot change owners; cross-org user ids answer `NOT_FOUND`.
 
-- [ ] P02-T08c Invitations: create, list, revoke, details, accept
+- [x] P02-T08c Invitations: create, list, revoke, details, accept — 3 /v1/org/members/invitations routes + 2 internal invitation routes, invitation email, InvitationLookupRepo; reviewer re-run: lint/typecheck/placeholders pass, make test 2766 passed, coverage 98.58%, openapi drift current, spec refs 0
   - Spec refs: specs/04-auth-tenancy-rbac.md §6 (invitations), §4.1 (`/internal/auth/invitations/*`), §4.2 (token format); specs/28-security.md §2
   - Depends on: P02-T08b
   - Deliverables: `POST/GET /v1/org/members/invitations`, `DELETE /v1/org/members/invitations/{id}`, invitation email template with `{DASHBOARD_BASE_URL}/invite/{token}`, `GET /internal/auth/invitations/{token}`, `POST /internal/auth/invitations/accept` (creates the user when needed, adds the membership)

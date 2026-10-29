@@ -266,6 +266,29 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 `INVALID_MFA_CODE` (401), `PASSWORD_TOO_WEAK` (400), `TOKEN_EXPIRED` (400), `REAUTH_REQUIRED` (401)
 (see shared-contract additions).
 
+> Decision (2026-10-29): **invitation endpoints** (public, `x-public: session-flow`). `GET
+> /internal/auth/invitations/{token}` needs no session; a malformed, unknown, revoked, accepted, or expired token →
+> `TOKEN_EXPIRED` (400) "Invitation link is invalid or has expired." field `token`; otherwise `{data:{org_name, role,
+> email, inviter_name, expires_at, account_exists}}` (`inviter_name` falls back to the inviter's email when the name
+> is empty; `account_exists` tells the dashboard whether to offer sign-in or account creation). `POST
+> /internal/auth/invitations/accept` `{token (1–256), name? (1–200, trimmed), password? (1–1024)}` checks, in order:
+> the token as above; the invitation's org `suspended`/`closed` → `ORG_SUSPENDED` (the session gate's messages);
+> then (a) with a valid session cookie (CSRF and dashboard `Origin` required as for other session writes): the
+> user's own MFA on and not passed → `MFA_REQUIRED`; the session user's email differing from the invited one
+> (case-insensitive) → `FORBIDDEN` "This invitation was sent to a different email address."; else the user joins,
+> the email is marked verified (an earlier verification is kept), and the invited org becomes the session's active
+> org; (b) without a valid session, when a user with the email exists → `AUTH_FAILURE` (401) "Sign in to accept this
+> invitation." (nothing consumed); (c) otherwise (dashboard `Origin` rule of signup): `name` and `password` are
+> required (`INVALID_INPUT` field `name` "Name is required to create your account." / field `password` "Password is
+> required to create your account."), an SSO-enforced domain (with `OIDC_ENABLED=true`) → `SSO_REQUIRED` with
+> `details.sso_url`, the §4.2 policy applies (`PASSWORD_TOO_WEAK` field `password`), and the user is created with
+> `email_verified_at = now`, joins, and gets a login session in the invited org (both cookies set). Every success runs
+> one `tenant_session(invitation org)` transaction that checks the membership (already a member → `CONFLICT` "You are
+> already a member of this organization."), consumes the invitation with a conditional `UPDATE … SET accepted_at`
+> (losing a race → `TOKEN_EXPIRED`), creates the user when needed, and adds the membership with the invited role;
+> any failure rolls back so the link stays usable. Response 200 `{data:{user, org_id, org_name, role}}` (`user` as in
+> `GET /internal/auth/session`).
+
 > Decision (2026-10-29): **org provisioning** (`va_db.provisioning.OrgProvisioner`, used by signup,
 > `POST /v1/orgs/create`, and seeding) creates in one `tenant_session(new_org_id)` transaction: the org row, its
 > `active` `org_data_keys` row, a webhook signing secret `whsec_` + 43-char opaque token encrypted with AAD
@@ -653,6 +676,27 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
 > `INVALID_INPUT` (field `user_id`) "You already own this organization."; not a member of the org → `NOT_FOUND`
 > "Member not found.". In one transaction under the org-row lock the target becomes `owner` and the caller `admin`;
 > other owners keep their role. Returns `{data:{previous_owner: <member>, owner: <member>}}`.
+
+> Decision (2026-10-29): `POST /v1/org/members/invitations` `{email, role}` (no other fields; `email` trimmed, 3–320
+> characters with exactly one `@` and non-empty sides, else `INVALID_INPUT` field `email`; `role` ∈ the six roles)
+> needs `org:write` + `members.manage`; role `owner` also needs `org.owner_transfer` (same `FORBIDDEN` message as
+> members). An email of a current member (any letter case) → `CONFLICT` field `email` "This person is already a
+> member of the organization.". An open (unaccepted) invitation of the same email in the org is deleted in the same
+> transaction, so re-inviting resends with a fresh token and the new role and the old link stops working. The token
+> is `issue_token()` (stored as sha256 hex, never returned), `expires_at = now + 7 days`. Response **201**
+> `{data: <invitation>}`, invitation = `{id, email, role, invited_by, status: "pending"|"expired", expires_at,
+> created_at}`. The `invitation` email (link `{DASHBOARD_BASE_URL}/invite/{token}`, greeting "Hi there", naming the
+> inviter, org, and role) goes out after the response; a delivery failure is logged as `invitation_email_failed`.
+> The inviter is the session's user, or the `created_by` user of the calling API key; a key without one →
+> `FORBIDDEN` "This API key has no creating user to send invitations as.".
+
+> Decision (2026-10-29): `GET /v1/org/members/invitations` needs `org:read` + `members.manage` (inviting is the job
+> of owners and admins, and the dashboard hides invitations from other roles) and returns every unaccepted
+> invitation, expired ones with `status: "expired"`, ordered `created_at` desc, `id` desc, unpaginated (one open
+> invitation per email; retention purges expired rows). `DELETE /v1/org/members/invitations/{id}` needs `org:write`
+> + `members.manage` (+ `org.owner_transfer` for an owner invitation), deletes the row (the table has no revoked
+> column), and returns `{data:{id, revoked: true}}`; an unknown, other-org, or accepted invitation → `NOT_FOUND`
+> "Invitation not found.".
 
 ## 7. OrgSettings model
 

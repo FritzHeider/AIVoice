@@ -1,6 +1,59 @@
 {
   "components": {
     "schemas": {
+      "DataResponse_InvitationRevoked_": {
+        "examples": [
+          {
+            "data": {
+              "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+              "revoked": true
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/InvitationRevoked"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[InvitationRevoked]",
+        "type": "object"
+      },
+      "DataResponse_InvitationView_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-10-29T09:12:40Z",
+              "email": "priya.nair@acme-dental.test",
+              "expires_at": "2026-11-05T09:12:40Z",
+              "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+              "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+              "role": "developer",
+              "status": "pending"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/InvitationView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[InvitationView]",
+        "type": "object"
+      },
       "DataResponse_MeView_": {
         "examples": [
           {
@@ -240,6 +293,41 @@
         "title": "DataResponse[SsoConnectionView]",
         "type": "object"
       },
+      "DataResponse_list_InvitationView__": {
+        "examples": [
+          {
+            "data": [
+              {
+                "created_at": "2026-10-29T09:12:40Z",
+                "email": "priya.nair@acme-dental.test",
+                "expires_at": "2026-11-05T09:12:40Z",
+                "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+                "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+                "role": "developer",
+                "status": "pending"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/InvitationView"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[list[InvitationView]]",
+        "type": "object"
+      },
       "DataResponse_list_MemberView__": {
         "examples": [
           {
@@ -433,6 +521,144 @@
           "status"
         ],
         "title": "HealthStatus",
+        "type": "object"
+      },
+      "InvitationCreate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/org/members/invitations``: who to invite and with which role.",
+        "examples": [
+          {
+            "email": "priya.nair@acme-dental.test",
+            "role": "developer"
+          }
+        ],
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "role"
+        ],
+        "title": "InvitationCreate",
+        "type": "object"
+      },
+      "InvitationRevoked": {
+        "description": "``DELETE /v1/org/members/invitations/{invitation_id}`` result.",
+        "examples": [
+          {
+            "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+            "revoked": true
+          }
+        ],
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "revoked": {
+            "const": true,
+            "default": true,
+            "title": "Revoked",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "InvitationRevoked",
+        "type": "object"
+      },
+      "InvitationStatus": {
+        "enum": [
+          "pending",
+          "expired"
+        ],
+        "type": "string"
+      },
+      "InvitationView": {
+        "description": "An unaccepted invitation; its token is never returned.",
+        "examples": [
+          {
+            "created_at": "2026-10-29T09:12:40Z",
+            "email": "priya.nair@acme-dental.test",
+            "expires_at": "2026-11-05T09:12:40Z",
+            "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+            "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "role": "developer",
+            "status": "pending"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "invited_by": {
+            "description": "The user who sent the invitation.",
+            "format": "uuid",
+            "title": "Invited By",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/InvitationStatus",
+            "description": "`expired` once `expires_at` has passed."
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "invited_by",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "InvitationView",
         "type": "object"
       },
       "JitRole": {
@@ -1567,6 +1793,151 @@
         ],
         "x-envelope": "envelope",
         "x-scope": "org:read"
+      }
+    },
+    "/v1/org/members/invitations": {
+      "get": {
+        "description": "Every unaccepted invitation, newest first; expired ones are listed with ``status: \"expired\"``.",
+        "operationId": "org_invitations_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_list_InvitationView__"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Invitations List",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "members.manage",
+        "x-scope": "org:read"
+      },
+      "post": {
+        "description": "Invite an email address into the org (7 days, single use); only owners can invite owners.",
+        "operationId": "org_invitations_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvitationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_InvitationView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Invitations Create",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "members.manage",
+        "x-scope": "org:write"
+      }
+    },
+    "/v1/org/members/invitations/{invitation_id}": {
+      "delete": {
+        "description": "Revoke an unaccepted invitation, so its link stops working; owner invitations only by owners.",
+        "operationId": "org_invitations_revoke",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invitation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Invitation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_InvitationRevoked_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Invitations Revoke",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "members.manage",
+        "x-scope": "org:write"
       }
     },
     "/v1/org/members/{user_id}": {

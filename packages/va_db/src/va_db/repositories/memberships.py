@@ -160,6 +160,11 @@ class MembershipRepo:
         row = (await self.session.execute(self._members().where(Membership.user_id == user_id))).first()
         return None if row is None else MemberRecord(*row)
 
+    async def member_by_email(self, email: str) -> MemberRecord | None:
+        """The member whose email is ``email`` (case-insensitive ``citext``), or ``None``."""
+        row = (await self.session.execute(self._members().where(User.email == email.strip()))).first()
+        return None if row is None else MemberRecord(*row)
+
     async def lock_org(self) -> None:
         """Lock the org row until the transaction ends; serialises changes to the org's owners."""
         await self.session.execute(select(Org.id).where(Org.id == self.org_id).with_for_update())

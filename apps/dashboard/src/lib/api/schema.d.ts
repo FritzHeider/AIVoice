@@ -86,6 +86,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/org/members/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Org Invitations List
+         * @description Every unaccepted invitation, newest first; expired ones are listed with ``status: "expired"``.
+         */
+        get: operations["org_invitations_list"];
+        put?: never;
+        /**
+         * Org Invitations Create
+         * @description Invite an email address into the org (7 days, single use); only owners can invite owners.
+         */
+        post: operations["org_invitations_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/org/members/invitations/{invitation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Org Invitations Revoke
+         * @description Revoke an unaccepted invitation, so its link stops working; owner invitations only by owners.
+         */
+        delete: operations["org_invitations_revoke"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/org/members/{user_id}": {
         parameters: {
             query?: never;
@@ -162,6 +206,39 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * DataResponse[InvitationRevoked]
+         * @example {
+         *       "data": {
+         *         "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+         *         "revoked": true
+         *       }
+         *     }
+         */
+        DataResponse_InvitationRevoked_: {
+            data: components["schemas"]["InvitationRevoked"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[InvitationView]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-10-29T09:12:40Z",
+         *         "email": "priya.nair@acme-dental.test",
+         *         "expires_at": "2026-11-05T09:12:40Z",
+         *         "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+         *         "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *         "role": "developer",
+         *         "status": "pending"
+         *       }
+         *     }
+         */
+        DataResponse_InvitationView_: {
+            data: components["schemas"]["InvitationView"];
+            /** Errors */
+            errors?: null;
+        };
         /**
          * DataResponse[MeView]
          * @example {
@@ -332,6 +409,28 @@ export interface components {
             errors?: null;
         };
         /**
+         * DataResponse[list[InvitationView]]
+         * @example {
+         *       "data": [
+         *         {
+         *           "created_at": "2026-10-29T09:12:40Z",
+         *           "email": "priya.nair@acme-dental.test",
+         *           "expires_at": "2026-11-05T09:12:40Z",
+         *           "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+         *           "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *           "role": "developer",
+         *           "status": "pending"
+         *         }
+         *       ]
+         *     }
+         */
+        DataResponse_list_InvitationView__: {
+            /** Data */
+            data: components["schemas"]["InvitationView"][];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[list[MemberView]]
          * @example {
          *       "data": [
@@ -451,6 +550,91 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /**
+         * InvitationCreate
+         * @description ``POST /v1/org/members/invitations``: who to invite and with which role.
+         * @example {
+         *       "email": "priya.nair@acme-dental.test",
+         *       "role": "developer"
+         *     }
+         */
+        InvitationCreate: {
+            /** Email */
+            email: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "developer" | "analyst" | "billing" | "viewer";
+        };
+        /**
+         * InvitationRevoked
+         * @description ``DELETE /v1/org/members/invitations/{invitation_id}`` result.
+         * @example {
+         *       "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+         *       "revoked": true
+         *     }
+         */
+        InvitationRevoked: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Revoked
+             * @default true
+             * @constant
+             */
+            revoked: true;
+        };
+        /** @enum {string} */
+        InvitationStatus: "pending" | "expired";
+        /**
+         * InvitationView
+         * @description An unaccepted invitation; its token is never returned.
+         * @example {
+         *       "created_at": "2026-10-29T09:12:40Z",
+         *       "email": "priya.nair@acme-dental.test",
+         *       "expires_at": "2026-11-05T09:12:40Z",
+         *       "id": "0192f1d2-9d5e-7c32-8e6f-7f8a9b0c1d2e",
+         *       "invited_by": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *       "role": "developer",
+         *       "status": "pending"
+         *     }
+         */
+        InvitationView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Email */
+            email: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Invited By
+             * Format: uuid
+             * @description The user who sent the invitation.
+             */
+            invited_by: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "developer" | "analyst" | "billing" | "viewer";
+            /** @description `expired` once `expires_at` has passed. */
+            status: components["schemas"]["InvitationStatus"];
         };
         /** @enum {string} */
         JitRole: "admin" | "developer" | "analyst" | "billing" | "viewer";
@@ -1086,6 +1270,117 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DataResponse_list_MemberView__"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_invitations_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_list_InvitationView__"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_invitations_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InvitationCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_InvitationView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_invitations_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invitation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_InvitationRevoked_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Error */

@@ -1,6 +1,59 @@
 {
   "components": {
     "schemas": {
+      "AcceptInvitationRequest": {
+        "additionalProperties": false,
+        "description": "``POST /internal/auth/invitations/accept``; ``name`` and ``password`` create a new account.",
+        "examples": [
+          {
+            "name": "Priya Nair",
+            "password": "quiet harbor lantern 7",
+            "token": "Vq3nT8bLw0eZ5yRk2mXc7hJd4sGa9uPf1oNi6tWe8Bq"
+          },
+          {
+            "token": "Vq3nT8bLw0eZ5yRk2mXc7hJd4sGa9uPf1oNi6tWe8Bq"
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "token": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "AcceptInvitationRequest",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "additionalProperties": false,
         "examples": [
@@ -51,6 +104,68 @@
           "data"
         ],
         "title": "DataResponse[ForgotPasswordResult]",
+        "type": "object"
+      },
+      "DataResponse_InvitationAccepted_": {
+        "examples": [
+          {
+            "data": {
+              "org_id": "0192f3c4-5a6b-7c8d-9e0f-2b3c4d5e6f70",
+              "org_name": "Acme Dental",
+              "role": "developer",
+              "user": {
+                "created_at": "2026-10-29T09:30:00Z",
+                "email": "priya.nair@acme-dental.test",
+                "email_verified": true,
+                "id": "0192f3c4-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
+                "is_platform_admin": false,
+                "mfa_enabled": false,
+                "name": "Priya Nair"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/InvitationAccepted"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[InvitationAccepted]",
+        "type": "object"
+      },
+      "DataResponse_InvitationDetails_": {
+        "examples": [
+          {
+            "data": {
+              "account_exists": false,
+              "email": "priya.nair@acme-dental.test",
+              "expires_at": "2026-11-05T09:12:40Z",
+              "inviter_name": "Jane Park",
+              "org_name": "Acme Dental",
+              "role": "developer"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/InvitationDetails"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[InvitationDetails]",
         "type": "object"
       },
       "DataResponse_LoginResult_": {
@@ -542,6 +657,118 @@
           "accepted"
         ],
         "title": "ForgotPasswordResult",
+        "type": "object"
+      },
+      "InvitationAccepted": {
+        "description": "The user who accepted, and the org they joined (now the session's active org).",
+        "examples": [
+          {
+            "org_id": "0192f3c4-5a6b-7c8d-9e0f-2b3c4d5e6f70",
+            "org_name": "Acme Dental",
+            "role": "developer",
+            "user": {
+              "created_at": "2026-10-29T09:30:00Z",
+              "email": "priya.nair@acme-dental.test",
+              "email_verified": true,
+              "id": "0192f3c4-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
+              "is_platform_admin": false,
+              "mfa_enabled": false,
+              "name": "Priya Nair"
+            }
+          }
+        ],
+        "properties": {
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "org_name": {
+            "title": "Org Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/SessionUser"
+          }
+        },
+        "required": [
+          "user",
+          "org_id",
+          "org_name",
+          "role"
+        ],
+        "title": "InvitationAccepted",
+        "type": "object"
+      },
+      "InvitationDetails": {
+        "description": "What the invitation page shows before accepting.",
+        "examples": [
+          {
+            "account_exists": false,
+            "email": "priya.nair@acme-dental.test",
+            "expires_at": "2026-11-05T09:12:40Z",
+            "inviter_name": "Jane Park",
+            "org_name": "Acme Dental",
+            "role": "developer"
+          }
+        ],
+        "properties": {
+          "account_exists": {
+            "description": "Whether a user with the email exists: sign in to accept, otherwise create the account.",
+            "title": "Account Exists",
+            "type": "boolean"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "inviter_name": {
+            "title": "Inviter Name",
+            "type": "string"
+          },
+          "org_name": {
+            "title": "Org Name",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "owner",
+              "admin",
+              "developer",
+              "analyst",
+              "billing",
+              "viewer"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_name",
+          "role",
+          "email",
+          "inviter_name",
+          "expires_at",
+          "account_exists"
+        ],
+        "title": "InvitationDetails",
         "type": "object"
       },
       "LoginRequest": {
@@ -1271,6 +1498,115 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/auth/invitations/accept": {
+      "post": {
+        "description": "Accept an invitation as the signed-in user, or create the account when the email has none.",
+        "operationId": "auth_invitation_accept",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_InvitationAccepted_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Accept Invitation",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/invitations/{token}": {
+      "get": {
+        "description": "The org, role, email, and inviter of an open invitation (no session needed).",
+        "operationId": "auth_invitation_details",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_InvitationDetails_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Invitation Details",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
     "/internal/auth/login": {
       "post": {
         "description": "Password login: throttled per email and IP, rejects foreign origins and emails of SSO-enforcing\ndomains, issues a new session.",

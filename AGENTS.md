@@ -527,3 +527,17 @@ Grafana 3001
   role)` (a second user in an existing org; log them in on another `session_client(session_app(container))`).
   Lock-wait tests: poll `SELECT count(*) FROM pg_locks WHERE NOT granted` on a third `open_database(url)` (bounded
   loop, no sleeps).
+- 2026-10-29 (P02-T08c): invitations. Public routes (`POST`/`GET /v1/org/members/invitations`, `DELETE
+  .../{invitation_id}`) live in `routers/org_invitations.py`; the token routes (`GET
+  /internal/auth/invitations/{token}`, `POST /internal/auth/invitations/accept`) in `routers/auth_invitations.py`
+  (both imported by `main.py`). Data: tenant `va_db.repositories.InvitationRepo` (`create` replaces an open invite
+  of the same email, `list_open`, `get_open`, `revoke` = DELETE, `consume` = conditional UPDATE) and the system-scope
+  `InvitationLookupRepo.by_token` (listed in specs/03 §2; `test_repositories.py` counts 10 system repos). Shared
+  pieces: `org_members.owner_guard(ctx, role)`, `routers.auth.check_sso_enforced(request, email)`,
+  `session_auth.optional_session(request)` (session or `None`; CSRF/Origin enforced only when one resolves),
+  `va_api.auth.invitations.send_invitation`, template `va_common.email.invitation(...)` (`_Copy.render(values=...)`
+  substitutes `$name`s into intros, escaped in HTML). Pydantic: `Field(repr=False)` inside an `Annotated` alias used
+  as `Alias | None` raises `UnsupportedFieldAttributeWarning` (an error under filterwarnings); put the `Field(...)`
+  on the attribute instead. Tests: `session_helpers.invite(client, container, email, role) -> token`
+  (`link_token(..., "invitation")`), `INVITATIONS`, `ACCEPT_INVITATION`; switch users on one client with
+  `client.cookies.clear()` + `login(...)`.

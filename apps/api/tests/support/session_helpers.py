@@ -45,9 +45,11 @@ from va_db.repositories import IdentityRepo, MembershipRepo, NewUser
 from va_db.session import Database
 
 __all__ = [
+    "ACCEPT_INVITATION",
     "API_BASE_URL",
     "CHEAP_ARGON2",
     "DASHBOARD_URL",
+    "INVITATIONS",
     "MFA_DISABLE",
     "MFA_ENABLE",
     "MFA_SETUP",
@@ -59,6 +61,7 @@ __all__ = [
     "add_member",
     "enrol_mfa",
     "error_of",
+    "invite",
     "link_token",
     "login",
     "make_member",
@@ -77,6 +80,8 @@ DASHBOARD_URL = "https://app.voiceagents.test"
 API_BASE_URL = "https://api.voiceagents.test"
 PASSWORD = "plum-orchard-sailboat-42"  # noqa: S105 - test users' password
 SESSION_PROBE_PATH = "/v1/knowledge/_session/whoami"
+INVITATIONS = "/v1/org/members/invitations"
+ACCEPT_INVITATION = "/internal/auth/invitations/accept"
 MFA_SETUP = "/internal/auth/mfa/setup"
 MFA_ENABLE = "/internal/auth/mfa/enable"
 MFA_VERIFY = "/internal/auth/mfa/verify"
@@ -313,7 +318,7 @@ async def signup(  # noqa: PLR0913 - keyword-only signup fields
     )
 
 
-_PAGES = {"verify_email": "verify-email", "password_reset": "reset-password"}
+_PAGES = {"verify_email": "verify-email", "password_reset": "reset-password", "invitation": "invite"}
 
 
 def link_token(sender: InMemoryEmailSender, email: str, template: str = "verify_email") -> str:
@@ -324,6 +329,17 @@ def link_token(sender: InMemoryEmailSender, email: str, template: str = "verify_
     match = link.search(messages[-1].text)
     assert match is not None, messages[-1].text
     return match.group(1)
+
+
+async def invite(
+    client: httpx.AsyncClient, container: SessionContainer, email: str, role: MemberRole = "developer"
+) -> str:
+    """The signed-in client invites ``email`` with ``role``; the token of the emailed link."""
+    response = await client.post(
+        INVITATIONS, json={"email": email, "role": role}, headers=write_headers(client)
+    )
+    assert response.status_code == 201, response.text
+    return link_token(container.outbox, email, "invitation")
 
 
 def mfa_code(container: SessionContainer, secret: str) -> str:

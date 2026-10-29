@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
-
 import httpx
-import pytest
-import respx
-from fake_oidc import FakeOidcProvider, configure_sso, mocked_idp, sso_app
+from fake_oidc import configure_sso
 from identity_db import IdentityDb
 from session_helpers import (
     API_BASE_URL,
@@ -18,25 +14,12 @@ from session_helpers import (
     error_of,
     login,
     make_member,
-    session_client,
 )
 from sqlalchemy import update
 
 from va_api.auth.login_throttle import email_failure_key
 from va_api.routers.auth import SSO_REQUIRED_MESSAGE
 from va_db.models import User
-
-
-@pytest.fixture
-def idp(container: SessionContainer) -> Iterator[respx.MockRouter]:
-    with mocked_idp(FakeOidcProvider(now=container.clock.now)) as router:
-        yield router
-
-
-@pytest.fixture
-async def sso(container: SessionContainer, idp: respx.MockRouter) -> AsyncIterator[httpx.AsyncClient]:
-    async with session_client(sso_app(container)) as http:
-        yield http
 
 
 async def domain_user(identity: IdentityDb, container: SessionContainer, email: str) -> None:

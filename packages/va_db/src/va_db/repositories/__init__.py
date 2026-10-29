@@ -2,8 +2,9 @@
 :class:`IdempotencyRepo` (specs/04 §12), :class:`MembershipRepo` and :class:`OrgDataKeyRepo`, the identity
 :class:`IdentityRepo` (``users``, ``sessions``, ``email_tokens``; specs/04 §4) with :class:`MfaRepo` (MFA
 enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OIDC connection; specs/04 §5),
-the envelope's :class:`OrgDataKeyStore` (specs/28 §3), :class:`OrgRepo` (``orgs`` on the global session;
-specs/04 §8.1), the tenant :class:`ApiKeyRepo`, and the system-scope ones.
+:class:`InvitationRepo` (an org's invitations; specs/04 §6), the envelope's :class:`OrgDataKeyStore` (specs/28
+§3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1), the tenant :class:`ApiKeyRepo`, and the
+system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -44,6 +45,12 @@ from va_db.repositories.identity import (
     NewUser,
 )
 from va_db.repositories.identity_mfa import MfaRepo
+from va_db.repositories.invitations import (
+    INVITATION_TTL,
+    InvitationLookup,
+    InvitationLookupRepo,
+    InvitationRepo,
+)
 from va_db.repositories.memberships import (
     LAST_OWNER_MESSAGE,
     NOT_OWNER_MESSAGE,
@@ -65,6 +72,7 @@ __all__ = [
     "DEFAULT_LEASE",
     "EMAIL_VERIFY_TTL",
     "IMMUTABLE_COLUMNS",
+    "INVITATION_TTL",
     "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
     "NOT_OWNER_MESSAGE",
@@ -82,6 +90,9 @@ __all__ = [
     "IdempotencyReplay",
     "IdempotencyRepo",
     "IdentityRepo",
+    "InvitationLookup",
+    "InvitationLookupRepo",
+    "InvitationRepo",
     "IssuedSession",
     "MemberRecord",
     "MembershipLookupRepo",

@@ -3,12 +3,14 @@
 Each template renders a plain-text and an HTML body from one shared layout: a greeting, a sentence explaining
 the email, the link (a button in HTML), a notice about expiry and what to do if the email was unexpected, and
 the sign-off. Every substituted value is HTML-escaped in the HTML body, so a display name such as
-``<script>`` arrives as text.
+``<script>`` arrives as text. An intro may name values (``$org``, ``$inviter``, ``$role`` in the invitation),
+which are substituted raw in the text body and escaped in the HTML body.
 """
 
 from __future__ import annotations
 
 import html
+from collections.abc import Mapping
 from dataclasses import dataclass
 from string import Template
 from typing import Final
@@ -17,14 +19,17 @@ from va_common.email.message import EmailMessage
 
 __all__ = [
     "EMAIL_VERIFICATION_HOURS",
+    "INVITATION_DAYS",
     "PASSWORD_RESET_MINUTES",
     "TEMPLATES",
+    "invitation",
     "password_reset",
     "verify_email",
 ]
 
 EMAIL_VERIFICATION_HOURS: Final = 24
 PASSWORD_RESET_MINUTES: Final = 60
+INVITATION_DAYS: Final = 7
 
 _TEXT_LAYOUT: Final = Template(
     """Hi $name,
@@ -60,7 +65,10 @@ color:#ffffff;text-decoration:none;border-radius:6px;">$button</a></p>
 
 @dataclass(frozen=True, slots=True)
 class _Copy:
-    """The fixed wording of one template; ``intro`` and ``notice`` hold the line breaks of each body."""
+    """The fixed wording of one template; ``intro`` and ``notice`` hold the line breaks of each body.
+
+    The intros are ``string.Template`` text: :meth:`render` substitutes ``values`` into them.
+    """
 
     template: str
     subject: str
@@ -70,16 +78,23 @@ class _Copy:
     text_notice: str
     html_notice: str
 
-    def render(self, *, name: str, link: str, to: str) -> EmailMessage:
+    def render(
+        self, *, name: str, link: str, to: str, values: Mapping[str, str] | None = None
+    ) -> EmailMessage:
+        raw = dict(values or {})
+        escaped = {key: html.escape(value) for key, value in raw.items()}
         return EmailMessage(
             to=to,
             subject=self.subject,
             text=_TEXT_LAYOUT.substitute(
-                name=name, intro=self.text_intro, link=link, notice=self.text_notice
+                name=name,
+                intro=Template(self.text_intro).substitute(raw),
+                link=link,
+                notice=self.text_notice,
             ),
             html=_HTML_LAYOUT.substitute(
                 name=html.escape(name),
-                intro=self.html_intro,
+                intro=Template(self.html_intro).substitute(escaped),
                 link=html.escape(link),
                 button=self.button,
                 notice=self.html_notice,
@@ -120,7 +135,27 @@ _RESET: Final = _Copy(
     ),
 )
 
-TEMPLATES: Final[frozenset[str]] = frozenset({_VERIFY.template, _RESET.template})
+_INVITATION: Final = _Copy(
+    template="invitation",
+    subject="You have been invited to VoiceAgents",
+    button="Accept invitation",
+    text_intro=(
+        "$inviter invited you to join $org on VoiceAgents with the $role role. Accept the invitation here"
+    ),
+    html_intro=(
+        "$inviter invited you to join $org on VoiceAgents with the $role role. Accept the\ninvitation here"
+    ),
+    text_notice=(
+        f"The link expires in {INVITATION_DAYS} days and works once. If you were not expecting this "
+        "invitation, you can\nignore this email; nothing changes until you accept it."
+    ),
+    html_notice=(
+        f"The link expires in {INVITATION_DAYS} days and works once. If you were not expecting this\n"
+        "invitation, you can ignore this email; nothing changes until you accept it."
+    ),
+)
+
+TEMPLATES: Final[frozenset[str]] = frozenset({_VERIFY.template, _RESET.template, _INVITATION.template})
 
 
 def verify_email(*, name: str, link: str, to: str) -> EmailMessage:
@@ -131,3 +166,10 @@ def verify_email(*, name: str, link: str, to: str) -> EmailMessage:
 def password_reset(*, name: str, link: str, to: str) -> EmailMessage:
     """The password reset email; ``link`` carries the one-time token and expires after 60 minutes."""
     return _RESET.render(name=name, link=link, to=to)
+
+
+def invitation(*, org_name: str, inviter_name: str, role: str, link: str, to: str) -> EmailMessage:
+    """The org invitation email; ``link`` carries the one-time token and expires after 7 days."""
+    return _INVITATION.render(
+        name="there", link=link, to=to, values={"org": org_name, "inviter": inviter_name, "role": role}
+    )

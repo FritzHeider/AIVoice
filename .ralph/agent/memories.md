@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793279423-eb1e
+> va_api tests: idp (FakeOidcProvider on container clock) and sso (OIDC_ENABLED client) fixtures live in apps/api/tests/conftest.py; invitation helpers session_helpers.invite(client, container, email, role)->token, INVITATIONS, ACCEPT_INVITATION; session_auth.optional_session for routes that work with or without a session
+<!-- tags: api, testing, auth | created: 2026-10-29 -->
+
 ### mem-1793275386-bcdb
 > va_api tests: session_helpers.signed_in(client, identity, container, role) + add_member(identity, hasher, org_id, role) for extra members; DataResponse[list[Model]] now wraps model examples (test_operations_contract requires examples on every 2xx)
 <!-- tags: api, testing, openapi | created: 2026-10-29 -->
@@ -97,6 +101,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793279423-b07e
+> pydantic: Field(repr=False) inside an Annotated alias used as 'Alias | None' raises UnsupportedFieldAttributeWarning (error under filterwarnings) at app build; put Field(default=None, min_length=..., repr=False) on the attribute instead (P02-T08c AcceptInvitationRequest.password)
+<!-- tags: api, pydantic, testing | created: 2026-10-29 -->
 
 ### mem-1793273041-6642
 > Ralph build.done backpressure: every gate must be 'key: pass' with a colon (tests:, lint:, typecheck:, audit:, coverage:, complexity: <number>, duplication:, specs:); 'tests pass' / 'cov 99%' / 'jscpd 0 clones' converts to build.blocked (P02-T07b)

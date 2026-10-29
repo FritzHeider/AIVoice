@@ -58,6 +58,7 @@ __all__ = [
     "mfa_due",
     "mfa_guard_of",
     "oidc_discovery_of",
+    "optional_session",
     "password_hasher_of",
     "pick_active",
     "provisioner_of",
@@ -66,6 +67,7 @@ __all__ = [
     "sessions_of",
     "settings_of",
     "sso_states_of",
+    "user_mfa_enabled",
 ]
 
 MFA_REQUIRED_MESSAGE: Final = "Multi-factor authentication is required for this organization."
@@ -168,15 +170,16 @@ def has_session_cookie(request: Request) -> bool:
     return bool(request.cookies.get(SESSION_COOKIE))
 
 
-async def current_session(request: Request) -> ActiveSession:
-    """The request's valid session (``AUTH_FAILURE`` otherwise); writes also pass CSRF and Origin checks.
+async def optional_session(request: Request) -> ActiveSession | None:
+    """The request's valid session, or ``None`` without one; a resolved session's writes also pass the CSRF
+    and Origin checks.
 
-    Stores the session on ``request.state.session``.
+    Stores a resolved session on ``request.state.session``.
     """
     token = request.cookies.get(SESSION_COOKIE)
     active = await sessions_of(request).resolve(token) if token else None
     if active is None:
-        raise AppError("AUTH_FAILURE", SESSION_INVALID)
+        return None
     if request.method.upper() not in READ_METHODS:
         check_csrf(request.headers.get(CSRF_HEADER), request.cookies.get(CSRF_COOKIE))
         check_origin(
@@ -186,6 +189,17 @@ async def current_session(request: Request) -> ActiveSession:
             required=True,
         )
     request.state.session = active
+    return active
+
+
+async def current_session(request: Request) -> ActiveSession:
+    """The request's valid session (``AUTH_FAILURE`` otherwise); writes also pass CSRF and Origin checks.
+
+    Stores the session on ``request.state.session``.
+    """
+    active = await optional_session(request)
+    if active is None:
+        raise AppError("AUTH_FAILURE", SESSION_INVALID)
     return active
 
 
@@ -225,7 +239,8 @@ def mfa_due(*, org_requires: bool, user_enabled: bool, passed: bool) -> bool:
     return (org_requires or user_enabled) and not passed
 
 
-async def _user_mfa_enabled(request: Request, active: ActiveSession) -> bool:
+async def user_mfa_enabled(request: Request, active: ActiveSession) -> bool:
+    """Whether the session's user has enabled MFA (``AUTH_FAILURE`` when the user is gone)."""
     async with database_of(request).global_session() as session:
         user = await IdentityRepo(session).get_user(active.user_id)
     if user is None:
@@ -242,7 +257,7 @@ async def gated_membership(
     if record is not None:
         org_requires, user_enabled = record.mfa_required, record.user_mfa_enabled
     else:
-        org_requires, user_enabled = False, await _user_mfa_enabled(request, active)
+        org_requires, user_enabled = False, await user_mfa_enabled(request, active)
     if mfa_due(org_requires=org_requires, user_enabled=user_enabled, passed=active.mfa_passed):
         raise AppError("MFA_REQUIRED", MFA_REQUIRED_MESSAGE)
     return active, record

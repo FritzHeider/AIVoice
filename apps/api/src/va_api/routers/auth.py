@@ -74,6 +74,7 @@ __all__ = [
     "SSO_REQUIRED_MESSAGE",
     "CurrentSession",
     "OptionalEmptyBody",
+    "check_sso_enforced",
     "internal_auth_router",
     "revoke_presented",
     "set_session_cookies",
@@ -127,7 +128,7 @@ def set_session_cookies(request: Request, response: Response, token: str) -> Non
     set_csrf_cookie(response, policy, generate_token())
 
 
-async def _check_sso_enforced(request: Request, email: str) -> None:
+async def check_sso_enforced(request: Request, email: str) -> None:
     """``SSO_REQUIRED`` (with the SSO start URL) when the email's domain has an enforcing connection."""
     settings = settings_of(request)
     domain = email_domain(email)
@@ -276,7 +277,7 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Dat
     ip = client_ip(request)
     throttle = login_throttle_of(request)
     await throttle.check(body.email, ip)
-    await _check_sso_enforced(request, body.email)
+    await check_sso_enforced(request, body.email)
     user = await _authenticate(request, body, ip)
     await throttle.clear(body.email)
     return DataResponse(data=await _issue(request, response, user, ip))

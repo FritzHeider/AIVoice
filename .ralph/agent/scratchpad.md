@@ -2963,3 +2963,183 @@ three are). Org settings validation (`OrgSettings`, `settings` in `PATCH /v1/org
 - Diff checked against specs/04 §3.2 matrix rows (Members list R all roles; change/remove members.manage; owner
   assignment org.owner_transfer) and §6 (exact CONFLICT message). updated_at covered by set_updated_at trigger.
   Lock-then-count under the org row; concurrency tests poll pg_locks with no sleeps. No findings.
+
+## 2026-10-29 Planner: P02-T08b approved → next P02-T08c
+
+## Plan P02-T08c — Invitations: create, list, revoke, details, accept (specs/04 §6, §4.1 invitation rows, §4.2 token format; specs/03 §2, §3 `invitations`; specs/31 TOKEN_EXPIRED)
+
+### Facts found while planning
+- `invitations` (specs/03 l.164, model `va_db.models.tenancy.Invitation`) is an RLS tenant table: id, org_id, email
+  citext, role, token_hash UNIQUE, invited_by uuid NOT NULL → users, expires_at, accepted_at, created_at/updated_at.
+  **No revoked column** → revoke = DELETE the row. Retention already purges by `expires_at`.
+- The accept/details endpoints know only the token, so the lookup needs a `va_system` repo (like
+  `ApiKeyLookupRepo`/`SsoConnectionLookupRepo`): add `InvitationLookupRepo` to the specs/03 §2 `va_system` bullet +
+  a `> Decision` (test_repositories.py enforces the set).
+- `invited_by` is NOT NULL → users. API keys with `*` hold `members.manage` (matrix row "Members: invite / change
+  role / remove"), so an API-key caller invites as the key's `api_keys.created_by` (nullable FK) via
+  `ApiKeyRepo(session, ctx.org_id).get(ctx.principal_id)`; null → FORBIDDEN (decision 2).
+- Reuse: `va_common.auth.issue_token()` / `looks_like_token()` / `sha256` hashing as email tokens;
+  `va_api.auth.verification.deliver(..., failure_event=)` + `dashboard_link(base, "invite", token)`;
+  `check_password_policy_async`; `routers/auth._check_sso_enforced` (make public `check_sso_enforced`, update the
+  login call); `routers/auth.set_session_cookies`; `SessionManager.start_in` / `remember` / `set_active_org`;
+  `session_auth.check_dashboard_origin`, `_user_mfa_enabled`/`mfa_due`; `conflict_savepoint(session, msg, field=)`;
+  `org_members._owner_guard` (permission `org.owner_transfer` for owner-role invitations); `org_sso.ReadOrg/WriteOrg`,
+  `org_router`. Pool size 1 per role: system lookup session closes before the tenant_session opens.
+- Templates: `_Copy` has fixed intros. The invitation intro needs the org and inviter names (HTML-escaped).
+
+### Decisions to record (specs/04 §6 and §4.1, specs/03 §2, same commit, `> Decision (2026-10-29):`)
+1. **Create** `POST /v1/org/members/invitations` `{email (3-320, trimmed, must contain exactly one "@" with
+   non-empty sides; else INVALID_INPUT field email), role (six roles)}` `extra="forbid"`; needs `org:write` +
+   `members.manage`; role `owner` also needs `org.owner_transfer` (same FORBIDDEN message as members). Email of a
+   current member of the org → `CONFLICT` field `email` "This person is already a member of the organization.".
+   An existing **open** (unaccepted) invitation for the same email in the org is replaced (deleted in the same
+   transaction) so re-inviting resends with a fresh token and the new role. Token = `issue_token()` (32 bytes
+   base64url, stored sha256 hex), `expires_at = now + 7 days`. Response **201** `{data: <invitation>}`, invitation =
+   `{id, email, role, invited_by, status: "pending"|"expired", expires_at, created_at}` (the token is never
+   returned). The email `invitation` (link `{DASHBOARD_BASE_URL}/invite/{token}`, specs/25 route) is sent as a
+   background task through `deliver(..., failure_event="invitation_email_failed")`. Idempotency-Key handled by the
+   existing `require_scope` claim.
+2. **Inviter**: a session's user; an API key's `created_by`; a key without one → `FORBIDDEN` "This API key has no
+   creating user to send invitations as.".
+3. **List** `GET /v1/org/members/invitations` needs `org:read` + `members.manage` (owners/admins; inviting is their
+   job and specs/25 hides invite controls from others). Returns every unaccepted invitation, expired ones with
+   `status: "expired"`, ordered `created_at` desc, `id` desc, unpaginated (bounded: one open invite per email,
+   expired rows purged by retention).
+4. **Revoke** `DELETE /v1/org/members/invitations/{invitation_id}` (uuid) needs `org:write` + `members.manage`
+   (+ `org.owner_transfer` for an owner-role invite); deletes the row; unknown, other-org, or already accepted →
+   `NOT_FOUND` "Invitation not found."; returns `{data:{id, revoked: true}}`.
+5. **Details** `GET /internal/auth/invitations/{token}` (public, `x-public: "session-flow"`, no session): a
+   malformed (`looks_like_token` false), unknown, revoked, accepted, or expired token → `TOKEN_EXPIRED` 400
+   "Invitation link is invalid or has expired." field `token`. Returns `{data:{org_name, role, email, inviter_name,
+   expires_at, account_exists}}` (`account_exists` tells the dashboard whether to show sign-in or create-account;
+   the token holder already knows the address).
+6. **Accept** `POST /internal/auth/invitations/accept` `{token (1-256), name? (1-200 trimmed), password? (1-1024)}`
+   `extra="forbid"`. Order: token check as 5 → org `suspended`/`closed` → `ORG_SUSPENDED` (existing messages) →
+   then by case:
+   - **valid session cookie** (resolved; CSRF + Origin required like other session writes; MFA gate: the user's
+     MFA on and not passed → `MFA_REQUIRED`): the session user's email must equal the invitation email
+     (casefold) else `FORBIDDEN` "This invitation was sent to a different email address."; adds the membership,
+     marks the email verified (first time kept), and switches the session's active org to the invited org.
+   - **no valid session, a user with the email exists** → `AUTH_FAILURE` 401 "Sign in to accept this invitation."
+     (nothing consumed).
+   - **no user**: dashboard Origin rule as signup; `name` and `password` required (`INVALID_INPUT` field `name` /
+     `password` "Name is required to create your account." / "Password is required to create your account.");
+     SSO-enforced domain (OIDC on) → `SSO_REQUIRED` with `details.sso_url` (check before the policy); §4.2 policy
+     (`PASSWORD_TOO_WEAK` field `password`); creates the user with `email_verified_at = now`, the membership, a login
+     session (active org = invited org, `last_login_at` = now) and sets both cookies (fixation: revoke a presented
+     cookie as login does).
+   In every success case one `tenant_session(invitation org)` transaction consumes the invitation with a conditional
+   `UPDATE … SET accepted_at = now WHERE id AND accepted_at IS NULL AND expires_at > now RETURNING` (losing a race →
+   `TOKEN_EXPIRED`), creates the user if needed, and adds the membership (already a member → `CONFLICT` "You are
+   already a member of this organization."; the transaction rolls back so the invite stays usable). Response 200
+   `{data:{user (§4.1 session user), org_id, org_name, role}}`.
+7. `InvitationLookupRepo` joins the specs/03 §2 `va_system` list: `by_token(token) -> InvitationLookup | None`
+   (invitation id, org_id, org name/status, email, role, expires_at, accepted_at, inviter name, account_exists)
+   because the token arrives before any org context.
+
+### Files
+**packages/va_db/src/va_db/repositories/invitations.py** (new; export from `repositories/__init__.py`):
+  - `@dataclass(frozen=True, slots=True) InvitationLookup(id, org_id, org_name, org_status, email, role,
+    expires_at, accepted_at, inviter_name, account_exists: bool)`; `usable(now) -> bool`.
+  - `class InvitationLookupRepo(SystemRepository)`: `by_token(token: str) -> InvitationLookup | None`
+    (hash with the same helper email tokens use; join orgs, inviter user, `EXISTS(users where email = inv.email)`).
+  - `class InvitationRepo` (tenant; `__init__(session, org_id, *, clock)` style of MembershipRepo):
+    `create(email, role, invited_by, now) -> tuple[Invitation, str]` (deletes open invites for the email first,
+    returns row + raw token), `list_open() -> list[Invitation]`, `revoke(invitation_id) -> bool` (DELETE … WHERE
+    org_id, id, accepted_at IS NULL RETURNING id), `consume(invitation_id, now) -> Invitation | None`.
+  - Every query also filters `org_id`. Docstrings cite specs/04 §6.
+**packages/va_db/src/va_db/repositories/memberships.py**: `MembershipRepo.member_by_email(email) -> MemberRecord |
+  None` (reuse `_members()` select).
+**packages/va_common/src/va_common/email/templates.py**: `INVITATION_DAYS: Final = 7`; `invitation(*, org_name,
+  inviter_name, role, link, to) -> EmailMessage` (greeting name = "there"); extend `_Copy` so intros may carry
+  `$org`/`$inviter`/`$role` substitutions (HTML-escaped in the HTML body, raw in text) without duplicating the
+  layout; add `"invitation"` to `TEMPLATES`; update the email package `__all__`.
+**apps/api/src/va_api/routers/org_invitations.py** + **org_invitations_schemas.py** (new, on `org_router`, side-effect
+  import in `main.py`): operations `org_invitations_create` (201, `x-scope: org:write`, `x-permission:
+  members.manage`), `org_invitations_list` (`org:read`, `members.manage`), `org_invitations_revoke`. Reuse
+  `_owner_guard` (move to a shared spot if needed, e.g. make it public in org_members). `inviter_of(ctx, session)`
+  helper for decision 2. Schemas: `InvitationCreate`, `InvitationView` (+ `invitation_view(row, now)`),
+  `InvitationRevoked`; examples on all (no None).
+**apps/api/src/va_api/routers/auth_invitations.py** + schemas (new, on `internal_auth_router`, side-effect import in
+  `main.py`, `x-public: "session-flow"`, `include_in_schema=False` like auth.py): `invitation_details`,
+  `accept_invitation`. Keep every function < radon C: split into `_lookup_usable(request, token)`,
+  `_accept_signed_in(...)`, `_accept_new_user(...)`.
+**apps/api/src/va_api/auth/session_auth.py**: `optional_session(request) -> ActiveSession | None` (resolve; when
+  resolved run the same CSRF/Origin checks as `current_session`; share them in a private helper, no copy).
+**apps/api/src/va_api/routers/auth.py**: rename `_check_sso_enforced` → `check_sso_enforced` (public, `__all__`).
+**specs/04 §6/§4.1, specs/03 §2** decisions; **AGENTS.md** entry (routes/modules, InvitationLookupRepo, test helpers).
+**openapi/openapi.json** + `openapi/internal.json` regenerated; `corepack pnpm gen:api` in sdks/typescript and
+  apps/dashboard.
+
+### Tests
+**packages/va_db/tests/test_invitation_repo.py** (identity_db): create stores sha256 not the token, 7-day expiry
+  given `now`; re-create replaces the open invite for the email; `by_token` finds org/inviter/account_exists for both
+  existing and new emails, `None` for unknown; `consume` once → row, second → None, expired → None; `revoke` other
+  org's id → False (RLS + filter); list ordering. `test_repositories.py` set updated via spec bullet.
+**packages/va_common/tests/test_email*.py**: invitation template text/html, org/inviter names with `<script>`
+  escaped in HTML only, link present, `TEMPLATES` includes it.
+**apps/api/tests/test_org_invitations_integration.py**: owner/admin create (201, outbox email link token, row
+  hashed); developer/analyst/billing/viewer → 403; admin invites owner → 403 `org.owner_transfer`; owner invites
+  owner → 201; existing member email (case-different) → 409 field email; re-invite replaces (old token
+  TOKEN_EXPIRED on details); invalid email / role / extra field → 400; `*` API key with `created_by` → 201
+  `invited_by` = creator; key without creator → 403; `org:read` key → 403 on create; list (status pending vs expired
+  after clock +7 d, accepted excluded, viewer → 403); revoke (200, then details → TOKEN_EXPIRED; other org id /
+  accepted → 404; admin revoking an owner invite → 403); CSRF missing → 403.
+**apps/api/tests/test_auth_invitations_integration.py**: details (fields, account_exists both ways, malformed /
+  unknown / expired (+7 d + 1 s) / accepted → 400 TOKEN_EXPIRED field token); accept new user (cookies set,
+  `/internal/auth/session` shows the org with the invited role, email verified, password policy failure keeps the
+  invite usable, missing name/password → 400 field, SSO-enforced domain → SSO_REQUIRED with sso_url using
+  `configure_sso`/`session_app(oidc_enabled=True)` helpers); existing user without session → 401 AUTH_FAILURE "Sign
+  in to accept this invitation."; existing user signed in → 200, active org switched, member listed; signed in as a
+  different email → 403; already a member → 409 and invite still usable; reuse after accept → 400; concurrent
+  double accept (gather) → exactly one success; suspended org → ORG_SUSPENDED; MFA-enabled user whose session has
+  not passed MFA → 401 MFA_REQUIRED; foreign Origin → 403. Add shared helpers to `support/session_helpers.py`
+  (`invite(client, email, role) -> token` using `link_token(container.outbox, email, "invitation")`).
+**apps/api/tests/test_openapi.py**: three public operation ids + x-scope/x-permission; `INTERNAL_PATHS` gets the two
+  internal paths.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1`; pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done as a PLAIN STRING with numeric complexity:
+`ralph emit "build.done" "P02-T08c tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1: lookup (system) → close → tenant_session; `optional_session` / MFA user lookup must finish before the
+  tenant transaction opens; `remember`/`set_active_org` only after commit.
+- Creating a `users` row inside `tenant_session` works (signup does it) — reuse that path.
+- citext: compare emails in SQL; in Python use `casefold()` for the session-email check.
+- jscpd: the two new routers resemble org_members/auth_password; share the guard, `error_of`, link helpers.
+- `/members/invitations` vs `/members/{user_id}`: `{user_id}` is uuid-typed; add a test that `GET
+  /v1/org/members/invitations` is not swallowed and `DELETE /v1/org/members/invitations/<uuid>` hits revoke.
+
+## 2026-10-29 Builder: P02-T08c build notes
+- Built per plan: `va_db.repositories.invitations` (`InvitationRepo` create/list_open/get_open/revoke/consume,
+  system `InvitationLookupRepo.by_token` with inviter name→email fallback); `MembershipRepo.member_by_email`;
+  template `invitation` (`_Copy.render(values=)` substitutes `$org/$inviter/$role` raw in text, escaped in HTML;
+  fixed subject, no user data in headers); `va_api.auth.invitations` (link + send); routers `org_invitations.py`
+  (+schemas) and `auth_invitations.py` (+schemas); `session_auth.optional_session` (current_session now wraps it)
+  and public `user_mfa_enabled`; `auth.check_sso_enforced` public; `org_members.owner_guard` public.
+- Deviation from plan: no `revoke_presented` in the new-user accept path — that path is only reached when
+  `optional_session` found no valid session, so a presented cookie is already invalid (nothing to revoke).
+- Inviter: `principal_type` user or platform_admin → principal; api_key → `api_keys.created_by`.
+- specs/04 §4.1 and §6 decisions, specs/03 §2 bullet + decision; AGENTS.md entry; openapi + internal.json and both
+  TS schema.d.ts regenerated. `idp`/`sso` fixtures moved to apps/api/tests/conftest.py (jscpd vs sso_enforce test).
+- Tests: va_db test_invitation_repo (7), test_email invitation template, apps/api test_org_invitations_integration
+  (24), test_auth_invitations_integration (20), test_openapi operation/internal path asserts.
+- Coverage of routers/org_invitations.py reports 69% with "missed" lines inside `async with tenant_session` bodies
+  that passing tests exercise (same greenlet tracing artifact as org_members.py / org.py).
+- Gates: fmt/lint/typecheck/placeholders pass; make test run 1: 2 pytest-timeout errors, run 2: 114 Docker
+  exec_create timeouts in va_db setup at load ~15 (none in new code; va_db alone 765 passed), run 3 green: 2766
+  passed, coverage 98.58%; make test-ts pass (52 + 48); openapi drift current; check_spec_refs 0; jscpd 0 clones;
+  radon no C+, avg 1.96; pip-audit + pnpm audit clean; gitleaks pass.
+
+## Review P02-T08c (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass, 0 placeholder findings); make test 2766 passed, coverage 98.58%;
+  check_openapi_drift current (openapi.json + internal.json); check_spec_refs 0.
+- Diff checked against specs/04 §6, §4.1 decisions and specs/03 §2: org_id filter + tenant_session on every
+  InvitationRepo query; system lookup cites specs/03 §2; token hashed (sha256), conditional UPDATE consume; CSRF/Origin
+  via optional_session on signed-in accept, check_dashboard_origin on new-user accept; owner_guard on create/revoke;
+  failure paths covered by tests. P02-T08 parent ticked (T08a/b/c all done).

@@ -2,6 +2,8 @@
 
 The session fixtures (``migrated_url`` per module, ``identity``, ``container``, ``client``) start a Postgres
 container only when a test requests them; modules that define their own fixtures of these names override them.
+``idp`` intercepts a :class:`FakeOidcProvider` on the container clock and ``sso`` is a client of the app with
+``OIDC_ENABLED=true``.
 """
 
 from __future__ import annotations
@@ -11,7 +13,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+import respx
 from api_helpers import make_settings
+from fake_oidc import FakeOidcProvider, mocked_idp, sso_app
 from identity_db import IdentityDb, open_identity_db
 from service_helpers import isolate_env, reset_logging
 from session_helpers import SessionContainer, migrated_postgres, session_app, session_client
@@ -52,4 +56,16 @@ def container(identity: IdentityDb) -> SessionContainer:
 @pytest.fixture
 async def client(container: SessionContainer) -> AsyncIterator[httpx.AsyncClient]:
     async with session_client(session_app(container)) as http:
+        yield http
+
+
+@pytest.fixture
+def idp(container: SessionContainer) -> Iterator[respx.MockRouter]:
+    with mocked_idp(FakeOidcProvider(now=container.clock.now)) as router:
+        yield router
+
+
+@pytest.fixture
+async def sso(container: SessionContainer, idp: respx.MockRouter) -> AsyncIterator[httpx.AsyncClient]:
+    async with session_client(sso_app(container)) as http:
         yield http
