@@ -5,7 +5,8 @@ it does not raise, so SELECT returns nothing and UPDATE/DELETE of B's row affect
 *produce* a row outside A raise ``new row violates row-level security policy`` (``WITH CHECK``): an INSERT
 with ``org_id = B`` and an UPDATE that moves A's own row to B. Afterwards B's row is unchanged when read in
 ``tenant_session(B)``. Platform rows (``org_id IS NULL``) of ``voices`` and ``dnc_entries`` are readable by
-every org and writable by none."""
+every org and writable by none. ``audit_logs`` is append-only for ``va_app`` (specs/28 §6.3), so its UPDATE
+and DELETE fail on privileges before RLS applies."""
 
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition
   AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polname = 'tenant_isolation')
 ORDER BY 1
 """
+_APPEND_ONLY_TABLES = frozenset({"audit_logs"})
 _PLATFORM_READ_TABLES = "SELECT tablename FROM pg_policies WHERE policyname = 'platform_read' ORDER BY 1"
 
 
@@ -97,12 +99,34 @@ async def _assert_sees_only_own(
     assert await _keys(session, table_name, _matches(table_name, other_key)) == []
 
 
+async def _assert_denied(session: AsyncSession, statement: Executable) -> None:
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with session.begin_nested():
+            await session.execute(statement)
+
+
 async def _assert_cannot_touch(session: AsyncSession, table_name: str, key: RowKey) -> None:
-    """UPDATE and DELETE of an invisible row affect nothing (RLS ``USING`` filters, it does not raise)."""
+    """UPDATE and DELETE of an invisible row affect nothing (RLS ``USING`` filters, it does not raise); on an
+    append-only table they are refused outright."""
     table = Base.metadata.tables[table_name]
     row = _matches(table_name, key)
-    assert await _rowcount(session, update(table).where(row).values(org_id=table.c.org_id)) == 0
-    assert await _rowcount(session, delete(table).where(row)) == 0
+    statements = (update(table).where(row).values(org_id=table.c.org_id), delete(table).where(row))
+    for statement in statements:
+        if table_name in _APPEND_ONLY_TABLES:
+            await _assert_denied(session, statement)
+        else:
+            assert await _rowcount(session, statement) == 0
+
+
+async def _assert_cannot_move(session: AsyncSession, table_name: str, key: RowKey, org_id: uuid.UUID) -> None:
+    """Moving the session's own row to another org violates ``WITH CHECK`` (or is refused on append-only)."""
+    statement = (
+        update(Base.metadata.tables[table_name]).where(_matches(table_name, key)).values(org_id=org_id)
+    )
+    if table_name in _APPEND_ONLY_TABLES:
+        await _assert_denied(session, statement)
+    else:
+        await _assert_rls_rejects(session, statement)
 
 
 def _shared(table_name: str) -> set[uuid.UUID | None]:
@@ -124,9 +148,7 @@ async def test_cross_org_access_is_impossible(database: Database, table_name: st
         await _assert_sees_only_own(session, table_name, (org_a, a_key), (org_b, b_key))
         await _assert_rls_rejects(session, insert(table).values(**b_values))
         await _assert_cannot_touch(session, table_name, b_key)
-        await _assert_rls_rejects(
-            session, update(table).where(_matches(table_name, a_key)).values(org_id=org_b)
-        )
+        await _assert_cannot_move(session, table_name, a_key, org_b)
 
     async with database.tenant_session(org_b) as session:
         await _assert_sees_only_own(session, table_name, (org_b, b_key), (org_a, a_key))

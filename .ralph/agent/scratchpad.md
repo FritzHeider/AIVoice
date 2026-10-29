@@ -3758,3 +3758,185 @@ Gates re-run by Reviewer: make lint, typecheck, placeholders pass; make test 290
 recorded decision block; repo updates filter org_id; cache invalidation after session close; error paths
 (403 scopes/env/own, 400 validation, 404 cross-org, 409 roll revoked) tested. Note for later: test keys may
 revoke/rename live keys (decision limits only create/roll) — acceptable per decision, revisit if specs/28 tightens.
+
+## 2026-10-29 Planner: P02-T10 approved → P02-T11 split into T11a/T11b
+T11 covers ~30 mutating routes plus a list endpoint and a grants change; split in plan/phase-02.md:
+T11a = writer core + migration + `GET /v1/audit_logs` + envelope-route rows; T11b = `/internal/auth/*` rows +
+`x-audit` markers + the enumeration test.
+
+### T11b design carried forward (do not build in T11a)
+- Every non-GET APIRoute declares `openapi_extra` `x-audit: "<action>"` (or a list for routes writing more than one
+  action) or `x-audit-exempt: "<reason>"`; the test walks `app.state.routers` (mem-1793257682-8f0e) and fails on an
+  unmarked route, both markers, or an action not in `va_db.audit.AUDIT_ACTIONS`. Later phases inherit it.
+- Auth actions: login → `auth.login` (session's active org); bad password for an existing user → `auth.login_failed`;
+  logout / logout-all → `auth.logout`; mfa enable/disable; password change/reset; SSO callback → `auth.sso_login`;
+  invitation accept → `invitation.accept` (added to the §13 list in T11a). User-level events (login_failed,
+  password_*, mfa_*) go to every org where the user has an active membership; unknown email/no membership → no row.
+- Exempt (reasons in the marker): signup, verify-email, resend-verification, password/forgot, mfa/setup,
+  mfa/verify, switch-org.
+
+## Plan P02-T11a — Audit writer, append-only grants, `GET /v1/audit_logs`, envelope-route audit rows (specs/04 §13, §8.3 d5; specs/28 §6.3, §10; specs/03 §3; specs/31 §2)
+
+### Facts found while planning
+- `AuditLog` model exists (`va_db.models.tenancy`, `AuditActorType` = user|api_key|system; `ip` INET; `changes` jsonb).
+- `0001_initial` GRANTS give `va_app` SELECT/INSERT/UPDATE/DELETE on every table including `audit_logs`; specs/28
+  §6.3 wants INSERT, SELECT only for `va_app` (append-only, threat T15). No REVOKE anywhere yet.
+- `TenantRepository[M].list(limit, cursor, where)` already does keyset pagination newest-first and returns `Page`
+  (`Page.pagination()`); `validate_limit`/`decode_cursor` raise INVALID_INPUT with field. No paginated response
+  model in `va_api.responses` yet (only `DataResponse`).
+- `RequestContext` carries `principal_type`, `principal_id`, `ip`, `user_agent`, `acting_parent_org_id`.
+- `va_common.auth.api_keys.API_KEY_RE` is the key regex for value redaction.
+- RBAC: `audit.read` permission exists (rbac_matrix "Audit logs" row → `_grant("org", "audit.read")`); envelope
+  family `/v1/audit_logs*` registered; §2.3 scope `org:read` covers audit logs.
+- spec signature is `va_db.audit.record(ctx, ...)`, but va_db cannot import `va_api.RequestContext` (layering).
+
+### Decisions to record (specs/04 §13, same commit, `> Decision (2026-10-29):` block)
+1. **Writer.** `va_db.audit.record(session, actor: AuditActor, action, resource_type, resource_id, before, after)`;
+   `AuditActor` (frozen dataclass in va_db: `org_id`, `actor_type`, `actor_id`, `ip`, `user_agent`,
+   `acting_parent_org_id`) replaces `ctx` because va_db must not import va_api; va_api builds it with
+   `va_api.audit.actor_of(ctx)`. The row is added to the caller's open `tenant_session`, so it commits or rolls
+   back with the change. Unknown action → `ValueError` (programming error, not a 4xx).
+2. **Actor mapping.** `api_key` principal → actor_type `api_key`, actor_id key id; `user` → `user`, user id;
+   `platform_admin` → `user` + `changes.platform_admin = true` (specs/28 §10); `widget` never mutates audited
+   resources → `ValueError`. `ip` stored only when it parses as an IP address (`ipaddress.ip_address`), else NULL.
+3. **changes** = `{"before": <obj|null>, "after": <obj|null>}` redacted, plus `"acting_parent_org_id": "<uuid>"`
+   when acting on a sub-account (row lives in the child org = `ctx.org_id`; "record both orgs" of §8.3 d5) and
+   `"platform_admin": true` when applicable. Values are made JSON-safe (uuid/datetime/Decimal → str via
+   pydantic `to_jsonable_python`).
+4. **Redaction** (recursive through dicts and lists): a key named (case-insensitive) `password`, `secret`, `token`,
+   `api_key`, `client_secret`, `authorization`, `secret_headers`, or ending in `_enc` → `"[REDACTED]"` (whole value,
+   whatever its type); any string value containing an API-key match (`API_KEY_RE.search`) → `"[REDACTED]"`.
+   Other keys like `secret_hash` are not in the list but must never be passed (callers pass views, not rows); add
+   `secret_hash` and `key` (ApiKeyCreated plaintext field) to the redacted names as well — record that extension.
+5. **Actions list** gains `api_key.update` (rename) and `invitation.accept` (T11b) so every mutating route of this
+   phase maps to a listed action; `AUDIT_ACTIONS: frozenset[str]` in `va_db.audit` mirrors the §13 list exactly
+   (a test parses §13's action bullet from the markdown and compares, like the RBAC matrix test).
+6. **Append-only.** Migration `0004_audit_logs_append_only`: `REVOKE UPDATE, DELETE ON audit_logs FROM va_app`.
+   `va_system` keeps DELETE for the retention purge of a later phase (retention by `retention_days`, min 365 in
+   hipaa_mode, arrives with OrgSettings/RetentionWorkflow; not in T11a). Downgrade re-grants.
+   `credit_ledger`/`usage_events` stay untouched here (their owning billing tasks apply the same rule).
+7. **List endpoint.** `GET /v1/audit_logs` (envelope, tag `Audit Logs` — add to TAG_NAMES if missing, `x-scope`
+   `org:read`, permission `audit.read` via the existing permission dependency used for e.g. `sso.manage`). Query
+   `action`, `actor_id` (uuid), `resource_type`, `resource_id`, `since`, `until` (aware datetimes; naive → 400 field
+   name; `since > until` → 400 field `since`), `cursor`, `limit` (1–100, default 25). Filters are exact matches;
+   `since` inclusive, `until` exclusive. Response `{data:[AuditLogView], errors:null, pagination:{next_cursor,
+   has_more}}`. View: `id, actor_type, actor_id, action, resource_type, resource_id, ip, user_agent, changes,
+   created_at`.
+8. **Resource conventions** for this task's rows (resource_type / resource_id / before → after):
+   - `org_update` → `org.update`, `org`/org id, changed fields before → after (only fields in the PATCH body).
+   - `org_members_update` → `member.role_change`, `membership`/user id, `{role}` → `{role}`.
+   - `org_members_remove` → `member.remove`, `membership`/user id, `{user_id,email,role}` → null.
+   - `org_transfer_ownership` → `org.ownership_transfer`, `org`/org id, `{owner_user_id: old}` → `{owner_user_id: new}`.
+   - `org_invitations_create` → `member.invite`, `invitation`/invitation id, null → `{email, role, expires_at}`.
+   - `org_invitations_revoke` → `invitation.revoke`, `invitation`/id, `{email, role}` → null.
+   - `org_sso_put` → `org.sso_update`, `sso_connection`/connection id, prior view (or null) → new view
+     (`client_secret` redacted by name); `org_sso_delete` → `org.sso_update`, prior view → null.
+   - `orgs_create` → `subaccount.create` in the **parent** org, `org`/child id, null → `{name, plan_id,
+     initial_credits}`; plus `billing.credit_transfer` in the parent when `initial_credits > 0`, `org`/child id,
+     null → `{amount_micros}`. The child's API key plaintext never reaches `after`.
+   - `orgs_suspend` / `orgs_reactivate` → `subaccount.suspend|reactivate` in the parent, `org`/child id,
+     `{status}` → `{status}`; an idempotent no-op (already in that status) writes no row.
+   - `api_keys_create` → `api_key.create`, `api_key`/key id, null → view without `key`; `api_keys_update` →
+     `api_key.update` `{name}` → `{name}` (`{}` body or same name → no row); `api_keys_revoke` → `api_key.revoke`
+     (already revoked → no row); `api_keys_roll` → `api_key.roll`, resource = **old** key id, before `{expires_at}`,
+     after `{expires_at, new_key_id, new_prefix}`.
+   - Failed requests (any AppError before commit) write nothing because the row is in the same transaction.
+
+### Files
+- **packages/va_db/src/va_db/audit.py** (new): `AUDIT_ACTIONS`, `REDACTED = "[REDACTED]"`, `REDACTED_KEYS`,
+  `AuditActor`, `redact(value: object) -> object`, `async record(session, actor, action, resource_type,
+  resource_id: str | uuid.UUID | None, before: Mapping|None, after: Mapping|None) -> AuditLog`. Export from
+  `va_db/__init__` if that's the package convention (check).
+- **packages/va_db/src/va_db/repositories/audit_logs.py** (new): `AuditLogRepo(TenantRepository[AuditLog])` with
+  `page(filters: AuditLogFilter, limit, cursor) -> Page[AuditLog]` building `where` and delegating to `list`;
+  `AuditLogFilter` frozen dataclass. Register in `repositories/__init__`.
+- **packages/va_db/migrations/versions/0004_audit_logs_append_only.py** (new; down_revision `0003...`). Update any
+  migration-head/test lists (test_migrations*, schema_catalog grant checks if present).
+- **specs/03-data-model.md** §3 (or §10 grants): one-line Decision noting 0004 revokes va_app UPDATE/DELETE.
+- **apps/api/src/va_api/audit.py** (new): `actor_of(ctx) -> AuditActor`, `async audit(session, ctx, action,
+  resource_type, resource_id, before=None, after=None)` thin wrapper used by routers.
+- **apps/api/src/va_api/responses.py**: `Pagination` model + `PageResponse[T]` (`data: list[T]`, `errors: None`,
+  `pagination: Pagination`), examples wrapped like `DataResponse` (reuse `_wrap_examples` — do not copy; jscpd).
+- **apps/api/src/va_api/routers/audit_logs.py** + **audit_logs_schemas.py** (new): `audit_logs_router =
+  envelope_router(prefix="/v1/audit_logs", tags=["Audit Logs"])`, operation `audit_logs_list`; examples on
+  `AuditLogView` (no None values; mem-1793265656-71f0). Register in `main.ROUTERS`.
+- **Routers wired** (call `audit(...)` inside the existing `tenant_session` before it closes): `org.py`
+  (org_update), `org_members.py` (3), `org_invitations.py` (create, revoke), `org_sso.py` (put, delete),
+  `orgs.py` (create, suspend, reactivate — the create path uses the CreditTransferRepo / provisioner session; write
+  the rows in the parent-org transaction; if the child is provisioned in a separate global/system session, the
+  audit rows go in the parent's tenant_session that moves credits — Builder checks and keeps one transaction for
+  the parent rows), `api_keys.py` (create, update, revoke, roll).
+- **specs/04 §13** Decision block (1–8); **AGENTS.md** (audit helper, how to add an action, migration 0004 note).
+- **openapi/openapi.json** regenerated; `corepack pnpm gen:api` in sdks/typescript and apps/dashboard.
+
+### Tests
+- **packages/va_db/tests/test_audit_unit.py**: `redact` — each named key (case-insensitive), `*_enc`, nested
+  dict/list, API key embedded in a string (`"Bearer va_live_<32>"`), non-secret untouched, input not mutated;
+  `AUDIT_ACTIONS` equals the action list parsed from specs/04 §13; `record` rejects unknown action.
+- **packages/va_db/tests/test_audit_integration.py**: `record` row fields (actor, ip INET round trip, invalid ip →
+  NULL, changes shape); rollback of the enclosing transaction leaves no row; as `va_app`, `UPDATE audit_logs` and
+  `DELETE FROM audit_logs` raise insufficient privilege (InsufficientPrivilegeError via DBAPIError) while INSERT/
+  SELECT work; RLS: another org's rows invisible; `AuditLogRepo.page` filters (each one), since/until bounds,
+  ordering, cursor pages no dupes.
+- **apps/api/tests/test_audit_logs_integration.py**: GET as owner session and `*` key; analyst/billing/viewer/
+  developer session → 403 per §3.2 "Audit logs" row (check matrix for which roles hold `audit.read`); key without
+  `org:read` → 403; filters + pagination over HTTP; naive `since` / bad cursor / limit 0 / 101 → 400 with field;
+  org B key sees none of org A rows; acting parent (`X-VA-Org-Id`) reads the child's log.
+- **apps/api/tests/test_audit_rows_integration.py**: for each wired route, perform the mutation and assert exactly
+  one row with action, actor_type/actor_id, resource_type/id, before/after, ip, user_agent; api_keys create row
+  has no plaintext anywhere (`API_KEY_RE` not in `json.dumps(changes)`); SSO put row has `client_secret` redacted;
+  orgs_create writes `subaccount.create` + `billing.credit_transfer` in the parent; acting-parent mutation row
+  in the child with `changes.acting_parent_org_id`; failed mutation (403/409) writes no row; no-op revoke/suspend
+  writes no row. Use a shared helper `audit_rows(identity, org_id, action=None)` in tests/support or
+  session_helpers (no per-module copies; jscpd).
+- **apps/api/tests/test_openapi.py**: `audit_logs_list` envelope, tag, `x-scope org:read`, pagination in schema.
+- Existing test suites must stay green (scope coverage / matrix tests enumerate the new route).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make migrate`-path tests (test_migrations*), `make openapi` +
+`uv run python scripts/check_openapi_drift.py`; `corepack pnpm gen:api` (sdks/typescript, apps/dashboard) +
+`make test-ts`; `uv run python scripts/check_spec_refs.py`; `npx jscpd@4` (0 clones); radon `-n C` none and
+`-s -a` numeric average; pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`; gitleaks. build.done as a PLAIN
+STRING with numeric complexity (mem-1793273041-6642, mem-1793269824-fe85):
+`ralph emit "build.done" "P02-T11a tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: write audit rows in the route's existing session; never open a second session for them.
+- The schema conformance / migration tests may snapshot privileges or the head revision: update expected heads.
+  Tests that UPDATE/DELETE audit_logs as va_app (fixtures/cleanup) will break — clean up as owner/superuser.
+- `ip` from ASGI tests is `127.0.0.1` (httpx) — fine for INET; Starlette TestClient gives `testclient` → NULL.
+- Do not run `ruff --select RUF100` (mem-1793280879-cb08). Keep each router function under radon C (extract
+  small helpers for before/after dicts).
+
+## 2026-10-29 Builder: P02-T11a build notes
+- `va_db.audit` (new): `AUDIT_ACTIONS` (= specs/04 §13 list incl. new `invitation.accept`, `api_key.update`),
+  `REDACTED`, `REDACTED_KEYS` (+`secret_hash`, `key`), `AuditActor` (+`platform_admin` flag), `redact`, `parse_ip`,
+  type aliases `ResourceId`/`Changes`, `record(session, actor, action, resource_type, resource_id, *, before, after)`
+  — flushes the row inside `use_org(session, actor.org_id)`, so it works on tenant and global sessions and can log
+  into the parent while the transaction runs in a sub-account. before/after are keyword-only (ruff PLR0917).
+- `AuditLogRepo` + `AuditLogFilter` (`repositories/audit_logs.py`); migration `0004_audit_logs_append_only`
+  (REVOKE UPDATE, DELETE FROM va_app; downgrade re-grants). Updated test_migrations(+_integration) heads/privileges
+  and test_rls_isolation (append-only tables expect "permission denied").
+- `va_api.audit`: `actor_of(ctx)`, `audit(session, ctx, ...)`, `changed(before, after)`. `va_api.responses`:
+  `Pagination`, `PageResponse[T]` (examples reuse `_parameter`/`_model_examples`). Router `audit_logs.py`
+  (+schemas), registered in `main.ROUTERS`.
+- Rows wired: org_update (global session; only changed fields; no-op → none), members role/remove/transfer,
+  invitations create/revoke, sso put (client_secret → "[REDACTED]" when sent)/delete, orgs create (+credit transfer,
+  `initial_credits_micros`), suspend/reactivate (no-op → none), api_keys create/update/revoke/roll.
+- Specs: specs/04 §13 list + Decision block (8 items), stale "(P02-T11)" notes in §5/§8/§9 pointed at it;
+  specs/03 §10 Decision for 0004. AGENTS.md entry. openapi + TS schemas regenerated.
+- Tests: va_db test_audit_unit (21), test_audit_integration (8), test_audit_logs_migration (4); api
+  test_audit_unit (5), test_audit_logs_integration (21), test_audit_rows_integration (8), test_openapi (+1);
+  helper `session_helpers.audit_rows`.
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 2968 passed, coverage 97.93% (logs/p02-t11a-test.log);
+make test-ts pass; openapi drift current; spec refs 0; jscpd 0 clones; radon -n C none on src (avg 1.9977);
+pip-audit + pnpm audit no vulns; gitleaks (pre-commit) passed.
+
+## Review P02-T11a (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass), make test 2968 passed / 98% (logs/rev-t11a-test.log), make test-ts
+  pass, openapi drift current, spec refs 0, jscpd 0 clones.
+- Diff matches specs/04 §13 Decision 1-8: writer in caller's transaction under use_org, redaction (named keys,
+  *_enc, API-key strings), 0004 REVOKE UPDATE/DELETE from va_app, list endpoint filters/pagination/audit.read,
+  no-op mutations write no row, api key plaintext never in changes.
+- Non-blocking notes for later: `org_sso_put` reads `existing` in a separate session before the write txn, so a
+  concurrent PUT could record a stale `before`; `AUDIT_ACTIONS` comment says "in its order" on a frozenset.

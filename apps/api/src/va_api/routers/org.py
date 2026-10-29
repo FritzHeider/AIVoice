@@ -12,6 +12,7 @@ from typing import Final
 
 from fastapi import Request
 
+from va_api.audit import audit, changed
 from va_api.auth.api_key_auth import INVALID_API_KEY
 from va_api.auth.context import RequestContext
 from va_api.auth.permissions import holds_permission
@@ -39,8 +40,16 @@ __all__ = ["ORG_NOT_FOUND_MESSAGE", "me_get", "me_router", "org_get", "org_updat
 ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."
 _COMPLIANCE: Final = "org.compliance"
 _COMPLIANCE_FIELDS: Final = ("retention_days", "recording_retention_days")
+_PATCH_FIELDS: Final = ("name", *_COMPLIANCE_FIELDS)
 
 me_router = envelope_router(prefix="/v1", tags=["Org"])
+
+
+def _patched(org: Org | None, body: OrgPatch) -> dict[str, object]:
+    """The current values of the columns ``body`` sets (empty when ``org`` is gone)."""
+    if org is None:
+        return {}
+    return {name: getattr(org, name) for name in _PATCH_FIELDS if getattr(body, name) is not None}
 
 
 def _summary(org: Org) -> OrgSummary:
@@ -130,12 +139,19 @@ async def org_update(body: OrgPatch, request: Request, ctx: WriteOrg) -> DataRes
         raise AppError("FORBIDDEN", f"Missing required permission '{_COMPLIANCE}'.")
     async with database_of(request).global_session() as session:
         repo = OrgRepo(session)
-        await repo.update(
-            ctx.org_id,
-            name=body.name,
-            retention_days=body.retention_days,
-            recording_retention_days=body.recording_retention_days,
+        before = _patched(await repo.get(ctx.org_id), body)
+        after = _patched(
+            await repo.update(
+                ctx.org_id,
+                name=body.name,
+                retention_days=body.retention_days,
+                recording_retention_days=body.recording_retention_days,
+            ),
+            body,
         )
+        old, new = changed(before, after)
+        if new:
+            await audit(session, ctx, "org.update", "org", ctx.org_id, before=old, after=new)
         overview = await repo.overview(ctx.org_id)
     if overview is None:
         raise AppError("NOT_FOUND", ORG_NOT_FOUND_MESSAGE)

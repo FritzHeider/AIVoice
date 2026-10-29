@@ -89,6 +89,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/audit_logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Audit Logs List
+         * @description The org's audit entries, newest first, filtered by action, actor, resource, and time window.
+         */
+        get: operations["audit_logs_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -573,6 +593,75 @@ export interface components {
             revoked_at: string | null;
             /** Scopes */
             scopes: string[];
+        };
+        /**
+         * AuditLogView
+         * @description One audit entry: who did what to which resource, from where, and the redacted before/after values.
+         * @example {
+         *       "action": "member.role_change",
+         *       "actor_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *       "actor_type": "user",
+         *       "changes": {
+         *         "after": {
+         *           "role": "developer"
+         *         },
+         *         "before": {
+         *           "role": "viewer"
+         *         }
+         *       },
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "id": "0192f4c8-1d2e-7f30-8a41-2b3c4d5e6f70",
+         *       "ip": "203.0.113.24",
+         *       "resource_id": "0192f3a0-4b5c-7d6e-8f70-1a2b3c4d5e6f",
+         *       "resource_type": "membership",
+         *       "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15"
+         *     }
+         */
+        AuditLogView: {
+            /**
+             * Action
+             * @description One of the actions of specs/04 §13, e.g. `api_key.create`.
+             */
+            action: string;
+            /**
+             * Actor Id
+             * @description The user or API key id; null for system actions.
+             */
+            actor_id: string | null;
+            /**
+             * Actor Type
+             * @description `user` (dashboard session), `api_key`, or `system`.
+             * @enum {string}
+             */
+            actor_type: "user" | "api_key" | "system";
+            /**
+             * Changes
+             * @description `{"before": ..., "after": ...}` with secrets replaced by "[REDACTED]"; `acting_parent_org_id` when a parent org acted on this sub-account.
+             */
+            changes: {
+                [key: string]: unknown;
+            };
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Ip
+             * @description Client IP address of the request, when known.
+             */
+            ip: string | null;
+            /** Resource Id */
+            resource_id: string | null;
+            /** Resource Type */
+            resource_type: string;
+            /** User Agent */
+            user_agent: string | null;
         };
         /**
          * DataResponse[ApiKeyCreated]
@@ -1443,6 +1532,59 @@ export interface components {
             owner: components["schemas"]["MemberView"];
             previous_owner: components["schemas"]["MemberView"];
         };
+        /**
+         * PageResponse[AuditLogView]
+         * @example {
+         *       "data": [
+         *         {
+         *           "action": "member.role_change",
+         *           "actor_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+         *           "actor_type": "user",
+         *           "changes": {
+         *             "after": {
+         *               "role": "developer"
+         *             },
+         *             "before": {
+         *               "role": "viewer"
+         *             }
+         *           },
+         *           "created_at": "2026-10-29T14:03:11Z",
+         *           "id": "0192f4c8-1d2e-7f30-8a41-2b3c4d5e6f70",
+         *           "ip": "203.0.113.24",
+         *           "resource_id": "0192f3a0-4b5c-7d6e-8f70-1a2b3c4d5e6f",
+         *           "resource_type": "membership",
+         *           "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15"
+         *         }
+         *       ],
+         *       "pagination": {
+         *         "has_more": true,
+         *         "next_cursor": "MjAyNi0xMC0yOVQxNDowMzoxMS4wMDAwMDArMDA6MDB8MDE5MmY0YjEtN2EyYy03ZDNlLTlmNDAtNWE2YjdjOGQ5ZTBm"
+         *       }
+         *     }
+         */
+        PageResponse_AuditLogView_: {
+            /** Data */
+            data: components["schemas"]["AuditLogView"][];
+            /** Errors */
+            errors?: null;
+            pagination: components["schemas"]["Pagination"];
+        };
+        /**
+         * Pagination
+         * @description Where the next page starts (specs/31-error-catalog.md §2).
+         */
+        Pagination: {
+            /**
+             * Has More
+             * @description Whether another page follows.
+             */
+            has_more: boolean;
+            /**
+             * Next Cursor
+             * @description Pass as `cursor` for the next page; null on the last page.
+             */
+            next_cursor: string | null;
+        };
         /** @enum {string} */
         PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
         /**
@@ -1920,6 +2062,61 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DataResponse_ApiKeyCreated_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    audit_logs_list: {
+        parameters: {
+            query?: {
+                /** @description `pagination.next_cursor` of the previous page. */
+                cursor?: string | null;
+                /** @description Page size, 1-100. */
+                limit?: number;
+                /** @description Only this action, e.g. `api_key.create`. */
+                action?: string | null;
+                /** @description Only actions of this user or API key. */
+                actor_id?: string | null;
+                /** @description Only this resource type, e.g. `api_key`. */
+                resource_type?: string | null;
+                /** @description Only this resource id. */
+                resource_id?: string | null;
+                /** @description Entries at or after this time (with timezone). */
+                since?: string | null;
+                /** @description Entries before this time (with timezone). */
+                until?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_AuditLogView_"];
                 };
             };
             /** @description Invalid input */

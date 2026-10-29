@@ -1405,6 +1405,11 @@ CREATE POLICY platform_read ON dnc_entries FOR SELECT USING (org_id IS NULL);
 > - `downgrade()` drops the 72 tables in reverse order (`DROP TABLE IF EXISTS … CASCADE`), `set_updated_at()`, and
 >   the three extensions. Roles and role memberships stay, because they are cluster-wide.
 
+> Decision (2026-10-29): migration `0004_audit_logs_append_only` revokes `UPDATE, DELETE` on `audit_logs` from
+> `va_app`, which keeps `SELECT, INSERT` (specs/28 §6.3, threat T15); `va_system` keeps every privilege for the
+> retention purge. `ON DELETE CASCADE` from `orgs` still works because referential actions run as the table owner.
+> `credit_ledger` and `usage_events` get the same rule from their owning billing tasks.
+
 > Decision (2026-10-27): `va_db.partitions.ensure_call_event_partitions(conn, now, months_ahead=3)` creates the
 > missing `call_events_pYYYYMM` partitions for the UTC month of `now` and the next `months_ahead` months
 > (`CREATE TABLE IF NOT EXISTS ... PARTITION OF call_events`, the same names and bounds as 0001) and returns the names it

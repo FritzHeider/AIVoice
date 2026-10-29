@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from typing import Annotated, Final
 
 from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from va_api.audit import audit
 from va_api.auth.api_keys import creating_user_id, invalidate_cached_keys, mint_api_key
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
@@ -91,6 +93,15 @@ def _initial_micros(amount: float | None) -> int:
     return 0 if amount is None else dollars_to_micros(amount)
 
 
+async def _audit_create(session: AsyncSession, ctx: RequestContext, child: Org, amount_micros: int) -> None:
+    """``subaccount.create`` and, when funded, ``billing.credit_transfer`` in the calling parent's log."""
+    created = {"name": child.name, "plan_id": child.plan_id, "initial_credits_micros": amount_micros}
+    await audit(session, ctx, "subaccount.create", "org", child.id, after=created)
+    if amount_micros > 0:
+        transfer = {"amount_micros": amount_micros}
+        await audit(session, ctx, "billing.credit_transfer", "org", child.id, after=transfer)
+
+
 @orgs_router.post(
     "/create",
     operation_id="orgs_create",
@@ -131,6 +142,7 @@ async def orgs_create(body: SubAccountCreate, request: Request, ctx: WriteOrgs) 
                 idempotency_key=f"xfer:{new_id()}",
                 description=_TRANSFER_DESCRIPTION,
             )
+        await _audit_create(session, ctx, provisioned.org, amount)
         item = sub_account_item(provisioned.org)
     return SubAccountCreated(
         org_id=item.org_id,
@@ -180,10 +192,16 @@ async def _set_status(request: Request, ctx: RequestContext, org_id: uuid.UUID, 
             raise AppError("NOT_FOUND", SUB_ACCOUNT_NOT_FOUND_MESSAGE)
         if child.status == "closed":
             raise AppError("CONFLICT", CLOSED_SUB_ACCOUNT_MESSAGE)
-        updated = await repo.set_status(org_id, status) if child.status != status else child
+        updated = child
+        if child.status != status:
+            previous = child.status
+            updated = await repo.set_status(org_id, status) or child
+            action = "subaccount.suspend" if status == "suspended" else "subaccount.reactivate"
+            statuses = ({"status": previous}, {"status": status})
+            await audit(session, ctx, action, "org", org_id, before=statuses[0], after=statuses[1])
         prefixes = await ApiKeyRepo(session, org_id).prefixes()
     await invalidate_cached_keys(request, prefixes)
-    return updated or child
+    return updated
 
 
 @orgs_router.post(

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793285970-ba4c
+> va_api audit rows: call va_api.audit.audit(session, ctx, action, resource_type, resource_id, before=, after=) inside the route's open session; va_db.audit.record flushes under use_org(actor org) so it works on global sessions too; new actions go in specs/04 §13 AND va_db.audit.AUDIT_ACTIONS (test compares); audit_logs is append-only for va_app (0004) so seed/cleanup via system_session; paginated envelope lists use va_api.responses.PageResponse[T]
+<!-- tags: api, database, audit | created: 2026-10-29 -->
+
 ### mem-1793282863-1d8b
 > va_api sub-accounts: get_principal applies X-VA-Org-Id via auth.sub_accounts.act_on_sub_account before rate limit/scope/idempotency; use ctx.principal_org_id (not ctx.org_id) for the caller's own API key/membership rows; session child active org via session_auth.resolve_switch_target (MembershipLookupRepo.via_parent). Tests: session_helpers.sub_account / sub_account_member; structlog capture_logs misses contextvars+cached loggers in full suite - wrap structlog.contextvars.bind_contextvars instead
 <!-- tags: api, auth, testing | created: 2026-10-29 -->

@@ -17,6 +17,7 @@ from typing import Annotated, Final
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from va_api.audit import audit
 from va_api.auth.api_keys import (
     check_environment,
     check_expires_at,
@@ -107,6 +108,8 @@ async def api_keys_create(
             created_by=await creating_user_id(ctx, session),
             expires_at=body.expires_at,
         )
+        view = api_key_view(row)
+        await audit(session, ctx, "api_key.create", "api_key", row.id, after=view.model_dump())
         created = api_key_created(row, minted.plaintext)
     return DataResponse(data=created)
 
@@ -118,8 +121,11 @@ async def api_keys_update(
     """Rename a key (revoked keys too); an empty body returns the key unchanged."""
     async with database_of(request).tenant_session(ctx.org_id) as session:
         row = await _managed_key(session, ctx, key_id)
-        if body.name is not None:
+        previous = row.name
+        if body.name is not None and body.name != previous:
             row = await ApiKeyRepo(session, ctx.org_id).rename(key_id, body.name) or row
+            names = ({"name": previous}, {"name": row.name})
+            await audit(session, ctx, "api_key.update", "api_key", key_id, before=names[0], after=names[1])
         view = api_key_view(row)
     return DataResponse(data=view)
 
@@ -130,7 +136,17 @@ async def api_keys_revoke(key_id: uuid.UUID, request: Request, ctx: ManageKeys) 
     now = clock_of(request).now()
     async with database_of(request).tenant_session(ctx.org_id) as session:
         row = await _managed_key(session, ctx, key_id)
-        row = await ApiKeyRepo(session, ctx.org_id).revoke(key_id, now) or row
+        if row.revoked_at is None:
+            row = await ApiKeyRepo(session, ctx.org_id).revoke(key_id, now) or row
+            await audit(
+                session,
+                ctx,
+                "api_key.revoke",
+                "api_key",
+                key_id,
+                before={"revoked_at": None},
+                after={"revoked_at": row.revoked_at},
+            )
         view = api_key_view(row)
     await invalidate_cached_keys(request, [view.prefix])
     return DataResponse(data=view)
@@ -165,7 +181,11 @@ async def api_keys_roll(
             environment=old.environment,
             created_by=await creating_user_id(ctx, session),
         )
+        previous_expiry = old.expires_at
         await repo.expire(key_id, old_expires_at)
+        rolled = {"expires_at": old_expires_at, "new_key_id": row.id, "new_prefix": row.prefix}
+        expiry = {"expires_at": previous_expiry}
+        await audit(session, ctx, "api_key.roll", "api_key", key_id, before=expiry, after=rolled)
         created = api_key_created(row, minted.plaintext)
     await invalidate_cached_keys(request, [old_prefix])
     return DataResponse(data=created)

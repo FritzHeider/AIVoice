@@ -15,6 +15,7 @@ from typing import Final
 from fastapi import BackgroundTasks, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from va_api.audit import audit
 from va_api.auth.api_keys import creating_user_id
 from va_api.auth.context import RequestContext
 from va_api.auth.invitations import send_invitation
@@ -87,6 +88,8 @@ async def org_invitations_create(
         )
         org_name = await _org_name(session, ctx.org_id)
         view = invitation_view(row, now)
+        invited = {"email": view.email, "role": view.role, "expires_at": view.expires_at}
+        await audit(session, ctx, "member.invite", "invitation", row.id, after=invited)
     background.add_task(
         send_invitation,
         email_sender_of(request),
@@ -131,6 +134,8 @@ async def org_invitations_revoke(
         if row is None:
             raise AppError("NOT_FOUND", INVITATION_NOT_FOUND_MESSAGE)
         owner_guard(ctx, row.role)
+        revoked = {"email": row.email, "role": row.role}
         if not await repo.revoke(invitation_id):
             raise AppError("NOT_FOUND", INVITATION_NOT_FOUND_MESSAGE)
+        await audit(session, ctx, "invitation.revoke", "invitation", invitation_id, before=revoked)
     return DataResponse(data=InvitationRevoked(id=invitation_id))

@@ -4,8 +4,8 @@
 enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OIDC connection; specs/04 §5),
 :class:`InvitationRepo` (an org's invitations; specs/04 §6), :class:`CreditTransferRepo` (parent and
 sub-account credit moves; specs/04 §8.4), the envelope's :class:`OrgDataKeyStore` (specs/28
-§3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1), the tenant :class:`ApiKeyRepo`, and the
-system-scope ones.
+§3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1), the tenant :class:`ApiKeyRepo`, the
+tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -15,6 +15,7 @@ on a tenant session that writes tenant rows in the same transaction.
 from __future__ import annotations
 
 from va_db.repositories.api_keys import ApiKeyLookupRepo, ApiKeyRecord, ApiKeyRepo
+from va_db.repositories.audit_logs import AuditLogFilter, AuditLogRepo
 from va_db.repositories.base import (
     IMMUTABLE_COLUMNS,
     NotFoundError,
@@ -95,6 +96,8 @@ __all__ = [
     "ApiKeyLookupRepo",
     "ApiKeyRecord",
     "ApiKeyRepo",
+    "AuditLogFilter",
+    "AuditLogRepo",
     "BalanceDrift",
     "BillingReconcileRepo",
     "ClaimOutcome",

@@ -65,7 +65,7 @@ def test_upgrade_creates_every_model_table(migrated_url: str) -> None:
     assert _names(migrated_url, "SELECT proname FROM pg_proc WHERE proname = 'set_updated_at'") == {
         "set_updated_at"
     }
-    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0003"
+    assert query(migrated_url, "SELECT version_num FROM alembic_version")[0][0] == "0004"
 
 
 def test_every_model_index_exists(migrated_url: str) -> None:
@@ -156,14 +156,18 @@ def test_tenant_session_sees_only_its_own_org(migrated_url: str) -> None:
     assert asyncio.run(_visible_contact_orgs(migrated_url, org_b)) == {org_b}
 
 
-def test_both_roles_hold_every_table_privilege(migrated_url: str) -> None:
+def test_both_roles_hold_every_table_privilege_except_audit_log_changes(migrated_url: str) -> None:
     missing = query(
         migrated_url,
         f"SELECT r, t, p FROM unnest(ARRAY['va_app', 'va_system']) r, ({TABLES_SQL}) AS tables(t), "  # noqa: S608  (constant catalog query)
         "unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p "
-        "WHERE t <> 'alembic_version' AND NOT has_table_privilege(r, t, p)",
+        "WHERE t <> 'alembic_version' AND NOT has_table_privilege(r, t, p) ORDER BY 1, 2, 3",
     )
-    assert missing == []
+    # specs/28 §6.3: audit_logs is append-only for va_app (0004); va_system keeps DELETE for retention.
+    assert [tuple(row) for row in missing] == [
+        ("va_app", "audit_logs", "DELETE"),
+        ("va_app", "audit_logs", "UPDATE"),
+    ]
     ((usage, version_select),) = query(
         migrated_url,
         "SELECT has_schema_privilege('va_app', 'public', 'USAGE'), "

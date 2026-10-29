@@ -24,7 +24,7 @@ from identity_db import IdentityDb, unique_email
 from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
 from service_helpers import make_client
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from va_api.auth import ApiKeyAuthenticator, RequestContext, require_scope
 from va_api.auth.api_key_auth import db_lookup
@@ -51,6 +51,7 @@ from va_common.ids import new_id
 from va_common.money import dollars_to_micros
 from va_db.models import (
     ApiKey,
+    AuditLog,
     CreditHold,
     CreditHoldStatus,
     CreditLedger,
@@ -484,3 +485,12 @@ async def enrol_mfa(client: httpx.AsyncClient, container: SessionContainer) -> t
     assert enable.status_code == 200, enable.text
     container.clock.advance(30)
     return secret, enable.json()["data"]["recovery_codes"]
+
+
+async def audit_rows(identity: IdentityDb, org_id: uuid.UUID, action: str | None = None) -> list[AuditLog]:
+    """The ``audit_logs`` rows of ``org_id`` (only ``action`` when given), oldest first."""
+    statement = select(AuditLog).where(AuditLog.org_id == org_id).order_by(AuditLog.created_at, AuditLog.id)
+    if action is not None:
+        statement = statement.where(AuditLog.action == action)
+    async with identity.database.system_session() as session:
+        return list(await session.scalars(statement))

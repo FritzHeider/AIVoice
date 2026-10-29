@@ -608,7 +608,7 @@ stored as argon2id hashes in `users.mfa_recovery_codes_hash`; each consumed code
 > 7. **Domains are unique across orgs.** A `PUT` listing a domain that another org's connection lists fails with
 >    `CONFLICT` field `allowed_domains` "Domain <d> is already claimed by another organization's SSO connection."
 >    (checked through the system-scope `SsoConnectionLookupRepo`, specs/03 §2); the org's own domains never conflict.
-> 8. **Audit** `org.sso_update` is written once the audit writer exists (P02-T11).
+> 8. **Audit** `org.sso_update` rows: see the §13 decision.
 
 > Decision (2026-10-29): **SSO login flow** (`GET /internal/auth/sso/start`, `GET /internal/auth/sso/callback`;
 > internal document, `x-public: session-flow`).
@@ -841,7 +841,7 @@ see shared-contract additions); `GET /v1/org/secrets` lists names only.
 > with defaults. **`PATCH /v1/org`** (`org:write`) accepts `{name? (1-200 chars, trimmed), retention_days?
 > (1-3650), recording_retention_days? (0-3650)}` with unknown fields `INVALID_INPUT`; setting either retention field
 > also needs `org.compliance` (`FORBIDDEN` "Missing required permission 'org.compliance'."); an empty body changes
-> nothing and returns the org. `settings` joins this body with P02-T12 and the `org.update` audit entry with P02-T11.
+> nothing and returns the org. `settings` joins this body with P02-T12; the `org.update` audit entry is in the §13 decision.
 > `orgs` has no RLS, so both routes read and write it through `OrgRepo` on the global session with the context's org
 > id only.
 
@@ -885,7 +885,7 @@ Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
 > - **Suspend/reactivate.** Same body as get. A `closed` child → `CONFLICT` "A closed sub-account cannot be
 >   changed."; repeating is a no-op. After the commit the child's `apikey:{prefix}` cache entries are deleted (a
 >   Redis error is logged as `api_key_cache_unavailable`, never raised) so the suspension applies to its keys at
->   once; sessions read the org status per request. `subaccount.*` audit rows arrive with the audit writer (P02-T11).
+>   once; sessions read the org status per request. `subaccount.*` audit rows: see the §13 decision.
 
 ### 8.3 Parent access rules
 
@@ -920,7 +920,7 @@ Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
 > 5. The new context replaces `org_id` and `plan_id` with the child's and sets `acting_parent_org_id` to the parent;
 >    principal, scopes, role, and environment are unchanged. The rate bucket keeps the principal's key and is sized
 >    by the child's plan and `limits.rate_per_sec`. Log lines bind `org_id` = child and `acting_parent_org_id` =
->    parent; idempotency rows are claimed in the child org; audit rows (P02-T11) record both orgs.
+>    parent; idempotency rows are claimed in the child org; audit rows record both orgs (§13 decision, item 3).
 > 6. `RequestContext.principal_org_id` (`acting_parent_org_id or org_id`) is the org owning the API key or
 >    membership: `GET /v1/me` and the creating-user lookup of invitations read the key there. `GET /v1/me` gains
 >    `acting_parent_org_id` (uuid | null) and `org` is the child. `POST /v1/org/transfer-ownership` while acting →
@@ -985,7 +985,7 @@ Rule: requested scopes must be a subset of the caller's scopes; otherwise `FORBI
 > - **PATCH** accepts only `name` (`{}` returns the key unchanged); revoked keys may be renamed.
 > - **List** returns every key of the org, revoked and expired ones included, oldest first, unpaginated (`{data:[…]}`),
 >   never `secret_hash` or plaintext. Create and roll withhold `data.key` from idempotent replays (§2.1 decision).
-> - **Audit.** `api_key.create`, `api_key.revoke`, `api_key.roll` audit rows arrive with the audit writer (P02-T11).
+> - **Audit.** `api_key.create`, `api_key.update`, `api_key.revoke`, `api_key.roll` rows: see the §13 decision.
 
 ## 10. Agent onboarding API (keys for AI agents)
 
@@ -1089,7 +1089,8 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
   `auth.mfa_disabled`, `auth.password_changed`, `auth.password_reset`, `auth.sso_login`, `org.update`,
   `org.delete`, `org.ownership_transfer`, `org.sso_update`, `org.secret_set`, `org.secret_delete`,
   `subaccount.create`, `subaccount.suspend`, `subaccount.reactivate`, `member.invite`, `member.role_change`,
-  `member.remove`, `invitation.revoke`, `api_key.create`, `api_key.revoke`, `api_key.roll`, `pathway.create`,
+  `member.remove`, `invitation.revoke`, `invitation.accept`, `api_key.create`, `api_key.update`, `api_key.revoke`,
+  `api_key.roll`, `pathway.create`,
   `pathway.update`, `pathway.delete`, `pathway.publish`, `pathway.promote`, `persona.publish`, `agent.version_create`,
   `agent.env_pin`, `experiment.start`, `experiment.stop`, `tool.create`, `tool.update`, `tool.delete`, `kb.create`,
   `kb.delete`, `voice.clone`, `voice.delete`, `number.purchase`, `number.release`, `number.inbound_update`,
@@ -1104,6 +1105,51 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
   before persisting `changes`.
 - `GET /v1/audit_logs?action=&actor_id=&resource_type=&resource_id=&since=&until=&cursor=&limit=` (envelope,
   `audit.read`). Retained per org `retention_days` (minimum 365 days when `hipaa_mode`).
+
+> Decision (2026-10-29): **Audit writer and log** (P02-T11a).
+> 1. **Writer.** `va_db.audit.record(session, actor, action, resource_type, resource_id, *, before, after)`
+>    takes a `va_db.audit.AuditActor` (`org_id`, `actor_type`, `actor_id`, `ip`, `user_agent`,
+>    `acting_parent_org_id`, `platform_admin`) in place of `ctx`, because `va_db` must not import `va_api`;
+>    routes call `va_api.audit.audit(session, ctx, ...)`, which builds the actor with `actor_of(ctx)`. The row is
+>    added to the caller's open session (tenant or global) and flushed with `app.org_id` set to the actor's org,
+>    so it commits or rolls back with the change, and a failed request writes nothing. An action outside the
+>    list above is a programming error (`ValueError`); `va_db.audit.AUDIT_ACTIONS` mirrors the list exactly.
+> 2. **Actor.** API key → `actor_type=api_key`, `actor_id` = key id; session user → `user`, user id; platform
+>    admin → `user` plus `changes.platform_admin = true` (specs/28 §10); widgets never write audit rows. `ip` is
+>    stored only when it parses as an IP address, else NULL.
+> 3. **changes** = `{"before": <object|null>, "after": <object|null>}`, redacted and JSON-safe (ids, datetimes,
+>    decimals, IP addresses, enums → strings), plus `"acting_parent_org_id": "<uuid>"` when a parent principal acts
+>    on a sub-account. That row lives in the sub-account's log (`ctx.org_id`), which is how "audit logs record both
+>    orgs" (§8.3) is met.
+> 4. **Redaction** recurses through objects and lists. Besides the names above (case-insensitive) it covers
+>    `secret_hash` and `key` (the plaintext field of a created key); the whole value of such an entry becomes
+>    `"[REDACTED]"`, as does any string containing an API key (`API_KEY_RE` search).
+> 5. **Actions added:** `api_key.update` (rename) and `invitation.accept`, so every mutating route of phase 02 maps
+>    to a listed action.
+> 6. **Append-only.** Migration `0004` revokes `UPDATE, DELETE` on `audit_logs` from `va_app` (specs/28 §6.3);
+>    `va_system` keeps them for the retention purge.
+> 7. **List.** Envelope, tag `Audit Logs`, scope `org:read`, permission `audit.read`. Filters are exact matches;
+>    `since` is inclusive and `until` exclusive, both must carry a timezone (`INVALID_INPUT` on the field
+>    otherwise) and `since > until` is `INVALID_INPUT` on `since`; `limit` 1–100 (default 25). Body
+>    `{data:[…], errors:null, pagination:{next_cursor, has_more}}`, newest first. Entry fields: `id, actor_type,
+>    actor_id, action, resource_type, resource_id, ip, user_agent, changes, created_at`.
+> 8. **Rows of the phase 02 routes** (resource_type / resource_id: before → after). A request that changes
+>    nothing writes no row.
+>    - `PATCH /v1/org` → `org.update`, `org`/org id: the changed fields' old → new values.
+>    - `PATCH /v1/org/members/{id}` → `member.role_change`, `membership`/user id: `{role}` → `{role}`;
+>      `DELETE` → `member.remove`, `{user_id, email, role}` → null; `transfer-ownership` →
+>      `org.ownership_transfer`, `org`/org id: `{owner_user_id}` → `{owner_user_id}`.
+>    - Invitations: create → `member.invite`, `invitation`/id: null → `{email, role, expires_at}`; revoke →
+>      `invitation.revoke`, `{email, role}` → null.
+>    - `PUT /v1/org/sso` → `org.sso_update`, `sso_connection`/id: previous connection (or null) → new connection,
+>      with `client_secret: "[REDACTED]"` when a secret was sent; `DELETE` → `org.sso_update`, connection → null.
+>    - `POST /v1/orgs/create` → `subaccount.create` in the calling (parent) org, `org`/child id: null →
+>      `{name, plan_id, initial_credits_micros}`, plus `billing.credit_transfer` (null → `{amount_micros}`) when
+>      funded; suspend / reactivate → `subaccount.suspend|reactivate` in the parent, `{status}` → `{status}`.
+>    - API keys: create → `api_key.create`, `api_key`/id: null → the key view (never the plaintext); rename →
+>      `api_key.update` `{name}` → `{name}`; revoke → `api_key.revoke` `{revoked_at: null}` → `{revoked_at}`; roll
+>      → `api_key.roll` on the **old** key: `{expires_at}` → `{expires_at, new_key_id, new_prefix}`.
+>    - The `/internal/auth/*` rows (`auth.*`, `invitation.accept`) arrive with P02-T11b.
 
 ## 14. Tests required
 

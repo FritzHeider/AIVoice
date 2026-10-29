@@ -345,3 +345,32 @@ def test_api_key_operations_are_envelope_with_the_write_scope() -> None:
     assert "Idempotency-Key replay" in created["properties"]["key"]["description"]
     assert "key" not in document["components"]["schemas"]["ApiKeyView"]["properties"]
     assert "secret_hash" not in document["components"]["schemas"]["ApiKeyView"]["properties"]
+
+
+def test_audit_log_list_is_a_paginated_envelope_needing_audit_read() -> None:
+    document = create_app(make_settings(), init_observability=False).openapi()
+    operation = document["paths"]["/v1/audit_logs"]["get"]
+    assert (operation["operationId"], operation["x-scope"], operation["x-permission"]) == (
+        "audit_logs_list",
+        "org:read",
+        "audit.read",
+    )
+    assert (operation["x-envelope"], operation["tags"]) == ("envelope", ["Audit Logs"])
+    assert {parameter["name"] for parameter in operation["parameters"]} == {
+        "action",
+        "actor_id",
+        "resource_type",
+        "resource_id",
+        "since",
+        "until",
+        "cursor",
+        "limit",
+    }
+    schemas = document["components"]["schemas"]
+    ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    page = schemas[ref.rsplit("/", 1)[1]]
+    assert set(page["required"]) == {"data", "pagination"}
+    assert set(schemas["Pagination"]["properties"]) == {"next_cursor", "has_more"}
+    (example,) = page["examples"]
+    assert {"data", "pagination"} <= set(example)
+    assert example["data"][0]["action"] == "member.role_change"

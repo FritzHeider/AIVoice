@@ -367,6 +367,128 @@
         "title": "ApiKeyView",
         "type": "object"
       },
+      "AuditLogView": {
+        "description": "One audit entry: who did what to which resource, from where, and the redacted before/after values.",
+        "examples": [
+          {
+            "action": "member.role_change",
+            "actor_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+            "actor_type": "user",
+            "changes": {
+              "after": {
+                "role": "developer"
+              },
+              "before": {
+                "role": "viewer"
+              }
+            },
+            "created_at": "2026-10-29T14:03:11Z",
+            "id": "0192f4c8-1d2e-7f30-8a41-2b3c4d5e6f70",
+            "ip": "203.0.113.24",
+            "resource_id": "0192f3a0-4b5c-7d6e-8f70-1a2b3c4d5e6f",
+            "resource_type": "membership",
+            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15"
+          }
+        ],
+        "properties": {
+          "action": {
+            "description": "One of the actions of specs/04 §13, e.g. `api_key.create`.",
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The user or API key id; null for system actions.",
+            "title": "Actor Id"
+          },
+          "actor_type": {
+            "description": "`user` (dashboard session), `api_key`, or `system`.",
+            "enum": [
+              "user",
+              "api_key",
+              "system"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
+          "changes": {
+            "additionalProperties": true,
+            "description": "`{\"before\": ..., \"after\": ...}` with secrets replaced by \"[REDACTED]\"; `acting_parent_org_id` when a parent org acted on this sub-account.",
+            "title": "Changes",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Client IP address of the request, when known.",
+            "title": "Ip"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Id"
+          },
+          "resource_type": {
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "user_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Agent"
+          }
+        },
+        "required": [
+          "id",
+          "actor_type",
+          "actor_id",
+          "action",
+          "resource_type",
+          "resource_id",
+          "ip",
+          "user_agent",
+          "changes",
+          "created_at"
+        ],
+        "title": "AuditLogView",
+        "type": "object"
+      },
       "DataResponse_ApiKeyCreated_": {
         "examples": [
           {
@@ -1867,6 +1989,87 @@
         "title": "OwnershipTransferred",
         "type": "object"
       },
+      "PageResponse_AuditLogView_": {
+        "examples": [
+          {
+            "data": [
+              {
+                "action": "member.role_change",
+                "actor_id": "0192f1d2-8c4d-7b21-8d5f-6e7a8b9c0d1e",
+                "actor_type": "user",
+                "changes": {
+                  "after": {
+                    "role": "developer"
+                  },
+                  "before": {
+                    "role": "viewer"
+                  }
+                },
+                "created_at": "2026-10-29T14:03:11Z",
+                "id": "0192f4c8-1d2e-7f30-8a41-2b3c4d5e6f70",
+                "ip": "203.0.113.24",
+                "resource_id": "0192f3a0-4b5c-7d6e-8f70-1a2b3c4d5e6f",
+                "resource_type": "membership",
+                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15"
+              }
+            ],
+            "pagination": {
+              "has_more": true,
+              "next_cursor": "MjAyNi0xMC0yOVQxNDowMzoxMS4wMDAwMDArMDA6MDB8MDE5MmY0YjEtN2EyYy03ZDNlLTlmNDAtNWE2YjdjOGQ5ZTBm"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLogView"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        },
+        "required": [
+          "data",
+          "pagination"
+        ],
+        "title": "PageResponse[AuditLogView]",
+        "type": "object"
+      },
+      "Pagination": {
+        "description": "Where the next page starts (specs/31-error-catalog.md §2).",
+        "properties": {
+          "has_more": {
+            "description": "Whether another page follows.",
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page.",
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "next_cursor",
+          "has_more"
+        ],
+        "title": "Pagination",
+        "type": "object"
+      },
       "PrincipalType": {
         "enum": [
           "api_key",
@@ -2633,6 +2836,194 @@
         ],
         "x-envelope": "envelope",
         "x-scope": "api_keys:write"
+      }
+    },
+    "/v1/audit_logs": {
+      "get": {
+        "description": "The org's audit entries, newest first, filtered by action, actor, resource, and time window.",
+        "operationId": "audit_logs_list",
+        "parameters": [
+          {
+            "description": "`pagination.next_cursor` of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`pagination.next_cursor` of the previous page.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "description": "Page size, 1-100.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "description": "Page size, 1-100.",
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only this action, e.g. `api_key.create`.",
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this action, e.g. `api_key.create`.",
+              "title": "Action"
+            }
+          },
+          {
+            "description": "Only actions of this user or API key.",
+            "in": "query",
+            "name": "actor_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only actions of this user or API key.",
+              "title": "Actor Id"
+            }
+          },
+          {
+            "description": "Only this resource type, e.g. `api_key`.",
+            "in": "query",
+            "name": "resource_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this resource type, e.g. `api_key`.",
+              "title": "Resource Type"
+            }
+          },
+          {
+            "description": "Only this resource id.",
+            "in": "query",
+            "name": "resource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this resource id.",
+              "title": "Resource Id"
+            }
+          },
+          {
+            "description": "Entries at or after this time (with timezone).",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Entries at or after this time (with timezone).",
+              "title": "Since"
+            }
+          },
+          {
+            "description": "Entries before this time (with timezone).",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Entries before this time (with timezone).",
+              "title": "Until"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse_AuditLogView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Audit Logs List",
+        "tags": [
+          "Audit Logs"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "audit.read",
+        "x-scope": "org:read"
       }
     },
     "/v1/health": {

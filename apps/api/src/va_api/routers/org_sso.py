@@ -14,6 +14,7 @@ from typing import Annotated, Final
 
 from fastapi import Depends, Request
 
+from va_api.audit import audit
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
 from va_api.auth.oidc_discovery import DiscoveryError
@@ -64,6 +65,10 @@ async def decrypt_client_secret(envelope: Envelope, row: SsoConnection) -> str:
 def _ensure_enabled(request: Request) -> None:
     if not settings_of(request).oidc_enabled:
         raise AppError("FORBIDDEN", NOT_ENABLED_MESSAGE)
+
+
+def _audited(view: SsoConnectionView | None) -> dict[str, object] | None:
+    return None if view is None else view.model_dump(exclude={"created_at", "updated_at"})
 
 
 def _view(row: SsoConnection) -> SsoConnectionView:
@@ -137,6 +142,12 @@ async def org_sso_put(
             enforce=body.enforce,
         )
         view = _view(row)
+        after = _audited(view) or {}
+        if body.client_secret is not None:
+            # Stored as "[REDACTED]": the entry shows that the secret was replaced, never its value.
+            after["client_secret"] = body.client_secret.get_secret_value()
+        before = _audited(_view(existing) if existing is not None else None)
+        await audit(session, ctx, "org.sso_update", "sso_connection", row.id, before=before, after=after)
     return DataResponse(data=view)
 
 
@@ -165,7 +176,11 @@ async def org_sso_delete(request: Request, ctx: WriteOrg) -> DataResponse[SsoCon
     """Remove the org's OIDC connection."""
     _ensure_enabled(request)
     async with database_of(request).tenant_session(ctx.org_id) as session:
-        deleted = await SsoConnectionRepo(session, ctx.org_id).delete()
-    if deleted is None:
-        raise AppError("NOT_FOUND", NOT_FOUND_MESSAGE)
-    return DataResponse(data=SsoConnectionDeleted(id=deleted))
+        repo = SsoConnectionRepo(session, ctx.org_id)
+        current = await repo.get()
+        if current is None:
+            raise AppError("NOT_FOUND", NOT_FOUND_MESSAGE)
+        before = _audited(_view(current))
+        await repo.delete()
+        await audit(session, ctx, "org.sso_update", "sso_connection", current.id, before=before)
+    return DataResponse(data=SsoConnectionDeleted(id=current.id))

@@ -579,3 +579,15 @@ Grafana 3001
   `list_keys`, `rename`, `revoke` (keeps the first `revoked_at`), `expire`, and `add(..., expires_at=)`. Tests:
   `store_api_key(container, org_id, scopes, environment="test")` issues test keys; `/v1/me` needs `org:read`, so a
   narrow key used to probe authentication must hold it.
+- 2026-10-29 (P02-T11a): Audit log. Write rows with `va_api.audit.audit(session, ctx, "<action>", resource_type,
+  resource_id, before=..., after=...)` inside the route's open session (tenant or global) before it closes; it calls
+  `va_db.audit.record`, which flushes the row under `use_org(actor org)`, so a parent's row can be written in a
+  sub-account's transaction and a failed request leaves nothing. New actions: add them to the specs/04 §13 list
+  **and** `va_db.audit.AUDIT_ACTIONS` (`test_audit_unit` compares the two); an unknown action is `ValueError`.
+  Pass views/dicts, never ORM rows; `redact` replaces secret-named keys (`password`, `token`, `key`, `*_enc`, ...)
+  and API-key strings, and raises `TypeError` on non-JSON values (bytes). Write no row for a no-op. Migration
+  `0004` revokes `UPDATE, DELETE` on `audit_logs` from `va_app` (append-only): tests must not modify audit rows as
+  `va_app` (seed or clean up through `system_session`); `test_rls_isolation` expects "permission denied" there.
+  `GET /v1/audit_logs` (`routers/audit_logs.py`) returns `va_api.responses.PageResponse[T]` (`data`, `errors`,
+  `pagination`) — reuse it for later cursor-paginated envelope lists. Test helper:
+  `session_helpers.audit_rows(identity, org_id, action=None)`.

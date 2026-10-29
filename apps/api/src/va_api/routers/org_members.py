@@ -15,6 +15,7 @@ from typing import Final
 
 from fastapi import Depends, Request
 
+from va_api.audit import audit
 from va_api.auth.context import RequestContext
 from va_api.auth.password_reset import require_recent_auth
 from va_api.auth.permissions import holds_permission, require_permission
@@ -96,6 +97,16 @@ async def org_members_update(
         target = await _locked_target(repo, user_id)
         owner_guard(ctx, target.role, body.role)
         updated = _found(await repo.change_role(user_id, body.role))
+        if updated.role != target.role:
+            await audit(
+                session,
+                ctx,
+                "member.role_change",
+                "membership",
+                user_id,
+                before={"role": target.role},
+                after={"role": updated.role},
+            )
     return DataResponse(data=member_view(updated))
 
 
@@ -115,6 +126,8 @@ async def org_members_remove(
         owner_guard(ctx, target.role)
         if not await repo.remove_member(user_id):
             raise AppError("NOT_FOUND", MEMBER_NOT_FOUND_MESSAGE)
+        removed = {"user_id": target.user_id, "email": target.email, "role": target.role}
+        await audit(session, ctx, "member.remove", "membership", user_id, before=removed)
     return DataResponse(data=MemberRemoved(user_id=user_id))
 
 
@@ -145,6 +158,15 @@ async def org_transfer_ownership(
     async with database_of(request).tenant_session(ctx.org_id) as session:
         previous, owner = _found(
             await MembershipRepo(session, ctx.org_id).transfer_ownership(ctx.principal_id, body.user_id)
+        )
+        await audit(
+            session,
+            ctx,
+            "org.ownership_transfer",
+            "org",
+            ctx.org_id,
+            before={"owner_user_id": previous.user_id},
+            after={"owner_user_id": owner.user_id},
         )
     return DataResponse(
         data=OwnershipTransferred(previous_owner=member_view(previous), owner=member_view(owner))
