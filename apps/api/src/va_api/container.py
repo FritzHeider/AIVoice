@@ -13,20 +13,23 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.sessions import SessionManager
+from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.settings import ApiSettings
 from va_common.auth import PasswordHasher
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import Envelope, open_kms_provider
+from va_common.email import EmailSender, InMemoryEmailSender, SmtpEmailSender
 from va_common.health import CheckFn
 from va_common.service import ReadinessSource
+from va_common.settings import Environment
 from va_common.time import Clock, SystemClock
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 
-__all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container"]
+__all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
 
 type ContainerFactory = Callable[[ApiSettings], AbstractAsyncContextManager[ReadinessSource]]
 
@@ -48,17 +51,26 @@ class Container:
     password_hasher: PasswordHasher
     sessions: SessionManager
     login_throttle: LoginThrottle
+    email_sender: EmailSender
+    resend_limiter: ResendLimiter
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
         return self.dependencies.readiness_checks()
 
 
+def email_sender_for(settings: ApiSettings, clock: Clock) -> EmailSender:
+    """The in-memory sender when ``VA_ENV=test``, else SMTP through ``SMTP_URL`` (connects per message)."""
+    if settings.va_env is Environment.TEST:
+        return InMemoryEmailSender()
+    return SmtpEmailSender(settings.smtp_config(), sender=settings.email_from, clock=clock)
+
+
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
-    session manager, and the login throttle.
+    session manager, the login throttle, the email sender, and the verification resend limiter.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -101,4 +113,6 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             password_hasher=password_hasher,
             sessions=SessionManager(database=database, redis=redis, clock=clock),
             login_throttle=LoginThrottle(redis),
+            email_sender=email_sender_for(settings, clock),
+            resend_limiter=ResendLimiter(redis),
         )

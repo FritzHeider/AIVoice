@@ -22,10 +22,14 @@ from va_api.auth.csrf import check_csrf, check_origin
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.rbac import scopes_for_role
 from va_api.auth.sessions import SESSION_INVALID, ActiveSession, SessionManager
+from va_api.auth.verification import ResendLimiter
 from va_api.middleware import request_id_of
 from va_api.settings import ApiSettings
 from va_common.auth import PasswordHasher
+from va_common.email import EmailSender
 from va_common.errors import AppError
+from va_common.time import Clock
+from va_db.provisioning import OrgProvisioner
 from va_db.repositories import MembershipLookupRepo, MembershipRecord
 from va_db.session import Database
 
@@ -36,15 +40,19 @@ __all__ = [
     "active_membership",
     "authenticate_session",
     "client_ip",
+    "clock_of",
     "cookie_policy_of",
     "current_session",
     "database_of",
+    "email_sender_of",
     "enforce_mfa",
     "has_session_cookie",
     "login_throttle_of",
     "memberships_of_user",
     "password_hasher_of",
     "pick_active",
+    "provisioner_of",
+    "resend_limiter_of",
     "session_principal",
     "sessions_of",
     "settings_of",
@@ -83,6 +91,26 @@ def password_hasher_of(request: Request) -> PasswordHasher:
 def database_of(request: Request) -> Database:
     database: Database = request.app.state.container.database
     return database
+
+
+def clock_of(request: Request) -> Clock:
+    clock: Clock = request.app.state.container.clock
+    return clock
+
+
+def provisioner_of(request: Request) -> OrgProvisioner:
+    provisioner: OrgProvisioner = request.app.state.container.provisioner
+    return provisioner
+
+
+def email_sender_of(request: Request) -> EmailSender:
+    sender: EmailSender = request.app.state.container.email_sender
+    return sender
+
+
+def resend_limiter_of(request: Request) -> ResendLimiter:
+    limiter: ResendLimiter = request.app.state.container.resend_limiter
+    return limiter
 
 
 def client_ip(request: Request) -> str | None:

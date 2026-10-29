@@ -1423,6 +1423,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `apikey:{id}:touched` | string | 60 s | `last_used_at` write gate (`SET NX EX 60`) |
 | `auth:fail:email:{sha256(email)}` | counter | 900 s | Failed password logins per email (casefolded), login throttling (specs/04 §4.2) |
 | `auth:fail:ip:{ip}` | counter | 900 s | Failed password logins per client IP, login throttling (specs/04 §4.2) |
+| `auth:verify:resend:{user_id}` | counter | 3600 s (set on the first resend of the window) | Verification email resends per user, at most 3 per hour (specs/04 §4.1) |
 | `call:{id}:seq` | counter | 48 h | Per-call event sequence (`19` §1) |
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |

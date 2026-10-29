@@ -9,12 +9,14 @@ from service_helpers import readiness_of, track_closes
 from va_api.auth import ApiKeyAuthenticator
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.sessions import SessionManager
-from va_api.container import Container, build_container
+from va_api.auth.verification import ResendLimiter
+from va_api.container import Container, build_container, email_sender_for
 from va_api.idempotency import DbIdempotencyStore
 from va_api.main import create_app
 from va_api.rate_limit import RateLimiter
 from va_common.auth import SPEC_ARGON2_PARAMS, PasswordHasher
 from va_common.crypto import Envelope
+from va_common.email import InMemoryEmailSender, SmtpEmailSender
 from va_common.time import SystemClock
 from va_db.provisioning import OrgProvisioner
 
@@ -43,9 +45,17 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert container.password_hasher.params == SPEC_ARGON2_PARAMS
         assert isinstance(container.sessions, SessionManager)
         assert isinstance(container.login_throttle, LoginThrottle)
+        assert isinstance(container.email_sender, SmtpEmailSender)
+        assert isinstance(container.resend_limiter, ResendLimiter)
         assert closed == []
     # The va_app and va_system engines first, then the dependency stack in reverse order.
     assert closed == ["engine", "engine", "redis", "engine"]
+
+
+def test_email_sender_is_in_memory_only_under_test() -> None:
+    clock = SystemClock()
+    assert isinstance(email_sender_for(make_settings(va_env="test"), clock), InMemoryEmailSender)
+    assert isinstance(email_sender_for(make_settings(va_env="local"), clock), SmtpEmailSender)
 
 
 async def test_build_container_requires_api_key_pepper(monkeypatch: pytest.MonkeyPatch) -> None:

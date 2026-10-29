@@ -44,6 +44,15 @@
 > `x-envelope`; the unused `HTTPValidationError`/`ValidationError` components are dropped. Contact: VoiceAgents
 > Support, `https://voiceagents.ai/support`, `support@voiceagents.ai`.
 
+> Decision (2026-10-29): **internal document** `openapi/internal.json`: title "VoiceAgents Internal API", the same
+> version, servers, contact, and license as the public document; `paths` = every route of the app's routers whose
+> path starts with `/internal/` (generated from shallow copies with `include_in_schema=True`, so the public document
+> still excludes them); `tags` = `Auth` (extended as internal families arrive, every internal route must use one);
+> `securitySchemes` = `SessionCookie` only; the same error components, `422`→`400` rewrite, and `default` response
+> as the public document; operations keep `x-public` and `x-envelope`. Envelope success bodies
+> (`DataResponse[T]`) carry `T`'s examples wrapped as `{data: <example>}`, so every 2xx response has an example.
+> `make openapi` writes both files and `scripts/check_openapi_drift.py` checks both, reporting each file separately.
+
 ## 2. Python SDK `voiceagents` (`sdks/python`)
 
 ### 2.1 Layout

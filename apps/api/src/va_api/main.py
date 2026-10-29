@@ -2,8 +2,8 @@
 
 ``create_app`` wires middleware (outer to inner: request context, metrics, rate-limit headers, idempotency
 capture, CORS), the envelope-aware error handlers and the idempotent replay handler, the routers, and the
-OpenAPI generator. The lifespan initialises observability
-and opens the dependency container; importing this module performs no I/O.
+OpenAPI generators (``app.openapi()`` public, ``app.state.internal_openapi()`` for ``/internal/*``). The
+lifespan initialises observability and opens the dependency container; importing this module performs no I/O.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from va_api.container import ContainerFactory, build_container
 from va_api.errors import install_handlers
 from va_api.idempotency import REPLAYED_HEADER, IdempotencyMiddleware, install_idempotency
 from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
-from va_api.openapi import TITLE, build_openapi
+from va_api.openapi import TITLE, build_internal_openapi, build_openapi
 from va_api.rate_limit import RateLimitHeadersMiddleware
 from va_api.routers.auth import internal_auth_router
 from va_api.routers.health import probe_router, public_router
@@ -98,6 +98,7 @@ def create_app(
     for router in routers:
         app.include_router(router)
     app.openapi = partial(build_openapi, app, cfg)  # type: ignore[method-assign]
+    app.state.internal_openapi = partial(build_internal_openapi, app, cfg)
     return app
 
 

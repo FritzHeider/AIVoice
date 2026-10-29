@@ -269,6 +269,35 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > `va_session` cookie it received (fixation defence); its active org is the user's oldest membership. All
 > `/internal/auth/*` routes carry `x-public: "session-flow"` and are excluded from `openapi.json`.
 
+> Decision (2026-10-29): **signup** body `{email (3-320 chars, trimmed), password (1-1024), name (1-200, trimmed),
+> org_name (1-200, trimmed)}`, unknown fields `INVALID_INPUT`. Order: foreign `Origin`/`Referer` rejected as for
+> login (requests with neither pass) → password policy (§4.2, `PASSWORD_TOO_WEAK` field `password`) → argon2 hash →
+> one `tenant_session(new org id)` transaction holding the org provisioning (owner `NewUser`, plan `start`), the
+> session row (active org = the new org, expires now + 14 d, `last_login_at` = now) and a `verify_email` token
+> (24 h). After the commit: the `sess:` cache entry is written, a valid `va_session` the request carried is revoked
+> (fixation defence, as login), both cookies are set, and the response is **201** `{data:{user, org}}` with `user` the
+> §4.1 session user and `org = {id, name, slug, plan_id, status, created_at}`. The verification email
+> (`{DASHBOARD_BASE_URL}/verify-email/{token}`, the specs/25 route) is sent after the response as a background task;
+> a delivery failure is logged as `verification_email_failed` (template and error type, never the address) and never
+> fails signup, since the user can resend. A duplicate email is `CONFLICT` 409 "An account with this email already
+> exists." with `field: "email"`: signup reveals registration by design, login stays generic. A new org has no
+> `mfa_required`, so "MFA not required until verified" needs no extra code; `EMAIL_NOT_VERIFIED` gates the specific
+> actions that require a verified email when those actions are built (none so far in phase 02).
+> **verify-email** body `{token (1-256 chars)}`, no session needed (the link may open in another browser), same
+> `Origin` rule. A malformed token, or one that is unknown, used, expired, or of another purpose, is `TOKEN_EXPIRED`
+> 400 "Verification link is invalid or has expired." with `field: "token"`. Success marks the email verified in the
+> same transaction (the first verification time is kept; a fresh token of an already verified user still returns
+> 200) and returns `{data:{user}}`.
+> **resend-verification** is session-authenticated (CSRF and `Origin` checks, MFA-gated like logout-all) with an
+> optional `{}` body. An already verified user gets 200 `{data:{sent:false, email_verified:true}}` and nothing is
+> counted. Otherwise the per-user fixed window `auth:verify:resend:<user_id>` (`INCR` + `EXPIRE 3600 NX` in one
+> `MULTI`) allows 3 per hour; the 4th is `RATE_LIMITED` 429 "Too many verification emails; try again in N seconds."
+> with `Retry-After: N` (the key's TTL, 3600 without one); rejected attempts count. Redis being unavailable logs
+> `resend_limit_unavailable` and allows the resend. Success issues a new 24 h token (older unused ones stay valid
+> until used or expired), emails it in the background, and returns `{data:{sent:true, email_verified:false}}`. The
+> signup email does not count toward the 3. The api sends through `SmtpEmailSender` (`SMTP_URL`, `EMAIL_FROM`) except
+> under `VA_ENV=test`, where it uses `InMemoryEmailSender`.
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,

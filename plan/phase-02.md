@@ -18,7 +18,7 @@
   - Deliverables: dependency/middleware storing request hash, lock, response replay for 24 h, cleanup job function
   - Acceptance: replay returns identical status/body; different body → 422 code; concurrent duplicate → 409.
 
-- [ ] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF (split by the planner on 2026-10-29 into T04a–T04d below; tick when all four are ticked)
+- [x] P02-T04 Dashboard accounts: signup, verification, login, sessions, CSRF (split by the planner on 2026-10-29 into T04a–T04d below; tick when all four are ticked) — all four subtasks approved 2026-10-29
   - Spec refs: specs/04-auth-tenancy-rbac.md (dashboard auth, sessions, CSRF); specs/28-security.md (password hashing, cookies)
   - Depends on: P01-T10
   - Deliverables: `/internal/auth/signup`, `/verify-email`, `/login`, `/logout`, `/session`, argon2id params, session cookie, sliding expiry, CSRF double-submit for cookie-authenticated mutations, `EmailSender` protocol + SMTP + in-memory implementations, email templates
@@ -42,7 +42,7 @@
   - Deliverables: `va_api.auth.rbac.ROLE_SCOPES`, session manager (create, resolve with 14 d sliding expiry extended at most hourly, 90 d absolute cap, `sess:` cache, revoke), session-cookie principal in `get_principal`, `va_session`/`va_csrf` cookies, CSRF double-submit + Origin/Referer check, `MFA_REQUIRED` gating with the §4.3 exemptions, `AUTH_LOCKED` login throttling, `POST /internal/auth/login`, `/logout`, `/logout-all`, `GET /internal/auth/session`
   - Acceptance: full login → session → logout flow tests on Postgres; CSRF missing → 403; expired session → 401; sliding/absolute expiry with a frozen clock; lock after 10 failures with `Retry-After`.
 
-- [ ] P02-T04d Signup, email verification, resend, internal OpenAPI document
+- [x] P02-T04d Signup, email verification, resend, internal OpenAPI document — reviewer 2026-10-29: make lint/typecheck/placeholders 0, make test 2289 passed (99.55 %), openapi drift both current, check_spec_refs 0, jscpd 0 clones, radon nothing >= C in src
   - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (signup, verify-email, resend-verification); specs/26-sdks-cli-mcp-docs.md §1 (`openapi/internal.json`, `SessionCookie` scheme); specs/31-error-catalog.md (`PASSWORD_TOO_WEAK`, `TOKEN_EXPIRED`, `EMAIL_NOT_VERIFIED`)
   - Depends on: P02-T04c
   - Deliverables: `POST /internal/auth/signup` (policy, provisioning + session + verify token in one transaction, verification email after commit), `/verify-email`, `/resend-verification` (3 per hour), `EmailSender` in the api container (SMTP; in-memory in tests), `openapi/internal.json` export + drift check

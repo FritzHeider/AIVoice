@@ -56,7 +56,7 @@ e2e: ## Simulator end-to-end suite
 e2e-ui: ## Dashboard Playwright suite
 	$(PNPM) --filter dashboard exec playwright test
 
-openapi: ## Regenerate openapi/openapi.json
+openapi: ## Regenerate openapi/openapi.json and openapi/internal.json
 	uv run python scripts/export_openapi.py
 
 placeholders: ## Placeholder/stub detector gate

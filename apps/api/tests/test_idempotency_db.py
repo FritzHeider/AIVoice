@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import pytest
-from session_helpers import migrated_postgres
 from tenant_rows import OrgFactory, open_database
 
 from va_api.idempotency import DbIdempotencyStore
@@ -17,12 +16,6 @@ from va_db.session import Database
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(180)]
 
 _PATH = "/v1/calls"
-
-
-@pytest.fixture(scope="module")
-def migrated_url() -> Iterator[str]:
-    with migrated_postgres() as url:
-        yield url
 
 
 @pytest.fixture

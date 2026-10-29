@@ -17,6 +17,7 @@ from typing import Any, Final
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common import json
 from va_common.auth import looks_like_token, sha256_hex
@@ -132,21 +133,46 @@ class SessionManager:
         user_agent: str | None,
     ) -> tuple[str, ActiveSession]:
         """Log the user in: a new session expiring in 14 days plus ``last_login_at``; the cookie token too."""
-        now = self._clock.now()
         async with self._database.global_session() as session:
-            repo = IdentityRepo(session)
-            issued = await repo.create_session(
-                user_id=user_id,
-                active_org_id=active_org_id,
-                expires_at=now + SLIDING_TTL,
-                ip=ip,
-                user_agent=user_agent,
-                created_at=now,
+            token, active = await self.start_in(
+                session, user_id=user_id, active_org_id=active_org_id, ip=ip, user_agent=user_agent
             )
-            await repo.record_login(user_id, now)
-        active = ActiveSession.of(issued.session)
-        await self._store(active)
-        return issued.token, active
+        await self.remember(active)
+        return token, active
+
+    async def start_in(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        active_org_id: uuid.UUID | None,
+        ip: str | None,
+        user_agent: str | None,
+    ) -> tuple[str, ActiveSession]:
+        """:meth:`start` inside the caller's transaction (signup creates the user in the same one).
+
+        Nothing is cached: the caller calls :meth:`remember` after its transaction commits.
+        """
+        now = self._clock.now()
+        repo = IdentityRepo(session)
+        issued = await repo.create_session(
+            user_id=user_id,
+            active_org_id=active_org_id,
+            expires_at=now + SLIDING_TTL,
+            ip=ip,
+            user_agent=user_agent,
+            created_at=now,
+        )
+        await repo.record_login(user_id, now)
+        return issued.token, ActiveSession.of(issued.session)
+
+    async def remember(self, active: ActiveSession) -> None:
+        """Cache ``active`` at ``sess:{token_hash}``; a Redis failure is logged, never raised."""
+        ttl = cache_ttl_s(active.expires_at, self._clock.now())
+        try:
+            await self._redis.set(session_cache_key(active.token_hash), json.dumps(active.to_json()), ex=ttl)
+        except (RedisError, OSError) as exc:
+            _log.warning("session_cache_unavailable", error=type(exc).__name__)
 
     async def resolve(self, token: str) -> ActiveSession | None:
         """The session of cookie ``token`` (extended when due), or ``None`` when invalid or expired.
@@ -169,7 +195,7 @@ class SessionManager:
                 await IdentityRepo(session).extend_session(active.session_id, expiry)
             active = replace(active, expires_at=expiry)
         if loaded or expiry is not None:
-            await self._store(active)
+            await self.remember(active)
         return active
 
     async def set_active_org(self, active: ActiveSession, org_id: uuid.UUID) -> ActiveSession:
@@ -177,7 +203,7 @@ class SessionManager:
         async with self._database.global_session() as session:
             await IdentityRepo(session).set_active_org(active.session_id, org_id)
         updated = replace(active, active_org_id=org_id)
-        await self._store(updated)
+        await self.remember(updated)
         return updated
 
     async def revoke(self, active: ActiveSession) -> int:
@@ -217,13 +243,6 @@ class SessionManager:
         except (KeyError, TypeError, ValueError):
             _log.warning("session_cache_invalid")
             return None
-
-    async def _store(self, active: ActiveSession) -> None:
-        ttl = cache_ttl_s(active.expires_at, self._clock.now())
-        try:
-            await self._redis.set(session_cache_key(active.token_hash), json.dumps(active.to_json()), ex=ttl)
-        except (RedisError, OSError) as exc:
-            _log.warning("session_cache_unavailable", error=type(exc).__name__)
 
     async def _forget(self, token_hashes: list[str]) -> None:
         if not token_hashes:

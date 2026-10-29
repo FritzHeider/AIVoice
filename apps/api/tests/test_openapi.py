@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +15,22 @@ from openapi_spec_validator import validate
 import check_openapi_drift
 from va_api import __version__
 from va_api.main import create_app
-from va_api.openapi import TAG_NAMES, servers
+from va_api.openapi import INTERNAL_TAG_NAMES, TAG_NAMES, internal_routes, servers
+from va_api.responses import DataResponse
 
 ROOT = Path(__file__).resolve().parents[3]
 SPEC_26 = ROOT / "specs" / "26-sdks-cli-mcp-docs.md"
 COMMITTED = ROOT / "openapi" / "openapi.json"
+COMMITTED_INTERNAL = ROOT / "openapi" / "internal.json"
+INTERNAL_PATHS = {
+    "/internal/auth/signup",
+    "/internal/auth/verify-email",
+    "/internal/auth/resend-verification",
+    "/internal/auth/login",
+    "/internal/auth/logout",
+    "/internal/auth/logout-all",
+    "/internal/auth/session",
+}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
 
@@ -38,6 +50,26 @@ def resolve(document: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
         return schema
     resolved: dict[str, Any] = document["components"]["schemas"][ref.rsplit("/", 1)[1]]
     return resolved
+
+
+def checked_operations(
+    document: dict[str, Any], tag_names: tuple[str, ...]
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Each operation after the shared checks: unique well-formed operationId, one known tag, and an example
+    on every 2xx response."""
+    ids = [operation["operationId"] for _, _, operation in operations(document)]
+    assert len(ids) == len(set(ids))
+    for path, method, operation in operations(document):
+        where = f"{method.upper()} {path}"
+        assert OPERATION_ID.fullmatch(operation["operationId"]), where
+        assert len(operation["tags"]) == 1, where
+        assert operation["tags"][0] in tag_names, where
+        success = [code for code in operation["responses"] if code.startswith("2")]
+        assert success, where
+        for code in success:
+            schema = operation["responses"][code]["content"]["application/json"]["schema"]
+            assert resolve(document, schema).get("examples"), where
+        yield where, operation
 
 
 def test_openapi_31_and_info() -> None:
@@ -88,20 +120,9 @@ def test_tags_order_matches_spec() -> None:
 def test_operations_contract(with_samples: bool) -> None:
     app = sample_app() if with_samples else create_app(make_settings(), init_observability=False)
     document = app.openapi()
-    ids = [operation["operationId"] for _, _, operation in operations(document)]
-    assert len(ids) == len(set(ids))
-    for path, method, operation in operations(document):
-        where = f"{method.upper()} {path}"
-        assert OPERATION_ID.fullmatch(operation["operationId"]), where
-        assert len(operation["tags"]) == 1, where
-        assert operation["tags"][0] in TAG_NAMES, where
+    for where, operation in checked_operations(document, TAG_NAMES):
         assert operation["x-envelope"] in {"legacy", "envelope"}, where
         assert operation["x-scope"], where
-        success = [code for code in operation["responses"] if code.startswith("2")]
-        assert success, where
-        for code in success:
-            schema = operation["responses"][code]["content"]["application/json"]["schema"]
-            assert resolve(document, schema).get("examples"), where
 
 
 def test_internal_routes_are_not_in_the_public_document() -> None:
@@ -173,3 +194,67 @@ def test_committed_document_is_valid_31() -> None:
     document = json.loads(COMMITTED.read_text(encoding="utf-8"))
     assert document["openapi"] == "3.1.0"
     validate(document)
+
+
+def internal_document() -> dict[str, Any]:
+    document: dict[str, Any] = create_app(make_settings(), init_observability=False).state.internal_openapi()
+    return document
+
+
+def test_internal_document_info_and_security() -> None:
+    document = internal_document()
+    validate(document)
+    assert document["openapi"] == "3.1.0"
+    assert document["info"]["title"] == "VoiceAgents Internal API"
+    assert document["info"]["version"] == __version__
+    assert document["info"]["license"] == {"name": "Proprietary"}
+    assert document["servers"] == servers(make_settings())
+    assert [tag["name"] for tag in document["tags"]] == list(INTERNAL_TAG_NAMES)
+    assert document["components"]["securitySchemes"] == {
+        "SessionCookie": {"type": "apiKey", "in": "cookie", "name": "va_session"}
+    }
+    assert {"ErrorItem", "ErrorLegacy", "ErrorEnvelope"} <= set(document["components"]["schemas"])
+    assert "HTTPValidationError" not in document["components"]["schemas"]
+
+
+def test_internal_document_is_cached() -> None:
+    app = create_app(make_settings(), init_observability=False)
+    assert app.state.internal_openapi() is app.state.internal_openapi()
+    assert app.openapi() is not app.state.internal_openapi()
+
+
+def test_internal_document_holds_only_internal_routes() -> None:
+    app = create_app(make_settings(), init_observability=False)
+    document = app.state.internal_openapi()
+    assert set(document["paths"]) >= INTERNAL_PATHS
+    assert all(path.startswith("/internal/") for path in document["paths"])
+    assert not [path for path in app.openapi()["paths"] if path.startswith("/internal/")]
+    originals = [route for router in app.state.routers for route in router.routes]
+    assert all(not route.include_in_schema for route in originals if route.path.startswith("/internal/"))
+    assert all(route.include_in_schema for route in internal_routes(app.state.routers))
+
+
+def test_internal_operations_contract() -> None:
+    document = internal_document()
+    for where, operation in checked_operations(document, INTERNAL_TAG_NAMES):
+        assert operation["x-envelope"] == "envelope", where
+        assert operation["x-public"] == "session-flow", where
+        for code, response in operation["responses"].items():
+            if code.startswith("2"):
+                examples = resolve(document, response["content"]["application/json"]["schema"])["examples"]
+                assert all(set(example) <= {"data", "errors"} for example in examples), where
+        body = operation.get("requestBody")
+        if body is not None:
+            schema = body["content"]["application/json"]["schema"]
+            variants = [item for item in schema.get("anyOf", [schema]) if item.get("type") != "null"]
+            assert all(resolve(document, item).get("examples") for item in variants), where
+    assert "201" in document["paths"]["/internal/auth/signup"]["post"]["responses"]
+
+
+def test_data_response_wraps_examples_only_for_models() -> None:
+    assert "examples" not in DataResponse[int].model_json_schema()
+    assert "examples" not in DataResponse[dict[str, int]].model_json_schema()
+
+
+def test_committed_internal_document_is_current() -> None:
+    assert check_openapi_drift.render(internal_document()) == COMMITTED_INTERNAL.read_text(encoding="utf-8")

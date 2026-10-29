@@ -7,14 +7,13 @@ logout, the MFA gate, and org status, all through the real app with fake Redis a
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from typing import Any
 
 import fakeredis
 import httpx
 import pytest
-from identity_db import IdentityDb, open_identity_db, unique_email
+from identity_db import IdentityDb, unique_email
 from session_helpers import (
     DASHBOARD_URL,
     PASSWORD,
@@ -23,7 +22,6 @@ from session_helpers import (
     SessionContainer,
     login,
     make_member,
-    migrated_postgres,
     session_app,
     session_client,
     write_headers,
@@ -52,32 +50,9 @@ _SESSION = "/internal/auth/session"
 _CLIENT_IP = "127.0.0.1"  # httpx.ASGITransport's peer address
 
 
-@pytest.fixture(scope="module")
-def migrated_url() -> Iterator[str]:
-    with migrated_postgres() as url:
-        yield url
-
-
-@pytest.fixture
-async def identity(migrated_url: str) -> AsyncIterator[IdentityDb]:
-    async with open_identity_db(migrated_url) as db:
-        yield db
-
-
-@pytest.fixture
-def container(identity: IdentityDb) -> SessionContainer:
-    return SessionContainer(database=identity.database)
-
-
 @pytest.fixture
 async def member(identity: IdentityDb, container: SessionContainer) -> Member:
     return await make_member(identity, container.password_hasher)
-
-
-@pytest.fixture
-async def client(container: SessionContainer) -> AsyncIterator[httpx.AsyncClient]:
-    async with session_client(session_app(container)) as http:
-        yield http
 
 
 def _error(response: httpx.Response) -> tuple[int, str, str]:
@@ -537,7 +512,7 @@ async def test_disabled_user_session_rejected_on_cache_miss(
 async def test_sessions_work_without_redis(identity: IdentityDb) -> None:
     server = fakeredis.FakeServer()
     server.connected = False
-    container = SessionContainer(database=identity.database, redis=fakeredis.FakeAsyncRedis(server=server))
+    container = SessionContainer(identity=identity, redis=fakeredis.FakeAsyncRedis(server=server))
     member = await make_member(identity, container.password_hasher)
     async with session_client(session_app(container)) as http:
         await login(http, member.user.email)

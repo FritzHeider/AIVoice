@@ -1323,3 +1323,208 @@ check_spec_refs 0; jscpd 0 clones; radon avg A (1.93), worst B (get_session 10).
 §3.3, §4.1–§4.4 decisions and specs/03 §11: cookie attributes, sliding/absolute expiry rule, `sess:` cache fields/TTL,
 CSRF double submit + Origin/Referer, MFA gate exemptions (session, logout; logout-all gated), throttle keys/limits/
 Retry-After, one argon2 verify for every failure path, pool-size-1 sessions never nested. No findings.
+
+## 2026-10-29 Planner: P02-T04c approved → next P02-T04d
+
+## Plan P02-T04d — Signup, email verification, resend, internal OpenAPI document (specs/04 §4.1; specs/26 §1; specs/31)
+
+### Facts found while planning
+- `OrgProvisioner.provision_in(session, org_id, name=, owner=NewUser(...))` runs inside a caller-owned
+  `tenant_session(org_id)`; users/sessions/email_tokens are global tables with no RLS (specs/03 §2 decision), so
+  the same transaction can insert the session row and the verify token. Duplicate email → `CONFLICT` field `email`;
+  empty org name → `INVALID_INPUT` field `org_name` (already implemented).
+- `IdentityRepo.issue_email_token(user_id, purpose, now, ttl)` / `consume_email_token(token, purpose, now)` /
+  `mark_email_verified(user_id, now)` (first wins) / `count_issued_since` exist; `EMAIL_VERIFY_TTL = 24 h`.
+- `va_common.email`: `EmailSender` protocol, `SmtpEmailSender(config, sender=, clock=)`, `InMemoryEmailSender`
+  (`.to(addr)`, `.clear()`), `templates.verify_email(name=, link=, to=)`; `ApiSettings` already includes
+  `EmailSettings` (`smtp_config()`, `email_from`).
+- `check_password_policy_async(password, email=)` raises `PASSWORD_TOO_WEAK` field `password`.
+- Dashboard route for the link is `/verify-email/[token]` (specs/25 §routes) → link
+  `{DASHBOARD_BASE_URL rstrip /}/verify-email/{token}`.
+- FastAPI `get_openapi` skips `include_in_schema=False` routes; internal doc must generate from copies.
+- `SessionManager.start` opens its own global session; signup needs a variant inside the provisioning txn.
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/04 §4.1 **signup**: body `{email (3-320, trimmed), password (1-1024), name (1-200, trimmed), org_name
+   (1-200, trimmed)}`, unknown fields `INVALID_INPUT`. Order: Origin/Referer check as login (`required=False`) →
+   `check_password_policy_async(password, email=email)` → `hash_async` → one `tenant_session(new_id())` transaction:
+   `provision_in(owner=NewUser(email, name, password_hash))` (plan `start`), session row (active org = new org,
+   `created_at=now`, expires now+14 d, `last_login_at=now`), `verify_email` token (24 h) → after commit: `sess:`
+   cache write, revoke a presented valid `va_session` (fixation defence, same as login), set `va_session`+`va_csrf`,
+   status **201**, body `{data:{user: SessionUser, org: SignupOrg}}` with `SignupOrg = {id, name, slug, plan_id,
+   status, created_at}`. The verification email is sent after the response as a FastAPI background task; a delivery
+   failure is logged (`verification_email_failed`, template + error type, never the address) and never fails signup
+   (the user can resend). Duplicate email `CONFLICT` 409 "An account with this email already exists." (signup reveals
+   registration by design, like every signup form; login stays generic). New orgs have no `mfa_required`, so the
+   "MFA not required until verified" clause holds with no extra code; `EMAIL_NOT_VERIFIED` gating of specific actions
+   arrives with those actions (none in phase 02 so far — note it).
+2. **verify-email**: body `{token: str (1-256)}`; no session needed (the link may be opened in another browser),
+   Origin check `required=False`. Malformed token (not `looks_like_token`) or `consume_email_token` → `None` ⇒
+   `TOKEN_EXPIRED` 400 "Verification link is invalid or has expired." `field: "token"`. Success → `mark_email_verified`
+   (same global txn) → `{data:{user: SessionUser}}` (re-read user). Already-verified user with a fresh token: still
+   200 (first verification time kept).
+3. **resend-verification**: session-authenticated (`current_session`: CSRF + Origin), MFA-gated like logout-all
+   (`active_membership` + `enforce_mfa`), optional `{}` body. Already verified → 200 `{data:{sent:false,
+   email_verified:true}}`, no counter increment. Limit: Redis fixed window `auth:resend:{<user_id>}`… no hash tag
+   needed → key `auth:verify:resend:<user_id>`: `INCR` + `EXPIRE 3600 NX` in one MULTI; count > 3 ⇒ `RATE_LIMITED`
+   429 "Too many verification emails; try again in N seconds." (same pluralisation helper as AUTH_LOCKED — reuse,
+   extract `seconds_phrase(n)` if it is private in login_throttle) with `Retry-After: N` = key TTL (3600 when none).
+   Rejected attempts still count (no extra work beyond INCR). Redis errors → `resend_limit_unavailable` warning and
+   allow. Success: issue a new 24 h token (older unused ones stay valid until used/expired), email in background,
+   `{data:{sent:true, email_verified:false}}`. The signup email does not count toward the 3.
+   Add the key to specs/03 §11 Redis table (TTL 1 h, counter).
+4. specs/26 §1 **internal document**: `openapi/internal.json`, title "VoiceAgents Internal API", same version,
+   servers, contact, license; paths = every APIRoute whose path starts with `/internal/` (from `app.state.routers`,
+   shallow `copy.copy` with `include_in_schema=True`); tags `[{"name":"Auth"}]` (extendable list
+   `INTERNAL_TAG_NAMES`); securitySchemes `{"SessionCookie": {"type":"apiKey","in":"cookie","name":"va_session"}}`
+   only; same error components + 422→400 + `default` rewrite; `x-public` kept on operations. Generated by
+   `app.state.internal_openapi()` (a `partial(build_internal_openapi, app, cfg)`, cached on `app.state`).
+   `make openapi` writes both files; `check_openapi_drift.py` checks both (each pair reported separately).
+
+### Files
+**apps/api/src/va_api/auth/sessions.py** — split `start` into `start_in(session: AsyncSession, *, user_id,
+  active_org_id, ip, user_agent) -> tuple[str, ActiveSession]` (row + `record_login`, no cache) and public
+  `remember(active) -> None` (the existing `_store`, Redis errors swallowed); `start` = global_session + start_in +
+  remember. Keep existing tests green.
+**apps/api/src/va_api/auth/verification.py** (new) — `RESEND_LIMIT: Final = 3`, `RESEND_WINDOW_S: Final = 3600`,
+  `TOKEN_INVALID_MESSAGE`, `RESEND_LIMITED_MESSAGE` builder, `resend_key(user_id) -> str`, `class ResendLimiter(redis)`
+  with `async hit(user_id) -> None` (raises RATE_LIMITED + headers), `verify_link(dashboard_base_url, token) -> str`,
+  `async def send_verification(sender: EmailSender, *, user: User, token: str, dashboard_base_url: str) -> None`
+  (builds `templates.verify_email`, catches `EmailDeliveryError`/`OSError` → warning). Pluralisation: reuse the
+  login_throttle helper (move it to a shared private module, e.g. `va_api/auth/_wording.py`, if needed for jscpd).
+**apps/api/src/va_api/auth/session_auth.py** — accessors `email_sender_of(request)`, `provisioner_of(request)`,
+  `resend_limiter_of(request)`, `clock_of(request)` (or reuse sessions' clock via container) in the existing style.
+**apps/api/src/va_api/routers/auth_schemas.py** — `SignupRequest`, `SignupOrg` (`.of(org)`), `SignupResult{user,
+  org}`, `VerifyEmailRequest{token}`, `VerifyEmailResult{user}`, `ResendResult{sent, email_verified}`; examples via
+  `json_schema_extra` (specs/26 requires them; now visible in internal.json). Reuse the email/password Annotated
+  types from LoginRequest (define `EmailField`/`PasswordField` aliases once).
+**apps/api/src/va_api/routers/auth.py** — routes `POST /signup` (`operation_id="auth_signup"`, status_code=201,
+  BackgroundTasks), `POST /verify-email` (`auth_verify_email`), `POST /resend-verification`
+  (`auth_resend_verification`), all with `openapi_extra=PUBLIC_MARKER`. Keep each handler ≤ radon B: split signup
+  into `_create_account(request, body, ip) -> tuple[ProvisionedOrg, str, ActiveSession, str]` (txn) and reuse a
+  shared `_set_session_cookies(response, request, token)` with `_issue` (login). If the module grows past ~350 lines,
+  move signup/verify/resend into `routers/auth_signup.py` sharing `internal_auth_router`.
+**apps/api/src/va_api/container.py** — fields `email_sender: EmailSender` (SmtpEmailSender(settings.smtp_config(),
+  sender=settings.email_from, clock=clock)), `resend_limiter: ResendLimiter`. No network at build (aiosmtplib
+  connects per send — verify).
+**apps/api/src/va_api/openapi.py** — factor the post-processing (`_finalise(document, security_schemes)`);
+  `INTERNAL_TITLE`, `INTERNAL_TAG_NAMES = ("Auth",)`, `INTERNAL_SECURITY_SCHEMES`, `INTERNAL_PREFIX = "/internal/"`,
+  `internal_routes(routers) -> list[APIRoute]`, `build_internal_openapi(app, settings) -> dict`. Every internal route
+  must have a tag in INTERNAL_TAG_NAMES (test).
+**apps/api/src/va_api/main.py** — `app.state.internal_openapi = partial(build_internal_openapi, app, cfg)`.
+**scripts/check_openapi_drift.py** — `DEFAULT_INTERNAL_SPEC = Path("openapi/internal.json")`, `--internal-spec`;
+  `render_documents(app) -> dict[Path, str]` (public via `app.openapi()`, internal via `app.state.internal_openapi()`
+  — protocol `AppLike` gains `state`); compare each, exit 1 if any drifts, message names the file.
+**scripts/export_openapi.py** — writes both (`wrote`/`unchanged` per file); `--internal-out`.
+**openapi/internal.json** (generated by `make openapi`, committed). `openapi/openapi.json` must stay unchanged.
+**Makefile** — `openapi` help text "Regenerate openapi/openapi.json and openapi/internal.json".
+**apps/api/tests/support/session_helpers.py** — `SessionContainer` gains `envelope`/`provisioner` (from IdentityDb;
+  take `identity: IdentityDb` kw field or pass both), `email_sender: InMemoryEmailSender`, `resend_limiter`;
+  helper `signup(client, *, email, password=PASSWORD, name="Jane Park", org_name="Acme Dental") -> httpx.Response`
+  and `link_token(sender, email) -> str` (parse the token from the text body link).
+**specs/04, specs/26, specs/03 §11** — decisions above. **AGENTS.md** — internal.json in `make openapi`, signup
+  email background task, resend key.
+
+### Tests
+apps/api/tests/test_signup_integration.py (migrated Postgres module fixture via `migrated_postgres`, fakeredis,
+FrozenClock, https client):
+- `test_signup_verify_flow`: 201; body user.email_verified false, org plan_id `start`, slug `acme-dental-xxxx`;
+  cookies set (attrs as login); session principal reaches the probe route with role owner; one email to the address
+  with template `verify_email` whose link starts with DASHBOARD_URL + `/verify-email/`; POST verify-email with the
+  token → user.email_verified true; DB `email_verified_at` == clock now; webhook secret decrypts (provisioner).
+- `test_signup_rejects_weak_password` (short, breached, contains local part → 400 PASSWORD_TOO_WEAK field password;
+  no rows created via row_counts).
+- `test_signup_duplicate_email` (409 CONFLICT field email; case-insensitive (citext) `JANE@…`; no new org rows).
+- `test_signup_validation` (missing org_name / blank org_name / unknown field → 400 INVALID_INPUT).
+- `test_signup_foreign_origin_rejected` (403) and no-Origin CLI ok.
+- `test_signup_revokes_presented_session`.
+- `test_signup_email_failure_does_not_fail` (sender stub raising EmailDeliveryError → 201, warning logged, no address
+  in log).
+- `test_verify_token_reuse_and_expiry` (second use → 400 TOKEN_EXPIRED; token after clock +24 h +1 s → TOKEN_EXPIRED;
+  garbage token → TOKEN_EXPIRED; reset-purpose token rejected for verify).
+- `test_resend_verification_limit` (3 resends 200 sent true + 3 more emails; 4th → 429 RATE_LIMITED Retry-After ≤
+  3600; clock-independent: delete key → allowed again); `test_resend_requires_session_and_csrf` (no cookie 401, no
+  CSRF 403); `test_resend_when_verified` (sent false, no email, no counter key); `test_resend_redis_down_allows`
+  (FakeServer connected=False on limiter only).
+apps/api/tests/test_verification.py (unit): verify_link joining (trailing slash), resend_key format, limiter with
+  fakeredis (TTL, message pluralisation "1 second").
+apps/api/tests/test_sessions_start_in.py or extend existing session tests: `start_in` + `remember` equals `start`.
+apps/api/tests/test_openapi.py: internal document — validates with openapi_spec_validator; contains
+  `/internal/auth/{signup,verify-email,resend-verification,login,logout,logout-all,session}`; only `SessionCookie`
+  security scheme; every operation has `x-public`, `x-envelope: envelope`, a 2xx example (request bodies too),
+  operationIds unique + regex; public document still has no `/internal/`; committed `openapi/internal.json` equals
+  `render(app.state.internal_openapi())`.
+scripts/tests/test_check_openapi_drift.py / test_export_openapi.py: both files written/checked; drift in only the
+  internal file → exit 1 naming it; fake apps updated with `state.internal_openapi`.
+apps/api/tests/test_container.py: container exposes SmtpEmailSender configured from settings and ResendLimiter.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` then `uv run python scripts/check_openapi_drift.py`
+(public unchanged, internal current); check_spec_refs; jscpd (session_helpers/test helpers reuse; signup cookie code
+shared with login), radon (nothing ≥ C), pip-audit, gitleaks, test_env_example (no new env vars).
+
+### Risks
+- Pool size 1 per role: signup holds a tenant session (va_app) — never open global_session/system inside it; the
+  revoke of a presented session and the cache write happen after commit.
+- `ActiveSession.of(row)` inside the txn before commit: build it inside, use it after (attributes loaded; no lazy
+  loads → MissingGreenlet).
+- BackgroundTasks run after the response body; with httpx ASGITransport the client call returns after they finish,
+  so in-memory assertions work without sleeps; verify.
+- `copy.copy(APIRoute)` keeps dependant/response models; ensure FastAPI does not reuse cached `openapi_schema`
+  across the two documents (separate cache attribute).
+- aiosmtplib: confirm `SmtpEmailSender.__init__` does no I/O (container builds without a relay).
+- Docker flakes (memories): rerun isolated before suspecting code.
+
+## 2026-10-29 Builder: P02-T04d build notes
+- `SessionManager.start` = `global_session` + `start_in(session, ...)` (row + `record_login`, no cache) + public
+  `remember(active)` (old `_store`). Signup: origin → policy → hash → one `tenant_session(new_id())`: `provision_in`
+  + `start_in` + `issue_email_token(verify_email, 24 h)` → after commit `remember`, revoke presented session, cookies,
+  201, background `send_verification`. Helpers `_check_dashboard_origin`, `_revoke_presented`, `_set_session_cookies`
+  shared with login. `_owner_of` raises RuntimeError if provisioning returned no owner (unreachable).
+- verify-email: `looks_like_token` → consume → get_user → mark verified → refresh → `{user}`; all failures
+  TOKEN_EXPIRED field token. resend: current_session + active_membership + enforce_mfa; verified → sent false (no
+  INCR); `ResendLimiter.hit` (INCR, EXPIRE NX, TTL in one MULTI) → new token → background email.
+- `va_api/auth/verification.py` (limits, key, link, `send_verification(sender, *, to, name, token,
+  dashboard_base_url)`); `login_throttle.seconds_phrase` shared for pluralisation.
+- Container: `email_sender = email_sender_for(settings, clock)` (InMemory only when VA_ENV=test, else
+  SmtpEmailSender, no I/O at build) and `resend_limiter`. Accessors `clock_of`, `provisioner_of`,
+  `email_sender_of`, `resend_limiter_of` in session_auth.
+- OpenAPI: `_finalise` shared; `internal_routes` (copy.copy + include_in_schema=True), `build_internal_openapi`
+  cached on `app.state.internal_openapi_schema`; `app.state.internal_openapi`. `DataResponse[T]` json_schema_extra
+  wraps T's examples as `{data: ...}` (public openapi.json unchanged). Scripts: `render_documents`,
+  `--internal-spec`/`--internal-out`, `load_app` requires `state.internal_openapi()`; per-file reporting.
+- Tests: session fixtures moved to apps/api/tests/conftest.py (jscpd); `SessionContainer(identity=...)` with
+  `outbox`, `provisioner`, `resend_limiter`; `session_helpers.signup`, `link_token`. New
+  test_signup_integration.py (19), test_verification.py, internal-doc tests in test_openapi.py, script tests.
+- Specs: 04 §4.1 decision (signup/verify/resend + email sender choice), 26 §1 decision (internal doc), 03 §11 row
+  `auth:verify:resend:{user_id}`. AGENTS.md entry + `make openapi` row; Makefile help text.
+Gates: make fmt/lint/typecheck 0; placeholders 0 findings; make test 2289 passed, 99.55 %; drift: both current;
+check_spec_refs 0; jscpd 0 clones; radon avg A (2.67), nothing ≥ C; pip-audit --strict clean; pnpm audit clean;
+gitleaks passed; test_env_example 43 passed.
+
+## 2026-10-29 Planner: P02-T04d build.blocked (payload format only) → re-plan same task
+The blocker is not a design or code problem: the Builder's `build.done` payload lacked the required backpressure
+keys, so the loop converted it to `build.blocked`. The implementation and its gate results above stand; no split or
+prerequisite is needed. Plan P02-T04d is unchanged.
+Builder, this activation: do not redesign. Re-run the gates on the current working tree (`make fmt lint typecheck
+placeholders test`, `uv run python scripts/check_openapi_drift.py`, check_spec_refs, jscpd, radon, pip-audit
+--strict, pnpm audit, gitleaks), fix anything red, then emit build.done with EXACTLY these keys in the payload
+(real values from this run), e.g.:
+`ralph emit "build.done" "P02-T04d: tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN %), complexity: A (x.xx), duplication: pass (0 clones), specs: pass"`
+
+## 2026-10-29 Builder: P02-T04d gate re-run (no code changes)
+Working tree unchanged from the build above. Re-ran every gate on it:
+make fmt 0; make lint 0; make typecheck 0; make placeholders 0 (0 findings); make test 0 (2289 passed, 99.55 %);
+check_openapi_drift both current; check_spec_refs 0 problems; jscpd@4 0 clones (523 files); radon production
+src avg A (1.93), nothing >= C (only test functions rated C/D because asserts count as branches; repo-wide avg A 2.60);
+uvx pip-audit --strict on uv export: no known vulnerabilities; corepack pnpm audit clean; pre-commit gitleaks passed.
+Note: bare `radon`, `pnpm`, `gitleaks` are not on PATH; use `uvx radon`, `corepack pnpm`, `uv run pre-commit run gitleaks`.
+
+## Review P02-T04d (2026-10-29): approved
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 (0 findings), make test 0 (2289 passed, 99.55 %),
+check_openapi_drift (openapi.json and internal.json current), check_spec_refs 0, jscpd@4 0 clones (523 files),
+radon cc -n C on apps/api/src: none. Diff checked against specs/04 §4.1 (signup/verify/resend decision, provisioning
+decision: CONFLICT field email, 24 h verify token, single-use consume), §4.2 (policy incl. email local part via
+check_password_policy_async), specs/26 §1 internal document decision, specs/03 §11 resend key row. Signup txn keeps
+everything in one tenant_session; cache write + presented-session revoke after commit; email failures logged without
+address; resend MFA-gated, counter before token issue, Redis down allows. P02-T04 parent ticked (T04a–d all done).

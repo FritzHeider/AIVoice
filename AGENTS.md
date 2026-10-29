@@ -21,7 +21,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Dashboard dev server | `corepack pnpm --filter dashboard dev` (port 3000; set `NEXT_TELEMETRY_DISABLED=1`) |
 | One TS package's gates | `corepack pnpm --filter <dashboard\|@voiceagents/widget\|@voiceagents/sdk> run <lint\|typecheck\|test\|build>` |
 | Regenerate TS API types | `make openapi` then `corepack pnpm --filter dashboard gen:api` and `corepack pnpm --filter @voiceagents/sdk gen:api` |
-| Regenerate OpenAPI | `make openapi` (commit `openapi/openapi.json`) |
+| Regenerate OpenAPI | `make openapi` (commit `openapi/openapi.json` and `openapi/internal.json`) |
 | Run a service on the host | `uv run python -m va_edge.serve` · `-m va_api.serve` · `-m va_media.main` · `-m va_worker.main` · `-m va_webhooks.main` · `-m va_events_sink.main` · `-m va_sim_server.main` (all take `--host`/`--port`) |
 | Pre-commit hooks | `uv run pre-commit install` once; `uv run pre-commit run --all-files` (ruff, placeholders, prettier, actionlint, gitleaks) |
 | Lint CI workflows | `uv run actionlint` |
@@ -433,8 +433,20 @@ Grafana 3001
   an invalid key. Envelope success bodies use `va_api.responses.DataResponse[T]`. `AppError(..., headers={...})`
   adds response headers (e.g. `Retry-After` on `AUTH_LOCKED`); they are not part of the error item. Session tests:
   `apps/api/tests/support/session_helpers.py` (`migrated_postgres()` context manager for a module fixture,
-  `SessionContainer(database=...)` with cheap argon2, `make_member`, `login`, `write_headers`, a
+  `SessionContainer(identity=...)` with cheap argon2, `make_member`, `login`, `write_headers`, a
   `/v1/knowledge/_session/whoami` probe) served over `https://` via `make_client(app, base_url=...)` because cookies
   are `Secure` outside `VA_ENV=local` and httpx drops `Secure` cookies on http. `httpx.ASGITransport` reports peer
   `127.0.0.1` (login throttling uses it); Starlette's `TestClient` reports `testclient`, which `client_ip` maps to
   `None`. `IdentityRepo.create_session(created_at=...)` takes the caller's clock so frozen-clock expiry tests agree.
+- 2026-10-29 (P02-T04d): signup / verify-email / resend-verification live in `va_api/routers/auth.py`. Signup runs
+  provisioning, `SessionManager.start_in` (no cache write) and the verify token in one `tenant_session`, then
+  `SessionManager.remember` after the commit (pool size 1: never open another session inside it). Verification
+  emails go out as FastAPI `BackgroundTasks` (`va_api.auth.verification.send_verification`; failures logged, never
+  raised); httpx's ASGI transport runs them before the call returns, so tests read `InMemoryEmailSender` directly.
+  The container's `email_sender` is `InMemoryEmailSender` only under `VA_ENV=test`, else `SmtpEmailSender` (Mailpit
+  in local dev). Resends are limited at `auth:verify:resend:<user_id>` (3/h). `make openapi` now writes
+  `openapi/internal.json` too (`app.state.internal_openapi()`, every `/internal/*` route, `SessionCookie` scheme) and
+  `check_openapi_drift.py` checks both; a fake app for the script tests needs `state.internal_openapi()`.
+  `DataResponse[T]` schemas carry `T`'s examples wrapped in `{data: ...}` (FastAPI drops `None` values from
+  examples). Tests: `SessionContainer(identity=identity)` (has `provisioner`, `outbox`, `resend_limiter`),
+  `session_helpers.signup(client, email=...)`, `link_token(container.outbox, email)`. `MFA_REQUIRED` is 401.

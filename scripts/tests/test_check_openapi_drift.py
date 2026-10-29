@@ -17,9 +17,19 @@ SCHEMA: dict[str, Any] = {
     "info": {"title": "VoiceAgents", "version": "1"},
     "paths": {"/healthz": {"get": {"summary": "Liveness, café"}}},
 }
+INTERNAL: dict[str, Any] = {
+    "openapi": "3.1.0",
+    "info": {"title": "VoiceAgents Internal", "version": "1"},
+    "paths": {"/internal/auth/session": {"get": {"summary": "Session"}}},
+}
 
 
-def write_app(directory: Path, schema: dict[str, Any] | None = None, body: str | None = None) -> str:
+def write_app(
+    directory: Path,
+    schema: dict[str, Any] | None = None,
+    body: str | None = None,
+    internal: dict[str, Any] | None = None,
+) -> str:
     name = f"fakeapi_{uuid.uuid4().hex}"
     if body is None:
         body = textwrap.dedent(
@@ -27,9 +37,17 @@ def write_app(directory: Path, schema: dict[str, Any] | None = None, body: str |
             import json as _json
 
             _RAW = {json.dumps(schema if schema is not None else SCHEMA)!r}
+            _INTERNAL = {json.dumps(internal if internal is not None else INTERNAL)!r}
+
+
+            class _State:
+                def internal_openapi(self) -> dict:
+                    return _json.loads(_INTERNAL)
 
 
             class _App:
+                state = _State()
+
                 def openapi(self) -> dict:
                     return _json.loads(_RAW)
 
@@ -49,10 +67,14 @@ def app_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return directory
 
 
-def commit_spec(root: Path, schema: dict[str, Any]) -> Path:
-    path = root / "openapi" / "openapi.json"
+def commit_spec(
+    root: Path, schema: dict[str, Any], internal: dict[str, Any] | None = INTERNAL, name: str = "openapi.json"
+) -> Path:
+    path = root / "openapi" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(cod.render(schema), encoding="utf-8")
+    if internal is not None:
+        (root / "openapi" / "internal.json").write_text(cod.render(internal), encoding="utf-8")
     return path
 
 
@@ -82,7 +104,9 @@ def test_render_is_canonical() -> None:
 def test_current_spec_passes(tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     commit_spec(tmp_path, SCHEMA)
     assert run(tmp_path, write_app(app_dir)) == 0
-    assert "openapi/openapi.json is current" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "openapi/openapi.json is current" in out
+    assert "openapi/internal.json is current" in out
 
 
 def test_drift_fails_with_diff(tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -93,7 +117,40 @@ def test_drift_fails_with_diff(tmp_path: Path, app_dir: Path, capsys: pytest.Cap
     assert "--- committed" in captured.out
     assert "+++ generated" in captured.out
     assert '+    "/readyz": {' in captured.out
-    assert "run: make openapi" in captured.err
+    assert "openapi/openapi.json is out of date; run: make openapi" in captured.err
+    assert "internal.json is out of date" not in captured.err
+
+
+def test_internal_drift_alone_fails(
+    tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commit_spec(tmp_path, SCHEMA)
+    changed = {**INTERNAL, "paths": {"/internal/auth/signup": {"post": {"summary": "Signup"}}}}
+    assert run(tmp_path, write_app(app_dir, internal=changed)) == 1
+    captured = capsys.readouterr()
+    assert "openapi/openapi.json is current" in captured.out
+    assert '+    "/internal/auth/signup": {' in captured.out
+    assert "openapi/internal.json is out of date; run: make openapi" in captured.err
+    assert "openapi.json is out of date" not in captured.err
+
+
+def test_missing_internal_spec_fails(
+    tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commit_spec(tmp_path, SCHEMA, internal=None)
+    assert run(tmp_path, write_app(app_dir)) == 1
+    assert "missing committed spec openapi/internal.json" in capsys.readouterr().err
+
+
+def test_app_without_internal_document_fails(
+    tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    commit_spec(tmp_path, SCHEMA)
+    name = write_app(
+        app_dir, body="class _App:\n    def openapi(self):\n        return {}\n\n\napp = _App()\n"
+    )
+    assert run(tmp_path, name) == 1
+    assert "has no callable state.internal_openapi()" in capsys.readouterr().err
 
 
 def test_app_without_spec_fails(tmp_path: Path, app_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:

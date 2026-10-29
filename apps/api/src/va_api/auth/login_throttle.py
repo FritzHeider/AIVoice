@@ -25,6 +25,7 @@ __all__ = [
     "email_failure_key",
     "ip_failure_key",
     "locked_message",
+    "seconds_phrase",
 ]
 
 EMAIL_FAILURE_LIMIT: Final = 10
@@ -42,9 +43,13 @@ def ip_failure_key(ip: str) -> str:
     return f"auth:fail:ip:{ip}"
 
 
+def seconds_phrase(seconds: int) -> str:
+    """``"1 second"`` or ``"<n> seconds"``."""
+    return f"{seconds} {'second' if seconds == 1 else 'seconds'}"
+
+
 def locked_message(retry_after_s: int) -> str:
-    unit = "second" if retry_after_s == 1 else "seconds"
-    return f"Too many failed login attempts; try again in {retry_after_s} {unit}."
+    return f"Too many failed login attempts; try again in {seconds_phrase(retry_after_s)}."
 
 
 def _counters(email: str, ip: str | None) -> list[tuple[str, int]]:

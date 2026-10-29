@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793265656-71f0
+> va_api session integration fixtures (migrated_url module-scope, identity, container=SessionContainer(identity=...), client) live in apps/api/tests/conftest.py; modules only add extras (member). Copying them per module trips jscpd. FastAPI drops None values from OpenAPI examples; MFA_REQUIRED is HTTP 401
+<!-- tags: api, testing | created: 2026-10-29 -->
+
 ### mem-1793264176-ecbf
 > fakeredis connection-failure stub: server=fakeredis.FakeServer(); server.connected=False; FakeAsyncRedis(server=server) raises ConnectionError for commands AND pipelines (overriding execute_command does not cover pipeline.execute)
 <!-- tags: testing, redis | created: 2026-10-29 -->

@@ -1,10 +1,11 @@
-"""Write the API's OpenAPI document to `openapi/openapi.json` (`make openapi`, specs/26 §1).
+"""Write the API's OpenAPI documents to `openapi/openapi.json` and `openapi/internal.json` (`make openapi`,
+specs/26 §1).
 
-The text comes from `check_openapi_drift.render`, the single canonical serializer, so an export always passes
-the drift gate. The file is replaced atomically and only when its content changes.
+The text comes from `check_openapi_drift.render_documents` (the single canonical serializer), so an export
+always passes the drift gate. Each file is replaced atomically and only when its content changes.
 
-Exit codes: 0 on success (`wrote <path>` or `unchanged <path>`), 1 when the application cannot be loaded, 2 on
-invalid arguments.
+Exit codes: 0 on success (`wrote <path>` or `unchanged <path>` per file), 1 when the application cannot be
+loaded, 2 on invalid arguments.
 """
 
 from __future__ import annotations
@@ -17,10 +18,11 @@ from pathlib import Path
 import check_openapi_drift
 
 DEFAULT_OUT = check_openapi_drift.DEFAULT_SPEC
+DEFAULT_INTERNAL_OUT = check_openapi_drift.DEFAULT_INTERNAL_SPEC
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export the API's OpenAPI document.")
+    parser = argparse.ArgumentParser(description="Export the API's public and internal OpenAPI documents.")
     parser.add_argument(
         "--root",
         type=Path,
@@ -33,7 +35,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=check_openapi_drift.DEFAULT_APP,
         help="application as module:attribute",
     )
-    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output file, relative to --root")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="public document, relative to --root")
+    parser.add_argument(
+        "--internal-out",
+        type=Path,
+        default=DEFAULT_INTERNAL_OUT,
+        help="internal document, relative to --root",
+    )
     return parser.parse_args(argv)
 
 
@@ -50,13 +58,16 @@ def write_if_changed(path: Path, text: str) -> bool:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    out: Path = args.root.resolve() / args.out
+    root: Path = args.root.resolve()
     try:
-        text = check_openapi_drift.render(check_openapi_drift.load_app(args.app).openapi())
+        documents = check_openapi_drift.render_documents(
+            check_openapi_drift.load_app(args.app), public=args.out, internal=args.internal_out
+        )
     except Exception as exc:  # any import or schema failure is reported in one line
         print(f"export_openapi: cannot load {args.app}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    print(f"{'wrote' if write_if_changed(out, text) else 'unchanged'} {args.out}")
+    for relative, text in documents.items():
+        print(f"{'wrote' if write_if_changed(root / relative, text) else 'unchanged'} {relative}")
     return 0
 
 

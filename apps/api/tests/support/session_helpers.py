@@ -6,6 +6,7 @@ outside ``VA_ENV=local`` and httpx never sends ``Secure`` cookies over http.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -27,9 +28,12 @@ from va_api.auth import RequestContext, require_scope
 from va_api.auth.cookies import CSRF_COOKIE
 from va_api.auth.login_throttle import LoginThrottle
 from va_api.auth.sessions import SessionManager
+from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
 from va_common.auth import Argon2Params, PasswordHasher
+from va_common.email import EmailSender, InMemoryEmailSender
 from va_db.models import MemberRole, Membership, Org, OrgStatus, User
+from va_db.provisioning import OrgProvisioner
 from va_db.repositories import NewUser
 from va_db.session import Database
 
@@ -41,11 +45,13 @@ __all__ = [
     "SESSION_PROBE_PATH",
     "Member",
     "SessionContainer",
+    "link_token",
     "login",
     "make_member",
     "migrated_postgres",
     "session_app",
     "session_client",
+    "signup",
     "write_headers",
 ]
 
@@ -68,17 +74,33 @@ def migrated_postgres() -> Iterator[str]:
 
 @dataclass
 class SessionContainer(AuthContainer):
-    """The fake api container plus a real database, cheap password hasher, sessions, and login throttle."""
+    """The fake api container plus a real database and provisioner, cheap password hasher, sessions, login
+    throttle, an in-memory email sender, and the verification resend limiter."""
 
-    database: Database = field(kw_only=True)
+    identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
+    email_sender: EmailSender = field(default_factory=InMemoryEmailSender)
+    database: Database = field(init=False)
+    provisioner: OrgProvisioner = field(init=False)
     sessions: SessionManager = field(init=False)
     login_throttle: LoginThrottle = field(init=False)
+    resend_limiter: ResendLimiter = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.database = self.identity.database
+        self.provisioner = self.identity.provisioner
         self.sessions = SessionManager(database=self.database, redis=self.redis, clock=self.clock)
         self.login_throttle = LoginThrottle(self.redis)
+        self.resend_limiter = ResendLimiter(self.redis)
+
+    @property
+    def outbox(self) -> InMemoryEmailSender:
+        """The in-memory sender (``TypeError`` when a test replaced it with another sender)."""
+        if not isinstance(self.email_sender, InMemoryEmailSender):
+            msg = "email_sender is not an InMemoryEmailSender"
+            raise TypeError(msg)
+        return self.email_sender
 
 
 _probe = envelope_router(prefix="/v1/knowledge/_session", tags=["Knowledge"])
@@ -178,3 +200,33 @@ async def login(client: httpx.AsyncClient, email: str, password: str = PASSWORD)
     )
     assert response.status_code == 200, response.text
     return response
+
+
+async def signup(  # noqa: PLR0913 - keyword-only signup fields
+    client: httpx.AsyncClient,
+    *,
+    email: str,
+    password: str = PASSWORD,
+    name: str = "Jane Park",
+    org_name: str = "Acme Dental",
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """``POST /internal/auth/signup`` from the dashboard origin (unless ``headers`` replace it)."""
+    body = {"email": email, "password": password, "name": name, "org_name": org_name}
+    return await client.post(
+        "/internal/auth/signup",
+        json=body,
+        headers=headers if headers is not None else {"Origin": DASHBOARD_URL},
+    )
+
+
+_LINK = re.compile(re.escape(DASHBOARD_URL) + r"/verify-email/([A-Za-z0-9_-]+)")
+
+
+def link_token(sender: InMemoryEmailSender, email: str) -> str:
+    """The token of the newest verification link sent to ``email``."""
+    messages = [message for message in sender.to(email) if message.template == "verify_email"]
+    assert messages, f"no verification email to {email}"
+    match = _LINK.search(messages[-1].text)
+    assert match is not None, messages[-1].text
+    return match.group(1)
