@@ -1,9 +1,10 @@
-"""API key lookup across orgs for authentication (specs/03-data-model.md §2; specs/04 §2.2).
+"""API keys: lookup across orgs for authentication (specs/03-data-model.md §2; specs/04 §2.2), org reads.
 
 A request carrying an API key has no org context yet, so the key is found by its ``prefix`` on the system
 session. The record carries what the auth middleware needs to build a request context and size its rate
 buckets without another query (the org's ``status``, ``plan_id`` and ``limits.rate_per_sec`` override) and
-serialises to the JSON stored in the ``apikey:{prefix}`` cache.
+serialises to the JSON stored in the ``apikey:{prefix}`` cache. :class:`ApiKeyRepo` reads one org's keys on a
+``tenant_session`` (RLS plus an explicit ``org_id`` filter).
 """
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_db.models import ApiKey, Org
 from va_db.repositories.base import SystemRepository
 
-__all__ = ["ApiKeyLookupRepo", "ApiKeyRecord", "rate_per_sec_override"]
+__all__ = ["ApiKeyLookupRepo", "ApiKeyRecord", "ApiKeyRepo", "rate_per_sec_override"]
 
 RATE_PER_SEC_KEY = "rate_per_sec"
 
@@ -119,3 +121,16 @@ class ApiKeyLookupRepo(SystemRepository):
     async def touch(self, api_key_id: uuid.UUID, now: datetime) -> None:
         """Set ``last_used_at`` of key ``api_key_id`` to ``now``."""
         await self.session.execute(update(ApiKey).where(ApiKey.id == api_key_id).values(last_used_at=now))
+
+
+class ApiKeyRepo:
+    """The API keys of one org; use it inside ``tenant_session(org_id)`` with the same org."""
+
+    def __init__(self, session: AsyncSession, org_id: uuid.UUID) -> None:
+        self.session = session
+        self.org_id = org_id
+
+    async def get(self, key_id: uuid.UUID) -> ApiKey | None:
+        """The org's key ``key_id`` (revoked or not), or ``None`` (also for another org's key)."""
+        statement = select(ApiKey).where(ApiKey.org_id == self.org_id, ApiKey.id == key_id)
+        return await self.session.scalar(statement)

@@ -3,7 +3,8 @@
 Routers declare ``dependencies=[Depends(require_permission("<name>"))]`` next to their ``require_scope``; the
 dependency it returns carries ``required_permission`` so tooling can find it on ``route.dependant``. Session
 principals hold the permissions of their role; API keys hold every permission except the session-only ones
-when they carry ``*``, and none otherwise; widgets hold none.
+when they carry ``*``, and none otherwise; widgets hold none. The names and the role grants come from the §3.2
+matrix in :mod:`va_api.auth.rbac_matrix`.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from fastapi import Depends
 
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import get_principal
+from va_api.auth.rbac_matrix import PERMISSIONS, ROLES, SESSION_ONLY_PERMISSIONS, role_permissions
 from va_api.auth.scopes import ALL_SCOPES
 from va_common.errors import AppError
 from va_db.models import MemberRole
@@ -31,45 +33,8 @@ __all__ = [
 
 REQUIRED_PERMISSION_ATTR: Final = "required_permission"
 
-PERMISSIONS: Final[frozenset[str]] = frozenset(
-    {
-        "pathways.publish",
-        "numbers.purchase",
-        "numbers.release",
-        "telnyx_accounts.manage",
-        "tendlc.manage",
-        "members.manage",
-        "org.owner_transfer",
-        "org.delete",
-        "org.compliance",
-        "sso.manage",
-        "subaccounts.manage",
-        "billing.plan_change",
-        "billing.payment",
-        "billing.credit_transfer",
-        "webhooks.secret",
-        "memory.erase",
-        "audit.read",
-        "voices.clone",
-        "experiments.operate",
-        "calls.operate",
-    }
-)
-SESSION_ONLY_PERMISSIONS: Final[frozenset[str]] = frozenset(
-    {"org.delete", "org.owner_transfer", "sso.manage"}
-)
-
-_BILLING: Final = frozenset({"billing.plan_change", "billing.payment", "billing.credit_transfer"})
-
 ROLE_PERMISSIONS: Final[Mapping[MemberRole, frozenset[str]]] = MappingProxyType(
-    {
-        "owner": PERMISSIONS,
-        "admin": PERMISSIONS - {"org.delete", "org.owner_transfer", "billing.plan_change"},
-        "developer": frozenset({"pathways.publish", "voices.clone", "experiments.operate", "calls.operate"}),
-        "analyst": frozenset(),
-        "billing": _BILLING,
-        "viewer": frozenset(),
-    }
+    {role: role_permissions(role) for role in ROLES}
 )
 
 

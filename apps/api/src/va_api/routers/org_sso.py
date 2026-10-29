@@ -44,7 +44,7 @@ NOT_FOUND_MESSAGE: Final = "SSO connection not found."
 SECRET_REQUIRED_MESSAGE: Final = "client_secret is required when creating an SSO connection."  # noqa: S105
 _PERMISSION: Final = "sso.manage"
 
-# T08 attaches the remaining /v1/org routes to this router.
+# va_api.routers.org and later /v1/org modules attach their routes to this router.
 org_router = envelope_router(prefix="/v1/org", tags=["Org"])
 
 ReadOrg = Annotated[RequestContext, Depends(require_scope("org:read"))]

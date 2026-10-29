@@ -504,3 +504,14 @@ Grafana 3001
   ID token, `None` removes a claim; `configure_sso(client, identity, container, enforce=..)` creates an org with a
   connection via `PUT /v1/org/sso` and clears cookies; `sso_login(client, provider, email)`). RSA test keys are
   generated once at import. OpenAPI redirect operations are listed in `test_openapi.REDIRECT_OPERATIONS`.
+- 2026-10-29 (P02-T08a): `va_api.auth.rbac_matrix` is the single RBAC source: `MATRIX` (specs/04 §3.2 rows,
+  labels verbatim, `—` em dash for denied) and `ROW_GRANTS` (row → scope resource + permissions); `ROLE_SCOPES`,
+  `ROLE_PERMISSIONS`, `PERMISSIONS`, `SESSION_ONLY_PERMISSIONS` are derived/defined there and re-exported by
+  `rbac.py`/`permissions.py`. Editing the §3.2 table means editing `MATRIX`/`ROW_GRANTS` (`test_rbac_matrix.py`
+  compares cell for cell). `rbac_matrix` imports only `va_api.auth.scopes` and `va_db.models` (no cycle).
+  `/v1/me` lives on `routers/org.me_router` (in `ROUTERS`); `GET/PATCH /v1/org` attach to `org_sso.org_router` from
+  `routers/org.py` (imported by `main.py`). `orgs` has no RLS: use `va_db.repositories.OrgRepo` on
+  `global_session()` with `ctx.org_id` only, never an org id from the request; the tenant `ApiKeyRepo(session,
+  org_id).get(key_id)` reads one org's key. Tests: `session_helpers.store_api_key(container, org_id, scopes)` issues
+  a key the in-memory store authenticates and inserts its `api_keys` row (for routes that read the key from the DB).
+  FastAPI drops `None` members from OpenAPI examples, so response examples with nullable fields render without them.

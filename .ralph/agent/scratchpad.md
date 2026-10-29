@@ -2597,3 +2597,193 @@ docs); spec refs 0; jscpd 0 clones; radon no C+ (avg 1.95); pip-audit + pnpm aud
 Re-ran make lint/typecheck/placeholders (exit 0), make test 2579 passed 99.05%, openapi drift current, spec refs 0,
 jscpd 0 clones, radon no C+. Diff checked against specs/04 §5 decision (reasons, state/cookie, ID-token checks, email
 rule, JIT, enforcement), specs/31 SSO_REQUIRED 403, specs/03 §11 `sso:state:{state}`. No findings.
+
+## 2026-10-29 Planner: P02-T07b approved → P02-T07 ticked; P02-T08 split into T08a/T08b/T08c
+T07a and T07b both ticked, so the parent P02-T07 is ticked. P02-T08 (me, org, members, invitations, matrix test)
+is too big for one activation: T08a matrix + `/v1/me` + `GET/PATCH /v1/org`; T08b members + transfer-ownership;
+T08c invitations (v1 management + internal details/accept). T09–T12 depend on the parent P02-T08 (ticked when all
+three are). Org settings validation (`OrgSettings`, `settings` in `PATCH /v1/org`, `/v1/org/settings`) stays in T12.
+
+## Plan P02-T08a — RBAC matrix table, `/v1/me`, `GET/PATCH /v1/org` (specs/04 §3.2, §3.3, §8.1; specs/24 §2)
+
+### Facts found while planning
+- `va_api.auth.rbac.ROLE_SCOPES` and `va_api.auth.permissions.ROLE_PERMISSIONS` are hand-written sets; exact-set
+  tests live in `apps/api/tests/test_rbac.py` and `test_permissions.py` (the latter parses the §3.3 permission list).
+  Both sets are derivable exactly from §3.2 with the rule below (checked row by row while planning).
+- `org_router = envelope_router(prefix="/v1/org", tags=["Org"])` lives in `routers/org_sso.py` with the comment
+  "T08 attaches the remaining /v1/org routes to this router"; routes use `ReadOrg`/`WriteOrg` Annotated deps and
+  `openapi_extra={"x-scope": ..., "x-permission": ...}`; `main.py` includes `org_router`.
+- `orgs` is a global identity table (no RLS, specs/03 §3 decision): read/write it through `Database.global_session()`.
+  `plans` is system-scope but granted to `va_app` without RLS, so `global_session()` can read it too.
+- No tenant `ApiKeyRepo` yet (only `ApiKeyLookupRepo`); test API keys come from the in-memory `KeyStore`
+  (`container.store.issue(org_id=..., scopes=...)`), not the DB.
+- Money: `va_common.money.micros_to_dollars(micros) -> Decimal`.
+- `orgs.limits` override keys (specs/24 §2): `connected_rate_micros_per_min`, `transfer_rate_micros_per_min`,
+  `sms_rate_micros`, `widget_message_micros`, `daily_calls`, `hourly_calls`, `concurrency`, `voice_clones`, `numbers`,
+  `international_enabled`, `sms_per_day`. Plan caps: `daily_call_cap`, `hourly_call_cap`, `concurrency_cap`,
+  `voice_clone_cap` (NULL = unlimited).
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/04 §3.3 (after the permissions note): **matrix in code**. `va_api.auth.rbac_matrix.MATRIX` holds every
+   §3.2 row (label text exactly as in the spec, backticks included) → cell per role, cells one of `R`, `R*`, `W`,
+   `W(own)`, `X`, `—`. Each row maps to a scope resource (or none) and zero or more permissions (`ROW_GRANTS`). A role
+   holds `<resource>:read` when a row of that resource has a non-`—` cell and `<resource>:write` when it has `W`,
+   `W(own)` or `X` (only scopes that exist in §2.3); it holds a permission when any row mapped to it has a non-`—`
+   cell. `ROLE_SCOPES` and `ROLE_PERMISSIONS` are derived from `MATRIX`; the exact sets in the two notes above are
+   unchanged. `apps/api/tests/test_rbac_matrix.py` parses §3.2 and compares cell-for-cell.
+2. specs/04 §8.1: **`/v1/me`** needs `org:read` (every role holds it; API keys need `org:read` or `*`). Response
+   `{data:{principal_type, user, api_key, org:{id,name,slug,plan_id,status}, role, scopes}}` — `user` is null for API
+   keys and `api_key` null for sessions (keys always present); `scopes` sorted. The API-key branch builds
+   `{id, prefix, scopes, environment}` from the context (`principal_id`, `scopes`, `environment`) plus the
+   `api_keys.prefix` from the DB (tenant read); a key row that vanished answers `AUTH_FAILURE`.
+3. specs/04 §8.1: **`GET /v1/org`** (`org:read`) → `{data:{id, name, slug, parent_org_id, plan_id, kyc_level, status,
+   data_region, retention_days, recording_retention_days, credits_balance, limits, settings, created_at,
+   updated_at}}`; `credits_balance` is a JSON number of dollars (`micros_to_dollars`); `limits` = plan caps as
+   `daily_calls`/`hourly_calls`/`concurrency`/`voice_clones` (null = unlimited) overlaid by every specs/24 §2 override
+   key present in `orgs.limits` (unknown keys ignored); `settings` is the stored object until `OrgSettings`
+   (P02-T12) returns it with defaults. **`PATCH /v1/org`** (`org:write`) accepts `{name? (1–200 chars, trimmed),
+   retention_days? (1–3650), recording_retention_days? (0–3650)}` (`extra="forbid"`); retention fields additionally
+   need `org.compliance` (`FORBIDDEN` "Missing required permission 'org.compliance'."); an empty body is a no-op
+   returning the org; `settings` joins this body in P02-T12. Audit `org.update` arrives with P02-T11.
+
+### Files
+**apps/api/src/va_api/auth/rbac_matrix.py** (new):
+  - `type Cell = Literal["R", "R*", "W", "W(own)", "X", "—"]`; `ROLES: Final[tuple[MemberRole, ...]] = ("owner",
+    "admin", "developer", "analyst", "billing", "viewer")` (spec column order).
+  - `@dataclass(frozen=True, slots=True) class RowGrant: resource: str | None; permissions: frozenset[str] =
+    frozenset()`.
+  - `MATRIX: Final[Mapping[str, Mapping[MemberRole, Cell]]]` — all 47 rows of §3.2 in spec order (MappingProxyType;
+    build each row with a small `_row("R","R","R","R","—","R*")` helper zipping `ROLES` to keep it compact and
+    jscpd-safe).
+  - `ROW_GRANTS: Final[Mapping[str, RowGrant]]` — resource per row: Calls×4→`calls` (send row + `calls.operate`);
+    Batches→`batches`; Pathways rows (incl. tests)→`pathways` (publish row + `pathways.publish`); Personas→`personas`;
+    Agents and Experiments→`agents` (experiments + `experiments.operate`); Tools→`tools`; Knowledge→`knowledge`;
+    Voices catalog→`voices`, clone→`voices` + `voices.clone`; Phone numbers view, pools→`numbers`; purchase/release→
+    `numbers` + `numbers.purchase`,`numbers.release`; BYO Telnyx→`numbers` + `telnyx_accounts.manage`; SMS view/send→
+    `sms`; 10DLC→`sms` + `tendlc.manage`; Widgets→`widgets`; Memory/contacts→`memory`; Memory reset/erasure→`memory` +
+    `memory.erase`; Dispositions→`analysis`; DNC, Guard rail→`compliance`; Webhook endpoints→`webhooks`; signing
+    secret→`webhooks` + `webhooks.secret`; Analytics→`analytics`; Prompts→`prompts`; Billing balance→`billing`;
+    top-up→`billing` + `billing.payment`; plan change→`billing` + `billing.plan_change`; credit transfer→`billing` +
+    `billing.credit_transfer`; API keys list→`None`; API keys create/revoke→`api_keys`; Members list→`org`; Members
+    invite→`org` + `members.manage`; Assign owner→`org` + `org.owner_transfer`; Org settings general→`org`; Org settings
+    compliance→`org` + `org.compliance`; SSO→`org` + `sso.manage`; Sub-accounts→`org` + `subaccounts.manage`; Audit
+    logs→`org` + `audit.read`; Delete org→`org` + `org.delete`. Module asserts at import nothing; a test asserts
+    `ROW_GRANTS.keys() == MATRIX.keys()` and every permission ∈ `PERMISSIONS` (import PERMISSIONS from a new
+    leaf location to avoid a cycle: move the `PERMISSIONS`/`SESSION_ONLY_PERMISSIONS` constants into
+    `rbac_matrix.py` and re-export them from `permissions.py`, keeping `permissions.__all__` and the
+    test_permissions spec-paragraph parse unchanged).
+  - `def role_scopes(role: MemberRole) -> frozenset[str]` and `def role_permissions(role: MemberRole) ->
+    frozenset[str]` implementing decision 1 (`_READABLE = {"R","R*","W","W(own)","X"}`, `_WRITABLE =
+    {"W","W(own)","X"}`; scope kept only if in `va_api.auth.scopes.SCOPES`).
+  - `def cell(row: str, role: MemberRole) -> Cell`.
+**apps/api/src/va_api/auth/rbac.py** — `ROLE_SCOPES = MappingProxyType({role: role_scopes(role) for role in ROLES})`;
+  drop the hand-written sets; docstring cites the matrix. `scopes_for_role` unchanged.
+**apps/api/src/va_api/auth/permissions.py** — `ROLE_PERMISSIONS` derived via `role_permissions`; constants imported
+  from `rbac_matrix`; `_BILLING` removed.
+**packages/va_db/src/va_db/repositories/orgs.py** (new; export in `repositories/__init__.py`):
+  - `@dataclass(frozen=True, slots=True) class OrgOverview: org: Org; plan: Plan | None`.
+  - `class OrgRepo` (global table; works on `global_session()`): `__init__(session)`, `async def get(org_id) -> Org |
+    None`, `async def overview(org_id) -> OrgOverview | None` (outer join `plans` on `plans.id == orgs.plan_id`),
+    `async def update(org_id, *, name: str | None = None, retention_days: int | None = None,
+    recording_retention_days: int | None = None) -> Org | None` (UPDATE … RETURNING only the provided columns +
+    `updated_at = now()`; nothing provided → `get`). Docstring: callers must pass the context's org id (global table,
+    no RLS) — the route always uses `ctx.org_id`.
+  - Add to `ApiKeyLookupRepo`? No: add a tenant `ApiKeyRepo(session, org_id)` in `repositories/api_keys.py` with
+    `async def get(key_id) -> ApiKey | None` (filters `org_id`; T10 extends it). Export it.
+**apps/api/src/va_api/routers/org_schemas.py** (new): `OrgSummary(id, name, slug, plan_id, status)`, `MeUser(id,
+  email, name, mfa_enabled)`, `MeApiKey(id, prefix, scopes: list[str], environment)`, `MeView(principal_type, user:
+  MeUser | None, api_key: MeApiKey | None, org: OrgSummary, role: MemberRole | None, scopes: list[str])`,
+  `OrgLimits` (`daily_calls`, `hourly_calls`, `concurrency`, `voice_clones`: `int | None`; optional override fields
+  `connected_rate_micros_per_min`, `transfer_rate_micros_per_min`, `sms_rate_micros`, `widget_message_micros`,
+  `numbers`, `sms_per_day`: `int | None = None`, `international_enabled: bool | None = None`; serialize with
+  `exclude_none`? No — keep a fixed shape, all keys present, null when not overridden), `OrgView(...)` per decision 3
+  (`credits_balance: float`), `OrgPatch` (`model_config = ConfigDict(extra="forbid")`, `name: Annotated[str,
+  StringConstraints(strip_whitespace=True, min_length=1, max_length=200)] | None = None`, `retention_days:
+  Annotated[int, Field(ge=1, le=3650)] | None = None`, `recording_retention_days: Annotated[int, Field(ge=0,
+  le=3650)] | None = None`). Field descriptions + examples (no None examples: FastAPI drops them).
+  `def effective_limits(plan: Plan | None, overrides: Mapping[str, object]) -> OrgLimits` (pure; ignores unknown
+  keys and wrongly typed values — `bool` only for `international_enabled`, `int` (not bool) for the rest).
+**apps/api/src/va_api/routers/org.py** (new): attaches to `org_router` (import from `routers/org_sso.py`; move
+  `org_router`, `ReadOrg`, `WriteOrg` into this new module? Keep them where they are to avoid churn, and import).
+  Also defines `me_router = envelope_router(prefix="/v1", tags=["Org"])` with `GET /me` (`operation_id="me_get"`,
+  `x-scope: org:read`). Routes: `GET /v1/org` (`org_get`), `PATCH /v1/org` (`org_update`, `x-scope: org:write`;
+  inside the handler: if `retention_days` or `recording_retention_days` is set and `not holds_permission(ctx,
+  "org.compliance")` → `FORBIDDEN` with the require_permission message; declare `x-permission-conditional:
+  org.compliance`? Not in specs/26 — instead document it in the operation description). Helpers `_org_view(overview)`,
+  `_load(request, org_id)` (`NOT_FOUND` "Organization not found." if missing). `/v1/me`: user branch reads the user via
+  `IdentityRepo.get_user` in `global_session()`; API-key branch reads the key in `tenant_session(ctx.org_id)`; org from
+  `OrgRepo.get` (separate sequential sessions; pool size 1 — never nest). `principal_type` platform_admin reports as
+  is. Register `me_router` in `main.py` and import `va_api.routers.org` for side effects (pattern of `auth_mfa`).
+**apps/api/src/va_api/openapi.py** — only if tags need it (`Org` tag exists already; verify).
+**specs/04 §3.3, §8.1** — decisions 1–3. **AGENTS.md** — `rbac_matrix` is the single RBAC source; editing §3.2
+  requires editing `MATRIX`/`ROW_GRANTS`; `/v1/org` reads `orgs` via `global_session` with `ctx.org_id` only.
+**openapi/openapi.json** regenerated (`make openapi`), then `corepack pnpm gen:api` in `sdks/typescript` and
+  `apps/dashboard` (mem-1793271457-e7c7) and commit generated schema changes.
+
+### Tests
+**apps/api/tests/test_rbac_matrix.py** (no DB): `_spec_matrix()` reads specs/04, slices from `### 3.2` to the next
+  blank line after the table, splits rows on `|`, strips cells; asserts header roles == `ROLES`; asserts
+  `list(MATRIX) == spec row labels` (order and text) and every cell equal (parametrize by row label for readable
+  failures); `ROW_GRANTS.keys() == MATRIX.keys()`; every grant permission ∈ PERMISSIONS and every permission is granted
+  by ≥ 1 row; every grant resource yields an existing scope; `role_scopes`/`role_permissions` equal `ROLE_SCOPES`/
+  `ROLE_PERMISSIONS`; mutation check: flipping one cell (build a modified matrix through the private derivation
+  helper taking a matrix argument, e.g. `_derive_scopes(matrix, role)`) changes the derived set (proves derivation is
+  live). Existing `test_rbac.py`/`test_permissions.py` stay unchanged and green.
+**apps/api/tests/test_org_limits.py** (no DB): `effective_limits` with plan caps, None plan, overrides replacing caps,
+  unknown keys ignored, bool-as-int refused, string values ignored, international flag.
+**apps/api/tests/test_org_integration.py** (client fixture, real DB): `/v1/me` for owner session (user block, role,
+  scopes == sorted ROLE_SCOPES["owner"], api_key null); for viewer; for a `*` API key whose DB row exists (helper
+  `store_api_key(identity, container, org_id, scopes)` in `session_helpers.py`: issues via `container.store.issue(org_id=
+  ..., scopes=...)` then inserts an `ApiKey` row with the same id/prefix/hash via `system_session`) → api_key block
+  with prefix, user null, role null; API key with `calls:read` only → 403 `FORBIDDEN`; API key without a DB row → 401
+  `AUTH_FAILURE`; no credentials → 401. `GET /v1/org` for each of the six roles → 200 with plan-derived limits (build
+  plan seeded: daily 2000 etc. — read expected values from the `plans` row in the test, not literals) and an
+  `orgs.limits` override (`{"concurrency": 7}`) reflected; `credits_balance` 12.5 for 12_500_000 micros. `PATCH
+  /v1/org`: owner renames (trimmed) → 200 and persisted; admin sets retention → 200; developer/analyst/viewer/billing
+  rename → 403 `FORBIDDEN`; `*` API key renames → 200 but retention → 200 too (keys with `*` hold org.compliance);
+  an `org:write`-only key setting retention → 403; invalid values (`name: ""`, `retention_days: 0`, `4000`,
+  `recording_retention_days: -1`, unknown field `settings`) → 400 `INVALID_INPUT` with field; empty body → 200
+  unchanged; CSRF missing on session PATCH → 403 (existing CSRF code). Cross-org: PATCH as org A never touches org B
+  (assert B's row unchanged).
+**apps/api/tests/test_openapi.py** — add the new operations to whatever explicit lists exist (check `x-scope`
+  assertions) and ensure `org_update`'s description mentions `org.compliance`.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1` for the numeric average; pip-audit (mem-1793267153-9b68) + `corepack pnpm audit`;
+`uv run pre-commit run gitleaks --all-files`. build.done as a PLAIN STRING in the exact `key: value` form
+(mem-1793273041-6642, mem-1793269824-fe85):
+`ralph emit "build.done" "P02-T08a tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Import cycle: `rbac_matrix` must import only `va_db.models.MemberRole` and `va_api.auth.scopes`; `permissions.py`
+  and `rbac.py` import from it, never the reverse.
+- The spec table uses an em dash `—` for denied cells and a backtick in "Assign `owner` role / transfer ownership";
+  compare labels verbatim.
+- `orgs` has no RLS: every `OrgRepo` call must use `ctx.org_id`; never accept an org id from the request in T08a.
+- Pool size 1 per role: `/v1/me` opens global and tenant sessions sequentially, never nested.
+- `credits_balance` float rounding: micros are integers; `float(micros_to_dollars(m))` is exact enough for display.
+- jscpd: reuse `make_member`, `error_of`, `write_headers`, conftest fixtures; parametrize role cases.
+
+## 2026-10-29 Builder: P02-T08a build notes
+- Built per plan: `auth/rbac_matrix.py` (MATRIX 47 rows, ROW_GRANTS, derivation; PERMISSIONS/SESSION_ONLY moved here,
+  re-exported), `rbac.py`/`permissions.py` derived; `va_db.repositories.OrgRepo`/`OrgOverview` (global session) and tenant
+  `ApiKeyRepo`; `routers/org_schemas.py` (+ `effective_limits`), `routers/org.py` (`me_router` GET /v1/me; GET/PATCH
+  /v1/org on `org_router`); `session_helpers.store_api_key`; specs/04 §3.3 + §8.1 decisions; AGENTS.md entry;
+  openapi.json + TS schemas regenerated.
+- Deviation from plan (recorded in the §8.1 decision): `limits` takes the plan's rates as well as caps (spec says
+  "effective (plan ⊕ overrides)"); `numbers`/`international_enabled`/`sms_per_day` null unless overridden.
+- AUTH_FAILURE messages reuse `INVALID_API_KEY` / `SESSION_INVALID`.
+- FastAPI drops None members from OpenAPI examples (MeView/OrgLimits examples render without null keys).
+- Gates: make fmt/lint/typecheck/placeholders pass; make test 2682 passed, coverage 99.00%; make test-ts pass;
+  openapi drift current; check_spec_refs 0; jscpd 0 clones; radon no C+, avg 1.95; pip-audit + pnpm audit clean;
+  gitleaks passed.
+
+## Review P02-T08a (2026-10-29): approved
+- Re-ran: make lint typecheck placeholders (pass), make test 2682 passed cov 99.00%, make test-ts pass,
+  check_openapi_drift current, check_spec_refs 0, jscpd 0 clones.
+- Diff checked against specs/04 §3.2/§3.3/§8.1: matrix rows verbatim and parse-tested; derived role sets equal the
+  previous exact sets (test_rbac/test_permissions unchanged); /v1/org uses ctx.org_id only on global session;
+  retention fields gated by org.compliance; sessions opened sequentially. No findings.

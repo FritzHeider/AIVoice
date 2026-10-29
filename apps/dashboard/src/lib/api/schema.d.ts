@@ -21,6 +21,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Me Get
+         * @description The calling principal: user or API key, its org, role and scopes.
+         */
+        get: operations["me_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/org": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Org Get
+         * @description The org with its effective limits (plan values overlaid by overrides) and balance in dollars.
+         */
+        get: operations["org_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Org Update
+         * @description Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the
+         *     `org.compliance` permission.
+         */
+        patch: operations["org_update"];
+        trace?: never;
+    };
     "/v1/org/sso": {
         parameters: {
             query?: never;
@@ -53,6 +98,75 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * DataResponse[MeView]
+         * @example {
+         *       "data": {
+         *         "org": {
+         *           "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *           "name": "Acme Dental",
+         *           "plan_id": "build",
+         *           "slug": "acme-dental-k3q9",
+         *           "status": "active"
+         *         },
+         *         "principal_type": "user",
+         *         "role": "owner",
+         *         "scopes": [
+         *           "agents:read",
+         *           "agents:write",
+         *           "analytics:read",
+         *           "org:read",
+         *           "org:write"
+         *         ],
+         *         "user": {
+         *           "email": "jane@acme-dental.test",
+         *           "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0e",
+         *           "mfa_enabled": true,
+         *           "name": "Jane Park"
+         *         }
+         *       }
+         *     }
+         */
+        DataResponse_MeView_: {
+            data: components["schemas"]["MeView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[OrgView]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-10-29T14:03:11Z",
+         *         "credits_balance": 12.5,
+         *         "data_region": "us",
+         *         "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *         "kyc_level": 0,
+         *         "limits": {
+         *           "concurrency": 50,
+         *           "connected_rate_micros_per_min": 100000,
+         *           "daily_calls": 2000,
+         *           "hourly_calls": 1000,
+         *           "sms_rate_micros": 20000,
+         *           "transfer_rate_micros_per_min": 40000,
+         *           "voice_clones": 5,
+         *           "widget_message_micros": 10000
+         *         },
+         *         "name": "Acme Dental",
+         *         "plan_id": "build",
+         *         "recording_retention_days": 90,
+         *         "retention_days": 365,
+         *         "settings": {},
+         *         "slug": "acme-dental-k3q9",
+         *         "status": "active",
+         *         "updated_at": "2026-10-29T14:03:11Z"
+         *       }
+         *     }
+         */
+        DataResponse_OrgView_: {
+            data: components["schemas"]["OrgView"];
+            /** Errors */
+            errors?: null;
+        };
         /**
          * DataResponse[SsoConnectionDeleted]
          * @example {
@@ -191,6 +305,258 @@ export interface components {
         };
         /** @enum {string} */
         JitRole: "admin" | "developer" | "analyst" | "billing" | "viewer";
+        /**
+         * MeApiKey
+         * @description The API key making the request (its prefix only, never the secret).
+         */
+        MeApiKey: {
+            /** Environment */
+            environment: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Prefix
+             * @description First 12 characters of the key, e.g. `va_live_3kQ9`.
+             */
+            prefix: string;
+            /** Scopes */
+            scopes: string[];
+        };
+        /**
+         * MeUser
+         * @description The signed-in dashboard user.
+         */
+        MeUser: {
+            /** Email */
+            email: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Mfa Enabled */
+            mfa_enabled: boolean;
+            /** Name */
+            name: string;
+        };
+        /**
+         * MeView
+         * @description ``GET /v1/me``: who is calling. ``user`` is null for API keys and ``api_key`` null for sessions.
+         * @example {
+         *       "org": {
+         *         "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *         "name": "Acme Dental",
+         *         "plan_id": "build",
+         *         "slug": "acme-dental-k3q9",
+         *         "status": "active"
+         *       },
+         *       "principal_type": "user",
+         *       "role": "owner",
+         *       "scopes": [
+         *         "agents:read",
+         *         "agents:write",
+         *         "analytics:read",
+         *         "org:read",
+         *         "org:write"
+         *       ],
+         *       "user": {
+         *         "email": "jane@acme-dental.test",
+         *         "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0e",
+         *         "mfa_enabled": true,
+         *         "name": "Jane Park"
+         *       }
+         *     }
+         */
+        MeView: {
+            api_key: components["schemas"]["MeApiKey"] | null;
+            org: components["schemas"]["OrgSummary"];
+            principal_type: components["schemas"]["PrincipalType"];
+            /**
+             * Role
+             * @description The member role of a session principal; null for API keys.
+             */
+            role: ("owner" | "admin" | "developer" | "analyst" | "billing" | "viewer") | null;
+            /**
+             * Scopes
+             * @description Granted scopes, sorted.
+             */
+            scopes: string[];
+            user: components["schemas"]["MeUser"] | null;
+        };
+        /**
+         * OrgLimits
+         * @description Effective limits: the plan's rates and caps overlaid by the org's overrides; null caps: unlimited.
+         * @example {
+         *       "concurrency": 50,
+         *       "connected_rate_micros_per_min": 100000,
+         *       "daily_calls": 2000,
+         *       "hourly_calls": 1000,
+         *       "sms_rate_micros": 20000,
+         *       "transfer_rate_micros_per_min": 40000,
+         *       "voice_clones": 5,
+         *       "widget_message_micros": 10000
+         *     }
+         */
+        OrgLimits: {
+            /** Concurrency */
+            concurrency: number | null;
+            /** Connected Rate Micros Per Min */
+            connected_rate_micros_per_min: number | null;
+            /** Daily Calls */
+            daily_calls: number | null;
+            /** Hourly Calls */
+            hourly_calls: number | null;
+            /**
+             * International Enabled
+             * @description International calling override; null when unset.
+             */
+            international_enabled: boolean | null;
+            /**
+             * Numbers
+             * @description Phone number cap override; null when not overridden.
+             */
+            numbers: number | null;
+            /**
+             * Sms Per Day
+             * @description Daily SMS cap override; null when not overridden.
+             */
+            sms_per_day: number | null;
+            /** Sms Rate Micros */
+            sms_rate_micros: number | null;
+            /** Transfer Rate Micros Per Min */
+            transfer_rate_micros_per_min: number | null;
+            /** Voice Clones */
+            voice_clones: number | null;
+            /** Widget Message Micros */
+            widget_message_micros: number | null;
+        };
+        /**
+         * OrgPatch
+         * @description ``PATCH /v1/org``: omitted fields stay unchanged; the retention fields need ``org.compliance``.
+         * @example {
+         *       "name": "Acme Dental West",
+         *       "retention_days": 180
+         *     }
+         */
+        OrgPatch: {
+            /** Name */
+            name?: string | null;
+            /**
+             * Recording Retention Days
+             * @description Days recordings are kept (needs `org.compliance`).
+             */
+            recording_retention_days?: number | null;
+            /**
+             * Retention Days
+             * @description Days call data is kept (needs `org.compliance`).
+             */
+            retention_days?: number | null;
+        };
+        /**
+         * OrgSummary
+         * @description The org a principal acts in.
+         * @example {
+         *       "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *       "name": "Acme Dental",
+         *       "plan_id": "build",
+         *       "slug": "acme-dental-k3q9",
+         *       "status": "active"
+         *     }
+         */
+        OrgSummary: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Plan Id */
+            plan_id: string;
+            /** Slug */
+            slug: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * OrgView
+         * @description ``GET /v1/org``: the org the principal acts in.
+         * @example {
+         *       "created_at": "2026-10-29T14:03:11Z",
+         *       "credits_balance": 12.5,
+         *       "data_region": "us",
+         *       "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+         *       "kyc_level": 0,
+         *       "limits": {
+         *         "concurrency": 50,
+         *         "connected_rate_micros_per_min": 100000,
+         *         "daily_calls": 2000,
+         *         "hourly_calls": 1000,
+         *         "sms_rate_micros": 20000,
+         *         "transfer_rate_micros_per_min": 40000,
+         *         "voice_clones": 5,
+         *         "widget_message_micros": 10000
+         *       },
+         *       "name": "Acme Dental",
+         *       "plan_id": "build",
+         *       "recording_retention_days": 90,
+         *       "retention_days": 365,
+         *       "settings": {},
+         *       "slug": "acme-dental-k3q9",
+         *       "status": "active",
+         *       "updated_at": "2026-10-29T14:03:11Z"
+         *     }
+         */
+        OrgView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Credits Balance
+             * @description Prepaid balance in dollars.
+             */
+            credits_balance: number;
+            /** Data Region */
+            data_region: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kyc Level */
+            kyc_level: number;
+            limits: components["schemas"]["OrgLimits"];
+            /** Name */
+            name: string;
+            /** Parent Org Id */
+            parent_org_id: string | null;
+            /** Plan Id */
+            plan_id: string;
+            /** Recording Retention Days */
+            recording_retention_days: number;
+            /** Retention Days */
+            retention_days: number;
+            /** Settings */
+            settings: {
+                [key: string]: unknown;
+            };
+            /** Slug */
+            slug: string;
+            /** Status */
+            status: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** @enum {string} */
+        PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
         /**
          * SsoConnectionDeleted
          * @description ``DELETE /v1/org/sso`` result.
@@ -332,6 +698,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    me_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_MeView_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_OrgView_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    org_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrgPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_OrgView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };

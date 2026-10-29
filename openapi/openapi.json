@@ -1,6 +1,95 @@
 {
   "components": {
     "schemas": {
+      "DataResponse_MeView_": {
+        "examples": [
+          {
+            "data": {
+              "org": {
+                "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+                "name": "Acme Dental",
+                "plan_id": "build",
+                "slug": "acme-dental-k3q9",
+                "status": "active"
+              },
+              "principal_type": "user",
+              "role": "owner",
+              "scopes": [
+                "agents:read",
+                "agents:write",
+                "analytics:read",
+                "org:read",
+                "org:write"
+              ],
+              "user": {
+                "email": "jane@acme-dental.test",
+                "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0e",
+                "mfa_enabled": true,
+                "name": "Jane Park"
+              }
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/MeView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[MeView]",
+        "type": "object"
+      },
+      "DataResponse_OrgView_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-10-29T14:03:11Z",
+              "credits_balance": 12.5,
+              "data_region": "us",
+              "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+              "kyc_level": 0,
+              "limits": {
+                "concurrency": 50,
+                "connected_rate_micros_per_min": 100000,
+                "daily_calls": 2000,
+                "hourly_calls": 1000,
+                "sms_rate_micros": 20000,
+                "transfer_rate_micros_per_min": 40000,
+                "voice_clones": 5,
+                "widget_message_micros": 10000
+              },
+              "name": "Acme Dental",
+              "plan_id": "build",
+              "recording_retention_days": 90,
+              "retention_days": 365,
+              "settings": {},
+              "slug": "acme-dental-k3q9",
+              "status": "active",
+              "updated_at": "2026-10-29T14:03:11Z"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OrgView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[OrgView]",
+        "type": "object"
+      },
       "DataResponse_SsoConnectionDeleted_": {
         "examples": [
           {
@@ -225,6 +314,552 @@
           "analyst",
           "billing",
           "viewer"
+        ],
+        "type": "string"
+      },
+      "MeApiKey": {
+        "description": "The API key making the request (its prefix only, never the secret).",
+        "properties": {
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "First 12 characters of the key, e.g. `va_live_3kQ9`.",
+            "title": "Prefix",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "prefix",
+          "scopes",
+          "environment"
+        ],
+        "title": "MeApiKey",
+        "type": "object"
+      },
+      "MeUser": {
+        "description": "The signed-in dashboard user.",
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "mfa_enabled": {
+            "title": "Mfa Enabled",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "name",
+          "mfa_enabled"
+        ],
+        "title": "MeUser",
+        "type": "object"
+      },
+      "MeView": {
+        "description": "``GET /v1/me``: who is calling. ``user`` is null for API keys and ``api_key`` null for sessions.",
+        "examples": [
+          {
+            "org": {
+              "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+              "name": "Acme Dental",
+              "plan_id": "build",
+              "slug": "acme-dental-k3q9",
+              "status": "active"
+            },
+            "principal_type": "user",
+            "role": "owner",
+            "scopes": [
+              "agents:read",
+              "agents:write",
+              "analytics:read",
+              "org:read",
+              "org:write"
+            ],
+            "user": {
+              "email": "jane@acme-dental.test",
+              "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0e",
+              "mfa_enabled": true,
+              "name": "Jane Park"
+            }
+          }
+        ],
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeApiKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "org": {
+            "$ref": "#/components/schemas/OrgSummary"
+          },
+          "principal_type": {
+            "$ref": "#/components/schemas/PrincipalType"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "owner",
+                  "admin",
+                  "developer",
+                  "analyst",
+                  "billing",
+                  "viewer"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The member role of a session principal; null for API keys.",
+            "title": "Role"
+          },
+          "scopes": {
+            "description": "Granted scopes, sorted.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeUser"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "principal_type",
+          "user",
+          "api_key",
+          "org",
+          "role",
+          "scopes"
+        ],
+        "title": "MeView",
+        "type": "object"
+      },
+      "OrgLimits": {
+        "description": "Effective limits: the plan's rates and caps overlaid by the org's overrides; null caps: unlimited.",
+        "examples": [
+          {
+            "concurrency": 50,
+            "connected_rate_micros_per_min": 100000,
+            "daily_calls": 2000,
+            "hourly_calls": 1000,
+            "sms_rate_micros": 20000,
+            "transfer_rate_micros_per_min": 40000,
+            "voice_clones": 5,
+            "widget_message_micros": 10000
+          }
+        ],
+        "properties": {
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency"
+          },
+          "connected_rate_micros_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected Rate Micros Per Min"
+          },
+          "daily_calls": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Calls"
+          },
+          "hourly_calls": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hourly Calls"
+          },
+          "international_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "International calling override; null when unset.",
+            "title": "International Enabled"
+          },
+          "numbers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Phone number cap override; null when not overridden.",
+            "title": "Numbers"
+          },
+          "sms_per_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Daily SMS cap override; null when not overridden.",
+            "title": "Sms Per Day"
+          },
+          "sms_rate_micros": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sms Rate Micros"
+          },
+          "transfer_rate_micros_per_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfer Rate Micros Per Min"
+          },
+          "voice_clones": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voice Clones"
+          },
+          "widget_message_micros": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Widget Message Micros"
+          }
+        },
+        "required": [
+          "connected_rate_micros_per_min",
+          "transfer_rate_micros_per_min",
+          "sms_rate_micros",
+          "widget_message_micros",
+          "daily_calls",
+          "hourly_calls",
+          "concurrency",
+          "voice_clones",
+          "numbers",
+          "international_enabled",
+          "sms_per_day"
+        ],
+        "title": "OrgLimits",
+        "type": "object"
+      },
+      "OrgPatch": {
+        "additionalProperties": false,
+        "description": "``PATCH /v1/org``: omitted fields stay unchanged; the retention fields need ``org.compliance``.",
+        "examples": [
+          {
+            "name": "Acme Dental West",
+            "retention_days": 180
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "recording_retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Days recordings are kept (needs `org.compliance`).",
+            "title": "Recording Retention Days"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Days call data is kept (needs `org.compliance`).",
+            "title": "Retention Days"
+          }
+        },
+        "title": "OrgPatch",
+        "type": "object"
+      },
+      "OrgSummary": {
+        "description": "The org a principal acts in.",
+        "examples": [
+          {
+            "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+            "name": "Acme Dental",
+            "plan_id": "build",
+            "slug": "acme-dental-k3q9",
+            "status": "active"
+          }
+        ],
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "plan_id",
+          "status"
+        ],
+        "title": "OrgSummary",
+        "type": "object"
+      },
+      "OrgView": {
+        "description": "``GET /v1/org``: the org the principal acts in.",
+        "examples": [
+          {
+            "created_at": "2026-10-29T14:03:11Z",
+            "credits_balance": 12.5,
+            "data_region": "us",
+            "id": "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d",
+            "kyc_level": 0,
+            "limits": {
+              "concurrency": 50,
+              "connected_rate_micros_per_min": 100000,
+              "daily_calls": 2000,
+              "hourly_calls": 1000,
+              "sms_rate_micros": 20000,
+              "transfer_rate_micros_per_min": 40000,
+              "voice_clones": 5,
+              "widget_message_micros": 10000
+            },
+            "name": "Acme Dental",
+            "plan_id": "build",
+            "recording_retention_days": 90,
+            "retention_days": 365,
+            "settings": {},
+            "slug": "acme-dental-k3q9",
+            "status": "active",
+            "updated_at": "2026-10-29T14:03:11Z"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "credits_balance": {
+            "description": "Prepaid balance in dollars.",
+            "title": "Credits Balance",
+            "type": "number"
+          },
+          "data_region": {
+            "title": "Data Region",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kyc_level": {
+            "title": "Kyc Level",
+            "type": "integer"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/OrgLimits"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_org_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Org Id"
+          },
+          "plan_id": {
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "recording_retention_days": {
+            "title": "Recording Retention Days",
+            "type": "integer"
+          },
+          "retention_days": {
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "title": "Settings",
+            "type": "object"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "parent_org_id",
+          "plan_id",
+          "kyc_level",
+          "status",
+          "data_region",
+          "retention_days",
+          "recording_retention_days",
+          "credits_balance",
+          "limits",
+          "settings",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OrgView",
+        "type": "object"
+      },
+      "PrincipalType": {
+        "enum": [
+          "api_key",
+          "user",
+          "widget",
+          "platform_admin"
         ],
         "type": "string"
       },
@@ -460,6 +1095,126 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "public"
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "description": "The calling principal: user or API key, its org, role and scopes.",
+        "operationId": "me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_MeView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Me Get",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "org:read"
+      }
+    },
+    "/v1/org": {
+      "get": {
+        "description": "The org with its effective limits (plan values overlaid by overrides) and balance in dollars.",
+        "operationId": "org_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_OrgView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Get",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "org:read"
+      },
+      "patch": {
+        "description": "Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the\n`org.compliance` permission.",
+        "operationId": "org_update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrgPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_OrgView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Org Update",
+        "tags": [
+          "Org"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "org:write"
       }
     },
     "/v1/org/sso": {

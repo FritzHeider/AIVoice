@@ -7,6 +7,7 @@ outside ``VA_ENV=local`` and httpx never sends ``Secure`` cookies over http.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -34,10 +35,10 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
 from va_api.settings import ApiSettings
-from va_common.auth import Argon2Params, PasswordHasher, totp_code, totp_counter
+from va_common.auth import Argon2Params, PasswordHasher, api_key_prefix, totp_code, totp_counter
 from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
-from va_db.models import MemberRole, Membership, Org, OrgStatus, User
+from va_db.models import ApiKey, MemberRole, Membership, Org, OrgStatus, User
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import NewUser
 from va_db.session import Database
@@ -64,6 +65,7 @@ __all__ = [
     "session_app",
     "session_client",
     "signup",
+    "store_api_key",
     "write_headers",
 ]
 
@@ -215,6 +217,25 @@ async def make_member(  # noqa: PLR0913 - keyword-only member attributes
             .values(role=role)
         )
     return Member(user=provisioned.owner, org=org)
+
+
+async def store_api_key(
+    container: SessionContainer, org_id: uuid.UUID, scopes: tuple[str, ...] = ("*",)
+) -> tuple[str, ApiKey]:
+    """A key the in-memory store authenticates for ``org_id``, also stored as an ``api_keys`` row."""
+    plaintext, record = container.store.issue(org_id=org_id, scopes=scopes)
+    row = ApiKey(
+        id=record.id,
+        org_id=org_id,
+        name="server",
+        prefix=api_key_prefix(plaintext),
+        secret_hash=record.secret_hash,
+        scopes=list(scopes),
+        environment=record.environment,
+    )
+    async with container.database.system_session() as session:
+        session.add(row)
+    return plaintext, row
 
 
 def error_of(response: httpx.Response) -> tuple[int, str, str | None]:

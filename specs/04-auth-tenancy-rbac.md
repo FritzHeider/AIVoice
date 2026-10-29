@@ -225,6 +225,17 @@ compares it to the table in §3.2 (parsed from this markdown file).
 > matrix-vs-§3.2 parse test arrives with the members/org routes (P02-T08), which may widen these sets only by
 > amending this note.
 
+> Decision (2026-10-29): **matrix in code**. `va_api.auth.rbac_matrix.MATRIX` holds every §3.2 row (label text
+> exactly as in the table, backticks included, in table order) with one cell per role, each one of `R`, `R*`, `W`,
+> `W(own)`, `X`, `—`. `ROW_GRANTS` maps each row to a scope resource (`None` for "API keys: list", which has no scope
+> of its own) and the permissions guarding its finer actions (e.g. "Calls: send …" → `calls` + `calls.operate`,
+> "Org settings (compliance, …)" → `org` + `org.compliance`, "Experiments start/stop" → `agents` +
+> `experiments.operate`, "Dispositions …" → `analysis`, "DNC list" and "Guard rail …" → `compliance`). A role holds
+> `<resource>:read` when a row of that resource has a non-`—` cell and `<resource>:write` when one has `W`, `W(own)` or
+> `X` (only scopes that exist in §2.3); it holds a permission when any row granting it has a non-`—` cell.
+> `ROLE_SCOPES` and `ROLE_PERMISSIONS` are derived from `MATRIX`, and the exact sets of the two notes above are
+> unchanged. `apps/api/tests/test_rbac_matrix.py` parses §3.2 and compares it to `MATRIX` cell for cell.
+
 ## 4. Dashboard authentication
 
 ### 4.1 Endpoints (`/internal/auth/*`, envelope format)
@@ -712,6 +723,29 @@ see shared-contract additions); `GET /v1/org/secrets` lists names only.
 | GET/POST/PATCH/DELETE | `/v1/org/members`, `/v1/org/members/invitations`, `/v1/org/transfer-ownership` | §6 |
 | PUT/GET/DELETE | `/v1/org/sso` | §5 |
 | PUT/GET/DELETE | `/v1/org/secrets[/{name}]` | §7 |
+
+> Decision (2026-10-29): **`GET /v1/me`** needs `org:read` (every role holds it; API keys need `org:read` or `*`) and
+> returns `{data:{principal_type, user, api_key, org:{id,name,slug,plan_id,status}, role, scopes}}`: both `user`
+> (`{id,email,name,mfa_enabled}`) and `api_key` (`{id,prefix,scopes,environment}`, the prefix read from `api_keys`)
+> are always present, `user` null for API keys and `api_key` null for sessions; `role` is null for API keys;
+> `scopes` (and `api_key.scopes`) are sorted. A session user or key row that no longer exists answers
+> `AUTH_FAILURE`.
+
+> Decision (2026-10-29): **`GET /v1/org`** (`org:read`) returns `{data:{id, name, slug, parent_org_id, plan_id,
+> kyc_level, status, data_region, retention_days, recording_retention_days, credits_balance, limits, settings,
+> created_at, updated_at}}`. `credits_balance` is a JSON number of dollars. `limits` always carries the eleven
+> specs/24 §2 override keys: the plan's values for `connected_rate_micros_per_min`, `transfer_rate_micros_per_min`,
+> `sms_rate_micros`, `widget_message_micros` and the caps `daily_calls`, `hourly_calls`, `concurrency`,
+> `voice_clones` (null = unlimited), with `numbers`, `international_enabled`, `sms_per_day` null unless overridden
+> (the plan number caps live in `va_billing`, which takes over the merge when it lands); every override present in
+> `orgs.limits` with the right type (`bool` for `international_enabled`, a non-bool integer for the rest) replaces
+> the plan value, anything else is ignored. `settings` is the stored object until `OrgSettings` (P02-T12) returns it
+> with defaults. **`PATCH /v1/org`** (`org:write`) accepts `{name? (1-200 chars, trimmed), retention_days?
+> (1-3650), recording_retention_days? (0-3650)}` with unknown fields `INVALID_INPUT`; setting either retention field
+> also needs `org.compliance` (`FORBIDDEN` "Missing required permission 'org.compliance'."); an empty body changes
+> nothing and returns the org. `settings` joins this body with P02-T12 and the `org.update` audit entry with P02-T11.
+> `orgs` has no RLS, so both routes read and write it through `OrgRepo` on the global session with the context's org
+> id only.
 
 ### 8.2 Bland-compatible sub-account creation (legacy envelope)
 

@@ -72,7 +72,7 @@
   - Deliverables: `POST /internal/auth/mfa/setup|enable|verify|disable`, TOTP replay guard `mfa:last:<user_id>`, per-user MFA failure lock, `MFA_REQUIRED` gate for org `mfa_required` and for users with MFA enabled, MFA verification refreshing recent auth for password change, `GET /session` reporting it
   - Acceptance: pyotp-based tests with frozen clock; replayed code rejected; recovery code single-use; disable refused when any org of the user requires MFA.
 
-- [ ] P02-T07 OIDC SSO (split by the planner on 2026-10-29 into T07a/T07b below; tick when both are ticked)
+- [x] P02-T07 OIDC SSO (split by the planner on 2026-10-29 into T07a/T07b below; tick when both are ticked) — T07a and T07b reviewed 2026-10-29
   - Spec refs: specs/04-auth-tenancy-rbac.md (OIDC SSO)
   - Depends on: P02-T04
   - Deliverables: SSO connection CRUD (owner/admin), login start/callback with authlib, state/nonce validation, JIT provisioning with `default_role`, domain restriction, enforce mode
@@ -90,11 +90,29 @@
   - Deliverables: authlib dependency; `GET /internal/auth/sso/start?email=` (domain lookup, PKCE S256, state/nonce in Redis 10 min, redirect); `GET /internal/auth/sso/callback` (state single-use, code exchange, ID token signature via JWKS, `iss`/`aud`/`exp`/`nonce`, `email_verified` rule, JIT user/membership with `default_role`, session with `mfa_passed=true`, redirect to the dashboard); password login on an enforced domain → `SSO_REQUIRED` with `details.sso_url`
   - Acceptance: tests against an in-process fake OIDC provider (respx discovery/JWKS/token endpoints, generated RSA key) including bad state, reused state, bad nonce, wrong issuer, wrong audience, expired token, bad signature, unverified email; JIT paths (new user, existing user without membership, existing membership keeps role); enforce blocks password login while API keys still work.
 
-- [ ] P02-T08 Orgs, members, invitations, RBAC matrix
+- [ ] P02-T08 Orgs, members, invitations, RBAC matrix (split by the planner on 2026-10-29 into T08a/T08b/T08c below; tick when all three are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (RBAC matrix, endpoints, invitations, org switching)
   - Depends on: P02-T01, P02-T04
   - Deliverables: `/v1/me`, `/v1/org` (GET/PATCH), `/v1/org/members` (list, change role, remove), invitations (create, list, revoke, accept), `require_permission(resource, action)` driven by a single matrix table in code that is tested against the spec matrix
   - Acceptance: test parses the RBAC table from specs/04 and asserts the code matrix matches cell-for-cell; last-owner protection.
+
+- [x] P02-T08a RBAC matrix table, `/v1/me`, `GET/PATCH /v1/org` — reviewed 2026-10-29: make lint/typecheck/placeholders pass, make test 2682 passed (cov 99.00%), test-ts pass, openapi drift current, spec refs 0, jscpd 0 clones
+  - Spec refs: specs/04-auth-tenancy-rbac.md §3.2 (matrix), §3.3 (role scopes/permissions decisions), §8.1 (`/v1/me`, `/v1/org`); specs/24-billing-and-limits.md §2 (plan caps, `orgs.limits` overrides)
+  - Depends on: P02-T01, P02-T04
+  - Deliverables: `va_api.auth.rbac_matrix` (the §3.2 table in code, cell-for-cell, plus each row's scope resource and permissions); `ROLE_SCOPES` and `ROLE_PERMISSIONS` derived from it (sets unchanged); `GET /v1/me` (user and API-key principals); `GET /v1/org` (org, effective limits, credits balance in dollars, stored settings); `PATCH /v1/org` (`name`; `retention_days`/`recording_retention_days` need `org.compliance`)
+  - Acceptance: a test parses the §3.2 table from specs/04 and asserts the code matrix matches cell-for-cell; the existing exact role scope/permission tests stay green on the derived sets; `/v1/me` and `/v1/org` integration tests for sessions of every role and for API keys; scope/permission failures answer `FORBIDDEN`.
+
+- [ ] P02-T08b Members: list, change role, remove, transfer ownership
+  - Spec refs: specs/04-auth-tenancy-rbac.md §6 (members, last-owner rule, transfer-ownership), §3.2 (`Members` rows, `Assign owner role / transfer ownership`), §4.3 (reauth)
+  - Depends on: P02-T08a
+  - Deliverables: `GET /v1/org/members`, `PATCH /v1/org/members/{user_id}`, `DELETE /v1/org/members/{user_id}`, `POST /v1/org/transfer-ownership` (owner session + recent auth); removed members' sessions lose the org
+  - Acceptance: last-owner protection (`CONFLICT` "An organization must have at least one owner.") including concurrent demotions; only owners assign `owner`; admins cannot change owners; cross-org user ids answer `NOT_FOUND`.
+
+- [ ] P02-T08c Invitations: create, list, revoke, details, accept
+  - Spec refs: specs/04-auth-tenancy-rbac.md §6 (invitations), §4.1 (`/internal/auth/invitations/*`), §4.2 (token format); specs/28-security.md §2
+  - Depends on: P02-T08b
+  - Deliverables: `POST/GET /v1/org/members/invitations`, `DELETE /v1/org/members/invitations/{id}`, invitation email template with `{DASHBOARD_BASE_URL}/invite/{token}`, `GET /internal/auth/invitations/{token}`, `POST /internal/auth/invitations/accept` (creates the user when needed, adds the membership)
+  - Acceptance: 7-day expiry, hashed single-use token, only owners invite owners, revoked/expired/accepted tokens refused, email mismatch rules, existing member → `CONFLICT`.
 
 - [ ] P02-T09 Sub-accounts and org switching
   - Spec refs: specs/04-auth-tenancy-rbac.md (sub-accounts)

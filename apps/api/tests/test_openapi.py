@@ -268,3 +268,13 @@ def test_data_response_wraps_examples_only_for_models() -> None:
 
 def test_committed_internal_document_is_current() -> None:
     assert check_openapi_drift.render(internal_document()) == COMMITTED_INTERNAL.read_text(encoding="utf-8")
+
+
+def test_org_operations_declare_scopes_and_the_compliance_rule() -> None:
+    document = create_app(make_settings(), init_observability=False).openapi()
+    paths = document["paths"]
+    assert paths["/v1/me"]["get"]["x-scope"] == "org:read"
+    assert paths["/v1/org"]["get"]["x-scope"] == "org:read"
+    update = paths["/v1/org"]["patch"]
+    assert (update["operationId"], update["x-scope"]) == ("org_update", "org:write")
+    assert "`org.compliance`" in update["description"]
