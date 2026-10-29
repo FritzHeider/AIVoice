@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793260371-4c41
+> Idempotency decision logic is va_db.repositories.resolve_existing (pure); test MemoryIdempotencyStore reuses it - never re-copy the decision chain (jscpd)
+<!-- tags: api, testing | created: 2026-10-29 -->
+
+### mem-1793260371-1459
+> va_api pure-ASGI middleware: subclass va_api.middleware.HttpMiddleware (http-only passthrough) and override handle(); jscpd flags a copied 'if scope[type] != http' preamble
+<!-- tags: api, tooling | created: 2026-10-29 -->
+
 ### mem-1793258976-9d0b
 > va_api.rate_limit must not import va_api.auth at runtime (va_api.auth.dependencies imports it): RequestContext is TYPE_CHECKING-only; rate_limit("calls_send") dependency lives in va_api.auth.dependencies
 <!-- tags: api | created: 2026-10-29 -->

@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
+from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.settings import ApiSettings
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
@@ -33,6 +34,7 @@ class Container:
     database: Database
     authenticator: ApiKeyAuthenticator
     rate_limiter: RateLimiter
+    idempotency: IdempotencyStore
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -41,9 +43,10 @@ class Container:
 
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
-    """Create the engines, Redis client, Temporal connector, authenticator, and rate limiter; dispose on exit.
+    """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store.
 
-    ``RuntimeError`` when ``API_KEY_PEPPER`` is not configured, before anything is opened.
+    Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` is not configured, before
+    anything is opened.
     """
     hasher = settings.api_key_hasher()
     async with open_dependencies() as deps, AsyncExitStack() as stack:
@@ -59,4 +62,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             clock=clock,
         )
         rate_limiter = RateLimiter(redis, clock)
-        yield Container(settings, engine, redis, temporal, deps, database, authenticator, rate_limiter)
+        idempotency = DbIdempotencyStore(database, clock)
+        yield Container(
+            settings, engine, redis, temporal, deps, database, authenticator, rate_limiter, idempotency
+        )

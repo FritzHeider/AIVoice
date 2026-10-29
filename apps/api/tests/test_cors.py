@@ -69,6 +69,7 @@ async def test_simple_request_exposes_request_id() -> None:
         "x-ratelimit-limit",
         "x-ratelimit-remaining",
         "x-ratelimit-reset",
+        "idempotent-replayed",
     }
 
 

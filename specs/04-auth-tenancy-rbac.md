@@ -498,6 +498,36 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
 `IDEMPOTENCY_KEY_REUSED`. Store response for 2xx and 4xx (not 5xx; 5xx deletes the row). Rows purged after 24 h by
 `RetentionWorkflow`.
 
+> Decision (2026-10-29): idempotency details. Implementation: `va_db.repositories.IdempotencyRepo` (tenant
+> session, RLS plus explicit `org_id` filter) and `va_api.idempotency`.
+> - **Where.** The org id is the key space (PK `(org_id, key)`), so the claim is taken inside the `require_scope`
+>   dependency once the scope check passes, at most once per request. Requests failing authentication (401), the
+>   `default` rate bucket (429), or the scope check (403) never create a row. Routes without `require_scope` (the
+>   public allowlist) and non-`POST` methods ignore the header. A capture middleware (pure ASGI,
+>   inside the rate-limit header middleware so replays still carry `X-RateLimit-*`) settles the claim before the
+>   last response chunk is sent.
+> - **Key syntax.** 1–255 printable ASCII characters (0x20–0x7E); otherwise 400 `INVALID_INPUT` with
+>   `field: "Idempotency-Key"` and message `Idempotency-Key must be 1-255 printable ASCII characters.`
+> - **Hash.** `sha256(method + "\n" + path + "\n" + body)` in hex, `path` being the concrete request path without
+>   the query string. A body that parses as JSON is canonicalised first (sorted keys, no whitespace, UTF-8), any
+>   other body is hashed as raw bytes (empty body → empty bytes). Bodies over 64 KiB are hashed in a worker thread.
+> - **Stored.** 2xx and 4xx responses whose body is JSON (status plus parsed body in `response_body`, lock
+>   cleared). Released (row deleted, the retry runs again): 5xx, unhandled exceptions, **429** (a throttle such as
+>   `calls_send` after the claim must stay retryable per its `Retry-After`), and empty or non-JSON bodies (not
+>   replayable faithfully). A failure writing the response is logged as `idempotency_store_failed` (org and
+>   status only, never the key), the claim is released, and the response is still delivered. A cancelled request
+>   (client disconnect) leaves its lock to expire.
+> - **Replay.** Stored status and JSON body (JSON-equal, not byte-equal: `jsonb` normalises key order),
+>   `Content-Type: application/json`, `Idempotent-Replayed: true`; the body keeps the original `request_id` while
+>   `X-Request-Id` is the new request's. Each replay increments `va_idempotent_replays_total`.
+>   `Idempotent-Replayed` is in the api CORS expose list (`va_api.main.CORS_EXPOSE_HEADERS`).
+> - **Precedence and expiry.** A different hash wins over everything (`IDEMPOTENCY_KEY_REUSED` 422, message
+>   `Idempotency-Key was already used with a different request.`), even while the original is in flight; same
+>   hash with a stored response replays; same hash while `locked_until > now` is `IDEMPOTENCY_IN_PROGRESS` 409
+>   (`A request with this Idempotency-Key is still in progress.`). A row without a response whose lock expired
+>   (crashed worker) is re-claimed. A row older than 24 h that the purge has not yet deleted is treated as absent
+>   and re-claimed in place. Times come from the api's injected `Clock`.
+
 ## 13. Audit logging
 
 - Written via `va_db.audit.record(ctx, action, resource_type, resource_id, before, after)` in the same transaction.

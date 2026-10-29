@@ -413,3 +413,197 @@ TOTAL 99 %). Checked plan table vs specs/04 §11, key names vs specs/03 §11, RA
 header middleware ordering (merge_headers keeps handler headers), fail-open logging (no key material), per-request
 dependency caching (default charged once with rate_limit("calls_send")). Reviewer fix: specs/04 §11 Decision wording
 claimed specs/28 §5 enumerates the CORS expose list; reworded to point at va_api.main.CORS_EXPOSE_HEADERS.
+
+## 2026-10-29 Planner: P02-T02 approved → next P02-T03
+
+## Plan P02-T03 — Idempotency-Key (specs/04 §12, specs/05 §Headers row, specs/03 §3 `idempotency_keys`, specs/31)
+
+Cleanup job function already exists: `va_db.repositories.retention.PURGE_RULES` has `idempotency_keys` 24 h
+(RetentionRepo.purge_expired). This task adds a test only if no existing test asserts that rule (grep first; the
+retention tests likely cover it, then nothing to add there).
+
+### Design summary
+Claim (DB row with 60 s lock) happens in a dependency after auth + `default` rate bucket + scope check; capture of
+the response happens in a pure-ASGI middleware that sees the claim in the scope. Replay is raised as an exception
+and rendered by a dedicated handler. Org id is the key space (PK `(org_id, key)`), so unauthenticated POSTs are
+not idempotent-capable.
+
+### Decisions to record (specs/04 §12, same commit, `> Decision (2026-10-29):`)
+1. **Where**: claimed inside `require_scope`'s dependency after the scope check passes, for `POST` requests carrying
+   `Idempotency-Key`, once per request (scope marker guards routes with several `require_scope` deps). Principals
+   that fail auth (401), the `default` bucket (429), or the scope check (403) never create a row. Routes without
+   `require_scope` (public allowlist: health, signup/login, webhooks) ignore the header. Header on non-POST: ignored.
+2. **Key syntax**: 1–255 chars, printable ASCII 0x20–0x7E (specs/05 "printable"); else
+   `AppError("INVALID_INPUT", "Idempotency-Key must be 1-255 printable ASCII characters.", field="Idempotency-Key")`
+   (check AppError signature for `field`; if absent, build via existing item API). Never stored.
+3. **Hash**: `sha256(method + "\n" + path + "\n" + canonical_body)` hex; `path` = `scope["path"]` (concrete path,
+   query string excluded, per spec text "method+path+body"); canonical body = `json.dumps(obj, sort_keys=True,
+   separators=(",", ":"), ensure_ascii=False).encode()` when the body parses as JSON, else the raw bytes (empty body
+   → b""). Bodies > 64 KiB are canonicalised in `asyncio.to_thread` (rule 7).
+4. **Stored**: 2xx and 4xx JSON responses (status + parsed body into `response_body` jsonb, lock cleared). Not stored
+   (row deleted): 5xx, unhandled exceptions, **429** (a transient throttle, e.g. `calls_send` after claim, must stay
+   retryable per its `Retry-After`), non-JSON or empty-bodied responses (not replayable faithfully). Cancellation /
+   client disconnect leaves the lock to expire.
+5. **Replay**: stored status, stored JSON body (JSON-equal, not byte-equal — jsonb normalises key order/whitespace),
+   `Content-Type: application/json`, header `Idempotent-Replayed: true`; body keeps the original `request_id`, the
+   `X-Request-Id` header is the new request's. Increments `va_idempotent_replays_total`.
+6. **Expired rows**: a row older than 24 h (created_at < now − 24 h, not yet purged) is treated as absent and
+   re-claimed in place. A row with no response whose `locked_until` ≤ now (crashed worker) is re-claimed
+   (lock refreshed). Time comes from the injected `Clock` (created_at/updated_at/locked_until written explicitly).
+7. Mismatched hash wins over everything (checked first): `IDEMPOTENCY_KEY_REUSED` 422 even if the original is in
+   flight. Same hash + locked → `IDEMPOTENCY_IN_PROGRESS` 409. Messages:
+   "Idempotency-Key was already used with a different request." / "A request with this Idempotency-Key is still in progress."
+Also add `Idempotent-Replayed` to `CORS_EXPOSE_HEADERS` (update test_cors + specs/04 §11-style mention in §12
+Decision pointing at `va_api.main.CORS_EXPOSE_HEADERS`).
+
+### Files
+
+**packages/va_db/src/va_db/repositories/idempotency.py** (new; tenant-scoped, NOT a SystemRepository)
+- `@dataclass(frozen=True, slots=True) class IdempotencyClaim: key: str` (fresh/re-claimed)
+- `@dataclass(frozen=True, slots=True) class IdempotencyReplay: status: int; body: Any`
+- `class IdempotencyConflict(StrEnum): IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"; KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"`
+- `type ClaimOutcome = IdempotencyClaim | IdempotencyReplay | IdempotencyConflict`
+- `LOCK_TTL: Final = timedelta(seconds=60)`, `REPLAY_WINDOW: Final = timedelta(hours=24)` (reuse the 24 h from
+  PURGE_RULES? keep one source: define REPLAY_WINDOW here and make the retention rule reference it — import
+  direction retention → idempotency is fine).
+- `class IdempotencyRepo: __init__(self, session: AsyncSession, org_id: uuid.UUID)`
+  - `async def claim(self, *, key, method, path, request_hash, now: datetime) -> ClaimOutcome`:
+    `insert(IdempotencyKey).values(org_id, key, method, path, request_hash, locked_until=now+LOCK_TTL,
+    created_at=now, updated_at=now).on_conflict_do_nothing(index_elements=[org_id, key]).returning(key)` (pg dialect
+    insert); inserted → Claim. Else `select ... where org_id, key .with_for_update()`; row missing (deleted between)
+    → retry the insert once (loop max 2, then IN_PROGRESS). Expired (created_at < now − REPLAY_WINDOW) → UPDATE all
+    fields like a fresh claim (response NULL) → Claim. hash differs → KEY_REUSED. response_status not None → Replay.
+    locked_until > now → IN_PROGRESS. else UPDATE locked_until=now+LOCK_TTL → Claim.
+  - `async def complete(self, key, *, status: int, body: Any, now) -> None` (UPDATE response_status/body,
+    locked_until NULL, updated_at=now; filter org_id+key).
+  - `async def release(self, key) -> None` (DELETE where org_id, key, response_status IS NULL — never delete a
+    completed row).
+  - Every statement filters `org_id` explicitly (RLS + explicit filter, rule 5).
+- Export from `va_db.repositories.__init__`.
+
+**apps/api/src/va_api/idempotency.py** (new; must NOT import `va_api.auth` at runtime — RequestContext TYPE_CHECKING
+only, same as rate_limit, see memory mem-1793258976-9d0b)
+- `IDEMPOTENCY_HEADER: Final = "idempotency-key"`, `REPLAYED_HEADER: Final = "Idempotent-Replayed"`,
+  `IDEMPOTENCY_SCOPE_KEY: Final = "va.idempotency"`, `MAX_KEY_LENGTH: Final = 255`.
+- `class IdempotencyStore(Protocol)`: `claim(org_id, *, key, method, path, request_hash) -> ClaimOutcome`,
+  `complete(org_id, key, *, status, body)`, `release(org_id, key)`.
+- `class DbIdempotencyStore: __init__(self, database: Database, clock: Clock)` — each method opens
+  `database.tenant_session(org_id)` and runs `IdempotencyRepo` (claim commits immediately so concurrent duplicates
+  see the row).
+- `def validate_key(raw: str) -> str`; `def canonical_body(body: bytes) -> bytes`;
+  `async def request_hash(method: str, path: str, body: bytes) -> str`.
+- `class IdempotentReplay(Exception)` carrying status + body; `def render_replay(request, exc) -> Response`
+  (JSONResponse with REPLAYED_HEADER "true"; metrics counter `request.app.state.metrics.counter(
+  "va_idempotent_replays_total").inc()`).
+- `@dataclass(slots=True) class ActiveClaim: org_id: uuid.UUID; key: str; store: IdempotencyStore`.
+- `async def claim_idempotency(request: Request, ctx: RequestContext) -> None` — no-op unless POST + header +
+  not already claimed for this request; validate, hash (`await request.body()`), `store.claim`; Replay → raise
+  IdempotentReplay; Conflict → `AppError(code, message)`; Claim → `request.scope[IDEMPOTENCY_SCOPE_KEY] = ActiveClaim`.
+- `def idempotency_of(request) -> IdempotencyStore` (container.idempotency).
+- `class IdempotencyMiddleware` (pure ASGI): wraps send; at `http.response.start` reads the claim from scope (absent →
+  passthrough); buffers body chunks while forwarding non-final ones; before forwarding the final chunk: status in
+  2xx/4xx except 429 and body parses as JSON (via `json.loads`, to_thread if > 64 KiB) → `complete`, else `release`.
+  Store failure (SQLAlchemyError/OSError) → log `idempotency_store_failed` (key not logged — log only org_id/status),
+  attempt release, still forward. App raising `Exception` with a claim present and nothing finalised → `release` then
+  re-raise. A claim whose response never started (e.g. exception) handled by same path.
+- `def install_idempotency(app: FastAPI) -> None` — registers the IdempotentReplay handler (middleware added in
+  main explicitly for ordering).
+
+**apps/api/src/va_api/auth/dependencies.py** — in `require_scope.check_scope`, after the scope check:
+`await claim_idempotency(request, ctx)` (add `request: Request` param). Update module docstring.
+
+**apps/api/src/va_api/container.py** — `idempotency: IdempotencyStore` field = `DbIdempotencyStore(database, clock)`.
+
+**apps/api/src/va_api/main.py** — `app.add_middleware(IdempotencyMiddleware)` immediately before
+`RateLimitHeadersMiddleware` line (so it is inner to it; replays still get rate headers); `install_idempotency(app)`
+after `install_handlers(app)`; `CORS_EXPOSE_HEADERS += "Idempotent-Replayed"`; docstring middleware order updated.
+
+**apps/api/tests/support/idempotency_helpers.py** (new) — `MemoryIdempotencyStore` implementing the Protocol with
+the same semantics (dict keyed (org_id, key), FrozenClock, `asyncio.Lock`), recording calls; plus fault-injection
+flag `fail_complete`. `AuthContainer` gains `idempotency` field (default MemoryIdempotencyStore sharing the clock).
+Add to `_auth_routes`: `POST /status/{code}` (returns JSON with a counter so replay is distinguishable from re-run:
+body includes `{"n": <calls>}`, status = code via `JSONResponse`), `POST /boom` (raises RuntimeError), `POST /text`
+(PlainTextResponse), and a body-model route `POST /echo` (pydantic body). Keep route-discovery tests updated
+(test_auth_dependencies expects the route list — memory mem-1793257682-8f0e).
+
+### Tests
+apps/api/tests/test_idempotency.py
+- `test_validate_key` param: "" / 256 chars / "\x7f" / "é" rejected; "a", 255 chars, "with space" accepted.
+- `test_canonical_body_ignores_key_order_and_whitespace`; `test_non_json_body_hashed_raw`;
+  `test_hash_includes_method_and_path`.
+- `test_replay_returns_identical_status_and_body` — POST /status/201 twice same key → same status+body (n=1 both),
+  second has `Idempotent-Replayed: true`, endpoint ran once, replay counter incremented; both families (legacy +
+  envelope).
+- `test_4xx_is_stored_and_replayed` (route returns 404 JSON).
+- `test_different_body_returns_422_key_reused` (envelope + legacy error shape, code IDEMPOTENCY_KEY_REUSED).
+- `test_same_key_different_path_is_reused`.
+- `test_in_progress_returns_409` — gate endpoint on an `asyncio.Event`; fire first request, wait until claimed, fire
+  second → 409 IDEMPOTENCY_IN_PROGRESS; release first → 200; third → replay.
+- `test_concurrent_duplicates_run_endpoint_once` — `asyncio.gather` 10 identical requests: exactly one 2xx-run,
+  others 409 or replay; endpoint counter == 1.
+- `test_5xx_not_stored` (/status/503 then retry runs again), `test_unhandled_exception_releases_claim` (/boom 500 then
+  retry hits /boom again, store has no row), `test_429_not_stored` (calls_send exhausted after claim → retry later
+  with refilled clock succeeds), `test_non_json_response_not_stored`.
+- `test_validation_error_400_is_stored` (spec: 4xx stored).
+- `test_auth_failure_and_forbidden_create_no_row`; `test_invalid_key_400_invalid_input`.
+- `test_get_and_no_header_ignore_idempotency`; `test_keys_are_per_org` (same key two orgs both run).
+- `test_lock_expiry_allows_takeover` (FrozenClock.advance(61) with abandoned claim in store → claim succeeds).
+- `test_expired_row_reclaimed_after_24h`.
+- `test_store_failure_still_returns_response` (fail_complete → 200 delivered, warning logged, row released).
+- `test_replay_has_rate_limit_and_request_id_headers`.
+- `test_cors_exposes_idempotent_replayed` (extend test_cors).
+packages/va_db/tests/test_idempotency_repo_integration.py (migrated_url + Database fixture like
+test_api_key_lookup_integration; uses tenant_session)
+- claim → Claim; complete → replay returns status/body; hash mismatch → KEY_REUSED; locked → IN_PROGRESS;
+  lock expired → Claim; created_at older than 24 h → Claim with response cleared; release deletes only unfinished
+  rows; `test_concurrent_claims_one_winner` (two tenant sessions, asyncio.gather → exactly one Claim, other
+  IN_PROGRESS); `test_rows_isolated_by_org` (org B same key → Claim; org B session cannot see org A row).
+- `DbIdempotencyStore` exercised through one api-level integration? Not needed if va_db covers repo and api covers
+  store Protocol; but DbIdempotencyStore needs coverage: add `apps/api/tests/test_idempotency_db.py` only if apps/api
+  tests already have a Postgres fixture; otherwise cover DbIdempotencyStore in the va_db integration file is wrong
+  layering → instead unit-test it with a tiny fake Database whose tenant_session yields a session from the va_db
+  test? Simplest: check how `db_lookup(database)` in api_key_auth is covered and mirror it.
+
+### Gates
+`make fmt lint typecheck placeholders test` (+ jscpd, radon, pip-audit; openapi drift check — handler/middleware
+should not change the doc). No TS/e2e.
+
+### Risks
+- Import cycle va_api.auth.dependencies → va_api.idempotency (keep idempotency free of va_api.auth runtime imports).
+- FastAPI body caching: dependency `await request.body()` must reuse the cached body (same Request object in deps);
+  verify a body-model route still parses after the dependency read it.
+- jsonb reorders keys → tests compare parsed JSON.
+- ExceptionMiddleware renders AppError/validation inside our middleware (seen and stored); unhandled exceptions
+  propagate through it (release then re-raise).
+- Concurrency test on fake store must be deterministic (asyncio.Event gates, no sleeps).
+- test_auth_dependencies route-discovery list must include the new test routes.
+
+## 2026-10-29 Builder: P02-T03 build notes
+
+Implemented per plan. Details/deviations:
+- `va_db.repositories.idempotency`: `IdempotencyRepo` (tenant) + pure `resolve_existing(row, hash, now)` returning
+  Replay/Conflict/`Takeover.EXPIRED|UNLOCKED`; the test `MemoryIdempotencyStore` reuses it (jscpd flagged the copied
+  decision chain). Fresh claims write `response_body = null()` (SQL NULL, not JSON null). Lock boundary: held while
+  `locked_until > now` (re-claimable at exactly `locked_until`). Retention rule now uses `REPLAY_WINDOW`.
+- `va_api.middleware.HttpMiddleware` base (http-only passthrough) now used by `RateLimitHeadersMiddleware` and
+  `IdempotencyMiddleware` (jscpd clone of the scope-type preamble).
+- Test support split: `idempotency_store.py` (memory store, imported by auth_helpers for `AuthContainer.idempotency`)
+  and `idempotency_helpers.py` (separate `/v1/calls/_idem` + `/v1/knowledge/_idem` routers, `IdempotencyContainer`),
+  so the auth route-discovery list is unchanged.
+- `DbIdempotencyStore` covered by `apps/api/tests/test_idempotency_db.py` (own module-scoped Postgres container via
+  va_db support helpers, timeout 180).
+- Uncovered: repo's retry when the row is deleted between the conflicting insert and the select (race only).
+Gates: make fmt/lint/typecheck (246 files)/placeholders (0) green; make test 2041 passed, 99.80 %; jscpd 0 clones;
+radon avg A (2.53); pip-audit + pnpm audit clean; openapi current; spec refs 0 problems.
+
+## Review P02-T03 (2026-10-29): approved
+Re-ran make lint typecheck placeholders (green, mypy 246 files, 0 placeholder findings) and make test (2041 passed,
+TOTAL 99.80 %). Checked against specs/04 §12, specs/05 header row, specs/31 (IDEMPOTENCY_KEY_REUSED 422,
+IDEMPOTENCY_IN_PROGRESS 409, INVALID_INPUT 400 with field), specs/27 (`va_idempotent_replays_total`), retention
+rule 24 h via REPLAY_WINDOW. Explicit org_id filters + tenant_session on every repo statement; key never logged;
+large bodies hashed/parsed in to_thread; tests use events/FrozenClock, no sleeps. Non-blocking note for later:
+complete/release do not check that the caller still holds the lock, so a request running past the 60 s LOCK_TTL
+whose claim was taken over can overwrite or release the newer claim (same hash, so the stored response stays a
+valid one; the worst case is a second concurrent run). Revisit if long-running POSTs appear.
+
+## 2026-10-29 Reviewer: P02-T03 approved → next P02-T04

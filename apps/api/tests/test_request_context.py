@@ -16,7 +16,7 @@ from fastapi.routing import APIRoute
 from sample_routes import ENVELOPE_PREFIX, LEGACY_PREFIX
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from va_api.middleware import merge_headers, new_request_id, resolve_request_id
+from va_api.middleware import HttpMiddleware, merge_headers, new_request_id, resolve_request_id
 from va_common.logging import configure_logging
 
 GENERATED = r"^req_[0-9a-f]{32}$"
@@ -150,3 +150,21 @@ async def test_non_http_scope_passes_through() -> None:
     app = sample_app()
     async with make_client(app) as client:  # lifespan scopes traverse both middlewares untouched
         assert (await client.get("/healthz")).status_code == 200
+
+
+async def test_http_middleware_base_passes_every_scope_through() -> None:
+    seen: list[str] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen.append(scope["type"])
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: Any) -> None:
+        seen.append(message["type"])
+
+    middleware = HttpMiddleware(app)
+    await middleware({"type": "lifespan"}, receive, send)
+    await middleware({"type": "http", "method": "GET", "path": "/", "headers": []}, receive, send)
+    assert seen == ["lifespan", "http"]

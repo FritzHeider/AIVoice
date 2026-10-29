@@ -16,6 +16,7 @@ from sqlalchemy import ColumnClause, delete, literal_column, select
 from va_db.base import Base
 from va_db.models import Org
 from va_db.repositories.base import SystemRepository, require_positive
+from va_db.repositories.idempotency import REPLAY_WINDOW
 
 __all__ = ["PURGE_RULES", "PurgeRule", "RetentionPolicy", "RetentionRepo"]
 
@@ -43,7 +44,7 @@ class PurgeRule:
 
 
 PURGE_RULES: Final[tuple[PurgeRule, ...]] = (
-    PurgeRule("idempotency_keys", "created_at", timedelta(hours=24)),
+    PurgeRule("idempotency_keys", "created_at", REPLAY_WINDOW),
     PurgeRule("telnyx_events", "created_at", timedelta(days=30)),
     PurgeRule("stripe_events", "created_at", timedelta(days=90)),
     PurgeRule("webhook_deliveries", "created_at", timedelta(days=30)),

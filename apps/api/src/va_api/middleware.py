@@ -24,6 +24,7 @@ from va_common.metrics import ServiceMetrics
 __all__ = [
     "REQUEST_ID_HEADER",
     "SECURITY_HEADERS",
+    "HttpMiddleware",
     "MetricsMiddleware",
     "RequestContextMiddleware",
     "merge_headers",
@@ -83,6 +84,23 @@ def merge_headers(
             headers.append((key, value.encode("latin-1")))
             present.add(key)
     return headers
+
+
+class HttpMiddleware:
+    """Base of pure-ASGI middleware acting on ``http`` requests only; other scopes go straight to the app."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        await self.handle(scope, receive, send)
+
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Serve one ``http`` request; subclasses wrap ``send`` or the call (this base passes it through)."""
+        await self.app(scope, receive, send)
 
 
 class RequestContextMiddleware:

@@ -1,9 +1,11 @@
-"""FastAPI dependencies: principal, scopes, and request rates (specs/04 §2.2, §2.4, §11).
+"""FastAPI dependencies: principal, scopes, request rates, idempotency (specs/04 §2.2, §2.4, §11, §12).
 
 Routers declare ``dependencies=[Depends(require_scope("<resource>:<read|write>"))]``; the dependency it
 returns carries ``required_scope`` so the route-coverage test can find it on ``route.dependant``. Every
 authenticated request is charged to the ``default`` rate bucket; routes that send calls add
-``Depends(rate_limit("calls_send"))``, whose dependency carries ``rate_limit_bucket``.
+``Depends(rate_limit("calls_send"))``, whose dependency carries ``rate_limit_bucket``. Once the scope check
+passes, a POST carrying ``Idempotency-Key`` is claimed (``va_api.idempotency``), so requests failing
+authentication, the ``default`` bucket, or the scope check never create an idempotency row.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from fastapi import BackgroundTasks, Depends, Request
 from va_api.auth.api_key_auth import ApiKeyAuthenticator
 from va_api.auth.context import RequestContext
 from va_api.auth.scopes import SCOPES
+from va_api.idempotency import claim_idempotency
 from va_api.middleware import request_id_of
 from va_api.rate_limit import enforce, limiter_of, plan_rate_limits
 from va_common.errors import AppError
@@ -68,15 +71,19 @@ async def get_principal(request: Request, background: BackgroundTasks) -> Reques
 def require_scope(scope: str) -> Callable[..., Awaitable[RequestContext]]:
     """A dependency granting access only to principals holding ``scope`` (or ``*``); else ``FORBIDDEN``.
 
-    ``scope`` must be one of specs/04 §2.3, checked when the router is defined.
+    ``scope`` must be one of specs/04 §2.3, checked when the router is defined. After the check it claims the
+    request's ``Idempotency-Key`` (replay or ``IDEMPOTENCY_*`` errors are raised from here).
     """
     if scope not in SCOPES:
         msg = f"unknown scope: {scope!r}"
         raise ValueError(msg)
 
-    async def check_scope(ctx: Annotated[RequestContext, Depends(get_principal)]) -> RequestContext:
+    async def check_scope(
+        request: Request, ctx: Annotated[RequestContext, Depends(get_principal)]
+    ) -> RequestContext:
         if not ctx.has_scope(scope):
             raise AppError("FORBIDDEN", f"Missing required scope '{scope}'.")
+        await claim_idempotency(request, ctx)
         return ctx
 
     setattr(check_scope, REQUIRED_SCOPE_ATTR, scope)

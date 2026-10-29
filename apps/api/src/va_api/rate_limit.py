@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from fastapi import Request
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
-from va_api.middleware import merge_headers
+from va_api.middleware import HttpMiddleware, merge_headers
 from va_common.errors import AppError
 from va_common.logging import get_logger
 from va_common.time import Clock
@@ -66,7 +66,6 @@ LIMIT_HEADER: Final = "x-ratelimit-limit"
 REMAINING_HEADER: Final = "x-ratelimit-remaining"
 RESET_HEADER: Final = "x-ratelimit-reset"
 RETRY_AFTER_HEADER: Final = "retry-after"
-_HTTP: Final = "http"
 
 _log = get_logger(__name__)
 
@@ -194,17 +193,10 @@ async def enforce(
         raise AppError("RATE_LIMITED", rate_limited_message(decision.retry_after_s))
 
 
-class RateLimitHeadersMiddleware:
+class RateLimitHeadersMiddleware(HttpMiddleware):
     """Adds the recorded bucket decision as headers to the response of the request (errors included)."""
 
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != _HTTP:
-            await self.app(scope, receive, send)
-            return
-
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
         async def send_with_headers(message: Message) -> None:
             decision = scope.get(RATE_LIMIT_SCOPE_KEY)
             if message["type"] == "http.response.start" and isinstance(decision, BucketDecision):

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 import fakeredis
 from api_helpers import FakeChecks, make_settings
 from fastapi import APIRouter, Depends, FastAPI, Request
+from idempotency_store import MemoryIdempotencyStore
 from redis.asyncio import Redis
 
 from va_api.auth import ApiKeyAuthenticator, RequestContext, rate_limit, require_scope
@@ -83,11 +84,15 @@ class KeyStore:
 
 @dataclass
 class AuthContainer(FakeChecks):
-    """The fake api container plus an authenticator over a :class:`KeyStore` and fake Redis."""
+    """The fake api container: a :class:`KeyStore` authenticator, fake Redis, a memory idempotency store."""
 
     store: KeyStore = field(default_factory=KeyStore)
     redis: Redis = field(default_factory=fakeredis.FakeAsyncRedis)
     clock: FrozenClock = field(default_factory=FrozenClock)
+    idempotency: MemoryIdempotencyStore = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.idempotency = MemoryIdempotencyStore(self.clock)
 
     @property
     def authenticator(self) -> ApiKeyAuthenticator:

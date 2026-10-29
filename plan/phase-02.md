@@ -12,7 +12,7 @@
   - Deliverables: Redis Lua token bucket, per-plan defaults, `RateLimit-Limit/Remaining/Reset` + `Retry-After` headers, `RATE_LIMITED` errors
   - Acceptance: deterministic tests with injected clock; concurrency test (100 parallel requests) never exceeds bucket.
 
-- [ ] P02-T03 Idempotency-Key middleware
+- [x] P02-T03 Idempotency-Key middleware — claim in require_scope + capture middleware + IdempotencyRepo; 2041 passed, 99.80 % cov, lint/mypy (246)/placeholders green; specs/04 §12 Decision
   - Spec refs: specs/03-data-model.md (`idempotency_keys`); specs/31-error-catalog.md (`IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS`)
   - Depends on: P02-T01
   - Deliverables: dependency/middleware storing request hash, lock, response replay for 24 h, cleanup job function

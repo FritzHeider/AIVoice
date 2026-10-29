@@ -395,3 +395,11 @@ Grafana 3001
   commands needs `redis_client(..., max_connections=100)` (default pool 50 raises `MaxConnectionsError`). Auth tests
   issue keys on the `build` plan by default (`KeyStore.issue(plan_id="start")` for small buckets); the frozen clock
   means buckets never refill unless the test calls `container.clock.advance(...)`.
+- 2026-10-29 (P02-T03): `Idempotency-Key` is claimed inside `require_scope` (after auth, `default` bucket, scope check);
+  `va_api.idempotency.IdempotencyMiddleware` (inside `RateLimitHeadersMiddleware`) stores or releases the claim before
+  the last body chunk; replays are an `IdempotentReplay` exception rendered by its own handler. `va_api.idempotency`
+  must not import `va_api.auth` at runtime (cycle, same as `rate_limit`). Tests: `AuthContainer.idempotency` is a
+  `MemoryIdempotencyStore` (`apps/api/tests/support/idempotency_store.py`, same rules as `IdempotencyRepo`);
+  route-level tests use `idempotency_helpers.idempotency_app` (counts endpoint runs in `container.hits`, `/gate` held
+  by `container.gate`). An api test needing Postgres boots its own module-scoped container with the va_db support
+  helpers (`running_postgres` + `fresh_database` + `upgrade`; see `apps/api/tests/test_idempotency_db.py`).

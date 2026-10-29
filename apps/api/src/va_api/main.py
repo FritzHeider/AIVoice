@@ -1,7 +1,8 @@
 """API application factory (specs/01-architecture.md §1: ``uvicorn va_api.main:app``, port 8000).
 
-``create_app`` wires middleware (outer to inner: request context, metrics, rate-limit headers, CORS), the
-envelope-aware error handlers, the routers, and the OpenAPI generator. The lifespan initialises observability
+``create_app`` wires middleware (outer to inner: request context, metrics, rate-limit headers, idempotency
+capture, CORS), the envelope-aware error handlers and the idempotent replay handler, the routers, and the
+OpenAPI generator. The lifespan initialises observability
 and opens the dependency container; importing this module performs no I/O.
 """
 
@@ -18,6 +19,7 @@ from starlette.middleware.cors import CORSMiddleware
 from va_api import __version__
 from va_api.container import ContainerFactory, build_container
 from va_api.errors import install_handlers
+from va_api.idempotency import REPLAYED_HEADER, IdempotencyMiddleware, install_idempotency
 from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_openapi
 from va_api.rate_limit import RateLimitHeadersMiddleware
@@ -44,6 +46,7 @@ CORS_EXPOSE_HEADERS: Final = [
     "X-RateLimit-Limit",
     "X-RateLimit-Remaining",
     "X-RateLimit-Reset",
+    REPLAYED_HEADER,
 ]
 # Routers carry their own prefix (route.path_format is then the full template used for metrics labels).
 ROUTERS: Final[tuple[APIRouter, ...]] = (public_router, probe_router)
@@ -85,10 +88,12 @@ def create_app(
         allow_headers=CORS_ALLOW_HEADERS,
         expose_headers=CORS_EXPOSE_HEADERS,
     )
+    app.add_middleware(IdempotencyMiddleware)
     app.add_middleware(RateLimitHeadersMiddleware)
     app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
     app.add_middleware(RequestContextMiddleware)
     install_handlers(app)
+    install_idempotency(app)
     for router in routers:
         app.include_router(router)
     app.openapi = partial(build_openapi, app, cfg)  # type: ignore[method-assign]
