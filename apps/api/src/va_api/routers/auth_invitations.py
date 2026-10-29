@@ -6,17 +6,19 @@ through the system-scope :class:`va_db.repositories.InvitationLookupRepo` first.
 ways: a signed-in user whose email is the invited one joins the org (which becomes the session's active org);
 an invited email that already has an account must sign in first; otherwise ``name`` and ``password`` create
 the account (verified, since the link proves the address) and sign it in. Every success consumes the
-invitation and adds the membership in one transaction of the invitation's org, so a failure leaves the link
-usable.
+invitation, adds the membership, and writes the ``invitation.accept`` audit row in one transaction of the
+invitation's org, so a failure leaves the link usable and unlogged.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Final
 
 from fastapi import Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from va_api.audit import audited, user_actor
 from va_api.auth.api_key_auth import ORG_SUSPENDED_MESSAGE
 from va_api.auth.invitations import ALREADY_MEMBER_MESSAGE, INVITATION_INVALID_MESSAGE
 from va_api.auth.session_auth import (
@@ -41,6 +43,7 @@ from va_api.routers.auth_invitations_schemas import (
 from va_api.routers.auth_schemas import SessionUser
 from va_common.auth import check_password_policy_async, looks_like_token
 from va_common.errors import AppError
+from va_db.audit import record
 from va_db.models import User
 from va_db.repositories import (
     IdentityRepo,
@@ -64,6 +67,8 @@ SIGN_IN_MESSAGE = "Sign in to accept this invitation."
 OTHER_EMAIL_MESSAGE = "This invitation was sent to a different email address."
 NAME_REQUIRED_MESSAGE = "Name is required to create your account."
 PASSWORD_REQUIRED_MESSAGE = "Password is required to create your account."  # noqa: S105 - error text
+
+_ACCEPT_EXTRA: Final = {**PUBLIC_MARKER, **audited("invitation.accept")}
 
 
 def _invalid_invitation() -> AppError:
@@ -89,14 +94,31 @@ def _check_org_open(found: InvitationLookup) -> None:
         raise AppError("ORG_SUSPENDED", ORG_SUSPENDED_MESSAGE)
 
 
-async def _join(session: AsyncSession, found: InvitationLookup, user: User, now: datetime) -> None:
-    """Consume the invitation and make ``user`` a member with its role, in the caller's tenant transaction."""
+async def _join(
+    session: AsyncSession,
+    request: Request,
+    found: InvitationLookup,
+    user: User,
+    now: datetime,
+    *,
+    user_created: bool,
+) -> None:
+    """Consume the invitation, make ``user`` a member with its role, and audit ``invitation.accept``, in the
+    caller's tenant transaction."""
     members = MembershipRepo(session, found.org_id)
     if await members.get_for_user(user.id) is not None:
         raise AppError("CONFLICT", ALREADY_MEMBER_MESSAGE)
     if await InvitationRepo(session, found.org_id).consume(found.id, now) is None:
         raise _invalid_invitation()
     await members.add(user.id, found.role)
+    await record(
+        session,
+        user_actor(request, found.org_id, user.id),
+        "invitation.accept",
+        "invitation",
+        found.id,
+        after={"user_id": user.id, "email": found.email, "role": found.role, "user_created": user_created},
+    )
 
 
 def _accepted(user: User, found: InvitationLookup) -> InvitationAccepted:
@@ -119,7 +141,7 @@ async def _accept_signed_in(
         raise AppError("FORBIDDEN", OTHER_EMAIL_MESSAGE)
     now = clock_of(request).now()
     async with database_of(request).tenant_session(found.org_id) as session:
-        await _join(session, found, user, now)
+        await _join(session, request, found, user, now, user_created=False)
         repo = IdentityRepo(session)
         await repo.mark_email_verified(user.id, now)
         joined = await repo.get_user(user.id)
@@ -153,7 +175,7 @@ async def _accept_new_user(
     new = NewUser(email=found.email, name=name, password_hash=password_hash, email_verified_at=now)
     async with database_of(request).tenant_session(found.org_id) as session:
         user = await IdentityRepo(session).create_user(new)
-        await _join(session, found, user, now)
+        await _join(session, request, found, user, now, user_created=True)
         token, active = await sessions.start_in(
             session,
             user_id=user.id,
@@ -185,7 +207,7 @@ async def invitation_details(token: str, request: Request) -> DataResponse[Invit
 
 
 @internal_auth_router.post(
-    "/invitations/accept", operation_id="auth_invitation_accept", openapi_extra=PUBLIC_MARKER
+    "/invitations/accept", operation_id="auth_invitation_accept", openapi_extra=_ACCEPT_EXTRA
 )
 async def accept_invitation(
     body: AcceptInvitationRequest, request: Request, response: Response

@@ -12,7 +12,7 @@ from typing import Final
 
 from fastapi import Request
 
-from va_api.audit import audit, changed
+from va_api.audit import audit, audited, changed
 from va_api.auth.api_key_auth import INVALID_API_KEY
 from va_api.auth.context import RequestContext
 from va_api.auth.permissions import holds_permission
@@ -129,7 +129,9 @@ async def org_get(request: Request, ctx: ReadOrg) -> DataResponse[OrgView]:
     return DataResponse(data=_org_view(await _overview(request, ctx.org_id)))
 
 
-@org_router.patch("", operation_id="org_update", openapi_extra={"x-scope": "org:write"})
+@org_router.patch(
+    "", operation_id="org_update", openapi_extra={"x-scope": "org:write", **audited("org.update")}
+)
 async def org_update(body: OrgPatch, request: Request, ctx: WriteOrg) -> DataResponse[OrgView]:
     """Rename the org or change its retention; `retention_days` and `recording_retention_days` also need the
     `org.compliance` permission."""

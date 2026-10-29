@@ -15,7 +15,7 @@ from typing import Final
 
 from fastapi import Depends, Request
 
-from va_api.audit import audit
+from va_api.audit import audit, audited
 from va_api.auth.context import RequestContext
 from va_api.auth.password_reset import require_recent_auth
 from va_api.auth.permissions import holds_permission, require_permission
@@ -86,7 +86,7 @@ async def org_members_list(request: Request, ctx: ReadOrg) -> DataResponse[list[
     "/members/{user_id}",
     operation_id="org_members_update",
     dependencies=[Depends(require_permission(_MANAGE))],
-    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE},
+    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE, **audited("member.role_change")},
 )
 async def org_members_update(
     user_id: uuid.UUID, body: MemberRolePatch, request: Request, ctx: WriteOrg
@@ -114,7 +114,7 @@ async def org_members_update(
     "/members/{user_id}",
     operation_id="org_members_remove",
     dependencies=[Depends(require_permission(_MANAGE))],
-    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE},
+    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE, **audited("member.remove")},
 )
 async def org_members_remove(
     user_id: uuid.UUID, request: Request, ctx: WriteOrg
@@ -142,7 +142,11 @@ def _session_of(request: Request) -> ActiveSession:
     "/transfer-ownership",
     operation_id="org_transfer_ownership",
     dependencies=[Depends(require_permission(_OWNER_TRANSFER))],
-    openapi_extra={"x-scope": "org:write", "x-permission": _OWNER_TRANSFER},
+    openapi_extra={
+        "x-scope": "org:write",
+        "x-permission": _OWNER_TRANSFER,
+        **audited("org.ownership_transfer"),
+    },
 )
 async def org_transfer_ownership(
     body: TransferOwnershipRequest, request: Request, ctx: WriteOrg

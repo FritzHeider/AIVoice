@@ -1583,6 +1583,9 @@
         "tags": [
           "Auth"
         ],
+        "x-audit": [
+          "invitation.accept"
+        ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -1692,6 +1695,10 @@
         "tags": [
           "Auth"
         ],
+        "x-audit": [
+          "auth.login",
+          "auth.login_failed"
+        ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -1752,6 +1759,9 @@
         "summary": "Logout",
         "tags": [
           "Auth"
+        ],
+        "x-audit": [
+          "auth.logout"
         ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
@@ -1814,6 +1824,9 @@
         "tags": [
           "Auth"
         ],
+        "x-audit": [
+          "auth.logout"
+        ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -1868,6 +1881,9 @@
         "tags": [
           "Auth"
         ],
+        "x-audit": [
+          "auth.mfa_disabled"
+        ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -1921,6 +1937,9 @@
         "summary": "Mfa Enable",
         "tags": [
           "Auth"
+        ],
+        "x-audit": [
+          "auth.mfa_enabled"
         ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
@@ -1983,6 +2002,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "pending secret; MFA changes are logged by enable",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2037,6 +2057,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "second factor of a logged login",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2090,6 +2111,10 @@
         "summary": "Password Change",
         "tags": [
           "Auth"
+        ],
+        "x-audit": [
+          "auth.password_changed",
+          "auth.login_failed"
         ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
@@ -2145,6 +2170,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "sends an email only; no account change",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2198,6 +2224,9 @@
         "summary": "Password Reset",
         "tags": [
           "Auth"
+        ],
+        "x-audit": [
+          "auth.password_reset"
         ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
@@ -2260,6 +2289,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "sends an email only",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2348,6 +2378,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "creates the org and its owner; the org's log starts empty",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2416,6 +2447,9 @@
         "summary": "Sso Callback",
         "tags": [
           "Auth"
+        ],
+        "x-audit": [
+          "auth.sso_login"
         ],
         "x-envelope": "envelope",
         "x-public": "session-flow"
@@ -2520,6 +2554,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "session preference only",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
@@ -2574,6 +2609,7 @@
         "tags": [
           "Auth"
         ],
+        "x-audit-exempt": "email verification is not a §13 action",
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }

@@ -2646,6 +2646,9 @@
         "tags": [
           "API Keys"
         ],
+        "x-audit": [
+          "api_key.create"
+        ],
         "x-envelope": "envelope",
         "x-scope": "api_keys:write"
       }
@@ -2712,6 +2715,9 @@
         "tags": [
           "API Keys"
         ],
+        "x-audit": [
+          "api_key.update"
+        ],
         "x-envelope": "envelope",
         "x-scope": "api_keys:write"
       }
@@ -2767,6 +2773,9 @@
         "summary": "Api Keys Revoke",
         "tags": [
           "API Keys"
+        ],
+        "x-audit": [
+          "api_key.revoke"
         ],
         "x-envelope": "envelope",
         "x-scope": "api_keys:write"
@@ -2833,6 +2842,9 @@
         "summary": "Api Keys Roll",
         "tags": [
           "API Keys"
+        ],
+        "x-audit": [
+          "api_key.roll"
         ],
         "x-envelope": "envelope",
         "x-scope": "api_keys:write"
@@ -3175,6 +3187,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "org.update"
+        ],
         "x-envelope": "envelope",
         "x-scope": "org:write"
       }
@@ -3296,6 +3311,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "member.invite"
+        ],
         "x-envelope": "envelope",
         "x-permission": "members.manage",
         "x-scope": "org:write"
@@ -3353,6 +3371,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "invitation.revoke"
+        ],
         "x-envelope": "envelope",
         "x-permission": "members.manage",
         "x-scope": "org:write"
@@ -3409,6 +3430,9 @@
         "summary": "Org Members Remove",
         "tags": [
           "Org"
+        ],
+        "x-audit": [
+          "member.remove"
         ],
         "x-envelope": "envelope",
         "x-permission": "members.manage",
@@ -3475,6 +3499,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "member.role_change"
+        ],
         "x-envelope": "envelope",
         "x-permission": "members.manage",
         "x-scope": "org:write"
@@ -3509,6 +3536,9 @@
         "summary": "Org Sso Delete",
         "tags": [
           "Org"
+        ],
+        "x-audit": [
+          "org.sso_update"
         ],
         "x-envelope": "envelope",
         "x-permission": "sso.manage",
@@ -3596,6 +3626,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "org.sso_update"
+        ],
         "x-envelope": "envelope",
         "x-permission": "sso.manage",
         "x-scope": "org:write"
@@ -3650,6 +3683,9 @@
         "summary": "Org Transfer Ownership",
         "tags": [
           "Org"
+        ],
+        "x-audit": [
+          "org.ownership_transfer"
         ],
         "x-envelope": "envelope",
         "x-permission": "org.owner_transfer",
@@ -3740,6 +3776,10 @@
         "summary": "Orgs Create",
         "tags": [
           "Org"
+        ],
+        "x-audit": [
+          "subaccount.create",
+          "billing.credit_transfer"
         ],
         "x-envelope": "legacy",
         "x-permission": "subaccounts.manage",
@@ -3855,6 +3895,9 @@
         "tags": [
           "Org"
         ],
+        "x-audit": [
+          "subaccount.reactivate"
+        ],
         "x-envelope": "legacy",
         "x-permission": "subaccounts.manage",
         "x-scope": "org:write"
@@ -3911,6 +3954,9 @@
         "summary": "Orgs Suspend",
         "tags": [
           "Org"
+        ],
+        "x-audit": [
+          "subaccount.suspend"
         ],
         "x-envelope": "legacy",
         "x-permission": "subaccounts.manage",

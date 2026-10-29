@@ -6,7 +6,8 @@ dashboard after a login, or to ``{DASHBOARD_BASE_URL}/login?sso_error=<reason>``
 the ``nonce`` and PKCE verifier) in Redis and binds it to the browser with the ``va_sso`` cookie; the callback
 consumes it, exchanges the code, validates the ID token, and provisions the user just in time in one tenant
 transaction. The pool holds one connection per role, so the provider requests run with no session open and
-no two sessions overlap. The routes attach to :data:`va_api.routers.auth.internal_auth_router`;
+no two sessions overlap. A login writes ``auth.sso_login`` in the connection's org in that same transaction.
+The routes attach to :data:`va_api.routers.auth.internal_auth_router`;
 ``va_api.main`` imports this module so they exist before the router is included.
 """
 
@@ -17,6 +18,7 @@ from typing import Any, Final
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 
+from va_api.audit import audit_user, audited
 from va_api.auth.cookies import (
     SSO_STATE_COOKIE,
     clear_sso_state_cookie,
@@ -277,6 +279,19 @@ async def _provision(
                 user_agent=request.headers.get("user-agent"),
                 mfa_passed=True,
             )
+            await audit_user(
+                session,
+                request,
+                [org_id],
+                user.id,
+                "auth.sso_login",
+                after={
+                    "method": "sso",
+                    "session_id": active.session_id,
+                    "user_created": user_created,
+                    "membership_created": membership_created,
+                },
+            )
     except AppError as exc:
         # A concurrent login created the same user or membership first.
         raise SsoLoginError("provider_unavailable", exc.code) from exc
@@ -310,7 +325,7 @@ async def _complete(request: Request, state: str, code: str, error: str) -> tupl
     status_code=_REDIRECT,
     response_class=RedirectResponse,
     responses=_REDIRECT_DOC,
-    openapi_extra=PUBLIC_MARKER,
+    openapi_extra={**PUBLIC_MARKER, **audited("auth.sso_login")},
 )
 async def sso_callback(
     request: Request, state: str = "", code: str = "", error: str = ""

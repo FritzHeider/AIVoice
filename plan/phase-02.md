@@ -138,7 +138,7 @@
   - Deliverables: create (secret shown once), list (prefix only), update name/scopes, revoke, rotate
   - Acceptance: secret never returned after creation; audit entries written (planner 2026-10-29: the `api_key.create`/`api_key.revoke`/`api_key.roll` rows are written by P02-T11, whose enumeration test covers these routes; T10 records the decision in specs/04 §9).
 
-- [ ] P02-T11 Audit logging (split by the planner on 2026-10-29 into T11a/T11b below; tick when both are ticked)
+- [x] P02-T11 Audit logging (split by the planner on 2026-10-29 into T11a/T11b below; tick when both are ticked)
   - Spec refs: specs/04-auth-tenancy-rbac.md (audit logging rules); specs/28-security.md (audit)
   - Depends on: P02-T08
   - Deliverables: `AuditWriter` with redaction of secret fields, decorator/helper for mutating endpoints, `/v1/audit_logs` with filters and pagination
@@ -150,7 +150,7 @@
   - Deliverables: `va_db.audit` (`AuditActor`, `redact`, `record`, `AUDIT_ACTIONS`), migration `0004_audit_logs_append_only`, `AuditLogRepo`, `va_api.audit` helpers, `PageResponse`, `GET /v1/audit_logs`; audit rows from `/v1/org`, members, invitations, SSO, sub-accounts, `/v1/api_keys`
   - Acceptance: redaction unit tests; `va_app` UPDATE/DELETE on `audit_logs` refused; each envelope mutating route writes its row in the same transaction (rolled back with it); list filters, pagination, `audit.read` gate, cross-tenant isolation.
 
-- [ ] P02-T11b Audit rows for `/internal/auth/*` routes and the mutating-route enumeration test
+- [x] P02-T11b Audit rows for `/internal/auth/*` routes and the mutating-route enumeration test — reviewer 2026-10-29: make test 2995 passed (97.81% cov), lint/typecheck/placeholders pass, openapi drift current, spec refs 0, jscpd 0 clones, radon no C+ (avg 2.01)
   - Spec refs: specs/04-auth-tenancy-rbac.md §13, §4.1, §4.5, §5
   - Depends on: P02-T11a
   - Deliverables: `auth.*` and `invitation.accept` rows from the dashboard auth routes; an `x-audit` / `x-audit-exempt` OpenAPI marker on every mutating route; a test enumerating every non-GET route (now and in later phases) that fails when one is unmarked or names an unknown action

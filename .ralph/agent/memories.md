@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793287252-a730
+> va_api audit markers: every POST/PUT/PATCH/DELETE route needs openapi_extra {**audited('<action>',...)} or {**audit_exempt('<reason>')} (test_audit_markers walks app.state.routers). Dashboard auth rows use va_api.audit.audit_user(session, request, org_ids, user_id, action) - one row per membership org; signing in now writes auth.login rows, so tests listing a whole org log must filter auth.* or remove them via system_session
+<!-- tags: api, audit, testing | created: 2026-10-29 -->
+
 ### mem-1793285970-ba4c
 > va_api audit rows: call va_api.audit.audit(session, ctx, action, resource_type, resource_id, before=, after=) inside the route's open session; va_db.audit.record flushes under use_org(actor org) so it works on global sessions too; new actions go in specs/04 §13 AND va_db.audit.AUDIT_ACTIONS (test compares); audit_logs is append-only for va_app (0004) so seed/cleanup via system_session; paginated envelope lists use va_api.responses.PageResponse[T]
 <!-- tags: api, database, audit | created: 2026-10-29 -->

@@ -230,16 +230,26 @@ class SessionManager:
     async def revoke(self, active: ActiveSession) -> int:
         """Revoke one session; how many rows were revoked (0 or 1)."""
         async with self._database.global_session() as session:
-            revoked = await IdentityRepo(session).revoke_session(active.session_id, self._clock.now())
+            revoked = await self.revoke_in(session, active)
         await self.forget([active.token_hash])
-        return int(revoked)
+        return revoked
+
+    async def revoke_in(self, session: AsyncSession, active: ActiveSession) -> int:
+        """:meth:`revoke` inside the caller's transaction (0 or 1); the caller forgets
+        ``active.token_hash`` after it commits."""
+        return int(await IdentityRepo(session).revoke_session(active.session_id, self._clock.now()))
 
     async def revoke_all(self, user_id: uuid.UUID) -> int:
         """Revoke every session of the user; how many were revoked."""
         async with self._database.global_session() as session:
-            hashes = await IdentityRepo(session).revoke_user_sessions(user_id, self._clock.now())
+            hashes = await self.revoke_all_in(session, user_id)
         await self.forget(hashes)
         return len(hashes)
+
+    async def revoke_all_in(self, session: AsyncSession, user_id: uuid.UUID) -> list[str]:
+        """:meth:`revoke_all` inside the caller's transaction: the revoked sessions' token hashes, which the
+        caller forgets after it commits."""
+        return await IdentityRepo(session).revoke_user_sessions(user_id, self._clock.now())
 
     async def _load(self, token: str, now: datetime) -> ActiveSession | None:
         async with self._database.global_session() as session:

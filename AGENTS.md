@@ -591,3 +591,10 @@ Grafana 3001
   `GET /v1/audit_logs` (`routers/audit_logs.py`) returns `va_api.responses.PageResponse[T]` (`data`, `errors`,
   `pagination`) — reuse it for later cursor-paginated envelope lists. Test helper:
   `session_helpers.audit_rows(identity, org_id, action=None)`.
+- 2026-10-29 (P02-T11b): Every route with a mutating method (POST/PUT/PATCH/DELETE) needs `**audited("<action>",
+  ...)` or `**audit_exempt("<reason>")` (from `va_api.audit`) merged into its `openapi_extra`;
+  `apps/api/tests/test_audit_markers.py` walks every router and fails on an unmarked route (a GET that mutates may
+  carry `audited` too). Dashboard auth routes have no `RequestContext`: use `va_api.audit.audit_user(session,
+  request, org_ids, user_id, action, after=...)` (one row per org of the user). Fetch `memberships_of_user`
+  (system pool) **before** opening the va_app session that writes the row. Logout-style writes use
+  `SessionManager.revoke_in` / `revoke_all_in` in the caller's transaction, then `forget(hashes)` after commit.

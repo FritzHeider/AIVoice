@@ -10,6 +10,7 @@ import httpx
 import pytest
 from identity_db import IdentityDb
 from session_helpers import (
+    Member,
     SessionContainer,
     error_of,
     make_member,
@@ -17,6 +18,7 @@ from session_helpers import (
     store_api_key,
     sub_account,
 )
+from sqlalchemy import delete
 
 from va_api.routers.audit_logs import NAIVE_DATETIME_MESSAGE, WINDOW_MESSAGE
 from va_db.models import AuditLog, MemberRole
@@ -64,6 +66,19 @@ async def entries(identity: IdentityDb, org_id: uuid.UUID, count: int) -> list[A
     return rows
 
 
+async def signed_in_owner(
+    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> Member:
+    """An owner signed in on ``client`` whose org log no longer holds the sign-in's ``auth.login`` row, so it
+    lists only the entries a test seeds (va_system may delete audit rows; va_app may not)."""
+    owner = await signed_in(client, identity, container)
+    async with identity.database.system_session() as session:
+        await session.execute(
+            delete(AuditLog).where(AuditLog.org_id == owner.org.id, AuditLog.action == "auth.login")
+        )
+    return owner
+
+
 async def listed(client: httpx.AsyncClient, headers: dict[str, str], **params: Any) -> dict[str, Any]:
     response = await client.get(LOGS, params=params, headers=headers)
     assert response.status_code == 200, response.text
@@ -78,7 +93,7 @@ def ids(body: dict[str, Any]) -> list[str]:
 async def test_owner_session_reads_entries_newest_first(
     client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
 ) -> None:
-    owner = await signed_in(client, identity, container)
+    owner = await signed_in_owner(client, identity, container)
     rows = await entries(identity, owner.org.id, 3)
     body = await listed(client, {})
     assert ids(body) == ["res-2", "res-1", "res-0"]
@@ -220,7 +235,7 @@ async def test_another_orgs_entries_are_invisible(
 async def test_a_parent_reads_its_sub_accounts_log(
     client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
 ) -> None:
-    owner = await signed_in(client, identity, container)
+    owner = await signed_in_owner(client, identity, container)
     child_id, _ = await sub_account(client)
     await entries(identity, child_id, 1)
     key, _ = await store_api_key(container, owner.org.id)

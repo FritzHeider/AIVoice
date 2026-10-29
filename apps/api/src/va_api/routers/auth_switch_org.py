@@ -14,6 +14,7 @@ from typing import Final
 
 from fastapi import Request, Response
 
+from va_api.audit import audit_exempt
 from va_api.auth.session_auth import check_org_status, gated_membership, resolve_switch_target, sessions_of
 from va_api.responses import DataResponse
 from va_api.routers.auth import PUBLIC_MARKER, CurrentSession, internal_auth_router, session_info
@@ -24,8 +25,10 @@ __all__ = ["SWITCH_FORBIDDEN_MESSAGE", "switch_org"]
 
 SWITCH_FORBIDDEN_MESSAGE: Final = "You do not have access to this organization."
 
+_SWITCH_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("session preference only")}
 
-@internal_auth_router.post("/switch-org", operation_id="auth_switch_org", openapi_extra=PUBLIC_MARKER)
+
+@internal_auth_router.post("/switch-org", operation_id="auth_switch_org", openapi_extra=_SWITCH_EXTRA)
 async def switch_org(
     body: SwitchOrgRequest, request: Request, response: Response, active: CurrentSession
 ) -> DataResponse[SessionInfo]:

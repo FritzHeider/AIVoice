@@ -1149,7 +1149,43 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
 >    - API keys: create → `api_key.create`, `api_key`/id: null → the key view (never the plaintext); rename →
 >      `api_key.update` `{name}` → `{name}`; revoke → `api_key.revoke` `{revoked_at: null}` → `{revoked_at}`; roll
 >      → `api_key.roll` on the **old** key: `{expires_at}` → `{expires_at, new_key_id, new_prefix}`.
->    - The `/internal/auth/*` rows (`auth.*`, `invitation.accept`) arrive with P02-T11b.
+>    - The `/internal/auth/*` rows (`auth.*`, `invitation.accept`): see the next decision.
+
+> Decision (2026-10-29): **Dashboard auth rows and route markers** (P02-T11b).
+> 1. **Orgs.** User-level events (`auth.login`, `auth.login_failed`, `auth.logout`, `auth.mfa_enabled`,
+>    `auth.mfa_disabled`, `auth.password_changed`, `auth.password_reset`) write one row in **every org where the
+>    user has a membership** at that moment, because the user's access spans them all; a user with no membership
+>    writes no row. `auth.sso_login` writes one row in the connection's org (the only org the identity provider
+>    authenticated for). `invitation.accept` writes one row in the invitation's org.
+> 2. **Actor.** `actor_type=user`, `actor_id` = the user (for `auth.login_failed`, the account the attempt
+>    targeted). An unknown email writes nothing: there is no org to log in, and a row would not add an
+>    enumeration signal anyway since the response is unchanged. `ip` and `user_agent` come from the request; no
+>    `acting_parent_org_id`. Built by `va_api.audit.user_actor` / `audit_user`.
+> 3. **Rows** (all `resource_type=user`, id = the user, unless stated; before → after):
+>    - `auth.login`: null → `{method: "password", session_id}`.
+>    - `auth.login_failed`: null → `{reason}` with `invalid_password` (wrong password, or an account without
+>      one), `account_disabled` (right password, disabled account), or `invalid_current_password` (wrong current
+>      password on `password/change`). A throttle lock (`AUTH_LOCKED`) and `SSO_REQUIRED` write nothing (no
+>      credential was checked). The row commits in its own transaction before the error is returned.
+>    - `auth.logout`: null → `{revoked_sessions, all}` (`all` true for `logout-all`); nothing revoked → no row.
+>    - `auth.mfa_enabled`: `{mfa_enabled: false}` → `{mfa_enabled: true}`; `auth.mfa_disabled` the reverse.
+>    - `auth.password_changed` / `auth.password_reset`: null → `{revoked_sessions}` (the other sessions / all).
+>    - `auth.sso_login`: null → `{method: "sso", session_id, user_created, membership_created}`.
+>    - `invitation.accept`: `invitation`/invitation id: null → `{user_id, email, role, user_created}`.
+>    Every success row is written in the transaction that makes the change (session row, password, MFA flag,
+>    membership); logout uses `SessionManager.revoke_in` / `revoke_all_in` for that.
+> 4. **Route markers.** Every route with a method other than GET/HEAD/OPTIONS declares exactly one of
+>    `openapi_extra["x-audit"]` (a non-empty list of distinct actions of the list above that the route may write)
+>    or `openapi_extra["x-audit-exempt"]` (a non-empty reason). A GET that changes state may carry `x-audit`
+>    (`/internal/auth/sso/callback`). Built with `va_api.audit.audited(*actions)` (unknown action → `ValueError`
+>    at import) and `audit_exempt(reason)`; `apps/api/tests/test_audit_markers.py` walks every router of the app,
+>    so routes of later phases are checked without editing it. The markers reach `openapi/openapi.json` for public
+>    routes as `x-audit` / `x-audit-exempt` extensions.
+> 5. **Exempt routes** (reasons): `auth_signup` "creates the org and its owner; the org's log starts empty",
+>    `auth_verify_email` "email verification is not a §13 action", `auth_resend_verification` "sends an email
+>    only", `auth_password_forgot` "sends an email only; no account change", `auth_mfa_setup` "pending secret;
+>    MFA changes are logged by enable", `auth_mfa_verify` "second factor of a logged login", `auth_switch_org`
+>    "session preference only".
 
 ## 14. Tests required
 

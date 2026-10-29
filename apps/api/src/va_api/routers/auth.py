@@ -7,14 +7,18 @@ The password routes live in :mod:`va_api.routers.auth_password`, the MFA routes 
 :mod:`va_api.routers.auth_mfa`, the OIDC login in :mod:`va_api.routers.auth_sso`, and ``switch-org`` in
 :mod:`va_api.routers.auth_switch_org`; all attach to the same router. With ``OIDC_ENABLED=true`` a password
 login for an email whose domain's SSO connection enforces SSO answers ``SSO_REQUIRED`` (specs/04 §5 step 6).
+Logins, failed credential checks, and logouts write user-level audit rows in every org of the user (specs/04
+§13); each route's ``openapi_extra`` names the actions it may write or why it writes none.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Final
+import uuid
+from typing import Annotated, Any, Final, Literal
 
 from fastapi import BackgroundTasks, Body, Depends, Request, Response
 
+from va_api.audit import audit_exempt, audit_user, audited
 from va_api.auth.cookies import (
     CSRF_COOKIE,
     SESSION_COOKIE,
@@ -74,6 +78,7 @@ __all__ = [
     "SSO_REQUIRED_MESSAGE",
     "CurrentSession",
     "OptionalEmptyBody",
+    "audit_login_failed",
     "check_sso_enforced",
     "internal_auth_router",
     "revoke_presented",
@@ -85,17 +90,45 @@ INVALID_CREDENTIALS_MESSAGE: Final = "Invalid email or password."
 PUBLIC_MARKER: Final[dict[str, Any]] = {"x-public": "session-flow"}
 SSO_REQUIRED_MESSAGE: Final = "Your organization requires single sign-on."
 
+_SIGNUP_EXTRA: Final = {
+    **PUBLIC_MARKER,
+    **audit_exempt("creates the org and its owner; the org's log starts empty"),
+}
+_VERIFY_EMAIL_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("email verification is not a §13 action")}
+_RESEND_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("sends an email only")}
+_LOGIN_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.login", "auth.login_failed")}
+_LOGOUT_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.logout")}
+
 internal_auth_router = envelope_router(prefix="/internal/auth", tags=["Auth"], include_in_schema=False)
+
+type FailureReason = Literal["invalid_password", "account_disabled", "invalid_current_password"]
 
 type OptionalEmptyBody = Annotated[EmptyBody | None, Body()]
 type CurrentSession = Annotated[ActiveSession, Depends(current_session)]
+
+
+async def audit_login_failed(request: Request, user_id: uuid.UUID, reason: FailureReason) -> None:
+    """Commit an ``auth.login_failed`` row in every org of ``user_id`` before the caller raises its error."""
+    records = await memberships_of_user(request, user_id)
+    if not records:
+        return
+    async with database_of(request).global_session() as session:
+        await audit_user(
+            session,
+            request,
+            (record.org_id for record in records),
+            user_id,
+            "auth.login_failed",
+            after={"reason": reason},
+        )
 
 
 async def _authenticate(request: Request, body: LoginRequest, ip: str | None) -> User:
     """The active user whose password matches; ``INVALID_CREDENTIALS`` (counted as a failure) otherwise.
 
     One argon2 verification runs whether or not the user exists or has a password. An outdated hash is
-    replaced after a successful verification.
+    replaced after a successful verification. A failure for an existing account is audited; an unknown email
+    writes nothing.
     """
     database = database_of(request)
     async with database.global_session() as session:
@@ -105,6 +138,9 @@ async def _authenticate(request: Request, body: LoginRequest, ip: str | None) ->
     verified = await hasher.verify_async(password_hash, body.password)
     if user is None or password_hash is None or not verified or user.status != "active":
         await login_throttle_of(request).record_failure(body.email, ip)
+        if user is not None:
+            reason: FailureReason = "account_disabled" if verified else "invalid_password"
+            await audit_login_failed(request, user.id, reason)
         raise AppError("INVALID_CREDENTIALS", INVALID_CREDENTIALS_MESSAGE)
     if hasher.needs_rehash(password_hash):
         new_hash = await hasher.hash_async(body.password)
@@ -146,15 +182,27 @@ async def check_sso_enforced(request: Request, email: str) -> None:
 
 
 async def _issue(request: Request, response: Response, user: User, ip: str | None) -> LoginResult:
-    """Start a fresh session (revoking the one presented, if any) and set both cookies."""
+    """Start a fresh session (revoking the one presented, if any), audit the login, and set both cookies."""
     await revoke_presented(request)
     records = await memberships_of_user(request, user.id)
-    token, _ = await sessions_of(request).start(
-        user_id=user.id,
-        active_org_id=records[0].org_id if records else None,
-        ip=ip,
-        user_agent=request.headers.get("user-agent"),
-    )
+    sessions = sessions_of(request)
+    async with database_of(request).global_session() as session:
+        token, active = await sessions.start_in(
+            session,
+            user_id=user.id,
+            active_org_id=records[0].org_id if records else None,
+            ip=ip,
+            user_agent=request.headers.get("user-agent"),
+        )
+        await audit_user(
+            session,
+            request,
+            (record.org_id for record in records),
+            user.id,
+            "auth.login",
+            after={"method": "password", "session_id": active.session_id},
+        )
+    await sessions.remember(active)
     set_session_cookies(request, response, token)
     return LoginResult(mfa_required=user.mfa_enabled, user=SessionUser.of(user))
 
@@ -209,7 +257,7 @@ def _queue_verification(
 
 
 @internal_auth_router.post(
-    "/signup", operation_id="auth_signup", status_code=201, openapi_extra=PUBLIC_MARKER
+    "/signup", operation_id="auth_signup", status_code=201, openapi_extra=_SIGNUP_EXTRA
 )
 async def signup(
     body: SignupRequest, request: Request, response: Response, background: BackgroundTasks
@@ -228,7 +276,9 @@ async def signup(
     return DataResponse(data=result)
 
 
-@internal_auth_router.post("/verify-email", operation_id="auth_verify_email", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post(
+    "/verify-email", operation_id="auth_verify_email", openapi_extra=_VERIFY_EMAIL_EXTRA
+)
 async def verify_email(body: VerifyEmailRequest, request: Request) -> DataResponse[VerifyEmailResult]:
     """Consume a verification token (no session needed) and mark the user's email verified."""
     check_dashboard_origin(request)
@@ -248,7 +298,7 @@ async def verify_email(body: VerifyEmailRequest, request: Request) -> DataRespon
 
 
 @internal_auth_router.post(
-    "/resend-verification", operation_id="auth_resend_verification", openapi_extra=PUBLIC_MARKER
+    "/resend-verification", operation_id="auth_resend_verification", openapi_extra=_RESEND_EXTRA
 )
 async def resend_verification(
     request: Request, active: CurrentSession, background: BackgroundTasks, _body: OptionalEmptyBody = None
@@ -270,7 +320,7 @@ async def resend_verification(
     return DataResponse(data=ResendResult(sent=True, email_verified=False))
 
 
-@internal_auth_router.post("/login", operation_id="auth_login", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/login", operation_id="auth_login", openapi_extra=_LOGIN_EXTRA)
 async def login(body: LoginRequest, request: Request, response: Response) -> DataResponse[LoginResult]:
     """Password login: throttled per email and IP, rejects foreign origins and emails of SSO-enforcing
     domains, issues a new session."""
@@ -284,23 +334,46 @@ async def login(body: LoginRequest, request: Request, response: Response) -> Dat
     return DataResponse(data=await _issue(request, response, user, ip))
 
 
-@internal_auth_router.post("/logout", operation_id="auth_logout", openapi_extra=PUBLIC_MARKER)
+async def _sign_out(request: Request, active: ActiveSession, *, everywhere: bool) -> int:
+    """Revoke the session (or every session of its user) and audit ``auth.logout`` in one transaction when
+    any was revoked; how many were."""
+    records = await memberships_of_user(request, active.user_id)
+    sessions = sessions_of(request)
+    async with database_of(request).global_session() as session:
+        if everywhere:
+            hashes = await sessions.revoke_all_in(session, active.user_id)
+        else:
+            hashes = [active.token_hash] if await sessions.revoke_in(session, active) else []
+        if hashes:
+            await audit_user(
+                session,
+                request,
+                (record.org_id for record in records),
+                active.user_id,
+                "auth.logout",
+                after={"revoked_sessions": len(hashes), "all": everywhere},
+            )
+    await sessions.forget(hashes or [active.token_hash])
+    return len(hashes)
+
+
+@internal_auth_router.post("/logout", operation_id="auth_logout", openapi_extra=_LOGOUT_EXTRA)
 async def logout(
     request: Request, response: Response, active: CurrentSession, _body: OptionalEmptyBody = None
 ) -> DataResponse[RevokedSessionsResult]:
     """Revoke the current session and clear the cookies."""
-    revoked = await sessions_of(request).revoke(active)
+    revoked = await _sign_out(request, active, everywhere=False)
     clear_auth_cookies(response, cookie_policy_of(request))
     return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
 
 
-@internal_auth_router.post("/logout-all", operation_id="auth_logout_all", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/logout-all", operation_id="auth_logout_all", openapi_extra=_LOGOUT_EXTRA)
 async def logout_all(
     request: Request, response: Response, active: CurrentSession, _body: OptionalEmptyBody = None
 ) -> DataResponse[RevokedSessionsResult]:
     """Revoke every session of the user (MFA-gated like any other endpoint) and clear the cookies."""
     active, _ = await gated_membership(request, active)
-    revoked = await sessions_of(request).revoke_all(active.user_id)
+    revoked = await _sign_out(request, active, everywhere=True)
     clear_auth_cookies(response, cookie_policy_of(request))
     return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
 

@@ -10,7 +10,9 @@ from session_helpers import (
     DASHBOARD_URL,
     PASSWORD,
     SESSION_PROBE_PATH,
+    Member,
     SessionContainer,
+    audit_rows,
     error_of,
     login,
     make_member,
@@ -22,11 +24,12 @@ from va_api.routers.auth import SSO_REQUIRED_MESSAGE
 from va_db.models import User
 
 
-async def domain_user(identity: IdentityDb, container: SessionContainer, email: str) -> None:
+async def domain_user(identity: IdentityDb, container: SessionContainer, email: str) -> Member:
     """A verified password user (in an org of their own) whose address is ``email``."""
     member = await make_member(identity, container.password_hasher)
     async with identity.database.global_session() as session:
         await session.execute(update(User).where(User.id == member.user.id).values(email=email))
+    return member
 
 
 async def password_login(client: httpx.AsyncClient, email: str) -> httpx.Response:
@@ -40,7 +43,7 @@ async def test_enforced_domain_requires_sso(
 ) -> None:
     org = await configure_sso(sso, identity, container, enforce=True)
     email = org.email().replace("sam-", "Sam-")
-    await domain_user(identity, container, email)
+    member = await domain_user(identity, container, email)
     response = await password_login(sso, f"  {email.upper()} ")
     assert error_of(response) == (403, "SSO_REQUIRED", None)
     item = response.json()["errors"][0]
@@ -50,6 +53,7 @@ async def test_enforced_domain_requires_sso(
     assert email.upper().replace("@", "%40") in sso_url
     assert await container.redis.get(email_failure_key(email)) is None
     assert "va_session" not in sso.cookies
+    assert await audit_rows(identity, member.org.id) == []
 
 
 async def test_unenforced_domain_logs_in_with_a_password(

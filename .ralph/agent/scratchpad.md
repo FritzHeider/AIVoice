@@ -3940,3 +3940,186 @@ pip-audit + pnpm audit no vulns; gitleaks (pre-commit) passed.
   no-op mutations write no row, api key plaintext never in changes.
 - Non-blocking notes for later: `org_sso_put` reads `existing` in a separate session before the write txn, so a
   concurrent PUT could record a stale `before`; `AUDIT_ACTIONS` comment says "in its order" on a frozenset.
+
+## 2026-10-29 Planner: P02-T11a approved → next P02-T11b
+
+## Plan P02-T11b — `/internal/auth/*` audit rows + mutating-route marker test (specs/04 §13, §4.1, §4.5, §5)
+
+### Facts found while planning
+- 31 mutating routes today (30 POST/PUT/PATCH/DELETE + GET `/internal/auth/sso/callback`, which logs in).
+  Internal auth routes carry `openapi_extra=PUBLIC_MARKER` (`{"x-public": "session-flow"}`, routers/auth.py:85)
+  and `include_in_schema=False`, so their markers only show on `route.openapi_extra`, not in openapi.json.
+- `SessionStore.start` wraps `start_in(session, ...)` (auth/sessions.py:135/151); `revoke`/`revoke_all`
+  (230/237) open their own `global_session` then `forget(hashes)`. `memberships_of_user(request, user_id)`
+  (session_auth.py:232) runs in a **system** session (separate pool from va_app global/tenant: fetch it
+  BEFORE opening the write session; never nest two va_app sessions, mem-1793262412-7bed).
+- Memberships have no status column: "orgs of the user" = `MembershipLookupRepo.for_user` records.
+- `va_db.audit.record` flushes under `use_org(actor.org_id)`, so one `global_session` can write rows into
+  several orgs. `AuditActor(org_id, actor_type, actor_id, ip, user_agent, ...)` can be built without a ctx.
+- Writes today: login → `_issue` (sessions.start); login failure → `_authenticate` raises INVALID_CREDENTIALS;
+  password change/reset → one global_session each; mfa enable/disable → `MfaRepo` in a global_session;
+  SSO → `_provision` tenant_session(connection.org_id); invitation accept → `_accept_signed_in` /
+  `_accept_new_user` tenant_session(found.org_id).
+
+### Decisions to record (specs/04 §13, same commit, `> Decision (2026-10-29):` block "Dashboard auth rows and
+route markers (P02-T11b)"; also replace the last bullet of the T11a Decision 8 with a pointer to it)
+1. **Orgs.** User-level events (`auth.login`, `auth.login_failed`, `auth.logout`, `auth.mfa_enabled`,
+   `auth.mfa_disabled`, `auth.password_changed`, `auth.password_reset`) write one row in **every org where the user
+   has a membership** at that moment (the user's access spans them all); a user with no membership → no row.
+   `auth.sso_login` writes one row in the connection's org (the only org the IdP authenticated for; the user's
+   other memberships are invisible inside that tenant transaction). `invitation.accept` → the invitation's org.
+2. **Actor.** `actor_type=user`, `actor_id` = the user; for `auth.login_failed` it is the account the attempt
+   targeted (an unknown email writes nothing — no org to log in, and no enumeration surface). `ip` =
+   `session_auth.client_ip(request)`, `user_agent` = request header. No `acting_parent_org_id`.
+3. **Rows** (resource_type / resource_id: before → after), all `resource_type="user"`, id = user id, except where
+   stated:
+   - `auth.login`: null → `{method: "password", session_id}`.
+   - `auth.login_failed`: null → `{reason}` with reason `invalid_password` (wrong or no password hash — SSO-only
+     account), `account_disabled`, or `invalid_current_password` (wrong current password on `password/change`).
+     Throttle lock (`LOGIN_LOCKED`) and `SSO_REQUIRED` write nothing (no credential was checked). Written in its
+     own committed transaction before the error is raised.
+   - `auth.logout`: null → `{revoked_sessions: n, all: false|true}` (logout / logout-all); n = 0 → no row.
+   - `auth.mfa_enabled`: `{mfa_enabled: false}` → `{mfa_enabled: true}`; `auth.mfa_disabled` reverse.
+   - `auth.password_changed`: null → `{revoked_sessions: n}` (other sessions); `auth.password_reset`: null →
+     `{revoked_sessions: n}`.
+   - `auth.sso_login`: null → `{method: "sso", session_id, user_created, membership_created}` (connection org).
+   - `invitation.accept`: `invitation`/invitation id: null → `{user_id, email, role, user_created}`.
+   Each success row is written in the same transaction as the change (session row, password, MFA flag,
+   membership); logout/logout-all need `SessionStore.revoke_in` / `revoke_all_in` for that (see Files).
+4. **Route markers.** Every APIRoute with a method other than GET/HEAD/OPTIONS declares exactly one of
+   `openapi_extra["x-audit"]` = non-empty list of §13 actions the route may write, or
+   `openapi_extra["x-audit-exempt"]` = non-empty reason string. A GET that mutates may carry `x-audit`
+   (`auth_sso_callback`). Built with `va_api.audit.audited(*actions)` (ValueError at import on an unknown action)
+   and `va_api.audit.audit_exempt(reason)`. A test walks every router of the app, so later phases inherit it.
+5. **Exempt routes** (reason strings): `auth_signup` ("creates the org and its owner; the org's log starts
+   empty"), `auth_verify_email` ("email verification is not a §13 action"), `auth_resend_verification`
+   ("sends an email only"), `auth_password_forgot` ("sends an email only; no account change"), `auth_mfa_setup`
+   ("pending secret; MFA changes are logged by enable"), `auth_mfa_verify` ("second factor of a logged login"),
+   `auth_switch_org` ("session preference only").
+
+### Files
+- **apps/api/src/va_api/audit.py**: add `AUDIT_KEY: Final = "x-audit"`, `AUDIT_EXEMPT_KEY: Final =
+  "x-audit-exempt"`, `audited(*actions: str) -> dict[str, list[str]]` (non-empty, each in `AUDIT_ACTIONS`, else
+  ValueError), `audit_exempt(reason: str) -> dict[str, str]` (non-blank), `user_actor(request, org_id, user_id)
+  -> AuditActor` (actor_type user, client_ip, user-agent), and `async audit_user(session, request, org_ids:
+  Iterable[uuid.UUID], user_id, action, *, before=None, after=None) -> list[AuditLog]` (one `record` per distinct
+  org, resource `user`/user_id). Extend `__all__` and the module docstring.
+- **apps/api/src/va_api/auth/sessions.py**: `revoke_in(session, active) -> int` and `revoke_all_in(session,
+  user_id) -> list[str]` (DB part only); `revoke`/`revoke_all` delegate (+`forget`). Docstrings: caller forgets
+  the hashes after commit.
+- **routers/auth.py**: `_issue` → fetch `memberships_of_user` first, then one `global_session`: `start_in` +
+  `audit_user(..., "auth.login", after={method, session_id})`, then `sessions.remember(active)`. `_authenticate`
+  failure branch → `await _login_failed(request, user, reason)` when `user is not None` (helper: memberships, then
+  global_session + audit_user) before raising; keep functions under radon C (extract `_failure_reason(user,
+  password_hash, verified) -> str | None`). logout / logout-all → global_session: `revoke_in`/`revoke_all_in` +
+  `audit_user` (memberships fetched before; skip when 0 revoked), then `forget`. Markers on all 7 routes:
+  `{**PUBLIC_MARKER, **audited(...)}` / `{**PUBLIC_MARKER, **audit_exempt(...)}` (module-level constants).
+- **routers/auth_password.py**: reset → `_apply_reset` takes the org ids and writes `auth.password_reset`;
+  change → same session writes `auth.password_changed`; `_verify_current` mismatch → `_login_failed(...,
+  "invalid_current_password")` (import the helper from routers/auth.py; export it there). Markers: forgot exempt;
+  reset `audited("auth.password_reset")`; change `audited("auth.password_changed", "auth.login_failed")`.
+- **routers/auth_mfa.py**: enable/disable write rows in the `MfaRepo` session (only when the repo reports the
+  change); disable reuses its existing `memberships_of_user` result. Markers: setup/verify exempt, enable/disable
+  audited.
+- **routers/auth_sso.py**: `_provision` writes `auth.sso_login` in its tenant_session after `start_in` (actor org
+  = connection.org_id); callback marker `{**PUBLIC_MARKER, **audited("auth.sso_login")}`; sso_start is GET, no
+  marker.
+- **routers/auth_invitations.py**: `_join` (or both callers) writes `invitation.accept` in the tenant_session;
+  `user_created` False for signed-in, True for new user. Marker `audited("invitation.accept")`.
+- **routers/auth_switch_org.py**: exempt marker.
+- **Envelope routers** (org.py, org_members.py, org_invitations.py, org_sso.py, orgs.py, api_keys.py): merge
+  `audited(...)` into each mutating route's `openapi_extra` (api_keys `_EXTRA` is shared with GET list — build
+  per-route dicts `{**_EXTRA, **audited(...)}`): org_update [org.update]; org_members_update [member.role_change],
+  org_members_remove [member.remove], org_transfer_ownership [org.ownership_transfer]; org_invitations_create
+  [member.invite], org_invitations_revoke [invitation.revoke]; org_sso_put / org_sso_delete [org.sso_update];
+  orgs_create [subaccount.create, billing.credit_transfer], orgs_suspend [subaccount.suspend], orgs_reactivate
+  [subaccount.reactivate]; api_keys_create/update/revoke/roll [api_key.create|update|revoke|roll].
+- **specs/04 §13** Decision block (1–5); **AGENTS.md**: "every mutating route needs `audited(...)` or
+  `audit_exempt(...)` in openapi_extra; test_audit_markers enforces".
+- **openapi/openapi.json** regenerated (`make openapi`; x-audit appears on public envelope routes) + `corepack pnpm
+  gen:api` in sdks/typescript and apps/dashboard; update test_openapi expectations only if they compare whole
+  extension dicts.
+
+### Tests
+- **apps/api/tests/test_audit_markers.py** (new): builds the app as test_envelopes does (`app.state.routers`,
+  APIRoute only); for each route with a method outside GET/HEAD/OPTIONS: exactly one of the two keys; `x-audit`
+  is a non-empty list ⊆ `AUDIT_ACTIONS` with no duplicates; exempt reason non-blank; any GET route carrying
+  `x-audit` passes the same checks. A pinned dict `PHASE_02 = {operation_id: [actions] | "exempt"}` for all 31
+  routes is compared for those operation ids (subset compare so later phases add routes freely). Unit tests for
+  `audited()` (unknown action / empty → ValueError) and `audit_exempt("")` → ValueError. A synthetic router with
+  one unmarked POST fed to the same checker function → it reports that route (proves the check bites).
+- **apps/api/tests/test_auth_audit_integration.py** (new; reuse conftest fixtures, `session_helpers.audit_rows`,
+  `signed_in`, `add_member`, `enrol_mfa`/`mfa_code`, `invite`, sso fixtures — no copied helpers, jscpd):
+  - login success: user with memberships in two orgs → one `auth.login` row in each, actor user, ip `127.0.0.1`,
+    user_agent, `after.method == "password"`, `session_id` matches the new session.
+  - wrong password → `auth.login_failed` `{reason: invalid_password}` in each org, request still 401/400 as
+    today; disabled user → `account_disabled`; unknown email → no row anywhere; locked (LOGIN_LOCKED) → no new
+    row; SSO-enforced domain → no row.
+  - logout → `auth.logout` `{revoked_sessions:1, all:false}`; logout-all with 2 sessions → `{revoked_sessions:2,
+    all:true}`.
+  - mfa enable / disable rows (before/after flags); failed enable (bad code) → no row.
+  - password change → `auth.password_changed`; wrong current password → `auth.login_failed`
+    `invalid_current_password` and no `password_changed`; password reset → `auth.password_reset` with
+    revoked count; reset with bad token → no row.
+  - SSO callback (fake IdP) → `auth.sso_login` in the connection org with `user_created`/`membership_created`
+    true for a JIT user, false on second login.
+  - invitation accept: new user → `invitation.accept` `user_created: true`, signed-in existing user →
+    `user_created: false`; accept of a used/expired token → no row.
+  - no row contains a password, token, or `va_session` value (`json.dumps(changes)` checks against the plaintext).
+- Exempt routes: one test calls signup, verify-email, mfa/setup, switch-org and asserts zero `audit_logs` rows
+  were added for the org (documents the exemption).
+- **packages / va_api unit**: `test_audit_unit.py` add `user_actor` / `audit_user` (distinct org ids → one row
+  each) if not covered by integration; `SessionStore.revoke_in`/`revoke_all_in` covered via existing session tests
+  staying green.
+- Existing suites green; T11a's test_audit_rows_integration unchanged.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make test-ts`; `make openapi` + `uv run python
+scripts/check_openapi_drift.py`; `corepack pnpm gen:api` (sdks/typescript, apps/dashboard);
+`uv run python scripts/check_spec_refs.py`; `npx jscpd@4` (0 clones); radon `-n C` none on src + numeric average;
+pip-audit + `corepack pnpm audit`; gitleaks. build.done PLAIN STRING (mem-1793273041-6642):
+`ralph emit "build.done" "P02-T11b tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: `memberships_of_user` (va_system) BEFORE opening the va_app global/tenant session; do not
+  call it inside one. `_login_failed` must commit even though the request then fails (own session, then raise).
+- Login timing: the failure branch now does extra DB work only for existing users — the argon2 verify already ran
+  for all; acceptable, but do not add a user-existence signal to the response.
+- `include_in_schema=False` routes: markers do not reach openapi.json; the internal OpenAPI document (T04d) may
+  now show `x-audit` — regenerate whatever `make openapi` writes and run drift for both.
+- api_keys `_EXTRA` is shared by GET list: do not put `x-audit` on the GET.
+- radon: `_authenticate` and the logout routes gain branches — extract helpers.
+
+## 2026-10-29 Builder: P02-T11b build notes
+- `va_api.audit`: `AUDIT_KEY`/`AUDIT_EXEMPT_KEY`, `audited(*actions)` (dedupes, ValueError on unknown/empty),
+  `audit_exempt(reason)`, `user_actor(request, org_id, user_id)`, `audit_user(session, request, org_ids, user_id,
+  action, before=, after=)` (one row per distinct org, resource user).
+- `SessionManager.revoke_in` / `revoke_all_in`; `revoke`/`revoke_all` delegate.
+- routers/auth.py: `audit_login_failed(request, user_id, reason)` (exported; memberships first, own committed
+  global session); `_authenticate` audits an existing account's failure (`account_disabled` only when the
+  password verified, else `invalid_password`); `_issue` = start_in + `auth.login` in one global session;
+  `_sign_out(request, active, everywhere=)` for logout/logout-all (no row when 0 revoked).
+- password reset/change, mfa enable/disable, sso `_provision`, invitation `_join(session, request, found, user,
+  now, user_created=)` write their rows in the changing transaction; `_verify_current` mismatch →
+  `auth.login_failed invalid_current_password`.
+- Markers on all 31 mutating routes (7 exempt); envelope routes merge `**audited(...)` into openapi_extra
+  (api_keys GET list keeps plain `_EXTRA`).
+- Specs/04 §13: T11a Decision 8 last bullet → pointer; new Decision block "Dashboard auth rows and route markers
+  (P02-T11b)" items 1–5. AGENTS.md entry. openapi.json/internal.json regenerated (x-audit extensions); TS
+  gen:api produced no diff.
+- Tests: new test_audit_markers.py (16: whole-app check, PHASE_02 pinned table, exempt reasons, synthetic
+  unmarked route bites, audited/audit_exempt units), test_auth_audit_integration.py (10); SSO login rows added
+  to test_sso_login_integration, no-row assertion to test_sso_enforce_integration (domain_user returns Member).
+  T11a tests adjusted for the new sign-in rows: test_audit_rows_integration `route_rows` drops `auth.*`;
+  test_audit_logs_integration `signed_in_owner` deletes the sign-in `auth.login` row via system_session.
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 2995 passed, coverage 97.82% (logs/p02-t11b-test.log);
+make test-ts pass; openapi drift current; spec refs 0; jscpd 0 clones; radon -n C none (avg 2.0129); pip-audit
+(--no-deps on uv export) + pnpm audit no vulns; gitleaks (pre-commit) passed.
+
+## Review P02-T11b (2026-10-29): approved
+- Re-ran: lint/typecheck/placeholders pass; make test 2995 passed, coverage 97.81% (logs/review-t11b-test.log);
+  openapi drift current (public + internal); spec refs 0; jscpd 0 clones; radon -n C none, avg 2.0129.
+- Diff matches plan + specs/04 §13 Decision (P02-T11b): rows written in the changing transaction, memberships
+  read before the va_app session, login_failed committed before raising, unknown email / AUTH_LOCKED /
+  SSO_REQUIRED write nothing, markers on all 31 mutating routes, marker checker proven to bite.
+- P02-T11 parent ticked (T11a + T11b done).

@@ -4,14 +4,18 @@ The routes attach to :data:`va_api.routers.auth.internal_auth_router`; ``va_api.
 they exist before the router is included. ``forgot`` always answers 200 whatever happens, so it reveals
 nothing about which addresses have accounts. ``reset`` needs no session (the link may open in another
 browser) and revokes every session of the user; ``change`` keeps the caller's session and revokes the others.
+A reset or change writes its audit row (in every org of the user) in the transaction that sets the password;
+a wrong current password on ``change`` is audited as ``auth.login_failed``.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+import uuid
+from typing import Final, Literal
 
 from fastapi import BackgroundTasks, Request, Response
 
+from va_api.audit import audit_exempt, audit_user, audited
 from va_api.auth.cookies import clear_auth_cookies
 from va_api.auth.password_reset import (
     CURRENT_PASSWORD_MESSAGE,
@@ -30,13 +34,14 @@ from va_api.auth.session_auth import (
     email_sender_of,
     gated_membership,
     login_throttle_of,
+    memberships_of_user,
     password_hasher_of,
     sessions_of,
     settings_of,
 )
 from va_api.auth.sessions import SESSION_INVALID, ActiveSession
 from va_api.responses import DataResponse
-from va_api.routers.auth import PUBLIC_MARKER, CurrentSession, internal_auth_router
+from va_api.routers.auth import PUBLIC_MARKER, CurrentSession, audit_login_failed, internal_auth_router
 from va_api.routers.auth_schemas import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
@@ -55,6 +60,15 @@ __all__ = ["password_change", "password_forgot", "password_reset"]
 type SuppressionReason = Literal["unknown_user", "disabled", "limit"]
 
 _log = get_logger(__name__)
+
+_FORGOT_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("sends an email only; no account change")}
+_RESET_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.password_reset")}
+_CHANGE_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.password_changed", "auth.login_failed")}
+
+
+async def _org_ids(request: Request, user_id: uuid.UUID) -> list[uuid.UUID]:
+    """The orgs where ``user_id`` has a membership (read before the write transaction opens)."""
+    return [record.org_id for record in await memberships_of_user(request, user_id)]
 
 
 def _invalid_reset_token() -> AppError:
@@ -86,7 +100,7 @@ async def _issue_reset(request: Request, email: str) -> tuple[User, str] | None:
 
 
 @internal_auth_router.post(
-    "/password/forgot", operation_id="auth_password_forgot", openapi_extra=PUBLIC_MARKER
+    "/password/forgot", operation_id="auth_password_forgot", openapi_extra=_FORGOT_EXTRA
 )
 async def password_forgot(
     body: ForgotPasswordRequest, request: Request, background: BackgroundTasks
@@ -122,7 +136,8 @@ async def _reset_target(request: Request, token: str) -> User:
 
 async def _apply_reset(request: Request, token: str, user: User, password_hash: str) -> list[str]:
     """One transaction: use the token, set the password, verify the email, retire the user's other reset
-    links, and revoke every session; the revoked sessions' token hashes."""
+    links, revoke every session, and audit ``auth.password_reset``; the revoked sessions' token hashes."""
+    org_ids = await _org_ids(request, user.id)
     now = clock_of(request).now()
     async with database_of(request).global_session() as session:
         repo = IdentityRepo(session)
@@ -131,10 +146,14 @@ async def _apply_reset(request: Request, token: str, user: User, password_hash: 
         await repo.set_password_hash(user.id, password_hash)
         await repo.mark_email_verified(user.id, now)
         await repo.retire_email_tokens(user.id, "reset_password", now)
-        return await repo.revoke_user_sessions(user.id, now)
+        hashes = await repo.revoke_user_sessions(user.id, now)
+        await audit_user(
+            session, request, org_ids, user.id, "auth.password_reset", after={"revoked_sessions": len(hashes)}
+        )
+    return hashes
 
 
-@internal_auth_router.post("/password/reset", operation_id="auth_password_reset", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/password/reset", operation_id="auth_password_reset", openapi_extra=_RESET_EXTRA)
 async def password_reset(
     body: ResetPasswordRequest, request: Request, response: Response
 ) -> DataResponse[RevokedSessionsResult]:
@@ -161,6 +180,7 @@ async def _verify_current(request: Request, active: ActiveSession, current_passw
     await throttle.check(user.email, ip)
     if not await password_hasher_of(request).verify_async(user.password_hash, current_password):
         await throttle.record_failure(user.email, ip)
+        await audit_login_failed(request, user.id, "invalid_current_password")
         raise AppError("INVALID_CREDENTIALS", CURRENT_PASSWORD_MESSAGE, field="current_password")
     await throttle.clear(user.email)
     return user
@@ -175,7 +195,7 @@ async def _check_new_password(password: str, email: str) -> None:
 
 
 @internal_auth_router.post(
-    "/password/change", operation_id="auth_password_change", openapi_extra=PUBLIC_MARKER
+    "/password/change", operation_id="auth_password_change", openapi_extra=_CHANGE_EXTRA
 )
 async def password_change(
     body: ChangePasswordRequest, request: Request, active: CurrentSession
@@ -186,11 +206,20 @@ async def password_change(
     user = await _verify_current(request, active, body.current_password)
     await _check_new_password(body.new_password, user.email)
     password_hash = await password_hasher_of(request).hash_async(body.new_password)
+    org_ids = await _org_ids(request, user.id)
     now = clock_of(request).now()
     async with database_of(request).global_session() as session:
         repo = IdentityRepo(session)
         await repo.set_password_hash(user.id, password_hash)
         await repo.retire_email_tokens(user.id, "reset_password", now)
         hashes = await repo.revoke_user_sessions(user.id, now, except_session_id=active.session_id)
+        await audit_user(
+            session,
+            request,
+            org_ids,
+            user.id,
+            "auth.password_changed",
+            after={"revoked_sessions": len(hashes)},
+        )
     await sessions_of(request).forget(hashes)
     return DataResponse(data=RevokedSessionsResult(revoked_sessions=len(hashes)))

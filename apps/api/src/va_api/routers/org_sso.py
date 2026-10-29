@@ -14,7 +14,7 @@ from typing import Annotated, Final
 
 from fastapi import Depends, Request
 
-from va_api.audit import audit
+from va_api.audit import audit, audited
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
 from va_api.auth.oidc_discovery import DiscoveryError
@@ -113,7 +113,7 @@ async def _check_domains(request: Request, org_id: uuid.UUID, domains: list[str]
     "/sso",
     operation_id="org_sso_put",
     dependencies=_MANAGE,
-    openapi_extra={"x-scope": "org:write", "x-permission": _PERMISSION},
+    openapi_extra={"x-scope": "org:write", "x-permission": _PERMISSION, **audited("org.sso_update")},
 )
 async def org_sso_put(
     body: SsoConnectionInput, request: Request, ctx: WriteOrg
@@ -170,7 +170,7 @@ async def org_sso_get(request: Request, ctx: ReadOrg) -> DataResponse[SsoConnect
     "/sso",
     operation_id="org_sso_delete",
     dependencies=_MANAGE,
-    openapi_extra={"x-scope": "org:write", "x-permission": _PERMISSION},
+    openapi_extra={"x-scope": "org:write", "x-permission": _PERMISSION, **audited("org.sso_update")},
 )
 async def org_sso_delete(request: Request, ctx: WriteOrg) -> DataResponse[SsoConnectionDeleted]:
     """Remove the org's OIDC connection."""

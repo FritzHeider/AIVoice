@@ -56,6 +56,11 @@ def iso(stamp: str) -> str:
     return stamp.replace("Z", "+00:00")
 
 
+async def route_rows(identity: IdentityDb, org_id: uuid.UUID) -> list[AuditLog]:
+    """The org's rows without the ``auth.*`` rows of signing in (tests/test_auth_audit_integration.py)."""
+    return [row for row in await audit_rows(identity, org_id) if not row.action.startswith("auth.")]
+
+
 def assert_entry(
     row: AuditLog,
     *,
@@ -132,7 +137,7 @@ async def test_refused_requests_write_nothing(
     await ok(client, "POST", f"{KEYS}/{own['id']}/revoke")
     conflict = await send(client, "POST", f"{KEYS}/{own['id']}/roll", {})
     assert error_of(conflict)[:2] == (409, "CONFLICT")
-    actions = [entry.action for entry in await audit_rows(identity, developer.org.id)]
+    actions = [entry.action for entry in await route_rows(identity, developer.org.id)]
     assert actions == ["api_key.create", "api_key.revoke"]
 
 
@@ -193,7 +198,7 @@ async def test_sub_account_rows_land_in_the_parent_log(
     await ok(client, "POST", f"/v1/orgs/{child_id}/reactivate")
     actor = ("user", owner.user.id)
     resource = ("org", child_id)
-    entries = await audit_rows(identity, owner.org.id)
+    entries = await route_rows(identity, owner.org.id)
     assert [entry.action for entry in entries] == [
         "subaccount.create",
         "billing.credit_transfer",
@@ -226,7 +231,7 @@ async def test_api_key_lifecycle_never_records_the_plaintext(
     rolled = (await ok(client, "POST", f"{KEYS}/{key_id}/roll", {"expire_old_in_hours": 0}))["data"]
     await ok(client, "POST", f"{KEYS}/{rolled['id']}/revoke")
     revoked = (await ok(client, "POST", f"{KEYS}/{rolled['id']}/revoke"))["data"]
-    entries = await audit_rows(identity, owner.org.id)
+    entries = await route_rows(identity, owner.org.id)
     assert [entry.action for entry in entries] == [
         "api_key.create",
         "api_key.update",

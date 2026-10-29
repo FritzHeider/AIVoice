@@ -32,6 +32,7 @@ from session_helpers import (
     DASHBOARD_URL,
     SESSION_PROBE_PATH,
     SessionContainer,
+    audit_rows,
     login,
     make_member,
     session_client,
@@ -321,3 +322,28 @@ async def test_presented_session_is_revoked(
     assert sso.cookies.get("va_session") != previous
     async with identity.database.global_session() as session:
         assert await IdentityRepo(session).get_active_session(previous, provider.now()) is None
+
+
+async def test_logins_are_audited_in_the_connection_org(
+    sso: httpx.AsyncClient, org: SsoOrg, provider: FakeOidcProvider, identity: IdentityDb
+) -> None:
+    email = org.email()
+    assert (await sso_login(sso, provider, email)).headers["location"] == f"{DASHBOARD_URL}/"
+    sso.cookies.clear()
+    assert (await sso_login(sso, provider, email)).headers["location"] == f"{DASHBOARD_URL}/"
+    user = await user_of(identity, email)
+    assert user is not None
+    async with identity.database.global_session() as session:
+        statement = (
+            select(Session.id).where(Session.user_id == user.id).order_by(Session.created_at, Session.id)
+        )
+        session_ids = [str(row) for row in await session.scalars(statement)]
+    rows = await audit_rows(identity, org.owner.org.id, "auth.sso_login")
+    assert [(row.actor_type, row.actor_id, row.resource_type, row.resource_id) for row in rows] == [
+        ("user", user.id, "user", str(user.id))
+    ] * 2
+    assert [row.changes["after"] for row in rows] == [
+        {"method": "sso", "session_id": session_ids[0], "user_created": True, "membership_created": True},
+        {"method": "sso", "session_id": session_ids[1], "user_created": False, "membership_created": False},
+    ]
+    assert {str(row.ip) for row in rows} == {"127.0.0.1"}

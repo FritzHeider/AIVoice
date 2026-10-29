@@ -17,7 +17,7 @@ from typing import Annotated, Final
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.audit import audit
+from va_api.audit import audit, audited
 from va_api.auth.api_keys import (
     check_environment,
     check_expires_at,
@@ -85,7 +85,9 @@ async def api_keys_list(request: Request, ctx: ManageKeys) -> DataResponse[list[
     return DataResponse(data=views)
 
 
-@api_keys_router.post("", operation_id="api_keys_create", status_code=201, openapi_extra=_EXTRA)
+@api_keys_router.post(
+    "", operation_id="api_keys_create", status_code=201, openapi_extra={**_EXTRA, **audited("api_key.create")}
+)
 async def api_keys_create(
     body: ApiKeyCreate, request: Request, ctx: ManageKeys
 ) -> DataResponse[ApiKeyCreated]:
@@ -114,7 +116,9 @@ async def api_keys_create(
     return DataResponse(data=created)
 
 
-@api_keys_router.patch("/{key_id}", operation_id="api_keys_update", openapi_extra=_EXTRA)
+@api_keys_router.patch(
+    "/{key_id}", operation_id="api_keys_update", openapi_extra={**_EXTRA, **audited("api_key.update")}
+)
 async def api_keys_update(
     key_id: uuid.UUID, body: ApiKeyPatch, request: Request, ctx: ManageKeys
 ) -> DataResponse[ApiKeyView]:
@@ -130,7 +134,9 @@ async def api_keys_update(
     return DataResponse(data=view)
 
 
-@api_keys_router.post("/{key_id}/revoke", operation_id="api_keys_revoke", openapi_extra=_EXTRA)
+@api_keys_router.post(
+    "/{key_id}/revoke", operation_id="api_keys_revoke", openapi_extra={**_EXTRA, **audited("api_key.revoke")}
+)
 async def api_keys_revoke(key_id: uuid.UUID, request: Request, ctx: ManageKeys) -> DataResponse[ApiKeyView]:
     """Revoke a key at once; revoking it again returns it with its first ``revoked_at``."""
     now = clock_of(request).now()
@@ -152,7 +158,9 @@ async def api_keys_revoke(key_id: uuid.UUID, request: Request, ctx: ManageKeys) 
     return DataResponse(data=view)
 
 
-@api_keys_router.post("/{key_id}/roll", operation_id="api_keys_roll", openapi_extra=_EXTRA)
+@api_keys_router.post(
+    "/{key_id}/roll", operation_id="api_keys_roll", openapi_extra={**_EXTRA, **audited("api_key.roll")}
+)
 async def api_keys_roll(
     key_id: uuid.UUID, body: ApiKeyRoll, request: Request, ctx: ManageKeys
 ) -> DataResponse[ApiKeyCreated]:

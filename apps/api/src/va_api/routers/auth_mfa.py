@@ -5,15 +5,19 @@ they exist before the router is included. They are session-authenticated (CSRF a
 the MFA gate (§4.3), because they are how a gated session passes it. Every code check goes through the
 :class:`va_api.auth.mfa_guard.MfaGuard` failure lock first; a TOTP match must also claim its time step, so a
 code is accepted at most once. The secret is decrypted only for the request that checks a code against it.
+Enable and disable write ``auth.mfa_enabled`` / ``auth.mfa_disabled`` in every org of the user, in the
+transaction that flips the flag; setup and verify write no audit row.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Final
 
 from fastapi import Request
 
+from va_api.audit import audit_exempt, audit_user, audited
 from va_api.auth.mfa_guard import (
     ALREADY_ENABLED_MESSAGE,
     NOT_ENABLED_MESSAGE,
@@ -57,6 +61,11 @@ from va_db.models import User
 from va_db.repositories import IdentityRepo, MfaRepo
 
 __all__ = ["mfa_disable", "mfa_enable", "mfa_setup", "mfa_verify"]
+
+_SETUP_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("pending secret; MFA changes are logged by enable")}
+_VERIFY_EXTRA: Final = {**PUBLIC_MARKER, **audit_exempt("second factor of a logged login")}
+_ENABLE_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.mfa_enabled")}
+_DISABLE_EXTRA: Final = {**PUBLIC_MARKER, **audited("auth.mfa_disabled")}
 
 
 async def _load_user(request: Request, active: ActiveSession) -> User:
@@ -106,7 +115,7 @@ async def _spend_recovery_code(request: Request, user: User, raw: str) -> int:
     return len(hashes) - 1
 
 
-@internal_auth_router.post("/mfa/setup", operation_id="auth_mfa_setup", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/mfa/setup", operation_id="auth_mfa_setup", openapi_extra=_SETUP_EXTRA)
 async def mfa_setup(
     request: Request, active: CurrentSession, _body: OptionalEmptyBody = None
 ) -> DataResponse[MfaSetupResult]:
@@ -125,7 +134,7 @@ async def mfa_setup(
     return DataResponse(data=MfaSetupResult(secret_base32=secret, otpauth_uri=uri, qr_svg=svg))
 
 
-@internal_auth_router.post("/mfa/enable", operation_id="auth_mfa_enable", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/mfa/enable", operation_id="auth_mfa_enable", openapi_extra=_ENABLE_EXTRA)
 async def mfa_enable(
     body: MfaCodeRequest, request: Request, active: CurrentSession
 ) -> DataResponse[MfaEnableResult]:
@@ -139,15 +148,26 @@ async def mfa_enable(
     await _check_totp(request, user.id, await _decrypt_secret(request, user.id, blob), body.code)
     codes = new_recovery_codes()
     hashes = await hash_recovery_codes(password_hasher_of(request), codes)
+    records = await memberships_of_user(request, user.id)
     async with database_of(request).global_session() as session:
         enabled = await MfaRepo(session).enable(user.id, blob, hashes)
+        if enabled:
+            await audit_user(
+                session,
+                request,
+                (record.org_id for record in records),
+                user.id,
+                "auth.mfa_enabled",
+                before={"mfa_enabled": False},
+                after={"mfa_enabled": True},
+            )
     if not enabled:
         raise AppError("CONFLICT", SETUP_CHANGED_MESSAGE)
     await sessions_of(request).mark_mfa_passed(active)
     return DataResponse(data=MfaEnableResult(mfa_enabled=True, recovery_codes=codes))
 
 
-@internal_auth_router.post("/mfa/verify", operation_id="auth_mfa_verify", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/mfa/verify", operation_id="auth_mfa_verify", openapi_extra=_VERIFY_EXTRA)
 async def mfa_verify(
     body: MfaVerifyRequest, request: Request, active: CurrentSession
 ) -> DataResponse[MfaVerifyResult]:
@@ -163,18 +183,29 @@ async def mfa_verify(
     return DataResponse(data=MfaVerifyResult(mfa_passed=True, recovery_codes_remaining=remaining))
 
 
-@internal_auth_router.post("/mfa/disable", operation_id="auth_mfa_disable", openapi_extra=PUBLIC_MARKER)
+@internal_auth_router.post("/mfa/disable", operation_id="auth_mfa_disable", openapi_extra=_DISABLE_EXTRA)
 async def mfa_disable(
     body: MfaCodeRequest, request: Request, active: CurrentSession
 ) -> DataResponse[MfaDisableResult]:
     """Turn MFA off with a TOTP code, unless any of the user's orgs requires MFA."""
     user = await _load_user(request, active)
     secret = await _enrolled_secret(request, user)
-    if any(record.mfa_required for record in await memberships_of_user(request, user.id)):
+    records = await memberships_of_user(request, user.id)
+    if any(record.mfa_required for record in records):
         raise AppError("FORBIDDEN", ORG_REQUIRES_MFA_MESSAGE)
     await _check_totp(request, user.id, secret, body.code)
     async with database_of(request).global_session() as session:
         disabled = await MfaRepo(session).disable(user.id)
+        if disabled:
+            await audit_user(
+                session,
+                request,
+                (record.org_id for record in records),
+                user.id,
+                "auth.mfa_disabled",
+                before={"mfa_enabled": True},
+                after={"mfa_enabled": False},
+            )
     if not disabled:
         raise AppError("CONFLICT", NOT_ENABLED_MESSAGE)
     await mfa_guard_of(request).forget_steps(user.id)

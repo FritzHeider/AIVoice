@@ -15,7 +15,7 @@ from typing import Final
 from fastapi import BackgroundTasks, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.audit import audit
+from va_api.audit import audit, audited
 from va_api.auth.api_keys import creating_user_id
 from va_api.auth.context import RequestContext
 from va_api.auth.invitations import send_invitation
@@ -71,7 +71,7 @@ async def _org_name(session: AsyncSession, org_id: uuid.UUID) -> str:
     operation_id="org_invitations_create",
     status_code=201,
     dependencies=[Depends(require_permission(_MANAGE))],
-    openapi_extra={"x-scope": "org:write", **_MANAGE_EXTRA},
+    openapi_extra={"x-scope": "org:write", **_MANAGE_EXTRA, **audited("member.invite")},
 )
 async def org_invitations_create(
     body: InvitationCreate, request: Request, ctx: WriteOrg, background: BackgroundTasks
@@ -122,7 +122,7 @@ async def org_invitations_list(request: Request, ctx: ReadOrg) -> DataResponse[l
     "/members/invitations/{invitation_id}",
     operation_id="org_invitations_revoke",
     dependencies=[Depends(require_permission(_MANAGE))],
-    openapi_extra={"x-scope": "org:write", **_MANAGE_EXTRA},
+    openapi_extra={"x-scope": "org:write", **_MANAGE_EXTRA, **audited("invitation.revoke")},
 )
 async def org_invitations_revoke(
     invitation_id: uuid.UUID, request: Request, ctx: WriteOrg

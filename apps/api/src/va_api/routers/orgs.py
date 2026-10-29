@@ -23,7 +23,7 @@ from typing import Annotated, Final
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.audit import audit
+from va_api.audit import audit, audited
 from va_api.auth.api_keys import creating_user_id, invalidate_cached_keys, mint_api_key
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
@@ -106,7 +106,11 @@ async def _audit_create(session: AsyncSession, ctx: RequestContext, child: Org, 
     "/create",
     operation_id="orgs_create",
     dependencies=_DEPENDENCIES,
-    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE},
+    openapi_extra={
+        "x-scope": "org:write",
+        "x-permission": _MANAGE,
+        **audited("subaccount.create", "billing.credit_transfer"),
+    },
 )
 async def orgs_create(body: SubAccountCreate, request: Request, ctx: WriteOrgs) -> SubAccountCreated:
     """Create a sub-account with its own API key, optionally funded from this org's available credits."""
@@ -208,7 +212,7 @@ async def _set_status(request: Request, ctx: RequestContext, org_id: uuid.UUID, 
     "/{org_id}/suspend",
     operation_id="orgs_suspend",
     dependencies=_DEPENDENCIES,
-    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE},
+    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE, **audited("subaccount.suspend")},
 )
 async def orgs_suspend(org_id: uuid.UUID, request: Request, ctx: WriteOrgs) -> SubAccountResult:
     """Suspend a sub-account: its keys and members may only read until it is reactivated."""
@@ -219,7 +223,7 @@ async def orgs_suspend(org_id: uuid.UUID, request: Request, ctx: WriteOrgs) -> S
     "/{org_id}/reactivate",
     operation_id="orgs_reactivate",
     dependencies=_DEPENDENCIES,
-    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE},
+    openapi_extra={"x-scope": "org:write", "x-permission": _MANAGE, **audited("subaccount.reactivate")},
 )
 async def orgs_reactivate(org_id: uuid.UUID, request: Request, ctx: WriteOrgs) -> SubAccountResult:
     """Reactivate a suspended sub-account."""
