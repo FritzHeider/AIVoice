@@ -13,8 +13,9 @@ from api_helpers import FakeChecks, make_settings
 from fastapi import APIRouter, Depends, FastAPI, Request
 from redis.asyncio import Redis
 
-from va_api.auth import ApiKeyAuthenticator, RequestContext, require_scope
+from va_api.auth import ApiKeyAuthenticator, RequestContext, rate_limit, require_scope
 from va_api.envelopes import envelope_router, legacy_router
+from va_api.rate_limit import RateLimiter
 from va_common.auth import ApiKeyHasher, KeyEnvironment, Pepper, api_key_prefix, generate_api_key
 from va_common.ids import new_id
 from va_common.time import FrozenClock
@@ -92,6 +93,10 @@ class AuthContainer(FakeChecks):
     def authenticator(self) -> ApiKeyAuthenticator:
         return self.store.authenticator(self.redis, self.clock)
 
+    @property
+    def rate_limiter(self) -> RateLimiter:
+        return RateLimiter(self.redis, self.clock)
+
 
 def _auth_routes(router: APIRouter, family: str) -> APIRouter:
     @router.get(
@@ -104,6 +109,15 @@ def _auth_routes(router: APIRouter, family: str) -> APIRouter:
     @router.post("/write", operation_id=f"auth_{family}_write")
     async def write(ctx: Annotated[RequestContext, Depends(require_scope("calls:write"))]) -> dict[str, str]:
         return {"org_id": str(ctx.org_id), "principal_id": str(ctx.principal_id)}
+
+    @router.post(
+        "/send",
+        operation_id=f"auth_{family}_send",
+        dependencies=[Depends(require_scope("calls:write")), Depends(rate_limit("calls_send"))],
+    )
+    async def send(request: Request) -> dict[str, str]:
+        ctx: RequestContext = request.state.ctx
+        return {"org_id": str(ctx.org_id)}
 
     return router
 

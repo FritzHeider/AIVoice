@@ -97,9 +97,14 @@ Rounding: amount = `round_half_up(quantity × unit_price_per_unit)` computed in 
 All checks run in `POST /v1/calls` (and batch dispatch, inbound has only concurrency) in this order; the first failure
 returns its error (`31-error-catalog.md`). Scripts are loaded with `SCRIPT LOAD` at startup and called with `EVALSHA`.
 
-1. **Request rate** (per API key): token bucket `rl:key:{api_key_id}:{window}` — 20 req/s burst 40 for start, 100/200 build,
-   200/400 scale, configurable enterprise. Lua `token_bucket.lua(key, rate, burst, now_ms, cost)` returns
+1. **Request rate** (per API key): token bucket `rl:key:{api_key_id}:{bucket}` with the rates and bursts of
+   specs/04 §11 (`default` and `calls_send` buckets). Lua `token_bucket.lua(key, rate, burst, now_ms, cost)` returns
    `{allowed, tokens_left, retry_after_ms}`; hash fields `tokens`, `ts`; `PEXPIRE` 2× fill time.
+
+   > Decision (2026-10-29): the numbers formerly here (20/40 start, 100/200 build, 200/400 scale) conflicted with
+   > specs/04 §11, which is normative; see the Decision there. The bucket is charged by the api request layer
+   > (`va_api.rate_limit`, script `va_common.token_bucket`, which returns tokens left in thousandths because Redis
+   > truncates Lua numbers), not by `va_billing.limits`.
 2. **Same-number rule**: `SET cap:dest:{org_id}:{e164} 1 NX PX 10000` → fails ⇒ `SAME_NUMBER_TOO_SOON`.
 3. **New account**: org `created_at` < 24 h ago ⇒ daily cap = min(plan daily, 100), concurrency = min(plan, 10), errors
    `NEW_ACCOUNT_LIMIT`.

@@ -231,3 +231,185 @@ Re-ran make lint typecheck placeholders test: all green (1914 passed, 99.83 %). 
 ApiKeyLookupRepo, settings/container, spec decisions against specs/04 §1–§2.3 and specs/03 §2/§11. Non-blocking notes:
 container opens a second engine pair via Database.from_settings alongside deps.postgres (fine for now; consolidate
 when tenant routes land); get_principal binds org_id via structlog directly (per-request task context, no leak).
+
+## 2026-10-29 Planner: P02-T01 approved → next P02-T02
+
+## Plan P02-T02 — Request rate limiting (specs/04 §11, specs/03 §11, specs/24 §6.1, specs/31 RATE_LIMITED)
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. **specs/04 §11 is normative** for request rates; specs/24 §6 item 1 (20/40, 100/200, 200/400) conflicts — replace its
+   numbers with a pointer "per specs/04 §11" + Decision note in both specs. Phase plan text says `RateLimit-*` headers;
+   spec says `X-RateLimit-*` → spec wins (no plan edit needed beyond tick text).
+2. Burst: the `burst` column is the `default` bucket capacity (always 2 × rate). `calls_send` capacity is also 2 × its
+   rate (4 / 20 / 50 / 200). `orgs.limits.rate_per_sec` (positive int, any plan; admin-set override, precedence over the
+   plan per specs/24 §1) replaces the `default` rate, capacity 2 × override; `calls_send` has no override.
+   Unknown `plan_id` → `start` limits + warning log `rate_limit_unknown_plan`.
+3. Keys (hash tags per §11 preamble): `rl:key:{<api_key_id>}:<bucket>`, `rl:user:{<user_id>}:<bucket>` (user and
+   platform_admin principals), bucket ∈ `default`, `calls_send`. specs/03 §11 row: replace `rl:key:{api_key_id}:{window}`
+   by `rl:key:{api_key_id}:{bucket}` + add the `rl:user:` row; type "hash (`tokens`, `ts`)"; TTL "2 × fill time".
+4. Charging: every authenticated request takes 1 token from `default` (inside `get_principal`, after auth succeeds,
+   before scope checks). Routes that send calls (`POST /v1/calls`, batch create = cost 1) additionally depend on
+   `rate_limit("calls_send")`. Denied → `AppError("RATE_LIMITED", "Rate limit exceeded; retry after N seconds.")`.
+   No refund of the `default` token when `calls_send` denies.
+5. Headers: on every response of a rate-limited request: `X-RateLimit-Limit` = bucket capacity (burst),
+   `X-RateLimit-Remaining` = floor(tokens left) ≥ 0, `X-RateLimit-Reset` = delta seconds (ceil, integer) until the
+   bucket is full again (not epoch). 429 additionally `Retry-After` = max(1, ceil(retry_after_ms / 1000)). When two
+   buckets were charged the headers describe the last (most specific) one. Headers are added by an ASGI middleware
+   reading a scope key, so they survive error responses (403/404/429) rendered by exception handlers.
+6. Redis unavailable (`RedisError`, `OSError`) → fail open (request allowed, no headers), structlog warning
+   `rate_limit_unavailable` (no key material). Matches T01 cache behaviour.
+7. Time source: `now_ms` from the injected `Clock` (not Redis `TIME`) so tests are deterministic; the Lua script is
+   registered with `redis.register_script` (EVALSHA with automatic NOSCRIPT reload — no network I/O at startup;
+   satisfies specs/24 "SCRIPT LOAD + EVALSHA" in spirit; note in the Decision).
+
+### Files
+
+**packages/va_common/src/va_common/token_bucket.py** (new; generic, reused later by widget/sms/batch pacing)
+- `TOKEN_BUCKET_LUA: Final[str]` — KEYS[1]; ARGV rate (tokens/s, float), burst (int), now_ms (int), cost (int).
+  Reads `HMGET key tokens ts`; missing → tokens=burst, ts=now; `elapsed = max(0, now - ts)`;
+  `tokens = min(burst, tokens + elapsed * rate / 1000)`; if tokens >= cost → tokens -= cost, allowed=1, retry=0 else
+  allowed=0, `retry = ceil((cost - tokens) * 1000 / rate)`; `HSET key tokens <tostring(tokens)> ts now`;
+  `PEXPIRE key ceil(2 * burst * 1000 / rate)`; returns `{allowed, tokens_x1000 (floor), retry_ms}` (return tokens×1000
+  floored as integer because Lua→Redis converts numbers to integers by truncation; Python divides).
+  Never let ts move backwards: `ts = max(ts, now)` stored.
+- `@dataclass(frozen=True, slots=True) class BucketLimit: rate_per_s: float; burst: int` (validate > 0 in `__post_init__`,
+  ValueError) + `fill_time_s` property (`burst / rate_per_s`).
+- `@dataclass(frozen=True, slots=True) class BucketDecision: allowed: bool; limit: int; remaining: int;
+  reset_s: int; retry_after_s: int` (remaining = floor(tokens); reset_s = ceil((burst - tokens)/rate); retry_after_s = 0
+  when allowed else max(1, ceil(retry_ms/1000))).
+- `class TokenBucket: __init__(self, redis: Redis)`; `self._script = redis.register_script(TOKEN_BUCKET_LUA)`;
+  `async def take(self, key: str, limit: BucketLimit, *, now_ms: int, cost: int = 1) -> BucketDecision`
+  (cost ≥ 1 else ValueError; Redis errors propagate — caller decides fail-open).
+- Export in va_common (match existing `__init__` export style if it re-exports; otherwise import path only).
+
+**apps/api/src/va_api/rate_limit.py** (new)
+- `type Bucket = Literal["default", "calls_send"]`; `BUCKETS: Final = ("default", "calls_send")`.
+- `@dataclass(frozen=True, slots=True) class PlanRateLimits: default: BucketLimit; calls_send: BucketLimit` + `def for_bucket(b)`.
+- `PLAN_RATE_LIMITS: Final[Mapping[str, PlanRateLimits]]` (MappingProxyType): start 10/20 & 2/4, build 50/100 & 10/20,
+  scale 100/200 & 25/50, enterprise 300/600 & 100/200.
+- `def plan_rate_limits(plan_id: str, rate_per_sec: int | None = None) -> PlanRateLimits` (override → default
+  `BucketLimit(override, 2*override)`; unknown plan → start + warning).
+- `def rate_limit_key(ctx: RequestContext, bucket: Bucket) -> str` — `rl:key:{<id>}:<bucket>` for api_key,
+  `rl:user:{<id>}:<bucket>` for user/platform_admin; widget → ValueError (widgets use `widget:rl:*`).
+- `RATE_LIMIT_SCOPE_KEY: Final = "va.rate_limit"`; `def record_decision(scope, decision)`; `def rate_limit_headers(decision)
+  -> tuple[tuple[str, str], ...]` (adds `retry-after` when not allowed).
+- `class RateLimiter: __init__(self, redis: Redis, clock: Clock)`;
+  `async def check(self, ctx: RequestContext, bucket: Bucket, limits: PlanRateLimits) -> BucketDecision | None`
+  (None when Redis fails → warning `rate_limit_unavailable` with `bucket`, `principal_type`).
+  `now_ms = int(clock.now().timestamp() * 1000)`.
+- `async def enforce(request: Request, limiter: RateLimiter, ctx, bucket, limits) -> None` — check, store decision in
+  `request.scope[RATE_LIMIT_SCOPE_KEY]`, raise `AppError("RATE_LIMITED", f"Rate limit exceeded; retry after {n} seconds.")`
+  when denied (message format recorded in specs/04 §11 Decision).
+- `def rate_limit(bucket: Literal["calls_send"]) -> Callable[..., Awaitable[RequestContext]]` — dependency depending
+  on `get_principal`; limits = `plan_rate_limits(ctx.plan_id)`; carries attribute `rate_limit_bucket = bucket`.
+- `class RateLimitHeadersMiddleware` (pure ASGI, like `RequestContextMiddleware`): on `http.response.start` merges
+  `rate_limit_headers(scope[...])` via `middleware.merge_headers` when a decision is present.
+- `limiter_of(request) -> RateLimiter` reading `request.app.state.container.rate_limiter`.
+
+**apps/api/src/va_api/auth/dependencies.py** — after authenticate: `limits = plan_rate_limits(ctx.plan_id,
+record.rate_per_sec)`; `await enforce(request, limiter_of(request), ctx, "default", limits)` (before touch scheduling? —
+schedule touch first: an authenticated-but-throttled request still used the key). Avoid an import cycle: rate_limit.py
+imports `get_principal` from dependencies; dependencies imports `enforce/plan_rate_limits/limiter_of` from rate_limit →
+cycle. Resolve by putting the `rate_limit(...)` dependency factory in `va_api/auth/dependencies.py` too (and the pure
+pieces in `va_api/rate_limit.py`, which must not import `va_api.auth.dependencies`). Re-export `rate_limit` from
+`va_api.auth`.
+
+**packages/va_db/src/va_db/repositories/api_keys.py** — `ApiKeyRecord.rate_per_sec: int | None` from
+`Org.limits.get("rate_per_sec")` (select `Org.limits` too; accept only `int` > 0 that is not bool, else None);
+`to_json`/`from_json` include it (`from_json` tolerates a missing key → None so 60 s-old cache entries still parse).
+Update fake `KeyStore.issue(...)` (`apps/api/tests/support/auth_helpers.py`) with `rate_per_sec: int | None = None`.
+
+**apps/api/src/va_api/container.py** — `rate_limiter: RateLimiter` field (`RateLimiter(redis, clock)`; share one
+`SystemClock()` with the authenticator). `AuthContainer` test helper gets `rate_limiter` property (same fakeredis +
+FrozenClock).
+
+**apps/api/src/va_api/main.py** — `app.add_middleware(RateLimitHeadersMiddleware)` before `MetricsMiddleware` line
+(innermost of ours is fine; it must wrap the exception middleware, which every user middleware does);
+`CORS_EXPOSE_HEADERS` += `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
+(update test_cors expectations if it asserts the list; specs/28 §5 CORS list if it enumerates exposed headers — check
+and record).
+
+**pyproject.toml (root dev deps)** — `fakeredis[lua]>=2.40.0` (pulls `lupa`) so Lua runs in unit tests; `uv lock`,
+`uv sync --all-packages`; pip-audit must stay clean.
+
+**specs/04 §11, specs/03 §11, specs/24 §6** — per Decisions. **AGENTS.md** — rate limiter location, fakeredis[lua],
+header semantics, "routes sending calls add `Depends(rate_limit("calls_send"))`".
+
+### Tests
+packages/va_common/tests/test_token_bucket.py (fakeredis[lua], unit)
+- `test_fresh_bucket_starts_full` — first take: allowed, remaining = burst-1, reset_s = ceil(1/rate).
+- `test_exhaustion_denies_with_retry_after` — burst takes allowed, next denied, retry_after_s = ceil(1/rate) (≥1).
+- `test_refill_math` parametrized (rate 10, burst 20): drain, advance now_ms by 100 → 1 token; by 550 → 5; by 10 000 →
+  capped at 20 (remaining 19 after take).
+- `test_fractional_rate` (rate 0.5) retry_after 2 s.
+- `test_cost_greater_than_one`, `test_cost_above_burst_never_allowed` (retry computed, never negative).
+- `test_clock_going_backwards_does_not_mint_tokens`.
+- `test_ttl_is_twice_fill_time` — `pttl` ≈ 2 × burst/rate s.
+- `test_bucket_limit_validation` (rate ≤ 0, burst ≤ 0 → ValueError); `test_cost_must_be_positive`.
+- `test_concurrent_takes_never_exceed_burst` — `asyncio.gather` 100 takes, same now_ms, burst 20 → exactly 20 allowed.
+packages/va_common/tests/test_redis_integration.py — add `test_token_bucket_against_real_redis` reusing the module
+`redis_url` fixture (no extra container): 100 concurrent takes, burst 20 → 20 allowed; refill after now_ms + 1000.
+
+apps/api/tests/test_rate_limit.py (unit + HTTP via `auth_app(AuthContainer)`; rate-limit routes in auth_helpers or a
+small `calls_send` route added to `_auth_routes`)
+- `test_plan_rate_limits_match_spec_table` — parse specs/04 §11 table (rate/burst per plan) and compare to
+  `PLAN_RATE_LIMITS` (default + calls_send rates, burst; calls_send capacity 2×).
+- `test_unknown_plan_falls_back_to_start`, `test_rate_per_sec_override`.
+- `test_rate_limit_key_for_api_key_and_user` (hash tags), `test_rate_limit_key_rejects_widget`.
+- `test_headers_on_success` — X-RateLimit-Limit 20 (start), Remaining 19, Reset 1.
+- `test_429_after_burst_with_retry_after` — 20 ok, 21st → 429 `RATE_LIMITED` in the route family envelope (legacy and
+  envelope routes), `Retry-After` = "1", Remaining "0".
+- `test_refill_after_clock_advance` — FrozenClock.advance(0.1) → one more request allowed (start rate 10/s).
+- `test_headers_on_error_responses` — FORBIDDEN (scope denied) response still has X-RateLimit-*.
+- `test_no_headers_when_auth_fails` — 401 has no X-RateLimit-* (no bucket charged).
+- `test_calls_send_bucket` — route with `rate_limit("calls_send")`: start → 4 allowed then 429; headers show Limit 4;
+  default bucket was also charged (Remaining on a plain route afterward = 20 - 5 - 1).
+- `test_per_key_isolation` — two keys of one org have independent buckets.
+- `test_enterprise_override_from_org_limits` — record `rate_per_sec=1` → Limit 2.
+- `test_redis_down_fails_open` — redis whose evalsha raises `RedisConnectionError`: 200, no headers, warning logged.
+- `test_concurrent_requests_never_exceed_bucket` — 100 parallel requests (`asyncio.gather` over httpx ASGITransport
+  client) with frozen clock, start plan → exactly 20 × 200 and 80 × 429.
+- `test_cors_exposes_rate_limit_headers` (or extend test_cors).
+packages/va_db/tests — extend `ApiKeyRecord` JSON round-trip with `rate_per_sec` and missing-key tolerance; integration
+`get_by_prefix` returns `rate_per_sec` from `orgs.limits` (set `limits={"rate_per_sec": 5}` on the org) and None for
+non-int (`"5"`, `true`).
+
+### Gates
+`make fmt lint typecheck placeholders test` (+ jscpd, radon, pip-audit, openapi drift if middleware touches the doc —
+it should not). No TS, no call flow → no test-ts/e2e.
+
+### Risks
+- fakeredis Lua needs `lupa`; if lupa wheel/pip-audit problems → fall back to the real-Redis integration module only
+  and record a fix memory.
+- Lua number→integer truncation on return: return tokens × 1000 floored; never return floats.
+- Import cycle auth.dependencies ↔ rate_limit (see layout above).
+- Exception handlers render inside ExceptionMiddleware, so the header middleware sees 429/403 responses; unhandled
+  500s bypass it (acceptable).
+- `test_env_example` untouched (no new env vars). CORS expose list may be pinned by a test and by specs/28 §5.
+- Concurrency test must use one event loop + fakeredis shared server; keep it deterministic (frozen clock).
+
+## 2026-10-29 Builder: P02-T02 build notes
+
+Implemented per plan. Details/deviations:
+- `va_api.rate_limit` imports `RequestContext` only under TYPE_CHECKING (va_api.auth → dependencies → rate_limit
+  cycle when rate_limit is imported first). `rate_limit("calls_send")` lives in `va_api.auth.dependencies`, re-exported
+  from `va_api.auth`; it carries `rate_limit_bucket`.
+- `ApiKeyRecord.rate_per_sec` defaults to None (keeps existing constructors valid); `rate_per_sec_override(limits)` in
+  `va_db.repositories.api_keys` (positive int, not bool).
+- Lua stores `ts` with `string.format('%d', ts)`, tokens with tostring; returns tokens×1000 floored.
+- RATE_LIMITED message: "Rate limit exceeded; retry after N second(s)." (singular for 1), recorded in the specs/04 §11 Decision.
+- A `default` denial never charges `calls_send` (test_default_bucket_denial_skips_calls_send).
+- `S105` false positive on TOKEN_BUCKET_LUA: the noqa goes after the closing `"""` (ruff maps multi-line strings
+  to their last line; a noqa after the opening quotes would end up inside the Lua source).
+- test_auth_dependencies route-discovery and test_cors expose-header expectations updated for the /send route and
+  the X-RateLimit-* expose headers.
+Gates: make fmt/lint/typecheck (239 files)/placeholders (0) green; make test 1978 passed, 99.83 % (first full run hit
+the known va_db 60 s Docker setup-timeout flake, 59 errors in va_db fixtures only; va_db alone 675 passed; rerun of
+full suite green). pip-audit clean (lupa 2.8), pnpm audit clean, jscpd 0 clones, radon avg A (1.90), openapi current.
+
+## Review P02-T02 (2026-10-29): approved
+Re-ran make lint typecheck placeholders (green, mypy 239 files, 0 placeholder findings) and make test (1978 passed,
+TOTAL 99 %). Checked plan table vs specs/04 §11, key names vs specs/03 §11, RATE_LIMITED vs specs/31, Lua atomicity,
+header middleware ordering (merge_headers keeps handler headers), fail-open logging (no key material), per-request
+dependency caching (default charged once with rate_limit("calls_send")). Reviewer fix: specs/04 §11 Decision wording
+claimed specs/28 §5 enumerates the CORS expose list; reworded to point at va_api.main.CORS_EXPOSE_HEADERS.

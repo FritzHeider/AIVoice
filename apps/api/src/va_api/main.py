@@ -1,8 +1,8 @@
 """API application factory (specs/01-architecture.md §1: ``uvicorn va_api.main:app``, port 8000).
 
-``create_app`` wires middleware (outer to inner: request context, metrics, CORS), the envelope-aware error
-handlers, the routers, and the OpenAPI generator. The lifespan initialises observability and opens the
-dependency container; importing this module performs no I/O.
+``create_app`` wires middleware (outer to inner: request context, metrics, rate-limit headers, CORS), the
+envelope-aware error handlers, the routers, and the OpenAPI generator. The lifespan initialises observability
+and opens the dependency container; importing this module performs no I/O.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from va_api.container import ContainerFactory, build_container
 from va_api.errors import install_handlers
 from va_api.middleware import MetricsMiddleware, RequestContextMiddleware
 from va_api.openapi import TITLE, build_openapi
+from va_api.rate_limit import RateLimitHeadersMiddleware
 from va_api.routers.health import probe_router, public_router
 from va_api.settings import ApiSettings
 from va_common.metrics import Service, build_metrics
@@ -37,7 +38,13 @@ CORS_ALLOW_HEADERS: Final = [
     "X-VA-Org-Id",
     "Last-Event-ID",
 ]
-CORS_EXPOSE_HEADERS: Final = ["X-Request-Id", "Retry-After"]
+CORS_EXPOSE_HEADERS: Final = [
+    "X-Request-Id",
+    "Retry-After",
+    "X-RateLimit-Limit",
+    "X-RateLimit-Remaining",
+    "X-RateLimit-Reset",
+]
 # Routers carry their own prefix (route.path_format is then the full template used for metrics labels).
 ROUTERS: Final[tuple[APIRouter, ...]] = (public_router, probe_router)
 
@@ -78,6 +85,7 @@ def create_app(
         allow_headers=CORS_ALLOW_HEADERS,
         expose_headers=CORS_EXPOSE_HEADERS,
     )
+    app.add_middleware(RateLimitHeadersMiddleware)
     app.add_middleware(MetricsMiddleware, metrics=app.state.metrics)
     app.add_middleware(RequestContextMiddleware)
     install_handlers(app)

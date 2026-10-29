@@ -63,7 +63,13 @@ async def test_simple_request_exposes_request_id() -> None:
         response = await client.get("/v1/health", headers={"Origin": DASHBOARD})
     assert response.headers["access-control-allow-origin"] == DASHBOARD
     exposed = {h.strip().lower() for h in response.headers["access-control-expose-headers"].split(",")}
-    assert exposed == {"x-request-id", "retry-after"}
+    assert exposed == {
+        "x-request-id",
+        "retry-after",
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+    }
 
 
 async def test_dashboard_origin_from_settings() -> None:

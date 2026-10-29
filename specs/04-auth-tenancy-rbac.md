@@ -466,6 +466,29 @@ Token bucket in Redis (`rl:key:{api_key_id}:{bucket}`, Lua script atomic refill+
 Responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`; on exhaustion `RATE_LIMITED`
 with `Retry-After` seconds (ceil). Call caps (daily/hourly/concurrency) are separate (`24-billing-and-limits.md`).
 
+> Decision (2026-10-29): This table is normative for request rates; the older numbers in specs/24 §6 item 1 are
+> replaced by a pointer here. Implementation: `va_common.token_bucket` (Lua, registered with `register_script`, so
+> EVALSHA with automatic reload on `NOSCRIPT`; no I/O at startup) and `va_api.rate_limit`.
+> - **Capacity.** The `burst` column is the `default` bucket capacity (2 × rate). `calls_send` capacity is also
+>   2 × its rate (4 / 20 / 50 / 200). `orgs.limits.rate_per_sec` (positive integer, any plan, admin-set; it takes
+>   precedence over the plan as in specs/24 §1) replaces the `default` rate with capacity 2 × override;
+>   `calls_send` has no override. An unknown `plan_id` gets the `start` limits (warning `rate_limit_unknown_plan`).
+> - **Keys.** `rl:key:{api_key_id}:<bucket>` and `rl:user:{user_id}:<bucket>` (user and platform_admin principals),
+>   `<bucket>` ∈ `default`, `calls_send`; the id is the hash tag. Widgets use `widget:rl:*` instead.
+> - **Charging.** Every authenticated request takes 1 token from `default` right after authentication, before
+>   scope checks (a request whose key fails authentication is not charged and gets no rate headers). Routes that
+>   send calls (`POST /v1/calls`; batch create costs 1) also declare `Depends(rate_limit("calls_send"))`. A
+>   `default` token is not refunded when `calls_send` denies; a `default` denial never reaches `calls_send`.
+> - **Headers.** Every response of a charged request (errors included) carries `X-RateLimit-Limit` = capacity of
+>   the last charged bucket, `X-RateLimit-Remaining` = whole tokens left, `X-RateLimit-Reset` = seconds (ceil) until
+>   that bucket is full again (a delta, not an epoch). A 429 adds `Retry-After` = max(1, ceil(wait)) and the message
+>   `Rate limit exceeded; retry after N second(s).` The api CORS expose list (`va_api.main.CORS_EXPOSE_HEADERS`;
+>   specs/28 §5 does not enumerate it) includes the three `X-RateLimit-*` headers next to `X-Request-Id` and
+>   `Retry-After`.
+> - **Time and failure.** `now_ms` comes from the api's injected `Clock`, not Redis `TIME` (deterministic tests; api
+>   pods are NTP-synced, and a clock behind the stored `ts` never mints tokens). Redis unavailable → fail open: the
+>   request proceeds without rate headers and `rate_limit_unavailable` is logged (same policy as the key cache).
+
 ## 12. Idempotency
 
 Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middleware: compute

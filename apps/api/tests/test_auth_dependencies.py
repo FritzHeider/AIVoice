@@ -102,6 +102,7 @@ def test_require_scope_dependency_is_discoverable() -> None:
     assert found == {
         f"{AUTH_LEGACY_PREFIX}/read": ["calls:read"],
         f"{AUTH_LEGACY_PREFIX}/write": ["calls:write"],
+        f"{AUTH_LEGACY_PREFIX}/send": ["calls:write"],
     }
 
 

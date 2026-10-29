@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793258976-9d0b
+> va_api.rate_limit must not import va_api.auth at runtime (va_api.auth.dependencies imports it): RequestContext is TYPE_CHECKING-only; rate_limit("calls_send") dependency lives in va_api.auth.dependencies
+<!-- tags: api | created: 2026-10-29 -->
+
 ### mem-1793257682-de8e
 > Adding an env var to specs/02 §6: update scripts/tests/test_env_example.py EXPECTED_SPEC_NAMES, EXPECTED_LITERAL_KEYS and the DevValueKind count dict, plus the '106 names in 105 rows' counts in the §6 Decision text
 <!-- tags: tooling, testing | created: 2026-10-29 -->
@@ -41,6 +45,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793258976-544c
+> Ruff noqa for a multi-line triple-quoted string (e.g. S105 on TOKEN_BUCKET_LUA) goes after the closing quotes; text after the opening quotes is part of the string (here, the Lua source)
+<!-- tags: tooling, ruff | created: 2026-10-29 -->
 
 ### mem-1793257682-c402
 > SQLAlchemy 2.1: Row.tuple() and Row._tuple() both raise SADeprecationWarning (error under filterwarnings); unpack the Row directly: a, b, c = row

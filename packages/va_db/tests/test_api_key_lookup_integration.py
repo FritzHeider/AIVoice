@@ -10,6 +10,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from model_factories import flushed, make_org
@@ -36,11 +37,15 @@ def _prefix() -> str:
 
 
 async def _make_key(
-    database: Database, *, org_status: str = "active", revoked_at: datetime | None = None
+    database: Database,
+    *,
+    org_status: str = "active",
+    revoked_at: datetime | None = None,
+    limits: dict[str, Any] | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, str]:
     prefix = _prefix()
     async with database.system_session() as session:
-        org = await make_org(session, status=org_status, plan_id="build")
+        org = await make_org(session, status=org_status, plan_id="build", limits=limits or {})
         key = await flushed(
             session,
             ApiKey(
@@ -73,7 +78,22 @@ async def test_get_by_prefix_returns_key_with_org_status_and_plan(database: Data
         expires_at=_NOW + timedelta(days=30),
         org_status="suspended",
         plan_id="build",
+        rate_per_sec=None,
     )
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected"),
+    [({"rate_per_sec": 5}, 5), ({"rate_per_sec": "5"}, None), ({"rate_per_sec": True}, None)],
+)
+async def test_get_by_prefix_reads_rate_per_sec_override(
+    database: Database, limits: dict[str, Any], expected: int | None
+) -> None:
+    _, _, prefix = await _make_key(database, limits=limits)
+    async with database.system_session() as session:
+        record = await ApiKeyLookupRepo(session).get_by_prefix(prefix)
+    assert record is not None
+    assert record.rate_per_sec == expected
 
 
 async def test_get_by_prefix_unknown_and_revoked(database: Database) -> None:

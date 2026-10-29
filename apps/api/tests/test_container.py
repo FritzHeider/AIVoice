@@ -9,6 +9,7 @@ from service_helpers import readiness_of, track_closes
 from va_api.auth import ApiKeyAuthenticator
 from va_api.container import Container, build_container
 from va_api.main import create_app
+from va_api.rate_limit import RateLimiter
 
 UNREACHABLE_PG = "postgresql+asyncpg://va:va@127.0.0.1:1/va"
 UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"
@@ -26,6 +27,7 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert set(container.readiness_checks()) == {"postgres", "redis", "temporal"}
         assert container.database.app_engine.pool.size() == 3  # type: ignore[attr-defined]
         assert isinstance(container.authenticator, ApiKeyAuthenticator)
+        assert isinstance(container.rate_limiter, RateLimiter)
         assert closed == []
     # The va_app and va_system engines first, then the dependency stack in reverse order.
     assert closed == ["engine", "engine", "redis", "engine"]

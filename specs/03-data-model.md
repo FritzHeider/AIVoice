@@ -1401,7 +1401,8 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:carrier` | pub/sub channel | — | Carrier events to owner |
 | `call:{id}:live` | pub/sub channel | — | Live events for dashboard/API SSE listeners |
 | `events:calls`, `events:sms`, `events:widget`, `events:billing`, `events:system` | streams (MAXLEN ~ 1 000 000) | — | Event bus |
-| `rl:key:{api_key_id}:{window}` | token bucket hash | window | Request rate limiting |
+| `rl:key:{api_key_id}:{bucket}` | hash (`tokens`, `ts`) | 2 × fill time | Request rate limiting per API key (specs/04 §11; `bucket` = `default`, `calls_send`) |
+| `rl:user:{user_id}:{bucket}` | hash (`tokens`, `ts`) | 2 × fill time | Request rate limiting per session principal (specs/04 §11) |
 | `cap:org:{org_id}:daily:{yyyymmdd}` | counter | 48 h | Daily call cap |
 | `cap:org:{org_id}:hourly:{yyyymmddhh}` | counter | 2 h | Hourly call cap |
 | `cap:org:{org_id}:concurrency` | sorted set (call_id → expiry ts) | — | Concurrency cap with self-healing expiry |

@@ -23,7 +23,7 @@ dev = [
   "syrupy>=6.1",
   "va-common",
   "types-aioboto3[kms]>=15.5.0",
-  "fakeredis>=2.40.0",
+  "fakeredis[lua]>=2.40.0",
   "pyyaml>=6.0.3",
   "types-pyyaml>=6.0.12.20260906",
   "numpy>=2.3",

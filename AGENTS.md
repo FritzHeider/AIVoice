@@ -386,3 +386,12 @@ Grafana 3001
   `auth_helpers.KeyStore` (in-memory `ApiKeyLookupRepo` stand-in) + `AuthContainer` (fakeredis + `FrozenClock`); build
   hashers directly with `ApiKeyHasher(Pepper(secrets.token_bytes(32), 1))`. FastAPI ≥ 0.16x nests included routers
   in `app.routes` (`_IncludedRouter`): enumerate `app.state.routers` to reach `APIRoute`s and `route.dependant`.
+- 2026-10-29 (P02-T02): request rate limiting: `va_common.token_bucket` (`TokenBucket(redis).take(key, BucketLimit(rate,
+  burst), now_ms=...)`, Lua via `register_script`) and `va_api.rate_limit` (plan table, keys, `RateLimiter`,
+  `RateLimitHeadersMiddleware`). `get_principal` charges the `default` bucket after auth; routes that send calls add
+  `Depends(rate_limit("calls_send"))` (from `va_api.auth`). Header semantics and fail-open: specs/04 §11 Decision.
+  `va_api.rate_limit` must not import `va_api.auth` at runtime (cycle; `RequestContext` is TYPE_CHECKING-only). Root
+  dev deps use `fakeredis[lua]` (lupa), so Lua scripts run in unit tests; an in-test `asyncio.gather` of 100 real-Redis
+  commands needs `redis_client(..., max_connections=100)` (default pool 50 raises `MaxConnectionsError`). Auth tests
+  issue keys on the `build` plan by default (`KeyStore.issue(plan_id="start")` for small buckets); the frozen clock
+  means buckets never refill unless the test calls `container.clock.advance(...)`.

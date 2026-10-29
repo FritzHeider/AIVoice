@@ -28,6 +28,7 @@ from va_db.repositories import (
     is_unique_violation,
     require_positive,
 )
+from va_db.repositories.api_keys import rate_per_sec_override
 
 
 @pytest.mark.parametrize("model", [IdempotencyKey, VoiceRating, Org, Plan, NumberPoolMember, StripeEvent])
@@ -133,8 +134,8 @@ async def test_system_repositories_reject_non_positive_sizes() -> None:
         await BillingReconcileRepo(AsyncSession()).calls_ended_between(now, now, limit=0)
 
 
-@pytest.mark.parametrize("expires", [True, False])
-def test_api_key_record_json_round_trip(expires: bool) -> None:
+@pytest.mark.parametrize(("expires", "rate_per_sec"), [(True, None), (False, None), (False, 450)])
+def test_api_key_record_json_round_trip(expires: bool, rate_per_sec: int | None) -> None:
     record = ApiKeyRecord(
         id=new_id(),
         org_id=new_id(),
@@ -146,8 +147,49 @@ def test_api_key_record_json_round_trip(expires: bool) -> None:
         expires_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=5) if expires else None,
         org_status="active",
         plan_id="start",
+        rate_per_sec=rate_per_sec,
     )
     data = record.to_json()
     assert ApiKeyRecord.from_json(data) == record
     assert isinstance(data["id"], str)
     assert data["expires_at"] == ("2026-01-01T05:00:00+00:00" if expires else None)
+    assert data["rate_per_sec"] == rate_per_sec
+
+
+def test_api_key_record_from_cache_entry_without_rate_per_sec() -> None:
+    record = ApiKeyRecord(
+        id=new_id(),
+        org_id=new_id(),
+        secret_hash="ef" * 32,
+        scopes=("calls:read",),
+        environment="test",
+        pepper_version=1,
+        revoked=True,
+        expires_at=None,
+        org_status="suspended",
+        plan_id="enterprise",
+        rate_per_sec=9,
+    )
+    data = record.to_json()
+    del data["rate_per_sec"]
+    assert ApiKeyRecord.from_json(data).rate_per_sec is None
+
+
+@pytest.mark.parametrize(
+    ("limits", "expected"),
+    [
+        ({"rate_per_sec": 450}, 450),
+        ({"rate_per_sec": 1, "daily_cap": 5}, 1),
+        ({}, None),
+        ({"rate_per_sec": 0}, None),
+        ({"rate_per_sec": -3}, None),
+        ({"rate_per_sec": "5"}, None),
+        ({"rate_per_sec": 5.0}, None),
+        ({"rate_per_sec": True}, None),
+        ({"rate_per_sec": None}, None),
+        ([], None),
+        (None, None),
+    ],
+)
+def test_rate_per_sec_override(limits: object, expected: int | None) -> None:
+    assert rate_per_sec_override(limits) == expected

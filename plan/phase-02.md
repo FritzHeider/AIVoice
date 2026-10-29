@@ -6,7 +6,7 @@
   - Deliverables: `va_api.auth.keys` (generate, hash with pepper, parse prefix), `get_principal` dependency accepting `Authorization: Bearer <key>` and bare key, ignoring `x-api-key`, `Principal` (org_id, actor, scopes, role), `require_scopes(...)`, `last_used_at` throttled updates (at most once per minute per key via Redis)
   - Acceptance: tests for both header styles, revoked/expired keys, wrong prefix, constant-time comparison usage, scope denial → `FORBIDDEN`.
 
-- [ ] P02-T02 Request rate limiting
+- [x] P02-T02 Request rate limiting — Lua token bucket (va_common.token_bucket) + va_api.rate_limit, X-RateLimit-* headers (spec wins over plan's RateLimit-*), 100-parallel test exact 20/80; make lint/typecheck/placeholders green, make test 1978 passed (99 % cov)
   - Spec refs: specs/04-auth-tenancy-rbac.md (request rate limits per key); specs/03-data-model.md (Redis keyspace `rl:*`)
   - Depends on: P02-T01
   - Deliverables: Redis Lua token bucket, per-plan defaults, `RateLimit-Limit/Remaining/Reset` + `Retry-After` headers, `RATE_LIMITED` errors
