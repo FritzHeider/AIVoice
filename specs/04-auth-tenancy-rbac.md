@@ -50,6 +50,15 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
   production, test keys may create/read configuration resources but `POST /v1/calls`, `/v2/batches/create`,
   `/v1/sms/send`, `/numbers/purchase` return `FORBIDDEN` with message "Test keys cannot place live calls, send SMS, or purchase numbers."
 
+> Decision (2026-10-28): the hashed bytes are `bytes.fromhex(API_KEY_PEPPER) + plaintext.encode()` (UTF-8, which is
+> ASCII for every well-formed key), i.e. `sha256(pepper || plaintext).hexdigest()`, implemented by
+> `va_common.auth.ApiKeyHasher`. Peppers are versioned with the new env var `API_KEY_PEPPER_VERSION` (int ≥ 1, default
+> `1`; specs/02 §6): it is the version of `API_KEY_PEPPER`, and new keys store it in `api_keys.pepper_version`. A key
+> whose `pepper_version` equals it verifies with `API_KEY_PEPPER`; one whose version is exactly one lower verifies
+> with `API_KEY_PEPPER_PREVIOUS` when that is set (setting it requires `API_KEY_PEPPER_VERSION` ≥ 2); any other version
+> fails with `AUTH_FAILURE`. Every verification attempt computes exactly one hash. `API_KEY_PEPPER` may be empty when
+> settings load (so the app module imports without environment), but the api refuses to start without a 64-hex value.
+
 ### 2.2 Middleware `va_api.auth.api_key_auth`
 
 1. Read `Authorization`. Accept `Bearer <key>` (case-insensitive scheme) or the bare key. Ignore `x-api-key`.
@@ -63,6 +72,17 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 5. Revocation invalidates the Redis cache entry immediately (`DEL apikey:{prefix}`).
 6. Failures return `AUTH_FAILURE` (401) with message "Invalid API key." Timing: always perform one hash even when
    prefix not found (hash a dummy) to avoid prefix enumeration timing leaks.
+
+> Decision (2026-10-28): the auth dependency is `va_api.auth.get_principal`, which delegates to
+> `va_api.auth.api_key_auth.ApiKeyAuthenticator`. A value that is not exactly `va_(live|test)_` + 32 base62 characters
+> fails with `AUTH_FAILURE` after one dummy hash, like an unknown prefix; until session auth (step 3) exists, a missing
+> `Authorization` header fails the same way. The cache JSON additionally carries `pepper_version`, `org_status`, and
+> `plan_id` so the `RequestContext` is built without a database hit; org status and plan changes therefore take
+> effect within 60 s unless the writer deletes `apikey:{prefix}`. Unknown prefixes are not cached. Redis keys use the
+> prefix / key id as the hash tag (`apikey:{va_live_3kQ9}`, `apikey:{<uuid>}:touched`; specs/03 §11). When Redis is
+> unavailable the cache is skipped (the database answers) and the `last_used_at` write is skipped; neither fails the
+> request. The `last_used_at` write runs as a FastAPI background task after the response; its failures are logged
+> (`api_key_touch_failed`, key id only) and swallowed.
 
 ### 2.3 Scopes (complete list)
 

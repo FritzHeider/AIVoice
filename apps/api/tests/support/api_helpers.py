@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,7 +17,8 @@ __all__ = ["FakeChecks", "failing", "make_client", "make_settings", "ok_check", 
 
 
 def make_settings(**overrides: Any) -> ApiSettings:
-    return settings_of(ApiSettings, **overrides)
+    """Settings without `.env`; a fresh random ``API_KEY_PEPPER`` unless one is given."""
+    return settings_of(ApiSettings, **{"api_key_pepper": secrets.token_hex(32), **overrides})
 
 
 @dataclass

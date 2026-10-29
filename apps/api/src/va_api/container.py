@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.settings import ApiSettings
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.health import CheckFn
 from va_common.service import ReadinessSource
+from va_common.time import SystemClock
+from va_db.session import Database
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container"]
 
@@ -26,6 +29,8 @@ class Container:
     redis: Redis
     temporal: TemporalConnector
     dependencies: Dependencies
+    database: Database
+    authenticator: ApiKeyAuthenticator
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -34,7 +39,20 @@ class Container:
 
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
-    """Create the engine, Redis client, and Temporal connector; dispose them on exit."""
-    async with open_dependencies() as deps:
+    """Create the engines, Redis client, Temporal connector, and authenticator; dispose them on exit.
+
+    ``RuntimeError`` when ``API_KEY_PEPPER`` is not configured, before anything is opened.
+    """
+    hasher = settings.api_key_hasher()
+    async with open_dependencies() as deps, AsyncExitStack() as stack:
         engine, redis, temporal = deps.postgres(settings), deps.redis(settings), deps.temporal(settings)
-        yield Container(settings, engine, redis, temporal, deps)
+        database = Database.from_settings(settings)
+        stack.push_async_callback(database.dispose)
+        authenticator = ApiKeyAuthenticator(
+            redis=redis,
+            hasher=hasher,
+            lookup=db_lookup(database),
+            toucher=db_touch(database),
+            clock=SystemClock(),
+        )
+        yield Container(settings, engine, redis, temporal, deps, database, authenticator)

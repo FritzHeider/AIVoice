@@ -302,6 +302,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `LIVE_LLM_API_KEY` | tests | empty | live smoke: Telnyx Inference key |
 | `API_KEY_PEPPER` | api | 64 random hex chars | 32-byte pepper mixed into API key hashes (`04-auth-tenancy-rbac.md`) |
 | `API_KEY_PEPPER_PREVIOUS` | api | empty | previous pepper used to verify keys whose `pepper_version` is older |
+| `API_KEY_PEPPER_VERSION` | api | `1` | version number of `API_KEY_PEPPER`, stored in `api_keys.pepper_version` of new keys |
 | `SECRET_KEY_PREVIOUS` | api | empty | previous session signing key accepted during rotation |
 | `STREAM_TOKEN_SECRET_PREVIOUS` | worker, edge, media | empty | previous media WS token secret accepted during rotation |
 | `SESSION_COOKIE_DOMAIN` | api | empty (host-only cookie) | dashboard session cookie domain |
@@ -317,8 +318,8 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 
 > Decision (2026-10-25): how `.env.example` mirrors this table is fixed as follows, and
 > `scripts/tests/test_env_example.py` (parsers in `scripts/env_spec.py`) fails when either side drifts.
-> The table declares 106 names in 105 rows — the `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` `` row declares two
-> names and splits its dev-value cell on `/` positionally — of which 105 are literal keys and one
+> The table declares 107 names in 106 rows — the `` `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` `` row declares two
+> names and splits its dev-value cell on `/` positionally — of which 106 are literal keys and one
 > (`LOG_LEVEL_<COMPONENT>`) is a name template. Dev-value cells fall into three classes: **literal** (the cell starts
 > with a backtick; the required value is the first backticked span, so `` `localhost:8100` (tunnel host for live
 > tests) `` means `localhost:8100` and ``` `console` in local, `json` elsewhere ``` means `console`), **empty** (the

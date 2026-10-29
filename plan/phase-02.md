@@ -1,6 +1,6 @@
 # Phase 02 — Authentication, Tenancy, RBAC, and API Foundations
 
-- [ ] P02-T01 API key format, hashing, and auth dependency
+- [x] P02-T01 API key format, hashing, and auth dependency — reviewer re-ran lint/typecheck/placeholders/test (1914 passed, 99.83% cov); Bearer/bare/x-api-key ignored, one hash per attempt, 60 s cache + touch gate, require_scope, specs 02/03/04 decisions
   - Spec refs: specs/04-auth-tenancy-rbac.md (API key format, key auth middleware, scopes); specs/02-repo-layout-and-conventions.md (Bland-compatibility conventions)
   - Depends on: P01-T10
   - Deliverables: `va_api.auth.keys` (generate, hash with pepper, parse prefix), `get_principal` dependency accepting `Authorization: Bearer <key>` and bare key, ignoring `x-api-key`, `Principal` (org_id, actor, scopes, role), `require_scopes(...)`, `last_used_at` throttled updates (at most once per minute per key via Redis)

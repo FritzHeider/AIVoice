@@ -57,7 +57,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
-  `TelnyxEventRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
+  `TelnyxEventRepo`, `ApiKeyLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
 > role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
@@ -86,6 +86,11 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > by `ctid`); `BillingReconcileRepo.calls_ended_between(start, end)` (half-open, keyset by id),
 > `release_expired_holds(now)`, `balance_drifts()`, `set_balance(org_id, micros)`; `TelnyxEventRepo.record(event)`
 > (`ON CONFLICT (telnyx_event_id) DO NOTHING`, `None` = duplicate) and `mark_processed(id, now, error)`.
+
+> Decision (2026-10-28): `ApiKeyLookupRepo` (named by specs/04-auth-tenancy-rbac.md §2.2) joins the `va_system` list
+> because an API key is resolved before any org context exists: `get_by_prefix(prefix)` returns an `ApiKeyRecord`
+> (the key row, revoked or not, joined with `orgs.status` and `orgs.plan_id`; `None` when unknown) and
+> `touch(api_key_id, now)` sets `last_used_at`.
 
 ## 3. Tenancy, identity, access
 
@@ -1406,6 +1411,8 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `dyn:{org_id}:{sha256(request)}` | string JSON | per `cache` setting (default 300 s) | Dynamic data cache |
 | `widget:rl:{widget_id}:{visitor}` | token bucket | 60 s | Widget per-visitor rate limit |
 | `sess:{token_hash}` | string JSON | session TTL | Session cache (DB is source of truth) |
+| `apikey:{prefix}` | string JSON | 60 s | API key auth cache (specs/04 §2.2); deleted on revoke/change |
+| `apikey:{id}:touched` | string | 60 s | `last_used_at` write gate (`SET NX EX 60`) |
 | `call:{id}:seq` | counter | 48 h | Per-call event sequence (`19` §1) |
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |

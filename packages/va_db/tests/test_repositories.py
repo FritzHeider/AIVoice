@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -18,6 +18,7 @@ from va_db.models import Call, IdempotencyKey, NumberPoolMember, Org, Plan, Prom
 from va_db.repositories import (
     IMMUTABLE_COLUMNS,
     PURGE_RULES,
+    ApiKeyRecord,
     BillingReconcileRepo,
     NotFoundError,
     RetentionRepo,
@@ -103,7 +104,7 @@ def _spec_system_repos() -> set[str]:
 def test_system_repositories_are_exactly_the_spec_list() -> None:
     subclasses = SystemRepository.__subclasses__()
     assert {cls.__name__ for cls in subclasses} == _spec_system_repos()
-    assert len(_spec_system_repos()) == 6
+    assert len(_spec_system_repos()) == 7
     assert all(cls.system_scope for cls in subclasses)
     assert all(name in va_db.repositories.__all__ for name in _spec_system_repos())
 
@@ -130,3 +131,23 @@ async def test_system_repositories_reject_non_positive_sizes() -> None:
         await SchedulerRepo(AsyncSession()).due_scheduled_calls(now, limit=0)
     with pytest.raises(ValueError, match="limit must be at least 1"):
         await BillingReconcileRepo(AsyncSession()).calls_ended_between(now, now, limit=0)
+
+
+@pytest.mark.parametrize("expires", [True, False])
+def test_api_key_record_json_round_trip(expires: bool) -> None:
+    record = ApiKeyRecord(
+        id=new_id(),
+        org_id=new_id(),
+        secret_hash="cd" * 32,
+        scopes=("*",),
+        environment="live",
+        pepper_version=1,
+        revoked=False,
+        expires_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(hours=5) if expires else None,
+        org_status="active",
+        plan_id="start",
+    )
+    data = record.to_json()
+    assert ApiKeyRecord.from_json(data) == record
+    assert isinstance(data["id"], str)
+    assert data["expires_at"] == ("2026-01-01T05:00:00+00:00" if expires else None)

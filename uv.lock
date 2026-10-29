@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [manifest]
@@ -2297,6 +2297,7 @@ dependencies = [
     { name = "temporalio" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "va-common" },
+    { name = "va-db" },
 ]
 
 [package.metadata]
@@ -2310,6 +2311,7 @@ requires-dist = [
     { name = "temporalio", specifier = ">=1.8" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
 ]
 
 [[package]]

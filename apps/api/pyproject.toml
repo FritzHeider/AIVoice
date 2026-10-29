@@ -1,7 +1,7 @@
 [project]
 name = "va-api"
 version = "0.1.0"
-description = "VoiceAgents public REST API (FastAPI): envelopes, error handlers, health, OpenAPI"
+description = "VoiceAgents public REST API (FastAPI): envelopes, error handlers, health, OpenAPI, auth"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "asyncpg>=0.32.0",
@@ -13,6 +13,7 @@ dependencies = [
     "temporalio>=1.8",
     "uvicorn[standard]>=0.54.0",
     "va-common",
+    "va-db",
 ]
 
 [build-system]
@@ -21,3 +22,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-db = { workspace = true }

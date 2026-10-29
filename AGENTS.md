@@ -70,7 +70,7 @@ Grafana 3001
   (`specs: pass` optional). It substring-matches a plain string: emit without `--json` (JSON keys never match). Get them
   for real: audit = `uvx pip-audit` on `uv export` + `corepack pnpm audit`; complexity = `uvx radon cc -s -a`;
   duplication = `npx --yes jscpd@4`.
-- 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (105 keys);
+- 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (106 keys since P02-T01);
   `scripts/tests/test_env_example.py` fails when a variable exists on only one side, when a literal dev value differs,
   or when an assignment loses its trailing comment. Add new variables to the spec table and `.env.example` in the same
   commit. The mirror rules (literal / empty / free dev-value classes) are the `> Decision (2026-10-25)` block under
@@ -380,3 +380,9 @@ Grafana 3001
   created/dropped. They need a connection of the login role that owns `call_events` (`create_engine(settings, None)`):
   `va_system` fails with `permission denied for schema public` (create) or `must be owner` (drop). Other partition
   names (test-only `call_events_current`, `call_events_2026_10`) are never dropped.
+- 2026-10-28 (P02-T01): api auth lives in `va_api.auth` (`get_principal`, `require_scope`, `ApiKeyAuthenticator`); key
+  format/hashing primitives in `va_common.auth`. The api lifespan fails with `RuntimeError("API_KEY_PEPPER is not
+  configured")` unless `API_KEY_PEPPER` is 64 hex; `api_helpers.make_settings()` supplies a random one. Auth tests use
+  `auth_helpers.KeyStore` (in-memory `ApiKeyLookupRepo` stand-in) + `AuthContainer` (fakeredis + `FrozenClock`); build
+  hashers directly with `ApiKeyHasher(Pepper(secrets.token_bytes(32), 1))`. FastAPI ≥ 0.16x nests included routers
+  in `app.routes` (`_IncludedRouter`): enumerate `app.state.routers` to reach `APIRoute`s and `route.dependant`.

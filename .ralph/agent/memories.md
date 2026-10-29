@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793257682-de8e
+> Adding an env var to specs/02 §6: update scripts/tests/test_env_example.py EXPECTED_SPEC_NAMES, EXPECTED_LITERAL_KEYS and the DevValueKind count dict, plus the '106 names in 105 rows' counts in the §6 Decision text
+<!-- tags: tooling, testing | created: 2026-10-29 -->
+
+### mem-1793257682-8f0e
+> FastAPI in this repo nests included routers in app.routes as fastapi.routing._IncludedRouter (no .path); enumerate APIRoutes via app.state.routers (route.dependant for require_scope.required_scope)
+<!-- tags: api, testing | created: 2026-10-29 -->
+
 ### mem-1793135968-8be6
 > clickhouse-connect 1.11 async: create_async_client does a network round-trip (server version/settings) so open it in a supervised task; network errors and retried server errors raise OperationalError (subclass of DatabaseError); AsyncClient satisfies va_events ClickHouseCommands Protocol; server-side {name:Type} params work in INSERT ... SELECT
 <!-- tags: clickhouse, testing | created: 2026-10-27 -->
@@ -33,6 +41,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793257682-c402
+> SQLAlchemy 2.1: Row.tuple() and Row._tuple() both raise SADeprecationWarning (error under filterwarnings); unpack the Row directly: a, b, c = row
+<!-- tags: database, sqlalchemy | created: 2026-10-29 -->
 
 ### mem-1793139282-8c73
 > failure: make test during OrbStack Sparkle auto-update -> 120 errors 'failed to connect to the docker API ... orbstack/run/docker.sock'; the updater stops the VM again after 'orb start'. Finish the OrbStack update first (check 'pgrep -lf Autoupdate', 'orb status'), then rerun

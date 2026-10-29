@@ -6,6 +6,7 @@ every one of them, and only those may exist.
 
 from __future__ import annotations
 
+from va_db.repositories.api_keys import ApiKeyLookupRepo, ApiKeyRecord
 from va_db.repositories.base import (
     IMMUTABLE_COLUMNS,
     NotFoundError,
@@ -26,6 +27,8 @@ __all__ = [
     "DEFAULT_LEASE",
     "IMMUTABLE_COLUMNS",
     "PURGE_RULES",
+    "ApiKeyLookupRepo",
+    "ApiKeyRecord",
     "BalanceDrift",
     "BillingReconcileRepo",
     "NewTelnyxEvent",

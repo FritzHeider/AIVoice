@@ -1,2030 +1,233 @@
+# Scratchpad — Phase 02
 
-# Phase 01 (2026-10-27)
+## 2026-10-28 Planner: phase 02 start
 
-Planner: phase 00 is fully ticked, so P01-T00a/b/c (re-runs of P00-T05/T08/T03) were already satisfied; ticked them in
-plan/phase-01.md with that evidence. Next unblocked task: P01-T01.
+Phase 01 fully ticked (0 open boxes). First unticked task in plan/phase-02.md is P02-T01; its dependency
+P01-T10 is ticked. The api app does not depend on `va_db` yet and its container only has a login-role engine
+from `va_common.checks`, so T01 must also wire a `va_db.Database` into the api container.
 
-## Plan P01-T01 — Engine, sessions, base model
+Spec-vs-plan naming: the plan says `va_api.auth.keys`, `Principal`, `require_scopes`; specs/04 (which wins)
+says `va_common.auth` owns hashing/token primitives, the middleware is `va_api.auth.api_key_auth`, the principal
+is the `RequestContext` dataclass (§1), and the dependency is `require_scope` (§2.4). Follow the spec names.
 
-Spec: specs/03 §1 (conventions), §2 (roles va_app / va_system), §10 (tenant_session sets app.org_id via
-`set_config(..., true)`). Acceptance: testcontainers `pgvector/pgvector:pg16` test of `current_setting('app.org_id')`
-inside and outside sessions.
+## Plan P02-T01
 
-### Design decision (record in specs/03 §2 as `> Decision (2026-10-27):` in the same commit)
-Only one DSN exists (`DATABASE_URL`, specs/02 §6); adding per-role DSNs would change the env contract. So engines
-connect with the `DATABASE_URL` login and assume the target role with `SET ROLE <role>` once per new DBAPI connection
-(pool "connect" event). `DbRole.APP` = `va_app` (RLS enforced; superuser login no longer bypasses RLS after SET ROLE),
-`DbRole.SYSTEM` = `va_system` (BYPASSRLS). `role=None` keeps the login role (Alembic/migrations, test setup only).
-Consequence for P01-T07: the migration must `GRANT va_app, va_system TO CURRENT_USER` (PG16 non-superuser creators need
-explicit SET membership) and grant table privileges to both roles. Write that into the Decision text too.
+Goal: API key format, peppered hashing, `Authorization` parsing (Bearer + bare, `x-api-key` ignored), the
+`RequestContext` principal, `get_principal` FastAPI dependency, `require_scope(...)`, Redis-gated
+`last_used_at` touch, Redis key cache with invalidation helper. Specs: 04 §1, §2.1, §2.2, §2.3, §2.4 (the
+dependency only; the coverage test comes when routers exist), §14 key-parsing bullet; 02 §6 (`API_KEY_PEPPER*`),
+§10; 28 §2 (pepper rotation); 31 (`AUTH_FAILURE`, `FORBIDDEN`, `ORG_SUSPENDED`).
 
-### Files
-1. `packages/va_db/pyproject.toml` — name `va-db`, version 0.1.0, requires-python ">=3.12,<3.13", uv_build backend
-   (copy va_common's), deps: `va-common`, `sqlalchemy[asyncio]>=2.0.35`, `asyncpg>=0.32.0`;
-   `[tool.uv.sources] va-common = { workspace = true }` if va_common's consumers do so (check apps/api/pyproject.toml
-   and mirror it).
-2. `packages/va_db/src/va_db/__init__.py` (docstring only, or re-export the public names below with `__all__`),
-   `py.typed`.
-3. `packages/va_db/src/va_db/engine.py`
-   - `class DbRole(StrEnum): APP = "va_app"; SYSTEM = "va_system"`
-   - `CONNECT_TIMEOUT_S: Final = 10.0`, `COMMAND_TIMEOUT_S: Final = 30.0`
-   - `def create_engine(settings: DatabaseSettings, role: DbRole | None) -> AsyncEngine`:
-     `create_async_engine(settings.database_url, pool_size=settings.database_pool_size, pool_pre_ping=True,
-     connect_args={"timeout": CONNECT_TIMEOUT_S, "command_timeout": COMMAND_TIMEOUT_S})`; when role is not None,
-     register `event.listens_for(engine.sync_engine, "connect")` handler that runs `SET ROLE <quoted>` through
-     `dbapi_connection.cursor()` (role names are enum members; still quote via `engine.dialect.identifier_preparer
-     .quote`). No string interpolation of untrusted input.
-4. `packages/va_db/src/va_db/base.py`
-   - `NAMING_CONVENTION` matching Postgres default names so later autogenerate parity (P01-T08) lines up:
-     `pk: "%(table_name)s_pkey"`, `fk: "%(table_name)s_%(column_0_name)s_fkey"`,
-     `uq: "%(table_name)s_%(column_0N_name)s_key"`, `ck: "%(table_name)s_%(constraint_name)s"` (models name checks
-     like `"status_check"` → `orgs_status_check`), `ix: "%(table_name)s_%(column_0N_name)s_idx"`.
-   - `class Base(AsyncAttrs, DeclarativeBase): metadata = MetaData(naming_convention=NAMING_CONVENTION)`
-   - `IdMixin`: `id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True) / postgresql.UUID, primary_key=True,
-     default=va_common.ids.new_id)` (UUIDv7 in Python, no server default — specs/03 §1).
-   - `TimestampMixin`: `created_at`, `updated_at`: `Mapped[datetime]`, `DateTime(timezone=True)`, nullable=False,
-     `server_default=func.now()`; `updated_at` also `server_onupdate=FetchedValue()` (trigger-maintained, §10).
-   - `SoftDeleteMixin`: `deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))`.
-5. `packages/va_db/src/va_db/session.py`
-   - `class Database`: `__init__(self, app_engine: AsyncEngine, system_engine: AsyncEngine)`; builds two
-     `async_sessionmaker(..., expire_on_commit=False)`; `@classmethod from_settings(cls, settings) -> Database`
-     (engines with DbRole.APP / DbRole.SYSTEM); `async def dispose()`;
-     `@asynccontextmanager async def tenant_session(self, org_id: uuid.UUID) -> AsyncIterator[AsyncSession]`:
-     `async with maker() as s, s.begin(): await s.execute(text("SELECT set_config('app.org_id', :org_id, true)"),
-     {"org_id": str(org_id)}); yield s` (commit on clean exit, rollback on exception; setting is transaction-local
-     so pooled connections never leak it);
-     `system_session(self)` same on the system engine without set_config. Docstring of system_session cites
-     specs/03 §2 (only the listed system repositories may use it).
-   - Process default: `configure_database(db: Database | None) -> None`, `get_database() -> Database` (raises
-     `RuntimeError("va_db is not configured; call configure_database() at startup")`), and module functions
-     `tenant_session(org_id)` / `system_session()` delegating to `get_database()` — this gives the exact
-     `va_db.session.tenant_session(org_id)` name from MASTER_PROMPT rule 5 / specs/03 §10.
-6. Root `pyproject.toml`: add `va-db` to dev group + `[tool.uv.sources] va-db = { workspace = true }`; mypy
-   `mypy_path` += `packages/va_db/src`, `files` += `packages/va_db/src`, `packages/va_db/tests`; coverage source if the
-   config lists packages explicitly (check `[tool.coverage.run]`). `uv lock` + `uv sync`.
-7. Shared docker probe: move `_reachable`/`_docker_available` out of `packages/va_common/tests/test_redis_integration.py`
-   into `packages/va_common/tests/docker_probe.py` (`docker_available() -> bool`, already on pytest pythonpath and mypy
-   path) and use it from both the redis test and the new va_db tests (avoids a jscpd clone).
-
-### Tests (`packages/va_db/tests/`)
-- `conftest.py`: session-scoped `pg_url` fixture: skip unless `docker_available()`; start
-  `PostgresContainer("pgvector/pgvector:pg16", username="va", password=<secrets.token_hex>, dbname="va")`
-  (testcontainers ≥ 4.15; `driver=None` / build `postgresql+asyncpg://` URL yourself), run the
-  `infra/docker/postgres-init/01-roles.sql` DO-block equivalent (create va_app LOGIN, va_system LOGIN BYPASSRLS
-  if absent — BYPASSRLS on va_system per specs/03 §2) plus a scratch table `rls_probe(org_id uuid, v text)` with the
-  exact §10 policy (ENABLE + FORCE RLS, tenant_isolation USING/WITH CHECK) and `GRANT SELECT, INSERT ON rls_probe TO
-  va_app, va_system`. Function-scoped `database` fixture yields `Database.from_settings(DatabaseSettings(
-  database_url=..., database_pool_size=2))` and disposes it. Mark module `pytestmark = pytest.mark.integration`.
-  Settings built via typed kwargs dict with `_env_file=None` (AGENTS P00-T05 gotcha).
-- `test_session_integration.py`:
-  - `test_tenant_session_sets_org_id` — inside: `current_setting('app.org_id', true) == str(org)`.
-  - `test_setting_is_cleared_after_tenant_session` — pool_size 1 engine; after the block, a new `tenant_session`-free
-    connection on the same engine returns `nullif(current_setting('app.org_id', true), '') IS NULL`.
-  - `test_setting_cleared_after_exception_rollback` — raise inside block; error propagates; setting gone; row inserted
-    inside is rolled back.
-  - `test_nested_orgs_do_not_leak` — sequential sessions for org A then B see only their own value.
-  - `test_tenant_session_runs_as_va_app` / `test_system_session_runs_as_va_system` — `SELECT current_user`.
-  - `test_rls_probe_isolation` — insert rows for A and B via system_session; tenant_session(A) sees only A; insert of
-    a B row under A raises `DBAPIError` (WITH CHECK); system_session sees both.
-  - `test_system_session_has_no_org_id`.
-  - `test_module_level_helpers_use_configured_database` + `test_unconfigured_raises` (configure_database(None) in a
-    fixture finalizer).
-- `test_engine.py` (unit, no docker): pool size from settings, `engine.url` matches, connect_args timeouts present,
-  role listener registered only when role given (`event.contains`).
-- `test_base.py` (unit): mixin columns — types (`UUID`, `DateTime(timezone=True)`), nullability, server_default
-  rendered `now()`, `id` default produces UUID version 7, naming convention yields `x_pkey`, `x_a_b_key`,
-  `x_org_id_fkey` on a throwaway model in its own `MetaData`-sharing Base subclass (use a fresh registry so the real
-  metadata stays clean — or `Base.metadata.remove(table)` in teardown).
-
-### Gates
-`make fmt lint typecheck placeholders test` (Docker running: `orb start`), then audit (uvx pip-audit on uv export),
-`uvx radon cc -s -a packages/va_db/src`, `npx --yes jscpd@4 --silent`. va_db coverage ≥ 85 % (target 100 %).
-Update AGENTS.md: va_db session usage, SET ROLE decision, docker_probe helper.
-
-### Risks
-- asyncpg dialect "connect" event: dbapi_connection is SQLAlchemy's AdaptedConnection; `cursor().execute` is the
-  supported sync-facade path. Verify with the current_user test.
-- Superuser login + SET ROLE va_app: RLS applies because current_user is va_app (non-superuser, FORCE RLS). Test proves it.
-- testcontainers PostgresContainer may require psycopg for its readiness wait in some versions; if so use
-  `wait_for_logs` / construct with `driver=None` — do not add psycopg2 unless unavoidable.
-- `filterwarnings=error`: dispose every engine (fixture finalizers) or asyncpg/ResourceWarnings fail the run.
-
-## Build P01-T01 (2026-10-27)
-Implemented per plan. Deviations/notes for the Reviewer:
-- Naming convention uses `%(column_0_N_name)s` (underscore-joined, matches Postgres `t_a_b_key`), not `column_0N_name`.
-- Role listener is a module-level callable class `_AssumeRole` so unit tests can find it among the pool's connect
-  listeners (the asyncpg dialect registers its own there).
-- `pg_container.py` lives in `packages/va_db/tests/support/` (pytest pythonpath + mypy_path), mirroring apps/*/tests/support.
-- Found that docker_probe never detected OrbStack (no DOCKER_HOST), so every integration test had been skipping;
-  probe now uses testcontainers' `get_docker_host()`. That surfaced a latent DeprecationWarning in
-  test_redis_integration (`testcontainers.redis`) — switched to `testcontainers.community.redis`.
-- Spec Decision added under specs/03 §2 roles list; AGENTS.md updated (va_db usage, docker probe).
-Gates: fmt ok, lint pass, typecheck pass, placeholders 0 findings, make test 1152 passed (99.83 %, va_db 100 %),
-pip-audit + pnpm audit no vulns, radon A (1.2), jscpd 0 clones.
-
-## Review P01-T01 (2026-10-27) — REJECTED
-Gates re-run by Reviewer: lint/typecheck pass, placeholders 0, make test 1152 passed, va_db 100 % coverage.
-Rejected on a correctness/security defect that the suite does not exercise:
-
-1. packages/va_db/src/va_db/engine.py:51-56 — `SET ROLE` is executed through the asyncpg adapter cursor, which
-   opens an implicit transaction. If the first transaction on a fresh connection does not COMMIT (exception
-   rollback in `tenant_session`, or any `engine.connect()` block, whose pool reset-on-return is a ROLLBACK),
-   the `SET ROLE` is rolled back with it and the pooled connection silently runs as the login role from then on.
-   With a superuser/owner login that bypasses RLS entirely (violates specs/03 §2/§10 and MASTER_PROMPT rule 5).
-   Reproduced by the Reviewer against pgvector/pg16 (probe test, since deleted): pool_size=1,
-   (a) first use `tenant_session` raising -> next checkout same backend pid, `current_user` = 'va' (expected va_app);
-   (b) first use `app_engine.connect()` without commit -> same result.
-   Fix: make the role durable independent of the first transaction, e.g. set `dbapi_connection.autocommit = True`
-   around the `SET ROLE` and restore it, or execute then commit immediately, or pass the role as an asyncpg
-   startup parameter (`connect_args={"server_settings": {"role": ...}}`) — pick one, verify it, and update the
-   specs/03 §2 Decision text ("once per new pooled connection") to describe the mechanism precisely.
-2. packages/va_db/tests/test_session_integration.py — no test covers a fresh connection whose first transaction
-   rolls back. Add regression tests (pool_size=1, assert same `pg_backend_pid()`): first use = tenant_session that
-   raises, and first use = bare `app_engine.connect()`; both must then show `current_user = 'va_app'` and RLS
-   still hiding another org's `rls_probe` rows. Same for the system engine (`va_system`).
-Everything else (naming convention, mixins, session API, docker_probe move, AGENTS.md, Decision placement) looks
-correct and can stay as is.
-
-## Build P01-T01 fix (2026-10-27) — addresses Review findings 1 and 2
-1. engine.py: dropped the `SET ROLE` connect listener. The role is now an asyncpg startup parameter
-   (`connect_args["server_settings"] = {"role": role.value}`), which becomes the session default for `role`:
-   rollback, pool reset-on-return, and even `RESET ROLE` keep the engine role. Spec §2 Decision text and AGENTS.md
-   rewritten to describe the mechanism (and why SET ROLE in a listener is unsafe). Unit tests now assert connect_args.
-2. Regression tests in test_session_integration.py (pool_size=1, same `pg_backend_pid()` asserted):
-   app first use = tenant_session raising / bare app_engine.connect() -> `current_user = va_app` and RLS hides the
-   other org's rls_probe row; system first use = system_session raising / bare system_engine.connect() ->
-   `va_system`; plus `RESET ROLE` inside tenant_session stays `va_app`. Verified all 5 fail against the old
-   SET ROLE listener (temporarily reinstated) and pass with the fix.
-Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 1154 passed (va_db 100 %, total 99 %),
-pip-audit no known vulns (pnpm not on PATH this shell; no TS changes), radon A (1.18), jscpd 0 clones.
-
-## Review P01-T01 fix (2026-10-27) — APPROVED
-Re-ran lint/typecheck/placeholders (pass, 0 findings) and make test (1154 passed, 99.83 %, va_db 100 %).
-Confirmed integration tests execute (Docker up, 15/15 PASSED, none skipped), including the 5 role-survives-rollback
-regressions. Role now via asyncpg `server_settings={"role": ...}`; spec §2 Decision and AGENTS.md match. Ticked + committed.
-
-## Plan P01-T02 — Tenancy and identity models (2026-10-27)
-
-Spec: specs/03 §1 (conventions), §3 (the 10 tables, column for column), specs/04 §3.1 (role names).
-Planner also amended plan/phase-01.md: §9a tables (`org_llm_providers`, `dnc_imports`, `erasure_requests`,
-`org_secrets`, `org_data_keys`) had no owning task; they are now P01-T06 deliverables. Do NOT model them here.
+### Decisions to record in specs (same commit, `> Decision (2026-10-28):`)
+1. specs/04 §2.1 — hash bytes: `sha256(bytes.fromhex(API_KEY_PEPPER) + plaintext.encode("ascii")).hexdigest()`.
+   Pepper versioning: new env var `API_KEY_PEPPER_VERSION` (int ≥ 1, default 1) is the version of
+   `API_KEY_PEPPER`; new keys store it in `api_keys.pepper_version`. Verification: key.pepper_version ==
+   current → current pepper; == current-1 and `API_KEY_PEPPER_PREVIOUS` set → previous pepper; anything else →
+   `AUTH_FAILURE`. Exactly one hash per verification attempt (still one dummy hash on unknown prefix).
+2. specs/02 §6 — add row `API_KEY_PEPPER_VERSION | api | 1 | version number of API_KEY_PEPPER stored in
+   api_keys.pepper_version` directly after `API_KEY_PEPPER_PREVIOUS`; add the same line to `.env.example`
+   after line 156 with a trailing comment (scripts/tests/test_env_example.py enforces order/literal/comment).
+3. specs/04 §2.2 — cache JSON also carries `pepper_version`, `org_status`, `plan_id` (needed to build
+   `RequestContext` without a DB hit); org status/plan changes are therefore visible within ≤ 60 s unless the
+   writer `DEL`s the entry. Missing `Authorization` → `AUTH_FAILURE` "Invalid API key." until session auth
+   (P02-T04) adds the `va_session` cookie branch. Non-`va_` values and wrong length → `AUTH_FAILURE` with one
+   dummy hash too (uniform timing).
+4. specs/03 §2 — add `ApiKeyLookupRepo` to the `va_system` bullet (cite: specs/04 §2.2 names it); update the
+   decision paragraph listing repo methods: `ApiKeyLookupRepo.get_by_prefix(prefix)` (join `orgs` for
+   status/plan_id), `touch(api_key_id, now)`.
+5. specs/03 §11 — add rows `apikey:{prefix}` (string JSON, 60 s, API key auth cache) and
+   `apikey:{id}:touched` (string, 60 s, `last_used_at` throttle gate).
+6. API_KEY_PEPPER is validated as empty-or-64-hex in settings (so `va_api.main` imports without env); the
+   container factory raises `RuntimeError("API_KEY_PEPPER is not configured")` at lifespan start when empty.
 
 ### Files
-1. `packages/va_db/src/va_db/models/__init__.py` — re-export every model + Literal alias below, `__all__` sorted.
-   Later tasks add `telephony.py`, `agents.py`, ... next to it. Do not add relationship()s (plain FKs only, avoids
-   import cycles across modules; repositories query by FK).
-2. `packages/va_db/src/va_db/models/_checks.py` — `def check_in(column: str, values: tuple[str, ...]) -> CheckConstraint`
-   building `"<column> IN ('a', 'b', ...)"` with `name=f"{column}_check"` (naming convention turns it into
-   `<table>_<column>_check`, Postgres' own name for an inline column CHECK). Callers pass `get_args(SomeLiteral)` so the
-   Literal is the single source of truth. Reject empty tuples / values containing `'` with ValueError (unit-tested).
-3. `packages/va_db/src/va_db/models/tenancy.py` — Literal aliases (exact spec order):
-   `OrgStatus = Literal["active","suspended","closed"]`, `DataRegion = Literal["us","eu"]`,
-   `UserStatus = Literal["active","disabled"]`,
-   `MemberRole = Literal["owner","admin","developer","analyst","billing","viewer"]`,
-   `EmailTokenPurpose = Literal["verify_email","reset_password"]`, `ApiKeyEnvironment = Literal["live","test"]`,
-   `SsoProvider = Literal["oidc"]`, `AuditActorType = Literal["user","api_key","system"]`.
-   Models (class → table): `Org`→orgs, `User`→users, `Membership`→memberships, `Invitation`→invitations,
-   `Session`→sessions, `EmailToken`→email_tokens, `ApiKey`→api_keys, `SsoConnection`→sso_connections,
-   `AuditLog`→audit_logs, `IdempotencyKey`→idempotency_keys. All but IdempotencyKey use `IdMixin, TimestampMixin`;
-   IdempotencyKey uses only TimestampMixin with composite PK `(org_id, key)` → `idempotency_keys_pkey`.
-   Rules:
-   - EVERY `mapped_column` passes an explicit SQL type (never rely on annotation inference; SQLAlchemy maps
-     `Literal` to `Enum` otherwise): `Text`, `CITEXT` / `INET` / `JSONB` / `ARRAY(Text)` from
-     `sqlalchemy.dialects.postgresql`, `SmallInteger`, `Integer`, `BigInteger`, `Boolean`, `LargeBinary` (bytea),
-     `DateTime(timezone=True)`, `Uuid(as_uuid=True)`.
-   - Annotations: enum columns `Mapped[OrgStatus]` etc.; jsonb `Mapped[dict[str, Any]]`; text[] `Mapped[list[str]]`;
-     inet `Mapped[str | None]` (asyncpg dialect returns str — verify in integration test); nullable → `X | None`.
-   - Nullability exactly per spec (nullable=False wherever NOT NULL; PK columns implied).
-   - server_default exactly per spec, no Python-side defaults besides IdMixin: `text("'start'")`, `text("0")`,
-     `text("false")`, `text("5000000")`, `text("25000000")`, `text("'{}'::jsonb")`, `text("'us'")`, `text("365")`,
-     `text("90")`, `text("''")`, `text("'{}'")` (text[]), `text("'{*}'")` (api_keys.scopes), `text("1")`,
-     `text("'live'")`, `text("'viewer'")`, `text("'active'")`.
-   - CHECKs: `check_in(...)` for every enum; `CheckConstraint("kyc_level BETWEEN 0 AND 3", name="kyc_level_check")`,
-     `retention_days BETWEEN 1 AND 3650`, `recording_retention_days BETWEEN 0 AND 3650` (same naming pattern).
-     `sso_connections.default_role` has NO check in the spec — annotate `Mapped[MemberRole]` but add no constraint.
-   - UNIQUE: column `unique=True` for orgs.slug, orgs.stripe_customer_id, users.email, invitations.token_hash,
-     sessions.token_hash, email_tokens.token_hash, api_keys.prefix (→ `<table>_<col>_key`);
-     `UniqueConstraint("org_id","user_id")` on memberships, `UniqueConstraint("org_id","issuer")` on sso_connections.
-   - FKs with exact `ondelete`: orgs.parent_org_id RESTRICT; tenant org_id CASCADE; memberships.user_id CASCADE;
-     invitations.invited_by (no ondelete); sessions.user_id CASCADE, sessions.active_org_id SET NULL;
-     email_tokens.user_id CASCADE; api_keys.created_by SET NULL.
-   - Named indexes exactly as spec (explicit names override the convention): `orgs_parent_idx(parent_org_id)`,
-     `memberships_user_idx(user_id)`, `invitations_org_idx(org_id)`, `sessions_user_idx(user_id)`,
-     `api_keys_org_idx(org_id)`, `audit_logs_org_created_idx(org_id, created_at DESC)` — the DESC one is declared
-     after the class: `Index("audit_logs_org_created_idx", AuditLog.org_id, AuditLog.created_at.desc())`.
-     No `index=True` anywhere (would invent unnamed indexes not in the spec).
-   - Class docstrings name the table and the Pydantic schema noted in spec comments (OrgLimitsOverride, OrgSettings)
-     but do not define those schemas here (later phases).
-4. `packages/va_db/src/va_db/__init__.py` — unchanged (models are imported as `va_db.models`).
+
+**packages/va_common/src/va_common/auth.py** (new; pure, no I/O)
+- `API_KEY_PREFIXES: Final = ("va_live_", "va_test_")`, `API_KEY_LENGTH: Final = 40`,
+  `API_KEY_PREFIX_LENGTH: Final = 12`, `BASE62: Final = string.digits + string.ascii_uppercase + string.ascii_lowercase`,
+  `API_KEY_RE: Final = re.compile(r"va_(?:live|test)_[0-9A-Za-z]{32}")` (reused later by audit redaction §13).
+- `type KeyEnvironment = Literal["live", "test"]`
+- `def generate_api_key(environment: KeyEnvironment) -> str` — `secrets.choice` ×32.
+- `def api_key_prefix(plaintext: str) -> str` — first 12 chars.
+- `def looks_like_api_key(value: str) -> bool` — prefix in API_KEY_PREFIXES and len == 40 (no charset check
+  beyond that is required by spec; use API_KEY_RE.fullmatch for strictness).
+- `def environment_of(plaintext: str) -> KeyEnvironment`.
+- `@dataclass(frozen=True, slots=True) class Pepper: value: bytes; version: int` with `@classmethod from_hex(hex, version)`
+  (ValueError unless exactly 32 bytes) and `__repr__` that hides the value.
+- `class ApiKeyHasher` (`__init__(current: Pepper, previous: Pepper | None = None)`):
+  - `current_version -> int` property
+  - `hash(plaintext: str, *, version: int | None = None) -> str` (hex sha256(pepper||plaintext); version None →
+    current; unknown version → `LookupError`)
+  - `verify(plaintext: str, secret_hash: str, version: int) -> bool` — picks pepper by version (unknown →
+    hashes with current pepper anyway and returns False, keeping one hash), compares with `hmac.compare_digest`.
+  - `dummy_verify(plaintext: str) -> None` — one hash with current pepper, compared against a constant
+    dummy hex via `hmac.compare_digest`, result discarded.
+- `def sha256_hex(value: str) -> str` (token primitive used later for session/email tokens).
+
+**apps/api/src/va_api/settings.py** — add fields `api_key_pepper: SecretStr = SecretStr("")`,
+`api_key_pepper_previous: SecretStr = SecretStr("")`, `api_key_pepper_version: int = Field(1, ge=1)`, validator
+(empty or 64 hex, lowercase/uppercase accepted) for both peppers; `def api_key_hasher(self) -> ApiKeyHasher`
+raising `RuntimeError` when the pepper is empty (previous pepper → version current-1, only when set and
+current version ≥ 2; if previous set with version 1, raise ValueError in a model validator).
+
+**apps/api/pyproject.toml** — add `va-db` dependency + `[tool.uv.sources] va-db = { workspace = true }`; run
+`uv lock`/`uv sync`. Update description string if it lists capabilities (add "auth").
+
+**packages/va_db/src/va_db/repositories/api_keys.py** (new) — `ApiKeyLookupRepo(SystemRepository)` with a
+docstring citing specs/03 §2 + specs/04 §2.2:
+- `@dataclass(frozen=True, slots=True) class ApiKeyRecord: id, org_id, secret_hash, scopes: tuple[str, ...],
+  environment, pepper_version, revoked: bool, expires_at: datetime | None, org_status, plan_id`, with
+  `to_json() -> dict[str, Any]` / `from_json(data) -> ApiKeyRecord` (ISO datetimes, str UUIDs) for the cache.
+- `async def get_by_prefix(self, prefix: str) -> ApiKeyRecord | None` — `select(ApiKey, Org.status, Org.plan_id)
+  .join(Org, Org.id == ApiKey.org_id).where(ApiKey.prefix == prefix)`; `revoked = revoked_at is not None`.
+- `async def touch(self, api_key_id: uuid.UUID, now: datetime) -> None` — `UPDATE api_keys SET last_used_at=:now
+  WHERE id=:id`.
+- Export both from `va_db.repositories.__init__` (`__all__`).
+- packages/va_db/tests/test_repositories.py: `len(_spec_system_repos()) == 7`.
+
+**apps/api/src/va_api/auth/__init__.py** (new package) — re-export `RequestContext`, `get_principal`,
+`require_scope`, `ApiKeyAuthenticator`.
+
+**apps/api/src/va_api/auth/context.py** — `Role = MemberRole` (from va_db.models.tenancy),
+`PrincipalType = Literal["api_key","user","widget","platform_admin"]`, `RequestContext` exactly the §1 fields
+(frozen dataclass, slots), plus `def has_scope(self, scope: str) -> bool` (`"*" in scopes or scope in scopes`).
+
+**apps/api/src/va_api/auth/api_key_auth.py**
+- `INVALID_API_KEY: Final = "Invalid API key."`, `CACHE_TTL_S: Final = 60`, `TOUCH_INTERVAL_S: Final = 60`,
+  `cache_key(prefix) -> "apikey:{prefix}"`, `touched_key(id) -> "apikey:{id}:touched"`.
+- `def extract_api_key(authorization: str | None) -> str | None` — strip; `Bearer <x>` case-insensitive scheme
+  (split once on whitespace) else bare value; empty → None.
+- `async def invalidate_api_key_cache(redis: Redis, prefix: str) -> None` — `DEL` (used by P02-T10 revoke/roll).
+- `class ApiKeyAuthenticator` (`__init__(database: Database, redis: Redis, hasher: ApiKeyHasher, clock: Clock)`):
+  - `async def authenticate(self, authorization: str | None, *, method: str, request_id: str, ip: str | None,
+    user_agent: str | None) -> tuple[RequestContext, ApiKeyRecord]` — steps: extract; not
+    `looks_like_api_key` → `hasher.dummy_verify` + raise `AppError("AUTH_FAILURE", INVALID_API_KEY)`;
+    `_lookup(prefix)` (Redis GET → `ApiKeyRecord.from_json`; miss → `system_session()` +
+    `ApiKeyLookupRepo.get_by_prefix`; found → `SET apikey:{prefix} <json> EX 60`; not found → dummy hash +
+    AUTH_FAILURE; negative results are NOT cached); `hasher.verify(...)` false → AUTH_FAILURE; revoked,
+    `expires_at <= clock.now()`, `org_status == "closed"` → AUTH_FAILURE; `org_status == "suspended"` and
+    method not in {GET, HEAD, OPTIONS} → `AppError("ORG_SUSPENDED", "Organization is suspended; only read
+    requests are allowed.")`. Builds `RequestContext(principal_type="api_key", principal_id=key.id, role=None,
+    scopes=frozenset(key.scopes), environment=key.environment, plan_id=key.plan_id, acting_parent_org_id=None, …)`.
+  - `async def touch_if_due(self, key_id: uuid.UUID) -> None` — `SET touched_key NX EX 60`; when set, open
+    `system_session()` and `ApiKeyLookupRepo(...).touch(key_id, clock.now())`; any exception (`RedisError`,
+    `SQLAlchemyError`, `OSError`) is logged with structlog `api_key_touch_failed` (key prefix only, never the
+    secret) and swallowed.
+- Redis errors during cache GET/SET: fall back to the DB lookup (log warning `api_key_cache_unavailable`);
+  never fail auth because Redis is down.
+
+**apps/api/src/va_api/auth/dependencies.py**
+- `async def get_principal(request: Request, background: BackgroundTasks) -> RequestContext` — reads
+  `request.app.state.container.authenticator` (typed via a small `authenticator_of(request)` helper),
+  `request.headers.get("authorization")` (never `x-api-key`), `request_id_of(request)`,
+  `request.client.host`, `user-agent`; schedules `authenticator.touch_if_due(key.id)` via `background.add_task`;
+  stores ctx on `request.state.ctx`; binds `org_id` to structlog contextvars.
+- `def require_scope(scope: str) -> Callable[..., Awaitable[RequestContext]]` — validates `scope` against
+  `SCOPES` at definition time (`ValueError` on unknown scope, so routers can't typo), returns a dependency that
+  depends on `get_principal` and raises `AppError("FORBIDDEN", f"Missing required scope '{scope}'.")` unless
+  `ctx.has_scope(scope)`; the returned callable carries attribute `required_scope = scope` (the §2.4 coverage test
+  in a later task finds it via `route.dependant`).
+- `SCOPES: Final[frozenset[str]]` — every scope of §2.3 (expand `a / b` rows into both scopes), in
+  `apps/api/src/va_api/auth/scopes.py` along with `READ_WRITE_RESOURCES`.
+
+**apps/api/src/va_api/container.py** — add `database: Database` (from `Database.from_settings(settings)`,
+disposed via the exit stack: `deps` has a stack-less API, so wrap with `contextlib.AsyncExitStack` in
+`build_container` and `push_async_callback(database.dispose)`) and `authenticator: ApiKeyAuthenticator`
+(`settings.api_key_hasher()`, `SystemClock()`). Do NOT call `configure_database` (explicit injection).
+Container field additions must keep `FakeChecks`/`FakeContainer` tests working: dependencies read
+`container.authenticator` only at request time.
+
+**.env.example**, **specs/02**, **specs/03**, **specs/04** — per Decisions above.
+**AGENTS.md** — note: api auth lives in `va_api.auth`; `API_KEY_PEPPER` must be 64 hex or the api lifespan
+fails; tests build `ApiKeyHasher(Pepper.from_hex(...))` directly.
 
 ### Tests
-- `packages/va_db/tests/conftest.py`: move the session-scoped `pg_url` fixture here from
-  test_session_integration.py (one container per worker, shared by both integration modules).
-- `test_checks.py` (unit): `check_in` SQL text and name; ValueError for empty tuple and quote in value.
-- `test_tenancy_models.py` (unit, no Docker):
-  - `test_tables_registered` — the 10 table names are in `Base.metadata.tables`.
-  - `test_enum_checks_mirror_literals` — parametrized (table, column, Literal, expected spec tuple): constraint named
-    `<table>_<column>_check` exists; its values parsed from the compiled SQL == `get_args(Literal)` == spec tuple.
-  - `test_range_checks` — kyc_level / retention_days / recording_retention_days constraint text + names.
-  - `test_server_defaults` — parametrized (table, column, expected compiled default) for every defaulted column.
-  - `test_nullability` — parametrized over the spec's nullable columns (e.g. users.password_hash, sessions.ip) and a
-    sample of NOT NULL ones; or assert the full {column: nullable} map per table (preferred, catches drift).
-  - `test_unique_and_pk_names` — `orgs_slug_key`, `orgs_stripe_customer_id_key`, `users_email_key`,
-    `memberships_org_id_user_id_key`, `sso_connections_org_id_issuer_key`, `idempotency_keys_pkey(org_id,key)`, ...
-  - `test_foreign_keys_ondelete` — parametrized (table, column, target, ondelete).
-  - `test_indexes` — exact set of index names + column order + DESC on audit_logs (compile CreateIndex).
-  - `test_column_types` — CITEXT on orgs.slug/users.email/invitations.email, INET on sessions.ip/audit_logs.ip,
-    ARRAY(Text) on users.mfa_recovery_codes_hash/api_keys.scopes/sso_connections.allowed_domains, JSONB, LargeBinary,
-    SmallInteger (kyc_level, pepper_version), BigInteger micros.
-- `test_tenancy_models_integration.py` (`pytestmark = pytest.mark.integration`, uses `pg_url`): a login-role engine
-  (`create_engine(settings, None)`), one connection + transaction ROLLED BACK at teardown (DDL is transactional, so
-  the container stays clean for other modules): `CREATE EXTENSION IF NOT EXISTS citext`,
-  `conn.run_sync(Base.metadata.create_all)`; `AsyncSession(bind=conn, join_transaction_mode="create_savepoint")`.
-  - `test_org_defaults` — insert `Org(name, slug, webhook_signing_secret_enc=os.urandom(32))`, refresh: every spec
-    default (plan_id 'start', kyc 0, status 'active', 0/0 micros, recharge False/5_000_000/25_000_000, limits {},
-    settings {}, 'us', 365, 90, created_at/updated_at tz-aware).
-  - `test_user_api_key_sso_defaults` — users (name '', mfa False, codes [], admin False, 'active'); api_keys
-    (scopes ['*'], pepper_version 1, 'live'); sso_connections (allowed_domains [], 'viewer', enforce False).
-  - `test_enum_values_accepted_and_rejected` — parametrized (model builder, column, Literal): each Literal value
-    inserts; `"bogus"` raises IntegrityError (CheckViolation) inside `begin_nested()`.
-  - `test_range_checks_enforced` — kyc_level 4, retention_days 0, recording_retention_days 3651 rejected; bounds accepted.
-  - `test_citext_unique_email_case_insensitive` — users 'A@x.test' then 'a@x.test' → IntegrityError.
-  - `test_inet_round_trips_as_str` — Session.ip '203.0.113.7' reads back as that str.
-  - `test_idempotency_key_composite_pk` — same (org, key) twice → IntegrityError; other org same key OK.
-  - `test_org_delete_cascades` — deleting an org removes its memberships/api_keys; parent org with child → RESTRICT error.
-  Use `va_common.ids.new_id` for ids, `secrets`/`os.urandom` for hashes/secrets (no literal secrets; mind the
-  gitleaks + placeholder filler-word rules in AGENTS.md).
+
+packages/va_common/tests/test_auth.py (unit)
+- `test_generate_api_key_shape[live|test]` — len 40, regex fullmatch, prefix, base62 only.
+- `test_generated_keys_are_unique` — 1 000 keys, 1 000 distinct.
+- `test_prefix_is_first_12_chars`.
+- `test_looks_like_api_key_rejects` parametrized: wrong prefix `va_prod_…`, len 39/41, `sk_live_…`, non-base62 char.
+- `test_hash_matches_spec_formula` — equals `hashlib.sha256(bytes.fromhex(p)+key.encode()).hexdigest()`.
+- `test_verify_uses_compare_digest` — monkeypatch `va_common.auth.hmac.compare_digest` with a spy; called once.
+- `test_verify_previous_pepper_for_older_version` / `test_unknown_version_fails_with_one_hash`.
+- `test_dummy_verify_hashes_once` (spy on `hashlib.sha256` via module attr).
+- `test_pepper_from_hex_rejects_wrong_length`, `test_pepper_repr_hides_value`.
+
+apps/api/tests/test_settings_auth.py (unit)
+- empty pepper allowed at construction; `api_key_hasher()` raises RuntimeError; non-hex/short pepper →
+  ValidationError; previous pepper requires version ≥ 2; hasher versions wired correctly.
+
+apps/api/tests/test_api_key_auth.py (unit; fakeredis.aioredis + fake lookup)
+- Make `ApiKeyAuthenticator` testable without Postgres: constructor takes a `lookup: Callable[[str],
+  Awaitable[ApiKeyRecord | None]]` and `toucher: Callable[[UUID, datetime], Awaitable[None]]`; the production
+  wiring passes `database`-backed functions (`db_lookup(database)`, `db_touch(database)` in api_key_auth.py).
+  (Builder: use this injection shape rather than a Database parameter.)
+- `test_extract_api_key` parametrized: `Bearer k`, `bearer k`, `BEARER   k`, bare `k`, `  k  `, `""`, None,
+  `Basic xyz` → returns `Basic xyz` as bare (then fails format check).
+- `test_bearer_and_bare_headers_authenticate` — both produce identical ctx (org_id, scopes, environment, plan_id,
+  principal_type api_key, role None).
+- `test_x_api_key_header_is_ignored` — via the HTTP app: only `x-api-key` set → 401 AUTH_FAILURE.
+- `test_wrong_prefix_or_length_fails_with_one_dummy_hash` — spy hasher counts exactly 1 hash, lookup not called.
+- `test_unknown_prefix_hashes_once` (§14: assert hash called once on unknown prefix).
+- `test_wrong_secret_same_prefix_fails`.
+- `test_revoked_key_fails`, `test_expired_key_fails` (FrozenClock at/after expires_at; just before → ok),
+  `test_closed_org_fails`.
+- `test_suspended_org_allows_reads_blocks_writes` — GET ok, POST → ORG_SUSPENDED 403.
+- `test_cache_hit_skips_lookup` — 2nd auth does not call lookup; cached JSON has the 60 s TTL
+  (`await redis.ttl(...)` in 1..60) and contains no plaintext key.
+- `test_unknown_prefix_not_cached`.
+- `test_invalidate_api_key_cache_forces_reload`.
+- `test_redis_down_falls_back_to_lookup` — redis client whose get/set raise `RedisConnectionError`.
+- `test_touch_at_most_once_per_minute` — 3 touches → toucher called once; after FrozenClock advance + fakeredis
+  key expiry (delete key / use `redis.pexpire`), called again (no sleeps).
+- `test_touch_failure_is_swallowed_and_logged` (structlog capture; log has no plaintext).
+
+apps/api/tests/test_auth_dependencies.py (HTTP, test-only router mounted via `create_app(routers=...)` with a
+FakeChecks-derived container carrying an authenticator built on fakeredis + fake lookup)
+- `test_require_scope_allows_wildcard_and_exact`, `test_require_scope_denies_with_forbidden` — 403, legacy and
+  envelope routes render `FORBIDDEN` in their family's shape (use one legacy `/v1/calls/_auth` and one envelope
+  `/v1/knowledge/_auth` route in `tests/support/sample_routes.py` or a new `auth_routes.py` helper).
+- `test_missing_authorization_is_auth_failure` — 401 "Invalid API key.".
+- `test_require_scope_rejects_unknown_scope_name` — ValueError at definition.
+- `test_scopes_match_spec_table` — parse specs/04 §2.3 table, expand `a` / `b`, equals `SCOPES`.
+- `test_principal_stored_on_request_state_and_org_bound_in_logs`.
+- `test_touch_scheduled_as_background_task` — after a request, toucher called once.
+
+packages/va_db/tests/test_api_key_lookup_integration.py (integration, migrated_url DB via existing fixtures)
+- `get_by_prefix` returns record with org status/plan; unknown → None; revoked flag; `touch` updates
+  `last_used_at`; runs on `system_session` (RLS bypass: no app.org_id set). Reuse `model_factories.make_org` and
+  existing helpers (jscpd).
+- `test_record_json_round_trip` (unit) for `ApiKeyRecord.to_json/from_json`.
 
 ### Gates
-`make fmt lint typecheck placeholders test` with Docker up (confirm integration tests PASSED, not skipped:
-`uv run pytest packages/va_db -m integration -rs`), `uvx pip-audit` on uv export, `uvx radon cc -s -a
-packages/va_db/src`, `npx --yes jscpd@4 --silent`. va_db coverage ≥ 85 % (target 100 %). AGENTS.md: note the
-explicit-SQL-type rule, `check_in` + Literal convention, and the rolled-back create_all integration pattern.
+`make fmt lint typecheck placeholders test` (+ jscpd duplication, radon complexity, pip-audit per memories);
+coverage ≥ 85 % for va_common, va_db, va_api. No TS changes → `test-ts` not required. No call flow → no e2e.
 
 ### Risks
-- `Mapped[Literal[...]]` without explicit type → SQLAlchemy Enum; the explicit `Text` avoids it. mypy: Literal in
-  Mapped is fine.
-- CITEXT needs the extension inside the scratch transaction (created there, rolled back with it).
-- `Session` model name shadows `sqlalchemy.orm.Session` for star-importers; never import both under that name.
-- Parsing CHECK values in unit tests: compile constraint `.sqltext` and regex `'([^']*)'`.
-
-## Build P01-T02 (2026-10-27)
-Implemented per plan. Deviations/notes for the Reviewer:
-- `inet` is NOT returned as str: SQLAlchemy 2.1.6 + asyncpg yields `IPv4Address`/`IPv6Address`. Columns annotated
-  `Mapped[IpAddress | None]` (`type IpAddress = IPv4Address | IPv6Address`, exported from va_db.models); the
-  integration test round-trips v4 and v6 on sessions.ip and audit_logs.ip.
-- `IdMixin.id` gained `sort_order=-1` (base.py) so model column order == spec order (id first); unit test
-  `test_columns_order_and_nullability` asserts the full ordered (name, nullable) list per table.
-- Extra unit tests beyond the plan: exact set of CHECK names, every timestamp tz-aware, text[] item types.
-- `pg_url` moved to conftest.py; test_session_integration.py otherwise unchanged.
-Gates: fmt 0, lint 0, typecheck 0 (156 files), placeholders 0 findings, make test 1252 passed (99.84 %, va_db 100 %),
-integration `-m integration` 43 passed / 0 skipped, pip-audit no known vulns, radon A (1.24), jscpd 0 clones.
-
-## Review P01-T02 (2026-10-27) — APPROVED
-Re-ran lint/typecheck/placeholders (pass, 0 findings), make test (1252 passed, 99.84 %), and
-`pytest packages/va_db -m integration` (43 passed, none skipped). Checked tenancy.py against specs/03 §3 line by line:
-column order, types (citext/inet/jsonb/text[]/bytea/smallint/bigint), nullability, server defaults, CHECKs, UNIQUE,
-FK ondelete, and named indexes (audit_logs DESC) all match. IpAddress deviation is documented in AGENTS.md and memory.
-The plan amendment that moves the §9a tables into P01-T06 is accepted. Ticked + committed.
-
-## Plan P01-T03 — Telephony models (2026-10-27)
-
-Spec: specs/03 §4 (6 tables, column for column), §1 conventions, §10 (RLS scope note below). Follow every P01-T02
-rule (explicit SQL type on every mapped_column, `check_in(col, get_args(Literal))`, server_default via `text(...)`,
-explicit index names, no `index=True`, no relationship(), plain FKs).
-
-### Files
-1. `packages/va_db/src/va_db/models/telephony.py` — Literal aliases (exact spec order):
-   `TelnyxAccountStatus = Literal["pending","active","error","deleted"]`,
-   `NumberType = Literal["local","toll_free","mobile","national"]`,
-   `PhoneNumberStatus = Literal["pending","active","releasing","released"]`,
-   `NumberOrderStatus = Literal["pending","success","failure"]`,
-   `NumberPoolStrategy = Literal["round_robin","least_recently_used","random","local_match"]`.
-   Models (class → table):
-   - `TelnyxAccount`→telnyx_accounts (IdMixin, TimestampMixin): org_id CASCADE NOT NULL, label Text NN,
-     api_key_enc LargeBinary NN, public_key Text NN, call_control_app_id / messaging_profile_id /
-     outbound_voice_profile_id Text NULL, encrypted_key_handle Text NN `unique=True` (→ telnyx_accounts_encrypted_key_handle_key),
-     status Text NN default `'pending'` + check, status_detail Text NULL. `Index("telnyx_accounts_org_idx","org_id")`.
-   - `PhoneNumber`→phone_numbers (IdMixin, SoftDeleteMixin, TimestampMixin): org_id CASCADE NN, e164 Text NN,
-     telnyx_account_id Uuid FK telnyx_accounts.id SET NULL nullable, telnyx_phone_number_id Text NULL,
-     country_code Text NN, number_type Text NN default `'local'` + check, label Text NULL,
-     capabilities ARRAY(Text) NN default `'{voice}'` (Mapped[list[str]]), inbound_config JSONB NN `'{}'::jsonb`
-     (docstring: InboundConfig, specs/16 §4), sms_config JSONB NN `'{}'::jsonb` (SmsNumberConfig, specs/21 §3),
-     monthly_cost_micros BigInteger NN default `0`, status Text NN default `'active'` + check, purchased_at,
-     released_at tz NULL; deleted_at (mixin) must land AFTER released_at and BEFORE created_at — the ordered-columns
-     unit test asserts it. If mixin ordering does not produce that, declare `deleted_at` explicitly in the class with
-     the same type instead of the mixin (do NOT change base.py sort orders that tenancy relies on), and note it.
-     Indexes: `Index("phone_numbers_e164_active_uq", "e164", unique=True,
-     postgresql_where=text("status IN ('pending', 'active')"))`, `Index("phone_numbers_org_idx","org_id")`.
-   - `NumberOrder`→number_orders (IdMixin, TimestampMixin): org_id CASCADE NN, telnyx_order_id Text NULL,
-     requested_numbers ARRAY(Text) NN (no default), status Text NN (NO default) + check, error Text NULL.
-     `Index("number_orders_org_idx","org_id")`.
-   - `NumberPool`→number_pools (IdMixin, TimestampMixin): org_id CASCADE NN, name Text NN, strategy Text NN default
-     `'round_robin'` + check, max_calls_per_number_per_day Integer NN default `100`;
-     `UniqueConstraint("org_id","name")` (→ number_pools_org_id_name_key). No extra index (UNIQUE starts with org_id).
-   - `NumberPoolMember`→number_pool_members (TimestampMixin only): pool_id Uuid FK number_pools.id CASCADE PK,
-     phone_number_id Uuid FK phone_numbers.id CASCADE PK, org_id CASCADE NN, last_used_at tz NULL,
-     calls_today Integer NN default `0`, calls_today_date `Date` NULL (Mapped[date | None]). PK name
-     number_pool_members_pkey (pool_id, phone_number_id). `Index("number_pool_members_org_idx","org_id")`.
-   - `TelnyxEvent`→telnyx_events (IdMixin, TimestampMixin; system scope, docstring cites §2 TelnyxEventRepo):
-     telnyx_event_id Text NN unique (→ telnyx_events_telnyx_event_id_key), event_type Text NN,
-     org_id Uuid FK orgs.id CASCADE **nullable**, call_id Uuid NULL with **no FK** (spec has none; calls arrive in
-     P01-T05 and events can precede the call row), call_control_id Text NULL, occurred_at tz NN, payload JSONB NN
-     (no default), processed_at tz NULL, process_error Text NULL. Indexes `telnyx_events_call_idx(call_id)`,
-     `telnyx_events_ccid_idx(call_control_id)`. No org index (spec has none; do not invent).
-2. `packages/va_db/src/va_db/models/__init__.py` — re-export the 6 models + 5 Literals, `__all__` sorted.
-
-### Test refactor (keep jscpd at 0 clones)
-- New `packages/va_db/tests/support/model_introspection.py` with the helpers now private in test_tenancy_models.py:
-  `table(name) -> Table`, `constraint(table, name)`, `enum_check_values(table, column) -> tuple[str, ...]`
-  (asserts `<table>_<column>_check` starts with `<column> IN (` and regex-parses values),
-  `server_defaults(tables) -> dict[(table,col), str]` (excludes created_at/updated_at),
-  `index_ddl(tables) -> set[str]` (whitespace-normalised CreateIndex compile, postgresql dialect),
-  `unique_and_pk(tables)`, `foreign_keys(tables) -> set[(name, table, column, target, ondelete)]`,
-  `check_names(tables)`. Refactor test_tenancy_models.py to use them (assertions unchanged).
-- Move the integration `session` fixture (login-role engine, transaction, citext, `Base.metadata.create_all`,
-  savepoint AsyncSession, rollback) from test_tenancy_models_integration.py into conftest.py as `scratch_session`
-  (rename usages), plus a shared `make_org(session, **values) -> Org` helper in a support module
-  (`support/model_factories.py`: `flushed(session, model)`, `make_org`, `make_user`) used by both integration modules.
-
-### Tests
-- `test_telephony_models.py` (unit): tables registered; full ordered (name, nullable) list per table (catches the
-  deleted_at position); enum checks mirror Literals (5 params, values == spec tuples); exact CHECK-name set for the 6
-  tables; server defaults map (telnyx_accounts.status 'pending', phone_numbers number_type 'local', capabilities
-  '{voice}', inbound_config/sms_config '{}'::jsonb, monthly_cost_micros 0, status 'active', number_pools strategy
-  'round_robin', max_calls 100, number_pool_members calls_today 0) — number_orders.status / payload have none;
-  unique + PK names (incl. number_pool_members_pkey composite); FKs + ondelete (8 rows incl. telnyx_events_org_id_fkey
-  CASCADE, phone_numbers_telnyx_account_id_fkey SET NULL) and assert telnyx_events.call_id has no FK;
-  index DDL set exactly: `CREATE UNIQUE INDEX phone_numbers_e164_active_uq ON phone_numbers (e164) WHERE status IN
-  ('pending', 'active')`, plus the 5 plain ones; column types (LargeBinary api_key_enc, ARRAY(Text) capabilities /
-  requested_numbers, JSONB inbound_config/sms_config/payload, BigInteger monthly_cost_micros, Integer
-  max_calls/calls_today, Date calls_today_date, Uuid call_id); every timestamp tz-aware; telnyx_events.org_id nullable.
-- `test_telephony_models_integration.py` (integration, `scratch_session`):
-  - `test_phone_number_defaults` — capabilities ['voice'], {} configs, 0 micros, 'local', 'active', deleted_at None.
-  - `test_e164_unique_among_active_numbers` (the task's acceptance) — org A active +15555550100; org B same e164
-    'pending' → IntegrityError (in begin_nested); set A to 'released' → B insert succeeds; a second 'released' row
-    with same e164 also succeeds; 'releasing' duplicates allowed.
-  - `test_enum_values_accepted_and_rejected` — parametrized over the 5 enum columns; every Literal value inserts,
-    'bogus' → IntegrityError.
-  - `test_number_pool_name_unique_per_org` — same name same org fails, other org OK.
-  - `test_pool_member_composite_pk_and_cascades` — duplicate (pool, number) fails; deleting the pool removes members;
-    deleting a phone number removes members.
-  - `test_telnyx_account_delete_sets_number_account_null`.
-  - `test_telnyx_event_without_org_or_call` — org_id/call_id NULL accepted; duplicate telnyx_event_id fails;
-    payload JSON round-trips; calls_today_date round-trips as `datetime.date`.
-  Use `+1555555xxxx`-style fictional numbers, `os.urandom` for api_key_enc, secrets.token_hex for handles.
-
-### Notes for later tasks (record, do not implement)
-- §10 RLS: telnyx_events has nullable org_id and is not in the voices/dnc_entries list, so P01-T07 must NOT enable
-  RLS on it (system scope via TelnyxEventRepo). number_pool_members has NOT NULL org_id → RLS applies.
-
-### Gates
-`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (Docker up, 0 skipped);
-`uvx pip-audit` on uv export; `uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones);
-va_db coverage 100 %. AGENTS.md: note the support/model_introspection + model_factories helpers and the
-`scratch_session` fixture.
-
-### Risks
-- Mixin column ordering for deleted_at (see above).
-- `postgresql_where` compiled text must match the unit expectation exactly; compile once and copy the real output.
-- `Date` import from sqlalchemy (not DateTime); mypy: `Mapped[date | None]`.
-- Moving fixtures must not change tenancy test behaviour; rerun those integration tests (43 still pass).
-
-## Build P01-T03 (2026-10-27)
-Implemented per plan. Notes for the Reviewer:
-- `va_db/models/telephony.py`: 6 models + 5 Literals, re-exported from `va_db.models`. Mixin ordering already puts
-  `deleted_at` after `released_at` and before `created_at` (bases `IdMixin, SoftDeleteMixin, TimestampMixin`); no
-  base.py change and no explicit column needed. `telnyx_events.call_id` has no FK; `org_id` nullable CASCADE.
-- Shared test helpers: `tests/support/model_introspection.py` (helper is `get_table`, not `table`, because tests
-  parametrize on `table`; added `naive_timestamps`, `text_array_columns`) and `tests/support/model_factories.py`
-  (`flushed`, `make_org`, `make_user`, `assert_enum_check_enforced`, `ModelBuilder`). `scratch_session` fixture in
-  conftest.py. Tenancy unit/integration tests refactored onto them with the same expectations; the tenancy text[]
-  and tz checks now compare whole sets (same coverage, fewer test IDs: suite 1298 -> 1289).
-- Extra integration coverage: duplicate encrypted_key_handle rejected; e164 duplicates allowed for released and
-  releasing rows; pool member daily counters round-trip (`calls_today_date` as `datetime.date`).
-- Builder E.164 numbers come from an itertools counter (no random values, no collisions).
-Gates: fmt 0, lint 0, typecheck 0 (161 files), placeholders 0 findings, make test 1289 passed (99.84 %, va_db 100 %),
-`pytest packages/va_db -m integration -rs` 55 passed / 0 skipped, pip-audit no known vulns, radon A (1.19),
-jscpd 0 clones.
-
-## Review P01-T03 (2026-10-27) — APPROVED
-Re-ran lint, typecheck, placeholders (0 findings), make test (1289 passed, 99.84 %), and
-`pytest packages/va_db -m integration` (55 passed, 108 deselected, none skipped). make fmt left no diff.
-Checked telephony.py against specs/03 §4 column by column: types, nullability, defaults, CHECK values, UNIQUE
-(encrypted_key_handle, telnyx_event_id, number_pools(org_id,name)), composite PK, FK ondelete (SET NULL on
-telnyx_account_id, nullable CASCADE org_id on telnyx_events, no FK on call_id), the partial unique index
-phone_numbers_e164_active_uq, and the plain indexes. All match. The integration tests cover the acceptance case
-(e164 unique among pending/active only) plus the cascade and SET NULL paths. The shared test-support refactor keeps
-the tenancy expectations unchanged. Ticked + committed.
-
-## Plan P01-T04 — Agent configuration models (2026-10-27)
-
-Spec: specs/03 §5 (24 tables, column for column), §1 conventions, §10. Same rules as P01-T02/T03: an explicit SQL type
-on every mapped_column, `check_in(col, get_args(Literal))` for enums, `server_default=text(...)`, explicit index
-names, no `index=True`, no relationship(), plain FKs. Mixin base order `IdMixin, SoftDeleteMixin, TimestampMixin`
-puts deleted_at right before created_at, as in phone_numbers.
-
-### Spec decision (record in specs/03 §1 as `> Decision (2026-10-27):` in the same commit)
-§1 says every tenant table has an index that starts with `org_id`. §3 and §4 follow that rule, but 13 §5 tables have
-no such index: voice_samples, voice_ratings, kb_documents, kb_chunks, pathway_unit_tests, pathway_test_runs,
-persona_versions, agent_versions, experiments, experiment_arms, citation_schemas, eval_setups, eval_setup_versions.
-(tools and dispositions are covered by UNIQUE (org_id, ...)). Decision: the §1 convention wins. Add
-`CREATE INDEX <table>_org_idx ON <table>(org_id);` to each of those 13 tables in the §5 SQL block (directly after its
-CREATE TABLE / existing indexes) and in the models. Why: the RLS predicate `org_id = app.org_id` and the org-scoped
-list endpoints need it. Two things depend on this: the P01-T07 migration copies the DDL, and P01-T08 conformance
-parses the spec.
-
-### Shared helpers (avoid jscpd clones)
-New `packages/va_db/src/va_db/models/_columns.py` with `tz() -> DateTime` (timezone=True), `org_fk() -> ForeignKey`
-(orgs.id CASCADE), and `jsonb_default(literal: str)` returning `text(f"'{literal}'::jsonb")`. Refactor telephony.py
-(`_tz`, `_org_fk`) and tenancy.py (`_tz`) onto them. Nothing changes in behaviour, so the existing unit tests stay green.
-
-### Dependency
-`uv add --package va-db pgvector` (latest; it pulls numpy). If pgvector ships no py.typed, add a
-`[[tool.mypy.overrides]] module = ["pgvector.*"] ignore_missing_imports = true` to the root pyproject and note it in
-AGENTS.md. Run `uvx pip-audit` afterwards.
-
-### Files
-1. `packages/va_db/src/va_db/models/library.py`. Literals:
-   `VoiceProvider = Literal["elevenlabs"]`, `VoiceService = Literal["ELEVEN_FLASH","ELEVEN_TURBO","ELEVEN_MULTILINGUAL"]`,
-   `VoiceCategory = Literal["premade","cloned","generated","professional","shared"]`,
-   `VoiceCloneStatus = Literal["processing","ready","failed"]`, `ToolHttpMethod = Literal["GET","POST","PUT","PATCH","DELETE"]`,
-   `KnowledgeBaseStatus = Literal["PROCESSING","COMPLETED","FAILED"]` (also used by kb_documents.status),
-   `KbDocumentType = Literal["FILE","WEB_SCRAPE","TEXT"]`.
-   Models: `Prompt` (prompts; tags text[] '{}'; soft delete; prompts_org_idx), `Voice` (voices; org_id **nullable**
-   CASCADE; defaults description '', provider 'elevenlabs', service 'ELEVEN_FLASH', category 'premade', is_public
-   false, tags '{}', language_codes '{en}', settings
-   `'{"stability":0.5,"similarity_boost":0.75,"style":0,"use_speaker_boost":true,"speed":1.0}'::jsonb` (copy exactly),
-   rating_sum/rating_count 0. clone_status is nullable with a check, consent is nullable JSONB, plus soft delete. Indexes: voices_org_idx,
-   `voices_name_scope_uq` = unique on (`coalesce(org_id, '00000000-0000-0000-0000-000000000000'::uuid)`, `lower(name)`)
-   WHERE deleted_at IS NULL, and `voices_provider_uq` = unique on (same coalesce, provider_voice_id) WHERE deleted_at IS NULL.
-   Build the expressions with `func.coalesce(<col>, text("'0000...'::uuid"))` / `func.lower(<col>)` declared after
-   the class (as audit_logs does) or with `text()` in __table_args__. Compile once and pin the real DDL in the unit test.
-   `VoiceSample` (voice_samples; voice_id CASCADE; voice_samples_voice_idx + new voice_samples_org_idx),
-   `VoiceRating` (voice_ratings; TimestampMixin only; composite PK voice_id+user_id → voice_ratings_pkey; column
-   order voice_id, org_id, user_id, rating; rating SmallInteger, `CheckConstraint("rating BETWEEN 1 AND 5",
-   name="rating_check")`; users FK CASCADE; new voice_ratings_org_idx),
-   `Tool` (tools; `CheckConstraint("name ~ '^[A-Za-z][A-Za-z0-9_]{0,63}$'", name="name_check")`, method default
-   'POST' + check_in, headers/query/response_map `'{}'::jsonb`, secret_headers_enc LargeBinary NULL, body JSONB NULL,
-   input_schema `'{"type":"object","properties":{}}'::jsonb`, timeout_ms Integer 10000 check BETWEEN 100 AND 60000,
-   retries SmallInteger 0 check BETWEEN 0 AND 3, soft delete, `UniqueConstraint("org_id","name")` → tools_org_id_name_key),
-   `KnowledgeBase` (knowledge_bases; status 'PROCESSING', chunk sizes 400/60, counts 0, soft delete, org idx),
-   `KbDocument` (kb_documents; type check, no default; size_bytes BigInteger NULL; status default 'PROCESSING'; kb idx + new org idx),
-   `KbChunk` (kb_chunks; heading_path text[] '{}'; `embedding` = `pgvector.sqlalchemy.Vector(1024)` NOT NULL;
-   `tsv` = `TSVECTOR` with `Computed("to_tsvector('simple', content)", persisted=True)`, nullable, Mapped[str | None];
-   indexes kb_chunks_kb_idx, new kb_chunks_org_idx,
-   `Index("kb_chunks_embedding_hnsw","embedding", postgresql_using="hnsw", postgresql_with={"m":16,"ef_construction":64},
-   postgresql_ops={"embedding":"vector_cosine_ops"})`, `Index("kb_chunks_tsv_idx","tsv", postgresql_using="gin")`).
-   Annotate `embedding` with the type the integration round-trip actually returns (pgvector returns a numpy ndarray;
-   for writes accept `list[float]`). Pick a Mapped annotation that mypy --strict accepts and say why in a comment.
-2. `packages/va_db/src/va_db/models/pathways.py`. `VersionStatus = Literal["draft","published","archived"]` (shared
-   with persona_versions; re-export from here), `PathwayTestRunKind = Literal["unit","simulation","regression"]`,
-   `PathwayTestRunStatus = Literal["queued","running","passed","failed","error"]`.
-   `PathwayFolder` (self FK parent_id CASCADE, org idx), `Pathway` (folder_id SET NULL; production/staging_version
-   NULL; draft/latest default 1; soft delete; org idx), `PathwayVersion` (status no default + check; nodes/edges
-   `'[]'::jsonb`, global_config `'{}'::jsonb`; graph_hash NN; published_by users SET NULL; UNIQUE(pathway_id,
-   version_number) → pathway_versions_pathway_id_version_number_key; org idx), `PathwayUnitTest` (source_call_id
-   Uuid NULL **no FK** since calls arrive in P01-T05; history/expected JSONB NN with no default; simulated_variations default 5
-   check BETWEEN 0 AND 20; pathway idx + new org idx), `PathwayTestRun` (kind/status checks with no default; results
-   `'[]'::jsonb`; `pathway_test_runs_pathway_idx (pathway_id, created_at DESC)` declared after the class with
-   `.desc()`, as audit_logs does; new org idx).
-3. `packages/va_db/src/va_db/models/agents.py`. `ExperimentStatus = Literal["draft","running","stopped"]`.
-   `Persona`, `PersonaVersion` (config JSONB NN; UNIQUE(persona_id, version_number); new org idx), `Agent`
-   (env_pins '{}'; soft delete; org idx), `AgentVersion` (raw-string check `semver ~ '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'`
-   name semver_check; branch default 'main' + `char_length(branch) BETWEEN 1 AND 64` name branch_check; pathway_id
-   FK **RESTRICT** nullable; pathway_version NULL; call_settings '{}'; changelog ''; created_by users SET NULL;
-   UNIQUE(agent_id, semver); `agent_versions_agent_branch_idx (agent_id, branch, created_at DESC)`; new org idx),
-   `Experiment` (status 'draft' + check; primary_metric Text default 'disposition_rate' with **no** CHECK (spec has
-   none; keep the comment); primary_metric_config '{}'; partial unique `experiments_one_running_per_agent ON (agent_id)
-   WHERE status = 'running'`; new org idx), `ExperimentArm` (agent_version_id FK RESTRICT; weight Integer check
-   BETWEEN 0 AND 100; new org idx), `Disposition` (tag check `tag ~ '^[A-Z][A-Z0-9_]{0,63}$'`; UNIQUE(org_id, tag)),
-   `CitationSchema` (variables JSONB NN with no default; new org idx), `EvalSetup` (latest_version 1; new org idx),
-   `EvalSetupVersion` (criteria JSONB NN; pass_threshold `Numeric(5, 2)` default `70`, Mapped[Decimal];
-   UNIQUE(eval_setup_id, version_number); new org idx), `Widget` (FKs pathway/agent/persona/voice all SET NULL;
-   allowed_domains '{}'; messages_per_minute 20 check BETWEEN 1 AND 600; voice_enabled false; config '{}';
-   public_key `unique=True` → widgets_public_key_key; soft delete; widgets_org_idx).
-   Docstrings name the Pydantic models the spec comments cite (GlobalConfig, PersonaConfig, WidgetConfig, ...).
-4. `va_db/models/__init__.py`: re-export the 24 models and 11 Literals. Keep `__all__` sorted.
-5. specs/03 §5 SQL: the 13 org indexes plus the Decision note (see above).
-
-### Tests
-- conftest `scratch_session`: add `CREATE EXTENSION IF NOT EXISTS vector` before create_all (container is
-  pgvector/pgvector:pg16). Tenancy and telephony integration tests must still pass.
-- `test_agent_config_models.py` (unit, reuses support/model_introspection; split into two files by area if it gets
-  past ~500 lines): all 24 tables registered; full ordered (name, nullable) column list per table; enum checks equal
-  the Literal tuples (voices provider/service/category/clone_status, tools method, knowledge_bases status,
-  kb_documents type/status, pathway_versions status, persona_versions status, pathway_test_runs kind/status,
-  experiments status); exact CHECK-name set over the 24 tables, plus the compiled sqltext of the non-enum checks (rating,
-  name regex, timeout_ms, retries, simulated_variations, semver, branch, weight, tag, messages_per_minute); full
-  server-default map, including the voices.settings and tools.input_schema JSON literals; the UNIQUE and PK sets,
-  including voice_ratings_pkey (voice_id, user_id); the FK set with ondelete (RESTRICT on agent_versions.pathway_id and
-  experiment_arms.agent_version_id; SET NULL on widgets ×4, pathways.folder_id, pathway_versions.published_by,
-  agent_versions.created_by; nullable CASCADE on voices.org_id); assert pathway_unit_tests.source_call_id has no FK;
-  the exact index DDL set (HNSW `USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`, GIN tsv,
-  both voices expression-unique partial indexes, the experiments partial unique, two DESC indexes, every org_idx);
-  column types (Vector dim 1024, TSVECTOR plus `Computed` persisted with the exact sqltext, Numeric(5,2), SmallInteger
-  rating/retries, LargeBinary secret_headers_enc, BigInteger size_bytes); every timestamp tz-aware; the text[] column
-  set; and every §5 table except voices has NOT NULL org_id with an index or UNIQUE starting with org_id (this test
-  guards the Decision).
-- `test_agent_config_models_integration.py` (integration, `scratch_session`, model_factories builders):
-  - `test_voice_defaults` covers settings JSON equality, '{en}', 'premade', and a platform voice with org_id NULL.
-  - `test_voice_name_unique_per_scope`: a case-insensitive duplicate name in the same org fails; another org and the
-    platform scope succeed; two platform voices with the same name fail; a soft-deleted duplicate is allowed. Do the
-    same for provider_voice_id.
-  - `test_enum_values_accepted_and_rejected`: parametrized over every enum column through `assert_enum_check_enforced`.
-  - `test_range_and_pattern_checks`: boundary values pass and out-of-range values fail for each non-enum check, e.g.
-    tool name "1bad", semver "1.2", tag "lower", branch "" and 65 chars.
-  - `test_kb_chunk_embedding_and_tsv`: insert a 1024-dim embedding; it round-trips and tsv is populated
-    (`tsv @@ to_tsquery('simple', ...)` matches); a 3-dim vector fails.
-  - `test_experiment_one_running_per_agent`: a second running experiment fails; draft and stopped ones are allowed.
-  - `test_restrict_and_set_null_paths`: deleting a pathway referenced by agent_versions raises; deleting an
-    agent_version referenced by an arm raises; deleting a voice nulls widgets.voice_id; deleting a folder cascades
-    child folders and nulls pathways.folder_id.
-  - `test_version_uniques`: pathway/persona/eval_setup version_number and agent semver duplicates fail.
-  - `test_eval_pass_threshold_decimal`: the default is Decimal("70.00").
-  Inside the scratch transaction, check that the indexes really exist: `pg_indexes` has kb_chunks_embedding_hnsw
-  (`USING hnsw`) and kb_chunks_tsv_idx (`USING gin`). This is an early answer to the acceptance item that P01-T07 will
-  re-verify after migration.
-
-### Gates
-`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` with Docker up and
-0 skipped; `uvx pip-audit` on uv export (pgvector and numpy are new); `uvx radon cc -s -a packages/va_db/src`;
-`npx --yes jscpd@4 --silent` (0 clones; the three model files must not repeat column blocks, so use `_columns.py`);
-va_db coverage at 100 %. AGENTS.md: record the pgvector dependency/mypy note, `_columns.py`, the org-index Decision, and
-the vector extension in scratch_session.
-
-### Risks
-- Expression indexes made of text() inside __table_args__ may not attach to the table. Fall back to module-level
-  `Index(...)` with column expressions. Pin the compiled DDL from real output.
-- asyncpg has no codec for `vector`. The SQLAlchemy Vector bind sends text and asyncpg falls back to the text format.
-  If binding fails, register the codec only for the scratch connection in tests and record a fix memory. Do NOT add
-  a connect listener to engine.py, because the extension may not exist yet at connect time.
-- jscpd can flag the large expected-column dicts against each other. Keep them as data and split them by file if needed.
-- A regex CHECK containing `\.` needs a raw string, and the compiled sqltext must equal the spec text.
-
-## Build P01-T04 (2026-10-27)
-Implemented per plan, with these deviations and findings for the Reviewer:
-- pgvector 0.5.1 (`uv add --package va-db pgvector`) ships `py.typed` and no longer pulls numpy; its result processor
-  returns `list[float]`, so `KbChunk.embedding: Mapped[list[float]]`. No mypy override was needed.
-- Bug caught while pinning DDL: `text("'{\"style\":0,...}'::jsonb")` compiled `:0`/`:true` as bind params. The fix is
-  `_columns.jsonb_default`, which escapes `:`. Unit tests pin the compiled voices.settings and tools.input_schema
-  literals, and test_columns.py asserts that no params appear.
-- `Mapped[Any]` made `tools.body` NOT NULL; it is now `Mapped[Any | None]` with `nullable=True` (the column-list test caught it).
-- `_columns.py` grew past the plan, because jscpd flagged 11 clones of repeated column blocks: `org_id_column(nullable=)`,
-  `fk_column`, `int_column`, `bool_column`, `text_column`, `text_array_column`, `jsonb_column(default=None)`. These were
-  applied to tenancy and telephony as well; behaviour is unchanged and their unit and integration tests are unchanged and green.
-  The last clone was the agents/library import header only, so agents.py wraps it in `# jscpd:ignore-start/end` with a reason.
-- `pathway_test_runs_org_idx` is declared module-level next to the DESC index (same DDL).
-- model_introspection: `server_defaults` skips `Computed`; new `computed_columns`. model_factories: new `assert_rejected`,
-  `assert_check_enforced` (`assert_enum_check_enforced` now delegates to it).
-- `pathway_unit_tests.source_call_id` has no FK, as in the spec.
-- Integration: 32 new tests, including pg_indexes `USING hnsw ... WITH (m='16', ef_construction='64')` and `USING gin (tsv)`,
-  cosine-distance ordering, tsv @@ match, and 3-dim vector rejection ("expected 1024 dimensions, not 3").
-- specs/03 §1 Decision plus the 13 `<table>_org_idx` statements in §5. AGENTS.md is updated.
-Gates: make fmt 0, lint 0, typecheck 0 (168 files), placeholders 0 findings, make test 1387 passed (99.85 %,
-va_db 100 %), `pytest packages/va_db -m integration -rs` 87 passed / 0 skipped, pip-audit no known vulns,
-radon A (1.15), jscpd 0 clones.
-
-## Review P01-T04 (2026-10-27) — APPROVED
-Re-ran: make lint/typecheck/placeholders clean; make test 1387 passed (99.85 %); `pytest packages/va_db -m integration`
-87 passed, 0 skipped; jscpd 0 clones; radon A (1.15). Compared library.py, pathways.py, agents.py against specs/03 §5
-column by column: types, nullability, defaults (voices.settings and tools.input_schema JSON literals), CHECKs,
-ondelete (RESTRICT x2, SET NULL paths), voices expression/partial uniques, HNSW/GIN, DESC indexes, the experiments
-partial unique, and widgets.public_key UNIQUE all match. The spec diff adds only the 13 org_idx lines plus the §1
-Decision. Unit tests pin the compiled DDL, and integration tests exercise the behaviour that matters.
-
-## Plan P01-T05 — Call models (2026-10-27)
-Spec: specs/03 §6 (12 tables). Depends on T03 and T04, both ticked. Follow the T02–T04 conventions: `_columns` builders,
-`check_in` from Literals, spec-named indexes, and the jscpd/test-support memories.
-
-### Spec decision (extend the §1 Decision in the same commit)
-The §1 org-index rule is binding, but §6 leaves these tables without an index that starts with org_id: contacts (only
-*partial* uniques, which cannot serve a full-org scan), batch_items, call_legs, call_turns, call_events,
-call_analyses, citations, eval_runs, guard_rail_events, dnc_entries (nullable org_id, same as voices, which
-has voices_org_idx). Add `CREATE INDEX <table>_org_idx ON <table>(org_id);` for each of the 10 tables to the §6 SQL
-block, directly after each table's existing indexes. Then append a second paragraph to the §1 Decision note
-("§6 likewise: ...") that lists them. Why: it is the same RLS-predicate reasoning, and the P01-T07 and T08 tasks copy
-and parse this DDL. call_events_org_idx on the partitioned parent becomes a partitioned index, which is fine.
-
-### Files
-1. `packages/va_db/src/va_db/models/calls.py`. Literals (names are exact; tuples copy the spec order):
-   `BatchStatus` (created, scheduled, validating, dispatching, in_progress, completed, stopped, failed),
-   `BatchItemStatus` (pending, skipped, dispatched, completed, failed, canceled), `CallDirection` (outbound, inbound, web),
-   `CallStatus` (12 values), `AnsweredBy` (human, voicemail, ivr, unknown, no_answer, fax), `RunnerType` (task, pathway,
-   persona, agent), `EndedBy` (agent, user, system, api, guard_rail, timeout, error), `CallLegRole`, `CallLegState`,
-   `CallTurnRole` ('user','assistant','agent-action','system','human_agent'), `CallEventCategory` (18 values),
-   `CallEventLevel` (debug, info, warning, error), `CallAnalysisKind`, `EvalRunStatus`, `DncSource`.
-   Models:
-   - `Contact` (contacts): email CITEXT NULL; attributes jsonb '{}'. Indexes: three partial uniques declared as
-     `Index("contacts_phone_uq", "org_id", "phone_e164", unique=True, postgresql_where=text("phone_e164 IS NOT NULL"))`
-     (likewise for email and external), plus contacts_org_idx.
-   - `Batch` (batches): status text_column('created') + check; global_props/schedule '{}'; five int_column(0)
-     counters; created_by_key FK api_keys.id SET NULL. `batches_org_created_idx (org_id, created_at DESC)` is
-     module-level with `.desc()`.
-   - `BatchItem` (batch_items): batch_id FK CASCADE NN; ordinal Integer NN; payload jsonb NN with no default; status
-     'pending' + check; attempts SmallInteger default 0; call_id is a Uuid NULL with **no FK** (calls.batch_item_id
-     already points the other way, and a cycle would break create_all/drop ordering); UNIQUE(batch_id, ordinal) →
-     batch_items_batch_id_ordinal_key; batch_items_dispatch_idx (batch_id, status, next_attempt_at); org idx.
-   - `Call` (calls): column order exactly as in the spec. external_id gets
-     `CheckConstraint("char_length(external_id) <= 256", name="external_id_check")`. answered_by and ended_by are
-     nullable with check_in; a NULL passes the CHECK. SET NULL FKs: contact, pathway, persona, agent, agent_version,
-     experiment, experiment_arm, batch, batch_item, parent_call_id (**self** "calls.id"), phone_number, voice.
-     created_by-style columns with **no FK**: credit_hold_id and memory_id (their targets come in T06; the spec has no
-     REFERENCES). config jsonb NN with no default; request_data/metadata/variables '{}'; connected_seconds and
-     transfer_seconds `Numeric(10, 3)` NN default `0`, Mapped[Decimal]; price_micros BigInteger default 0;
-     recording_duration_ms Integer NULL; test_call bool_column(default=False). Attribute `metadata` is reserved on
-     Declarative classes, so map it as `metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, ...)`.
-     Add a comment saying why, and assert the column name in the unit test. Six indexes: `calls_org_created_idx` and
-     `calls_org_to_idx` (org_id, to_number, created_at DESC) and `calls_pathway_idx` (org_id, pathway_id,
-     created_at DESC) are module-level with `.desc()`; calls_org_status_idx; `calls_org_external_idx` partial
-     WHERE external_id IS NOT NULL (non-unique); calls_batch_idx.
-   - `CallLeg` (call_legs): call_id CASCADE NN; telnyx_account_id SET NULL; call_control_id NN; started_at
-     tz NN `server_default=func.now()`; `call_legs_ccid_uq` unique index (an index, not a constraint);
-     call_legs_call_idx; org idx.
-   - `CallTurn` (call_turns): **the attribute named `text`** shadows `sqlalchemy.text` inside the class body.
-     Either declare it with `mapped_column("text", Text, nullable=False)` under attribute `text` placed so that no later
-     line in the class body calls `text(...)` (builders are safe because they call text() in `_columns`), or name it
-     `text_` with an explicit column name "text". Prefer `text_` for clarity; mypy and the reader both see it. stt_confidence
-     `REAL` (sqlalchemy.REAL) Mapped[float | None]; latency '{}'; interrupted bool false; start_ms/end_ms Integer NN
-     with no default; UNIQUE(call_id, turn_index, role) → call_turns_call_id_turn_index_role_key;
-     call_turns_call_idx (call_id, turn_index); org idx.
-   - `CallEvent` (call_events): **no IdMixin and no TimestampMixin** (it has no updated_at, and the PK is composite).
-     Columns in spec order: id Uuid NN `default=new_id`; org_id Uuid NN with **no FK** (partitioned table; the spec
-     has no REFERENCES); call_id Uuid NN with no FK; seq Integer NN; category check; level text_column('info') + check;
-     message NN; data '{}'; created_at tz NN server_default now(). `PrimaryKeyConstraint("created_at", "id")` →
-     call_events_pkey, and `{"postgresql_partition_by": "RANGE (created_at)"}` as the trailing dict in
-     __table_args__. Indexes: call_events_call_idx (call_id, seq), call_events_org_idx. The comment cites the
-     RetentionWorkflow partition note. Do not give created_at a Python default: the server fills it
-     and RETURNING brings it back (Postgres + asyncpg do implicit RETURNING for server-generated PK parts). If the ORM
-     still complains because a PK part is NULL at flush, set `default=utcnow` from va_common.time as well, keep the
-     server default, and record the fix memory.
-   - `CallAnalysis` (call_analyses): kind check; goal Text NULL; questions/schema JSONB NULL as `Mapped[Any | None]`
-     (memory: Mapped[Any] would make them NOT NULL); `schema` is fine as an attribute name; result jsonb NN with no
-     default; model NN; call idx and org idx.
-   - `Citation` (citations): citation_schema_id FK CASCADE NN; value JSONB NULL; conditions_met Boolean NULL;
-     cited_utterances '[]'; call idx and org idx.
-   - `EvalRun` (eval_runs): call_id FK calls CASCADE **nullable**; eval_setup_version_id FK CASCADE NN; status check
-     with no default; overall_score Numeric(5,2) NULL Mapped[Decimal | None]; passed Boolean NULL; results '[]';
-     error NULL; call idx and org idx.
-   - `GuardRailEvent` (guard_rail_events): triggered Boolean NN with **no default** (plain mapped_column); action
-     NULL; turn_index Integer NULL; detail '{}'; call idx and org idx.
-   - `DncEntry` (dnc_entries): org_id_column(nullable=True); source check; call_id Uuid NULL with no FK;
-     expires_at tz NULL; `dnc_scope_phone_uq` = unique on (coalesce(org_id, '0000…'::uuid), phone_e164) **without**
-     WHERE. Reuse the same expression-building approach as voices_name_scope_uq; if the coalesce expression is
-     duplicated, factor it into a helper in `_columns.py` such as `platform_scope(column)` and use it in both
-     library.py and calls.py (jscpd). Add dnc_entries_org_idx.
-   Docstrings name the Pydantic models and specs cited in the comments (BatchSchedule 17-batches §3, SendCallConfig
-   05-calls-api §4, end_reason enumeration 05-calls-api §9).
-2. `va_db/models/__init__.py`: re-export the 12 models and 15 Literals, with `__all__` kept sorted.
-3. specs/03: the §6 org_idx lines plus the extension of the §1 Decision.
-4. AGENTS.md: `metadata_` / `text_` attribute mapping convention; call_events has no FK, a composite PK, and is
-   partitioned; the partition name used by tests (see below) is a candidate for T13.
-
-### Tests
-- `packages/va_db/tests/test_call_models.py` (unit; model_introspection): all 12 tables registered; ordered
-  (name, nullable) columns per table; every enum check equals its Literal tuple; exact CHECK-name set, plus the
-  sqltext of `calls_external_id_check`; server-default map; UNIQUE/PK set (call_events_pkey = (created_at, id),
-  batch_items and call_turns uniques); FK set with ondelete, including `calls.parent_call_id → calls.id SET NULL`;
-  **no-FK assertions** for batch_items.call_id, calls.credit_hold_id, calls.memory_id, call_events.org_id/call_id,
-  dnc_entries.call_id; exact index DDL set (three contacts partial uniques, calls_org_external_idx partial,
-  three DESC indexes, call_legs_ccid_uq UNIQUE, the dnc coalesce expression, every org_idx); the
-  `postgresql_partition_by` dialect option == "RANGE (created_at)"; types (CITEXT email, Numeric(10,3) x2,
-  Numeric(5,2), REAL, SmallInteger attempts, BigInteger price_micros); tz-aware timestamps; `Call.metadata_` maps
-  to column "metadata" and `CallTurn.text_` to "text"; every §6 table except dnc_entries has NOT NULL org_id, and all
-  12 have an index starting with org_id (this test guards the Decision). Extend the existing §5 org-index test helper
-  rather than copy it (put a shared `org_leading_index_tables()` in model_introspection if needed).
-- `packages/va_db/tests/test_call_models_integration.py` (scratch_session plus factory builders; add `make_call` and
-  `make_batch` to model_factories if reused):
-  - `test_call_event_lands_in_monthly_partition`: inside the scratch txn,
-    `CREATE TABLE call_events_2026_10 PARTITION OF call_events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')`
-    plus the 2026_11 partition, then insert CallEvents with created_at in each month and assert
-    `SELECT tableoid::regclass::text FROM call_events WHERE id = :id` gives the right partition. An insert outside every
-    partition raises ("no partition of relation"). This is the task's acceptance item. Also insert one CallEvent
-    with no created_at and check that the server default plus RETURNING populates it (needs a partition covering now; create
-    it from `SELECT date_trunc('month', now())` in the test).
-  - `test_call_defaults`: Decimal("0.000") for the seconds columns, price 0, test_call false, and the '{}' jsonb defaults.
-  - `test_enum_values_accepted_and_rejected`: parametrized over every enum column via assert_enum_check_enforced
-    (answered_by and ended_by NULL accepted).
-  - `test_external_id_length_check`: 256 chars pass, 257 fail.
-  - `test_contact_partial_uniques`: duplicate phone/email (email case-insensitive via citext)/external per org fails;
-    multiple NULLs allowed; the same value in another org is allowed.
-  - `test_dnc_scope_unique`: a duplicate phone in one org fails; a platform (NULL org) duplicate fails; the same phone in
-    an org plus the platform succeeds.
-  - `test_uniques`: batch_items (batch_id, ordinal), call_turns (call_id, turn_index, role) where the same index with
-    a different role is allowed, and call_legs call_control_id.
-  - `test_delete_paths`: deleting a call cascades legs, turns, analyses, citations, guard_rail_events and eval_runs;
-    deleting the parent call nulls parent_call_id; deleting a contact, batch or voice nulls the calls FKs; deleting a
-    batch cascades its batch_items.
-  - `test_call_turn_text_and_real_round_trip`: the `text_` attribute round-trips; stt_confidence is a float.
-
-### Gates
-`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (Docker up, 0 skipped);
-`uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones); va_db coverage at 100 %;
-`uvx pip-audit` on uv export (no new deps expected).
-
-### Risks
-- `metadata` is reserved by Declarative (InvalidRequestError), hence `metadata_`. `text` shadows the import in the class body.
-- create_all on a table with postgresql_partition_by: SQLAlchemy emits `PARTITION BY RANGE (created_at)`, and
-  Postgres requires the PK to include the partition key, which it does. Unique and plain indexes on the parent are fine.
-- Self-referential FK calls.parent_call_id together with calls.batch_item_id → batch_items: no cycle as long as
-  batch_items.call_id has no FK. Keep it that way.
-- If jscpd flags call_id-FK + call_idx blocks repeated across call_analyses/citations/guard_rail_events/eval_runs,
-  add a small `_columns` helper (e.g. `call_fk_column()`) instead of using ignore markers.
-- test file length: split the unit test by area (calls vs. the rest) if it goes past about 500 lines.
-
-## Build P01-T05 (2026-10-27)
-Implemented per plan. Notes for the Reviewer:
-- `models/calls.py`: 12 models and 15 Literals. Local helpers `_call_id_column()` (call_id FK CASCADE NN) and
-  `_seconds_column()` (numeric(10,3) NN default 0). `Call.metadata_` maps to "metadata" and `CallTurn.text_` to "text".
-- New `_columns.platform_scope(org_id)` (coalesce with the nil uuid). library.py now uses it for both voices uniques,
-  and `_NIL_UUID` is gone; the DDL is unchanged and pinned by test_agent_config_models.
-- CallEvent: no mixins, `PrimaryKeyConstraint("created_at","id")`, partition_by RANGE (created_at). `created_at` has only
-  a server default; asyncpg RETURNING filled it at flush, so no Python default was needed. This is verified in
-  `test_call_event_created_at_comes_back_from_the_server_default`, which uses a partition whose bounds are the
-  `date_trunc('month', now())` expression.
-- specs/03: 10 `<table>_org_idx` lines in §6, plus a "§6 likewise" paragraph appended to the §1 Decision.
-- Test support (jscpd): `model_introspection.leading_columns`, `spec_column_mismatches`, `assert_enum_check_mirrors`.
-  The agent-config and telephony unit tests now use them. Their behaviour is the same, and they are green.
-- Integration (27 tests): monthly partition routing (Oct/Nov) with an out-of-range insert rejected ('no partition of
-  relation "call_events" found for row'); server-default created_at; defaults; 13 enum checks; answered_by/ended_by/
-  external_id (256 ok, 257 rejected, NULL ok); contact partial uniques including the citext email case; dnc scope;
-  batch_items/call_turns/call_legs uniques; child cascades; SET NULL paths for parent call, contact, voice, and batch
-  (+ batch_items cascade); text_/REAL round-trip.
-Gates: make fmt 0, lint 0, typecheck 0 (171 files), placeholders 0 findings, make test 1464 passed (99.86 %, va_db
-100 %), `pytest packages/va_db -m integration -rs` 114 passed / 0 skipped, radon A (1.12), jscpd 0 clones, pip-audit
-no known vulns (no new deps).
-
-## Review P01-T05 (2026-10-27) — APPROVED
-Re-ran: make lint/typecheck/placeholders clean; make test 1464 passed (99.86 %); `pytest packages/va_db -m integration`
-114 passed, 0 skipped; jscpd 0 clones; radon A (1.12). Checked calls.py against specs/03 §6 column by column: order,
-types (CITEXT, numeric(10,3) x2, numeric(5,2), REAL, smallint, bigint), nullability, defaults, every CHECK list,
-calls_external_id_check, FK ondelete (self FK parent_call_id SET NULL; eval_runs.call_id nullable CASCADE), the
-FK-less columns (batch_items.call_id, credit_hold_id, memory_id, call_events org_id/call_id, dnc call_id), call_events
-composite PK + RANGE partitioning, partial/DESC/expression indexes. The spec diff only adds the 10 org_idx lines and
-the "§6 likewise" Decision paragraph. The platform_scope refactor leaves the voices DDL unchanged (pinned by tests).
-
-## Plan P01-T06 — Memory, messaging, webhook, billing, §9a models (2026-10-27)
-Spec: specs/03 §7, §8, §9, §9a (20 tables). Depends on T05 (ticked). Same conventions as T02–T05: `_columns`
-builders, `check_in(get_args(Literal))`, spec-named indexes, `metadata_` mapping, tests via model_introspection /
-model_factories, jscpd 0 clones.
-
-### Spec decision (extend the §1 Decision in the same commit)
-Tables in §7–§9a with no plain index leading with org_id: memory_changes, messages, ten_dlc_brands,
-ten_dlc_campaigns, org_subscriptions (only a *partial* unique), org_data_keys (only a partial unique). Add
-`CREATE INDEX <table>_org_idx ON <table>(org_id);` after each table's indexes in the SQL blocks, and append a third
-paragraph to the §1 Decision ("§7–§9a likewise: ..."). Already satisfied: memories (non-partial unique starting
-org_id), conversations (lookup idx), webhook_endpoints, webhook_deliveries, credit_ledger, credit_holds,
-usage_events, invoices, org_llm_providers (org_id UNIQUE), dnc_imports, erasure_requests, org_secrets
-(UNIQUE(org_id,name)). plans and stripe_events are system scope (no org_id, no RLS) — say so in the paragraph.
-
-### Files (new model modules import only va_db.base, _checks, _columns, and library.EMBEDDING_DIMENSIONS — no
-### sibling-model imports beyond that; FKs are strings)
-1. `packages/va_db/src/va_db/models/memory.py` (§7):
-   - `MemoryChangeType` Literal ('summary','fact_set','fact_delete','open_item_add','open_item_close','reset').
-   - `Memory` (memories): org_id; contact_id fk contacts CASCADE NN; persona_id fk personas CASCADE NULL (comment:
-     NULL = org-wide memory); summary text_column(''); facts jsonb '{}'; open_items '[]'; recent_messages '[]';
-     enabled bool true; summary_embedding `Vector(EMBEDDING_DIMENSIONS)` NULL `Mapped[list[float] | None]`
-     (import the constant from va_db.models.library). Index `memories_contact_persona_uq` unique on
-     ("org_id","contact_id", platform_scope(persona_id)) — reuse `_columns.platform_scope` and widen its docstring to
-     "NULL means the shared scope (platform rows for voices/DNC, org-wide memory for memories)"; do NOT rename
-     (DDL pinned by earlier tests). Docstring names the facts/open_items/recent_messages shapes per the spec comments.
-   - `MemoryChange` (memory_changes): memory_id fk memories CASCADE NN; call_id, conversation_id plain Uuid NULL
-     (**no FK**, spec has none); change_type check (no default); before/after JSONB NULL `Mapped[Any | None]`
-     (memory fix: not Mapped[Any]). Indexes: module-level `memory_changes_memory_idx (memory_id, created_at DESC)`
-     with `.desc()`; memory_changes_org_idx.
-2. `packages/va_db/src/va_db/models/messaging.py` (§8):
-   - Literals `ConversationChannel` (sms,mms,widget,imessage,rcs), `ConversationRunnerType` (objective,pathway,
-     persona,agent — distinct from calls.RunnerType, say why in a comment), `ConversationStatus` (active,
-     human_takeover,closed,timed_out), `MessageDirection`, `MessageRole` (user,assistant,human_agent,system),
-     `MessageStatus` (8 values in spec order), `TenDlcBrandStatus`, `TenDlcCampaignStatus`.
-   - `Conversation`: columns in spec order; SET NULL FKs widget, contact, pathway, persona, agent; engine_state/
-     request_data '{}'; `metadata_` → "metadata" '{}' (same comment as Call); status text_column('active')+check;
-     time_out_minutes int_column(1440); last_message_at tz NULL; webhook/summary/disposition_tag Text NULL.
-     Indexes conversations_lookup_idx (org_id, channel, agent_number, user_number, status) and
-     conversations_widget_idx (widget_id, widget_visitor_id).
-   - `Message`: conversation_id fk CASCADE NN; body NN; media_urls text_array_column('{}'); telnyx_message_id Text
-     unique (→ messages_telnyx_message_id_key); status text_column('queued')+check; error JSONB NULL Mapped[Any|None];
-     segments int_column(1); price_micros bigint default 0; node_id NULL. Indexes messages_conversation_idx
-     (conversation_id, created_at), messages_org_idx.
-   - `TenDlcBrand` (ten_dlc_brands): telnyx_brand_id unique; payload jsonb NN no default (comment 21-messaging §6);
-     status check no default; status_detail NULL; org idx.
-   - `TenDlcCampaign` (ten_dlc_campaigns): brand_id fk ten_dlc_brands CASCADE NN; telnyx_campaign_id unique;
-     use_case NN; payload NN; status check; status_detail; org idx.
-3. `packages/va_db/src/va_db/models/billing.py` (§9 — webhooks and billing as the spec groups them):
-   - Literals `WebhookFormat` (bland,envelope), `WebhookDeliveryStatus` (pending,delivering,succeeded,failed,dead),
-     `SubscriptionStatus` (active,past_due,canceled,trialing), `CreditEntryType` (11 values), `CreditHoldStatus`
-     (held,captured,released), `UsageMeter` (13 values), `InvoiceStatus` (draft,finalized,paid,void).
-   - `WebhookEndpoint`: url NN; description text_column(''); event_types text_array_column('{*}'); enabled bool
-     true; phi_allowed bool false; webhook_endpoints_org_idx (org_id).
-   - `WebhookDelivery`: event_id/event_type/url NN; endpoint_id fk SET NULL; payload jsonb NN; format
-     text_column('bland')+check; status text_column('pending')+check; attempts SmallInteger NN default 0;
-     next_attempt_at tz NN server_default now(); last_status_code/last_response_ms Integer NULL; last_error NULL;
-     call_id/batch_id/conversation_id Uuid NULL **no FK**; delivered_at tz NULL. UniqueConstraint("event_id","url")
-     → webhook_deliveries_event_id_url_key. Indexes: `webhook_deliveries_due_idx (next_attempt_at)` partial
-     `postgresql_where=text("status IN ('pending', 'delivering')")`; module-level
-     `webhook_deliveries_org_idx (org_id, created_at DESC)`.
-   - `Plan` (plans): **no IdMixin**; `id: Mapped[str] = mapped_column(Text, primary_key=True)` declared first; name
-     NN; six bigint NN rate columns with no default; tts_rate_micros_per_1k_chars bigint default 0; four Integer
-     NULL caps (comment: NULL = unlimited); features text_array '{}'; stripe_price_id NULL; is_public bool true;
-     TimestampMixin. No org_id.
-   - `OrgSubscription`: plan_id `mapped_column(Text, ForeignKey("plans.id"), nullable=False)` (no ondelete →
-     NO ACTION; FK test asserts ondelete None); status check no default; stripe_subscription_id unique;
-     current_period_start/end tz NN; cancel_at_period_end bool false. Indexes `org_subscriptions_active_uq` unique on
-     org_id WHERE status IN ('active', 'past_due', 'trialing'); org_subscriptions_org_idx.
-   - `CreditLedger` (credit_ledger): entry_type check; amount_micros/balance_after_micros bigint NN (no default);
-     reference_type/reference_id NULL; description ''; idempotency_key NN; UNIQUE(org_id, idempotency_key) →
-     credit_ledger_org_id_idempotency_key_key; module-level credit_ledger_org_created_idx (org_id, created_at DESC).
-     Docstring: append-only.
-   - `CreditHold` (credit_holds): reference_type/reference_id NN; amount_micros NN; status check; expires_at tz NN;
-     credit_holds_org_status_idx (org_id, status).
-   - `UsageEvent` (usage_events): meter check; quantity `Numeric(18, 6)` NN Mapped[Decimal]; unit_price_micros,
-     amount_micros NN; cost_micros default 0; reference_type/reference_id NN; idempotency_key NN; occurred_at tz NN;
-     UNIQUE(org_id, idempotency_key); module-level usage_events_org_time_idx (org_id, occurred_at DESC).
-   - `Invoice` (invoices): period_start/end tz NN; subtotal/credits_applied/total micros NN; line_items jsonb NN no
-     default; status check; stripe_invoice_id unique; pdf_s3_key NULL; module-level invoices_org_idx
-     (org_id, period_start DESC).
-   - `StripeEvent` (stripe_events): **no IdMixin**, `id` Text PK (Stripe event id); `type` Text NN (attribute name is
-     fine); payload jsonb NN; processed_at tz NULL; TimestampMixin. No org_id.
-   - If the "bigint NOT NULL DEFAULT 0" mapped_column repeats (calls.price_micros, messages.price_micros,
-     usage_events.cost_micros, plans.tts_rate...) and jscpd flags it, add `_columns.micros_column(default: int |
-     None = None)` (bigint NOT NULL, optional DEFAULT) and use it in calls.py too (DDL unchanged, pinned by tests).
-4. `packages/va_db/src/va_db/models/security.py` (§9a):
-   - Literals `JobStatus` (queued,running,completed,failed — shared by dnc_imports and erasure_requests),
-     `OrgDataKeyStatus` (active,retired).
-   - `OrgLlmProvider`: `org_id` = `mapped_column(Uuid, org_fk(), nullable=False, unique=True)` →
-     org_llm_providers_org_id_key; base_url NN; api_key_enc LargeBinary NN; models jsonb NN (docstring:
-     {"dialogue","router","analysis","fallback"}, 10-llm-gateway); supports_tool_choice bool true; baa_covered bool
-     false; last_probe_at tz NULL; last_probe_error NULL.
-   - `DncImport`: status check; s3_key NN; total/inserted/invalid/duplicates Integer NULL; error NULL; module-level
-     dnc_imports_org_idx (org_id, created_at DESC).
-   - `ErasureRequest`: selector jsonb NN; status check; result JSONB NULL Mapped[Any|None]; module-level
-     erasure_requests_org_idx (org_id, created_at DESC).
-   - `OrgSecret`: name NN with `CheckConstraint("name ~ '^[A-Z][A-Z0-9_]{0,63}$'", name="name_check")`
-     (→ org_secrets_name_check); value_enc bytea NN; UNIQUE(org_id, name) → org_secrets_org_id_name_key.
-   - `OrgDataKey`: kek_id NN; encrypted_data_key bytea NN; status check; `org_data_keys_active_uq` unique on org_id
-     WHERE status = 'active'; org_data_keys_org_idx.
-   - Module docstring: envelope encryption (28-security), {{secrets.NAME}} (04 §7).
-5. `va_db/models/__init__.py`: re-export the 20 models and new Literals, `__all__` sorted.
-6. specs/03: the 6 org_idx lines + §1 Decision paragraph.
-7. AGENTS.md: list the model modules by spec section; system-scope tables (plans, stripe_events) use text PKs and
-   no IdMixin; model modules must not import each other except for shared constants (import-graph test).
-
-### Tests
-- `tests/test_memory_messaging_models.py` (unit, §7+§8, 6 tables) and `tests/test_billing_models.py` (unit, §9+§9a,
-  14 tables). Each: tables registered; spec_column_mismatches == {}; assert_enum_check_mirrors for every enum
-  column; exact check_names set (incl. org_secrets_name_check sqltext); server_defaults map (incl. '{*}', 1440,
-  'bland', jsonb '{}'/'[]'); unique_and_pk set (plans/stripe_events PK = id Text; messages/ten_dlc/subscription/
-  invoice stripe ids; ledger/usage (org_id, idempotency_key); webhook (event_id,url); org_secrets; org_llm_providers
-  org_id); foreign_keys set incl. org_subscriptions.plan_id → plans.id ondelete None; **no-FK assertions** for
-  memory_changes.call_id/conversation_id, webhook_deliveries.call_id/batch_id/conversation_id; exact index_ddl
-  (partials, DESC, the memories coalesce expression, every Decision org_idx); every org table has a NOT NULL org_id
-  and "org_id" in leading_columns; plans/stripe_events have no org_id column; types (Vector(1024) on
-  summary_embedding, Numeric(18,6), SmallInteger attempts, LargeBinary *_enc, BigInteger micros, ARRAY(Text)
-  via text_array_columns); naive_timestamps == []; `Conversation.metadata_` maps to "metadata". If a §1-org-index
-  parametrized test would be cloned a third time, move it into model_introspection as
-  `assert_org_indexed(table, *, nullable=False)` and reuse it from test_call_models/test_agent_config_models.
-- `tests/test_model_imports.py` (acceptance "no cycles"): ast-parse every module under va_db (src), build the
-  intra-va_db import graph (from va_db.x import ...; resolve package `__init__`), assert acyclic via DFS
-  (graphlib.TopologicalSorter.static_order raising CycleError is the simplest), and `sqlalchemy.orm.configure_mappers()`
-  succeeds after `import va_db.models`. Assert every specs/03 §3–§9a table name is in Base.metadata.tables (parse
-  `CREATE TABLE (\w+)` from specs/03-data-model.md — gives T08 a head start; path via repo root relative to test).
-- `tests/test_memory_messaging_models_integration.py` and `tests/test_billing_models_integration.py`
-  (scratch_session; add `make_contact`, `make_conversation`, `make_plan` to model_factories if reused):
-  - defaults for each table (jsonb '{}'/'[]', bools, 1440, 'queued', '{*}', next_attempt_at populated, Decimal
-    quantity round-trip Decimal("1.500000")).
-  - enum checks accepted/rejected via assert_enum_check_enforced, parametrized over every enum column.
-  - `memories_contact_persona_uq`: two org-wide (NULL persona) memories for one contact fail; one per persona plus
-    one NULL pass; summary_embedding 1024-float round-trip.
-  - `org_subscriptions_active_uq`: second active/trialing fails; canceled + active ok.
-  - `org_data_keys_active_uq`: second active fails; retired + active ok.
-  - uniques: webhook (event_id,url); ledger and usage (org_id, idempotency_key) same key other org ok; org_secrets
-    (org_id,name); messages.telnyx_message_id; org_llm_providers one per org.
-  - `org_secrets_name_check`: 'API_KEY' ok, 'api_key', '1KEY', 65-char name rejected.
-  - plan FK: deleting a plan referenced by a subscription raises (NO ACTION); plan without org_id inserts with text id.
-  - delete paths: contact delete cascades memories → memory_changes; persona delete cascades persona memory;
-    conversation delete cascades messages; widget/contact/pathway/persona/agent delete nulls conversation FKs;
-    brand delete cascades campaigns; endpoint delete nulls webhook_deliveries.endpoint_id; org delete cascades
-    org_llm_providers/org_data_keys.
-  - bytea round-trip (OrgSecret.value_enc).
-
-### Gates
-`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (0 skipped);
-`uvx radon cc -s -a packages/va_db/src`; `npx --yes jscpd@4 --silent` (0 clones); va_db coverage 100 %; pip-audit
-(no new deps).
-
-### Risks
-- `metadata` reserved → `metadata_`. `type` and `schema` attribute names are fine.
-- Partial-index WHERE text must be literal SQL (no colons) — fine; regex CHECK has none either.
-- Text-PK models without IdMixin: TimestampMixin columns must still sort last (match how tenancy/calls order).
-- plan FK without ondelete: ForeignKey("plans.id") — foreign_keys helper reports None; don't pass ondelete="NO ACTION"
-  (it would render explicitly and break T08 parity).
-- Vector import: Mapped[list[float] | None]; asyncpg needs pgvector codec as already set up for kb_chunks.
-- Unit test files ≤ ~500 lines each; split integration by area as listed.
-
-## Build P01-T06 (2026-10-27)
-New: va_db/models/memory.py (§7), messaging.py (§8), billing.py (§9), security.py (§9a): 20 tables, all
-Literals, spec-named indexes; models/__init__ re-exports (131 names). `_columns.micros_column(default=None)` added
-and used by calls.price_micros (DDL unchanged); `platform_scope` docstring widened (memories reuse it). specs/03:
-6 `<table>_org_idx` lines (memory_changes, messages, ten_dlc_brands, ten_dlc_campaigns, org_subscriptions,
-org_data_keys) + "§7–§9a likewise" paragraph in the §1 Decision. AGENTS.md P01-T06 entry.
-Tests: test_memory_messaging_models.py, test_billing_models.py (unit), *_integration.py for both (37 tests),
-test_model_imports.py (ast import graph acyclic via graphlib, configure_mappers, sibling model imports are
-constants/Literals only — agents imports pathways.VersionStatus so "no sibling imports" was too strict — and the
-specs/03 §3–§9a CREATE TABLE set == Base.metadata.tables exactly: 72 tables). model_introspection gained
-assert_org_indexed, org_index_ddl, enum_check_names, expected_foreign_keys, assert_enum_checks_mirror; call/agent
-config unit tests refactored to use them (jscpd 0 clones).
-Gates: make fmt 0, lint 0, typecheck 0 (180 files), placeholders 0 findings, make test 1563 passed (99.87 %,
-va_db 100 %), `pytest packages/va_db -m integration -rs` 151 passed / 0 skipped, radon A (1.11), jscpd 0 clones,
-pip-audit no known vulns. Note: the very first `make test` run of this iteration had 1 failed + 40 errors in va_db
-integration setup (output not kept); three later full runs were green — likely Docker contention right after my
-standalone integration runs; flag if it recurs.
-
-## Review P01-T06 (2026-10-27) — APPROVED
-Re-ran: make lint 0, typecheck 0 (180 files), placeholders 0 findings, make test 1563 passed / 0 skipped (99.87 %,
-va_db 100 %), jscpd 0 clones, radon A (1.11). Checked memory.py, messaging.py, billing.py, security.py column by
-column against specs/03 §7–§9a: types, nullability, defaults, CHECK lists in spec order, FK ondelete (plans FK
-NO ACTION, no-FK call/conversation/batch refs), unique names, partial/DESC/coalesce indexes, Decision org_idx lines.
-Tests cover defaults, enum enforcement, partial uniques, cascades/SET NULL, bytea/vector/numeric round-trips.
-Minor, not blocking: test_cycle_detection_reports_a_cycle exercises graphlib itself rather than va_db.
-
-## Plan P01-T07 — Alembic initial migration (exact DDL) (2026-10-27)
-Spec refs: specs/03 §1, §2 (+ its Decision), every ```sql block §3–§9a, §10. Verified: the 72 spec tables appear
-in FK-dependency order (no forward REFERENCES), so DDL can run in spec order with no deferred ALTERs.
-
-### Spec decision (add to specs/03 §10 as `> Decision (2026-10-27):` in the same commit)
-- Roles: created only when absent, `CREATE ROLE va_app LOGIN` / `CREATE ROLE va_system LOGIN BYPASSRLS`, no
-  password. If `va_system` already exists without BYPASSRLS (the compose init script created it that way), the
-  migration runs `ALTER ROLE va_system BYPASSRLS`. Then `GRANT va_app, va_system TO CURRENT_USER`.
-- Privileges: `GRANT USAGE ON SCHEMA public` and `SELECT, INSERT, UPDATE, DELETE` on every 0001 table (not
-  alembic_version) to va_app and va_system. Later migrations that add tables must grant explicitly (no default
-  privileges). Partitions need no grants because they are always reached through the parent.
-- call_events partitions are named `call_events_pYYYYMM` with UTC month bounds `[month start, next month start)`.
-  0001 creates the current UTC month plus 3. P01-T13 `ensure_call_event_partitions` must use the same name/bounds.
-- The trigger and RLS loops run in DO blocks over pg_catalog: every public base or partitioned table that is not
-  a partition (`relkind IN ('r','p') AND NOT relispartition`) with an `updated_at` column gets
-  `<t>_set_updated_at`. Every such table with an `org_id` column gets ENABLE + FORCE RLS + `tenant_isolation`
-  (exact §10 text). voices and dnc_entries also get `platform_read`.
-- downgrade(): drops all 72 tables (explicit reverse-order tuple, `DROP TABLE IF EXISTS ... CASCADE`), the
-  set_updated_at function, and the three extensions. It keeps roles and role memberships because they are
-  cluster-wide and may be used by other databases.
-
-### Files
-1. `packages/va_db/pyproject.toml`: add `alembic>=1.16` (whatever `uv add --package va-db alembic` resolves; keep
-   the lower bound at the resolved minor). Run `uv lock`.
-2. `packages/va_db/alembic.ini`: `script_location = %(here)s/migrations`, `file_template = %%(rev)s_%%(slug)s`,
-   no `sqlalchemy.url` (env.py takes it from settings), standard logger sections (WARN root, alembic INFO).
-3. `packages/va_db/migrations/env.py` (async):
-   - `target_metadata = Base.metadata` after `import va_db.models` (P01-T08 autogenerate uses it).
-   - URL from `DatabaseSettings().database_url` (DATABASE_URL, specs/02 §6), read fresh on every run.
-   - online: `create_engine(settings, None)` from va_db.engine (login role, per the §2 Decision) →
-     `async with engine.connect() as c: await c.run_sync(_run)` with `context.configure(connection=...,
-     target_metadata=..., transaction_per_migration=True)` and `context.begin_transaction()`; dispose engine in
-     `finally`. Entry `asyncio.run(...)`.
-   - offline: `context.configure(url=..., literal_binds=True, dialect_opts={"paramstyle": "named"})` so
-     `alembic upgrade head --sql` emits the script.
-   - Typed functions, module docstring citing specs/03.
-4. `packages/va_db/migrations/script.py.mako`: the standard template, fully typed (`def upgrade() -> None:`), with
-   `revision: str`, `down_revision: str | None`, docstring.
-5. `packages/va_db/migrations/versions/0001_initial.py`: `revision = "0001"`, `down_revision = None`.
-   - Module-level SQL constants, one triple-quoted string per spec section, copied verbatim from the spec
-     (EXTENSIONS_AND_FUNCTIONS §2, TENANCY §3, TELEPHONY §4, AGENT_CONFIGURATION §5, CALLS §6, MEMORY §7,
-     MESSAGING §8, WEBHOOKS_AND_BILLING §9, ADDITIONAL §9a), plus the Decision org_idx lines, which are already in
-     the spec blocks. Wrap spec lines longer than 110 chars (36 of them, mostly long CHECK IN lists) at commas.
-     The SQL meaning is unchanged, and P01-T08 compares catalogs, not text. Keep `'{}'::jsonb` and similar
-     defaults exactly as written. No `:name` tokens appear in the DDL. Execute through `op.execute(sql)` with a
-     plain string, not text(), so colons like `'{}'::jsonb` are never treated as bind params. Confirm this with
-     the offline test.
-   - ROLES (DO block above), GRANTS (DO block looping pg_tables in schema public where tablename <>
-     'alembic_version'), TRIGGERS and RLS (DO blocks as in the Decision, using `format('%I')`), PLATFORM_READ (the
-     two §10 statements verbatim), CALL_EVENT_PARTITIONS (DO block `FOR i IN 0..3` that computes
-     `date_trunc('month', now() AT TIME ZONE 'UTC') + make_interval(months => i)`, converts it back with
-     `AT TIME ZONE 'UTC'`, and runs `CREATE TABLE IF NOT EXISTS call_events_p<YYYYMM> PARTITION OF call_events FOR
-     VALUES FROM (...) TO (...)`).
-   - `upgrade()`: run the statements in order: extensions/function → sections → grants → triggers → RLS → platform_read →
-     partitions. `downgrade()` as in the Decision, with `_TABLES: Final[tuple[str, ...]]` in spec order and
-     iterated reversed.
-   - asyncpg cannot run several statements with bind params in one execute, but plain multi-statement strings
-     work through `op.execute` in the simple-query protocol only. If asyncpg rejects multi-statement text
-     ("cannot insert multiple commands into a prepared statement"), split each constant on top-level `;` with a
-     small helper `_statements(sql) -> list[str]` that respects `$$` bodies, and execute each statement. This
-     helper is the likely path because SQLAlchemy+asyncpg prepares statements. Unit-test it.
-6. Tooling: add `packages/va_db/migrations` to mypy `files`. Add ruff per-file-ignores for
-   `packages/va_db/migrations/**`: `INP001` (not a package) and `N999` if 0001_initial trips it. Do not add other
-   ignores. Check that coverage tracks env.py and the versions files, since alembic loads them in-process.
-7. `infra/docker/postgres-init/01-roles.sql`: create va_system with `BYPASSRLS` (dev parity with §2).
-8. specs/03 §10 Decision. AGENTS.md: `make migrate`, `alembic upgrade head --sql`, partition naming, the "grant
-   new tables to va_app/va_system in each migration" rule, and that migrations run as the login role.
-
-### Tests
-- `packages/va_db/tests/test_migrations.py` (unit, no Docker):
-  - offline `command.upgrade(cfg, "head", sql=True)` with stdout captured (Config(..., stdout=buf) / capsys)
-    contains `CREATE TABLE orgs`, `PARTITION BY RANGE (created_at)`, `CREATE POLICY platform_read ON voices`,
-    `'{}'::jsonb`, and every Base.metadata table name in a `CREATE TABLE` statement.
-  - `_statements` splitter: `$$` bodies stay intact, trailing whitespace/empty statements are dropped, and the
-    statement count for the §2 block is 4. Import the version module via importlib from its path.
-  - `_TABLES` == the spec's CREATE TABLE order (reuse the parser from test_model_imports, or move it to
-    model_introspection to avoid a jscpd clone) and set-equal to Base.metadata.tables.
-- `packages/va_db/tests/test_migrations_integration.py` (integration). Each test gets a fresh database:
-  `CREATE DATABASE mig_<hex>` on the session `pg_url` server via a login connection with AUTOCOMMIT, and DATABASE_URL
-  is monkeypatched to it. Tests are sync, call `alembic.command`, and inspect through `asyncio.run(helper)`, or
-  are async and run commands via `asyncio.to_thread`.
-  - `test_upgrade_creates_every_model_table`: public base/partitioned non-partition tables minus alembic_version
-    == Base.metadata table names. Extensions vector/pg_trgm/citext installed; `set_updated_at` exists.
-  - `test_updated_at_triggers`: trigger `<t>_set_updated_at` exists for exactly the metadata tables with an
-    updated_at column. Behaviour: insert an org, then UPDATE in a later txn, and updated_at advances.
-  - `test_rls_enabled_and_forced`: relrowsecurity and relforcerowsecurity hold for exactly the tables with an org_id
-    column. The tenant_isolation qual/with_check (pg_policies) match the §10 expression, and platform_read exists
-    only on voices and dnc_entries.
-  - `test_rls_smoke`: as va_app through Database(...).tenant_session, org A cannot see org B's contact row. The full
-    harness is P01-T09.
-  - `test_grants`: `has_table_privilege(role, t, 'SELECT,INSERT,UPDATE,DELETE')` for both roles on every table,
-    and false on alembic_version for va_app.
-  - `test_call_event_partitions`: 4 partitions named call_events_pYYYYMM for the DB's current UTC month +0..3,
-    with bounds from pg_get_expr(relpartbound). call_events_org_idx is a partitioned index attached on each
-    partition. An insert routes into the current partition.
-  - `test_downgrade_then_upgrade`: upgrade head → downgrade base leaves no tables except alembic_version, no
-    set_updated_at, and no extensions; then upgrade head succeeds and the table set matches again.
-  - `test_roles_created_when_absent` uses a dedicated container without SETUP_SQL. Give `running_postgres` a
-    `setup_sql: str | None = SETUP_SQL` parameter. Assert va_app/va_system exist, va_system has rolbypassrls,
-    rolpassword is NULL (pg_authid), and current_user is a member of both. Then downgrade, run
-    `ALTER ROLE va_system NOBYPASSRLS`, upgrade, and assert BYPASSRLS is restored.
-- Add any reused helpers (fresh-db context manager, alembic Config builder) to tests/support, not copied.
-
-### Gates
-`make fmt lint typecheck placeholders test`; `uv run pytest packages/va_db -m integration -rs` (0 skipped);
-`make up` (infra) then `make migrate`, then `uv run alembic -c packages/va_db/alembic.ini downgrade base &&
-make migrate` against compose Postgres (evidence for the acceptance criterion); radon; jscpd 0 clones; va_db
-coverage 100 % (now including migrations/); pip-audit (alembic is new).
-
-### Risks
-- asyncpg multi-statement execution, handled by the splitter as above.
-- CREATE EXTENSION vector requires superuser or trusted-extension rights. The compose `va` user and the
-  testcontainer user are superusers.
-- PG16 GRANT role TO CURRENT_USER requires ADMIN. It works for a superuser or the creator of the roles.
-- alembic_version is created before upgrade runs, so the GRANT loop must exclude it explicitly.
-- The BEFORE UPDATE trigger on partitioned call_events is supported on PG13+ (row triggers propagate to
-  partitions).
-- Partition names in the test must come from the DB's `now()`, not Python's clock, so a month rollover mid-test
-  cannot break it.
-- Compose pgdata may already hold roles without BYPASSRLS, which the migration fixes. If `make migrate` finds
-  leftover tables from an earlier experiment, `make down -v` first and note it.
-
-## Build P01-T07 (2026-10-27)
-New: packages/va_db/alembic.ini, migrations/env.py (async online through `create_engine(settings, None)`, offline
-`--sql`, `configure_logger` attribute gates fileConfig), migrations/script.py.mako (typed; empty bodies render as
-`pass` so the placeholder gate catches an unfilled revision), migrations/versions/0001_initial.py: spec §2-§9a
-blocks verbatim. They were generated once from the spec; 36 lines over 110 chars were wrapped outside string
-literals, and the result is equal to the spec after whitespace/comment normalisation. Also ROLES, GRANTS
-(explicit TABLES list), UPDATED_AT_TRIGGERS / ROW_LEVEL_SECURITY DO loops limited to the 0001 tables,
-PLATFORM_READ, CALL_EVENT_PARTITIONS (call_events_pYYYYMM, UTC months), `statements()` splitter (dollar quotes,
-literals, comments), and `execute_script()` (escapes `:word` colons because op.execute wraps strings in text()).
-Downgrade covers 72 tables, the function, and the extensions; roles stay.
-Deviations from plan (recorded in the specs/03 §10 Decision): RLS applies to NOT NULL org_id + voices/dnc_entries per the
-spec text, not to "every org_id column" (plans and telnyx_events have a nullable org_id and are system scope).
-The loops are scoped to the revision's tables, not to all public tables (the test server has rls_probe).
-Roles test: renames the worker server's roles aside instead of a second container (the Docker daemon timed out
-creating one under the full suite). Test Postgres now runs with fsync=off (DROP DATABASE checkpoint hit
-asyncpg's 30 s timeout under xdist); the va_db suite went from ~4.5 to ~1.5 min.
-Other: alembic 1.20.1 dependency; mypy files += packages/va_db/migrations; ruff per-file ignores INP001/N999
-(+RUF001 for 0001's verbatim en dash); spec_table_names moved to model_introspection; 01-roles.sql va_system
-BYPASSRLS (+ test_compose assertion); AGENTS.md (migrate commands, conventions, partition naming fixed to pYYYYMM).
-Tests: test_migrations.py (12 unit tests: offline upgrade/downgrade SQL, colon escaping, grants list, logging, TABLES ==
-spec order == models, splitter), test_migrations_integration.py (13: tables/extensions/function/version,
-every model index + hnsw/gin, triggers exact + behaviour, RLS exact + forced, tenant_isolation deparse ==
-rls_probe spec policy, platform_read, tenant_session smoke, grants per privilege, partitions + routing at
-bounds + out-of-range rejection, partitioned index attachment, downgrade→upgrade, roles absent + BYPASSRLS restore).
-Gates: make fmt 0; make lint 0; make typecheck 0 (185 files); make placeholders 0 findings; check_spec_refs 0;
-make test 1587 passed (99.87 %; va_db incl. migrations/env.py and 0001 100 %); pytest packages/va_db -m
-integration -rs 164 passed / 0 skipped; radon A (1.21); jscpd 0 clones; pip-audit no known vulns; pnpm audit
-clean; scripts compose/ci tests 68 passed.
-Compose acceptance: `make migrate` on the empty compose DB → 73 tables (72 + alembic_version), 4 partitions,
-67 policies, 71 triggers, va_system BYPASSRLS fixed; `alembic downgrade base` → only alembic_version, no
-extensions/function; `make migrate` again → OK. The compose DB is left migrated at 0001.
-
-## Review P01-T07 (2026-10-27) — APPROVED
-Re-ran: make lint 0, typecheck 0, placeholders 0 findings, jscpd@4 0 clones, radon A (migrations 2.13).
-make test: the first run had 1585 passed + 2 setup errors, both pytest-timeout (60 s) in `scratch_session` setup
-(test_call_models_integration / test_memory_messaging_models_integration, which are pre-T07 model tests). jscpd and
-compose `make migrate` were running at the same time. The isolated rerun had 1587 passed, 0 errors (99.87 %).
-This is the same signature as the T06 first-run note, so it is a recurring load-sensitive flake: the scratch_session
-setup hangs on the server under host contention. It is not caused by this diff; it is tracked as a fix task.
-Verified: the 9 SQL constants equal specs/03 §2–§9a sql blocks after whitespace/comment normalisation (scripted
-compare); RLS rule = §10 text (NOT NULL org_id + voices/dnc_entries), exact policy text; roles absent-only,
-no password, BYPASSRLS repair, GRANT TO CURRENT_USER per §2 Decision; colon-escape regex leaves `::casts` and
-`:=` alone; downgrade keeps roles. Compose: make migrate → downgrade base → make migrate → `current` = 0001 (head).
-Tests are behavioural (catalog-exact sets, trigger advance, partition routing at bounds, roles-absent path).
-
-## Plan P01-T08 — Schema conformance and autogenerate parity tests (2026-10-27)
-Spec refs: specs/03 header paragraph (conformance test), §2–§10 sql blocks; plan/phase-01.md T08 acceptance; phase
-constraint "autogenerate comparison against the models ... no differences (excluding RLS/trigger objects)".
-No production code changes expected. If a test exposes a real model/migration mismatch, fix the model (or the
-0001 SQL if it deviates from the spec). Never weaken the comparison to make it pass. Record any spec-level
-ambiguity as a `> Decision (2026-10-27):` in specs/03 in the same commit.
-
-### Which spec blocks are applied (conformance)
-- Relational blocks = every ```sql fence between `## 2.` and `## 11.` (§2, §3, §4, §5, §6, §7, §8, §9, §9a, and
-  the two §10 blocks). §12 ClickHouse is excluded because it is not Postgres. The §10 blocks are examples for
-  `calls` (trigger, ENABLE/FORCE RLS, tenant_isolation) and voices/dnc_entries (platform_read). Apply them as
-  written. They are compared only on those objects (see below), because the migration generates the rest in loops.
-- Execution: split each block with `statements()` from 0001 (load via `migration_helpers.load_initial_revision()`)
-  and run each statement with `AsyncConnection.exec_driver_sql(stmt)` in one login-role transaction. That way no
-  text() bind parsing happens, and `'{}'::jsonb` and `:=` need no escaping. Risk: the asyncpg dialect may
-  %-format driver SQL. Check whether any spec statement contains `%`. If one does and it breaks, use `%%` for
-  that run only and document why in a comment.
-
-### Files
-1. `packages/va_db/tests/support/model_introspection.py`: add `spec_sql_blocks() -> list[str]`. It returns the
-   relational ```sql blocks of SPEC_03 (§2 up to `## 11.`) in order. Reuse the `relational`-slice idiom.
-   `spec_table_names` stays as is.
-2. `packages/va_db/tests/support/schema_catalog.py` (new, typed, docstrings):
-   - `TABLES_SQL` moved here from test_migrations_integration.py (import it there; no jscpd clone).
-   - `@dataclass(frozen=True) class CatalogSnapshot` with frozenset fields:
-     `columns` (table, column, ordinal_position, data_type, udt_name, is_nullable, column_default,
-     character_maximum_length, numeric_precision, numeric_scale, is_generated, generation_expression), taken from
-     information_schema.columns. Atttypmod also goes through `format_type(a.atttypid, a.atttypmod)` from
-     pg_attribute so `vector(1024)` and `numeric(10,3)` are compared exactly. Fold this into the columns query
-     with a join, or use a second field `column_types`.
-     `constraints` (table, conname, contype, pg_get_constraintdef(oid, true)).
-     `indexes` (table, indexname, indexdef) from pg_indexes.
-     `triggers` (table, tgname, pg_get_triggerdef) with NOT tgisinternal.
-     `policies` (tablename, policyname, cmd, roles, qual, with_check) from pg_policies.
-     `rls` (relname, relrowsecurity, relforcerowsecurity).
-     `extensions` (extname) and `functions` (proname, pg_get_functiondef) for set_updated_at.
-     Every table-scoped query is limited to schema public, `relkind IN ('r','p') AND NOT relispartition`, and
-     `relname <> 'alembic_version'`. This excludes call_events_pYYYYMM and their cloned indexes and triggers.
-     Indexes and constraints are filtered by joining to that relation set.
-   - `snapshot(url) -> CatalogSnapshot` (sync, `migration_helpers.query`), plus
-     `restrict(snapshot, tables) -> CatalogSnapshot` for the §10 subset comparison.
-   - `apply_spec(url) -> None`: applies spec_sql_blocks() as described above (async helper + asyncio.run, as in
-     migration_helpers._query; pool_size 1, `create_engine(settings, None)`).
-   - `diff(a, b) -> dict[str, tuple[frozenset, frozenset]]`: per field, (only_in_a, only_in_b), with empty
-     fields omitted, so a failing assert prints a readable diff.
-3. `packages/va_db/tests/test_schema_matches_spec.py` (integration, `pytestmark = pytest.mark.integration`):
-   - module fixture `spec_and_migrated(pg_url)`: two `fresh_database`s. Apply the spec to one and `upgrade()` the
-     other. Snapshot both.
-   - `test_spec_tables_equal_model_tables`: spec snapshot table set == set(Base.metadata.tables) ==
-     set(spec_table_names()) (72).
-   - `test_columns_match_spec`: columns and column types equal (assert `diff(...) == {}` per field).
-   - `test_constraints_match_spec`: equal (names, kinds, definitions: CHECK lists, FK ondelete, uniques, PKs).
-   - `test_indexes_match_spec`: equal (partial, DESC, coalesce, hnsw/gin, org_idx).
-   - `test_extensions_and_function_match_spec`: extensions ⊇ {vector, pg_trgm, citext} on both and equal.
-     set_updated_at definitions are equal.
-   - `test_section_10_examples_match_migration`: for `calls`, `voices`, `dnc_entries`, the spec DB's triggers,
-     policies, and rls rows equal the migrated DB's rows restricted to those tables. The spec DB has exactly the
-     §10 objects, and the migrated DB has the same for those tables.
-   - `test_spec_blocks_cover_every_section` (unit, no marker, or in test_migrations.py): spec_sql_blocks() has 11
-     blocks. The first contains `CREATE EXTENSION IF NOT EXISTS vector`. None contains `ENGINE =` (ClickHouse
-     excluded). The set of CREATE TABLE names over the blocks == spec_table_names().
-4. `packages/va_db/tests/test_autogenerate_parity.py`:
-   - helper (put in support/schema_catalog.py or a new support/autogen.py) `autogenerate_diff(url, metadata) ->
-     list[Any]`. It uses an async engine (login role) and `connection.run_sync(lambda c: compare_metadata(
-     MigrationContext.configure(c, opts={"compare_type": True, "compare_server_default": True,
-     "include_object": include_object}), metadata))`.
-   - `include_object(obj, name, type_, reflected, compare_to)`: for type_ == "table", skip `alembic_version` and
-     partitions matching `^call_events_p\d{6}$`. Skip nothing else. RLS, policies, and triggers are invisible to
-     autogenerate, which satisfies the exclusion.
-   - Known comparator noise, to handle narrowly only if it appears:
-     (a) alembic warns "autogenerate skipping functional index" (or similar) for expression indexes (coalesce
-     ones). filterwarnings=error turns this into a failure. Wrap compare_metadata in
-     `warnings.catch_warnings()` + `filterwarnings("ignore", message=<exact text>, category=UserWarning)`. Then
-     add a separate assertion that every expression index is covered by test_indexes_match_spec (the conformance
-     test compares their indexdef exactly) and by an explicit check that the model's index names == the
-     reflected index names for every table, which covers expression indexes skipped by autogenerate.
-     (b) server-default text differences (e.g. `now()` vs `now()`, jsonb casts). Fix them through a
-     `compare_server_default` callable only if they are proven equivalent. The callable must normalise both sides
-     by running `SELECT <a> IS NOT DISTINCT FROM <b>` or by canonicalising the model default with
-     `pg_get_expr` on the DB. Prefer evaluating both default expressions on the DB. Document each normalisation
-     in a comment.
-     (c) pgvector `Vector` type comparison. pgvector.sqlalchemy registers the reflection type, so check that
-     `vector(1024)` compares cleanly.
-     Anything else is a real diff: fix the model.
-   - module fixture `migrated_url` (fresh_database + upgrade). Reuse the one in test_migrations_integration by
-     moving it to conftest.py as a module-scoped fixture `migrated_url` (no duplicate fixture code).
-   - `test_models_match_migrated_schema`: `autogenerate_diff(url, Base.metadata) == []`.
-   - `test_model_index_names_match_database` (covers indexes autogenerate skips): for every table, the
-     {index names} in metadata == pg_indexes names (non-constraint indexes) in the migrated DB.
-   - `test_parity_detects_model_drift` parametrized over mutations of a temporary metadata copy
-     (`copy = MetaData(); for t in Base.metadata.sorted_tables: t.to_metadata(copy)`). Base.metadata is never
-     mutated, which the test asserts afterwards. Each case is (id, mutate(copy), expected diff op name):
-     - "column-added": `Column("drift", Text)` appended to orgs → `add_column`
-     - "column-removed": rebuild by `copy.remove(t)` + `Table(...)` without one column? Simpler: in the copy, set
-       `include_object` ... Use: drop `orgs.c.slug` via `copy.tables["orgs"]._columns.remove(...)` only if public
-       API fails. Otherwise skip this case and rely on the next three.
-     - "nullability-flipped": `copy.tables["agents"].c.<a NOT NULL text col>.nullable = True` → `modify_nullable`
-     - "type-changed": `.type = Integer()` on a text column → `modify_type`
-     - "default-changed": `.server_default = DefaultClause(text("'x'"))` on a column with a text default →
-       `modify_default`
-     - "index-removed": `copy.tables["calls"].indexes.remove(<named index>)` → `remove_index`
-     The assertion flattens the diff (modify_* entries come as nested lists of tuples) and checks that the expected
-     op name, together with the table name, is present.
-5. `packages/va_db/tests/test_migrations_integration.py`: use the shared `migrated_url` fixture and `TABLES_SQL`
-   from the support modules (delete the local copies).
-6. AGENTS.md: one bullet under va_db testing on the conformance and parity tests, the spec-apply mechanics
-   (exec_driver_sql, statements()), and the rule that "autogenerate noise is filtered only by named, commented
-   exceptions".
-
-### Gates
-`make fmt lint typecheck placeholders test` (do NOT run jscpd/compose concurrently with make test, see the flake
-memory); `uv run pytest packages/va_db -m integration -rs` (0 skipped); jscpd 0 clones; radon A; va_db coverage
-100 %; check_spec_refs. Show the negative test fails for real: temporarily alter a model column locally, run
-test_models_match_migrated_schema, record the failing output in the build note, and revert.
-
-### Risks
-- Autogenerate noise (expression/partial/hnsw indexes, server defaults, vector type). Handle it narrowly as above.
-  Each exception is commented, so a reviewer can verify it is not hiding real drift.
-- Spec text wrapped at >110 columns is fine here because the test reads the markdown, not 0001.
-- information_schema.columns `column_default` for computed tsvector columns is NULL and `generation_expression`
-  is set, which is compared as well.
-- Two extra fresh DBs per module under xdist mean more load on the worker server (fsync=off already). Keep the
-  conformance snapshots module-scoped so each DB is built once.
-- Constraint names generated by Postgres (e.g. `<t>_<col>_check`) must match between the spec DB and the migrated
-  DB. They will, since both run the same DDL, but the comparison also guards against 0001 drift.
-
-## Build P01-T08 (2026-10-27)
-New: tests/support/schema_catalog.py (TABLES_SQL moved here; CatalogSnapshot of columns [format_type, attnotnull,
-pg_get_expr default, attgenerated, attidentity], constraints [conparentid = 0: partition clones excluded], indexdefs,
-triggers, policies, RLS flags, extensions, non-extension functions in public; snapshot/restrict/diff; apply_spec via
-exec_driver_sql + 0001 statements() in one txn; include_object [alembic_version + call_events_pYYYYMM only];
-autogenerate_diff with compare_type + compare_server_default). tests/test_schema_matches_spec.py (7 integration
-tests), tests/test_autogenerate_parity.py (8: parity == [], index names per table == DB, 6 drift cases incl. an
-expression index). model_introspection.spec_sql_blocks(); migration_helpers.query_many (one connection, _query
-generalised); migrated_url moved to conftest (module scope); test_migrations.py +1 unit test (11 blocks, no
-ClickHouse, CREATE TABLE names == spec_table_names). AGENTS.md bullet.
-Deviation from plan: no autogenerate noise appeared at all (alembic 1.20.1 compares expression/partial/hnsw indexes,
-server defaults, and vector(1024) cleanly, without warnings), so no warning filter and no compare_server_default
-callable exist. No model or 0001 change was needed: spec DB == migrated DB and models == migrated DB on the first run.
-The "column-removed" drift case was skipped as the plan allowed (no public API); an expression-index case replaces it.
-Negative proofs (reverted, git diff clean):
-- tenancy.py orgs.slug CITEXT -> Text: test_models_match_migrated_schema FAILED with
-  [('modify_type', None, 'orgs', 'slug', {...}, CITEXT(), ...)].
-- specs/03 hnsw `m = 16` -> `m = 8`: test_table_objects_match_spec[indexes] FAILED showing kb_chunks_embedding_hnsw
-  WITH (m='8', ...) vs (m='16', ...).
-Gates: make fmt 0; make lint 0; make typecheck 0 (188 files); make placeholders 0 findings; check_spec_refs 0;
-make test 1603 passed, 99.87 % (run alone); pytest packages/va_db -m integration -rs 179 passed / 0 skipped;
-jscpd@4 0 clones; radon A (2.57 overall); pip-audit no known vulns; pnpm audit clean.
-
-## Review P01-T08 (2026-10-27) — APPROVED
-Re-ran (sequentially, nothing heavy concurrently): make lint 0, typecheck 0, placeholders 0 findings, make test 1603
-passed / 99.87 % (no scratch_session timeout this time), pytest packages/va_db -m integration 179 passed, jscpd@4
-0 clones. Own negative proof: personas.name nullable=True → test_models_match_migrated_schema FAILED with
-('modify_nullable', None, 'personas', 'name', ...); reverted, src diff clean.
-Checked: spec blocks = §2..§10 (11, no ClickHouse), applied via exec_driver_sql + statements() in one txn; snapshot
-restricted to non-partition public tables minus alembic_version; conparentid = 0 drops partition-clone FKs on
-referencing tables; include_object excludes only alembic_version + call_events_pYYYYMM; drift cases mutate a
-to_metadata copy and re-assert Base.metadata parity. column-removed case skipped as plan allowed; type/nullable/default
-cases cover "altering a model column". Uses pg_attribute/format_type instead of information_schema.columns: stricter.
-
-## Plan P01-T09 — RLS isolation test harness (2026-10-27)
-Spec refs: specs/03 §10 (RLS rule + exact policies, platform_read), §1; specs/00 §4 rule 7; plan/phase-01.md T09.
-Test-only task; no production code changes. If a test exposes a missing/incorrect policy, fix 0001 (and the
-spec if the spec is wrong, with a `> Decision`). Never weaken an assertion.
-
-### Facts gathered (introspection of Base.metadata)
-- Tenant tables by the §10 rule (NOT NULL org_id, plus voices and dnc_entries) = 65. Excluded: telnyx_events and
-  plans (nullable org_id, system scope), and every table without org_id (orgs, users, sessions, email_tokens, ...).
-- Composite PKs without `id`: call_events (created_at, id), idempotency_keys (org_id, key), voice_ratings
-  (voice_id, user_id), number_pool_members (pool_id, phone_number_id). Row identity = the PK columns, never `id`.
-- Required FKs (other than org_id) point to tenant tables, to users.id (memberships, invitations.invited_by,
-  voice_ratings) or to plans.id (org_subscriptions). call_events.call_id has no FK.
-- Non-enum CHECKs that a generic value violates (these need overrides): dispositions.tag and org_secrets.name
-  `^[A-Z][A-Z0-9_]{0,63}$`, tools.name `^[A-Za-z][A-Za-z0-9_]{0,63}$`, agent_versions.semver (semver regex),
-  voice_ratings.rating 1..5, experiment_arms.weight 0..100, plus range checks on columns that all have server
-  defaults (so they are never filled). Integer value 1 satisfies every remaining range.
-
-### Semantics (record in the test module docstring)
-In tenant_session(A), a row of org B is invisible: SELECT returns 0 rows, UPDATE/DELETE affect 0 rows (Postgres RLS
-USING filters, it does not raise). "Cross-org INSERT/UPDATE raise" therefore means: INSERT with org_id = B raises
-`new row violates row-level security policy`, and UPDATE that moves A's own row to org B (SET org_id = B) raises the
-same (WITH CHECK). Both forms are asserted, plus B's row is unchanged afterwards when read in tenant_session(B).
-
-### Files
-1. `packages/va_db/tests/support/tenant_rows.py` (new, typed, docstrings, `__all__`):
-   - `TENANT_TABLE_NAMES: Final[tuple[str, ...]]` — sorted names of tables in Base.metadata with `org_id` NOT NULL,
-     plus "voices", "dnc_entries" (`PLATFORM_READ_TABLES: Final = ("dnc_entries", "voices")`). Computed from metadata
-     (function `tenant_table_names()`), so a new tenant table is covered automatically.
-   - `type RowKey = dict[str, Any]` (PK column → value).
-   - `@asynccontextmanager async def open_database(url: str) -> AsyncIterator[Database]`:
-     `Database.from_settings(settings_of(DatabaseSettings, database_url=url, database_pool_size=1))`, dispose in
-     finally. Refactor the `database` fixture in test_session_integration.py to use it (avoids a jscpd clone).
-   - `class OrgFactory`: `__init__(self, database: Database)`; `async def create(self) -> uuid.UUID` — inserts an
-     org with `model_factories.make_org(session)` inside `database.system_session()` and returns its id.
-   - `class RowFactory` — the per-model minimal valid row builder, generic over metadata with named overrides:
-     - `async def values(self, session: AsyncSession, table: Table, org_id: uuid.UUID | None) -> dict[str, Any]`:
-       for every column that is required (`not nullable`, no `server_default`, no `default`, not `Computed`):
-       `org_id` → org_id; required FK → key of a parent row created with `self.insert(session, parent_table,
-       org_id)` (target `orgs` → org_id; targets without org_id such as users/plans are built the same way, their
-       org_id column, if nullable, stays NULL); otherwise `_value(table, column)`. PK columns without a default
-       (plans.id TEXT, idempotency_keys.key) are filled too. Nullable FKs stay NULL. Each call creates fresh parents.
-     - `async def insert(self, session, table, org_id) -> RowKey`: `values()` then Core
-       `insert(table).values(**v).returning(*table.primary_key.columns)`; returns `dict(row._mapping)`.
-     - `_value(table, column)` (module function, small helpers to keep radon A): override from
-       `VALUE_OVERRIDES: Final[dict[tuple[str, str], Callable[[], Any]]]` first; else enum CHECK
-       `<table>_<column>_check` whose sqltext starts with `<column> IN (` → first allowed value (write a local
-       lookup that returns None when absent; do not call `model_introspection.enum_check_values`, it asserts);
-       else by type: UUID → `new_id()`; Text/String/CITEXT → f"{column.name}-{secrets.token_hex(6)}" (CITEXT:
-       f"{hex}@example.test"); Integer/SmallInteger/BigInteger → 1; Numeric → Decimal("1"); Boolean → False;
-       DateTime → fixed `datetime(2026, 1, 1, tzinfo=UTC)` (+ timedelta(days=1) for names ending `_end`/`expires_at`
-       if a check needs ordering); JSONB → {}; ARRAY(Text) → ["+15550100000"] for requested_numbers else [];
-       LargeBinary → `secrets.token_bytes(16)`; Vector(1024) → `[1.0] + [0.0] * 1023` (not a zero vector: hnsw
-       cosine). Unknown type → `TypeError` naming table.column (so a new type fails loudly, not silently).
-     - Overrides: dispositions.tag and org_secrets.name → f"T{hex.upper()}"; tools.name → f"t{hex}";
-       agent_versions.semver → "1.0.0"; voice_ratings.rating → 3; experiment_arms.weight → 50. Add more only when
-       an insert proves it necessary, each with a comment naming the CHECK.
-   - Keep builders free of randomness at collection time (xdist): only test IDs come from TENANT_TABLE_NAMES.
-2. `packages/va_db/tests/test_rls_isolation.py` (new; `pytestmark = pytest.mark.integration`):
-   - function fixture `database(migrated_url)` via `open_database` (function-scoped event loop; migrated_url is the
-     module-scoped conftest fixture, so one migrated DB per module).
-   - helpers `_select_keys(session, table, where)` and `_assert_rls_rejects(session, stmt)` (savepoint
-     `session.begin_nested()`, `pytest.raises(DBAPIError, match="row-level security policy")`).
-   - `test_rls_tables_are_the_tenant_tables(migrated_url)`: set(TENANT_TABLE_NAMES) == catalog tables (public,
-     relkind r/p, not a partition) with relrowsecurity AND relforcerowsecurity AND a `tenant_isolation` policy;
-     and the catalog `platform_read` tables == set(PLATFORM_READ_TABLES).
-   - `test_tenant_table_names_follow_section_10_rule` (unit, no DB, may live in test_migrations.py or a small
-     test_tenant_rows.py): 65 names, sorted, contains voices/dnc_entries, excludes plans, telnyx_events, orgs, users.
-   - `@pytest.mark.parametrize("table_name", TENANT_TABLE_NAMES) test_cross_org_access_is_impossible`:
-     1. orgs A, B via OrgFactory. 2. `tenant_session(A)`: a_key = RowFactory.insert(A) (proves a legal write and
-     the builder). `tenant_session(B)`: b_key = insert(B); b_values = values(B) (fresh parents, not inserted).
-     3. `tenant_session(A)`: all PKs of the table == [a_key]; `WHERE org_id = B` → []; `WHERE <pk> = b_key` → [];
-     INSERT b_values → RLS error; UPDATE ... SET org_id = org_id WHERE pk = b_key → rowcount 0; DELETE WHERE
-     pk = b_key → rowcount 0; UPDATE ... SET org_id = B WHERE pk = a_key → RLS error.
-     4. `tenant_session(B)`: all PKs == [b_key] (B's row survived and A's row is still invisible).
-     5. `database.app_engine.connect()` without app.org_id: `SELECT` of the table → [] (fail closed).
-   - `@pytest.mark.parametrize("table_name", PLATFORM_READ_TABLES) test_platform_rows_are_shared_read_only`:
-     insert a platform row (org_id None) via `system_session` with RowFactory; in tenant_session(A) and (B) the
-     platform row is visible; in tenant_session(A): INSERT with org_id NULL raises RLS; UPDATE / DELETE of the
-     platform row → rowcount 0; then system_session confirms it still exists.
-3. `packages/va_db/tests/test_session_integration.py`: `database` fixture uses `open_database(pg_url)`.
-4. AGENTS.md: bullet under va_db testing — test_rls_isolation, tenant_rows.RowFactory (generic metadata builder +
-   VALUE_OVERRIDES; a new CHECK that the generic value violates needs an override), the invisibility-vs-raise
-   semantics, and that new tenant tables are covered automatically.
-
-### Gates
-`make fmt lint typecheck placeholders test` (run `make test` alone; no jscpd/compose concurrently — scratch_session
-flake memory); `uv run pytest packages/va_db -m integration -rs` (0 skipped); jscpd 0 clones; radon A; va_db coverage
-100 %; check_spec_refs. Negative proof (reverted): in a scratch run, `ALTER TABLE calls DISABLE ROW LEVEL SECURITY`
-(or drop the policy) on the migrated DB via a temporary local edit, and show test_cross_org_access_is_impossible[calls]
-and test_rls_tables_are_the_tenant_tables fail; record output in the build note.
-
-### Risks
-- 65 parametrized tests × ~6 transactions under xdist: keep one migrated DB per module (migrated_url), pool_size 1,
-  dispose per test. If the 60 s timeout is approached, batch nothing silently; report timings.
-- Generic values may violate an unlisted CHECK (multi-column or regex inside an IN-check). The first insert fails
-  with the constraint name; add a commented VALUE_OVERRIDES entry.
-- RLS error vs FK/unique error ordering: INSERT with b_values uses fresh, unique values and existing B parents, so
-  the only possible failure is the WITH CHECK violation. UPDATE SET org_id = B on idempotency_keys changes a PK
-  column; WITH CHECK still fires first (no row with that key exists under B).
-- users/plans parents are inserted by va_app inside the tenant session (no RLS on them; 0001 grants va_app DML).
-
-## Build P01-T09 (2026-10-27)
-New: tests/support/tenant_rows.py (PLATFORM_READ_TABLES, tenant_table_names()/TENANT_TABLE_NAMES = 65 from
-metadata, VALUE_OVERRIDES [dispositions.tag, org_secrets.name, tools.name, agent_versions.semver,
-voice_ratings.rating, experiment_arms.weight], column_value [override -> enum IN-check first value -> by type;
-unknown type -> TypeError], open_database, OrgFactory, RowFactory.values/insert/insert_values),
-tests/test_rls_isolation.py (catalog FORCE-RLS tenant_isolation tables == TENANT_TABLE_NAMES and platform_read ==
-PLATFORM_READ_TABLES; 65x test_cross_org_access_is_impossible; 2x test_platform_rows_are_shared_read_only),
-tests/test_tenant_rows.py (5 unit tests). test_session_integration `database` fixture now uses open_database.
-AGENTS.md bullet.
-Deviations from plan: RowFactory fills `org_id` whenever the table has the column (also nullable: voices/plans
-parents), so a voices parent of voice_ratings belongs to the org, not the platform. A required FK to orgs reuses
-org_id. requested_numbers uses the generic [] (no CHECK needs a number). The "all PKs == [a_key]" check is split
-into: visible org_ids ⊆ {A} (∪ {NULL} on platform-read tables, since platform rows from the other test share the
-module DB) + keys WHERE org_id = A == [a_key]; fail-closed check: app_engine without app.org_id sees org_ids ⊆
-{NULL} on platform tables, nothing otherwise. No 0001 change needed: all 65 tables isolated on the first run; no
-extra overrides were needed beyond the plan's six.
-Negative proof (reverted, test file restored from backup): ALTER TABLE calls DISABLE ROW LEVEL SECURITY on the
-migrated DB -> test_rls_tables_are_the_tenant_tables FAILED ('citation_schemas' != 'calls', calls missing) and
-test_cross_org_access_is_impossible[calls] FAILED (visible org_ids contained org B's id).
-Gates: make fmt 0; make lint 0; make typecheck 0; make placeholders 0 findings; check_spec_refs 0;
-make test run 1: 1675 passed, 2 errors = known scratch_session setup timeout (test_tenancy_models_integration,
-asyncpg TimeoutError in CREATE EXTENSION citext / create_all; task fix:scratch-session-timeout); run 2 (alone):
-1677 passed, 99.87 %; pytest packages/va_db -m integration -rs 247 passed / 0 skipped; RLS module alone 68 passed
-in 23 s (-n 4); jscpd@4 0 clones; radon A overall (2.50), new files all A; pip-audit no known vulns.
-
-## Review P01-T09 (2026-10-27) — APPROVED
-Re-ran (sequentially): make lint 0, make typecheck 0, make placeholders 0 findings, make test 1677 passed / 99.87 %
-(no scratch_session timeout), pytest packages/va_db -m integration 247 passed, jscpd@4 0 clones.
-Own negative proof: 0001 `platform_read ON voices FOR SELECT` -> `FOR ALL` (USING doubles as WITH CHECK, so NULL-org
-inserts pass) -> test_platform_rows_are_shared_read_only[voices] FAILED "DID NOT RAISE DBAPIError"; restored, diff clean.
-Checked: TENANT_TABLE_NAMES derived from metadata (65) and asserted equal to catalog FORCE-RLS tenant_isolation tables;
-semantics (USING hides, WITH CHECK raises) documented and both raise paths asserted; B's row re-verified from B;
-fail-closed check on app_engine without app.org_id is meaningful (pool_size 1, a leaked setting would expose B's
-org_id and fail). Unknown type -> TypeError; overrides each name their CHECK. No production code changed.
-
-## Plan P01-T10 — Repository layer and pagination (2026-10-27)
-Spec refs: specs/31 §2 (limit 1–100 default 25, opaque base64 cursor of (created_at, id), `{"next_cursor","has_more"}`),
-specs/31 §3 (NOT_FOUND never reveals existence; INVALID_INPUT 400; CONFLICT 409), specs/03 §1 (soft delete: queries
-exclude deleted rows by default), §2 (va_system only for the six named system_scope repos), specs/06 §7 step 2
-(`PhoneNumberRoutingRepo.get_active(to)`), specs/19 §8 (outbox poll: pending|delivering, next_attempt_at <= now,
-ORDER BY next_attempt_at LIMIT 200 FOR UPDATE SKIP LOCKED, mark delivering; dead after attempt 8 / 410),
-specs/28 §8.1 step 5 (purge windows), specs/24 §12 (reconcile: ended calls 48 h, release expired holds, ledger-sum
-balance drift), specs/17 (scheduled calls: status 'scheduled' + start_time). No schema/migration change.
-Scope rule: generic data access only; retry schedules, routing decisions, reconcile math stay in later phases.
-
-### Spec decisions (same commit)
-- specs/31 §2 `> Decision (2026-10-27):` cursor = URL-safe base64 without `=` padding of
-  `"<created_at UTC ISO-8601 with microseconds>|<uuid>"`; lists are ordered `created_at DESC, id DESC` (newest first)
-  and the next page is the keyset `(created_at, id) < cursor`, so rows inserted after the first page never shift or
-  duplicate later pages; malformed cursor → `INVALID_INPUT` field `cursor`; limit outside 1–100 → `INVALID_INPUT`
-  field `limit`.
-- specs/03 §2 `> Decision (2026-10-27):` lists each system repo's method set (below), that they live in
-  `va_db.repositories`, accept only a `system_session()` session, and that `TenantRepository` filters
-  `org_id = :org_id` explicitly in addition to RLS, so platform rows (voices/dnc_entries with NULL org_id) are not
-  returned by the generic repository (resource-specific repos add them in later phases).
-
-### Files (all new unless noted; src typed, docstrings, `__all__`; keep every function radon A)
-1. `packages/va_db/src/va_db/pagination.py`
-   - `DEFAULT_PAGE_LIMIT: Final = 25`, `MAX_PAGE_LIMIT: Final = 100`
-   - `@dataclass(frozen=True, slots=True) class Cursor: created_at: datetime; id: uuid.UUID`
-   - `def encode_cursor(created_at: datetime, row_id: uuid.UUID) -> str` (naive datetime → ValueError; converts to UTC)
-   - `def decode_cursor(value: str) -> Cursor` — any failure (bad base64, non-ASCII/UTF-8, missing `|`, bad ISO,
-     naive datetime, bad UUID, empty) → `AppError("INVALID_INPUT", "Invalid cursor.", field="cursor")` (chain `from`)
-   - `def validate_limit(limit: int) -> int` → `AppError("INVALID_INPUT", "limit must be between 1 and 100.", field="limit")`
-   - `@dataclass(frozen=True, slots=True) class Page[T]: items: tuple[T, ...]; next_cursor: str | None; has_more: bool`
-     with `def pagination(self) -> dict[str, str | bool | None]` → `{"next_cursor": ..., "has_more": ...}`.
-2. `packages/va_db/src/va_db/repositories/__init__.py` — re-exports everything below.
-3. `packages/va_db/src/va_db/repositories/base.py`
-   - `class NotFoundError(AppError)`: `__init__(self, resource: str)` → code `NOT_FOUND`, message
-     `f"{resource} not found."` (resource = model `__tablename__`; never the id, never says "other org").
-   - `IMMUTABLE_COLUMNS: Final = frozenset({"id", "org_id", "created_at", "updated_at", "deleted_at"})`
-   - `class TenantRepository[M: Base]`:
-     `__init__(self, model: type[M], session: AsyncSession, org_id: uuid.UUID, *, clock: Clock | None = None)`;
-     validates the table has columns `id`, `org_id`, `created_at` (else `TypeError` naming the table; so
-     idempotency_keys, voice_ratings, number_pool_members, call_events, plans, orgs are rejected); `_soft = "deleted_at"
-     in table.c`. Every statement filters `org_id == self.org_id` (+ `deleted_at IS NULL` unless include_deleted).
-     - `async def get(self, row_id, *, include_deleted=False) -> M` → `NotFoundError`.
-     - `async def list(self, *, limit=DEFAULT_PAGE_LIMIT, cursor: str | None = None,
-        where: Sequence[ColumnElement[bool]] = (), include_deleted=False) -> Page[M]` — validate_limit, decode cursor,
-        `ORDER BY created_at DESC, id DESC`, `tuple_(created_at, id) < (c.created_at, c.id)`, fetch limit+1;
-        next_cursor from last returned item only when has_more.
-     - `async def create(self, values: Mapping[str, Any]) -> M` — keys in IMMUTABLE_COLUMNS minus {"id"} or unknown
-       attributes → `ValueError` (programming error); sets org_id; add + flush inside `session.begin_nested()`;
-       unique violation (asyncpg `UniqueViolationError` / sqlstate 23505 via `IntegrityError.orig`) →
-       `AppError("CONFLICT", f"{table} already exists.")`; then `session.refresh(obj)` so server defaults are loaded.
-     - `async def update(self, row_id, values: Mapping[str, Any]) -> M` — IMMUTABLE_COLUMNS/unknown keys → ValueError;
-       get (NotFoundError for other org/deleted), setattr, flush in savepoint (23505 → CONFLICT), refresh (updated_at
-       from trigger).
-     - `async def soft_delete(self, row_id) -> M` — model without deleted_at → `TypeError`; get (deleted → NotFound,
-       so a second soft_delete raises NotFound); `deleted_at = clock.now()`; flush; refresh.
-     - helper `_validate_keys(values, forbidden)` shared by create/update.
-   - `class SystemRepository`: `system_scope: ClassVar[bool] = True`; `__init__(self, session: AsyncSession)`.
-     Docstring cites specs/03 §2 (only the listed repos; obtain the session from `Database.system_session()`).
-4. `packages/va_db/src/va_db/repositories/routing.py` — `PhoneNumberRoutingRepo(SystemRepository)`:
-   `async def get_active(self, e164: str) -> PhoneNumber | None` (status 'active', deleted_at IS NULL; pending,
-   releasing, released, soft-deleted → None).
-5. `repositories/outbox.py` — `OutboxRepo`:
-   - `CLAIM_LIMIT: Final = 200`, `DEFAULT_LEASE: Final = timedelta(minutes=5)`
-   - `async def claim_due(self, now: datetime, *, limit=CLAIM_LIMIT, lease=DEFAULT_LEASE) -> list[WebhookDelivery]`
-     — one statement: subquery `SELECT id ... WHERE status IN ('pending','delivering') AND next_attempt_at <= :now
-     ORDER BY next_attempt_at LIMIT :limit FOR UPDATE SKIP LOCKED`, `UPDATE ... SET status='delivering',
-     next_attempt_at = now + lease RETURNING` (lease makes rows of a crashed dispatcher due again); result ordered by
-     next_attempt_at in Python? No — return in subquery order (sort returned rows by original next_attempt_at is lost;
-     document "order not guaranteed"). limit < 1 → ValueError.
-   - `async def mark_succeeded(self, delivery_id, *, now, status_code: int, response_ms: int) -> WebhookDelivery`
-     (status succeeded, delivered_at=now, attempts+1, last_status_code/last_response_ms, last_error NULL)
-   - `async def schedule_retry(self, delivery_id, *, next_attempt_at, status_code: int | None, error: str,
-     response_ms: int | None) -> WebhookDelivery` (status pending, attempts+1)
-   - `async def mark_dead(self, delivery_id, *, status_code: int | None, error: str, response_ms: int | None)
-     -> WebhookDelivery` (status dead, attempts+1)
-   - unknown id → `NotFoundError("webhook_deliveries")`. Shared private `_finish(delivery_id, values)` (UPDATE ...
-     attempts = attempts + 1 RETURNING) to avoid three copies.
-6. `repositories/scheduler.py` — `SchedulerRepo.due_scheduled_calls(self, now, *, limit=100) -> list[Call]`
-   (status 'scheduled', start_time <= now, ORDER BY start_time, id; recovery sweep for scheduled calls whose
-   CallWorkflow did not start).
-7. `repositories/retention.py` — `RetentionRepo`:
-   - `@dataclass(frozen=True, slots=True) class RetentionPolicy: org_id; retention_days: int; recording_retention_days: int`
-   - `async def retention_policies(self) -> list[RetentionPolicy]` (all orgs, ordered by id)
-   - `PURGE_RULES: Final[tuple[PurgeRule, ...]]` — `PurgeRule(table, column, age: timedelta | None)`:
-     idempotency_keys.created_at 24 h, telnyx_events.created_at 30 d, stripe_events.created_at 90 d,
-     webhook_deliveries.created_at 30 d, sessions.expires_at (age None = `< now`), email_tokens.expires_at,
-     invitations.expires_at (specs/28 §8.1 step 5, in this order).
-   - `async def purge_expired(self, now: datetime, *, batch_size: int = 1000) -> dict[str, int]` — per rule,
-     repeat `DELETE FROM t WHERE ctid IN (SELECT ctid FROM t WHERE col < cutoff LIMIT :batch)` until a batch deletes
-     fewer than batch_size; returns counts keyed by table (0 included). batch_size < 1 → ValueError. Tables via
-     `Base.metadata.tables[...]` (Core, no raw SQL strings).
-8. `repositories/billing_reconcile.py` — `BillingReconcileRepo`:
-   - `async def calls_ended_between(self, start, end, *, after_id: uuid.UUID | None = None, limit: int = 1000)
-     -> list[Call]` (start <= ended_at < end, keyset by id ascending)
-   - `async def release_expired_holds(self, now, *, limit: int = 1000) -> list[CreditHold]` (status 'held' and
-     expires_at <= now → 'released' RETURNING; captured/released untouched; SKIP LOCKED subquery like outbox)
-   - `@dataclass(frozen=True, slots=True) class BalanceDrift: org_id; materialized_micros: int; ledger_micros: int`
-   - `async def balance_drifts(self) -> list[BalanceDrift]` (orgs LEFT JOIN SUM(credit_ledger.amount_micros) grouped;
-     `coalesce(sum, 0) <> credits_balance_micros`; ordered by org id)
-   - `async def set_balance(self, org_id, balance_micros: int) -> None` (unknown org → NotFoundError("orgs"))
-9. `repositories/telnyx_events.py` — `TelnyxEventRepo`:
-   - `async def record(self, *, telnyx_event_id: str, event_type: str, occurred_at: datetime, payload: dict[str, Any],
-     org_id=None, call_id=None, call_control_id=None) -> TelnyxEvent | None` — `pg insert ... on_conflict_do_nothing(
-     index_elements=["telnyx_event_id"]).returning(TelnyxEvent)`; None = duplicate (dedupe).
-   - `async def mark_processed(self, event_id: uuid.UUID, *, now: datetime, error: str | None = None) -> None`
-     (sets processed_at, process_error; unknown → NotFoundError("telnyx_events"))
-10. `packages/va_db/src/va_db/__init__.py` (modify): no re-export of repositories (keep import graph acyclic;
-    callers import `va_db.repositories`). Check `test_model_imports` import-graph test still passes; extend if it
-    enumerates modules.
-11. `AGENTS.md` (modify): bullet — TenantRepository usage, pagination/cursor format, NotFoundError, system repos list
-    and that each new system repo must be listed in specs/03 §2 (enforced by test).
-
-### Tests (`packages/va_db/tests/`)
-- `test_pagination.py` (unit): round-trip encode/decode (microseconds, non-UTC aware input normalised to UTC);
-  encoded value is URL-safe without `=`; naive datetime → ValueError; parametrized invalid cursors ("", "!!!",
-  base64 of "no-sep", of "2026-01-01T00:00:00|not-a-uuid", of naive "2026-01-01T00:00:00|<uuid>", of b"\xff") →
-  AppError code INVALID_INPUT, field "cursor", http 400; validate_limit 1/25/100 ok, 0/101/-1 → field "limit";
-  Page.pagination() shape.
-- `test_repositories.py` (unit, no DB): TenantRepository(IdempotencyKey/VoiceRating/Org/Plan, ...) → TypeError;
-  soft_delete on a model without deleted_at (e.g. Call) → TypeError (raised before any SQL; use a session mock-free
-  path: construct with `AsyncSession()` unbound, the check fires first); create/update with org_id/created_at/unknown
-  key → ValueError; NotFoundError code/status/message has no id; `SystemRepository` subclasses ==
-  names parsed from specs/03 §2 bullet `va_system` (backticked names ending in `Repo`) and all have system_scope True.
-- `test_repositories_integration.py` (`pytestmark = integration`; `database` fixture via `open_database(migrated_url)`,
-  orgs via `OrgFactory`, rows via `RowFactory` from tests/support/tenant_rows):
-  - get/create/update/soft_delete round-trip on `prompts` (soft-delete table): create returns server defaults
-    (created_at, tags == []); update changes name and updated_at advances (separate transactions); soft_delete sets
-    deleted_at = FrozenClock time; get/list exclude it; include_deleted returns it; second soft_delete → NotFound.
-  - cross-org: repo for org A on B's prompt id: get/update/soft_delete → NotFoundError; list never contains it.
-  - create duplicate on `dispositions` (UNIQUE org_id, tag) → AppError CONFLICT and the session stays usable
-    (a following get succeeds in the same transaction).
-  - pagination: 7 rows with controlled created_at (Core insert in tenant_session, including two rows sharing one
-    created_at to prove id tie-break); pages of 3 → 3/3/1, has_more True/True/False, next_cursor None on last;
-    concatenation == expected order with no duplicates; **stability**: after page 1, insert 3 new rows (separate
-    transaction, newer created_at) and 1 row with created_at older than all, then fetch page 2/3 → the original rows
-    in order followed by the older row (keyset semantics), none of the newer rows, no duplicates.
-  - limit 0 / 101 → INVALID_INPUT; garbage cursor → INVALID_INPUT; `where=[Prompt.name == "x"]` filter.
-  - system repos (via `database.system_session()`):
-    PhoneNumberRoutingRepo: active number found; same e164 released (other row) ignored; soft-deleted → None; unknown → None.
-    OutboxRepo: due pending + expired-lease delivering claimed; future rows, succeeded/dead not claimed; second claim
-    inside lease returns []; claimed rows have status delivering and next_attempt_at = now + lease; limit honoured;
-    mark_succeeded/schedule_retry/mark_dead field effects and attempts increments; unknown id → NotFoundError;
-    SKIP LOCKED: two concurrent system sessions claim disjoint sets.
-    SchedulerRepo: only scheduled + due calls, ordered by start_time.
-    RetentionRepo: rows just inside/outside each window (FrozenClock-style fixed now) → exact counts per table,
-    survivors remain; batch_size 2 with 5 expired rows deletes all 5; policies list contains the test orgs with
-    their values; batch_size 0 → ValueError.
-    BillingReconcileRepo: ended-window bounds (start inclusive, end exclusive) + keyset after_id; expired held holds
-    released, captured/unexpired untouched; drift detected for an org whose balance != ledger sum and absent for a
-    matching org; set_balance clears the drift; unknown org → NotFoundError.
-    TelnyxEventRepo: record returns row, duplicate telnyx_event_id → None (one row); mark_processed sets fields;
-    unknown → NotFoundError.
-  Note: the module DB is shared by tests (module-scoped migrated_url) — assertions on global sets (drifts, policies,
-  purge counts, claim_due) must scope to rows created by the test (filter by own org ids / ids) or use a unique
-  `now` far in the future/past; prefer fresh orgs per test and assert membership, not equality, on cross-org lists.
-  Retention purge counts are global — run them with `now` values and rows whose timestamps are unique to the test
-  (e.g. year 2099) or assert survivors/deletions by id instead of exact counts.
-
-### Gates
-`make fmt lint typecheck placeholders`; `make test` alone (scratch_session flake memory); `uv run pytest
-packages/va_db -m integration -rs` (0 skipped); va_db coverage 100 %; jscpd@4 0 clones; radon A; check_spec_refs;
-pip-audit/pnpm audit. Negative proofs (revert after): drop the `org_id` filter in TenantRepository._base_select and
-run the cross-org test as va_system-bypassing? (RLS would still hide — instead prove with keyset: change `<` to `<=`
-in list → stability/no-duplicate test fails); remove `with_for_update(skip_locked=True)` → concurrent claim test
-fails or deadlocks within timeout (record which).
-
-### Risks
-- SQLAlchemy ORM `update().returning(Model)` / `insert().on_conflict_do_nothing().returning(Model)` need
-  `select(Model).from_statement(stmt)` or `session.scalars(stmt)` with ORM-enabled DML; use `session.scalars(stmt)`
-  (SQLAlchemy 2 supports ORM DML RETURNING) and `execution_options(populate_existing=True)`.
-- `func.now()` vs clock: repos take explicit `now` arguments (system) or a Clock (tenant soft delete); no
-  `datetime.now()` calls.
-- created_at = transaction start: rows created in one transaction share created_at — tie-break by id (UUIDv7) is
-  what makes ordering total; the test covers it.
-- Unique violation inside a savepoint keeps the outer tenant transaction alive; without begin_nested the session
-  would be in failed state — test asserts usability.
-- Concurrent SKIP LOCKED test needs pool_size ≥ 2 for the system engine: open a second Database for the second session.
-
-## Build P01-T10 (2026-10-27)
-Implemented per plan, with these deviations (all recorded in specs/03 §2 Decision):
-- `TelnyxEventRepo.record(event: NewTelnyxEvent)` takes a frozen dataclass instead of 7 keyword args (ruff PLR0913).
-- `TenantRepository._savepoint()` is an async context manager; mutations (add/setattr) happen INSIDE
-  `begin_nested()` because entering it autoflushes pending changes into the outer transaction (first attempt aborted
-  the whole tenant transaction on CONFLICT). A failed savepoint expires touched rows; the test keeps ids.
-- CallEvent was dropped from the "rejected model" list: it has id/org_id/created_at, so it is a valid tenant table.
-- Extra test: platform voices (NULL org) are visible via RLS platform_read but not through TenantRepository.
-Files: va_db/pagination.py, va_db/repositories/{__init__,base,routing,outbox,scheduler,retention,billing_reconcile,
-telnyx_events}.py; tests test_pagination.py, test_repositories.py, test_repositories_integration.py; specs/03 §2 and
-specs/31 §2 Decisions; AGENTS.md bullet.
-Gates (this iteration): make fmt ok; make lint exit 0; make typecheck exit 0 (mypy 203 files); make placeholders 0
-findings; make test exit 0 (1744 passed, total 99.88 %, va_db 1617 stmts 0 missed; new modules 100 %);
-`pytest packages/va_db -m integration -rs` 268 passed 0 skipped; jscpd@4 0 clones; radon no B+ (avg A 1.37);
-check_spec_refs 0 problems; pip-audit no known vulns; pnpm audit no known vulns.
-Negative proofs (reverted): keyset `<` -> `<=` fails both pagination tests; removing `skip_locked=True` makes the
-concurrent claim test hit its 20 s asyncio.timeout (TimeoutError) — blocks rather than deadlocks.
-
-## Review P01-T10 (2026-10-27) — APPROVED
-Re-ran: make lint typecheck placeholders exit 0 (0 placeholder findings); make test exit 0 (1744 passed, 99.88 %,
-va_db repositories/pagination 100 %); `pytest packages/va_db -m integration -rs` 268 passed, 0 skipped; jscpd@4 0 clones.
-Checked against specs/31 §2-§3 (cursor, limit 1-100 default 25, INVALID_INPUT field cursor/limit, NOT_FOUND never
-reveals existence, CONFLICT on 23505), specs/03 §2 va_system list (test enforces the exact 6 names), specs/19 poll
-query (pending|delivering, next_attempt_at <= now, LIMIT 200, SKIP LOCKED), specs/28 §8.1 step 5 purge windows, and the
-credit_holds/webhook_deliveries DDL. Non-blocking notes: test_attempt_outcomes overwrites the first mark_processed error
-before asserting it (TelnyxEvent test asserts only the second call); outbox tests delete the whole webhook_deliveries
-table of the module DB (fine while only this module polls it).
-
-## Plan P01-T11 — Plans seed migration (2026-10-27)
-
-### Spec decisions (record in specs/24 §2 as `> Decision (2026-10-27):` in the same commit)
-- "custom" cells resolve to the "Micro-dollar seed values" paragraph: enterprise monthly_fee 0, connected 80 000,
-  transfer 25 000, sms 20 000, widget 10 000 (per-org values come from `orgs.limits` overrides).
-- "unlimited" caps -> NULL. The `numbers` column of the table is not a `plans` column (it is `PLAN_NUMBER_CAPS` in
-  va_billing.plans, specs/16 §3) and is not seeded.
-- `tts_rate_micros_per_1k_chars` = 120 000 for every plan ($0.00012/char x 1000, the §2 "TTS standalone" price).
-- `is_public` true for all four (Bland lists Enterprise publicly as contact-sales); `stripe_price_id` NULL (set by
-  ops/deploy per environment, never in a migration).
-- Downgrade `DELETE FROM plans WHERE id IN ('start','build','scale','enterprise')`; it fails with an FK error if
-  org_subscriptions reference them (intended: no silent data loss).
-
-### Files
-1. `packages/va_db/migrations/versions/0002_seed_plans.py` (new): revision "0002", down_revision "0001", docstring
-   citing specs/24 §2. Hand-written SQL constants (no colons, no execute_script needed):
-   - `PLAN_IDS: Final = ("start", "build", "scale", "enterprise")`
-   - `SEED_PLANS: Final = """INSERT INTO plans (id, name, monthly_fee_micros, connected_rate_micros_per_min,
-     transfer_rate_micros_per_min, min_attempt_micros, sms_rate_micros, widget_message_micros,
-     tts_rate_micros_per_1k_chars, daily_call_cap, hourly_call_cap, concurrency_cap, voice_clone_cap, features,
-     is_public) VALUES (...4 rows...)"""` with `features` as `ARRAY[...]::text[]` / `'{}'::text[]`:
-     start: Start, 0, 120000, 50000, 15000, 20000, 10000, 120000, 100, 100, 10, 1, {}
-     build: Build, 249000000, 100000, 40000, 15000, 20000, 10000, 120000, 2000, 1000, 50, 5,
-            {local_presence, analysis_schema, webhooks_org}
-     scale: Scale, 449000000, 90000, 30000, 15000, 20000, 10000, 120000, 5000, 1000, 100, 15,
-            {local_presence, analysis_schema, webhooks_org, citations, white_label_widget}
-     enterprise: Enterprise, 0, 80000, 25000, 15000, 20000, 10000, 120000, NULL x4, the 12 features of the spec row
-     in spec order.
-   - `upgrade()`: `op.execute(sa.text(SEED_PLANS))`; `downgrade()`: `op.execute(sa.text(DELETE_PLANS))` where
-     DELETE_PLANS is built from PLAN_IDS.
-   Keep lines ≤ 110 cols; ruff per-file ignores for migrations already apply.
-2. `packages/va_db/tests/support/plan_catalog.py` (new): `parse_spec_plans() -> dict[str, SpecPlan]` reading
-   specs/24 §2 (markdown slice between "\n## 2. " and "\n## 3. "):
-   - `SpecPlan` frozen dataclass mirroring the seeded columns (id, name, 6 price micros, tts, 4 caps, features tuple).
-   - table rows `| \`id\` | ...|` -> cells; `$x` -> `round(Decimal(x) * 1_000_000)`; "2 000" -> 2000;
-     "unlimited" -> None; `` `{a, b}` `` -> tuple; "custom"/"custom (per-org override)" -> taken from the
-     paragraph lists: regex over "connected 120 000 / ... / enterprise default 80 000", "transfer ...", "fees ..."
-     (4 values each, index by plan order) and single values "SMS 20 000", "widget 10 000", "min attempt 15 000";
-     TTS from "$0.00012/char" x 1000.
-   - also `paragraph_values()` so the unit test can assert table and paragraph agree on every non-custom cell.
-   Export `SPEC_PLAN_COLUMNS` (ordered seeded column names) for SELECT building.
-3. `packages/va_db/tests/test_seed_plans.py` (new, unit): parse yields exactly start/build/scale/enterprise; table
-   dollar cells == paragraph micro values for non-custom cells (catches spec drift); enterprise caps all None;
-   offline `alembic upgrade 0001:0002 --sql` contains one `INSERT INTO plans` and the `UPDATE alembic_version ...
-   '0002'`; offline `downgrade 0002:0001 --sql` contains the DELETE with the 4 ids and no DROP; revision chain
-   (0002.down_revision == "0001") via importlib load (generalise `load_initial_revision` into
-   `load_revision(filename)` in migration_helpers, keep the old name as a thin call or update its callers).
-4. `packages/va_db/tests/test_seed_plans_integration.py` (new, `pytestmark = integration`, uses `migrated_url`):
-   SELECT seeded columns FROM plans ORDER BY id == parse_spec_plans() (all columns, features as list,
-   stripe_price_id NULL, is_public true); `va_system` and `va_app` can SELECT plans (system_session read through
-   `open_database(migrated_url)` returning 4 rows).
-5. Modify `packages/va_db/tests/test_migrations_integration.py`: head version assertion "0001" -> "0002";
-   `test_downgrade_then_upgrade_on_a_fresh_database`: after first upgrade, `downgrade(url, "0001")` -> plans has 0 rows
-   and tables intact, then `downgrade(url)` to base as now, then upgrade head -> 4 plans. (No extra fresh_database —
-   DROP DATABASE checkpoint flake memory.)
-6. Modify `packages/va_db/tests/test_migrations.py`: keep '0001' INSERT assertion, add `UPDATE alembic_version SET
-   version_num='0002'` assertion for head.
-7. `specs/24-billing-and-limits.md` §2: the Decision above. `AGENTS.md`: bullet — seed data migrations are
-   hand-written INSERTs, downgrade deletes exactly seeded keys, plan test parses specs/24 §2.
-
-### Gates
-`make fmt lint typecheck placeholders`; `make test` run alone (scratch_session flake); `uv run pytest
-packages/va_db -m integration -rs` 0 skipped; va_db coverage 100 % (migrations included); jscpd@4 0 clones; radon A;
-check_spec_refs; pip-audit/pnpm audit. Compose: `make migrate` then `uv run alembic -c packages/va_db/alembic.ini
-downgrade base` and `upgrade head` against the dev DB. Negative proof (revert): change build connected rate to 110000
-in 0002 -> integration test fails.
-
-### Risks
-- Existing tests that assert "head == 0001" (found: test_migrations_integration line 68). grep `"0001"` again after.
-- Any integration test inserting plan ids start/build/scale/enterprise into a migrated DB would now collide
-  (none found: billing model tests use scratch_session + random plan ids).
-- Spec table parsing of the enterprise "custom (per-org override)" cell — handle by prefix "custom".
-
-## Build P01-T11 (2026-10-27)
-Implemented per plan. Deviations: `DELETE_PLANS` is a literal string (ruff S608 flagged the join); the unit test
-asserts it lists exactly `PLAN_IDS`. `load_initial_revision()` became `load_revision(filename)` and both callers
-(test_migrations, schema_catalog) were updated, with no alias left behind. The tenant-session read in the integration
-test uses a random org id because plans has no RLS.
-Files: migrations/versions/0002_seed_plans.py; tests/support/plan_catalog.py; tests/test_seed_plans.py;
-tests/test_seed_plans_integration.py; migration_helpers.py, schema_catalog.py, test_migrations.py,
-test_migrations_integration.py (head 0002, downgrade 0001 empties plans, re-upgrade gives 4 rows); specs/24 §2 Decision;
-AGENTS.md P01-T11 bullet (+ load_revision rename).
-Gates: make fmt/lint/typecheck exit 0 (mypy 207 files); placeholders 0 findings; make test exit 0 (1756 passed,
-99.88 %, 0002_seed_plans.py 100 %). One earlier full run hit 138 pytest-timeout errors in pg_url container boot
-(Docker latency right after the compose round-trip). The isolated rerun was green; recorded as a memory.
-`pytest packages/va_db -m integration -rs` 271 passed 0 skipped; jscpd@4 0 clones; radon: new code all A;
-check_spec_refs 0; pip-audit (--no-deps) no known vulns; corepack pnpm audit no known vulns.
-Compose: make migrate ran 0001->0002; alembic downgrade base + upgrade head OK, current 0002 (head).
-Negative proof (reverted): build connected 110000 in 0002 -> test_plans_rows_equal_the_spec_catalogue fails.
-
-## Review P01-T11 (2026-10-27) — APPROVED
-Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (1756 passed, 0002_seed_plans.py 100 %);
-`pytest packages/va_db -m integration -rs` 271 passed, 0 skipped; jscpd@4 0 clones. Checked the 0002 INSERT values
-against the specs/24 §2 table and seed-value paragraph cell by cell (fees, rates, caps, features in spec order,
-enterprise custom -> seed values, unlimited -> NULL) and against the specs/03 plans DDL (all NOT NULL columns set).
-No other code inserts the seeded ids into migrated DBs (billing model tests use random plan ids in scratch DBs).
-
-## Plan P01-T12 — ClickHouse schema applier (2026-10-27)
-
-Context found: `packages/va_events` does NOT exist yet (only va_common, va_db). clickhouse-connect is NOT in uv.lock
-(only clickhouse-driver via testcontainers). PyPI: clickhouse-connect 1.11.0 (extra `async` = native aiohttp client).
-events_sink today: probe app via `probe_service_app`, container = `Dependencies` with redis + clickhouse ping checks.
-Compose ClickHouse 24.8 creates db `va` (CLICKHOUSE_DB); CLICKHOUSE_URL default `http://default:@localhost:8123/va`.
-
-### Spec decisions (same commit)
-specs/03 §12 `> Decision (2026-10-27):`
-- 0001_init.sql = `CREATE DATABASE IF NOT EXISTS va` + the six §12 CREATE TABLE statements verbatim (both sql blocks).
-- Applied versions live in `va.schema_migrations (version String, name String, checksum String,
-  applied_at DateTime64(3, 'UTC')) ENGINE = ReplacingMergeTree(applied_at) ORDER BY version`, created by the applier
-  before reading it. Concurrent sink pods may both apply (DDL is IF NOT EXISTS) and both insert — ReplacingMergeTree +
-  `FINAL`/GROUP BY version makes that harmless.
-- checksum = sha256 hex of the file bytes; a recorded version whose checksum differs from the packaged file raises
-  `ClickHouseSchemaDriftError` (applied migrations are immutable: add a new file instead).
-- The client is opened with credentials/host/port from CLICKHOUSE_URL and the URL's database as default database
-  ONLY after bootstrap? -> simpler: client opened with database "default" (URL path ignored for DDL); all DDL and
-  bookkeeping are fully qualified `va.`. (Queries in later phases also qualify `va.`.)
-specs/27 §9 `> Decision (2026-10-27):` events-sink readiness adds check `clickhouse_schema` (error until
-`apply_migrations` has completed in this process). Startup does not block on ClickHouse: a supervised task retries
-transient connection errors with backoff 0.5 s doubling to 5 s cap; drift or a SQL error is fatal (supervisor ->
-StopController -> exit 1, like va_worker).
-
-### Files
-1. `packages/va_events/pyproject.toml` (dist `va-events`, module `va_events`, uv_build like va_db; deps
-   `clickhouse-connect[async]>=1.11`, `va-common` workspace). `src/va_events/{__init__.py (docstring + __version__ via
-   importlib.metadata), py.typed}`. Root pyproject: `va-events` in dev group + `[tool.uv.sources]`; mypy `mypy_path`
-   add `packages/va_events/src`, `files` add `packages/va_events/src`, `packages/va_events/tests`. `uv lock`/`uv sync
-   --all-packages`. events_sink pyproject: add `va-events` dep + source. If clickhouse_connect lacks py.typed, add a
-   `[[tool.mypy.overrides]] module = ["clickhouse_connect.*"] ignore_missing_imports = true` WITH a comment, and keep
-   our code typed through the Protocol below (verify first: `ls .venv/.../clickhouse_connect/py.typed`).
-   BUILDER MUST VERIFY the installed clickhouse-connect async API (`clickhouse_connect.get_async_client` signature,
-   `AsyncClient.command(cmd, parameters=...)`, `AsyncClient.query(...).result_rows`, `close()` coroutine or not,
-   exception classes `clickhouse_connect.driver.exceptions.OperationalError` / `DatabaseError`) by reading the
-   installed source, not from memory.
-2. `packages/va_events/src/va_events/clickhouse/__init__.py` — re-exports (`apply_migrations`, `load_migrations`,
-   `Migration`, `ClickHouseSchemaDriftError`, `open_clickhouse`, `ClickHouseTarget`, `parse_clickhouse_url`).
-3. `packages/va_events/src/va_events/clickhouse/migrations/0001_init.sql` — header `--` comment citing specs/03 §12,
-   `CREATE DATABASE IF NOT EXISTS va;` then the 6 tables copied character-for-character from specs/03 §12.
-   Confirm uv_build ships `.sql` in the wheel (it includes all files under the module dir; verify with
-   `uv build --package va-events` + `unzip -l`), and read via `importlib.resources.files("va_events.clickhouse")
-   .joinpath("migrations")` (directory, not a package).
-4. `packages/va_events/src/va_events/clickhouse/schema.py`:
-   - `MIGRATION_FILE_RE = re.compile(r"^(\d{4})_([a-z0-9_]+)\.sql$")`
-   - `@dataclass(frozen=True, slots=True) class Migration: version: str; name: str; statements: tuple[str, ...];
-     checksum: str`
-   - `split_statements(sql: str) -> tuple[str, ...]`: drop `--` line comments outside quotes, split on `;` outside
-     single quotes (handle `''` escapes), strip, drop empties.
-   - `load_migrations(directory: Traversable | None = None) -> tuple[Migration, ...]`: sorted by version; reject
-     non-matching `.sql` names and duplicate versions with ValueError.
-   - `class ClickHouseCommands(Protocol)`: the structural subset of AsyncClient used (`command`, `query` returning
-     an object with `result_rows`) — shape it to the real signatures so `AsyncClient` is assignable (assert by a
-     typed assignment in a test, mypy proves it).
-   - `class ClickHouseSchemaDriftError(RuntimeError)` with version/expected/recorded in message.
-   - `SCHEMA_MIGRATIONS_DDL: Final`, `async def apply_migrations(client, *, clock: Clock,
-     migrations: Sequence[Migration] | None = None) -> list[str]`: CREATE DATABASE IF NOT EXISTS va; DDL; read
-     `SELECT version, argMax(checksum, applied_at) FROM va.schema_migrations GROUP BY version`; for each migration:
-     recorded & equal -> skip; recorded & different -> raise drift; else run statements in order then INSERT
-     (server-side parameters `{version:String}` etc., applied_at = clock.now()). Log `clickhouse.migration_applied`
-     (version, name, statements). Return the versions applied now.
-5. `packages/va_events/src/va_events/clickhouse/client.py`:
-   - `@dataclass(frozen=True, slots=True) class ClickHouseTarget: host, port, username, password (repr=False),
-     secure: bool, database: str`.
-   - `parse_clickhouse_url(url) -> ClickHouseTarget`: http/https only (ValueError otherwise, message without the
-     URL — it may contain a password), default port 8123/8443, percent-decoded user/password, user default
-     "default", database = path stripped or "default".
-   - `@asynccontextmanager async def open_clickhouse(url, *, connect_timeout_s=5.0, send_receive_timeout_s=30.0)`
-     -> yields the AsyncClient created with `database="default"` (Decision) and closes it on exit. Client creation
-     may do a network round-trip in clickhouse-connect (it queries server version) — if so, do NOT call it inside
-     build_container; create it inside the bootstrap task instead (builder checks; record in AGENTS.md).
-6. `apps/events_sink/src/va_events_sink/schema.py`:
-   - `@dataclass class SchemaState: applied: bool = False` + `async def check(self) -> None` raising
-     `ConnectionError("clickhouse schema not applied")` until applied.
-   - `async def bootstrap_schema(connect: Callable[[], AbstractAsyncContextManager[ClickHouseCommands]],
-     state, *, clock, sleep=asyncio.sleep, initial_backoff_s=0.5, max_backoff_s=5.0) -> None`: loop: open client,
-     apply_migrations, set applied, return; on transient errors (clickhouse_connect OperationalError, OSError,
-     aiohttp.ClientError / whatever the verified client raises for refused connections) log
-     `clickhouse.schema_retry` with attempt + backoff and sleep; other exceptions propagate.
-7. `apps/events_sink/src/va_events_sink/container.py` + `main.py`: container dataclass `SinkContainer(dependencies,
-   schema: SchemaState)` with `readiness_checks()` = deps checks + `{"clickhouse_schema": schema.check}`.
-   `create_app` gets a worker-style lifespan (service_scope + Supervisor(controller.task_failed) starting
-   "clickhouse_schema" -> bootstrap_schema(partial(open_clickhouse, settings.clickhouse_url), ...)); test seams
-   `schema_connect` and `stop: StopController | None`; `main()` passes stop to `serve` like va_worker.
-   Update the module docstrings (remove "come with the analytics work" for the schema part).
-
-### Tests
-- `packages/va_events/tests/test_clickhouse_schema.py` (unit): packaged load -> exactly ("0001","init"), 7
-  statements (CREATE DATABASE + 6 tables); spec parity: parse specs/03 §12 ```sql blocks, split, whitespace-normalise,
-  equal to statements[1:] (catches drift either side); split_statements quote/comment cases (`';'` inside literal,
-  `''` escape, trailing comment, empty); load_migrations rejects bad filename / duplicate version (tmp dir via
-  pathlib, Path satisfies Traversable); fake client (records commands, serves rows): first apply runs bootstrap +
-  all statements + insert, returns ["0001"]; second apply with recorded checksum runs no table DDL, returns [];
-  drift raises with version in message; two synthetic migrations applied in version order; applied_at uses
-  FrozenClock.
-- `packages/va_events/tests/test_clickhouse_client.py`: parse_clickhouse_url cases (compose default, https default
-  8443, explicit port, %40 in password, no path -> "default", rejects clickhouse:// and missing host, error message
-  does not contain the password); open_clickhouse closes the client (monkeypatch the factory symbol).
-- `packages/va_events/tests/test_clickhouse_integration.py` (`pytestmark = integration`, docker_available skip):
-  module fixture `ClickHouseContainer("clickhouse/clickhouse-server:24.8")` from `testcontainers.community
-  .clickhouse` (legacy import path warns -> error); URL `http://user:pass@host:<8123 mapped>/va`; apply twice ->
-  ["0001"] then []; `system.columns` (database='va') per table == expected (name, type) parsed from the spec DDL
-  (helper in tests maps the spec column list; Nullable/LowCardinality strings compare verbatim); engines from
-  `system.tables` (MergeTree x4, ReplacingMergeTree calls_fact + schema_migrations); one schema_migrations row
-  for 0001 with the packaged checksum; tamper the recorded checksum (INSERT newer row) -> drift on next apply.
-- `apps/events_sink/tests/test_schema_bootstrap.py`: fake connect failing 2x with the transient error then OK ->
-  sleeps [0.5, 1.0], state applied; backoff caps at 5.0; non-transient error propagates; app-level: lifespan with a
-  fake connect -> /readyz checks include `clickhouse_schema: ok`; drift -> stop.failed is True. Update
-  test_events_sink.py expected check dicts (FakeContainer probes) for the new check.
-- Coverage: va_events 100 %, events_sink 100 %.
-
-### Gates
-`uv lock && uv sync --all-packages`; `make fmt lint typecheck placeholders`; `make test` ALONE (scratch_session /
-container-boot flake memories); `uv run pytest packages/va_events apps/events_sink -m integration -rs` 0 skipped;
-jscpd@4 0 clones; radon A; check_spec_refs; pip-audit (new deps clickhouse-connect/aiohttp/lz4/zstd) + pnpm audit.
-Compose: `make up` then `uv run python -m va_events_sink.main --port 19500` briefly -> /readyz 200 with
-clickhouse_schema ok, and `curl 'http://localhost:8123/?query=SHOW+TABLES+FROM+va'` lists the 6 tables.
-Negative proof (revert): change `UInt32` -> `UInt64` for call_events.seq in 0001_init.sql -> spec-parity unit test
-and integration column test fail.
-
-### Risks
-- clickhouse-connect async API/typing differs from assumptions -> verify installed source first; keep Protocol tight.
-- clickhouse-connect may emit DeprecationWarning/ResourceWarning (filterwarnings=error) - close clients/sessions.
-- ClickHouse container boot under xdist (one per worker module fixture): boot ~5-10 s; module scope, single module.
-- HTTP endpoint runs one statement per request: never send the whole file; the splitter is mandatory.
-- New package must be added to workspace sources, dev group, mypy paths, or imports fail in tests.
-
-## Build P01-T12 (2026-10-27)
-Implemented per plan. Facts/deviations:
-- specs/03 §12 has FIVE tables (call_events, call_turns, calls_fact, usage_events_raw, eval_metrics), not six:
-  0001_init.sql = CREATE DATABASE + 5 tables = 6 statements; engines MergeTree x4, ReplacingMergeTree calls_fact
-  + schema_migrations.
-- clickhouse-connect 1.11.0 (ships py.typed, no mypy override). `create_async_client` awaits `_initialize()`
-  (network round-trip) -> opened only inside the supervised bootstrap task. Network failures and retried server
-  errors -> `OperationalError` (subclass of `DatabaseError`); TRANSIENT_ERRORS = (OperationalError, OSError).
-  `AsyncClient` is assignable to the `ClickHouseCommands` Protocol (checked with mypy).
-- Record insert is `INSERT ... SELECT {version:String}, ...` with applied_at formatted as a millisecond UTC string.
-- `bootstrap_schema` sleeps with `clock.sleep` (va_common Clock already has sleep), so there is no separate `sleep`
-  seam. SchemaState wraps an asyncio.Event (`wait()` for tests). The readiness check is added in
-  `main.sink_checks` (container checks + `clickhouse_schema`); the container factory is unchanged, so FakeContainer
-  still works. A fresh SchemaState is created per lifespan on `app.state.schema`.
-- The log field of `clickhouse.migration_applied` is `migration` (not `version`): the compose smoke run showed
-  `version=` overwriting the bound service version.
-- The ClickHouse integration test is one test (one container per xdist worker) with `pytest.mark.timeout(180)`.
-  First full `make test`: its Docker container *create* call hit the 60 s default while 8 PG containers were booting,
-  plus 8 known va_db load flakes (scratch_session timeout, DROP DATABASE WITH (FORCE) "being accessed by other
-  users"). The next two isolated runs were green.
-- radon: every new function is A (helpers `_http_host`, `_reject_duplicate_versions`, test `logged`/
-  `assert_schema_matches_spec`).
-Files: packages/va_events/{pyproject.toml, src/va_events/{__init__,py.typed}, src/va_events/clickhouse/{__init__,
-schema,client}.py, clickhouse/migrations/0001_init.sql, tests/{conftest, test_clickhouse_schema,
-test_clickhouse_client, test_clickhouse_integration}.py, tests/support/ch_support.py};
-apps/events_sink/{pyproject.toml, src/va_events_sink/{main,schema}.py, tests/test_events_sink.py,
-tests/test_schema_bootstrap.py, tests/support/sink_helpers.py}; root pyproject (dev dep, source, mypy paths, pytest
-pythonpath); uv.lock (clickhouse-connect 1.11.0, lz4, backports-zstd); specs/03 §12 + specs/27 §9 Decisions; AGENTS.md.
-Gates: make fmt/lint/typecheck exit 0 (mypy 219 files); placeholders 0; make test exit 0 (1797 passed, 99.88 %;
-va_events + events_sink 100 %); `pytest packages/va_events apps/events_sink -m integration -rs` 1 passed, 0 skipped;
-jscpd@4 0 clones; radon new code all A; check_spec_refs 0; pip-audit --no-deps no known vulns; pnpm audit none;
-uv build ships migrations/0001_init.sql in the wheel.
-Compose: `python -m va_events_sink.main --port 19500` -> /readyz 200 {redis, clickhouse, clickhouse_schema: ok};
-SHOW TABLES FROM va lists the 5 tables + schema_migrations; 0001 recorded.
-Negative proof (reverted): call_events.seq UInt32->UInt64 in 0001_init.sql -> test_initial_migration_tables_equal_
-the_spec_ddl and the integration test fail.
-
-## Review P01-T12 (2026-10-27) — APPROVED
-Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (1797 passed; va_events + events_sink
-100 %); `pytest packages/va_events apps/events_sink -m integration -rs` 1 passed, 0 skipped; jscpd@4 0 clones;
-check_spec_refs 0. Checked 0001_init.sql against specs/03 §12 (5 tables, all IF NOT EXISTS so a crash between DDL and
-the record insert re-applies cleanly); splitter handles quotes/comments; drift raises before any DDL of that version;
-retry loop only catches OperationalError/OSError, other errors propagate to the supervisor (exit 1, tested);
-readiness check `clickhouse_schema` matches the specs/27 §9 Decision; no URL/password in errors or logs.
-
-## Plan P01-T13 — Partition maintenance helper (2026-10-27)
-
-Context found: 0001_initial `CALL_EVENT_PARTITIONS` DO block creates `call_events_pYYYYMM` for the UTC month
-`[month start, next month start)`, current UTC month + 3 (specs/03 §10 Decision says the helper MUST use the same names
-and bounds). specs/28 §8.1 step 1: RetentionWorkflow creates partitions for the next 3 months and drops partitions
-older than max(retention_days) + 30 days. `call_events` (and its partitions) are OWNED by the migration login role:
-`CREATE TABLE ... PARTITION OF` and `DROP TABLE` of a partition require ownership of the parent, so neither `va_app`
-nor `va_system` (BYPASSRLS but not owner) can run them. The existing test helper in test_call_models_integration.py
-uses names `call_events_2026_10` (scratch DB only, unaffected).
-
-### Spec decision (same commit)
-Append to the specs/03 §10 partition bullet (or a new `> Decision (2026-10-27):` right below the §10 Decision block):
-- `va_db.partitions.ensure_call_event_partitions(conn, now, months_ahead=3)` creates `call_events_pYYYYMM` for the UTC
-  month of `now` and the next `months_ahead` months (CREATE TABLE IF NOT EXISTS, same bounds as 0001) and returns the
-  names it created, in month order. `drop_call_event_partitions_before(conn, cutoff)` drops every
-  `call_events_pYYYYMM` partition whose upper bound (next month start) is <= `cutoff` (i.e. holds only rows strictly
-  older than cutoff) and returns the dropped names in month order; partitions with other names are never touched.
-- Both run in the caller's transaction on an `AsyncConnection` of the login role that owns `call_events` (an engine
-  from `create_engine(settings, None)`, as migrations use), because partition DDL requires ownership of the parent;
-  `va_system` cannot run them. RetentionWorkflow (later phase) computes `cutoff = now - (max retention_days + 30 d)`.
-Also add a one-line `> Decision (2026-10-27):` in specs/28 §8.1 under step 1 pointing to that: partition DDL runs as
-the `call_events` owner via va_db.partitions, the rest of the activities stay system scope.
-
-### Files
-1. `packages/va_db/src/va_db/partitions.py` (new; typed, docstring citing specs/03 §10 + specs/28 §8.1, `__all__`):
-   - `CALL_EVENTS_PARTITION_PREFIX: Final = "call_events_p"`;
-     `_PARTITION_NAME: Final = re.compile(r"^call_events_p(\d{4})(\d{2})$")`.
-   - `@dataclass(frozen=True, slots=True) class MonthPartition: name: str; start: datetime; end: datetime`
-     (aware UTC; `start` = first instant of the month, `end` = next month start).
-   - `def month_start(moment: datetime, offset: int = 0) -> datetime` — `ensure_utc` first (va_common.time; it rejects
-     naive datetimes — Builder verify its behaviour: if it assumes UTC for naive values instead of raising, raise
-     `ValueError("... must be timezone-aware")` explicitly here before calling it), then year*12+month arithmetic
-     (same as `_month_start` in test_migrations_integration.py).
-   - `def call_event_partition(month: datetime) -> MonthPartition` — name `f"call_events_p{start:%Y%m}"`.
-   - `def planned_call_event_partitions(now: datetime, months_ahead: int = 3) -> tuple[MonthPartition, ...]` —
-     `months_ahead < 0` -> ValueError; returns months_ahead + 1 partitions starting at the UTC month of `now`.
-   - `def partition_month(name: str) -> datetime | None` — month start parsed from a `call_events_pYYYYMM` name
-     (None for other names and for month 00/13+).
-   - `def expired_call_event_partitions(names: Iterable[str], cutoff: datetime) -> tuple[str, ...]` — names whose
-     parsed month end <= ensure_utc(cutoff), sorted by month; non-matching names ignored. Pure.
-   - `async def existing_call_event_partitions(conn: AsyncConnection) -> tuple[str, ...]` —
-     `SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent =
-     'call_events'::regclass ORDER BY 1`.
-   - `async def ensure_call_event_partitions(conn: AsyncConnection, now: datetime, months_ahead: int = 3)
-     -> list[str]` — read existing, for each planned partition not present execute
-     `CREATE TABLE IF NOT EXISTS {quoted} PARTITION OF call_events FOR VALUES FROM ('{start}') TO ('{end}')` with
-     bounds formatted `%Y-%m-%d %H:%M:%S+00` (DDL takes no bind params; values come only from our datetimes, the
-     name is quoted via `conn.dialect.identifier_preparer.quote`). Log `db.call_event_partition_created`
-     (partition=name) via structlog. Return created names.
-   - `async def drop_call_event_partitions_before(conn: AsyncConnection, cutoff: datetime) -> list[str]` — existing
-     -> `expired_call_event_partitions` -> `DROP TABLE IF EXISTS {quoted}` each; log `db.call_event_partition_dropped`.
-   Keep every function radon A. No commit inside: the caller owns the transaction.
-2. `packages/va_db/src/va_db/__init__.py` — leave exports unchanged (module is imported as `va_db.partitions`), only
-   mention it in the package docstring if the docstring lists modules (it doesn't today: skip).
-3. `AGENTS.md` — va_db section: partition DDL needs the call_events owner (login-role engine `create_engine(s, None)`),
-   names/bounds rule, where the helper lives.
-4. specs/03 §10 + specs/28 §8.1 Decisions (above).
-
-### Tests
-- `packages/va_db/tests/test_partitions.py` (unit, no DB):
-  - planned partitions from `FrozenClock(datetime(2026, 11, 15, 12, tzinfo=UTC)).now()` -> names
-    p202611..p202702 with exact start/end; year rollover from December (2026-12-31T23:59:59.999999Z -> p202612..p202703);
-  - non-UTC aware input normalised: `2026-10-31T20:30-05:00` -> first partition p202611;
-  - naive datetime -> ValueError (both planned and expired); months_ahead=-1 -> ValueError; months_ahead=0 -> 1 partition;
-  - `partition_month` parses p202602, rejects `call_events_p202613`, `call_events_p2026011`, `call_events_2026_10`,
-    `call_events_p000000`? (month 00 -> None);
-  - `expired_call_event_partitions(["call_events_p202612","call_events_p202610","call_events_legacy",
-    "call_events_p202611"], cutoff=2026-12-01T00:00Z)` -> ("call_events_p202610","call_events_p202611") (boundary:
-    end == cutoff is dropped; cutoff one microsecond earlier keeps p202611).
-- `packages/va_db/tests/test_partitions_integration.py` (`pytestmark = pytest.mark.integration`; uses
-  `scratch_session` — create_all makes only the parent, login role owns it — and `conn = await
-  scratch_session.connection()`; reuse model_factories (make_org etc.) for inserting a call_event if needed, NOT a
-  copy of test_call_models_integration helpers — jscpd):
-  - ensure with FrozenClock 2026-11-15 creates exactly [p202611, p202612, p202701, p202702]; second call returns [];
-    catalog via `pg_get_expr(relpartbound, oid)` after `SET LOCAL TimeZone = 'UTC'` equals
-    `FOR VALUES FROM ('2026-11-01 00:00:00+00') TO ('2026-12-01 00:00:00+00')` etc.;
-  - advancing the clock one month (`clock.advance(timedelta(days=31))`) creates only [p202703];
-  - a row at 2026-12-01T00:00Z lands in p202612 and at 2026-11-30T23:59:59.999999Z in p202611
-    (`tableoid::regclass::text`); new partitions carry the partitioned indexes (pg_inherits on
-    call_events_org_idx / call_events_call_idx count == number of partitions);
-  - drop with cutoff 2027-01-01T00:00Z returns [p202611, p202612]; repeat returns []; cutoff 2027-01-15 keeps p202701;
-    a manually created `call_events_legacy` partition (FROM 2020-01-01 TO 2020-02-01) survives every drop;
-  - ensure after drop of a month recreates nothing older than `now`'s month (drop then ensure with same clock is
-    idempotent for the surviving future months).
-  - migrated DB (fresh_database + upgrade in a module-scoped fixture of this module or the existing `migrated_url`
-    fixture): `ensure_call_event_partitions(conn, now=<SELECT now()>)` returns [] (same names/bounds as 0001 -> the
-    Decision is honoured), run in a rolled-back transaction of a login-role engine;
-    with `create_engine(settings, DbRole.SYSTEM)` creating the next month raises DBAPIError matching
-    "must be owner" (proves the ownership Decision).
-- Coverage: va_db stays 100 %.
-
-### Gates
-`make fmt lint typecheck placeholders`; `make test` ALONE (flake memories: scratch_session timeout / container boot);
-`uv run pytest packages/va_db -m integration -rs -k partition` 0 skipped; jscpd@4 0 clones; radon cc A for
-partitions.py and new tests; `python scripts/check_spec_refs.py` (or `make` target) 0; pip-audit/pnpm audit (no new deps).
-Negative proof (revert after): change the name format to `call_events_%Y_%m` -> unit names test and the migrated-DB
-"returns []" test fail.
-
-### Risks
-- `DROP TABLE` on a partition takes ACCESS EXCLUSIVE on the parent in PG16 — acceptable for the daily 03:17 job;
-  document in the module docstring; DETACH CONCURRENTLY cannot run in a transaction, so not used.
-- pg_get_expr text depends on TimeZone — set it LOCAL in the test transaction.
-- Overlapping foreign partition (e.g. a test's `call_events_current`) makes CREATE fail with an overlap error — that
-  is correct behaviour (surfaces drift); don't catch it.
-- scratch_session flake under load: run make test alone.
-
-## Build P01-T13 (2026-10-27)
-Implemented per plan. Facts/deviations:
-- `va_system` creating a partition fails first with `permission denied for schema public` (PG16: no CREATE on public),
-  dropping one with `must be owner of table`. The integration test is parametrized (create/drop) on those messages and
-  the specs/03 §10 Decision says "ownership of the parent and CREATE on schema public".
-- `existing_call_event_partitions` orders by relname, so `call_events_legacy` sorts before `call_events_p...`.
-- `ensure` after a drop with now=2027-01-10 creates p202703 + p202704 (current month + 3), nothing older.
-- radon: `expired_call_event_partitions` uses a walrus dict + `sorted(key=months.__getitem__)` (mypy rejects
-  `months.get`), now A; the drop integration test was split (shared `legacy_conn` fixture), every function A.
-- Logs: `db.call_event_partition_created` / `db.call_event_partition_dropped` (field `partition`).
-Files: packages/va_db/src/va_db/partitions.py (new), packages/va_db/tests/test_partitions.py (16 unit),
-packages/va_db/tests/test_partitions_integration.py (8 integration), specs/03 §10 Decision, specs/28 §8.1 Decision,
-AGENTS.md.
-Gates: make fmt 0; make lint 0; make typecheck 0 (mypy 222 files); make placeholders 0 findings;
-`pytest packages/va_db -m integration -rs -k partition` 10 passed 0 skipped; jscpd@4 0 clones; radon -n B: none;
-check_spec_refs 0; pip-audit no known vulns; pnpm audit none (pnpm via npx; not on PATH in this shell).
-make test: run 2 exit 0 (1820 passed, partitions.py 100 %, TOTAL 99 %) before the radon refactor; after it the
-targeted unit + integration files pass (24). Runs 1, 3, 4 hit the known Docker/asyncpg timeout family (pytest-timeout
-60 s in migrated_url upgrade / scratch_session / ClickHouse container create; run 4 had 140 setup errors) with the
-host at load ~8 and a 3.9 GiB Docker VM. No failure was in partition code.
-Negative proof (reverted): name format `call_events_{%Y_%m}` -> 3 unit + 6 integration tests fail, including the
-migrated-DB "helper matches 0001" test.
-
-## Review P01-T13 (2026-10-27) — PENDING (environment blocker, no code findings)
-Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); radon -n B none; check_spec_refs 0; jscpd@4 0 clones in
-va_db. Diff matches the plan and the specs/03 §10 + specs/28 §8.1 Decisions; no code findings.
-`pytest packages/va_db -m integration -rs -k partition` (Docker up): 11 passed.
-make test: run 1 exit 0 but 281 skipped (OrbStack daemon stopped); run 2 exit 2, 1541 passed / 163 skipped / 120
-errors, every error "failed to connect to the docker API" - OrbStack stopped again mid-run. Cause: an OrbStack
-Sparkle auto-update (Autoupdate pid 8286) keeps stopping the VM; `orb start` brings it up only briefly. Not approving
-on a run with skipped/errored integration tests. Next: let the OrbStack update finish (it may need a click in the
-updater UI), `orb start`, re-run `make test` alone, then approve if green.
-
-## Review P01-T13 (2026-10-28) — APPROVED
-OrbStack update finished (2.2.5); `orb start` stayed up through the run. `.venv` hit the `.DS_Store` gotcha; fixed per
-AGENTS.md. `make test` alone: exit 0, 1821 passed, 0 skipped, partitions.py 100 %, TOTAL 99 %. Committed P01-T13.
-Next: P01-T14.
+- `va_api.main` builds `ApiSettings()` at import: keep pepper optional at construction (Decision 6).
+- Adding `va-db` to api pulls SQLAlchemy models into api import time — fine, no I/O.
+- test_repositories asserts the system-repo set equals spec bullet: update the spec bullet AND the count to 7.
+- test_env_example enforces order/literal/comment for the new env var.
+- Background task exceptions surface in the server; touch must swallow and log.
+- fakeredis TTL/time: don't rely on wall-clock expiry; delete the gate key to simulate expiry.
+- Do not log `Authorization` values anywhere; masking.py already masks `pepper`.
+
+## 2026-10-29 Builder: P02-T01 build notes
+
+Implemented per plan with these deviations/details:
+- Redis keys use hash tags per specs/03 §11 preamble: `apikey:{<prefix>}`, `apikey:{<uuid>}:touched` (recorded in
+  specs/04 §2.2 Decision and the §11 rows).
+- `ApiKeyAuthenticator(redis=, hasher=, lookup=, toucher=, clock=)`; production wiring `db_lookup(database)` /
+  `db_touch(database)`; malformed cache JSON is treated as a miss.
+- Hash input is `plaintext.encode()` (UTF-8, ASCII for valid keys) so malformed non-ASCII headers still cost one hash.
+- `api_helpers.make_settings()` now injects a random pepper; `.env.example` + specs/02 §6 gained
+  `API_KEY_PEPPER_VERSION=1` (env test counts 107 names / 106 literal keys).
+- FastAPI nests included routers (`_IncludedRouter`) in `app.routes`; route enumeration goes through
+  `app.state.routers` (important for the §2.4 coverage test and P02-T15).
+
+## Review P02-T01 (2026-10-29): approved
+Re-ran make lint typecheck placeholders test: all green (1914 passed, 99.83 %). Checked va_common.auth, va_api.auth.*,
+ApiKeyLookupRepo, settings/container, spec decisions against specs/04 §1–§2.3 and specs/03 §2/§11. Non-blocking notes:
+container opens a second engine pair via Database.from_settings alongside deps.postgres (fine for now; consolidate
+when tenant routes land); get_principal binds org_id via structlog directly (per-request task context, no leak).
