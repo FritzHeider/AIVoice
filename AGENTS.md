@@ -414,3 +414,14 @@ Grafana 3001
   `va_common.settings`, because `va_common.logging` imports `va_common.settings` (cycle). Tests with a real SMTP server
   use `aiosmtpd.controller.Controller` on a free 127.0.0.1 port (`test_email.py`). `check_no_placeholders` flags
   `example.com` in production code (docstrings too); tests may use it.
+- 2026-10-29 (P02-T04b): identity tables without `org_id` (`orgs`, `users`, `sessions`, `email_tokens`) go through
+  `Database.global_session()` (`va_app`, no `app.org_id`: RLS tables read empty and reject writes) with
+  `va_db.repositories.IdentityRepo`; a user's memberships across orgs come from the `va_system`
+  `MembershipLookupRepo`. Create orgs only with `va_db.provisioning.OrgProvisioner` (org + active data key +
+  encrypted `whsec_` secret + owner, one transaction); signup uses `provision_in(session, org_id, ...)` inside its
+  own `tenant_session(org_id)` to add the login session/verify token atomically. Unique-violation savepoints:
+  `va_db.repositories.conflict_savepoint(session, message, field=...)`.
+- 2026-10-29 (P02-T04b): the api container now needs `LOCAL_MASTER_KEY` (64 hex, `openssl rand -hex 32`) as well as
+  `API_KEY_PEPPER`; both may be empty at settings construction, `build_container` raises `RuntimeError` before
+  opening anything. `apps/api/tests/support/api_helpers.make_settings` fills both with random values. Production
+  settings tests must pass `kms_provider="aws", aws_kms_key_id=...` or the local-KMS refusal fires first.

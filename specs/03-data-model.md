@@ -57,7 +57,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
-  `TelnyxEventRepo`, `ApiKeyLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
+  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
 > role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
@@ -91,6 +91,13 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > because an API key is resolved before any org context exists: `get_by_prefix(prefix)` returns an `ApiKeyRecord`
 > (the key row, revoked or not, joined with `orgs.status` and `orgs.plan_id`; `None` when unknown) and
 > `touch(api_key_id, now)` sets `last_used_at`.
+
+> Decision (2026-10-29): the **global identity tables** (`orgs`, `users`, `sessions`, `email_tokens`) have no `org_id`
+> and no RLS; code reaches them through `Database.global_session()` (a `va_app` transaction with `app.org_id` unset,
+> so every RLS table returns no rows and rejects writes) or through a `tenant_session` when it also writes tenant rows
+> in the same transaction. `MembershipLookupRepo` joins the `va_system` list because a dashboard user's memberships
+> span orgs and are read before an active org exists: `for_user(user_id)` returns `MembershipRecord`s (membership id,
+> role, org id, name, slug, plan_id, status, parent_org_id) ordered by membership `created_at`, id.
 
 ## 3. Tenancy, identity, access
 

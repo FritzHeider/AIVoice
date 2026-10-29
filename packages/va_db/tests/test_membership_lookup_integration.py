@@ -1,0 +1,72 @@
+"""``MembershipRepo`` and the system-scope ``MembershipLookupRepo`` (specs/03-data-model.md §2)."""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from identity_db import IdentityDb, unique_email
+from model_factories import make_org, make_user
+
+from va_common.errors import AppError
+from va_db.repositories import MembershipLookupRepo, MembershipRecord, MembershipRepo
+
+pytestmark = pytest.mark.integration
+
+
+async def test_for_user_lists_memberships_across_orgs_in_order(identity_db: IdentityDb) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        parent = await make_org(session, name="Parent", plan_id="build")
+        child = await make_org(session, name="Child", parent_org_id=parent.id, status="suspended")
+        user = await make_user(session, unique_email())
+        other = await make_user(session, unique_email())
+    async with database.tenant_session(parent.id) as session:
+        first = await MembershipRepo(session, parent.id).add(user.id, "owner")
+        await MembershipRepo(session, parent.id).add(other.id, "viewer")
+    async with database.tenant_session(child.id) as session:
+        second = await MembershipRepo(session, child.id).add(user.id, "developer")
+    async with database.system_session() as session:
+        records = await MembershipLookupRepo(session).for_user(user.id)
+        assert await MembershipLookupRepo(session).for_user(uuid.uuid4()) == []
+    assert records == [
+        MembershipRecord(
+            membership_id=first.id,
+            role="owner",
+            org_id=parent.id,
+            org_name="Parent",
+            org_slug=parent.slug,
+            plan_id="build",
+            org_status="active",
+            parent_org_id=None,
+        ),
+        MembershipRecord(
+            membership_id=second.id,
+            role="developer",
+            org_id=child.id,
+            org_name="Child",
+            org_slug=child.slug,
+            plan_id="start",
+            org_status="suspended",
+            parent_org_id=parent.id,
+        ),
+    ]
+
+
+async def test_membership_repo_add_duplicate_conflict_and_get(identity_db: IdentityDb) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        org, other_org = await make_org(session), await make_org(session)
+        user = await make_user(session, unique_email())
+    async with database.tenant_session(org.id) as session:
+        repo = MembershipRepo(session, org.id)
+        added = await repo.add(user.id, "admin")
+        with pytest.raises(AppError) as info:
+            await repo.add(user.id, "viewer")
+        assert (info.value.code, info.value.message) == ("CONFLICT", "User is already a member of this org.")
+        found = await repo.get_for_user(user.id)
+    assert found is not None
+    assert (found.id, found.role) == (added.id, "admin")
+    async with database.tenant_session(other_org.id) as session:
+        assert await MembershipRepo(session, other_org.id).get_for_user(user.id) is None
+        assert await MembershipRepo(session, org.id).get_for_user(user.id) is None

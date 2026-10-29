@@ -83,7 +83,20 @@
 > key or plaintext material; the API surfaces it as `INTERNAL_ERROR`. A missing active key raises `CryptoError`.
 > (g) `CryptoSettings` (extended by the api, worker and media settings) refuses `KMS_PROVIDER=local` with
 > `VA_ENV=production`, requires `LOCAL_MASTER_KEY` to be 64 hex chars for `local` and `AWS_KMS_KEY_ID` for `aws`,
-> at startup. The AWS KMS client uses connect timeout 5 s, read timeout 10 s, and 3 retries in standard mode.
+> at startup (an empty `LOCAL_MASTER_KEY` is refused when the provider opens, not at construction; see (i)). The AWS
+> KMS client uses connect timeout 5 s, read timeout 10 s, and 3 retries in standard mode.
+
+> Decision (2026-10-29): continues the list above.
+> (h) `OrgDataKeyStore` in `va_db.repositories.data_keys` implements `DataKeyStore` over `org_data_keys`
+> (`status='active'`) on a `tenant_session(org_id)`; `Envelope.encrypt_with_key(org_id, wrapped, plaintext, aad)`
+> seals under an explicit wrapped key so a transaction that has just created a data key (org provisioning,
+> specs/04-auth-tenancy-rbac.md §4.1) can encrypt before committing. The platform (nil org) key has no
+> `org_data_keys` row (its FK points at `orgs`), so `OrgDataKeyStore` returns `None` for it and `platform_encrypt`
+> stays unused until a later task introduces a platform key source.
+> (i) `LOCAL_MASTER_KEY` may be empty at settings construction (so the api imports without environment, like
+> `API_KEY_PEPPER`); a non-empty value must be 64 hex characters, production still refuses `local`, and
+> `open_kms_provider` raises `RuntimeError("LOCAL_MASTER_KEY is not configured")` before opening anything when it is
+> empty.
 
 ## 4. Transport security
 

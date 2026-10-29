@@ -11,6 +11,8 @@ from va_api.container import Container, build_container
 from va_api.idempotency import DbIdempotencyStore
 from va_api.main import create_app
 from va_api.rate_limit import RateLimiter
+from va_common.crypto import Envelope
+from va_db.provisioning import OrgProvisioner
 
 UNREACHABLE_PG = "postgresql+asyncpg://va:va@127.0.0.1:1/va"
 UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"
@@ -30,6 +32,8 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert isinstance(container.authenticator, ApiKeyAuthenticator)
         assert isinstance(container.rate_limiter, RateLimiter)
         assert isinstance(container.idempotency, DbIdempotencyStore)
+        assert isinstance(container.envelope, Envelope)
+        assert isinstance(container.provisioner, OrgProvisioner)
         assert closed == []
     # The va_app and va_system engines first, then the dependency stack in reverse order.
     assert closed == ["engine", "engine", "redis", "engine"]
@@ -39,6 +43,14 @@ async def test_build_container_requires_api_key_pepper(monkeypatch: pytest.Monke
     closed = track_closes(monkeypatch)
     with pytest.raises(RuntimeError, match="API_KEY_PEPPER is not configured"):
         async with build_container(make_settings(api_key_pepper="")):
+            pytest.fail("the container must not open")
+    assert closed == []
+
+
+async def test_build_container_requires_local_master_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    closed = track_closes(monkeypatch)
+    with pytest.raises(RuntimeError, match="LOCAL_MASTER_KEY is not configured"):
+        async with build_container(make_settings(local_master_key="")):
             pytest.fail("the container must not open")
     assert closed == []
 

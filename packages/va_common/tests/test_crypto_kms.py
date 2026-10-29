@@ -282,6 +282,12 @@ async def test_open_kms_provider_local() -> None:
         assert await provider.decrypt_data_key(org, data_key.wrapped) == data_key.plaintext
 
 
+async def test_open_kms_provider_local_requires_master_key() -> None:
+    with pytest.raises(RuntimeError, match="LOCAL_MASTER_KEY is not configured"):
+        async with open_kms_provider(crypto_settings()):
+            pytest.fail("the provider must not open without LOCAL_MASTER_KEY")
+
+
 async def test_open_kms_provider_aws(monkeypatch: pytest.MonkeyPatch) -> None:
     session = FakeSession(FakeKmsClient())
     monkeypatch.setattr(aioboto3, "Session", lambda: session)

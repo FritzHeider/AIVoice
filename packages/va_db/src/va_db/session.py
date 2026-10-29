@@ -2,7 +2,8 @@
 
 Every tenant query runs inside :func:`tenant_session`, which opens a transaction on the ``va_app`` engine and
 sets ``app.org_id`` transaction-locally so row-level security confines it to one org. The setting ends with
-the transaction, so a pooled connection never carries it into the next session.
+the transaction, so a pooled connection never carries it into the next session. :func:`global_session` reaches
+the identity tables without ``org_id`` (``orgs``, ``users``, ``sessions``, ``email_tokens``; specs/03 §2).
 """
 
 from __future__ import annotations
@@ -18,7 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from va_common.settings import DatabaseSettings
 from va_db.engine import DbRole, create_engine
 
-__all__ = ["Database", "configure_database", "get_database", "system_session", "tenant_session"]
+__all__ = [
+    "Database",
+    "configure_database",
+    "get_database",
+    "global_session",
+    "system_session",
+    "tenant_session",
+]
 
 _SET_ORG_ID = text("SELECT set_config('app.org_id', :org_id, true)")
 
@@ -47,6 +55,16 @@ class Database:
         """A transaction as ``va_app`` with ``app.org_id`` set; commits on success, rolls back on error."""
         async with self._app_sessions() as session, session.begin():
             await session.execute(_SET_ORG_ID, {"org_id": str(org_id)})
+            yield session
+
+    @asynccontextmanager
+    async def global_session(self) -> AsyncIterator[AsyncSession]:
+        """A transaction as ``va_app`` without ``app.org_id``; commits on success, rolls back on error.
+
+        Only for the tables without ``org_id`` and RLS (``orgs``, ``users``, ``sessions``, ``email_tokens``):
+        every RLS table reads as empty and rejects writes here (specs/03-data-model.md §2).
+        """
+        async with self._app_sessions() as session, session.begin():
             yield session
 
     @asynccontextmanager
@@ -82,6 +100,13 @@ def get_database() -> Database:
 async def tenant_session(org_id: uuid.UUID) -> AsyncIterator[AsyncSession]:
     """:meth:`Database.tenant_session` of the process-wide database."""
     async with get_database().tenant_session(org_id) as session:
+        yield session
+
+
+@asynccontextmanager
+async def global_session() -> AsyncIterator[AsyncSession]:
+    """:meth:`Database.global_session` of the process-wide database (identity tables only)."""
+    async with get_database().global_session() as session:
         yield session
 
 

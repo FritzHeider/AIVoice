@@ -36,12 +36,12 @@ async def flushed[M: Base](session: AsyncSession, model: M) -> M:
 
 
 async def make_org(session: AsyncSession, **values: Any) -> Org:
-    org = Org(
-        name="Acme Dental",
-        slug=f"acme-{secrets.token_hex(4)}",
-        webhook_signing_secret_enc=os.urandom(32),
-        **values,
-    )
+    defaults: dict[str, Any] = {
+        "name": "Acme Dental",
+        "slug": f"acme-{secrets.token_hex(4)}",
+        "webhook_signing_secret_enc": os.urandom(32),
+    }
+    org = Org(**{**defaults, **values})
     return await flushed(session, org)
 
 

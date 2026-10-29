@@ -120,15 +120,16 @@ def test_subclass_adds_fields_and_ignores_unrelated_env(monkeypatch: pytest.Monk
     assert not hasattr(settings, "some_other_service_var")
 
 
-def test_crypto_settings_require_local_master_key() -> None:
-    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY must be 64 hex characters"):
-        load(CryptoSettings)
+def test_crypto_settings_allow_empty_local_master_key() -> None:
+    settings = load(CryptoSettings)
+    assert settings.kms_provider is KmsProviderName.LOCAL
+    assert settings.local_master_key.get_secret_value() == ""
 
 
 @pytest.mark.parametrize("value", ["zz" * 32, "ab" * 31, "ab" * 33])
 def test_crypto_settings_reject_malformed_master_key(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("LOCAL_MASTER_KEY", value)
-    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY") as info:
+    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY must be 64 hex characters") as info:
         load(CryptoSettings)
     assert value not in str(info.value)
 

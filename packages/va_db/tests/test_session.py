@@ -19,6 +19,9 @@ async def test_unconfigured_database_raises() -> None:
     with pytest.raises(RuntimeError, match="configure_database"):
         async with db_session.system_session():
             pytest.fail("entered a session without a database")
+    with pytest.raises(RuntimeError, match="configure_database"):
+        async with db_session.global_session():
+            pytest.fail("entered a session without a database")
 
 
 async def test_from_settings_builds_one_engine_per_pool() -> None:

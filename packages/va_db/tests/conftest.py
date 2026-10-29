@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from docker_probe import docker_available
+from identity_db import IdentityDb, open_identity_db
 from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
 from service_helpers import isolate_env, settings_of
@@ -59,3 +60,10 @@ async def scratch_session(pg_url: str) -> AsyncIterator[AsyncSession]:
             await transaction.rollback()
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def identity_db(migrated_url: str) -> AsyncIterator[IdentityDb]:
+    """A migrated database with an envelope (random local master key) and an org provisioner."""
+    async with open_identity_db(migrated_url) as db:
+        yield db

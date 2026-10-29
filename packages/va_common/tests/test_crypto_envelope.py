@@ -133,6 +133,19 @@ async def test_missing_active_key(harness: Harness) -> None:
     assert not isinstance(info.value, DecryptionError)
 
 
+async def test_encrypt_with_key_decrypts_with_store_less_envelope(harness: Harness) -> None:
+    org = uuid.uuid4()
+    wrapped = await harness.envelope.create_data_key(org)
+    blob = await harness.envelope.encrypt_with_key(org, wrapped, b"uncommitted", AAD)
+    parsed = EncryptedBlob.from_bytes(blob)
+    assert (parsed.kek_id, parsed.encrypted_data_key) == (wrapped.kek_id, wrapped.encrypted_data_key)
+    assert org not in harness.store.active
+    envelope = fresh_envelope(harness)
+    assert await envelope.decrypt(org, blob, AAD) == b"uncommitted"
+    with pytest.raises(DecryptionError):
+        await envelope.decrypt(org, blob, column_aad("tools", "secret_headers_enc", ROW_B))
+
+
 async def test_old_blobs_decrypt_after_rotation(harness: Harness) -> None:
     old = await harness.envelope.encrypt(harness.org, b"before", AAD)
     await harness.rotate()

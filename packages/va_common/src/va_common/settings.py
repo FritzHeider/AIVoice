@@ -126,7 +126,11 @@ def _is_master_key_hex(value: str) -> bool:
 
 
 class CryptoSettings(BaseServiceSettings):
-    """Envelope-encryption settings for services that store tenant secrets (api, worker, media)."""
+    """Envelope-encryption settings for services that store tenant secrets (api, worker, media).
+
+    ``LOCAL_MASTER_KEY`` may be empty at construction so a service module imports without environment;
+    :func:`va_common.crypto.open_kms_provider` refuses to open the local provider without it.
+    """
 
     kms_provider: KmsProviderName = KmsProviderName.LOCAL
     local_master_key: SecretStr = SecretStr("")
@@ -142,7 +146,8 @@ class CryptoSettings(BaseServiceSettings):
         if self.is_production:
             msg = "KMS_PROVIDER=local is refused when VA_ENV=production"
             raise ValueError(msg)
-        if not _is_master_key_hex(self.local_master_key.get_secret_value()):
-            msg = "LOCAL_MASTER_KEY must be 64 hex characters (32 bytes) when KMS_PROVIDER=local"
+        master_key = self.local_master_key.get_secret_value()
+        if master_key and not _is_master_key_hex(master_key):
+            msg = "LOCAL_MASTER_KEY must be 64 hex characters (32 bytes) when set"
             raise ValueError(msg)
         return self

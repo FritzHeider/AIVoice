@@ -805,3 +805,251 @@ Diff checked against specs/04 §4.2 (argon2id t=3/m=65536/p=4/hash 32/salt 16, r
 list path, local-part rule), specs/31 PASSWORD_TOO_WEAK 400 with field, specs/02 §6 SMTP_URL/EMAIL_FROM defaults
 unchanged, specs/28 §2 SMTP_URL as secret. No PII in EmailDeliveryError (raised from None) or logs (mask_email).
 Blocking argon2/list load offloaded via to_thread. No findings. Next: P02-T04b.
+
+## 2026-10-29 Planner: P02-T04a approved → next P02-T04b
+
+## Plan P02-T04b — Identity repositories and org provisioning (specs/04 §4.1, §4.3; specs/28 §3; specs/03 §2, §3, §10)
+
+### Key facts found while planning
+- `orgs`, `users`, `sessions`, `email_tokens` have no `org_id` column → no RLS; `va_app` has DML grants on them.
+  `memberships`, `org_data_keys`, `invitations` have NOT NULL `org_id` → RLS (`tenant_isolation`).
+- `va_common.crypto.DataKeyStore` is only a Protocol; no implementation exists yet (specs/28 Decision (d) said
+  "implemented over org_data_keys in phase 01" — it was not). `Envelope.encrypt` reads the active key through the
+  store, which cannot see the uncommitted key row inside the provisioning transaction.
+- `ApiSettings` does not yet extend `CryptoSettings`, and `CryptoSettings` rejects an empty `LOCAL_MASTER_KEY` at
+  construction, while `va_api.main` builds `ApiSettings()` at import with no environment (`app = create_app()`).
+- Listing a user's memberships across orgs (needed by T04c login/`/internal/auth/session`) cannot run under RLS
+  before an org is chosen → needs a `va_system` lookup repo (spec list + test count change).
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+1. specs/03 §2 (append new Decision under the existing ApiKeyLookupRepo one, and add `MembershipLookupRepo` to the
+   backticked `va_system` bullet list so `_spec_system_repos()` sees it): "**Global identity tables** (`orgs`,
+   `users`, `sessions`, `email_tokens`) have no `org_id` and no RLS; code reaches them through
+   `Database.global_session()` (a `va_app` transaction with `app.org_id` unset, so every RLS table returns no rows and
+   rejects writes) or through a `tenant_session` when it also writes tenant rows in the same transaction.
+   `MembershipLookupRepo` joins the `va_system` list because a dashboard user's memberships span orgs and are read
+   before an active org exists: `for_user(user_id)` returns `MembershipRecord`s (membership id, role, org id, name,
+   slug, plan_id, status, parent_org_id) ordered by membership `created_at`, id."
+2. specs/04 §4.1 (Decision under the table): "**Org provisioning** (`va_db.provisioning.OrgProvisioner`, used by
+   signup, `POST /v1/orgs/create`, and seeding) creates in one `tenant_session(new_org_id)` transaction: the org row,
+   its `active` `org_data_keys` row, a webhook signing secret `whsec_` + 43-char opaque token encrypted with AAD
+   `orgs.webhook_signing_secret_enc:<org_id>`, and (when an owner is given) the owner user (new or existing) plus an
+   `owner` membership; any failure rolls everything back. **Slug** = org name NFKD-folded to ASCII, lower-cased,
+   runs of non-`[a-z0-9]` replaced by `-`, trimmed of `-`, cut to 40 characters (re-trimmed), `org` when empty, then
+   `-` + 4 random characters from `[a-z0-9]`; on a slug collision a new suffix is drawn, up to 5 attempts, then
+   `CONFLICT`. **Duplicate user email** raises `CONFLICT` with `field: "email"`, message "An account with this email
+   already exists." Email addresses are stored as given after `strip()` (the column is `citext`)."
+3. specs/28 §3 (new Decision after the 2026-10-25 one): "(h) `OrgDataKeyStore` in `va_db.repositories.data_keys`
+   implements `DataKeyStore` over `org_data_keys` (`status='active'`) on a `tenant_session(org_id)`;
+   `Envelope.encrypt_with_key(org_id, wrapped, plaintext, aad)` seals under an explicit wrapped key so a transaction
+   that has just created a data key can encrypt before committing. (i) `LOCAL_MASTER_KEY` may be empty at settings
+   construction (so the api imports without environment, like `API_KEY_PEPPER`); a non-empty value must be 64 hex
+   characters, production still refuses `local`, and `open_kms_provider` raises `RuntimeError("LOCAL_MASTER_KEY is
+   not configured")` before opening anything when it is empty." Also adjust (g) wording only by referencing (i).
+   The platform (nil org) key has no `org_data_keys` row (FK to `orgs`); `platform_encrypt` stays unused until a
+   later task introduces a platform key source — state that in (h).
+
+### Files
+
+**packages/va_common/src/va_common/crypto/envelope.py**
+- `async def encrypt_with_key(self, org_id: UUID, wrapped: WrappedDataKey, plaintext: bytes, aad: str) -> bytes`
+  → `return await self._seal(org_id, wrapped, plaintext, aad)`; docstring per decision 3(h). Plus
+  `encrypt_str_with_key(...)` is NOT needed (callers `.encode()`); keep API minimal.
+
+**packages/va_common/src/va_common/settings.py** — `CryptoSettings._check_kms_provider`: local branch rejects a
+non-empty key that is not 64 hex (message unchanged otherwise: "LOCAL_MASTER_KEY must be 64 hex characters (32 bytes)
+when set"); empty allowed. Production refusal stays first for local.
+**packages/va_common/src/va_common/crypto/kms.py** — `open_kms_provider`: local branch raises
+`RuntimeError("LOCAL_MASTER_KEY is not configured")` when the secret is empty.
+Update `packages/va_common/tests/test_settings.py` / `test_crypto_kms.py` cases accordingly (empty accepted at
+construction; bad hex rejected; `open_kms_provider` with empty → RuntimeError).
+
+**packages/va_db/src/va_db/session.py**
+- `Database.global_session()` asynccontextmanager: `async with self._app_sessions() as session, session.begin():
+  yield session` (no set_config). Module-level helper `global_session()` mirroring the existing `tenant_session`/
+  `system_session` helpers (check how they are defined at the bottom of the file and follow the same pattern); add
+  to `__all__`. Docstring: only for `orgs`, `users`, `sessions`, `email_tokens`.
+
+**packages/va_db/src/va_db/repositories/data_keys.py** (new)
+- `class OrgDataKeyRepo:` `__init__(self, session: AsyncSession)` (tenant session);
+  `async def active(self, org_id) -> WrappedDataKey | None` (select kek_id, encrypted_data_key where org_id and
+  status='active'; explicit org_id filter + RLS); `async def add_active(self, org_id, wrapped) -> OrgDataKey`
+  (insert `status='active'`, id `new_id()`, flush; unique partial index violation → `AppError("CONFLICT", ...)`
+  inside a savepoint).
+- `class OrgDataKeyStore:` `__init__(self, database: Database)`; `async def active_data_key(self, org_id) ->
+  WrappedDataKey | None` → `async with database.tenant_session(org_id) as s: return await OrgDataKeyRepo(s).active(org_id)`.
+  Returns None for `NIL_ORG_ID` without a query (no row can exist). Satisfies `va_common.crypto.DataKeyStore`
+  (assert structurally in a test: `store: DataKeyStore = OrgDataKeyStore(db)` typechecks).
+
+**packages/va_db/src/va_db/repositories/identity.py** (new; no RLS tables only, works on global or tenant session)
+- `@dataclass(frozen=True, slots=True) class NewUser: email: str; name: str = ""; password_hash: str | None = None;
+  email_verified_at: datetime | None = None` (`password_hash` `field(repr=False)`).
+- `@dataclass(frozen=True, slots=True) class IssuedSession: token: str = field(repr=False); session: Session`.
+- `class IdentityRepo:` `__init__(self, session: AsyncSession)`:
+  - Users: `create_user(new: NewUser) -> User` (id new_id(), email stripped; unique violation in a savepoint →
+    `AppError("CONFLICT", "An account with this email already exists.", field="email")`);
+    `get_user(user_id) -> User | None`; `get_user_by_email(email) -> User | None` (`email.strip()`, citext compare);
+    `mark_email_verified(user_id, now) -> None` (only sets when NULL: `UPDATE ... WHERE email_verified_at IS NULL`);
+    `set_password_hash(user_id, password_hash) -> None`; `record_login(user_id, now) -> None` (`last_login_at`).
+  - Sessions (token never stored; hash = `va_common.auth.sha256_hex`):
+    `create_session(*, user_id, active_org_id: UUID | None, expires_at: datetime, ip: str | None, user_agent:
+    str | None, mfa_passed: bool = False) -> IssuedSession` (uses `va_common.auth.issue_token()`);
+    `get_active_session(token: str, now) -> Session | None` (by hash; `revoked_at IS NULL AND expires_at > now`);
+    `extend_session(session_id, expires_at) -> None`; `set_active_org(session_id, org_id) -> None`;
+    `set_mfa_passed(session_id) -> None`; `revoke_session(session_id, now) -> bool` (only unrevoked; returns whether
+    a row changed); `revoke_user_sessions(user_id, now, *, except_session_id: UUID | None = None) -> list[str]`
+    returning the revoked rows' `token_hash`es (T04c deletes `sess:{hash}` cache keys from them).
+    `ip` stored as given string (asyncpg casts to inet; validate with `ipaddress.ip_address` → ValueError early).
+  - Email tokens: `issue_email_token(*, user_id, purpose: EmailTokenPurpose, now, ttl: timedelta) -> IssuedToken`;
+    `consume_email_token(token: str, purpose, now) -> UUID | None` — single atomic
+    `UPDATE email_tokens SET used_at = :now WHERE token_hash = :h AND purpose = :p AND used_at IS NULL AND
+    expires_at > :now RETURNING user_id` (returns user id; None for unknown/used/expired/wrong purpose — the router
+    maps None to `TOKEN_EXPIRED`); `count_issued_since(user_id, purpose, since) -> int` (resend limit 3/h in T04c).
+  - Constants exported: `EMAIL_VERIFY_TTL: Final = timedelta(hours=24)`, `PASSWORD_RESET_TTL: Final = timedelta(hours=1)`
+    (spec §4.1 values; session lifetimes stay in T04c).
+
+**packages/va_db/src/va_db/repositories/memberships.py** (new)
+- `@dataclass(frozen=True, slots=True) class MembershipRecord: membership_id, role: MemberRole, org_id, org_name,
+  org_slug, plan_id, org_status: OrgStatus, parent_org_id: UUID | None`.
+- `class MembershipLookupRepo(SystemRepository):` (`system_scope = True`, comment citing specs/03 §2)
+  `async def for_user(self, user_id) -> list[MembershipRecord]` (join orgs; order by memberships.created_at, id).
+- `class MembershipRepo:` tenant: `__init__(session, org_id)`; `add(user_id, role) -> Membership` (unique
+  (org_id,user_id) → `CONFLICT` in savepoint, message "User is already a member of this org.");
+  `get_for_user(user_id) -> Membership | None` (explicit org_id filter).
+  (Do not build member list/role-change endpoints — that is T08.)
+
+**packages/va_db/src/va_db/provisioning.py** (new)
+- `SLUG_MAX_BASE: Final = 40`, `SLUG_SUFFIX_LEN: Final = 4`, `SLUG_ATTEMPTS: Final = 5`,
+  `WEBHOOK_SECRET_PREFIX: Final = "whsec_"`, `WEBHOOK_SECRET_AAD_COLUMN = ("orgs", "webhook_signing_secret_enc")`.
+- `def slug_base(name: str) -> str` (pure, decision 2); `def make_slug(name: str, *, suffix: str | None = None) -> str`
+  (suffix from `secrets.choice` over `string.ascii_lowercase + string.digits` when None).
+- `def webhook_secret_aad(org_id) -> str` → `column_aad("orgs", "webhook_signing_secret_enc", org_id)`.
+- `@dataclass(frozen=True, slots=True) class ProvisionedOrg: org: Org; owner: User | None; membership: Membership |
+  None; webhook_signing_secret: str = field(repr=False)` (returned so `/v1/orgs/create`/seed can show nothing or use
+  it; never logged).
+- `class OrgProvisioner:` `__init__(self, database: Database, envelope: Envelope)`;
+  - `async def provision(self, *, name: str, owner: UUID | NewUser | None, plan_id: str = "start",
+    parent_org_id: UUID | None = None) -> ProvisionedOrg`: `org_id = new_id()`; `async with
+    database.tenant_session(org_id) as s: return await self.provision_in(s, org_id, ...)`.
+  - `async def provision_in(self, session, org_id, *, name, owner, plan_id="start", parent_org_id=None) ->
+    ProvisionedOrg` — caller guarantees `session` is `tenant_session(org_id)` (T04c signup uses this to also write the
+    session row and verify token in the same transaction). Steps, flushing explicitly in this order (FKs):
+    1. `wrapped = await envelope.create_data_key(org_id)`; secret = `WEBHOOK_SECRET_PREFIX + generate_token()`;
+       `enc = await envelope.encrypt_with_key(org_id, wrapped, secret.encode(), webhook_secret_aad(org_id))`.
+    2. Org insert in a savepoint (`session.begin_nested()`, `session.add` INSIDE the block per memory
+       mem-1793133155-6419) with `make_slug(name)`; on slug unique violation retry with a new suffix up to
+       `SLUG_ATTEMPTS`, then `AppError("CONFLICT", "Could not allocate a unique org slug.")`. Name is `strip()`ed;
+       empty name → `AppError("INVALID_INPUT", "Org name must not be empty.", field="org_name")` (specs/31 code).
+    3. `OrgDataKeyRepo(session).add_active(org_id, wrapped)`.
+    4. Owner: `NewUser` → `IdentityRepo(session).create_user(...)`; `UUID` → `get_user` (missing →
+       `NotFoundError("user")`); then `MembershipRepo(session, org_id).add(user.id, "owner")`.
+  - `async def webhook_signing_secret(self, org: Org) -> str` → `envelope.decrypt_str(org.id,
+    org.webhook_signing_secret_enc, webhook_secret_aad(org.id))` (used by the acceptance test and later webhooks).
+- Export from `va_db.repositories.__init__` (new repos, `NewUser`, `IssuedSession`, `MembershipRecord`,
+  `EMAIL_VERIFY_TTL`, `PASSWORD_RESET_TTL`) and update its docstring; `va_db.provisioning` is its own module.
+
+**apps/api/src/va_api/settings.py** — `ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings,
+EmailSettings, CryptoSettings)`; docstring mentions `LOCAL_MASTER_KEY` like the pepper.
+**apps/api/src/va_api/container.py** — inside the stack: `provider = await stack.enter_async_context(
+open_kms_provider(settings))` (raises RuntimeError before opening when key empty — check ordering: call a cheap
+pre-check alongside `settings.api_key_hasher()` so nothing opens; simplest: add `CryptoSettings.require_kms_configured()`
+method used first, or open the provider BEFORE `open_dependencies()` in the same AsyncExitStack); `envelope =
+Envelope(provider, OrgDataKeyStore(database))`; `provisioner = OrgProvisioner(database, envelope)`; Container gains
+fields `envelope: Envelope`, `provisioner: OrgProvisioner`. Keep the constructor call readable (keyword args).
+**apps/api/tests/support/api_helpers.py** — `make_settings` adds `local_master_key=secrets.token_hex(32)` default.
+Check `apps/worker` / `apps/media_worker` settings: do NOT add CryptoSettings there in this task (no consumers yet).
+**AGENTS.md** — bullets: `Database.global_session()` for identity tables; `provision_in` for same-txn signup;
+`LOCAL_MASTER_KEY` required by the api container.
+
+### Tests
+packages/va_common/tests: `test_encrypt_with_key_decrypts_with_store_less_envelope` (create_data_key, encrypt_with_key,
+then decrypt through an Envelope whose store returns None → still decrypts, embedded key); settings/kms updates above.
+
+packages/va_db/tests/test_identity_repo_integration.py (migrated_url, integration mark; reuse tenant_rows.open_database,
+model_factories; check model_factories for make_org/make_user helpers and reuse them):
+- `test_create_user_and_lookup_case_insensitive` (create "Jane@Example.org" → get_user_by_email("jane@example.ORG"));
+  use `example.org` only in tests (placeholder checker flags example.com in production docstrings only).
+- `test_create_user_duplicate_email_conflict` (AppError CONFLICT, field email; session still usable after).
+- `test_session_stores_only_hash` (row.token_hash == sha256_hex(issued.token), token not in any column: select all
+  text columns and assert plaintext absent); `test_get_active_session_excludes_expired_and_revoked`;
+  `test_extend_and_set_active_org_and_mfa`; `test_revoke_user_sessions_except_current_returns_hashes`.
+- `test_email_token_hash_only_and_single_use` (consume → user id, second consume → None);
+  `test_email_token_expired_or_wrong_purpose_none`; `test_count_issued_since`.
+- `test_mark_email_verified_keeps_first_timestamp`.
+packages/va_db/tests/test_membership_lookup_integration.py — user with memberships in 2 orgs → `for_user` returns both
+  in order with org fields; MembershipRepo.add duplicate → CONFLICT.
+packages/va_db/tests/test_data_keys_integration.py — `OrgDataKeyStore.active_data_key` returns the active row, None
+  for an org without one and for NIL_ORG_ID; second `add_active` → CONFLICT; store under another org's id cannot read
+  (RLS + filter).
+packages/va_db/tests/test_provisioning.py (unit): `slug_base` table ("Acme Corp" → "acme-corp", "  Ünïcödé Café!! "
+  → "unicode-cafe", "日本" → "org", 60-char name cut to 40 without trailing `-`), `make_slug` suffix format regex
+  `^[a-z0-9-]+-[a-z0-9]{4}$`, `webhook_secret_aad`.
+packages/va_db/tests/test_provisioning_integration.py (use a real `Envelope(LocalKmsProvider.from_hex(token_hex(32)),
+OrgDataKeyStore(db))`):
+- `test_provision_with_new_owner_creates_all_rows` (org plan 'start', slug pattern, one active data key, owner
+  membership role owner, user exists).
+- `test_webhook_secret_decrypts_with_its_aad` (`provisioner.webhook_signing_secret(org)` == returned secret, starts
+  `whsec_`, len 49; decrypt with another org's AAD → DecryptionError; ciphertext does not contain the secret).
+- `test_provision_is_atomic` — duplicate owner email (pre-create the user, pass NewUser with same email) → CONFLICT
+  and zero new `orgs` / `org_data_keys` / `memberships` rows (count via system session before/after); also a variant
+  that monkeypatches `MembershipRepo.add` to raise → no rows.
+- `test_provision_existing_owner_and_parent` (owner UUID, parent_org_id set; missing user id → NOT_FOUND, no rows).
+- `test_slug_collision_retries` (monkeypatch suffix generator to return a taken suffix first, then a free one).
+- `test_provision_in_shares_caller_transaction` (open tenant_session(org_id), provision_in, then create a session row
+  via IdentityRepo in the same txn, raise → nothing persisted).
+packages/va_db/tests/test_session_integration.py — add `test_global_session_denies_tenant_tables`: in
+  `global_session()` `current_setting('app.org_id')` is NULL, `SELECT count(*) FROM memberships` = 0 while rows exist
+  (inserted via system session), INSERT into memberships raises (RLS WITH CHECK), users/orgs visible.
+packages/va_db/tests/test_repositories.py — count 7 → 8 in `test_system_repositories_are_exactly_the_spec_list`.
+apps/api/tests/test_container.py — container exposes `Envelope` and `OrgProvisioner`; `local_master_key=""` →
+  RuntimeError "LOCAL_MASTER_KEY is not configured" with `closed == []`; existing close-order assertion still holds
+  (local provider has no close; if order changes, update the assertion and explain in build notes).
+apps/api/tests/test_settings_auth.py — `ApiSettings()` without env constructs (import path) and bad-hex
+  LOCAL_MASTER_KEY rejected.
+
+### Gates
+`make fmt lint typecheck placeholders test` + jscpd (reuse `TenantRepository._savepoint`-style helper instead of
+copying the unique-violation savepoint block 3×: factor a module-level `async def conflict_savepoint(session, message,
+field=None)` asynccontextmanager in `repositories/base.py` and use it from identity/memberships/data_keys/provisioning),
+radon, pip-audit, check_spec_refs, openapi drift (unchanged), gitleaks, scripts/tests/test_env_example.py (no env rows
+change; LOCAL_MASTER_KEY default text in specs/02 §6 says "64 hex chars" for dev value — unchanged).
+
+### Risks
+- jscpd: the four integration test files will share fixture boilerplate → put a `identity_db` fixture (Database +
+  Envelope + provisioner) in packages/va_db/tests/conftest.py or support module once.
+- `begin_nested` autoflush: flush pending objects before entering each savepoint, `add` inside it.
+- RLS: provisioning inserts `org_data_keys`/`memberships` — only valid because `tenant_session(org_id)` sets the new
+  id; `orgs` insert itself is not RLS-protected. Test that `provision_in` with a mismatched session org id fails
+  (RLS WITH CHECK) rather than silently writing.
+- va_db now imports `va_common.crypto` (cryptography, aiobotocore) — already a va_common dependency, no new deps.
+- `CryptoSettings` relaxation touches va_common tests written for P01; update, do not delete, the assertions.
+- Flaky Docker timeouts (memories mem-1793129328-3035 family): rerun isolated before suspecting code.
+
+## 2026-10-29 Builder: P02-T04b build notes
+Implemented per plan. Deviations (deliberate):
+- `global_session` tests live in `test_session_integration.py` on the existing `rls_probe` harness (va_app, NULL
+  `app.org_id`, RLS rows invisible, INSERT rejected with "row-level security") plus the module helper and the
+  unconfigured-database case in `test_session.py`, instead of memberships on a migrated DB.
+- `issue_email_token` writes `created_at=now` from the caller's clock so `count_issued_since` (resend limit in T04c)
+  agrees with the injectable Clock rather than DB `now()`.
+- `OrgProvisioner._insert_org(session, name=, build=Callable[[slug], Org])`, so the slug retry loop does not take six
+  arguments; `provisioning.random_slug_suffix` is the monkeypatch seam for the collision tests.
+- `TenantRepository._savepoint` now delegates to the new `conflict_savepoint(session, message, field=)` in
+  `repositories/base.py`, which identity/memberships/data_keys/provisioning share.
+- `model_factories.make_org` now lets callers override `slug`/`name` (it passed duplicate kwargs before).
+- `test_settings_email.test_api_settings_refuse_plain_smtp_in_production` passes `kms_provider="aws"` because ApiSettings
+  now includes CryptoSettings, and local KMS is refused first in production.
+- Extra tests: empty org name → `INVALID_INPUT` field `org_name`; slug attempts exhausted → CONFLICT, no rows;
+  provision without owner; `provision_in` with a mismatched tenant session → RLS error, no rows.
+Decisions written: specs/03 §2 (global identity tables + `MembershipLookupRepo` in the va_system bullet), specs/04 §4.1
+(provisioning, slug, duplicate email, token TTL/consume), specs/28 §3 (h)/(i) and the (g) cross-reference. AGENTS.md: two bullets.
+Gates: make fmt 0; make lint 0; make typecheck 0 (271 files); make placeholders 0 findings; make test 2171 passed,
+TOTAL 99.82 % (every new module is 100 %); jscpd 0 clones; radon avg A (2.54); pip-audit + pnpm audit clean; check_spec_refs
+0 problems; openapi current; gitleaks (pre-commit hook) passed; test_env_example 43 passed.
+
+## Review P02-T04b (2026-10-29): approved
+Re-ran make lint typecheck placeholders (exit 0, 0 findings) and make test (2171 passed, 99.82 %). Diff checked against
+specs/04 §4.1, specs/03 §2/§3, specs/28 §3: provisioning is one tenant_session txn (org, active data key, whsec_ secret
+with column AAD, owner + membership), conflict_savepoint only maps unique violations (FK errors propagate, so a bad
+parent_org_id is not misreported as a slug conflict), tokens stored hash-only, consume is one conditional UPDATE,
+container refuses an empty LOCAL_MASTER_KEY before opening anything. Decisions recorded in specs. No findings.

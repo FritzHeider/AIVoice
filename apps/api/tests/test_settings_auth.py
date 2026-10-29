@@ -52,3 +52,9 @@ def test_hasher_without_previous_pepper_rejects_old_version() -> None:
     hasher = make_settings(api_key_pepper_version=3).api_key_hasher()
     key = generate_api_key("test")
     assert not hasher.verify(key, hasher.hash(key), 2)
+
+
+def test_local_master_key_may_be_empty_but_not_malformed() -> None:
+    assert make_settings(local_master_key="").local_master_key.get_secret_value() == ""
+    with pytest.raises(ValidationError, match="LOCAL_MASTER_KEY must be 64 hex characters"):
+        make_settings(local_master_key="ab" * 31)

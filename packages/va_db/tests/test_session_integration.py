@@ -125,6 +125,21 @@ async def test_app_engine_without_org_sees_no_tenant_rows(database: Database) ->
         assert rows.scalar_one() == 0
 
 
+async def test_global_session_runs_as_va_app_and_denies_tenant_rows(database: Database) -> None:
+    org = new_id()
+    async with database.system_session() as session:
+        await _insert(session, org, "tenant")
+    async with database.global_session() as session:
+        assert (await session.execute(_USER)).scalar_one() == "va_app"
+        assert await _org_id(session) is None
+        assert await _values(session, org) == []
+    with pytest.raises(DBAPIError, match="row-level security"):
+        async with database.global_session() as session:
+            await _insert(session, org, "forged")
+    async with database.system_session() as session:
+        assert await _values(session, org) == [(org, "tenant")]
+
+
 async def test_module_helpers_use_configured_database(database: Database) -> None:
     configure_database(database)
     assert db_session.get_database() is database
@@ -133,6 +148,8 @@ async def test_module_helpers_use_configured_database(database: Database) -> Non
         assert await _org_id(session) == str(org)
     async with db_session.system_session() as session:
         assert (await session.execute(text("SELECT current_user"))).scalar_one() == "va_system"
+    async with db_session.global_session() as session:
+        assert await _org_id(session) is None
 
 
 # Regression: the role must survive a fresh connection whose first transaction rolls back

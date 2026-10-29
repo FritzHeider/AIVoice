@@ -78,6 +78,16 @@ class Envelope:
         """Encrypt under the org's active data key, bound to ``aad`` (use :func:`column_aad`)."""
         return await self._seal(org_id, await self._active_key(org_id), plaintext, aad)
 
+    async def encrypt_with_key(
+        self, org_id: UUID, wrapped: WrappedDataKey, plaintext: bytes, aad: str
+    ) -> bytes:
+        """Encrypt under the explicit data key ``wrapped`` instead of the store's active one.
+
+        For a transaction that has just created the org's data key (:meth:`create_data_key`) and has not
+        committed it yet, so the store cannot see it.
+        """
+        return await self._seal(org_id, wrapped, plaintext, aad)
+
     async def decrypt(self, org_id: UUID, blob: bytes, aad: str) -> bytes:
         """Decrypt with the data key embedded in ``blob``; raise :class:`DecryptionError` on any mismatch."""
         return await self._open(org_id, EncryptedBlob.from_bytes(blob), aad)

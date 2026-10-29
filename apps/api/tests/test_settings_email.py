@@ -23,4 +23,9 @@ def test_api_settings_read_smtp_url_from_environment(monkeypatch: pytest.MonkeyP
 
 def test_api_settings_refuse_plain_smtp_in_production() -> None:
     with pytest.raises(ValidationError, match="smtp://"):
-        make_settings(va_env="production", smtp_url="smtp://smtp.example.com")
+        make_settings(
+            va_env="production",
+            smtp_url="smtp://smtp.example.com",
+            kms_provider="aws",
+            aws_kms_key_id="alias/voiceagents",
+        )

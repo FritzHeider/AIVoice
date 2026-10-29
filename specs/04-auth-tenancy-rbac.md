@@ -233,6 +233,19 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 `INVALID_MFA_CODE` (401), `PASSWORD_TOO_WEAK` (400), `TOKEN_EXPIRED` (400), `REAUTH_REQUIRED` (401)
 (see shared-contract additions).
 
+> Decision (2026-10-29): **org provisioning** (`va_db.provisioning.OrgProvisioner`, used by signup,
+> `POST /v1/orgs/create`, and seeding) creates in one `tenant_session(new_org_id)` transaction: the org row, its
+> `active` `org_data_keys` row, a webhook signing secret `whsec_` + 43-char opaque token encrypted with AAD
+> `orgs.webhook_signing_secret_enc:<org_id>`, and (when an owner is given) the owner user (new or existing) plus an
+> `owner` membership; any failure rolls everything back. An empty (after `strip()`) org name is `INVALID_INPUT` with
+> `field: "org_name"`. **Slug** = org name NFKD-folded to ASCII, lower-cased, runs of non-`[a-z0-9]` replaced by `-`,
+> trimmed of `-`, cut to 40 characters (re-trimmed), `org` when empty, then `-` + 4 random characters from
+> `[a-z0-9]`; on a slug collision a new suffix is drawn, up to 5 attempts, then `CONFLICT`. **Duplicate user email**
+> raises `CONFLICT` with `field: "email"`, message "An account with this email already exists." Email addresses are
+> stored as given after `strip()` (the column is `citext`). Email-link tokens live 24 h (`verify_email`) and 1 h
+> (`reset_password`); consuming one is a single conditional `UPDATE` (unused, unexpired, matching purpose), so a
+> token is accepted at most once.
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,

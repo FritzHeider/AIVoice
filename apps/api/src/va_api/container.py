@@ -14,9 +14,12 @@ from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.settings import ApiSettings
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
+from va_common.crypto import Envelope, open_kms_provider
 from va_common.health import CheckFn
 from va_common.service import ReadinessSource
 from va_common.time import SystemClock
+from va_db.provisioning import OrgProvisioner
+from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container"]
@@ -35,6 +38,8 @@ class Container:
     authenticator: ApiKeyAuthenticator
     rate_limiter: RateLimiter
     idempotency: IdempotencyStore
+    envelope: Envelope
+    provisioner: OrgProvisioner
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -43,13 +48,18 @@ class Container:
 
 @asynccontextmanager
 async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
-    """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store.
+    """Create the engines, Redis, Temporal connector, authenticator, rate limiter, idempotency store, the
+    envelope (KMS provider plus ``org_data_keys`` store), and the org provisioner.
 
-    Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` is not configured, before
-    anything is opened.
+    Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
+    provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
     """
     hasher = settings.api_key_hasher()
-    async with open_dependencies() as deps, AsyncExitStack() as stack:
+    async with (
+        open_kms_provider(settings) as kms_provider,
+        open_dependencies() as deps,
+        AsyncExitStack() as stack,
+    ):
         engine, redis, temporal = deps.postgres(settings), deps.redis(settings), deps.temporal(settings)
         database = Database.from_settings(settings)
         stack.push_async_callback(database.dispose)
@@ -63,6 +73,17 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         )
         rate_limiter = RateLimiter(redis, clock)
         idempotency = DbIdempotencyStore(database, clock)
+        envelope = Envelope(kms_provider, OrgDataKeyStore(database))
         yield Container(
-            settings, engine, redis, temporal, deps, database, authenticator, rate_limiter, idempotency
+            settings=settings,
+            engine=engine,
+            redis=redis,
+            temporal=temporal,
+            dependencies=deps,
+            database=database,
+            authenticator=authenticator,
+            rate_limiter=rate_limiter,
+            idempotency=idempotency,
+            envelope=envelope,
+            provisioner=OrgProvisioner(database, envelope),
         )

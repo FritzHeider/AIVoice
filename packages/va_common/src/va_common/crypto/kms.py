@@ -223,9 +223,17 @@ async def aws_kms_provider(
 
 @asynccontextmanager
 async def open_kms_provider(settings: CryptoSettings) -> AsyncIterator[KmsProvider]:
-    """Yield the provider selected by ``KMS_PROVIDER``."""
+    """Yield the provider selected by ``KMS_PROVIDER``.
+
+    ``RuntimeError`` before anything is opened when the local provider is selected and ``LOCAL_MASTER_KEY``
+    is empty.
+    """
     if settings.kms_provider is KmsProviderName.AWS:
         async with aws_kms_provider(settings.aws_kms_key_id) as provider:
             yield provider
         return
-    yield LocalKmsProvider.from_hex(settings.local_master_key.get_secret_value())
+    master_key = settings.local_master_key.get_secret_value()
+    if not master_key:
+        msg = "LOCAL_MASTER_KEY is not configured"
+        raise RuntimeError(msg)
+    yield LocalKmsProvider.from_hex(master_key)

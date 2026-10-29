@@ -17,8 +17,9 @@ __all__ = ["FakeChecks", "failing", "make_client", "make_settings", "ok_check", 
 
 
 def make_settings(**overrides: Any) -> ApiSettings:
-    """Settings without `.env`; a fresh random ``API_KEY_PEPPER`` unless one is given."""
-    return settings_of(ApiSettings, **{"api_key_pepper": secrets.token_hex(32), **overrides})
+    """Settings without `.env`; fresh random ``API_KEY_PEPPER`` and ``LOCAL_MASTER_KEY`` unless given."""
+    defaults = {"api_key_pepper": secrets.token_hex(32), "local_master_key": secrets.token_hex(32)}
+    return settings_of(ApiSettings, **{**defaults, **overrides})
 
 
 @dataclass

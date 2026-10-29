@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, ClassVar, Final
 
 from sqlalchemy import ColumnElement, Select, Table, inspect, select, tuple_
@@ -28,6 +28,7 @@ __all__ = [
     "NotFoundError",
     "SystemRepository",
     "TenantRepository",
+    "conflict_savepoint",
     "is_unique_violation",
     "require_positive",
 ]
@@ -53,6 +54,26 @@ class NotFoundError(AppError):
 def is_unique_violation(exc: IntegrityError) -> bool:
     """Whether ``exc`` is a Postgres unique violation (SQLSTATE 23505)."""
     return getattr(exc.orig, "sqlstate", None) == _UNIQUE_VIOLATION
+
+
+@asynccontextmanager
+async def conflict_savepoint(
+    session: AsyncSession, message: str, *, field: str | None = None
+) -> AsyncIterator[None]:
+    """Apply the block's changes and flush them in a savepoint; a unique violation becomes ``CONFLICT``.
+
+    Changes must be made inside the block: ``begin_nested()`` first flushes pending changes into the
+    enclosing transaction, where a failure would abort the caller's whole transaction. After a conflict the
+    caller's transaction stays usable.
+    """
+    try:
+        async with session.begin_nested():
+            yield
+            await session.flush()
+    except IntegrityError as exc:
+        if is_unique_violation(exc):
+            raise AppError("CONFLICT", message, field=field) from exc
+        raise
 
 
 def require_positive(name: str, value: int) -> int:
@@ -107,21 +128,9 @@ class TenantRepository[M: Base]:
             msg = f"{self.resource} does not accept {', '.join(rejected)}"
             raise ValueError(msg)
 
-    @asynccontextmanager
-    async def _savepoint(self) -> AsyncIterator[None]:
-        """Apply the block's changes and flush them in a savepoint; a unique violation becomes ``CONFLICT``.
-
-        Changes must be made inside the block: ``begin_nested()`` first flushes pending changes into the
-        enclosing transaction, where a failure would abort the caller's whole transaction.
-        """
-        try:
-            async with self.session.begin_nested():
-                yield
-                await self.session.flush()
-        except IntegrityError as exc:
-            if is_unique_violation(exc):
-                raise AppError("CONFLICT", f"{self.resource} already exists.") from exc
-            raise
+    def _savepoint(self) -> AbstractAsyncContextManager[None]:
+        """:func:`conflict_savepoint` with the message "<table> already exists."."""
+        return conflict_savepoint(self.session, f"{self.resource} already exists.")
 
     async def get(self, row_id: uuid.UUID, *, include_deleted: bool = False) -> M:
         """The org's row ``row_id``; :class:`NotFoundError` when absent, deleted, or another org's."""

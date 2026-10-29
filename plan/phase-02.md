@@ -30,7 +30,7 @@
   - Deliverables: `va_common.auth` package (api key module moved, `passwords`, `tokens`, bundled `data/common_passwords.txt.gz`), `scripts/build_password_list.py`, `va_common.email` (`EmailSender` protocol, `SmtpEmailSender` on aiosmtplib with timeouts, `InMemoryEmailSender`, `EmailSettings`, `verify_email` template)
   - Acceptance: argon2id parameters exactly as specs/04 §4.2 and rehash detection; policy rejects short/long/breached/email-local-part passwords; SMTP sender delivers to an aiosmtpd test server; in-memory sender records messages.
 
-- [ ] P02-T04b Identity repositories and org provisioning
+- [x] P02-T04b Identity repositories and org provisioning — global_session, IdentityRepo, MembershipLookupRepo/MembershipRepo, OrgDataKeyStore, atomic OrgProvisioner (data key + encrypted whsec_ secret + owner), Envelope+provisioner in api container; review re-run: lint/typecheck/placeholders 0, make test 2171 passed, coverage 99.82 %
   - Spec refs: specs/04-auth-tenancy-rbac.md §4.1 (signup creates org/user/membership), §4.3; specs/28-security.md §3 (data key on org creation); specs/03-data-model.md §2, §3 (`users`, `sessions`, `email_tokens`, `org_data_keys`)
   - Depends on: P02-T04a
   - Deliverables: va_db access path for the global identity tables, `org_data_keys`-backed `DataKeyStore`, identity repository (users, sessions, email tokens), org provisioning service (org + active data key + encrypted webhook signing secret + owner membership in one transaction), `Envelope` in the api container

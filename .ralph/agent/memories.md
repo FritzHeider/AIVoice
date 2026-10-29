@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793262412-7bed
+> va_db identity tests: identity_db fixture (conftest, support/identity_db.py) gives Database + local-KMS Envelope + OrgProvisioner; row_counts(db) asserts provisioning atomicity. Pool size is 1 per role, so never nest two app sessions (tenant/global) in one test (it deadlocks on pool checkout)
+<!-- tags: database, testing | created: 2026-10-29 -->
+
 ### mem-1793261328-920d
 > va_common.email.EmailSettings lives in the email package, not va_common.settings: va_common.logging imports va_common.settings, so settings -> email.sender -> logging is a cycle. check_no_placeholders flags example.com in production docstrings
 <!-- tags: email, settings | created: 2026-10-29 -->
@@ -57,6 +61,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793262412-b2f5
+> ApiSettings includes CryptoSettings: settings tests with va_env=production must also pass kms_provider=aws + aws_kms_key_id, otherwise 'KMS_PROVIDER=local is refused' fires before the validator under test
+<!-- tags: api, settings, testing | created: 2026-10-29 -->
 
 ### mem-1793258976-544c
 > Ruff noqa for a multi-line triple-quoted string (e.g. S105 on TOKEN_BUCKET_LUA) goes after the closing quotes; text after the opening quotes is part of the string (here, the Lua source)
