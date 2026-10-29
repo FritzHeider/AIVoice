@@ -81,7 +81,7 @@ resumes from the first unticked task. Each phase is sized to finish within one R
 |---|---|---|
 | 00 | Repository bootstrap, tooling, quality gates | complete (2026-10-25, 1a154c5) |
 | 01 | Data layer: models, migrations, RLS, repositories, ClickHouse | pending |
-| 02 | Authentication, tenancy, RBAC, API foundations | pending |
+| 02 | Authentication, tenancy, RBAC, API foundations | complete (2026-10-29, a64df23) |
 | 03 | Vendor clients and simulators (Telnyx, ElevenLabs, Telnyx Inference, Stripe) + event publisher | pending |
 | 04 | Real-time media pipeline core | pending |
 | 05 | Telephony edge, call lifecycle, task-mode calling end to end | pending |
