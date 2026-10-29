@@ -92,7 +92,7 @@
   - Deliverables: `packages/va_events/src/va_events/clickhouse/migrations/0001_init.sql`, `apply_migrations(client)` (idempotent, records applied versions in `va.schema_migrations`), wired into `events_sink` startup
   - Acceptance: testcontainers ClickHouse test applies twice without error and tables exist with expected columns.
 
-- [ ] P01-T13 Partition maintenance helper
+- [x] P01-T13 Partition maintenance helper — va_db.partitions ensure_call_event_partitions (current month + 3, call_events_pYYYYMM, same bounds as 0001) + drop_call_event_partitions_before (only pYYYYMM names); make test 1821 passed 0 skipped (partitions.py 100 %), integration -k partition 11 passed 0 skipped (migrated DB returns [], va_system denied), jscpd 0 clones, radon A
   - Spec refs: specs/03-data-model.md (Calls: call_events partition comment); specs/28-security.md (RetentionWorkflow)
   - Depends on: P01-T07
   - Deliverables: `va_db.partitions.ensure_call_event_partitions(conn, now, months_ahead=3)`, `drop_call_event_partitions_before(conn, cutoff)`

@@ -374,3 +374,9 @@ Grafana 3001
   `apps/events_sink/tests/support/sink_helpers.py` (`FakeConnect`, `never_connects`, `RecordingClock`). ClickHouse
   integration tests use `testcontainers.community.clickhouse.ClickHouseContainer("clickhouse/clickhouse-server:24.8")`
   on the mapped 8123 port, one test per module (each xdist worker running a test boots its own container).
+- 2026-10-27 (P01-T13): `va_db.partitions` maintains `call_events` partitions (`call_events_pYYYYMM`, UTC month
+  `[start, next start)`, same as 0001): `ensure_call_event_partitions(conn, now, months_ahead=3)` and
+  `drop_call_event_partitions_before(conn, cutoff)` run in the caller's transaction and return the names they
+  created/dropped. They need a connection of the login role that owns `call_events` (`create_engine(settings, None)`):
+  `va_system` fails with `permission denied for schema public` (create) or `must be owner` (drop). Other partition
+  names (test-only `call_events_current`, `call_events_2026_10`) are never dropped.

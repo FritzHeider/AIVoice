@@ -34,6 +34,14 @@
 
 ## Fixes
 
+### mem-1793139282-8c73
+> failure: make test during OrbStack Sparkle auto-update -> 120 errors 'failed to connect to the docker API ... orbstack/run/docker.sock'; the updater stops the VM again after 'orb start'. Finish the OrbStack update first (check 'pgrep -lf Autoupdate', 'orb status'), then rerun
+<!-- tags: testing, docker | created: 2026-10-27 -->
+
+### mem-1793138363-ca2f
+> make test flake (P01-T13 build): 3 of 5 full runs hit pytest-timeout 60s in va_db setup (migrated_url upgrade, scratch_session) + Docker read timeouts; Docker VM is 3.9 GiB running the full compose stack, host load ~8. Isolated rerun green; partition code never failed
+<!-- tags: database, testing, docker | created: 2026-10-27 -->
+
 ### mem-1793135968-c35b
 > make test flake variant (P01-T12 build): ClickHouseContainer docker create exceeded the 60s pytest-timeout while 8 xdist Postgres containers booted; the va_events integration test has pytest.mark.timeout(180) and is a single test per module (one container per xdist worker)
 <!-- tags: testing, docker, clickhouse | created: 2026-10-27 -->

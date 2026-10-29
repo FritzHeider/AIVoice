@@ -180,6 +180,8 @@ empty tmpfs. Details in `13-tools-and-dynamic-data.md` §8.
 Activities (each batched 1 000 rows, idempotent, system scope):
 1. Create `call_events` partitions for the next 3 months; drop partitions older than the max `retention_days`
    across orgs + 30 days.
+   > Decision (2026-10-27): partition DDL runs as the `call_events` owner (the migration login role) through
+   > `va_db.partitions` (specs/03 §10 Decision); the other activities stay system scope (`va_system`).
 2. For each org: delete `call_events` rows older than `retention_days` within surviving partitions; delete
    `call_turns`, `call_analyses`, `citations`, `eval_runs`, `guard_rail_events` for calls older than `retention_days`
    and null transcript-derived columns on `calls` (`summary`, `variables` → `{}`); keep the `calls` row (billing metadata)

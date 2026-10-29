@@ -1365,6 +1365,17 @@ CREATE POLICY platform_read ON dnc_entries FOR SELECT USING (org_id IS NULL);
 > - `downgrade()` drops the 72 tables in reverse order (`DROP TABLE IF EXISTS … CASCADE`), `set_updated_at()`, and
 >   the three extensions. Roles and role memberships stay, because they are cluster-wide.
 
+> Decision (2026-10-27): `va_db.partitions.ensure_call_event_partitions(conn, now, months_ahead=3)` creates the
+> missing `call_events_pYYYYMM` partitions for the UTC month of `now` and the next `months_ahead` months
+> (`CREATE TABLE IF NOT EXISTS ... PARTITION OF call_events`, the same names and bounds as 0001) and returns the names it
+> created, in month order. `drop_call_event_partitions_before(conn, cutoff)` drops every `call_events_pYYYYMM`
+> partition whose upper bound (next month start) is `<= cutoff`, so it holds only rows strictly older than `cutoff`,
+> and returns the dropped names in month order. Partitions with any other name are never touched. Both run in the
+> caller's transaction on an `AsyncConnection` of the login role that owns `call_events` (an engine from
+> `create_engine(settings, None)`, as migrations use): partition DDL requires ownership of the parent and `CREATE` on
+> schema `public`, which neither `va_app` nor `va_system` has. RetentionWorkflow computes
+> `cutoff = now - (max retention_days + 30 days)`.
+
 `va_db.session.tenant_session(org_id)` opens a transaction and executes `SELECT set_config('app.org_id', :org_id, true)`.
 Sub-account access (parent org admins acting on child orgs) switches `app.org_id` to the child after an authorization
 check in the API layer; RLS is never relaxed for it.

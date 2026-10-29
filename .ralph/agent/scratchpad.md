@@ -1884,3 +1884,147 @@ check_spec_refs 0. Checked 0001_init.sql against specs/03 §12 (5 tables, all IF
 the record insert re-applies cleanly); splitter handles quotes/comments; drift raises before any DDL of that version;
 retry loop only catches OperationalError/OSError, other errors propagate to the supervisor (exit 1, tested);
 readiness check `clickhouse_schema` matches the specs/27 §9 Decision; no URL/password in errors or logs.
+
+## Plan P01-T13 — Partition maintenance helper (2026-10-27)
+
+Context found: 0001_initial `CALL_EVENT_PARTITIONS` DO block creates `call_events_pYYYYMM` for the UTC month
+`[month start, next month start)`, current UTC month + 3 (specs/03 §10 Decision says the helper MUST use the same names
+and bounds). specs/28 §8.1 step 1: RetentionWorkflow creates partitions for the next 3 months and drops partitions
+older than max(retention_days) + 30 days. `call_events` (and its partitions) are OWNED by the migration login role:
+`CREATE TABLE ... PARTITION OF` and `DROP TABLE` of a partition require ownership of the parent, so neither `va_app`
+nor `va_system` (BYPASSRLS but not owner) can run them. The existing test helper in test_call_models_integration.py
+uses names `call_events_2026_10` (scratch DB only, unaffected).
+
+### Spec decision (same commit)
+Append to the specs/03 §10 partition bullet (or a new `> Decision (2026-10-27):` right below the §10 Decision block):
+- `va_db.partitions.ensure_call_event_partitions(conn, now, months_ahead=3)` creates `call_events_pYYYYMM` for the UTC
+  month of `now` and the next `months_ahead` months (CREATE TABLE IF NOT EXISTS, same bounds as 0001) and returns the
+  names it created, in month order. `drop_call_event_partitions_before(conn, cutoff)` drops every
+  `call_events_pYYYYMM` partition whose upper bound (next month start) is <= `cutoff` (i.e. holds only rows strictly
+  older than cutoff) and returns the dropped names in month order; partitions with other names are never touched.
+- Both run in the caller's transaction on an `AsyncConnection` of the login role that owns `call_events` (an engine
+  from `create_engine(settings, None)`, as migrations use), because partition DDL requires ownership of the parent;
+  `va_system` cannot run them. RetentionWorkflow (later phase) computes `cutoff = now - (max retention_days + 30 d)`.
+Also add a one-line `> Decision (2026-10-27):` in specs/28 §8.1 under step 1 pointing to that: partition DDL runs as
+the `call_events` owner via va_db.partitions, the rest of the activities stay system scope.
+
+### Files
+1. `packages/va_db/src/va_db/partitions.py` (new; typed, docstring citing specs/03 §10 + specs/28 §8.1, `__all__`):
+   - `CALL_EVENTS_PARTITION_PREFIX: Final = "call_events_p"`;
+     `_PARTITION_NAME: Final = re.compile(r"^call_events_p(\d{4})(\d{2})$")`.
+   - `@dataclass(frozen=True, slots=True) class MonthPartition: name: str; start: datetime; end: datetime`
+     (aware UTC; `start` = first instant of the month, `end` = next month start).
+   - `def month_start(moment: datetime, offset: int = 0) -> datetime` — `ensure_utc` first (va_common.time; it rejects
+     naive datetimes — Builder verify its behaviour: if it assumes UTC for naive values instead of raising, raise
+     `ValueError("... must be timezone-aware")` explicitly here before calling it), then year*12+month arithmetic
+     (same as `_month_start` in test_migrations_integration.py).
+   - `def call_event_partition(month: datetime) -> MonthPartition` — name `f"call_events_p{start:%Y%m}"`.
+   - `def planned_call_event_partitions(now: datetime, months_ahead: int = 3) -> tuple[MonthPartition, ...]` —
+     `months_ahead < 0` -> ValueError; returns months_ahead + 1 partitions starting at the UTC month of `now`.
+   - `def partition_month(name: str) -> datetime | None` — month start parsed from a `call_events_pYYYYMM` name
+     (None for other names and for month 00/13+).
+   - `def expired_call_event_partitions(names: Iterable[str], cutoff: datetime) -> tuple[str, ...]` — names whose
+     parsed month end <= ensure_utc(cutoff), sorted by month; non-matching names ignored. Pure.
+   - `async def existing_call_event_partitions(conn: AsyncConnection) -> tuple[str, ...]` —
+     `SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid WHERE i.inhparent =
+     'call_events'::regclass ORDER BY 1`.
+   - `async def ensure_call_event_partitions(conn: AsyncConnection, now: datetime, months_ahead: int = 3)
+     -> list[str]` — read existing, for each planned partition not present execute
+     `CREATE TABLE IF NOT EXISTS {quoted} PARTITION OF call_events FOR VALUES FROM ('{start}') TO ('{end}')` with
+     bounds formatted `%Y-%m-%d %H:%M:%S+00` (DDL takes no bind params; values come only from our datetimes, the
+     name is quoted via `conn.dialect.identifier_preparer.quote`). Log `db.call_event_partition_created`
+     (partition=name) via structlog. Return created names.
+   - `async def drop_call_event_partitions_before(conn: AsyncConnection, cutoff: datetime) -> list[str]` — existing
+     -> `expired_call_event_partitions` -> `DROP TABLE IF EXISTS {quoted}` each; log `db.call_event_partition_dropped`.
+   Keep every function radon A. No commit inside: the caller owns the transaction.
+2. `packages/va_db/src/va_db/__init__.py` — leave exports unchanged (module is imported as `va_db.partitions`), only
+   mention it in the package docstring if the docstring lists modules (it doesn't today: skip).
+3. `AGENTS.md` — va_db section: partition DDL needs the call_events owner (login-role engine `create_engine(s, None)`),
+   names/bounds rule, where the helper lives.
+4. specs/03 §10 + specs/28 §8.1 Decisions (above).
+
+### Tests
+- `packages/va_db/tests/test_partitions.py` (unit, no DB):
+  - planned partitions from `FrozenClock(datetime(2026, 11, 15, 12, tzinfo=UTC)).now()` -> names
+    p202611..p202702 with exact start/end; year rollover from December (2026-12-31T23:59:59.999999Z -> p202612..p202703);
+  - non-UTC aware input normalised: `2026-10-31T20:30-05:00` -> first partition p202611;
+  - naive datetime -> ValueError (both planned and expired); months_ahead=-1 -> ValueError; months_ahead=0 -> 1 partition;
+  - `partition_month` parses p202602, rejects `call_events_p202613`, `call_events_p2026011`, `call_events_2026_10`,
+    `call_events_p000000`? (month 00 -> None);
+  - `expired_call_event_partitions(["call_events_p202612","call_events_p202610","call_events_legacy",
+    "call_events_p202611"], cutoff=2026-12-01T00:00Z)` -> ("call_events_p202610","call_events_p202611") (boundary:
+    end == cutoff is dropped; cutoff one microsecond earlier keeps p202611).
+- `packages/va_db/tests/test_partitions_integration.py` (`pytestmark = pytest.mark.integration`; uses
+  `scratch_session` — create_all makes only the parent, login role owns it — and `conn = await
+  scratch_session.connection()`; reuse model_factories (make_org etc.) for inserting a call_event if needed, NOT a
+  copy of test_call_models_integration helpers — jscpd):
+  - ensure with FrozenClock 2026-11-15 creates exactly [p202611, p202612, p202701, p202702]; second call returns [];
+    catalog via `pg_get_expr(relpartbound, oid)` after `SET LOCAL TimeZone = 'UTC'` equals
+    `FOR VALUES FROM ('2026-11-01 00:00:00+00') TO ('2026-12-01 00:00:00+00')` etc.;
+  - advancing the clock one month (`clock.advance(timedelta(days=31))`) creates only [p202703];
+  - a row at 2026-12-01T00:00Z lands in p202612 and at 2026-11-30T23:59:59.999999Z in p202611
+    (`tableoid::regclass::text`); new partitions carry the partitioned indexes (pg_inherits on
+    call_events_org_idx / call_events_call_idx count == number of partitions);
+  - drop with cutoff 2027-01-01T00:00Z returns [p202611, p202612]; repeat returns []; cutoff 2027-01-15 keeps p202701;
+    a manually created `call_events_legacy` partition (FROM 2020-01-01 TO 2020-02-01) survives every drop;
+  - ensure after drop of a month recreates nothing older than `now`'s month (drop then ensure with same clock is
+    idempotent for the surviving future months).
+  - migrated DB (fresh_database + upgrade in a module-scoped fixture of this module or the existing `migrated_url`
+    fixture): `ensure_call_event_partitions(conn, now=<SELECT now()>)` returns [] (same names/bounds as 0001 -> the
+    Decision is honoured), run in a rolled-back transaction of a login-role engine;
+    with `create_engine(settings, DbRole.SYSTEM)` creating the next month raises DBAPIError matching
+    "must be owner" (proves the ownership Decision).
+- Coverage: va_db stays 100 %.
+
+### Gates
+`make fmt lint typecheck placeholders`; `make test` ALONE (flake memories: scratch_session timeout / container boot);
+`uv run pytest packages/va_db -m integration -rs -k partition` 0 skipped; jscpd@4 0 clones; radon cc A for
+partitions.py and new tests; `python scripts/check_spec_refs.py` (or `make` target) 0; pip-audit/pnpm audit (no new deps).
+Negative proof (revert after): change the name format to `call_events_%Y_%m` -> unit names test and the migrated-DB
+"returns []" test fail.
+
+### Risks
+- `DROP TABLE` on a partition takes ACCESS EXCLUSIVE on the parent in PG16 — acceptable for the daily 03:17 job;
+  document in the module docstring; DETACH CONCURRENTLY cannot run in a transaction, so not used.
+- pg_get_expr text depends on TimeZone — set it LOCAL in the test transaction.
+- Overlapping foreign partition (e.g. a test's `call_events_current`) makes CREATE fail with an overlap error — that
+  is correct behaviour (surfaces drift); don't catch it.
+- scratch_session flake under load: run make test alone.
+
+## Build P01-T13 (2026-10-27)
+Implemented per plan. Facts/deviations:
+- `va_system` creating a partition fails first with `permission denied for schema public` (PG16: no CREATE on public),
+  dropping one with `must be owner of table`. The integration test is parametrized (create/drop) on those messages and
+  the specs/03 §10 Decision says "ownership of the parent and CREATE on schema public".
+- `existing_call_event_partitions` orders by relname, so `call_events_legacy` sorts before `call_events_p...`.
+- `ensure` after a drop with now=2027-01-10 creates p202703 + p202704 (current month + 3), nothing older.
+- radon: `expired_call_event_partitions` uses a walrus dict + `sorted(key=months.__getitem__)` (mypy rejects
+  `months.get`), now A; the drop integration test was split (shared `legacy_conn` fixture), every function A.
+- Logs: `db.call_event_partition_created` / `db.call_event_partition_dropped` (field `partition`).
+Files: packages/va_db/src/va_db/partitions.py (new), packages/va_db/tests/test_partitions.py (16 unit),
+packages/va_db/tests/test_partitions_integration.py (8 integration), specs/03 §10 Decision, specs/28 §8.1 Decision,
+AGENTS.md.
+Gates: make fmt 0; make lint 0; make typecheck 0 (mypy 222 files); make placeholders 0 findings;
+`pytest packages/va_db -m integration -rs -k partition` 10 passed 0 skipped; jscpd@4 0 clones; radon -n B: none;
+check_spec_refs 0; pip-audit no known vulns; pnpm audit none (pnpm via npx; not on PATH in this shell).
+make test: run 2 exit 0 (1820 passed, partitions.py 100 %, TOTAL 99 %) before the radon refactor; after it the
+targeted unit + integration files pass (24). Runs 1, 3, 4 hit the known Docker/asyncpg timeout family (pytest-timeout
+60 s in migrated_url upgrade / scratch_session / ClickHouse container create; run 4 had 140 setup errors) with the
+host at load ~8 and a 3.9 GiB Docker VM. No failure was in partition code.
+Negative proof (reverted): name format `call_events_{%Y_%m}` -> 3 unit + 6 integration tests fail, including the
+migrated-DB "helper matches 0001" test.
+
+## Review P01-T13 (2026-10-27) — PENDING (environment blocker, no code findings)
+Re-ran: make lint/typecheck/placeholders exit 0 (0 findings); radon -n B none; check_spec_refs 0; jscpd@4 0 clones in
+va_db. Diff matches the plan and the specs/03 §10 + specs/28 §8.1 Decisions; no code findings.
+`pytest packages/va_db -m integration -rs -k partition` (Docker up): 11 passed.
+make test: run 1 exit 0 but 281 skipped (OrbStack daemon stopped); run 2 exit 2, 1541 passed / 163 skipped / 120
+errors, every error "failed to connect to the docker API" - OrbStack stopped again mid-run. Cause: an OrbStack
+Sparkle auto-update (Autoupdate pid 8286) keeps stopping the VM; `orb start` brings it up only briefly. Not approving
+on a run with skipped/errored integration tests. Next: let the OrbStack update finish (it may need a click in the
+updater UI), `orb start`, re-run `make test` alone, then approve if green.
+
+## Review P01-T13 (2026-10-28) — APPROVED
+OrbStack update finished (2.2.5); `orb start` stayed up through the run. `.venv` hit the `.DS_Store` gotcha; fixed per
+AGENTS.md. `make test` alone: exit 0, 1821 passed, 0 skipped, partitions.py 100 %, TOTAL 99 %. Committed P01-T13.
+Next: P01-T14.
