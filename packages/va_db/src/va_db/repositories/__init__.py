@@ -62,6 +62,7 @@ from va_db.repositories.invitations import (
 from va_db.repositories.memberships import (
     LAST_OWNER_MESSAGE,
     NOT_OWNER_MESSAGE,
+    PARENT_ACCESS_ROLES,
     MemberRecord,
     MembershipLookupRepo,
     MembershipRecord,
@@ -86,6 +87,7 @@ __all__ = [
     "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
     "NOT_OWNER_MESSAGE",
+    "PARENT_ACCESS_ROLES",
     "PASSWORD_RESET_TTL",
     "PURGE_RULES",
     "REPLAY_WINDOW",

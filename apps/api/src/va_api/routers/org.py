@@ -85,8 +85,8 @@ async def _me_user(request: Request, ctx: RequestContext) -> MeUser:
 
 
 async def _me_api_key(request: Request, ctx: RequestContext) -> MeApiKey:
-    async with database_of(request).tenant_session(ctx.org_id) as session:
-        key = await ApiKeyRepo(session, ctx.org_id).get(ctx.principal_id)
+    async with database_of(request).tenant_session(ctx.principal_org_id) as session:
+        key = await ApiKeyRepo(session, ctx.principal_org_id).get(ctx.principal_id)
     if key is None:
         raise AppError("AUTH_FAILURE", INVALID_API_KEY)
     return MeApiKey(id=key.id, prefix=key.prefix, scopes=sorted(ctx.scopes), environment=ctx.environment)
@@ -94,7 +94,8 @@ async def _me_api_key(request: Request, ctx: RequestContext) -> MeApiKey:
 
 @me_router.get("/me", operation_id="me_get", openapi_extra={"x-scope": "org:read"})
 async def me_get(request: Request, ctx: ReadOrg) -> DataResponse[MeView]:
-    """The calling principal: user or API key, its org, role and scopes."""
+    """The calling principal: user or API key, the org it acts in, role and scopes; `acting_parent_org_id` is
+    the parent org while a parent principal acts on a sub-account."""
     user = await _me_user(request, ctx) if ctx.principal_type in {"user", "platform_admin"} else None
     api_key = await _me_api_key(request, ctx) if ctx.principal_type == "api_key" else None
     async with database_of(request).global_session() as session:
@@ -108,6 +109,7 @@ async def me_get(request: Request, ctx: ReadOrg) -> DataResponse[MeView]:
         org=_summary(org),
         role=ctx.role,
         scopes=sorted(ctx.scopes),
+        acting_parent_org_id=ctx.acting_parent_org_id,
     )
     return DataResponse(data=view)
 

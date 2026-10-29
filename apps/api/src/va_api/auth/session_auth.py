@@ -3,8 +3,10 @@
 :func:`current_session` resolves the ``va_session`` cookie and, for writes, enforces the CSRF double submit
 and the dashboard ``Origin``. :func:`session_principal` turns the session into a :class:`RequestContext` for
 its active org: the membership role gives the scopes (§3.3), sessions that have not passed MFA are gated when
-the org requires MFA or the user has enabled it, and the org status gates writes like it does for API keys. A
-session without an active org falls back to the user's oldest membership and persists it.
+the org requires MFA or the user has enabled it, and the org status gates writes like it does for API keys.
+The active org is one of the user's memberships or a sub-account of an org where the user is owner/admin
+(§8.3, ``acting_parent_org_id`` set). A session whose active org is unset or no longer reachable falls back to
+the user's oldest membership and persists it.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from va_common.crypto import Envelope
 from va_common.email import EmailSender
 from va_common.errors import AppError
 from va_common.time import Clock
+from va_db.models import OrgStatus
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import IdentityRepo, MembershipLookupRepo, MembershipRecord
 from va_db.session import Database
@@ -46,6 +49,7 @@ __all__ = [
     "api_key_hasher_of",
     "authenticate_session",
     "check_dashboard_origin",
+    "check_org_status",
     "client_ip",
     "clock_of",
     "cookie_policy_of",
@@ -66,6 +70,7 @@ __all__ = [
     "provisioner_of",
     "redis_of",
     "resend_limiter_of",
+    "resolve_switch_target",
     "session_principal",
     "sessions_of",
     "settings_of",
@@ -231,15 +236,24 @@ async def memberships_of_user(request: Request, user_id: uuid.UUID) -> list[Memb
         return await MembershipLookupRepo(session).for_user(user_id)
 
 
+async def resolve_switch_target(
+    request: Request, user_id: uuid.UUID, org_id: uuid.UUID
+) -> MembershipRecord | None:
+    """The user's membership in ``org_id``, else ``org_id`` as a sub-account of an org where the user is owner
+    or admin (``acting_parent_org_id`` set, specs/04 §8.3), else ``None``."""
+    # specs/03-data-model.md §2: MembershipLookupRepo is a system-scope repository.
+    async with database_of(request).system_session() as session:
+        repo = MembershipLookupRepo(session)
+        return await repo.for_user_in_org(user_id, org_id) or await repo.via_parent(user_id, org_id)
+
+
 async def active_membership(
     request: Request, active: ActiveSession
 ) -> tuple[ActiveSession, MembershipRecord | None]:
     """The membership the session acts in; persists a fallback org when the active one is unset or gone."""
     record: MembershipRecord | None = None
     if active.active_org_id is not None:
-        # specs/03-data-model.md §2: MembershipLookupRepo is a system-scope repository.
-        async with database_of(request).system_session() as session:
-            record = await MembershipLookupRepo(session).for_user_in_org(active.user_id, active.active_org_id)
+        record = await resolve_switch_target(request, active.user_id, active.active_org_id)
     if record is None:
         record = pick_active(await memberships_of_user(request, active.user_id), active.active_org_id)
         if record is not None:
@@ -276,10 +290,11 @@ async def gated_membership(
     return active, record
 
 
-def _check_org_status(record: MembershipRecord, method: str) -> None:
-    if record.org_status == "closed":
+def check_org_status(status: OrgStatus, method: str) -> None:
+    """``ORG_SUSPENDED`` for every method of a closed org and for writes to a suspended one."""
+    if status == "closed":
         raise AppError("ORG_SUSPENDED", ORG_CLOSED_MESSAGE)
-    if record.org_status == "suspended" and method.upper() not in READ_METHODS:
+    if status == "suspended" and method.upper() not in READ_METHODS:
         raise AppError("ORG_SUSPENDED", ORG_SUSPENDED_MESSAGE)
 
 
@@ -290,7 +305,7 @@ async def session_principal(
     active, record = await gated_membership(request, active)
     if record is None:
         raise AppError("FORBIDDEN", NO_MEMBERSHIP_MESSAGE)
-    _check_org_status(record, request.method)
+    check_org_status(record.gate_status, request.method)
     context = RequestContext(
         request_id=request_id_of(request),
         org_id=record.org_id,
@@ -302,7 +317,7 @@ async def session_principal(
         plan_id=record.plan_id,
         ip=client_ip(request),
         user_agent=request.headers.get(_USER_AGENT),
-        acting_parent_org_id=None,
+        acting_parent_org_id=record.acting_parent_org_id,
     )
     return context, record
 

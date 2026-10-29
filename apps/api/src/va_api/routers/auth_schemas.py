@@ -28,6 +28,7 @@ __all__ = [
     "SignupOrg",
     "SignupRequest",
     "SignupResult",
+    "SwitchOrgRequest",
     "VerifyEmailRequest",
     "VerifyEmailResult",
 ]
@@ -228,6 +229,7 @@ class SessionInfo(BaseModel):
                     "user": _USER_EXAMPLE,
                     "memberships": [_MEMBERSHIP_EXAMPLE],
                     "active_org_id": _MEMBERSHIP_EXAMPLE["org_id"],
+                    "acting_parent_org_id": None,
                     "mfa_passed": False,
                     "mfa_required": False,
                     "csrf_token": "q0Jm2pQe8v1XcT7bYk3sLw9RfH5nZa4dGu6iEo2MjNc",
@@ -240,10 +242,25 @@ class SessionInfo(BaseModel):
     user: SessionUser
     memberships: list[SessionMembership]
     active_org_id: uuid.UUID | None
+    acting_parent_org_id: uuid.UUID | None = Field(
+        description="The parent org when the active org is a sub-account reached through an owner or admin "
+        "membership of its parent (specs/04 §8.3); null otherwise."
+    )
     mfa_passed: bool
     mfa_required: bool
     csrf_token: str
     expires_at: datetime
+
+
+class SwitchOrgRequest(BaseModel):
+    """``POST /internal/auth/switch-org``: an org the user is a member of, or a sub-account of an org where
+    the user is owner or admin."""
+
+    model_config = ConfigDict(
+        extra="forbid", json_schema_extra={"examples": [{"org_id": "0192f3c4-5a6b-7c8d-9e0f-3c4d5e6f7081"}]}
+    )
+
+    org_id: uuid.UUID
 
 
 class SignupOrg(BaseModel):

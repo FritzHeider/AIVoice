@@ -557,3 +557,14 @@ Grafana 3001
   and `creating_user_id(ctx, session)`; `Container.api_key_hasher` / `session_auth.api_key_hasher_of`, `redis_of`.
   Tests: `SessionContainer.authenticator` falls back to the DB lookup, so route-minted keys authenticate;
   `session_helpers.fund(container, org_id, "50")` (grant row + balance) and `hold(container, org_id, "15", status)`.
+- 2026-10-29 (P02-T09b): parent access to sub-accounts. `get_principal` calls
+  `va_api.auth.sub_accounts.act_on_sub_account(request, ctx, rate_per_sec)` right after authentication, so the rate
+  limit, scope check, and idempotency claim already see the child context; never read `ctx.org_id` as "the org owning
+  the principal" — use `ctx.principal_org_id` (parent while acting) for the API key / membership rows (`/v1/me`,
+  `api_keys.creating_user_id`, which switches RLS with `use_org` for the key lookup). Routes that must refuse acting
+  principals check `ctx.acting_parent_org_id` (transfer-ownership). Sessions: `session_auth.resolve_switch_target`
+  (own membership, else `MembershipLookupRepo.via_parent`; roles `PARENT_ACCESS_ROLES`) backs both
+  `active_membership` and `POST /internal/auth/switch-org` (`routers/auth_switch_org.py`, side-effect import in
+  `main.py`); `routers.auth.session_info(request, response, active)` builds the `GET /session` body. Org status gate:
+  `session_auth.check_org_status(status, method)`. Tests: `session_helpers.sub_account(client, name, **headers) ->
+  (child_id, key)`; contextvars-bound log fields need `capture_logs(processors=[merge_contextvars])`.

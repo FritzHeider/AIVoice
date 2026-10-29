@@ -89,6 +89,8 @@ __all__ = [
     "signup",
     "store_api_key",
     "stored_org",
+    "sub_account",
+    "sub_account_member",
     "write_headers",
 ]
 
@@ -352,6 +354,31 @@ async def stored_org(identity: IdentityDb, org_id: uuid.UUID) -> Org:
         org = await session.get(Org, org_id)
     assert org is not None
     return org
+
+
+async def sub_account(
+    client: httpx.AsyncClient, name: str = "Acme Dental - Austin", **headers: str
+) -> tuple[uuid.UUID, str]:
+    """``POST /v1/orgs/create`` as the client's principal (session or ``headers``); the child id and key."""
+    response = await client.post(
+        "/v1/orgs/create", json={"org_display_name": name}, headers={**write_headers(client), **headers}
+    )
+    assert response.status_code == 200, response.text
+    return uuid.UUID(response.json()["org_id"]), response.json()["api_key"]
+
+
+@asynccontextmanager
+async def sub_account_member(
+    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer, role: MemberRole
+) -> AsyncIterator[tuple[httpx.AsyncClient, Member, uuid.UUID]]:
+    """An owner signed in on ``client`` creates a sub-account; a second client is signed in as a new member
+    of the owner's org with ``role``. Yields that client, the owner, and the child id."""
+    owner = await signed_in(client, identity, container)
+    child_id, _ = await sub_account(client)
+    user = await add_member(identity, container.password_hasher, owner.org.id, role)
+    async with session_client(session_app(container)) as other:
+        await login(other, user.email)
+        yield other, owner, child_id
 
 
 def error_of(response: httpx.Response) -> tuple[int, str, str | None]:

@@ -32,6 +32,11 @@ class RequestContext:
     user_agent: str | None
     acting_parent_org_id: uuid.UUID | None  # set when a parent-org user/key acts on a sub-account
 
+    @property
+    def principal_org_id(self) -> uuid.UUID:
+        """The org owning the API key or membership; the parent while acting on a sub-account (§8.3)."""
+        return self.acting_parent_org_id or self.org_id
+
     def has_scope(self, scope: str) -> bool:
         """Whether ``scope`` is granted, directly or through ``*``."""
         return ALL_SCOPES in self.scopes or scope in self.scopes

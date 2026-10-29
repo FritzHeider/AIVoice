@@ -4,18 +4,20 @@
 plus an explicit ``org_id`` filter). Every change that can take away an owner first locks the org row
 (``SELECT … FOR UPDATE``) and only then counts the owners, so concurrent demotions are serialised and an org
 always keeps at least one owner. :class:`MembershipLookupRepo` lists a user's memberships across orgs before
-an active org exists, so it is a ``va_system`` repository named in specs/03 §2.
+an active org exists, so it is a ``va_system`` repository named in specs/03 §2; it also resolves a sub-account
+the user reaches through an owner/admin membership of its parent (specs/04 §8.3).
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Final
 
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from va_common.errors import AppError
 from va_db.models import MemberRole, Membership, Org, OrgStatus, User
@@ -25,6 +27,7 @@ from va_db.repositories.base import SystemRepository, conflict_savepoint
 __all__ = [
     "LAST_OWNER_MESSAGE",
     "NOT_OWNER_MESSAGE",
+    "PARENT_ACCESS_ROLES",
     "MemberRecord",
     "MembershipLookupRepo",
     "MembershipRecord",
@@ -35,6 +38,7 @@ __all__ = [
 MFA_REQUIRED_KEY = "mfa_required"
 LAST_OWNER_MESSAGE: Final = "An organization must have at least one owner."
 NOT_OWNER_MESSAGE: Final = "Only an owner can transfer ownership."
+PARENT_ACCESS_ROLES: Final[frozenset[MemberRole]] = frozenset({"owner", "admin"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +47,9 @@ class MembershipRecord:
 
     ``mfa_required`` is ``orgs.settings.mfa_required`` (only a JSON ``true`` counts); ``rate_per_sec`` is the
     org's positive ``limits.rate_per_sec`` override or ``None``; ``user_mfa_enabled`` is the member's own
-    ``users.mfa_enabled``.
+    ``users.mfa_enabled``. ``acting_parent_org_id`` is set when the org is a sub-account the user reaches
+    through an owner/admin membership of its parent (``role`` and ``membership_id`` are then the parent's);
+    ``acting_parent_status`` is then the parent's status, and :attr:`gate_status` the stricter of the two.
     """
 
     membership_id: uuid.UUID
@@ -57,6 +63,22 @@ class MembershipRecord:
     mfa_required: bool = False
     rate_per_sec: int | None = None
     user_mfa_enabled: bool = False
+    acting_parent_org_id: uuid.UUID | None = None
+    acting_parent_status: OrgStatus | None = None
+
+    @property
+    def gate_status(self) -> OrgStatus:
+        """The stricter of the org's and the acting parent's status, for the org gates (specs/04 §8.3)."""
+        if self.acting_parent_status is None:
+            return self.org_status
+        return max(self.org_status, self.acting_parent_status, key=_STATUS_SEVERITY.__getitem__)
+
+
+_STATUS_SEVERITY: Final[dict[OrgStatus, int]] = {"active": 0, "suspended": 1, "closed": 2}
+
+
+def _requires_mfa(org: Org) -> bool:
+    return org.settings.get(MFA_REQUIRED_KEY) is True
 
 
 def _record(membership: Membership, org: Org, user_mfa_enabled: bool) -> MembershipRecord:
@@ -69,7 +91,7 @@ def _record(membership: Membership, org: Org, user_mfa_enabled: bool) -> Members
         plan_id=org.plan_id,
         org_status=org.status,
         parent_org_id=org.parent_org_id,
-        mfa_required=org.settings.get(MFA_REQUIRED_KEY) is True,
+        mfa_required=_requires_mfa(org),
         rate_per_sec=rate_per_sec_override(org.limits),
         user_mfa_enabled=user_mfa_enabled,
     )
@@ -113,6 +135,32 @@ class MembershipLookupRepo(SystemRepository):
             return None
         membership, org, mfa_enabled = row
         return _record(membership, org, mfa_enabled)
+
+    async def via_parent(self, user_id: uuid.UUID, org_id: uuid.UUID) -> MembershipRecord | None:
+        """``org_id`` as the user reaches it through an owner/admin membership of its parent, or ``None``.
+
+        The record carries the child's org fields and ``rate_per_sec``, the parent membership's role, and
+        ``acting_parent_org_id`` / ``acting_parent_status`` = the parent's id and status; ``mfa_required`` is
+        true when the child or the parent requires MFA. Only direct children count (specs/04 §8.3).
+        """
+        child = aliased(Org)
+        statement = (
+            _joined(user_id)
+            .add_columns(child)
+            .join(child, child.parent_org_id == Membership.org_id)
+            .where(child.id == org_id, Membership.role.in_(PARENT_ACCESS_ROLES))
+        )
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        membership, parent, mfa_enabled, sub_account = row
+        record = _record(membership, sub_account, mfa_enabled)
+        return replace(
+            record,
+            mfa_required=record.mfa_required or _requires_mfa(parent),
+            acting_parent_org_id=parent.id,
+            acting_parent_status=parent.status,
+        )
 
 
 class MembershipRepo:

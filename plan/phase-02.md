@@ -114,7 +114,7 @@
   - Deliverables: `POST/GET /v1/org/members/invitations`, `DELETE /v1/org/members/invitations/{id}`, invitation email template with `{DASHBOARD_BASE_URL}/invite/{token}`, `GET /internal/auth/invitations/{token}`, `POST /internal/auth/invitations/accept` (creates the user when needed, adds the membership)
   - Acceptance: 7-day expiry, hashed single-use token, only owners invite owners, revoked/expired/accepted tokens refused, email mismatch rules, existing member → `CONFLICT`.
 
-- [ ] P02-T09 Sub-accounts and org switching (split by the planner on 2026-10-29 into T09a/T09b below; tick when both are ticked)
+- [x] P02-T09 Sub-accounts and org switching (split by the planner on 2026-10-29 into T09a/T09b below; tick when both are ticked) — T09a and T09b approved
   - Spec refs: specs/04-auth-tenancy-rbac.md (sub-accounts)
   - Depends on: P02-T08
   - Deliverables: `POST /v1/orgs/create` (Bland-compatible response with `org_plan`, `kyc_level`), list children, parent-admin access to child via `X-VA-Org-Id` header with authorization check, session active org switching
@@ -126,7 +126,7 @@
   - Deliverables: legacy `POST /v1/orgs/create`, `GET /v1/orgs`, `GET /v1/orgs/{org_id}`, `POST /v1/orgs/{org_id}/suspend`, `POST /v1/orgs/{org_id}/reactivate`; child `*` API key minted in the same transaction (plaintext returned once); `initial_credits` moved with `transfer_out`/`transfer_in` ledger rows and both org rows locked in id order (`va_db.repositories.credits.CreditTransferRepo`, reused by P15-T07); suspend invalidates the child's cached API keys
   - Acceptance: Bland-shaped bodies; nesting depth 1 (`FORBIDDEN`); insufficient parent balance → `INSUFFICIENT_CREDITS` and nothing created; ledger sums equal both balances; non-child ids → `NOT_FOUND`; developer/analyst/billing/viewer sessions and `org:read` keys refused; the minted key authenticates against the child.
 
-- [ ] P02-T09b Parent access to sub-accounts: `X-VA-Org-Id` and `switch-org`
+- [x] P02-T09b Parent access to sub-accounts: `X-VA-Org-Id` and `switch-org` — 2862 tests pass, cov 98.46%, lint/typecheck/placeholders clean; parent status gates switched sessions (stricter of child/parent)
   - Spec refs: specs/04-auth-tenancy-rbac.md §1 (`acting_parent_org_id`), §4.1 (`switch-org`, session memberships), §8.3, §14 (sub-account tests)
   - Depends on: P02-T09a
   - Deliverables: `X-VA-Org-Id` handling in `get_principal` for API keys (`org:write` or `*`) and sessions (owner/admin) that rebuilds the `RequestContext` for a direct child (`acting_parent_org_id` set, scopes and role kept, child plan and status gates); `POST /internal/auth/switch-org` (membership, or owner/admin of the child's parent); the session's active org may be a child of a parent membership

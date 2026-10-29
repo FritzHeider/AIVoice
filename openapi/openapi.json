@@ -764,6 +764,19 @@
           }
         ],
         "properties": {
+          "acting_parent_org_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The parent org while a parent principal acts on this sub-account (X-VA-Org-Id or switch-org); null otherwise.",
+            "title": "Acting Parent Org Id"
+          },
           "api_key": {
             "anyOf": [
               {
@@ -825,7 +838,8 @@
           "api_key",
           "org",
           "role",
-          "scopes"
+          "scopes",
+          "acting_parent_org_id"
         ],
         "title": "MeView",
         "type": "object"
@@ -1906,7 +1920,7 @@
     },
     "/v1/me": {
       "get": {
-        "description": "The calling principal: user or API key, its org, role and scopes.",
+        "description": "The calling principal: user or API key, the org it acts in, role and scopes; `acting_parent_org_id` is\nthe parent org while a parent principal acts on a sub-account.",
         "operationId": "me_get",
         "responses": {
           "200": {
@@ -2448,7 +2462,7 @@
     },
     "/v1/org/transfer-ownership": {
       "post": {
-        "description": "Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.",
+        "description": "Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.\n\nA parent-org principal acting on a sub-account is not one of its members and cannot transfer it.",
         "operationId": "org_transfer_ownership",
         "requestBody": {
           "content": {

@@ -20,6 +20,7 @@ from session_helpers import (
 )
 
 from va_api.auth.rbac import ROLE_SCOPES
+from va_api.auth.sub_accounts import NOT_A_CHILD_MESSAGE
 from va_db.models import MemberRole, Plan
 
 ME = "/v1/me"
@@ -235,10 +236,11 @@ async def test_patch_never_touches_another_org(
     response = await patch(
         client, {"name": "Acme Dental West", "retention_days": 30}, **{"X-VA-Org-Id": str(other.org.id)}
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["id"] == str(member.org.id)
+    assert error_of(response) == (403, "FORBIDDEN", None)
+    assert response.json()["errors"][0]["message"] == NOT_A_CHILD_MESSAGE
     untouched = await stored_org(identity, other.org.id)
     assert (untouched.name, untouched.retention_days) == ("Acme Dental", 365)
+    assert (await stored_org(identity, member.org.id)).name == "Acme Dental"
     other_key, _ = await store_api_key(container, other.org.id)
     data = (await client.get(ORG, headers={"Authorization": other_key})).json()["data"]
     assert data["id"] == str(other.org.id)

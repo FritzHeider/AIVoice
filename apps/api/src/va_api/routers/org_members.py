@@ -36,6 +36,7 @@ from va_db.repositories import MemberRecord, MembershipRepo
 
 __all__ = [
     "MEMBER_NOT_FOUND_MESSAGE",
+    "PARENT_TRANSFER_MESSAGE",
     "SELF_TRANSFER_MESSAGE",
     "TRANSFER_REAUTH_MESSAGE",
     "org_members_list",
@@ -48,6 +49,7 @@ __all__ = [
 MEMBER_NOT_FOUND_MESSAGE: Final = "Member not found."
 TRANSFER_REAUTH_MESSAGE: Final = "Sign in again to transfer ownership."
 SELF_TRANSFER_MESSAGE: Final = "You already own this organization."
+PARENT_TRANSFER_MESSAGE: Final = "Ownership of a sub-account cannot be transferred by a parent-org principal."
 _MANAGE: Final = "members.manage"
 _OWNER_TRANSFER: Final = "org.owner_transfer"
 
@@ -132,7 +134,11 @@ def _session_of(request: Request) -> ActiveSession:
 async def org_transfer_ownership(
     body: TransferOwnershipRequest, request: Request, ctx: WriteOrg
 ) -> DataResponse[OwnershipTransferred]:
-    """Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes."""
+    """Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.
+
+    A parent-org principal acting on a sub-account is not one of its members and cannot transfer it."""
+    if ctx.acting_parent_org_id is not None:
+        raise AppError("FORBIDDEN", PARENT_TRANSFER_MESSAGE)
     require_recent_auth(_session_of(request), clock_of(request).now(), message=TRANSFER_REAUTH_MESSAGE)
     if body.user_id == ctx.principal_id:
         raise AppError("INVALID_INPUT", SELF_TRANSFER_MESSAGE, field="user_id")

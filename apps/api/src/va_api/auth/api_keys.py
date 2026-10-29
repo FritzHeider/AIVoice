@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from va_api.auth.context import RequestContext
 from va_common.auth import ApiKeyHasher, KeyEnvironment, api_key_prefix, generate_api_key
 from va_db.repositories import ApiKeyRepo
+from va_db.session import use_org
 
 __all__ = ["USER_PRINCIPALS", "MintedKey", "creating_user_id", "mint_api_key"]
 
@@ -46,11 +47,13 @@ def mint_api_key(hasher: ApiKeyHasher, environment: KeyEnvironment) -> MintedKey
 async def creating_user_id(ctx: RequestContext, session: AsyncSession) -> uuid.UUID | None:
     """The session's user, or the user who created the calling API key (``None`` when it has none).
 
-    ``session`` must be a ``tenant_session(ctx.org_id)`` so the calling key's row is visible.
+    ``session`` is a ``tenant_session(ctx.org_id)``; the key row is read in the org owning the key, which is
+    the parent while acting on a sub-account (specs/04 §8.3, RLS switched for the lookup only).
     """
     if ctx.principal_type in USER_PRINCIPALS:
         return ctx.principal_id
     if ctx.principal_type == "api_key":
-        key = await ApiKeyRepo(session, ctx.org_id).get(ctx.principal_id)
+        async with use_org(session, ctx.principal_org_id):
+            key = await ApiKeyRepo(session, ctx.principal_org_id).get(ctx.principal_id)
         return key.created_by if key is not None else None
     return None

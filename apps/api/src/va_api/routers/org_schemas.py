@@ -90,6 +90,7 @@ _ME_EXAMPLE: Final[dict[str, JsonValue]] = {
     "org": _SUMMARY_EXAMPLE,
     "role": "owner",
     "scopes": ["agents:read", "agents:write", "analytics:read", "org:read", "org:write"],
+    "acting_parent_org_id": None,
 }
 
 
@@ -134,6 +135,10 @@ class MeView(BaseModel):
     org: OrgSummary
     role: MemberRole | None = Field(description="The member role of a session principal; null for API keys.")
     scopes: list[str] = Field(description="Granted scopes, sorted.")
+    acting_parent_org_id: uuid.UUID | None = Field(
+        description="The parent org while a parent principal acts on this sub-account (X-VA-Org-Id or "
+        "switch-org); null otherwise."
+    )
 
 
 class OrgLimits(BaseModel):

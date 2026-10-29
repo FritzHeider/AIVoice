@@ -10,7 +10,7 @@ from model_factories import make_org, make_user
 from sqlalchemy import update
 
 from va_common.errors import AppError
-from va_db.models import User
+from va_db.models import MemberRole, OrgStatus, User
 from va_db.repositories import MembershipLookupRepo, MembershipRecord, MembershipRepo
 
 pytestmark = pytest.mark.integration
@@ -127,3 +127,124 @@ async def test_records_carry_the_member_mfa_flag(identity_db: IdentityDb) -> Non
     assert enrolled_record.user_mfa_enabled is True
     assert listed.user_mfa_enabled is True
     assert plain_record.user_mfa_enabled is False
+
+
+async def test_via_parent_resolves_a_direct_child_through_an_owner_or_admin_membership(
+    identity_db: IdentityDb,
+) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        parent = await make_org(session, name="Parent", plan_id="start")
+        child = await make_org(
+            session, name="Austin", parent_org_id=parent.id, plan_id="scale", limits={"rate_per_sec": 30}
+        )
+        grandchild = await make_org(session, name="Nested", parent_org_id=child.id)
+        stranger = await make_org(session, name="Other")
+        stranger_child = await make_org(session, name="Other child", parent_org_id=stranger.id)
+        owner = await make_user(session, unique_email())
+        admin = await make_user(session, unique_email())
+    async with database.tenant_session(parent.id) as session:
+        owned = await MembershipRepo(session, parent.id).add(owner.id, "owner")
+        await MembershipRepo(session, parent.id).add(admin.id, "admin")
+    async with database.system_session() as session:
+        repo = MembershipLookupRepo(session)
+        record = await repo.via_parent(owner.id, child.id)
+        as_admin = await repo.via_parent(admin.id, child.id)
+        assert await repo.via_parent(owner.id, parent.id) is None
+        assert await repo.via_parent(owner.id, grandchild.id) is None
+        assert await repo.via_parent(owner.id, stranger.id) is None
+        assert await repo.via_parent(owner.id, stranger_child.id) is None
+        assert await repo.via_parent(owner.id, uuid.uuid4()) is None
+        assert await repo.via_parent(uuid.uuid4(), child.id) is None
+    assert record == MembershipRecord(
+        membership_id=owned.id,
+        role="owner",
+        org_id=child.id,
+        org_name="Austin",
+        org_slug=child.slug,
+        plan_id="scale",
+        org_status="active",
+        parent_org_id=parent.id,
+        mfa_required=False,
+        rate_per_sec=30,
+        user_mfa_enabled=False,
+        acting_parent_org_id=parent.id,
+        acting_parent_status="active",
+    )
+    assert as_admin is not None
+    assert (as_admin.role, as_admin.org_id, as_admin.acting_parent_org_id) == ("admin", child.id, parent.id)
+
+
+@pytest.mark.parametrize("role", ["developer", "analyst", "billing", "viewer"])
+async def test_via_parent_refuses_other_parent_roles(identity_db: IdentityDb, role: MemberRole) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        parent = await make_org(session)
+        child = await make_org(session, parent_org_id=parent.id)
+        user = await make_user(session, unique_email())
+    async with database.tenant_session(parent.id) as session:
+        await MembershipRepo(session, parent.id).add(user.id, role)
+    async with database.system_session() as session:
+        assert await MembershipLookupRepo(session).via_parent(user.id, child.id) is None
+
+
+@pytest.mark.parametrize(
+    ("parent_settings", "child_settings", "required"),
+    [
+        ({}, {}, False),
+        ({"mfa_required": True}, {}, True),
+        ({}, {"mfa_required": True}, True),
+        ({"mfa_required": True}, {"mfa_required": True}, True),
+    ],
+)
+async def test_via_parent_requires_mfa_when_the_child_or_the_parent_does(
+    identity_db: IdentityDb,
+    parent_settings: dict[str, object],
+    child_settings: dict[str, object],
+    required: bool,
+) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        parent = await make_org(session, settings=parent_settings)
+        child = await make_org(session, parent_org_id=parent.id, settings=child_settings)
+        user = await make_user(session, unique_email())
+        await session.execute(update(User).where(User.id == user.id).values(mfa_enabled=True))
+    async with database.tenant_session(parent.id) as session:
+        await MembershipRepo(session, parent.id).add(user.id, "admin")
+    async with database.system_session() as session:
+        record = await MembershipLookupRepo(session).via_parent(user.id, child.id)
+    assert record is not None
+    assert (record.mfa_required, record.user_mfa_enabled, record.rate_per_sec) == (required, True, None)
+
+
+@pytest.mark.parametrize(
+    ("parent_status", "child_status", "gate_status"),
+    [
+        ("active", "active", "active"),
+        ("suspended", "active", "suspended"),
+        ("active", "suspended", "suspended"),
+        ("closed", "suspended", "closed"),
+        ("suspended", "closed", "closed"),
+    ],
+)
+async def test_via_parent_exposes_the_parent_status_and_gates_on_the_stricter(
+    identity_db: IdentityDb, parent_status: OrgStatus, child_status: OrgStatus, gate_status: OrgStatus
+) -> None:
+    database = identity_db.database
+    async with database.system_session() as session:
+        parent = await make_org(session, status=parent_status)
+        child = await make_org(session, parent_org_id=parent.id, status=child_status)
+        user = await make_user(session, unique_email())
+    async with database.tenant_session(parent.id) as session:
+        await MembershipRepo(session, parent.id).add(user.id, "owner")
+    async with database.system_session() as session:
+        repo = MembershipLookupRepo(session)
+        record = await repo.via_parent(user.id, child.id)
+        (own,) = await repo.for_user(user.id)
+    assert record is not None
+    assert (record.org_status, record.acting_parent_status, record.gate_status) == (
+        child_status,
+        parent_status,
+        gate_status,
+    )
+    assert (own.acting_parent_status, own.gate_status) == (None, parent_status)

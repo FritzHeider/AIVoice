@@ -3370,3 +3370,235 @@ before `complete`; live response untouched; specs/04 §2.1/§8.2/§12 decisions 
 stored row free of the key (DbIdempotencyStore), replay null, first key authenticates. Reviewer gates: lint,
 typecheck, placeholders 0, make test 2811 passed (98%), openapi drift current, spec refs 0, jscpd 0, radon no C+
 (avg 1.96), gitleaks pass.
+
+## 2026-10-29 Planner: P02-T09a approved → next P02-T09b
+P02-T09a committed (4fe50fe) and ticked. P02-T09 parent stays unticked until T09b is approved (Reviewer ticks both).
+
+## Plan P02-T09b — Parent access to sub-accounts: `X-VA-Org-Id` and `switch-org` (specs/04 §1, §4.1, §4.3, §8.3, §14)
+
+### Facts found while planning
+- `get_principal` (va_api/auth/dependencies.py) authenticates (API key or session), stores `request.state.ctx`, binds
+  `org_id`, then `enforce(... plan_rate_limits(ctx.plan_id, rate_per_sec))`. Rate keys are per principal
+  (`rl:key:{id}` / `rl:user:{id}`), so the bucket identity is unaffected by a switched org.
+- `RequestContext.acting_parent_org_id` exists and is always `None` today (api_key_auth.py:166, session_auth.py:305).
+- `session_auth.active_membership` resolves `sessions.active_org_id` only through the user's own memberships
+  (`MembershipLookupRepo.for_user_in_org`), else falls back to the oldest membership and persists it. `GET
+  /internal/auth/session` (routers/auth.py `get_session`) uses `pick_active` over own memberships — a child active org
+  would be silently reset. Both must learn the parent path.
+- `MembershipRecord` (va_db/repositories/memberships.py) carries org fields + role + mfa/rate; `_joined(user_id)`
+  builds the select. `MFA_REQUIRED_KEY`, `rate_per_sec_override` (repositories/api_keys.py) exist.
+- `OrgRepo.child(parent_id, child_id)` exists (orgs table has no RLS; use `global_session`).
+- Code that assumes the principal belongs to `ctx.org_id`: `routers/org.py:_me_api_key` (ApiKeyRepo(session,
+  ctx.org_id).get(ctx.principal_id)), `auth/api_keys.py:creating_user_id` (same lookup), `routers/org_members.py`
+  transfer-ownership (`ctx.principal_id` as the current owner).
+- `claim_idempotency` keys rows by `ctx.org_id` → acting requests' idempotency rows live in the child org (fine,
+  RLS-consistent; record it).
+- CORS already allows `X-VA-Org-Id` (main.py:52).
+
+### Decisions to record (same commit, `> Decision (2026-10-29):`)
+specs/04 §8.3:
+1. **Header.** `X-VA-Org-Id` is read in `get_principal` after authentication, before the rate limit. Absent or blank
+   → ignored. Not a UUID → `INVALID_INPUT` field `X-VA-Org-Id` "X-VA-Org-Id must be an organization id.". Equal to
+   `ctx.org_id` → no-op (context unchanged, `acting_parent_org_id` stays as it was).
+2. **Who may.** API key holding `org:write` (or `*`); session principal whose role (in the org the session acts in)
+   is `owner` or `admin`. Otherwise `FORBIDDEN` "Acting on a sub-account requires the org:write scope or the owner or
+   admin role." (checked before the org lookup, so it leaks nothing).
+3. **Which org.** The target must be a direct child of `ctx.org_id` (`OrgRepo.child` in a `global_session`); anything
+   else — sibling, the parent, the caller's own parent, other tenant, unknown, a grandchild — `FORBIDDEN`
+   "Organization is not a sub-account of the caller.". A context that already acts in a child (session switched via
+   `switch-org`) therefore cannot hop to a sibling or back to the parent through the header (depth 1).
+4. **Gates on the child.** `closed` → `ORG_SUSPENDED` "Organization is closed." (every method); `suspended` → writes
+   `ORG_SUSPENDED` (API-key message `ORG_SUSPENDED_MESSAGE`), reads allowed. Session principal: the child's
+   `settings.mfa_required` true and the session not MFA-passed → `MFA_REQUIRED` (the session gate's message), so the
+   header cannot bypass a child's MFA policy.
+5. **New context.** `dataclasses.replace(ctx, org_id=child.id, plan_id=child.plan_id, acting_parent_org_id=
+   ctx.org_id)`; scopes, role, principal id/type, environment unchanged. Rate limiting keeps the principal's bucket
+   key; its size uses the child's plan and the child's `limits.rate_per_sec` override (every bucket follows
+   `ctx.plan_id`). Logs bind `org_id` = child and `acting_parent_org_id` = parent. Idempotency rows are claimed in
+   the child org. Audit (P02-T11) records both orgs.
+6. **Principal's own rows.** `RequestContext.principal_org_id` (property: `acting_parent_org_id or org_id`) is the
+   org owning the API key / membership; `/v1/me` and `creating_user_id` look the key up there. `GET /v1/me` gains
+   `acting_parent_org_id` (uuid | null) and `org` is the child. `POST /v1/org/members/transfer-ownership` (whatever
+   the route path is in org_members.py) with `acting_parent_org_id` set → `FORBIDDEN` "Ownership of a sub-account
+   cannot be transferred by a parent-org principal." (the caller is not the child's owner member).
+specs/04 §4.1 (`switch-org` row):
+7. **`POST /internal/auth/switch-org`** `{org_id: uuid}` (unknown fields `INVALID_INPUT`, `x-public: session-flow`,
+   `operation_id="auth_switch_org"`): requires a valid session (CSRF + dashboard Origin, as other session writes) and
+   passes the MFA gate of the *current* active org (`gated_membership`). Allowed targets: an org the user is a member
+   of, or a direct child of an org where the user is `owner`/`admin`. Otherwise `FORBIDDEN` "You do not have access
+   to this organization." (unknown ids included). Org status is not checked (the dashboard shows suspended/closed
+   orgs; the principal gates apply on later requests). Persists `sessions.active_org_id` via
+   `SessionManager.set_active_org` (cache rewritten) and returns 200 with the same body as `GET /internal/auth/session`.
+8. **Session resolution** (amends the §4.3 session-mechanics "Active org"): when `sessions.active_org_id` is not
+   one of the user's memberships, it resolves through `MembershipLookupRepo.via_parent(user_id, org_id)` (the user is
+   owner/admin of the org's parent): the principal acts in the child with the parent membership's role and
+   `acting_parent_org_id` = parent; MFA is required when the child **or** the parent requires it (or the user enabled
+   it); `rate_per_sec` is the child's override. When neither path resolves (role lowered, membership removed, child
+   re-parented) it falls back to the oldest membership as today. `GET /internal/auth/session` resolves the active org
+   the same way and gains `acting_parent_org_id` (uuid | null); `memberships[]` is unchanged (children come from
+   `GET /v1/orgs`).
+
+### Files
+**packages/va_db/src/va_db/repositories/memberships.py**
+- `MembershipRecord.acting_parent_org_id: uuid.UUID | None = None` (last field, docstring line).
+- `PARENT_ACCESS_ROLES: Final = frozenset({"owner", "admin"})` (export).
+- `MembershipLookupRepo.via_parent(user_id, org_id) -> MembershipRecord | None`: `child = aliased(Org)`;
+  `select(Membership, child, Org, User.mfa_enabled).join(Org, Org.id == Membership.org_id).join(child,
+  child.parent_org_id == Membership.org_id).join(User, ...).where(Membership.user_id == user_id, child.id == org_id,
+  Membership.role.in_(PARENT_ACCESS_ROLES))`; record = `_record(membership, child, mfa)` with
+  `mfa_required = child flag or parent flag`, `acting_parent_org_id = parent.id` (use `dataclasses.replace` on the
+  `_record` result, or give `_record` keyword args — keep it one builder, no duplicate field list).
+**apps/api/src/va_api/auth/context.py**: `principal_org_id` property.
+**apps/api/src/va_api/auth/sub_accounts.py** (new): module docstring citing specs/04 §8.3;
+  `ORG_HEADER: Final = "x-va-org-id"`, message constants (`ACT_FORBIDDEN_MESSAGE`, `NOT_A_CHILD_MESSAGE`,
+  `INVALID_ORG_HEADER_MESSAGE`); `async def act_on_sub_account(request, ctx, rate_per_sec) -> tuple[RequestContext,
+  int | None]` implementing decisions 1–5 (returns inputs unchanged when no switch); small private helpers to stay
+  below radon C (`_target(request) -> uuid | None`, `_may_act(ctx) -> bool`, `_check_child(child, request)`).
+  Session MFA check reads `request.state.session` (set by `current_session`) — `getattr(request.state, "session",
+  None)`; only for `principal_type == "user"`. Reuse `ORG_CLOSED_MESSAGE`, `MFA_REQUIRED_MESSAGE` from
+  session_auth and `ORG_SUSPENDED_MESSAGE`, `READ_METHODS` from api_key_auth — factor `_check_org_status` in
+  session_auth into a public `check_org_status(status: OrgStatus, method)` used by both (no copy).
+**apps/api/src/va_api/auth/dependencies.py**: `get_principal` calls `act_on_sub_account` after authentication; binds
+  `acting_parent_org_id` (str or omitted) to structlog contextvars; docstring updated.
+**apps/api/src/va_api/auth/session_auth.py**: `active_membership` tries `via_parent` (same system session) when
+  `for_user_in_org` misses; `session_principal` sets `acting_parent_org_id=record.acting_parent_org_id`;
+  `check_org_status` public; new `async def resolve_switch_target(request, user_id, org_id) -> MembershipRecord |
+  None` (own membership or via_parent, one system session) used by switch-org and by active_membership (no dup).
+**apps/api/src/va_api/routers/auth.py**: extract `_session_info(request, response, active) -> SessionInfo` from
+  `get_session` (resolves via `active_membership`, not `pick_active` — keep the "persist fallback" behaviour) and
+  add `switch_org` (`POST /switch-org`, `SwitchOrgRequest`). If auth.py nears radon/size limits put switch-org in
+  `routers/auth_switch_org.py` on `internal_auth_router` with a side-effect import in main.py
+  (mem-1793267153-d5f5).
+**apps/api/src/va_api/routers/auth_schemas.py**: `SwitchOrgRequest(org_id: uuid.UUID, extra="forbid")`;
+  `SessionInfo.acting_parent_org_id: uuid.UUID | None` (+ example value `None` is dropped by FastAPI → leave it out
+  of the example or use a uuid; examples must not contain None, mem-1793265656-71f0).
+**apps/api/src/va_api/routers/org.py + org_schemas.py**: `MeView.acting_parent_org_id`; `_me_api_key` uses
+  `ctx.principal_org_id`. **apps/api/src/va_api/auth/api_keys.py** `creating_user_id` same.
+**apps/api/src/va_api/routers/org_members.py**: transfer-ownership refusal (decision 6).
+**specs/04** §8.3 decisions 1–6, §4.1 decision 7, §4.3 decision 8 (short "amends" note under the session-mechanics
+  decision). **AGENTS.md**: X-VA-Org-Id, `principal_org_id`, switch-org, test helpers.
+**openapi/openapi.json** regenerated (`MeView`); internal OpenAPI doc too if the repo keeps one (P02-T04d added an
+  internal document — regenerate/drift-check both); `corepack pnpm gen:api` in sdks/typescript and apps/dashboard.
+
+### Tests
+**packages/va_db/tests/test_membership_lookup_integration.py**: `via_parent` returns the child record with parent
+  role, child plan/status/name, `acting_parent_org_id`; `mfa_required` true when only parent or only child requires
+  it; None for developer/analyst/billing/viewer parent roles, for a non-child org, for a grandchild-shaped id (child of
+  a child — build via direct insert if provisioner forbids), for the user's own org, for unknown ids.
+**apps/api/tests/test_sub_account_access_integration.py** (new; reuse conftest `identity/container/client`,
+  session_helpers `signed_in`, `fund`, `set_org`, `add_member`, `error_of`; create children through
+  `POST /v1/orgs/create` so the child key exists):
+  - API key `*` of parent + header child: `GET /v1/me` → org = child, `acting_parent_org_id` = parent, `api_key.id` =
+    parent key; `GET /v1/org` → child; `PATCH /v1/org` renames the child only (parent name unchanged in DB) — proves
+    the tenant session uses the child id.
+  - parent `org:write` key allowed; `org:read`-only key → 403 FORBIDDEN act message (no org lookup).
+  - header = own org id → unchanged ctx (`acting_parent_org_id` null); blank header ignored; malformed → 400
+    INVALID_INPUT field `X-VA-Org-Id`.
+  - sibling child key with header = other child → 403 not-a-child; child key with header = parent → 403; other
+    tenant's org / unknown uuid → 403 not-a-child.
+  - suspended child (via suspend route): parent header GET works, PATCH → ORG_SUSPENDED; closed child (set_org) →
+    GET ORG_SUSPENDED "Organization is closed.".
+  - sessions: owner and admin with header allowed (role echoed in `/v1/me`); developer/analyst/billing/viewer →
+    403; child with `settings.mfa_required` and session not MFA-passed → MFA_REQUIRED, after `enrol_mfa`/verify ok.
+  - nested: child-of-child creation stays FORBIDDEN while acting (`POST /v1/orgs/create` with header → 403
+    depth message); `GET /v1/orgs` with header → empty list.
+  - transfer ownership while acting → 403 decision-6 message.
+  - idempotent POST with header stores the row under the child org (query `idempotency_keys.org_id` via
+    DbIdempotencyStore monkeypatch, mem-1793281395-6e00) — optional if cheap; otherwise skip and note.
+  - switch-org: to own second membership → 200, session body `active_org_id` = it; to a child as owner → 200 with
+    `acting_parent_org_id` = parent, then (no header) `GET /v1/me` org = child, role owner, `PATCH /v1/org` renames
+    child; as developer → 403; sibling-of-nothing/unknown/other-tenant → 403; missing CSRF → CSRF error; unknown
+    body field → 400; after switching to a child, header = sibling → 403, header = parent → 403; demote the user to
+    developer in the parent (DB via `add_member`/role change route) → next `GET /internal/auth/session` falls back to
+    the oldest membership (`acting_parent_org_id` null); child MFA required → gated after switching.
+  - `GET /internal/auth/session` keeps a child active org (regression for `pick_active`).
+**apps/api/tests/test_auth_dependencies.py** (unit, fakes): header ignored for blank; INVALID_INPUT; rate limits
+  use the child plan (if the unit harness has a limiter fake; else covered in integration via `X-RateLimit-Limit`
+  differing between a `start` parent and a `scale` child — Builder picks).
+**apps/api/tests/test_openapi.py / internal doc test**: `auth_switch_org` present only in the internal document with
+  `x-public: session-flow`; `MeView` has `acting_parent_org_id`.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make openapi` + `uv run python scripts/check_openapi_drift.py`;
+`corepack pnpm gen:api` (sdks/typescript, apps/dashboard) + `make test-ts`; `uv run python scripts/check_spec_refs.py`;
+`npx jscpd@4` (0 clones); `uvx radon cc -n C packages/va_common/src packages/va_db/src apps/api/src` (none) and
+`uvx radon cc -s -a ... | tail -1` (numeric average for build.done); pip-audit per mem-1793267153-9b68 +
+`corepack pnpm audit`; `uv run pre-commit run gitleaks --all-files`. build.done as a PLAIN STRING:
+`ralph emit "build.done" "P02-T09b tests: pass (N passed), lint: pass, typecheck: pass, audit: pass, coverage: pass (NN.NN%), complexity: N.NN, duplication: pass, specs: pass"`
+
+### Risks
+- Pool size 1 per role: `act_on_sub_account` opens one `global_session` after authentication has closed its
+  sessions; never nest it inside another session. `via_parent` runs inside the same system session as
+  `for_user_in_org`.
+- Do not run `ruff --select RUF100` (mem-1793280879-cb08).
+- `get_principal` ordering: the switch must happen before `request.state.ctx`, the structlog bind, the rate limit,
+  and `require_scope`/`claim_idempotency`, so idempotency and scope checks see the child context.
+- `_session_info` refactor must keep the existing GET /session tests green (fallback persistence, mfa_required).
+- `RequestContext` is `slots=True`: a `@property` is fine; `dataclasses.replace` works with slots.
+- Child key cache: a parent acting on a child never touches the child's key cache; no invalidation needed.
+
+## 2026-10-29 Builder: P02-T09b build notes
+Implemented per plan. Deviations / details for the Reviewer:
+- `act_on_sub_account` additionally refuses any header hop when the context already acts in a child
+  (`acting_parent_org_id` set) with NOT_A_CHILD_MESSAGE (explicit depth-1 check, decision 3).
+- `creating_user_id` keeps its `tenant_session(ctx.org_id)` contract and reads the key row under
+  `use_org(session, ctx.principal_org_id)` (an acting key's row lives in the parent; RLS would hide it). Covered by
+  `test_a_key_invites_into_the_child_as_its_creator`.
+- `routers.auth.session_info(...)` replaces the inline `get_session` body and resolves via `active_membership`
+  (`pick_active` no longer used by routers). switch-org lives in `routers/auth_switch_org.py` (side-effect import).
+- Existing `test_org_integration.test_patch_never_touches_another_org` assumed the header was ignored; it now
+  asserts 403 NOT_A_CHILD and both orgs untouched.
+- Idempotency-row-in-child test skipped (plan marked optional): rows are keyed by `ctx.org_id`, which is the child
+  once `get_principal` returns; recorded in specs/04 §8.3 decision 5.
+- Test helpers: `session_helpers.sub_account(client, name, **headers)`, `sub_account_member(client, identity,
+  container, role)` (asynccontextmanager). Log binding test wraps `structlog.contextvars.bind_contextvars`
+  (capture_logs misses cached loggers in the full suite).
+Gates: make fmt/lint/typecheck pass; placeholders 0; make test 2855 passed, coverage 98.45%; test-ts pass (52 + 48);
+openapi + internal drift current; spec refs 0; jscpd 0 clones; radon no C+ (avg 1.9645); pip-audit + pnpm audit no
+vulns; gitleaks pass.
+
+## Review P02-T09b (2026-10-29): rejected (1 finding)
+Gates re-run by Reviewer: make lint, typecheck, placeholders pass; make test 2855 passed, coverage 98% (logs/review-p02-t09b.log).
+Rest of the diff matches specs/04 §8.3 decisions 1–6 and §4.1/§4.3 decisions 7–8 (header parsing, may-act before lookup,
+depth 1, child status/MFA gates, principal_org_id for /v1/me and creating_user_id, transfer-ownership refusal, switch-org).
+
+1. **A switched session ignores the parent org's status.** `packages/va_db/src/va_db/repositories/memberships.py`
+   `via_parent` (and its callers `session_auth.resolve_switch_target` / `active_membership` / `session_principal`):
+   the record carries only the child's `org_status`, and `session_principal` calls `check_org_status(record.org_status, …)`
+   on the child alone. So when the parent is `suspended`, an owner/admin who switched into an active child keeps
+   **write** access to it. When the parent is `closed` (`DELETE /v1/org`, specs/04 §8.1), they keep full access. On top
+   of that, `switch-org` itself never checks the status of the org the session currently acts in (only its MFA gate),
+   so a user whose parent was suspended or closed can still switch into a child.
+   This contradicts the header path of the same feature. An API key or session in a suspended or closed parent is
+   refused by the parent's own gate (specs/04 §1 step 2, §4.3 org-status decision) before `X-VA-Org-Id` is applied,
+   so parent status already gates acting there. specs/04 §8.3 grants child access by virtue of the parent role, and
+   a closed parent's role must not keep granting it.
+   Fix: in `via_parent`, the record (or the caller) must also apply the parent's status. A closed parent →
+   `ORG_SUSPENDED` "Organization is closed." for every method. A suspended parent → writes refused with the
+   suspended message, reads allowed, the same as the parent's own gate (strictest of parent and child). One option is
+   to carry `parent_status` on `MembershipRecord`, or to fold the stricter status into `org_status`. Record it as a
+   bullet under specs/04 §8.3 decision 4 ("Gates on the child: … the parent's status gates too").
+   Tests in `test_switch_org_integration.py`: switch into a child, then `set_org(identity, parent, status="suspended")`
+   → GET ok, PATCH /v1/org → ORG_SUSPENDED; parent `closed` → GET ORG_SUSPENDED "Organization is closed.". Plus one
+   `via_parent` repo test that the parent status is exposed.
+
+## 2026-10-29 Builder: P02-T09b fix for review finding 1
+- `MembershipRecord.acting_parent_status` (set by `via_parent`) + `gate_status` property (stricter of
+  child/parent: closed > suspended > active). `session_principal` gates on `record.gate_status`, so a switched
+  session gets the parent's gate: suspended parent → reads ok, writes ORG_SUSPENDED; closed parent → every method
+  "Organization is closed.".
+- `switch-org`: target reached via a parent → `check_org_status(parent_status, "GET")`, so a closed parent refuses
+  the switch; a suspended parent may still switch (reads allowed). The target's own status is still unchecked
+  (decision 7).
+- specs/04 §8.3 decision 4 gains a "parent's status gates too" bullet.
+- Tests: `test_via_parent_exposes_the_parent_status_and_gates_on_the_stricter` (5 status combos + own membership
+  has no parent status); switch-org suspended-parent (GET ok, PATCH refused, child unchanged, re-switch ok) and
+  closed-parent (GET + switch refused) tests.
+Gates: fmt/lint/typecheck pass; placeholders 0; make test 2862 passed, coverage 98.46%; openapi drift current;
+spec refs 0; jscpd 0 clones; radon no C+ (avg 1.9671); pip-audit + pnpm audit no vulns; gitleaks pass.
+
+## Review P02-T09b re-review (2026-10-29): approved
+Gates re-run by Reviewer: make lint, typecheck, placeholders pass; make test 2862 passed, coverage 98.46%
+(logs/review-p02-t09b-fix.log). Finding 1 fixed: `MembershipRecord.acting_parent_status` + `gate_status` (stricter of
+child/parent) used by `session_principal`; switch-org refuses a closed parent; specs/04 §8.3 decision 4 bullet added;
+repo test over 5 status combos and switch-org suspended/closed parent integration tests present. P02-T09 ticked.

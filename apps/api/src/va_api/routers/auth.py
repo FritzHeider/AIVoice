@@ -4,9 +4,9 @@ Envelope format, excluded from the public OpenAPI document and emitted to ``open
 §1), and marked ``x-public: session-flow``: they authenticate with the session cookie themselves instead of
 ``require_scope``. Signup and resend send the verification email after the response (a background task).
 The password routes live in :mod:`va_api.routers.auth_password`, the MFA routes in
-:mod:`va_api.routers.auth_mfa`, and the OIDC login in :mod:`va_api.routers.auth_sso`; all attach to the same
-router. With ``OIDC_ENABLED=true`` a password login for an email whose domain's SSO connection enforces SSO
-answers ``SSO_REQUIRED`` (specs/04 §5 step 6).
+:mod:`va_api.routers.auth_mfa`, the OIDC login in :mod:`va_api.routers.auth_sso`, and ``switch-org`` in
+:mod:`va_api.routers.auth_switch_org`; all attach to the same router. With ``OIDC_ENABLED=true`` a password
+login for an email whose domain's SSO connection enforces SSO answers ``SSO_REQUIRED`` (specs/04 §5 step 6).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from va_api.auth.cookies import (
     set_session_cookie,
 )
 from va_api.auth.session_auth import (
+    active_membership,
     check_dashboard_origin,
     client_ip,
     clock_of,
@@ -35,7 +36,6 @@ from va_api.auth.session_auth import (
     memberships_of_user,
     mfa_due,
     password_hasher_of,
-    pick_active,
     provisioner_of,
     resend_limiter_of,
     sessions_of,
@@ -77,6 +77,7 @@ __all__ = [
     "check_sso_enforced",
     "internal_auth_router",
     "revoke_presented",
+    "session_info",
     "set_session_cookies",
 ]
 
@@ -304,15 +305,14 @@ async def logout_all(
     return DataResponse(data=RevokedSessionsResult(revoked_sessions=revoked))
 
 
-@internal_auth_router.get("/session", operation_id="auth_session_get", openapi_extra=PUBLIC_MARKER)
-async def get_session(
-    request: Request, response: Response, active: CurrentSession
-) -> DataResponse[SessionInfo]:
-    """The signed-in user, their memberships, the active org, and the CSRF token (cookie set or reused)."""
+async def session_info(request: Request, response: Response, active: ActiveSession) -> SessionInfo:
+    """The ``GET /session`` body; sets or reuses the CSRF cookie.
+
+    The active org resolves to the user's membership or a sub-account reached through a parent owner/admin
+    membership, else to the persisted oldest membership.
+    """
+    active, record = await active_membership(request, active)
     records = await memberships_of_user(request, active.user_id)
-    record = pick_active(records, active.active_org_id)
-    if record is not None and record.org_id != active.active_org_id:
-        active = await sessions_of(request).set_active_org(active, record.org_id)
     async with database_of(request).global_session() as session:
         user = await IdentityRepo(session).get_user(active.user_id)
     if user is None:
@@ -321,10 +321,11 @@ async def get_session(
     if csrf is None or not looks_like_token(csrf):
         csrf = generate_token()
     set_csrf_cookie(response, cookie_policy_of(request), csrf)
-    info = SessionInfo(
+    return SessionInfo(
         user=SessionUser.of(user),
         memberships=[SessionMembership.of(item) for item in records],
         active_org_id=record.org_id if record is not None else None,
+        acting_parent_org_id=record.acting_parent_org_id if record is not None else None,
         mfa_passed=active.mfa_passed,
         mfa_required=mfa_due(
             org_requires=record is not None and record.mfa_required,
@@ -334,4 +335,12 @@ async def get_session(
         csrf_token=csrf,
         expires_at=active.expires_at,
     )
-    return DataResponse(data=info)
+
+
+@internal_auth_router.get("/session", operation_id="auth_session_get", openapi_extra=PUBLIC_MARKER)
+async def get_session(
+    request: Request, response: Response, active: CurrentSession
+) -> DataResponse[SessionInfo]:
+    """The signed-in user, their memberships, the active org (with `acting_parent_org_id` when it is a
+    sub-account reached through its parent), and the CSRF token (cookie set or reused)."""
+    return DataResponse(data=await session_info(request, response, active))

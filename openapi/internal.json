@@ -1109,6 +1109,19 @@
           }
         ],
         "properties": {
+          "acting_parent_org_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The parent org when the active org is a sub-account reached through an owner or admin membership of its parent (specs/04 §8.3); null otherwise.",
+            "title": "Acting Parent Org Id"
+          },
           "active_org_id": {
             "anyOf": [
               {
@@ -1153,6 +1166,7 @@
           "user",
           "memberships",
           "active_org_id",
+          "acting_parent_org_id",
           "mfa_passed",
           "mfa_required",
           "csrf_token",
@@ -1427,6 +1441,27 @@
           "org"
         ],
         "title": "SignupResult",
+        "type": "object"
+      },
+      "SwitchOrgRequest": {
+        "additionalProperties": false,
+        "description": "``POST /internal/auth/switch-org``: an org the user is a member of, or a sub-account of an org where\nthe user is owner or admin.",
+        "examples": [
+          {
+            "org_id": "0192f3c4-5a6b-7c8d-9e0f-3c4d5e6f7081"
+          }
+        ],
+        "properties": {
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id"
+        ],
+        "title": "SwitchOrgRequest",
         "type": "object"
       },
       "VerifyEmailRequest": {
@@ -2231,7 +2266,7 @@
     },
     "/internal/auth/session": {
       "get": {
-        "description": "The signed-in user, their memberships, the active org, and the CSRF token (cookie set or reused).",
+        "description": "The signed-in user, their memberships, the active org (with `acting_parent_org_id` when it is a\nsub-account reached through its parent), and the CSRF token (cookie set or reused).",
         "operationId": "auth_session_get",
         "responses": {
           "200": {
@@ -2428,6 +2463,60 @@
           }
         },
         "summary": "Sso Start",
+        "tags": [
+          "Auth"
+        ],
+        "x-envelope": "envelope",
+        "x-public": "session-flow"
+      }
+    },
+    "/internal/auth/switch-org": {
+      "post": {
+        "description": "Make `org_id` the session's active org (a membership, or a sub-account of an org where the user is\nowner or admin); returns the same body as `GET /internal/auth/session`.",
+        "operationId": "auth_switch_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SessionInfo_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Switch Org",
         "tags": [
           "Auth"
         ],

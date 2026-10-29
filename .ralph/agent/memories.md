@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793282863-1d8b
+> va_api sub-accounts: get_principal applies X-VA-Org-Id via auth.sub_accounts.act_on_sub_account before rate limit/scope/idempotency; use ctx.principal_org_id (not ctx.org_id) for the caller's own API key/membership rows; session child active org via session_auth.resolve_switch_target (MembershipLookupRepo.via_parent). Tests: session_helpers.sub_account / sub_account_member; structlog capture_logs misses contextvars+cached loggers in full suite - wrap structlog.contextvars.bind_contextvars instead
+<!-- tags: api, auth, testing | created: 2026-10-29 -->
+
 ### mem-1793281395-6e00
 > va_api: routes returning one-time secrets call va_api.idempotency.withhold_on_replay(request, 'api_key' | 'data.key'); stored idempotency body and replays get null. Session tests asserting idempotency_keys rows: monkeypatch container.idempotency = DbIdempotencyStore(identity.database, container.clock)
 <!-- tags: api, testing, auth | created: 2026-10-29 -->

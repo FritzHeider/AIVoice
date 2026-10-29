@@ -30,7 +30,8 @@ export interface paths {
         };
         /**
          * Me Get
-         * @description The calling principal: user or API key, its org, role and scopes.
+         * @description The calling principal: user or API key, the org it acts in, role and scopes; `acting_parent_org_id` is
+         *     the parent org while a parent principal acts on a sub-account.
          */
         get: operations["me_get"];
         put?: never;
@@ -194,6 +195,8 @@ export interface paths {
         /**
          * Org Transfer Ownership
          * @description Make another member an owner and the calling owner an admin; needs a sign-in in the last 10 minutes.
+         *
+         *     A parent-org principal acting on a sub-account is not one of its members and cannot transfer it.
          */
         post: operations["org_transfer_ownership"];
         delete?: never;
@@ -804,6 +807,11 @@ export interface components {
          *     }
          */
         MeView: {
+            /**
+             * Acting Parent Org Id
+             * @description The parent org while a parent principal acts on this sub-account (X-VA-Org-Id or switch-org); null otherwise.
+             */
+            acting_parent_org_id: string | null;
             api_key: components["schemas"]["MeApiKey"] | null;
             org: components["schemas"]["OrgSummary"];
             principal_type: components["schemas"]["PrincipalType"];

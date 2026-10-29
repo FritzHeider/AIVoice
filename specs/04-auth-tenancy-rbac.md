@@ -385,6 +385,15 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > needs less than 10 minutes since `max(sessions.created_at, sessions.mfa_passed_at)`; `mfa/verify` and `mfa/enable`
 > set `mfa_passed_at` to now, so a long-lived session re-authenticates with an MFA code instead of a new login.
 
+> Decision (2026-10-29): **`POST /internal/auth/switch-org`** `{org_id: uuid}` (unknown fields → `INVALID_INPUT`;
+> `x-public: session-flow`, `operation_id` `auth_switch_org`, internal document only). It needs a valid session (CSRF
+> and dashboard `Origin` like every session write) and passes the MFA gate of the session's *current* active org.
+> Allowed targets: an org the user is a member of, or a direct sub-account of an org where the user is `owner` or
+> `admin` (§8.3). Anything else, unknown ids included → `FORBIDDEN` "You do not have access to this organization.".
+> The target's status is not checked (the dashboard shows suspended and closed orgs; principal routes apply the
+> status gates on every later request). It persists `sessions.active_org_id` (the `sess:` cache entry is rewritten)
+> and answers 200 with the body of `GET /internal/auth/session`.
+
 ### 4.2 Passwords
 
 - argon2id via `argon2-cffi`: `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4`, `hash_len=32`,
@@ -468,6 +477,16 @@ Error codes added: `SSO_REQUIRED` (403), `EMAIL_NOT_VERIFIED` (403), `INVALID_CR
 > still fail with `FORBIDDEN` for lack of a membership after passing the gate. `GET /session.mfa_required` follows
 > the same rule. The `sess:` cache JSON gains `mfa_passed_at` (ISO 8601 or `null`; an entry written without it
 > reads as `null`).
+
+> Decision (2026-10-29): **Active org via a parent** (amends **Active org** of the session-mechanics decision).
+> When `sessions.active_org_id` is not one of the user's memberships it resolves as a sub-account of an org where
+> the user is `owner`/`admin` (`MembershipLookupRepo.via_parent`): the principal acts in the child with the parent
+> membership's role and `acting_parent_org_id` = the parent; the MFA gate fires when the child **or** the parent
+> requires MFA (or the user enabled it); the rate limit uses the child's plan and `limits.rate_per_sec`. A user who is
+> also a direct member of the child acts through that membership. When neither path resolves (role lowered,
+> membership removed, child re-parented) the session falls back to the oldest membership as before. `GET
+> /internal/auth/session` resolves the active org the same way and gains `acting_parent_org_id` (uuid | null);
+> `memberships[]` lists only the user's own memberships (children come from `GET /v1/orgs`).
 
 ### 4.4 CSRF
 
@@ -877,6 +896,36 @@ Max nesting depth: 1 (a child cannot create children) → `FORBIDDEN`.
 - Child principals can never see the parent.
 - Billing: children have independent balances; parent can transfer credits; usage rolls up in parent analytics
   (`GET /v1/analytics/usage?include_sub_accounts=true`).
+
+> Decision (2026-10-29): **`X-VA-Org-Id`** is applied in `get_principal` after authentication and before the rate
+> limit, scope checks, and idempotency claims (`va_api.auth.sub_accounts.act_on_sub_account`):
+> 1. Absent or blank → ignored. Not a UUID → `INVALID_INPUT` field `X-VA-Org-Id` "X-VA-Org-Id must be an
+>    organization id.". Equal to the context's `org_id` → no change.
+> 2. Who may: an API key holding `org:write` (or `*`); a session principal whose role in the org it acts in is
+>    `owner` or `admin`. Otherwise `FORBIDDEN` "Acting on a sub-account requires the org:write scope or the owner or
+>    admin role." (checked before any org lookup, so it reveals nothing).
+> 3. Which org: a direct child of the context's `org_id`. A sibling, the parent, the caller's own parent, another
+>    tenant's org, an unknown id, or anything named by a context that already acts in a child (a session switched
+>    with `switch-org`) → `FORBIDDEN` "Organization is not a sub-account of the caller." (depth 1).
+> 4. Gates on the child: `closed` → `ORG_SUSPENDED` "Organization is closed." (every method); `suspended` → writes
+>    `ORG_SUSPENDED` (the API-key message), reads allowed. For session principals a child whose
+>    `settings.mfa_required` is true gates a session that has not passed MFA with `MFA_REQUIRED`, so the header never
+>    bypasses a child's MFA policy.
+>    - The parent's status gates too: a session whose active org is a child reached through the parent (§4.1
+>      `switch-org`, decision 8) applies the stricter of the child's and the parent's status, so a `closed` parent
+>      refuses every method and a `suspended` parent refuses writes, exactly as the parent's own gate does on the
+>      `X-VA-Org-Id` path (where the parent principal is gated before the header applies). `switch-org` into a child
+>      of a `closed` parent → `ORG_SUSPENDED` "Organization is closed."; a `suspended` parent may still switch
+>      (reads stay allowed).
+> 5. The new context replaces `org_id` and `plan_id` with the child's and sets `acting_parent_org_id` to the parent;
+>    principal, scopes, role, and environment are unchanged. The rate bucket keeps the principal's key and is sized
+>    by the child's plan and `limits.rate_per_sec`. Log lines bind `org_id` = child and `acting_parent_org_id` =
+>    parent; idempotency rows are claimed in the child org; audit rows (P02-T11) record both orgs.
+> 6. `RequestContext.principal_org_id` (`acting_parent_org_id or org_id`) is the org owning the API key or
+>    membership: `GET /v1/me` and the creating-user lookup of invitations read the key there. `GET /v1/me` gains
+>    `acting_parent_org_id` (uuid | null) and `org` is the child. `POST /v1/org/transfer-ownership` while acting →
+>    `FORBIDDEN` "Ownership of a sub-account cannot be transferred by a parent-org principal." (the parent principal
+>    is not a member of the child).
 
 ### 8.4 Credit transfer
 
