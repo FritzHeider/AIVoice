@@ -685,3 +685,11 @@ Grafana 3001
   14 400 s virtual — instant). A test that busy-polls with `asyncio.sleep(0)` keeps the loop non-idle and freezes
   accelerated time. Builders: `dial`, `command`, `ok`, `summary`, `events`, `payloads`, `register`,
   `inbound_call`, `answered_call`, `ringing_call`, `ringing_inbound` in `tests/support/telnyx_helpers.py`.
+- 2026-10-29 (P03-T03a): `va_sim.audio` is the synthetic caller audio (specs/30 §3.1 Decision): `synthesize_utterance`
+  (μ-law 8 kHz), `synthesize_pcm16`/`synthesize_wire(..., sample_rate=8000|16000)` (16 kHz synthesized natively,
+  wire = L16 BE), `decode_marker(pcm16, sample_rate)`, `goertzel_power`, `synthesize_dtmf`, plus the sim's own G.711
+  codec (`va_sim.audio.codec`, must stay bit-identical with `va_voice.codec`; never import `va_voice` from the sim).
+  Seed synthesis with `SimState.utterance_seed(id)`; utterance ids are 16-bit (registry caps at 65 535). Randomness
+  only via `va_sim.audio.AudioRng` (raw PCG64). Synthesis is CPU-bound: call it through `asyncio.to_thread` from
+  async code. `va_sim.audio` must not import `va_sim.state` (the state imports `MAX_UTTERANCE_ID`). The Silero
+  check of §3.1 lives in P04-T03.

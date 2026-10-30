@@ -13,6 +13,7 @@ from typing import Final
 import httpx
 from pydantic import JsonValue
 
+from va_sim.audio.marker import MAX_UTTERANCE_ID
 from va_sim.clock import SimClock
 from va_sim.ids import SimIds
 from va_sim.scenario import Scenario
@@ -26,6 +27,7 @@ from va_sim.telnyx.webhooks import WebhookEmitter
 __all__ = ["DEFAULT_SEED", "SimState", "Utterance"]
 
 DEFAULT_SEED: Final = 0
+_UTTERANCE_SEED_STRIDE: Final = MAX_UTTERANCE_ID + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,10 +136,17 @@ class SimState:
         self.recordings[recording_id] = wav
 
     def register_utterance(self, text: str, language: str, words: tuple[str, ...]) -> int:
-        """Allocate the next utterance id (sequential from 1 per sim run)."""
+        """Allocate the next utterance id (sequential from 1 per sim run, up to the 16-bit marker limit)."""
+        if len(self.utterances) >= MAX_UTTERANCE_ID:
+            msg = f"all {MAX_UTTERANCE_ID} utterance ids (16-bit marker) are in use; reset the sim"
+            raise ValueError(msg)
         utterance_id = len(self.utterances) + 1
         self.utterances[utterance_id] = Utterance(text=text, language=language, words=words)
         return utterance_id
+
+    def utterance_seed(self, utterance_id: int) -> int:
+        """Synthesis seed of ``utterance_id``: ``seed · 65 536 + utterance_id`` (specs/30 §3.1)."""
+        return self.seed * _UTTERANCE_SEED_STRIDE + utterance_id
 
     def apply_profile(self, profile: ProfileName) -> None:
         self.latencies = PROFILES[profile]

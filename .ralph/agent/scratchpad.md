@@ -776,3 +776,151 @@ Finding 1 fixed: `Call.waiting_legs` + `CallEngine._cancel_waiting_legs` (origin
 `_unbridge`; `answer` hangs up a leg whose peer already ended; Decision (9) in specs/30 updated; 3 transfer tests.
 Finding 2 fixed: `call_media._encode` (mix + WAV) runs inside `asyncio.to_thread`; off-loop test present.
 Approved; task ticked and committed.
+
+## Plan P03-T03a — Synthetic caller audio `va_sim.audio` (Planner, 2026-10-29)
+
+Why the split: P03-T03 as written needs the §3.1 synthetic caller speech (marker preamble + formant body +
+`decode_marker`), which no task owned; P03-T05 (STT marker scheme) needs `decode_marker` too. plan/phase-03.md now
+has P03-T03a (this, audio only) and P03-T03b (media WS client + caller steps, depends on T02b + T03a); P03-T05
+depends on T03a. The §3.1 Silero requirement cannot run yet (no onnxruntime / `SileroVad` until P04-T03), so it
+is moved into the P04-T03 acceptance (plan/phase-04.md edited). Builder commits these plan edits with the task.
+
+### Decisions (Builder writes ONE `> Decision (2026-10-29): synthetic caller audio (P03-T03a).` block at the end of specs/30 §3.1)
+1. The simulator has its own G.711 μ-law codec (`va_sim.audio.codec`), table-based exactly as specs/07 describes
+   (`ULAW_TO_PCM16` (256,) int16 with bias 0x84 / inverted bits; `PCM16_TO_ULAW` (65536,) uint8 indexed by
+   `int16 + 32768`, clipping at 32635). `va_voice.codec` arrives in P04-T01 and must be bit-identical (P04 adds a
+   cross-check test); the sim does not import `va_voice` (phase rule: no shared message/audio construction).
+   Do NOT copy `scripts/generate_audio_assets.py` ulaw code (jscpd) — build the tables independently.
+2. Randomness only from `numpy.random.PCG64(seed).random_raw()` (AGENTS.md rule), converted to uniform floats as
+   `(raw >> 11) * 2**-53`. Utterance seed: `SimState.utterance_seed(utterance_id) = seed * 65_536 + utterance_id`
+   (non-negative; `seed` is `SimState.seed`).
+3. Utterance ids are 16-bit (the marker carries 16 bits): `synthesize_*` require `0 <= utterance_id <= 65_535`;
+   `SimState.register_utterance` raises `ValueError` once 65 535 ids are allocated (ids start at 1, so 0 is never
+   allocated but is synthesizable for tests).
+4. Marker preamble (180 ms, peak −12 dBFS = round(32767·10^(−12/20)) = 8231): 20 ms sync sine 1 700 Hz, then 16
+   bits × 10 ms FSK MSB first (0 → 1 200 Hz, 1 → 2 200 Hz), phase-continuous across segments (no clicks), 0 ms gap.
+5. Voiced body: duration `len(text) * rate_ms_per_char` ms; syllables of 180 ms (last one shorter); syllable k's
+   vowel = `"aeiou"[sum(map(ord, chunk_k)) % 5]` where `chunk_k` is the slice of `text` covering that syllable's
+   time span (`chars_per_syllable = 180 / rate_ms_per_char`, slice `[floor(k·c), max(floor((k+1)·c), floor(k·c)+1))`
+   clamped to the text). Source: Rosenberg glottal pulse train (open phase 40 % of the period rising
+   `0.5·(1 − cos(π t/Tp))`, closing 16 % `cos(π (t−Tp) / (2 Tn))`, closed rest), each period `T0·(1 + 0.03·(2u−1))`
+   from the RNG, first difference for lip radiation. Filter: three formant resonators in parallel (gains 1.0, 0.5,
+   0.25; bandwidths 80/120/160 Hz) implemented as `np.convolve` with the truncated impulse response of a two-pole
+   resonator `h[n] = r^n·sin(ω(n+1))` (`r = exp(−π B / sr)`, truncated when `r^n < 1e-4`), each normalised to unit
+   peak. Each syllable is filtered with its vowel's formants and shaped by a raised-cosine (Hann) envelope over its
+   own length; the body is normalised to peak −6 dBFS (16 423). Then μ-law (8 kHz) or kept PCM16 (16 kHz).
+6. `text` must contain a non-whitespace character; `rate_ms_per_char` ≥ 1; `f0_hz` in [50, 400]; `sample_rate`
+   is 8 000 or 16 000; otherwise `ValueError`.
+7. `decode_marker(pcm16, sample_rate)`: scans the whole array in 1 ms steps for the first 20 ms window whose
+   Goertzel 1 700 Hz power is ≥ 50 % of the window energy (and window RMS ≥ −30 dBFS), refines the offset to the
+   local maximum within the next 5 ms, then reads 16 bits from 10 ms windows trimmed 1 ms each side (8 ms):
+   bit = power(2 200) > power(1 200), and requires `(p1200 + p2200) ≥ 0.5 · energy` for every bit, else `None`.
+   Works for any `sample_rate` ≥ 8 000. Returns the first valid id or None (silence, body-only audio,
+   truncated preamble).
+8. `synthesize_dtmf(digit, ms=120, *, sample_rate=8000) -> bytes` returns wire audio: μ-law bytes for
+   `sample_rate=8000`, L16 big-endian bytes for 16 000 (the hd_audio wire format, specs/30 §3.2). Same convention for a `synthesize_utterance_wire(..., sample_rate)` helper
+   used by T03b (see signatures). Tones: standard DTMF row/column frequencies, each component −10 dBFS; digits
+   `0-9*#A-D` else `ValueError`.
+
+### Files
+- `packages/va_sim/pyproject.toml`: add `"numpy>=2.3"` to dependencies; `uv lock`.
+- `packages/va_sim/src/va_sim/audio/__init__.py` — re-exports the public names below, docstring citing §3.1.
+- `packages/va_sim/src/va_sim/audio/codec.py` — `ULAW_TO_PCM16: Final[NDArray[np.int16]]`,
+  `PCM16_TO_ULAW: Final[NDArray[np.uint8]]`, `ulaw_encode(x: NDArray[np.int16]) -> bytes`,
+  `ulaw_decode(b: bytes) -> NDArray[np.int16]`, `pcm_to_l16be(x) -> bytes`, `l16be_to_pcm(b) -> NDArray[np.int16]`,
+  `ULAW_SILENCE: Final = 0xFF`, `dbfs_peak(dbfs: float) -> int` (int16 amplitude).
+- `packages/va_sim/src/va_sim/audio/rng.py` — `class AudioRng(seed)`: `uniform(n) -> NDArray[np.float64]`
+  (raw PCG64 → [0,1)).
+- `packages/va_sim/src/va_sim/audio/marker.py` — constants `SYNC_HZ=1700`, `BIT0_HZ=1200`, `BIT1_HZ=2200`,
+  `SYNC_MS=20`, `BIT_MS=10`, `MARKER_BITS=16`, `MARKER_MS=180`, `MAX_UTTERANCE_ID=65_535`;
+  `marker_preamble(utterance_id, sample_rate) -> NDArray[np.float64]` (unit-peak float, scaled by synth);
+  `goertzel_power(x: NDArray[np.float64], freq_hz: float, sample_rate: int) -> float` (public; DTMF tests and
+  FakeElevenLabs STT reuse it); `decode_marker(pcm16: NDArray[np.int16], sample_rate: int) -> int | None`.
+- `packages/va_sim/src/va_sim/audio/synth.py` — `VOWEL_FORMANTS: Final[Mapping[str, tuple[float,float,float]]]`
+  (§3.1 table), `vowel_sequence(text, rate_ms_per_char) -> tuple[str, ...]`,
+  `synthesize_pcm16(utterance_id: int, text: str, *, sample_rate: int = 8000, f0_hz: float = 140.0,
+  rate_ms_per_char: int = 70, seed: int) -> NDArray[np.int16]`,
+  `synthesize_utterance(utterance_id, text, *, f0_hz=140.0, rate_ms_per_char=70, seed) -> bytes` (μ-law 8 kHz,
+  the §3.1 signature), `synthesize_wire(utterance_id, text, *, sample_rate, seed, f0_hz=140.0,
+  rate_ms_per_char=70) -> bytes` (8 000 → μ-law, 16 000 → L16 BE), `utterance_ms(text, rate_ms_per_char) -> int`
+  (= 180 + len(text)·rate).
+- `packages/va_sim/src/va_sim/audio/dtmf.py` — `DTMF_FREQS: Final[Mapping[str, tuple[int, int]]]`,
+  `synthesize_dtmf(digit: str, ms: int = 120, *, sample_rate: int = 8000) -> bytes`.
+- `packages/va_sim/src/va_sim/state.py` — `utterance_seed(utterance_id) -> int`; 16-bit cap in
+  `register_utterance` (import `MAX_UTTERANCE_ID`; watch import cycles: audio must not import state).
+- specs/30 §3.1 Decision block (above, plus: synthesis is CPU-bound — async callers (T03b) run it in
+  `asyncio.to_thread`); AGENTS.md P03-T03a note (va_sim.audio API, PCG64 raw rule applies, Silero check lives in
+  P04-T03, codec must stay bit-identical with va_voice).
+- mypy: numpy typing works with `NDArray`; `files` already include packages/va_sim/src+tests.
+
+### Tests (`packages/va_sim/tests/audio/`, plain pytest, no clock needed)
+- `test_codec.py`: known vectors (0 → 0xFF, 32 767 → 0x80, −32 768 → 0x00, 0xFF → 0, 0x7F → 0); decode table equals
+  an independent formula written in the test (sign/exponent/mantissa per G.711); full-range round trip
+  |decode(encode(x)) − clip(x)| ≤ one quantization step of x's segment for all 65 536 inputs; encode clips at
+  ±32 635; L16 BE round trip and byte order (`0x0102` → `b"\x01\x02"`).
+- `test_marker.py`: 20 ids from `random.Random(7)` over 0..65 535 (+ 0 and 65 535 explicitly) decode exactly after
+  μ-law round trip at 8 kHz; after resampling the 8 kHz decode to 16 kHz in the test (`np.interp` linear) ; from
+  native 16 kHz `synthesize_pcm16`; with 0–500 ms of leading silence plus −40 dBFS white noise (test-side
+  `np.random.PCG64` raw) over the whole signal; `None` for silence, for noise only, for the voiced body alone
+  (slice off the preamble), for a preamble truncated mid-bits; preamble length = 180 ms; sync window spectrum
+  peak at 1 700 Hz (via `goertzel_power` vs 1 200/2 200).
+- `test_synth.py`: length = (180 + len·rate) ms × sr/1000 samples for 8 k and 16 k; same seed → identical bytes,
+  other seed → different body and identical preamble; different ids → different preamble, identical body;
+  preamble peak 8 231 ± 2 % and body peak 16 423 ± 2 % (PCM16 path), μ-law decode within one step; voiced body has
+  F0 periodicity (autocorrelation peak lag within ±5 % of sr/f0 on a 100 ms window) for f0 120 and 200;
+  ≥ 90 % of 32 ms body windows have RMS above −40 dBFS (energy stand-in until P04-T03's Silero test);
+  `vowel_sequence` deterministic and matches the documented rule on a hand-worked example; formant check: the
+  spectrum of a single-vowel text ("aaaa…" chosen so all syllables map to /a/, or monkeypatch-free by picking a text
+  whose vowel_sequence is all one vowel) has energy peaks within ±15 % of F1/F2; ValueError cases (id −1 and
+  65 536, blank text, rate 0, f0 30, sample_rate 11 025).
+- `test_dtmf.py`: all 16 digits: row and column frequency powers each ≥ 10× any other DTMF frequency;
+  length 120 ms → 960 μ-law bytes (8 kHz) / 3 840 L16 bytes (16 kHz); peak ≈ −4 dBFS; bad digit / ms ≤ 0 →
+  ValueError.
+- `packages/va_sim/tests/test_state.py` additions: `utterance_seed` = seed·65 536 + id and changes with reset seed;
+  registry cap raises after 65 535 (monkeypatch/pre-fill the dict rather than synthesizing).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (va_sim coverage ≥ 85 %, jscpd 0 clones — no copy of the
+scripts/ codec); `uvx radon cc -s -a packages/va_sim/src` (keep new functions ≤ B); pip-audit (numpy already in the
+lock). No e2e.
+
+### Risks
+- Speed: keep synthesis vectorised (per-period pulse placement may loop over periods — ~140/s, fine; never loop per
+  sample in Python). 10 s of text at 16 kHz should synthesize in well under 100 ms.
+- FSK decode robustness after linear-interpolation resampling and μ-law: 8 ms trimmed windows give ~1 kHz bin width
+  at 8 kHz — 1 200 vs 2 200 Hz separate cleanly; do not shrink the windows.
+- Phase-continuous FSK: accumulate phase across segments, or bit boundaries splatter energy and break the 50 %
+  dominance check.
+- Floating-point determinism: same numpy ops on the same platform → identical output; tests compare bytes only
+  within one run (do not commit golden audio files).
+
+## Build P03-T03a (Builder, 2026-10-29)
+
+`va_sim.audio` (codec, rng, marker, synth, dtmf, wire) + tests in `packages/va_sim/tests/audio/` (111 tests);
+`SimState.utterance_seed` + 16-bit registry cap; numpy dependency + uv.lock; specs/30 §3.1 Decision; AGENTS.md note.
+Plan deviations (all written into the Decision):
+- Envelope: raised cosine from a 0.25 (-12 dB) floor to 1 instead of a full Hann — a full Hann left only 87 % of
+  32 ms body windows above -40 dBFS (boundary windows go silent), failing the planned energy test and risking the
+  P04-T03 Silero ≥ 90 % requirement. With the floor: 100 %, min window ~-33 dBFS.
+- Decoder refines to the sync power peak within the next 12 ms (plan said 5 ms): the first passing 1 ms window can
+  start up to 10 ms early because the dominance ratio equals the overlap fraction. Failed candidates are skipped and
+  the scan continues (test with a false 1 700 Hz burst before a real marker).
+- Body peak is 16 422 (round(32767·10^(-6/20)) = round(16422.5)), not 16 423.
+- `POST /sim/reset` now rejects a negative seed (422; `NonNegativeInt`) because PCG64 seeds must be non-negative.
+- Formant test is discriminative (band energy within ±10 % of F1/F2 larger than for vowels with no formant within
+  25 %); smoothed-peak picking and LPC were biased by glottal tilt / parallel resonators.
+- `goertzel_power` is the single-bin DFT (equal to Goertzel output), normalised so a tone's power equals its energy.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 findings; make check 0 (3880 passed, coverage 97.96 %, TS
+vitest passed, openapi drift current, spec refs 0 problems); radon va_sim/src avg A (2.11), audio A (1.91);
+jscpd va_sim src+tests+scripts 0 clones; pip-audit + pnpm audit no known vulnerabilities.
+
+## Review P03-T03a (Reviewer, 2026-10-29)
+
+Gates re-run: make lint 0, typecheck 0, placeholders 0 findings, make test 0 (3880 passed, coverage 97.96 %);
+jscpd va_sim src+tests+scripts 0 clones; radon va_sim.audio avg A (1.91).
+Checked against specs/30 §3.1 and specs/07 codec: decode table = G.711 (bias 0x84, inverted, verified vs an
+independent formula in tests), encode clips at 32 635, -1 → 0x7F as in reference g711.c; preamble 20 ms 1 700 Hz +
+16×10 ms FSK MSB first, phase-continuous, -12 dBFS; body Rosenberg + ±3 % jitter from raw PCG64, formant table
+matches, -6 dBFS; decode_marker Goertzel sync scan + bits, skips false syncs. state imports audio.marker only
+(no cycle); negative reset seed → 422. Plan deviations are all recorded in the §3.1 Decision. Silero requirement
+moved to P04-T03 acceptance. Approved; task ticked and committed.

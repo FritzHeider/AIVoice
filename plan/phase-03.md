@@ -18,9 +18,15 @@
   - Deliverables: `POST /v2/calls` (dial) and every call action used (answer, reject, hangup, transfer, bridge, streaming_start/stop, record_start/stop, send_dtmf, playback_start/stop), conferences (create/join/leave), `command_id` deduplication, `90018` for ended calls; scenario-driven progress (call.initiated, ringing → answered | busy | no answer | rejected | failed with the hangup causes of specs/06 §5.1), premium AMD events, `call.recording.saved` with sim recording URLs, transfer legs from `transfer_target`; inbound `POST /sim/telnyx/inbound`; control API `GET /sim/telnyx/calls`, `/sim/telnyx/calls/{ccid}/timeline`, `POST /sim/telnyx/calls/{ccid}/hangup`
   - Acceptance: event sequences per scenario outcome asserted in accelerated clock; responses validate against the Telnyx shapes; webhooks signed as in P03-T02a.
 
-- [ ] P03-T03 FakeTelnyx media WebSocket client
-  - Spec refs: specs/30-testing-and-evals.md (FakeTelnyx media); specs/06-telephony-telnyx.md (media WS protocol)
-  - Depends on: P03-T02b
+- [x] P03-T03a Synthetic caller audio (`va_sim.audio`) — codec/marker/formant synth/DTMF, utterance_seed + 16-bit cap; 3880 passed, coverage 97.96 %, lint/typecheck/placeholders 0, jscpd 0 clones, radon audio A (1.91)
+  - Spec refs: specs/30-testing-and-evals.md §3.1 (synthetic caller speech, utterance markers, DTMF, utterance registry); specs/07-media-pipeline.md (G.711 μ-law codec tables, L16 big-endian)
+  - Depends on: P03-T01
+  - Deliverables: numpy G.711 μ-law codec and L16 helpers built independently in the simulator; `synthesize_utterance` (180 ms sync + 16-bit FSK marker preamble, Rosenberg-pulse formant voiced body with ±3 % jitter, raised-cosine syllables, deterministic vowels, peaks −12/−6 dBFS) at 8 kHz μ-law and natively at 16 kHz PCM16 for hd_audio; `decode_marker` (Goertzel sync search then bits); `synthesize_dtmf`; `SimState.utterance_seed` and a 16-bit cap on utterance ids
+  - Acceptance: the marker decoder recovers 100 % of 20 seeded random ids after μ-law round trip, after resampling to 16 kHz, from native 16 kHz audio, and behind random leading silence plus −40 dBFS noise; codec known vectors and full-range round trip; synthesis deterministic per seed. The Silero detection requirement of §3.1 (`test_synth_detected_by_silero`) is verified in P04-T03 once `SileroVad` exists.
+
+- [ ] P03-T03b FakeTelnyx media WebSocket client
+  - Spec refs: specs/30-testing-and-evals.md §3.2 (media WS client, clock, control API agent audio/timeline), §3.5 (steps, greeting_audio); specs/06-telephony-telnyx.md §4.2 (stream signature), §8 (media WS protocol)
+  - Depends on: P03-T02b, P03-T03a
   - Deliverables: on answer, connects to `stream_url` with signature headers; sends `connected`, `start`, `media` frames (μ-law 20 ms) from scenario audio (WAV files or synthesized marker audio), `dtmf`, `stop`; accepts outbound `media`, `mark`, `clear`; echoes marks per Telnyx semantics; records agent audio per call; supports out-of-order frame injection for tests
   - Acceptance: loopback test with a minimal test WS server proves framing, mark echo after playback, clear behaviour.
 
@@ -32,7 +38,7 @@
 
 - [ ] P03-T05 FakeElevenLabs STT (realtime WS + batch) and voices REST
   - Spec refs: specs/30-testing-and-evals.md (FakeElevenLabs STT marker scheme); specs/08-stt-elevenlabs.md; specs/15-voices.md (vendor endpoints)
-  - Depends on: P03-T01
+  - Depends on: P03-T01, P03-T03a (`decode_marker`)
   - Deliverables: `/v1/speech-to-text/realtime` (session_started, partial_transcript, committed_transcript(_with_timestamps), error types), marker-driven transcript mapping, `previous_text` first-chunk rule, `/v1/speech-to-text` batch with diarization, `/v2/voices`, `/v1/voices/add`, `/v1/voices/{id}`, `/v1/voices/{id}/edit`, `/v1/voices/{id}/settings`, delete
   - Acceptance: error message types reproducible via scenario flags; batch output shape matches spec.
 

@@ -16,7 +16,7 @@
   - Spec refs: specs/07-media-pipeline.md (Silero VAD)
   - Depends on: P04-T01, P00-T10
   - Deliverables: `SileroVad` (onnxruntime session from `models/silero_vad.onnx`, state tensors, 512-sample windows at 16 kHz, thresholds, thread-pool execution), `VadEvent` stream (speech_start, speech_end, probability)
-  - Acceptance: fixture WAVs (speech/silence generated via TTS fixture files committed under tests/fixtures) produce expected segments; manifest verification on load.
+  - Acceptance: fixture WAVs (speech/silence generated via TTS fixture files committed under tests/fixtures) produce expected segments; manifest verification on load; `test_synth_detected_by_silero` (specs/30 §3.1): the production `SileroVad` with production thresholds classifies ≥ 90 % of 32 ms windows of the voiced body of 20 random `va_sim.audio.synthesize_utterance` utterances as speech (deferred here from P03-T03a).
 
 - [ ] P04-T04 Adaptive endpointer
   - Spec refs: specs/07-media-pipeline.md (endpointing algorithm, resumption_speed)

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793326334-2ae5
+> va_sim.audio: synthetic caller audio (synthesize_utterance/pcm16/wire, decode_marker, goertzel_power, synthesize_dtmf, own G.711 codec); seed with SimState.utterance_seed(id); utterance ids 16-bit; audio must not import va_sim.state; synthesis is CPU-bound -> asyncio.to_thread; body envelope has a -12 dB floor so VAD sees continuous speech
+<!-- tags: sim, audio | created: 2026-10-30 -->
+
 ### mem-1793323959-b262
 > va_sim AcceleratedClock advances only when loop._ready is empty; tests drive FakeTelnyx calls with telnyx_helpers.at(state, s)/settle(state) (both also await state.call_engine.idle() since recording WAVs encode in a thread); a test busy-polling asyncio.sleep(0) freezes accelerated time; an in-process ASGI request can finish without yielding, so settle (clock.sleep(0)) before sleeping to a tie deadline
 <!-- tags: sim, testing, clock | created: 2026-10-30 -->

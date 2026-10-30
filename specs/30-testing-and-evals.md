@@ -102,6 +102,35 @@ config (`/sim/*/config`) overrides env values at runtime; values named elsewhere
   sequentially per sim run.
 - DTMF: `synthesize_dtmf(digit, ms=120)` for in-band tests; Telnyx-style `dtmf` WS events are also emitted.
 
+> Decision (2026-10-29): synthetic caller audio (P03-T03a). (1) The simulator has its own G.711 μ-law codec
+> (`va_sim.audio.codec`: `ULAW_TO_PCM16`, `PCM16_TO_ULAW`, `ulaw_encode`/`ulaw_decode`, `pcm_to_l16be`/`l16be_to_pcm`)
+> built table-first as specs/07 describes (bias 0x84, inverted bits, clip at 32 635); the sim never imports
+> `va_voice`, and `va_voice.codec` (P04-T01) must be bit-identical (P04 adds the cross-check). (2) Randomness comes
+> only from raw `numpy.random.PCG64(seed)` draws (`(raw >> 11) · 2⁻⁵³`); the per-utterance seed is
+> `SimState.utterance_seed(id) = seed · 65 536 + id`, and sim seeds are non-negative (`POST /sim/reset` rejects a
+> negative `seed` with 422). (3) The marker carries 16 bits, so utterance ids are 0..65 535: synthesis rejects other ids
+> and `SimState.register_utterance` raises once 65 535 ids (1..65 535) are allocated in one run. (4) Preamble: peak
+> −12 dBFS (8 231), phase-continuous FSK across symbols. (5) Body: `len(text) · rate_ms_per_char` ms; 180 ms
+> syllables (the last may be shorter); syllable k speaks characters `[⌊k·c⌋, max(⌊(k+1)·c⌋, ⌊k·c⌋+1))` with
+> `c = 180 / rate_ms_per_char`, and its vowel is `"aeiou"[Σ ord mod 5]`. Source: Rosenberg pulses (open 40 % of the
+> period, closing 16 %), periods `T0 · (1 ± 3 %)` from the RNG, then a first difference (lip radiation). Each
+> syllable runs through three parallel two-pole resonators (`rⁿ·sin(ω(n+1))`, unit peak, truncated at `rⁿ < 10⁻⁴`;
+> gains 1.0/0.5/0.25, bandwidths 80/120/160 Hz) and a raised-cosine envelope from a 0.25 (−12 dB) floor up to 1,
+> so the body never falls silent between syllables (a full Hann leaves ~13 % of 32 ms windows below −40 dBFS, too
+> little for VAD). The body peak is −6 dBFS (`round(32 767 · 10^(−6/20))` = 16 422). (6) `text` needs a
+> non-whitespace character, `rate_ms_per_char` ≥ 1, `f0_hz` in 50..400, `sample_rate` 8 000 or 16 000. 16 kHz audio
+> (`synthesize_pcm16(..., sample_rate=16000)`, `synthesize_wire(..., sample_rate=16000)` → L16 big-endian) is
+> synthesized natively for hd_audio; 8 kHz wire audio is μ-law. (7) `decode_marker` works at any sample rate
+> ≥ 8 kHz: it scans in 1 ms steps for the first 20 ms window where the 1 700 Hz Goertzel power is ≥ 50 % of the
+> window energy (RMS ≥ −30 dBFS), moves to the sync power peak within the next 12 ms (a passing window can start up
+> to 10 ms early), and reads 16 symbols from 8 ms windows (1 ms trimmed each side): bit = P(2 200) > P(1 200), with
+> P(1 200) + P(2 200) ≥ 50 % of the energy and RMS ≥ −30 dBFS for every symbol. A candidate that fails is skipped
+> and the scan continues; it returns the first valid id or None. (8) `synthesize_dtmf(digit, ms=120, *,
+> sample_rate=8000)` returns wire bytes (μ-law or L16 BE), each component at −10 dBFS; digits `0-9*#A-D`. (9)
+> Synthesis is CPU-bound: async callers (the P03-T03b media client) run it in `asyncio.to_thread`. The
+> `test_synth_detected_by_silero` requirement is checked in P04-T03, when `SileroVad` exists; until then
+> `packages/va_sim/tests/audio` checks that ≥ 90 % of 32 ms body windows have RMS above −40 dBFS.
+
 ### 3.2 FakeTelnyx (port 9100)
 
 REST endpoints (base `/v2`), response bodies follow Telnyx shapes `{"data": {...}}` / errors

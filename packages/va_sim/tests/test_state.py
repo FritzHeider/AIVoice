@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from sim_helpers import LATENCIES, new_state, scenario
 
+from va_sim.audio import MAX_UTTERANCE_ID
 from va_sim.settings import PROFILES
 
 
@@ -45,6 +47,26 @@ def test_utterance_ids_are_sequential_from_one() -> None:
     assert (first, second) == (1, 2)
     assert state.utterances[2].language == "es"
     assert state.utterances[1].words == ("Hi", "there.")
+
+
+def test_utterance_ids_stop_at_the_16_bit_marker_limit() -> None:
+    state = new_state()
+    for _ in range(MAX_UTTERANCE_ID - 1):
+        state.register_utterance("x", "en", ("x",))
+    assert state.register_utterance("last", "en", ("last",)) == MAX_UTTERANCE_ID
+    with pytest.raises(ValueError, match="16-bit"):
+        state.register_utterance("one too many", "en", ("one", "too", "many"))
+    state.reset()
+    assert state.register_utterance("again", "en", ("again",)) == 1
+
+
+def test_utterance_seed_combines_run_seed_and_id() -> None:
+    state = new_state(seed=3)
+    assert state.utterance_seed(7) == 3 * 65_536 + 7
+    assert state.utterance_seed(8) != state.utterance_seed(7)
+    state.reset(seed=4)
+    assert state.utterance_seed(7) == 4 * 65_536 + 7
+    assert new_state().utterance_seed(MAX_UTTERANCE_ID) == MAX_UTTERANCE_ID
 
 
 def test_same_seed_same_random_sequence() -> None:

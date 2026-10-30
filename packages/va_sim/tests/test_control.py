@@ -38,9 +38,12 @@ async def test_reset_clears_state_and_optionally_reseeds() -> None:
         assert seeded.status_code == 204
         assert state.seed == 42
         bad = await client.post("/sim/reset", json={"seed": "x", "extra": 1})
+        negative = await client.post("/sim/reset", json={"seed": -1})
         broken = await client.post("/sim/reset", content=b"{", headers={"content-type": "application/json"})
     assert bad.status_code == 422
     assert {issue["path"] for issue in bad.json()["error"]["issues"]} == {"seed", "extra"}
+    assert negative.status_code == 422
+    assert state.seed == 42
     assert broken.status_code == 422
     assert broken.json()["error"]["message"] == "the request body is not valid JSON"
 

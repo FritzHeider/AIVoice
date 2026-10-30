@@ -36,7 +36,7 @@ class _Strict(BaseModel):
 
 
 class ResetBody(_Strict):
-    seed: int | None = None
+    seed: NonNegativeInt | None = None
 
 
 class ProfileBody(_Strict):
