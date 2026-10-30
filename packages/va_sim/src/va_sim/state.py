@@ -15,6 +15,7 @@ from pydantic import JsonValue
 
 from va_sim.audio.marker import MAX_UTTERANCE_ID
 from va_sim.clock import SimClock
+from va_sim.elevenlabs.store import ElevenLabsStore
 from va_sim.ids import SimIds
 from va_sim.scenario import Scenario
 from va_sim.settings import PROFILES, Latencies, ProfileName, WebhookDefaults
@@ -43,7 +44,8 @@ class SimState:
     """Scenarios, recordings, utterances, latencies, clock, and the seeded RNG shared by the simulators.
 
     FakeTelnyx adds its resource store, the webhook signing key (kept across resets), the webhook emitter,
-    the call engine, and the supervisor owning every simulator background task. ``webhook_transport`` lets
+    the call engine, and the supervisor owning every simulator background task; FakeElevenLabs its store
+    (accepted keys, TTS request records, the armed fault, live TTS sockets). ``webhook_transport`` lets
     tests receive webhooks in-process (an ``httpx`` transport) instead of over the network.
     """
 
@@ -66,6 +68,7 @@ class SimState:
         self.signing_key = signing_key if signing_key is not None else SigningKey.generate()
         self.webhook_defaults = webhook_defaults if webhook_defaults is not None else WebhookDefaults()
         self.telnyx = TelnyxStore()
+        self.elevenlabs = ElevenLabsStore()
         self.webhooks = WebhookEmitter(
             signing_key=self.signing_key,
             clock=clock,
@@ -87,12 +90,14 @@ class SimState:
 
         Scenarios, recordings, utterances, FakeTelnyx resources (calls and conferences included), and
         webhook deliveries are dropped and every pending background task (call progress, timers, deliveries)
-        is cancelled.
+        is cancelled. Live FakeElevenLabs TTS sockets close with code 1012 and its records, keys, and fault
+        are dropped.
         """
         self.tasks.cancel_all()
         self.call_engine.reset()
         self.telnyx.reset()
         self.webhooks.clear()
+        self.elevenlabs.reset()
         if seed is not None:
             self.seed = seed
         self.rng.seed(self.seed)
@@ -186,6 +191,10 @@ class SimState:
                 "conferences": sum(len(account.conferences) for account in self.telnyx.accounts.values()),
                 "phone_numbers": sum(len(account.numbers) for account in self.telnyx.accounts.values()),
                 "webhook_deliveries": len(self.webhooks.deliveries),
+            },
+            "elevenlabs": {
+                "tts_requests": len(self.elevenlabs.tts_requests),
+                "tts_sockets": len(self.elevenlabs.sockets),
             },
         }
 

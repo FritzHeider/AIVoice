@@ -712,3 +712,14 @@ Grafana 3001
   name=...)` + `asyncio.to_thread`. Tests: `tests/telnyx/test_caller_script.py` (`until(state, predicate)` sleeps
   on the sim clock; assert step times relative to played agent frames, never socket arrival times). Two
   `telnyx_client(...)` blocks streaming to media agents in ONE test hang (pre-existing); use separate tests.
+- 2026-10-29 (P03-T04): FakeElevenLabs TTS = `va_sim.elevenlabs` (spec: specs/30 §3.3 Decision P03-T04):
+  `tts_ws.TtsSocket` (multi-context WS, one worker task per context in a per-socket TaskGroup, one send lock),
+  `tts_rest` (convert/stream/with-timestamps), pure `tts_audio`/`mp3`/`tts_context`, `store.ElevenLabsStore` on
+  `SimState.elevenlabs` (records, allow-list keys, armed fault, live sockets closed 1012 by reset). Control:
+  `/sim/elevenlabs/tts/requests`, `/sim/elevenlabs/tts/fault`, `/sim/elevenlabs/api-keys`. Tests
+  (`tests/elevenlabs/`, helpers `tests/support/tts_helpers.py`: `served`, `tts_socket`, `recv_spoken`,
+  `recv_until_final`, `wait_closed`, `rest_client`): WS protocol tests run on `realtime_state()` (wall clock,
+  ttfa 0) because audio is sent with no pacing — a `close_context` sent right after a flush stops it before the
+  first chunk, so read the audio first (`recv_spoken`) or hold the stream with a `delay` fault. Only inactivity
+  tests use an accelerated clock (it fires as soon as the loop idles). Starlette `WebSocketRoute` needs a plain
+  `async def` endpoint (a `functools.partial` is treated as an ASGI app).

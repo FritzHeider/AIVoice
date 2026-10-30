@@ -433,6 +433,69 @@ Behavioural rules:
 - **Control API**: `/sim/elevenlabs/tts/requests`, `/sim/elevenlabs/stt/sessions`, `/sim/elevenlabs/config`
   (`tts_ttfa_ms`, `stt_final_ms`, failure injection), `/sim/reset`.
 
+> Decision (2026-10-29): FakeElevenLabs TTS (P03-T04). Package `va_sim.elevenlabs` (`routes.elevenlabs_routes`,
+> added by `simulator_routes("elevenlabs", ...)`).
+> 1. Audio: 60 ms per character; whitespace is silence, any other character a sine of `300 + (ord(c) % 12)·25` Hz,
+>    −10 dBFS peak, phase 0 at each character start. `ulaw_8000` (G.711 μ-law), `pcm_16000|22050|24000|44100`
+>    (signed 16-bit little-endian mono), `mp3_44100_128`: valid MPEG-1 Layer III mono 128 kbps 44.1 kHz frames with
+>    all-zero side info and main data (they decode to silence; no encoder dependency), frame sizes 417/418 bytes
+>    (padding bit on the 418-byte frames), frame count `ceil(duration·44.1/1152)` raised when needed so the last
+>    200 ms piece holds at least one frame (at most one extra silent frame). Other formats are rejected.
+> 2. Chunking: 200 ms pieces (last one shorter; mp3 pieces are the frames starting in the window); a piece's
+>    `alignment` lists the characters starting inside it with start times relative to the piece, `null` when none
+>    does; `normalizedAlignment` equals `alignment`.
+> 3. WebSocket: always accepted, failures close it. Auth `xi-api-key` header, else the first message's
+>    `xi_api_key` or `authorization` (`Bearer <key>` or raw); missing or not accepted → close 1008
+>    `"Invalid API key"`. Accepted keys: any non-empty key unless `PUT /sim/elevenlabs/api-keys {"keys": [...]}`
+>    set an allow list (`GET` reads it; reset clears). Query `model_id` (default `eleven_flash_v2_5`),
+>    `output_format` (default `mp3_44100_128`), `inactivity_timeout` 1..180 (default 20), `sync_alignment`,
+>    `auto_mode`, `enable_ssml_parsing`, `enable_logging` (`true|false`), `apply_text_normalization`
+>    (`auto|on|off`), `language_code`; invalid → close 1008 `"invalid <param>: <why>"`. Any voice id is accepted.
+>    Invalid JSON or a non-object message → close 1008 `"invalid message"`; unknown fields are ignored.
+> 4. Contexts: `context_id` defaults to `"default"`; at most 5 open per socket (a 6th → error frame
+>    `{"message": "Maximum of 5 concurrent contexts per connection exceeded", "error": "max_active_conversations",
+>    "code": 1008}`, message ignored, socket stays open); a closed id → error frame `context_closed`; a bad
+>    `generation_config.chunk_length_schedule` (1-4 integers, each 50..500), non-string `text`, or empty/non-string
+>    `context_id` → error frame `invalid_message`. `voice_settings` and the schedule come from a context's first
+>    message. Default schedule `[120, 160, 250, 290]` (ElevenLabs' default; "[0] (default 120)" above is its first
+>    element).
+> 5. Generation: text appends to the context buffer; a generation takes the whole buffer verbatim on `flush: true`
+>    or when the stripped buffer reaches `schedule[min(k, len-1)]` (k = generations so far). A whitespace-only
+>    buffer never generates (a flush discards it), so the keepalive `{"text": "", "context_id": "ka"}` only
+>    refreshes the inactivity timer. Generations of a context run in order on a per-context worker; contexts
+>    interleave; the first chunk of a context's first generation waits `tts_ttfa_ms` (sim clock) after its trigger,
+>    later chunks go back to back.
+> 6. `close_context: true` supersedes "generates audio on `close_context`" above: it discards the unflushed buffer,
+>    stops the in-flight generation before its next chunk, drops queued generations, then sends
+>    `{"isFinal": true, "contextId": id}` (specs/09 §8). `close_socket: true` discards unflushed buffers, lets
+>    triggered generations finish, sends `isFinal` per open context, then closes 1000.
+> 7. Inactivity: sim-clock timer from the last message carrying a `text` field; expiry closes 1008 with
+>    `"Have not received a new text input within the timeout of {N} seconds."`. On an accelerated clock it fires as
+>    soon as the loop idles past N virtual seconds (idle real-socket waits do not hold virtual time).
+> 8. Records: `SimState.elevenlabs.tts_requests`, served at `GET /sim/elevenlabs/tts/requests` as
+>    `{"requests": [{id ("ttsreq_<n>"), transport ("ws"|"rest"), voice_id, model_id, output_format, context_id (null
+>    for REST), started_ms, text (all text received), generated_text, characters, ended_ms, interrupted,
+>    end_reason (null|close_context|close_socket|inactivity|disconnect|fault|reset|completed)}]}`; `interrupted`
+>    means non-whitespace text was discarded or audio dropped.
+> 9. Faults: `PUT /sim/elevenlabs/tts/fault {"kind": "disconnect"|"error"|"delay", "after_chunks" = 0,
+>    "delay_ms" = 0, "times" = 1}` (204), `GET` → `{"fault": null|{kind, after_chunks, delay_ms, remaining}}`,
+>    `DELETE` (204); reset clears. WebSocket: checked before a context's chunk number `after_chunks` (0-based);
+>    `disconnect` → close 1011 `"simulated disconnect"`; `error` → frame `{"message": "Simulated TTS failure",
+>    "error": "internal_error", "code": 1011}` then close 1011; `delay` → wait `delay_ms` then send. REST: `error`
+>    → 500 `{"detail": {"status": "internal_error", "message": "Simulated TTS failure"}}`, `delay` adds latency;
+>    `disconnect` does not apply. Each firing consumes one of `times`.
+> 10. REST: `POST /v1/text-to-speech/{voice_id}` (whole audio), `.../stream` (the 200 ms pieces, first after
+>    `tts_ttfa_ms`), `.../with-timestamps` (`{"audio_base64", "alignment": {"characters",
+>    "character_start_times_seconds", "character_end_times_seconds"}, "normalized_alignment"}`, absolute seconds).
+>    Body `{text (1..40 000), model_id (default eleven_multilingual_v2), voice_settings?, language_code?,
+>    apply_text_normalization?}`, query `output_format`, header `xi-api-key`; content types `audio/mpeg`,
+>    `audio/pcm`, `audio/basic`; headers `x-character-count`, `request-id`. Missing key → 401 `needs_authorization`,
+>    rejected key → 401 `invalid_api_key`, invalid body/query/JSON → 422 `{"detail": [{"loc", "msg", "type"}]}`.
+> 11. Synthesis runs in a worker thread inside `va_sim.tasks.hold_clock` (no virtual time lost). `/sim/reset`
+>    closes live sockets with 1012 `"simulator reset"` and clears records, keys, and the fault; `GET /sim/state`
+>    adds `"elevenlabs": {"tts_requests", "tts_sockets"}`. The voice registry (`voice_not_found`) arrives with the
+>    voices task.
+
 ### 3.4 FakeLLM (port 9300, OpenAI-compatible at `/v1`)
 
 - `POST /v1/chat/completions`: supports `model`, `messages`, `stream`, `tools`, `tool_choice`, `temperature`,

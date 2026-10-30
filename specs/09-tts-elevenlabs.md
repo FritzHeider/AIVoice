@@ -220,6 +220,9 @@ Implements the multi-context protocol: for each flushed clause returns audio = a
 first-audio latency `SIM_TTS_TTFA_MS` (default 80); honors `close_context` (stops emitting); fault injection
 (disconnect mid-utterance, error frame, delayed audio). REST `with-timestamps` returns the same synthesis in one body.
 
+> Decision (2026-10-29): specs/30 §3.3 (Decision P03-T04) governs the simulator: 60 ms per character, 200 ms
+> chunks, tones of 300 Hz + (ord mod 12)·25 Hz at −10 dBFS — not the 55 ms / 100 ms / 440 Hz described above.
+
 ## 14. Tests required
 
 - Message shapes (snapshots), context lifecycle, keepalive cadence (fake clock), max contexts.

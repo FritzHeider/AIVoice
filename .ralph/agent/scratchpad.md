@@ -1349,3 +1349,173 @@ timeouts, interruption, reset) tested.
 Notes (not blocking, consistent with the Decision text): a pending `expect_hangup` is cancelled (not ok) when the
 leg ends during an earlier step, and a running `expect_hangup` is cancelled "media stream stopped" if the platform
 stops streaming before hanging up; revisit if scenario assertions need it.
+
+## Plan P03-T04 — FakeElevenLabs TTS: multi-context WS + REST (Planner, 2026-10-29)
+
+Spec refs: specs/30 §3.3 (primary simulator contract), specs/09 §2-§3, §8, §9, §13. P03-T03c committed (e11eca6).
+
+### Decisions (Builder writes ONE `> Decision (2026-10-29): FakeElevenLabs TTS (P03-T04).` block at the end of
+specs/30 §3.3, and a one-line `> Decision (2026-10-29):` under specs/09 §13 saying specs/30 §3.3 governs the
+simulator: 60 ms/char, 200 ms chunks, 300 Hz + (ord mod 12)·25 Hz tones at −10 dBFS, not 55 ms/100 ms/440 Hz)
+1. Audio generator (pure, `va_sim.elevenlabs.tts_audio`): each character of the generated text is 60 ms; whitespace
+   (`c.isspace()`) is silence, any other char a sine of `300 + (ord(c) % 12) * 25` Hz, peak `dbfs_peak(-10)`, phase 0
+   at each char start. Samples/char = `rate * 60 // 1000`. Formats: `ulaw_8000` (va_sim.audio.codec.ulaw_encode),
+   `pcm_16000|pcm_22050|pcm_24000|pcm_44100` (signed 16-bit little-endian mono), `mp3_44100_128`: valid MPEG-1
+   Layer III mono 128 kbps 44.1 kHz frames with all-zero side info/main data (decode to silence; no encoder dependency;
+   header `FF FB 90|92 C0`, frame bytes `floor((n+1)*144*128000/44100) - floor(n*144*128000/44100)` with the padding
+   bit set when that is 418), frame count `ceil(duration_ms * 44.1 / 1152)`. Any other format → validation error.
+2. Chunking: audio split into 200 ms pieces (last one shorter); each piece's alignment holds the chars whose start
+   time lies in `[chunk_start, chunk_end)`: `{"chars": [...], "charStartTimesMs": [start - chunk_start],
+   "charDurationsMs": [60, ...]}`; no char start in the piece → `null`. `normalizedAlignment` == `alignment`.
+   mp3 pieces = the frames whose start time lies in the 200 ms window.
+3. WS `GET /v1/text-to-speech/{voice_id}/multi-stream-input` (Starlette `WebSocketRoute`). Always `accept()`, then
+   on error close with code 1008 and a reason. Auth: `xi-api-key` header, else the first message's `xi_api_key` or
+   `authorization` (`Bearer <k>` or raw). Missing → close 1008 `"Invalid API key"`; same for a key not accepted (4).
+   Query: `model_id` (default `eleven_flash_v2_5`, any non-empty string, recorded), `output_format` (default
+   `mp3_44100_128`, set in 1), `inactivity_timeout` int 1..180 default 20, `sync_alignment`, `auto_mode`,
+   `enable_ssml_parsing`, `enable_logging` (bool `true|false`), `apply_text_normalization` (`auto|on|off`),
+   `language_code` (recorded). Invalid → close 1008 reason `"invalid <param>: <why>"`. Any voice_id accepted in this
+   task (P03-T05 adds the voice registry and `voice_not_found`).
+4. Accepted keys: `ElevenLabsStore.api_keys` empty (default) → any non-empty key; non-empty → only those keys.
+   Control `PUT /sim/elevenlabs/api-keys {"keys": [str, ...]}` (204), `GET` → `{"keys": [...]}`; reset clears.
+5. Client messages: JSON object (non-object/invalid JSON → close 1008 `"invalid message"`); unknown fields ignored.
+   `close_socket: true` first; else `context_id` (missing → `"default"`). Unknown context → created (max 5 open per
+   socket; a 6th → error frame `{"message": "Maximum of 5 concurrent contexts per connection exceeded", "error":
+   "max_active_conversations", "code": 1008}` and the message is ignored, socket stays open). A context id that was
+   closed on this socket → error frame `error: "context_closed"`, message ignored. `voice_settings` and
+   `generation_config.chunk_length_schedule` (list of 1-4 ints each 50..500, else error frame `invalid_message` and
+   the message ignored) are taken from the context's first message only. Default schedule `[120, 160, 250, 290]`
+   (ElevenLabs default; specs/30's "[0] (default 120)" is its first element).
+6. Generation per context: `text` is appended to the context buffer. A generation takes the whole buffer when
+   (a) `flush: true` (with or without text), or (b) `len(buffer.strip()) >= schedule[min(k, len-1)]` where k = the
+   context's generations so far. A whitespace-only buffer generates nothing (stays buffered; flush clears it). The
+   generated text is the buffer verbatim (alignment chars = its chars incl. spaces). Generations of one context run
+   in order on a per-context worker; the first chunk of a context's FIRST generation waits `state.latencies
+   .tts_ttfa_ms` on the sim clock after its trigger; later chunks/generations are sent back to back. Contexts
+   interleave freely; sends go through one per-socket lock. Messages `{"audio": b64, "contextId": id,
+   "alignment": ..., "normalizedAlignment": ...}` (key order as written). Keepalive `{"text": "", "context_id":
+   "ka"}` only refreshes the inactivity timer (creates context `ka` if new; empty text never generates).
+7. `close_context: true`: unflushed buffer discarded, in-flight generation stops before its next chunk (unsent audio
+   dropped), queued generations dropped, then `{"isFinal": true, "contextId": id}`. specs/30's "generates audio on
+   close_context" is superseded: close_context only stops (specs/09 §8/§13, live test "close_context mid-stream
+   stops audio"). `close_socket: true`: unflushed buffers discarded, triggered generations finish, `isFinal` for each
+   open context, close 1000.
+8. Inactivity: sim-clock timer from the last message carrying a `text` field; expiry → close 1008
+   `"Have not received a new text input within the timeout of {N} seconds."` (N = inactivity_timeout). On an
+   accelerated clock this fires as soon as the loop idles past N virtual seconds (documented).
+9. Records `ElevenLabsStore.tts_requests: list[TtsRequest]` one per context (WS) or request (REST):
+   `{id ("ttsreq_<n>"), transport: "ws"|"rest", voice_id, model_id, output_format, context_id (null for rest),
+   text (all text received), generated_text, characters (generated chars), started_ms, ended_ms (null while open),
+   interrupted (true when close_context/close_socket/disconnect discarded text or dropped audio),
+   end_reason: null|"close_context"|"close_socket"|"inactivity"|"disconnect"|"fault"|"reset"|"completed"}`
+   (REST → `completed`). Control `GET /sim/elevenlabs/tts/requests` → `{"requests": [...]}`.
+10. Faults: `PUT /sim/elevenlabs/tts/fault {"kind": "disconnect"|"error"|"delay", "after_chunks": int>=0 = 0,
+    "delay_ms": int>=0 = 0, "times": int>=1 = 1}` (204), `GET` → `{"fault": null|{...,"remaining"}}`, `DELETE` 204;
+    reset clears. WS: checked before sending chunk number `after_chunks` (0-based within a context); disconnect →
+    close 1011 `"simulated disconnect"`; error → frame `{"message": "Simulated TTS failure", "error":
+    "internal_error", "code": 1011}` then close 1011; delay → sim sleep `delay_ms` then send. Each firing decrements
+    `remaining`; 0 clears. REST: `error` → 500 `{"detail": {"status": "internal_error", "message": "Simulated TTS
+    failure"}}`, `delay` → extra latency before the response; disconnect does not apply to REST.
+11. REST (JSON body `{text (1..40 000 chars), model_id?, voice_settings?, language_code?, apply_text_normalization?,
+    ...extra ignored}`, query `output_format` default `mp3_44100_128`, auth `xi-api-key`):
+    - `POST /v1/text-to-speech/{voice_id}` → full audio; `POST .../stream` → `StreamingResponse` of the 200 ms pieces
+      (first after tts_ttfa_ms); `POST .../with-timestamps` → `{"audio_base64", "alignment": {"characters",
+      "character_start_times_seconds", "character_end_times_seconds"}, "normalized_alignment": same}` (absolute
+      seconds, ElevenLabs REST shape). Content types: mp3 `audio/mpeg`, pcm `audio/pcm`, ulaw `audio/basic`; headers
+      `x-character-count`, `request-id`. Non-stream routes also wait tts_ttfa_ms.
+    - Errors: missing key 401 `{"detail": {"status": "needs_authorization", "message": "Neither authorization
+      header nor xi-api-key received, please provide one."}}`; rejected key 401 `{"detail": {"status":
+      "invalid_api_key", "message": "Invalid API key"}}`; invalid body/query 422 `{"detail": [{"loc", "msg",
+      "type"}]}` (pydantic errors; invalid JSON → loc `["body"]`).
+12. Synthesis runs `asyncio.to_thread` inside `va_sim.tasks.hold_clock` (no virtual time lost); tone tables cached
+    per sample rate. `SimState.reset()` → `elevenlabs.reset()`: closes live sockets with 1012 `"simulator reset"`
+    (open records end `reset`), clears records/keys/fault. Snapshot adds `"elevenlabs": {"tts_requests": n,
+    "tts_sockets": open}`.
+
+### Files
+- `packages/va_sim/src/va_sim/elevenlabs/__init__.py` (docstring only), `routes.py` (`elevenlabs_routes(state)`),
+  `tts_audio.py` (`OutputFormat` dataclass + `OUTPUT_FORMATS`, `parse_output_format(str) -> OutputFormat`,
+  `synthesize(text, fmt) -> bytes`, `chunks(text, fmt) -> list[TtsChunk(audio: bytes, alignment: Alignment|None)]`,
+  `absolute_alignment(text) -> dict`), `mp3.py` (silent frame writer), `auth.py` (header/first-message key check,
+  REST error responses), `store.py` (`ElevenLabsStore`, `TtsRequest`, `TtsFault`, socket registry, `reset()`),
+  `tts_ws.py` (endpoint + `TtsSocket` with reader/watchdog/context workers in one TaskGroup), `tts_context.py`
+  (`TtsContext` buffer/schedule/trigger logic, pure enough to unit test), `tts_rest.py`, `control.py`
+  (`/sim/elevenlabs/tts/requests`, `/tts/fault`, `/api-keys`). Keep each ≤ ~250 lines, radon ≤ B per function.
+- `packages/va_sim/src/va_sim/state.py` — `self.elevenlabs = ElevenLabsStore()`, reset, snapshot.
+- `packages/va_sim/src/va_sim/server.py` — `simulator_routes` adds `elevenlabs_routes` for `"elevenlabs"`.
+- `specs/30` §3.3 Decision, `specs/09` §13 Decision, AGENTS.md (FakeElevenLabs TTS test notes), a Ralph memory.
+
+### Tests (`packages/va_sim/tests/elevenlabs/`, conftest + `support/tts_helpers.py`: `tts_socket(state, url,
+query, key)` websockets client helper over `running_sims(state, ports={"elevenlabs": 0})`, `recv_until_final`,
+`decode_audio(fmt, b64)`; WS tests on `RealtimeClock` with `tts_ttfa_ms` 0/20 unless the test is about timing)
+- `test_tts_audio.py` (pure): per-char durations for every format (bytes = 60 ms × rate × width); tone frequency
+  of `"a"` = 300 + (97 % 12)·25 = 325 Hz via `goertzel_power`; space is silence; peak ≈ −10 dBFS; 200 ms chunking
+  and per-chunk alignment (7 chars → 3 pieces, third alignment null; starts relative); mp3 frames sync/length/count;
+  unknown format → ValueError.
+- `test_tts_context.py`: schedule triggers ([50] fires at 50 non-space chars; progression uses k-th element; flush
+  generates whole buffer; whitespace-only no generation; invalid schedules rejected).
+- `test_tts_ws.py`: auth via header / first message / missing (close 1008 "Invalid API key") / api-keys allow list;
+  invalid output_format and inactivity_timeout → 1008; flush returns audio whose total length = 60 ms·chars and
+  alignment reconstructs the text; ttfa (tts_ttfa_ms 200: first chunk ≥ 200 ms after flush, wall clock) ;
+  interleaved contexts A/B both complete, each context's chunks in order, both texts reconstructed; close_context
+  mid-stream (long text, after first chunk) → no further audio for that context, isFinal, record interrupted;
+  close_context with unflushed text → no audio, isFinal, interrupted; chunk_length_schedule auto-trigger without
+  flush; keepalive produces no audio; 6th context → max_active_conversations frame, socket alive; closed id reuse →
+  context_closed; invalid JSON → 1008; close_socket → in-flight finishes, isFinal per open context, close 1000;
+  inactivity: AcceleratedClock state, no messages → close 1008 with the exact 20 s message (and N=5 variant);
+  realtime inactivity_timeout=1 with keepalives every 0.4 s stays open 1.5 s then closes; faults: disconnect after 1
+  chunk (1011), error frame + 1011, delay ≥ delay_ms, `times` consumed then cleared; `/sim/reset` with an open
+  socket → close 1012 and `state.tasks.pending == 0` afterwards; tts_requests records (text, generated_text,
+  characters, end_reason, transport ws).
+- `test_tts_rest.py` (httpx ASGITransport over `Starlette(routes=simulator_routes("elevenlabs", state))`):
+  convert ulaw/pcm_16000/mp3 lengths + content types + headers; stream yields 200 ms pieces whose concat equals
+  convert; with-timestamps alignment absolute seconds and audio identical; 401 needs_authorization /
+  invalid_api_key; 422 empty text / bad format / invalid JSON; fault error → 500 and delay; record transport rest.
+- `test_control.py`/`test_state.py`: snapshot `elevenlabs` keys; reset clears records/keys/fault; elevenlabs control
+  routes absent on the telnyx port (404).
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (va_sim coverage ≥ 85 %, jscpd 0, spec refs);
+`uvx radon cc -s -a packages/va_sim/src` (new functions ≤ B); `uv export --no-emit-workspace --frozen | uvx
+pip-audit --strict`; `corepack pnpm audit --audit-level high`. No e2e. build.done payload must carry every key:
+`tests, lint, typecheck, audit, coverage, complexity, duplication, specs`.
+
+### Risks
+- Accelerated clock + real sockets: virtual time jumps while waiting on I/O, so inactivity fires instantly when
+  idle; run protocol tests on RealtimeClock with small latencies; only the inactivity-close test uses accelerated.
+- Never block the loop: synthesis in to_thread under hold_clock; per-socket TaskGroup cancels workers on close;
+  reset must wake the handler (event) since it is sync.
+- uvicorn WS close reasons must be ≤ 123 bytes (the inactivity message fits).
+- Don't share message construction with the future va_elevenlabs client (phase constraint).
+- `apps/sim` mounts `simulator_routes`, so its tests may need an expectation update for the new routes.
+
+## Build P03-T04 (Builder, 2026-10-29)
+
+Implemented FakeElevenLabs TTS per Plan P03-T04: `va_sim.elevenlabs` (`tts_audio`, `mp3`, `tts_context`,
+`tts_params`, `auth`, `store`, `tts_ws`, `tts_rest`, `control`, `routes`), wired into `SimState` (store, reset,
+snapshot) and `simulator_routes("elevenlabs")`. Decisions in specs/30 §3.3 (P03-T04 rules 1-11) + specs/09 §13.
+Deviations from the plan text, recorded in the Decision:
+- mp3 frame count is `ceil(duration·44.1/1152)` raised so the last 200 ms piece holds a frame (875 of the first
+  40 000 lengths would otherwise get an empty last piece); at most one extra silent frame.
+- Plan file names: params parsing split into `tts_params.py` (keeps `tts_ws.py` focused); the WS endpoint is a
+  closure because Starlette treats a `functools.partial` endpoint as an ASGI app.
+- REST default model_id `eleven_multilingual_v2` (ElevenLabs REST default); WS default stays `eleven_flash_v2_5`.
+- A delay fault re-checks `stopped` after waiting, so close_context during a delayed chunk drops it.
+Tests: tests/elevenlabs/ test_tts_audio, test_tts_context, test_tts_ws (realtime sockets; inactivity tests on
+an accelerated clock), test_tts_rest, test_control_elevenlabs; test_state snapshot updated. 97 tests, 4 repeated
+-n 8 runs stable; elevenlabs coverage 97 %.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 (0 findings); make check exit 0: 4109 passed, coverage
+97.95 %, vitest widget 22 / dashboard 52 / sdk 48, openapi drift current, spec refs 0 problems. radon -nc only
+pre-existing C `scenario._locate`, va_sim avg A (2.25), new code max B (10, parse_schedule); jscpd va_sim src+tests
+0 clones; pip-audit --strict no known vulns; pnpm audit high: none.
+
+## Review P03-T04 (Reviewer, 2026-10-29)
+
+APPROVED. Re-ran: make lint 0, make typecheck 0 (mypy 514 files), make placeholders 0 findings, make test 4109
+passed (coverage 97.95 %), radon -nc on va_sim/elevenlabs: no C+. Diff matches Plan P03-T04 and the specs/30 §3.3
+Decision rules 1-11 (formats, mp3 header FF FB 90/92 C0, 200 ms chunking, auth, query validation, context limit,
+schedule trigger, close_context/close_socket, inactivity, records, faults, REST shapes/errors, reset 1012).
+Synthesis runs in to_thread under hold_clock; per-socket TaskGroup; tests cover every error path.
+Non-blocking notes: a REST /stream whose client disconnects mid-body never ends its record (end_reason stays
+null); `voice_settings` is accepted but not recorded; specs/30's `/sim/elevenlabs/config` stays served by the
+shared control latency config (not part of this task).

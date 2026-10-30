@@ -18,6 +18,7 @@ from starlette.routing import BaseRoute
 from va_common.service import ReadyServer, ServerStartupError, StopController, run_server
 from va_sim.clock import clock_for
 from va_sim.control import control_routes
+from va_sim.elevenlabs.routes import elevenlabs_routes
 from va_sim.settings import SIMULATORS, SimName, SimSettings
 from va_sim.state import DEFAULT_SEED, SimState
 from va_sim.telnyx.keys import SigningKey
@@ -48,6 +49,8 @@ def simulator_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
     routes = control_routes(sim, state)
     if sim == "telnyx":
         routes.extend(telnyx_routes(state))
+    elif sim == "elevenlabs":
+        routes.extend(elevenlabs_routes(state))
     return routes
 
 

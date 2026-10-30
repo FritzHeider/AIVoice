@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793334623-f891
+> va_sim FakeElevenLabs TTS: va_sim.elevenlabs (tts_ws TtsSocket, tts_rest, store on SimState.elevenlabs); WS tests use tts_helpers.realtime_state + served/tts_socket/recv_spoken; audio is unpaced so close_context right after flush yields no audio - read audio first or arm a delay fault; Starlette WebSocketRoute needs a plain async def endpoint (partial = ASGI app)
+<!-- tags: sim, testing, elevenlabs | created: 2026-10-30 -->
+
 ### mem-1793330327-17d9
 > va_sim caller runner: CallerScript (telnyx/caller_script.py + caller_steps.py) starts via CallMedia.media_connected after the media start frame; MediaSession.add_listener(on_tick(AgentTick)/on_media_end) must stay O(1); completion via queue_caller/queue_dtmf offsets vs caller_sent/dtmf_sent; CPU prep under va_sim.tasks.hold_clock + to_thread costs no virtual time
 <!-- tags: sim, testing, clock | created: 2026-10-30 -->
