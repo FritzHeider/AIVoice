@@ -1,10 +1,13 @@
-"""FakeElevenLabs control API: TTS request records, fault arming, the API-key allow list, reset, scoping."""
+"""FakeElevenLabs control API: TTS request records, TTS and STT faults, the STT transcript script and
+sessions, the API-key allow list, reset, scoping."""
 
 from __future__ import annotations
 
 from sim_helpers import new_state
 from telnyx_helpers import telnyx_client
 from tts_helpers import rest_client
+
+from va_sim.elevenlabs.stt_store import SttFault, SttSessionRecord
 
 CONVERT = "/v1/text-to-speech/v/with-timestamps"
 
@@ -65,7 +68,12 @@ async def test_reset_clears_records_keys_and_fault() -> None:
         await client.post(CONVERT, json={"text": "hi"})
         await client.put("/sim/elevenlabs/api-keys", json={"keys": ["sim-elevenlabs-key"]})
         await client.put("/sim/elevenlabs/tts/fault", json={"kind": "error"})
-        assert state.snapshot()["elevenlabs"] == {"tts_requests": 1, "tts_sockets": 0}
+        assert state.snapshot()["elevenlabs"] == {
+            "tts_requests": 1,
+            "tts_sockets": 0,
+            "stt_sessions": 0,
+            "stt_sockets": 0,
+        }
         assert (await client.post("/sim/reset")).status_code == 204
     assert state.elevenlabs.tts_requests == []
     assert state.elevenlabs.api_keys == ()
@@ -76,3 +84,94 @@ async def test_elevenlabs_routes_are_absent_on_the_telnyx_port() -> None:
     async with telnyx_client(new_state()) as client:
         assert (await client.get("/sim/elevenlabs/tts/requests")).status_code == 404
         assert (await client.post("/v1/text-to-speech/v", json={"text": "x"})).status_code == 404
+
+
+async def test_stt_sessions_lists_records() -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        assert (await client.get("/sim/elevenlabs/stt/sessions")).json() == {"sessions": []}
+        state.elevenlabs.stt.sessions.append(
+            SttSessionRecord(
+                id="a" * 32,
+                model_id="scribe_v2_realtime",
+                audio_format="ulaw_8000",
+                commit_strategy="manual",
+                language_code=None,
+                keyterms=[],
+                entity_detection=[],
+                include_timestamps=False,
+                started_ms=0,
+            )
+        )
+        (record,) = (await client.get("/sim/elevenlabs/stt/sessions")).json()["sessions"]
+    assert (record["id"], record["end_reason"], record["transcripts"]) == ("a" * 32, None, [])
+
+
+async def test_stt_fault_put_get_delete() -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        assert (await client.get("/sim/elevenlabs/stt/fault")).json() == {"fault": None}
+        put = await client.put(
+            "/sim/elevenlabs/stt/fault", json={"kind": "transcriber_error", "after_ms": 1500, "times": 2}
+        )
+        assert put.status_code == 204
+        assert (await client.get("/sim/elevenlabs/stt/fault")).json() == {
+            "fault": {"kind": "transcriber_error", "after_ms": 1500, "remaining": 2}
+        }
+        default = await client.put("/sim/elevenlabs/stt/fault", json={"kind": "disconnect"})
+        assert default.status_code == 204
+        armed = state.elevenlabs.stt.fault
+        assert armed == SttFault(kind="disconnect", after_ms=0, remaining=1)
+        assert (await client.delete("/sim/elevenlabs/stt/fault")).status_code == 204
+        assert state.elevenlabs.stt.fault is None
+        assert state.elevenlabs.fault is None  # the TTS fault is separate
+
+
+async def test_stt_fault_body_is_validated() -> None:
+    async with rest_client(new_state()) as client:
+        responses = [
+            await client.put("/sim/elevenlabs/stt/fault", json=body)
+            for body in (
+                {"kind": "delay"},
+                {"kind": "error", "after_ms": -1},
+                {"kind": "error", "times": 0},
+                {"kind": "error", "after_chunks": 1},
+            )
+        ]
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
+
+
+async def test_stt_transcripts_queue() -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        assert (await client.get("/sim/elevenlabs/stt/transcripts")).json() == {"texts": []}
+        for texts in (["first"], ["second", "third"]):
+            posted = await client.post("/sim/elevenlabs/stt/transcripts", json={"texts": texts})
+            assert posted.status_code == 204
+        assert (await client.get("/sim/elevenlabs/stt/transcripts")).json() == {
+            "texts": ["first", "second", "third"]
+        }
+        empty_list = await client.post("/sim/elevenlabs/stt/transcripts", json={"texts": []})
+        blank = await client.post("/sim/elevenlabs/stt/transcripts", json={"texts": [""]})
+        assert (empty_list.status_code, blank.status_code) == (422, 422)
+        assert (await client.delete("/sim/elevenlabs/stt/transcripts")).status_code == 204
+        assert list(state.elevenlabs.stt.script) == []
+
+
+async def test_reset_clears_the_stt_state() -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        await client.post("/sim/elevenlabs/stt/transcripts", json={"texts": ["queued"]})
+        await client.put("/sim/elevenlabs/stt/fault", json={"kind": "error"})
+        assert (await client.post("/sim/reset")).status_code == 204
+    assert list(state.elevenlabs.stt.script) == []
+    assert state.elevenlabs.stt.fault is None
+    assert state.elevenlabs.stt.sessions == []
+
+
+async def test_stt_routes_are_absent_on_the_telnyx_port() -> None:
+    async with telnyx_client(new_state()) as client:
+        assert (await client.get("/sim/elevenlabs/stt/sessions")).status_code == 404
+        assert (await client.get("/sim/elevenlabs/stt/transcripts")).status_code == 404

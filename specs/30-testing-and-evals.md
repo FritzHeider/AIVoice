@@ -496,6 +496,75 @@ Behavioural rules:
 >    adds `"elevenlabs": {"tts_requests", "tts_sockets"}`. The voice registry (`voice_not_found`) arrives with the
 >    voices task.
 
+> Decision (2026-10-29): FakeElevenLabs realtime STT (P03-T05a). `va_sim.elevenlabs` modules `stt_params`,
+> `stt_stream` (pure analysis), `stt_text` (word timings, entities), `stt_store` (`ElevenLabsStore.stt`), `stt_ws`,
+> `stt_control`; `ws_io` holds the JSON receive/close helpers shared with the TTS socket.
+> 1. `WS /v1/speech-to-text/realtime`, always accepted. Auth: `xi-api-key` header only. Missing → frame
+>    `{"message_type": "auth_error", "error": "Neither authorization header nor xi-api-key received, please provide
+>    one."}` + close 1008 `"Missing API key"`; not accepted → frame `auth_error` `"Invalid API key"` + close 1008
+>    `"Invalid API key"`. The query is validated before auth.
+> 2. Query: `model_id` required; `audio_format` `ulaw_8000|pcm_8000|pcm_16000|pcm_22050|pcm_24000|pcm_44100|
+>    pcm_48000` (default `pcm_16000`; pcm = signed 16-bit little-endian mono); `commit_strategy` `manual` (default)
+>    | `vad`; `include_timestamps`, `include_language_detection`, `filter_background_audio`, `no_verbatim` (false),
+>    `enable_logging` (true) as `true|false`; `language_code` `^[a-z]{2,3}$`; `keyterms` repeated (≤ 100, each
+>    1..50 chars); `entity_detection` repeated (`pii|pci|phi|all`); `keepalive_interval_ms` 1000..60000 (recorded
+>    only); `vad_silence_threshold_secs` 0.3..3.0 (default 1.5). Unknown parameters are ignored. Invalid → frame
+>    `{"message_type": "invalid_request", "error": "invalid <param>: <why>"}` + close 1008 with the same text
+>    (close reasons are cut to 123 UTF-8 bytes).
+> 3. First frame `{"message_type": "session_started", "session_id": <32 hex>, "config": {model_id, audio_format,
+>    sample_rate, commit_strategy, include_timestamps, include_language_detection, language_code, keyterms,
+>    entity_detection, filter_background_audio, keepalive_interval_ms, enable_logging, no_verbatim,
+>    vad_silence_threshold_secs}}`.
+> 4. Client messages `{"message_type": "input_audio_chunk", "audio_base_64", "commit"?, "sample_rate"?,
+>    "previous_text"?}`; unknown fields ignored. Invalid JSON/non-object, wrong `message_type`, missing or invalid
+>    base64, non-boolean `commit`, `sample_rate` ≠ the format's rate, odd PCM byte count, non-string
+>    `previous_text`, or `previous_text` after the first valid chunk → frame `{"message_type": "input_error",
+>    "error"}`, message dropped, socket open. More than 1 000 ms of audio in one message → frame
+>    `chunk_size_exceeded` `"Audio chunk exceeds 1000 ms"`, message (and its commit) dropped.
+> 5. Analysis: 20 ms frames (a partial frame waits for the next message), voiced when RMS ≥ 328 (−40 dBFS). A
+>    voiced frame with no open segment starts one; 300 ms of unvoiced audio ends it; a segment with < 100 ms voiced
+>    audio is discarded and never resolved. Once a segment has ≥ 100 ms voiced audio and 260 ms of samples after
+>    its first voiced frame (plus a 40 ms pre-roll), `decode_marker` runs once (zero-padded when the segment ends
+>    earlier): registered id → that utterance's text and language; unregistered id → `"[unintelligible]"`; no
+>    marker → the next text of the transcript script, else `"[unintelligible]"`. A commit does not force an
+>    unresolved open segment (a partial preamble would misdecode); its words join a later commit. Expected duration:
+>    marker segments `utterance_ms(text, 70)` (= 180 ms preamble + 70 ms/char, the caller's default rate; the body
+>    starts 180 ms after the segment start), markerless `len(text)·70` (body = segment start). Revealed words
+>    `ceil(n · voiced_ms / expected_ms)` (capped), all once the segment ended. The commit window is every
+>    revealed, uncommitted word; a `partial_transcript` `{"message_type", "text": <window>}` goes out each time
+>    the window's voiced audio reaches a multiple of 300 ms (reset by commits) and the text is non-empty — this
+>    replaces specs/08 §10's 200 ms. `vad` commits by itself when unvoiced audio first reaches
+>    `vad_silence_threshold_secs` after a segment ended and the window is non-empty.
+> 6. Commits are sent `stt_final_ms` (sim clock) after the commit was read, in order, by a per-socket committer
+>    task: `committed_transcript {"text"}`; with `include_timestamps` also `committed_transcript_with_timestamps
+>    {"text", "language_code", "words"}` (words `{"text", "start", "end", "type": "word", "logprob": 0.0}` at
+>    70 ms/char from the body start, session-relative seconds rounded to 3 decimals, alternating with `spacing`
+>    entries); with `entity_detection` and non-empty text also `committed_transcript_entities {"text", "entities":
+>    [{"text", "entity_type", "start_char", "end_char"}]}` (emails → `email_address` for pii/all; ≥ 13 digits with
+>    optional single space/hyphen separators → `credit_card_number` for pci/all; the list may be empty). Utterance
+>    entity names are not modelled (the registry has no entities). No voiced audio → empty text (`words: []`).
+> 7. Faults: `PUT /sim/elevenlabs/stt/fault {"kind", "after_ms" = 0, "times" = 1}` (204), `GET` → `{"fault":
+>    null|{kind, after_ms, remaining}}`, `DELETE` (204), separate from the TTS fault. Kinds: every specs/08 §4
+>    error `message_type` plus `disconnect`. Checked after each chunk's audio is fed once the session's analysed
+>    audio reaches `after_ms`; `commit_throttled` instead fires on the first client commit at/after `after_ms` and
+>    swallows it (the window waits for the next commit). Frame `{"message_type": kind, "error": "Simulated
+>    <kind>"}`, then close 1008 (`auth_error`, `quota_exceeded`, `unaccepted_terms`, `invalid_request`,
+>    `rate_limited`, `session_time_limit_exceeded`) or 1011 (`error`, `transcriber_error`, `resource_exhausted`)
+>    with the error as reason; the other kinds leave the socket open; `disconnect` closes 1011 `"simulated
+>    disconnect"` without a frame. Each firing consumes one of `times`, across sessions. `SimState.stt_fail_after_s`
+>    above is this route with kind `transcriber_error`.
+> 8. Records at `GET /sim/elevenlabs/stt/sessions` → `{"sessions": [{id, model_id, audio_format, commit_strategy,
+>    language_code, keyterms, entity_detection, include_timestamps, started_ms, previous_text, ended_ms,
+>    end_reason (null|disconnect|fault|reset), audio_ms (whole frames analysed), voiced_ms, partials, commits,
+>    transcripts: [{text, utterance_ids, language_code, committed_ms}]}]}`, recorded once authenticated; commits not
+>    yet sent when the socket closes are dropped.
+> 9. Transcript script: `POST /sim/elevenlabs/stt/transcripts {"texts": [non-empty, ...]}` appends (204), `GET` →
+>    `{"texts"}`, `DELETE` clears (204); it replaces specs/08 §10's Redis key `sim:stt:{session}`.
+> 10. `/sim/reset` closes STT sockets 1012 `"simulator reset"` (records end `reset`) and clears sessions, script,
+>    and fault; `GET /sim/state` `elevenlabs` adds `stt_sessions` and `stt_sockets`.
+> 11. No server inactivity timeout and no spontaneous limit errors; errors come only from faults. Analysis runs in
+>    a worker thread inside `va_sim.tasks.hold_clock`.
+
 ### 3.4 FakeLLM (port 9300, OpenAI-compatible at `/v1`)
 
 - `POST /v1/chat/completions`: supports `model`, `messages`, `stream`, `tools`, `tool_choice`, `temperature`,

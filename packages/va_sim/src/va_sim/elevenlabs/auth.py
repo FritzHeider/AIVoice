@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 __all__ = [
     "API_KEY_HEADER",
     "INVALID_API_KEY",
+    "MISSING_KEY",
     "detail_error",
     "key_from_message",
     "rest_auth_error",
@@ -23,7 +24,7 @@ __all__ = [
 API_KEY_HEADER: Final = "xi-api-key"
 INVALID_API_KEY: Final = "Invalid API key"
 _BEARER: Final = "bearer "
-_MISSING_KEY: Final = "Neither authorization header nor xi-api-key received, please provide one."
+MISSING_KEY: Final = "Neither authorization header nor xi-api-key received, please provide one."
 
 
 def key_from_message(message: Mapping[str, object]) -> str | None:
@@ -46,7 +47,7 @@ def detail_error(status_code: int, status: str, message: str) -> JSONResponse:
 def rest_auth_error(key: str | None, accepted: bool) -> JSONResponse | None:
     """The 401 response for a REST request with ``key``, or ``None`` when it authenticates."""
     if not key:
-        return detail_error(401, "needs_authorization", _MISSING_KEY)
+        return detail_error(401, "needs_authorization", MISSING_KEY)
     if not accepted:
         return detail_error(401, "invalid_api_key", INVALID_API_KEY)
     return None

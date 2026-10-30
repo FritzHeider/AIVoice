@@ -13,16 +13,25 @@ import asyncio
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final
 
-import orjson
-from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocket
 
 from va_sim.elevenlabs.auth import API_KEY_HEADER, INVALID_API_KEY, key_from_message
 from va_sim.elevenlabs.store import EndReason, FaultKind
 from va_sim.elevenlabs.tts_audio import chunks
 from va_sim.elevenlabs.tts_context import MAX_CONTEXTS, TtsContext, parse_schedule
 from va_sim.elevenlabs.tts_params import TtsParams, parse_params
+from va_sim.elevenlabs.ws_io import (
+    INTERNAL_ERROR,
+    NORMAL_CLOSURE,
+    POLICY_VIOLATION,
+    SERVICE_RESTART,
+    Message,
+    close_quietly,
+    receive_json,
+    send_json,
+)
 from va_sim.tasks import hold_clock
 
 if TYPE_CHECKING:
@@ -31,17 +40,10 @@ if TYPE_CHECKING:
 __all__ = ["INACTIVITY_MESSAGE", "TtsSocket", "tts_websocket"]
 
 INACTIVITY_MESSAGE: Final = "Have not received a new text input within the timeout of {seconds} seconds."
-POLICY_VIOLATION: Final = 1008
-INTERNAL_ERROR: Final = 1011
-SERVICE_RESTART: Final = 1012
-NORMAL_CLOSURE: Final = 1000
 DEFAULT_CONTEXT: Final = "default"
 _INVALID_MESSAGE: Final = "invalid message"
 _WS_FAULTS: Final[frozenset[FaultKind]] = frozenset({"disconnect", "error", "delay"})
 _MS_PER_S: Final = 1000
-
-type Message = dict[str, object]
-type Received = Message | Literal["disconnect", "invalid"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,29 +75,6 @@ class _Close:
     code: int | None
     reason: str
     end_reason: EndReason
-
-
-async def _receive(ws: WebSocket) -> Received:
-    message = await ws.receive()
-    if message["type"] == "websocket.disconnect":
-        return "disconnect"
-    raw = message.get("text")
-    if raw is None:
-        raw = message.get("bytes")
-    if not isinstance(raw, str | bytes):
-        return "invalid"
-    try:
-        parsed = orjson.loads(raw)
-    except orjson.JSONDecodeError:
-        return "invalid"
-    return parsed if isinstance(parsed, dict) else "invalid"
-
-
-async def _close(ws: WebSocket, code: int, reason: str) -> None:
-    try:
-        await ws.close(code, reason)
-    except (RuntimeError, OSError, WebSocketDisconnect):
-        return
 
 
 def _error_frame(message: str, error: str, code: int) -> Message:
@@ -144,7 +123,7 @@ class TtsSocket:
             store.sockets.discard(self)
             self._end_open()
         if self._close is not None and self._close.code is not None:
-            await _close(self._ws, self._close.code, self._close.reason)
+            await close_quietly(self._ws, self._close.code, self._close.reason)
 
     def _end_open(self) -> None:
         reason: EndReason = self._close.end_reason if self._close is not None else "disconnect"
@@ -156,9 +135,7 @@ class TtsSocket:
         if self._close is not None:
             return
         async with self._send_lock:
-            try:
-                await self._ws.send_text(orjson.dumps(payload).decode())
-            except (WebSocketDisconnect, OSError, RuntimeError):
+            if not await send_json(self._ws, payload):
                 self._finish(None, "", "disconnect")
 
     async def _error(self, message: str, error: str) -> None:
@@ -170,7 +147,7 @@ class TtsSocket:
         message = first
         while True:
             if message is None:
-                received = await _receive(self._ws)
+                received = await receive_json(self._ws)
                 if received == "disconnect":
                     self._finish(None, "", "disconnect")
                     return
@@ -342,20 +319,20 @@ async def tts_websocket(state: SimState, ws: WebSocket) -> None:
     try:
         params = parse_params(ws.query_params)
     except ValueError as exc:
-        await _close(ws, POLICY_VIOLATION, str(exc))
+        await close_quietly(ws, POLICY_VIOLATION, str(exc))
         return
     first: Message | None = None
     key = ws.headers.get(API_KEY_HEADER)
     if key is None:
-        received = await _receive(ws)
+        received = await receive_json(ws)
         if received == "disconnect":
             return
         if received == "invalid":
-            await _close(ws, POLICY_VIOLATION, _INVALID_MESSAGE)
+            await close_quietly(ws, POLICY_VIOLATION, _INVALID_MESSAGE)
             return
         first = received
         key = key_from_message(first)
     if not state.elevenlabs.accepts(key):
-        await _close(ws, POLICY_VIOLATION, INVALID_API_KEY)
+        await close_quietly(ws, POLICY_VIOLATION, INVALID_API_KEY)
         return
     await TtsSocket(ws, state, ws.path_params["voice_id"], params).run(first)

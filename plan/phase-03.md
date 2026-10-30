@@ -42,11 +42,31 @@
   - Deliverables: `/v1/text-to-speech/{voice_id}/multi-stream-input` WS honoring contexts, flush, close_context, close_socket, keepalive, inactivity timeout, chunk_length_schedule buffering, deterministic μ-law/PCM audio (60 ms per character) with per-chunk alignment; REST `/v1/text-to-speech/{voice_id}` and `/stream`
   - Acceptance: protocol tests incl. interleaved contexts and close_context discarding pending audio.
 
-- [ ] P03-T05 FakeElevenLabs STT (realtime WS + batch) and voices REST
-  - Spec refs: specs/30-testing-and-evals.md (FakeElevenLabs STT marker scheme); specs/08-stt-elevenlabs.md; specs/15-voices.md (vendor endpoints)
-  - Depends on: P03-T01, P03-T03a (`decode_marker`)
-  - Deliverables: `/v1/speech-to-text/realtime` (session_started, partial_transcript, committed_transcript(_with_timestamps), error types), marker-driven transcript mapping, `previous_text` first-chunk rule, `/v1/speech-to-text` batch with diarization, `/v2/voices`, `/v1/voices/add`, `/v1/voices/{id}`, `/v1/voices/{id}/edit`, `/v1/voices/{id}/settings`, delete
-  - Acceptance: error message types reproducible via scenario flags; batch output shape matches spec.
+- [x] P03-T05a FakeElevenLabs STT realtime WebSocket — va_sim+apps/sim 771 passed (98% va_sim cov); make lint/typecheck/placeholders 0; make test 4174 passed, 24 apps/api pytest-timeout setup errors (known fix:api-test-timeout-load; module 27 passed alone); spec refs 0; jscpd 0 clones
+  - Spec refs: specs/30-testing-and-evals.md §3.3 (STT realtime, marker scheme); specs/08-stt-elevenlabs.md §2-§4, §10
+  - Depends on: P03-T01, P03-T03a (`decode_marker`), P03-T04 (`va_sim.elevenlabs` package, auth, store)
+  - Deliverables: `/v1/speech-to-text/realtime` (query validation, `session_started` config echo, `input_audio_chunk`
+    decoding for every audio format, 20 ms energy segmentation, marker-driven transcript mapping with a scripted
+    fallback queue and `[unintelligible]`, `partial_transcript` every 300 ms of voiced audio, manual and vad commits
+    after `stt_final_ms` with `committed_transcript`, `committed_transcript_with_timestamps`,
+    `committed_transcript_entities`, `previous_text` first-chunk rule, `input_error`/`chunk_size_exceeded`), STT
+    fault injection for every §4 error `message_type` plus disconnect, session records, control routes
+    `/sim/elevenlabs/stt/sessions`, `/stt/fault`, `/stt/transcripts`, reset closes sockets 1012
+  - Acceptance: protocol tests over real sockets with synthesized caller audio (μ-law 8 kHz and PCM 16 kHz) recover
+    the registered utterance text; every error message type reproducible via the fault control route.
+  - Split from P03-T05 (2026-10-29, Planner): realtime STT alone is a TTS-sized task.
+
+- [ ] P03-T05b FakeElevenLabs batch STT, voices REST, and subscription
+  - Spec refs: specs/30-testing-and-evals.md §3.3 (REST); specs/08-stt-elevenlabs.md §8; specs/15-voices.md (vendor endpoints)
+  - Depends on: P03-T05a
+  - Deliverables: `/v1/speech-to-text` batch (multipart `file` or `cloud_storage_url`, `use_multi_channel`, `diarize`,
+    `timestamps_granularity`; caller-channel markers and agent-channel tone-character reverse mapping, word
+    timestamps, `speaker_id`/`channel_index`), voice registry seeded with premade voices (incl. `Karen`),
+    `/v2/voices`, `/v1/voices/add`, `/v1/voices/{id}`, `/v1/voices/{id}/edit`, `/v1/voices/{id}/settings`,
+    `/v1/voices/{id}/settings/edit`, `DELETE /v1/voices/{id}`, TTS `voice_not_found` for unknown voices,
+    `GET /v1/user/subscription`
+  - Acceptance: batch output shape matches spec and reconstructs both sides of a FakeTelnyx dual-channel recording;
+    voice clone rejects samples < 1 s with `invalid_sample`.
 
 - [ ] P03-T06 FakeLLM (OpenAI-compatible) and embeddings
   - Spec refs: specs/30-testing-and-evals.md (FakeLLM rules file); specs/10-llm-gateway.md

@@ -723,3 +723,12 @@ Grafana 3001
   first chunk, so read the audio first (`recv_spoken`) or hold the stream with a `delay` fault. Only inactivity
   tests use an accelerated clock (it fires as soon as the loop idles). Starlette `WebSocketRoute` needs a plain
   `async def` endpoint (a `functools.partial` is treated as an ASGI app).
+- 2026-10-29 (P03-T05a): FakeElevenLabs realtime STT (spec: specs/30 §3.3 Decision P03-T05a): `stt_ws.SttSocket`
+  (reader + committer tasks, one send lock), pure `stt_stream.SttStream` (20 ms frames, segments, marker decode,
+  partial cadence, vad) and `stt_text` (word timings, regex entities), `stt_store.SttStore` on
+  `ElevenLabsStore.stt` (sessions, transcript script deque, fault, sockets). `ws_io` has the JSON receive / quiet
+  close helpers both sockets use. Control: `/sim/elevenlabs/stt/sessions`, `/stt/fault`, `/stt/transcripts`.
+  Tests: `tests/elevenlabs/test_stt_*.py`, helpers `tests/support/stt_helpers.py` (`stt_socket`, `caller_audio`
+  registers + synthesizes an utterance in any audio format, `chunked`, `send_audio`, `recv_type`). A segment
+  resolves only after 100 ms voiced audio AND 260 ms of marker window, so commit-mid-utterance tests must commit
+  at least ~300 ms into the utterance; markerless test speech = loud μ-law codes (`b"\x10\x90" * n`).

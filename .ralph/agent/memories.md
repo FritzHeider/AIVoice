@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793337252-fee0
+> va_sim FakeElevenLabs STT: va_sim.elevenlabs stt_ws/stt_stream(pure)/stt_store (ElevenLabsStore.stt); tests use stt_helpers.caller_audio(state,text,fmt)+chunked+send_audio+recv_type on realtime_state; segment resolves after 100 ms voiced + 260 ms marker window, so mid-utterance commits need >=300 ms of speech; markerless test speech = b'\x10\x90'*n μ-law
+<!-- tags: sim, testing, elevenlabs | created: 2026-10-30 -->
+
 ### mem-1793334623-f891
 > va_sim FakeElevenLabs TTS: va_sim.elevenlabs (tts_ws TtsSocket, tts_rest, store on SimState.elevenlabs); WS tests use tts_helpers.realtime_state + served/tts_socket/recv_spoken; audio is unpaced so close_context right after flush yields no audio - read audio first or arm a delay fault; Starlette WebSocketRoute needs a plain async def endpoint (partial = ASGI app)
 <!-- tags: sim, testing, elevenlabs | created: 2026-10-30 -->

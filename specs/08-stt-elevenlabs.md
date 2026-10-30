@@ -224,6 +224,11 @@ produce a higher-accuracy transcript aligned to the recording for citations, eva
 - Configurable latency (`SIM_STT_COMMIT_LATENCY_MS`, default 60) and fault injection (`error`, `session_time_limit_exceeded`,
   disconnect after N seconds) via sim control API `POST /sim/elevenlabs/faults`.
 
+> Decision (2026-10-29): specs/30 §3.3 (Decision P03-T05a) governs the simulator: partials every 300 ms of voiced
+> audio (not 200 ms), a 180 ms FSK marker preamble (specs/30 §3.1) instead of a 40 ms tone sequence, the transcript
+> script at `/sim/elevenlabs/stt/transcripts` instead of the Redis key `sim:stt:{session}`, and faults at
+> `PUT /sim/elevenlabs/stt/fault` (every §4 error type plus `disconnect`) instead of `POST /sim/elevenlabs/faults`.
+
 ## 11. Tests required
 
 - Query string construction for every option combination (snapshot).

@@ -1,4 +1,5 @@
-"""FakeElevenLabs state (specs/30 §3.3; Decision P03-T04): accepted keys, TTS request records, fault, sockets.
+"""FakeElevenLabs state (specs/30 §3.3; Decisions P03-T04, P03-T05a): accepted keys, TTS request records,
+fault, sockets, and the realtime STT state (``stt``, see ``stt_store``).
 
 ``api_keys`` empty (the default) accepts every non-empty key. Every TTS context (WebSocket) or REST request is
 recorded as a :class:`TtsRequest`. One :class:`TtsFault` can be armed at a time; each firing consumes one of
@@ -9,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Final, Literal, Protocol
+
+from va_sim.elevenlabs.stt_store import SttStore
 
 __all__ = ["ElevenLabsStore", "EndReason", "FaultKind", "LiveSocket", "Transport", "TtsFault", "TtsRequest"]
 
@@ -65,19 +68,20 @@ class TtsFault:
 
 
 class LiveSocket(Protocol):
-    """A connected TTS WebSocket that the simulator can close."""
+    """A connected TTS or STT WebSocket that the simulator can close."""
 
     def close_for_reset(self) -> None: ...
 
 
 class ElevenLabsStore:
-    """Accepted API keys, TTS request records, the armed fault, and the live TTS sockets."""
+    """Accepted API keys, TTS request records, the armed TTS fault, live TTS sockets, and the STT state."""
 
     def __init__(self) -> None:
         self.api_keys: tuple[str, ...] = ()
         self.tts_requests: list[TtsRequest] = []
         self.fault: TtsFault | None = None
         self.sockets: set[LiveSocket] = set()
+        self.stt = SttStore()
 
     def accepts(self, key: str | None) -> bool:
         """Whether ``key`` authenticates: any non-empty key unless an allow list is set."""
@@ -123,7 +127,8 @@ class ElevenLabsStore:
         return fault
 
     def reset(self) -> None:
-        """Close every live socket (code 1012), forget records, keys, and the fault."""
+        """Close every live socket (code 1012), forget records, keys, faults, and the STT state."""
+        self.stt.reset()
         for socket in tuple(self.sockets):
             socket.close_for_reset()
         self.sockets.clear()

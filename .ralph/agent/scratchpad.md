@@ -1519,3 +1519,251 @@ Synthesis runs in to_thread under hold_clock; per-socket TaskGroup; tests cover 
 Non-blocking notes: a REST /stream whose client disconnects mid-body never ends its record (end_reason stays
 null); `voice_settings` is accepted but not recorded; specs/30's `/sim/elevenlabs/config` stays served by the
 shared control latency config (not part of this task).
+
+## Plan P03-T05a — FakeElevenLabs STT realtime WebSocket (Planner, 2026-10-29)
+
+P03-T05 was split (plan/phase-03.md) into T05a (this: realtime STT WS) and T05b (batch STT, voices REST, voice
+registry + TTS voice_not_found, subscription). Both specs/30 §3.3 and specs/08 §10 describe the sim; specs/30 is the
+sim contract. Builder writes ONE `> Decision (2026-10-29): FakeElevenLabs realtime STT (P03-T05a).` block at the end
+of specs/30 §3.3 (after the P03-T04 Decision) and a one-line `> Decision (2026-10-29):` at the end of specs/08 §10
+saying specs/30 §3.3 governs the simulator (fault route is `/sim/elevenlabs/stt/fault`, not `POST
+/sim/elevenlabs/faults`; the Redis side channel `sim:stt:{session}` is replaced by `/sim/elevenlabs/stt/transcripts`;
+partials every 300 ms of voiced audio, not 200 ms).
+
+### Decisions (numbered as in the Decision block)
+1. Route `WS /v1/speech-to-text/realtime` (Starlette `WebSocketRoute`, plain async def closure in `routes.py`).
+   Always `accept()`. Auth: `xi-api-key` header only (STT messages carry no key). Missing → frame
+   `{"message_type": "auth_error", "error": MISSING_KEY}` then close 1008 with the same text truncated to fit 123
+   bytes (use `"Missing API key"` as the close reason); not accepted (store.accepts) → frame `{"message_type":
+   "auth_error", "error": "Invalid API key"}` + close 1008 `"Invalid API key"`. Make `_MISSING_KEY` in auth.py public
+   (`MISSING_KEY`) and reuse it.
+2. Query (`stt_params.py`, `SttParams` frozen dataclass, `parse_stt_params(QueryParams) -> SttParams`, raises
+   ValueError `"invalid <param>: <why>"`): `model_id` required non-empty (missing → `"invalid model_id: required"`);
+   `audio_format` ∈ `ulaw_8000 | pcm_8000 | pcm_16000 | pcm_22050 | pcm_24000 | pcm_44100 | pcm_48000`, default
+   `pcm_16000` (ElevenLabs default; pcm = signed 16-bit little-endian mono; ulaw = G.711 μ-law via
+   `va_sim.audio.codec.ulaw_decode`); `commit_strategy` `manual` (default) | `vad`; bools `true|false`:
+   `include_timestamps` (false), `include_language_detection` (false), `filter_background_audio` (false),
+   `enable_logging` (true), `no_verbatim` (false); `language_code` optional, `^[a-z]{2,3}$`; `keyterms` repeated
+   (`QueryParams.getlist`), each 1..50 chars, ≤ 100 terms; `entity_detection` repeated, each ∈ `pii|pci|phi|all`;
+   `keepalive_interval_ms` int 1000..60000, `null` when absent (recorded, no behaviour);
+   `vad_silence_threshold_secs` float 0.3..3.0 default 1.5. Unknown params ignored. Invalid → frame
+   `{"message_type": "invalid_request", "error": "<reason>"}` then close 1008 `<reason>` (≤ 123 bytes; truncate
+   defensively). Query is validated before auth (same order as TTS).
+3. `session_started` (first frame after auth): `{"message_type": "session_started", "session_id": <32 lowercase hex
+   from state.ids.uuid() without dashes>, "config": {"model_id", "audio_format", "sample_rate", "commit_strategy",
+   "include_timestamps", "include_language_detection", "language_code" (null when absent), "keyterms": [...],
+   "entity_detection": [...], "filter_background_audio", "keepalive_interval_ms" (null|int), "enable_logging",
+   "no_verbatim", "vad_silence_threshold_secs"}}` (key order as written).
+4. Client messages: JSON object with `message_type: "input_audio_chunk"`, `audio_base_64` (str, valid base64),
+   `commit` (bool, default false), `sample_rate` (int, optional; must equal the format's rate), `previous_text`
+   (str, optional, first chunk only). Unknown fields ignored. Any violation → frame `{"message_type": "input_error",
+   "error": "<why>"}`, the message is dropped, socket stays open (specs/08 §4 "input_error: continue"). Cases:
+   invalid JSON / non-object; message_type missing or not `input_audio_chunk`; audio_base_64 missing/not str/invalid
+   base64; commit non-bool; sample_rate mismatch (`"sample_rate 16000 does not match audio_format ulaw_8000"`); odd
+   byte length for pcm; `previous_text` on a non-first chunk (`"previous_text can only be sent with the first audio
+   chunk"`); previous_text non-str. "First chunk" = the first valid input_audio_chunk of the session. An empty
+   audio string with `commit: true` is valid (commit only). Decoded audio > 1 000 ms in one message → frame
+   `{"message_type": "chunk_size_exceeded", "error": "Audio chunk exceeds 1000 ms"}`, message dropped (incl. its
+   commit), socket open.
+5. Audio analysis (`stt_stream.py`, pure, no asyncio, unit-testable): `SttStream(sample_rate, resolver,
+   vad_silence_ms | None)` with `feed(pcm: NDArray[np.int16]) -> list[StreamEvent]` and `commit() -> Commit`.
+   - 20 ms frames (`rate*20//1000` samples), remainder carried to the next feed. Voiced frame: RMS ≥ 328
+     (−40 dBFS, `round(32767·10^(−40/20))`). Audio clock `audio_ms` advances 20 per frame (session-relative).
+   - Segments: a voiced frame after ≥ 300 ms of unvoiced audio (or the first voiced frame) starts a segment; an
+     unvoiced run ≥ 300 ms ends it (end = time of its last voiced frame + 20). Gaps < 300 ms stay in the segment.
+     A segment ending with < 100 ms voiced audio is discarded (clicks); it never produced partials (see below).
+   - Marker: each segment collects samples from 40 ms before its first voiced frame (keep a 2-frame pre-roll) up to
+     260 ms after it, then calls `decode_marker(samples, rate)` once (also on segment end / commit when shorter,
+     padded with zeros to 260 ms). Resolution via `resolver(marker_id | None) -> Heard(text, language,
+     utterance_id | None, has_marker: bool)` provided by the socket layer: registered marker id →
+     `state.utterances[id]` text/language; marker decoded but unregistered → `"[unintelligible]"`; no marker → pop
+     the head of `store.stt_script` (FIFO texts from `/sim/elevenlabs/stt/transcripts`) else `"[unintelligible]"`.
+     Language falls back to the session `language_code` or `"en"`.
+   - Expected duration: marker segments `MARKER_MS + utterance_ms(text, 70)` with body start = segment start +
+     MARKER_MS; others `len(text)·70` with body start = segment start (70 ms/char = the caller's synthesis default,
+     import the constant from synth if public else define `CALLER_MS_PER_CHAR = 70` with a comment).
+   - Words = `text.split()`. Revealed count `n = len(words)` once the segment ended, else
+     `min(len, ceil(len · voiced_ms / expected_ms))` (0 before the marker decode). Each segment tracks
+     `committed` (words already committed); the window text = join of every non-discarded segment's
+     `words[committed:n]` with single spaces.
+   - Partials: every time the commit window's voiced ms crosses a multiple of 300 (counted per window, reset by a
+     commit) and the window text is non-empty, emit `partial_transcript {"message_type": "partial_transcript",
+     "text": <window text>}` (repeats allowed).
+   - Commit: snapshot window text, word timings, language; mark revealed words committed; drop fully-committed
+     ended segments; reset the window voiced counter. Word timing: per char `70 ms` from body start: word i at
+     `body_start + char_offset(i)·70` .. `+ len(word)·70`, seconds rounded to 3 decimals, session-relative audio
+     time. `words` list alternates `{"text": w, "start", "end", "type": "word", "logprob": 0.0}` and
+     `{"text": " ", "start": prev_end, "end": next_start, "type": "spacing", "logprob": 0.0}` (spacing between
+     words of the committed text, also across segments).
+   - vad strategy: after each frame, if a segment has ended, the window text is non-empty and unvoiced audio since
+     the last voiced frame ≥ `vad_silence_threshold_secs`, `feed` returns an auto `Commit` event (processed like a
+     manual commit).
+   `feed` is CPU work (decode_marker): the socket runs it via `asyncio.to_thread` inside `hold_clock` per message;
+   the stream object is touched only by the reader task (sequential). `store.stt_script` is a `collections.deque`;
+   popleft from the worker thread and append from control routes are atomic under the GIL (comment it).
+6. Commit output (committer worker task per socket, FIFO queue so reading continues): wait `state.latencies
+   .stt_final_ms` (sim clock) after the commit message was read, then send `{"message_type": "committed_transcript",
+   "text"}`; if `include_timestamps`: `{"message_type": "committed_transcript_with_timestamps", "text",
+   "language_code", "words": [...]}`; if `entity_detection` non-empty and the text non-empty:
+   `{"message_type": "committed_transcript_entities", "text", "entities": [{"text", "entity_type", "start_char",
+   "end_char"}]}` with regex entities: emails (`[\w.+-]+@[\w-]+(\.[\w-]+)+`) → `email_address` when pii|all;
+   digit runs `\d(?:[ -]?\d){12,}` (≥ 13 digits) → `credit_card_number` when pci|all; sorted by start_char; empty
+   list allowed (still sent). No voiced audio → `committed_transcript` with `""` (and the timestamps variant with
+   `words: []` when requested). Entity names from the registry are not modelled (Utterance has no entities).
+7. Faults (`PUT /sim/elevenlabs/stt/fault {"kind", "after_ms": int ≥ 0 = 0, "times": int ≥ 1 = 1}` 204; `GET` →
+   `{"fault": null|{kind, after_ms, remaining}}`; `DELETE` 204; reset clears; separate from the TTS fault).
+   `kind` ∈ the specs/08 §4 error types `error | auth_error | quota_exceeded | commit_throttled | unaccepted_terms |
+   rate_limited | queue_overflow | resource_exhausted | session_time_limit_exceeded | input_error |
+   invalid_request | chunk_size_exceeded | insufficient_audio_activity | transcriber_error` plus `disconnect`.
+   Firing point: when a session's received audio reaches `after_ms` (checked after each chunk's audio is fed), except
+   `commit_throttled`, which fires on the first commit at/after `after_ms` and swallows that commit (window kept for
+   the next commit). Frame `{"message_type": kind, "error": "Simulated <kind>"}`. Fatal kinds close after the frame:
+   1008 for `auth_error | quota_exceeded | unaccepted_terms | invalid_request | rate_limited |
+   session_time_limit_exceeded`, 1011 for `error | transcriber_error | resource_exhausted` (reason = the error text);
+   non-fatal (`commit_throttled | queue_overflow | input_error | chunk_size_exceeded | insufficient_audio_activity`)
+   leave the socket open; `disconnect` closes 1011 `"simulated disconnect"` with no frame. One fault per firing,
+   `times` consumed per firing across sessions. specs/30's `SimState.stt_fail_after_s` = kind `transcriber_error`
+   with `after_ms`. "Scenario flags" in the plan acceptance = this control route (the e2e harness arms it).
+8. Records `store.stt_sessions: list[SttSession]` (`store.py` dataclass `SttSessionRecord`), served at
+   `GET /sim/elevenlabs/stt/sessions` → `{"sessions": [{id, model_id, audio_format, commit_strategy, language_code,
+   keyterms, entity_detection, include_timestamps, previous_text, started_ms, ended_ms, end_reason
+   (null|disconnect|fault|reset|invalid), audio_ms, voiced_ms, partials, commits, transcripts: [{text, utterance_ids:
+   [...], language_code, committed_ms}]}]}`. Sessions are recorded only after auth succeeds. Client close or
+   disconnect → `disconnect`. Pending (not yet sent) commits are dropped on close.
+9. Control `POST /sim/elevenlabs/stt/transcripts {"texts": [non-empty str, ...]}` appends to `store.stt_script`
+   (204); `GET` → `{"texts": [...]}`; `DELETE` clears (204). Reset clears.
+10. Reset: `ElevenLabsStore.reset()` also closes `stt_sockets` (1012 `"simulator reset"`, open records end
+    `reset`), clears `stt_sessions`, `stt_script`, `stt_fault`. Snapshot `elevenlabs` adds `"stt_sessions": n,
+    "stt_sockets": open`.
+11. No server inactivity timeout and no spontaneous `commit_throttled`/limits (accelerated clock would fire them
+    on idle socket waits); errors only via faults.
+
+### Files
+- `packages/va_sim/src/va_sim/elevenlabs/stt_params.py` — `AUDIO_FORMATS: Mapping[str, SttFormat(name, rate,
+  encoding: Literal["ulaw","pcm"])]`, `SttParams`, `parse_stt_params`, `config_json(params) -> dict`.
+- `.../elevenlabs/stt_stream.py` — `SttStream`, `Heard`, `Commit` (text, words, language, utterance_ids),
+  `Partial`, `decode_chunk(audio: bytes, fmt) -> NDArray[np.int16]`, constants (FRAME_MS 20, VOICED_RMS 328,
+  SEGMENT_GAP_MS 300, MIN_SPEECH_MS 100, PARTIAL_EVERY_MS 300, MARKER_WINDOW_MS 260, CALLER_MS_PER_CHAR 70).
+  If > ~250 lines, put word timing + entities in `stt_text.py` (`word_timings`, `find_entities`).
+- `.../elevenlabs/stt_ws.py` — `stt_websocket(state, ws)` + `SttSocket` (reader + committer in one TaskGroup, send
+  lock, `close_for_reset`, fault firing, message validation helper `parse_chunk(message, first) -> Chunk | str`).
+  Reuse `tts_ws._close`/`_receive`-style helpers: move the generic `receive_json`/`close_quietly` into a new
+  `elevenlabs/ws_io.py` used by both tts_ws and stt_ws (avoid jscpd clones; keep TTS behaviour identical).
+- `.../elevenlabs/store.py` — `SttSessionRecord`, `SttFault`, `SttFaultKind` Literal, `stt_sessions`,
+  `stt_sockets`, `stt_script: deque[str]`, `stt_fault`, `new_stt_session(...)`, `arm_stt_fault`,
+  `take_stt_fault(at_ms: int, *, on_commit: bool) -> SttFault | None`, reset additions. If the file passes ~250
+  lines, move STT records/fault to `stt_store.py` and compose (`ElevenLabsStore.stt = SttStore()`), Builder's choice;
+  record it.
+- `.../elevenlabs/control.py` — STT routes (sessions, fault, transcripts); split to `stt_control.py` if long.
+- `.../elevenlabs/routes.py` — add `WebSocketRoute("/v1/speech-to-text/realtime", ...)` and STT control routes.
+- `.../elevenlabs/auth.py` — public `MISSING_KEY`.
+- `packages/va_sim/src/va_sim/state.py` — snapshot keys, reset docstring.
+- `specs/30` §3.3 Decision, `specs/08` §10 Decision, `AGENTS.md` (FakeElevenLabs STT test notes), Ralph memory.
+
+### Tests (`packages/va_sim/tests/elevenlabs/`; helpers in new `tests/support/stt_helpers.py` importing `served`,
+`realtime_state`, `send`, `recv_json`, `wait_closed`, `API_KEY` from tts_helpers — no copies: `stt_socket(base,
+query, key)`, `chunked(audio, fmt, ms=100)`, `send_audio(ws, audio, *, commit=False, previous_text=None)`,
+`recv_type(ws, message_type)` (skips partials unless asked), `caller_audio(state, text, sample_rate)` =
+register_utterance + synthesize_wire (+ L16 BE→LE conversion for pcm_16000), `silence(fmt, ms)`)
+- `test_stt_stream.py` (pure, no sockets): ulaw and pcm_16000 utterance audio → after trailing 400 ms silence a
+  commit returns the registered text; partial cadence (count = floor(voiced/300) with non-empty text, increasing
+  word counts, first partial ≤ 2 words); unknown registered-id → `[unintelligible]`; no marker (plain 400 Hz tone)
+  with script queue → scripted text, empty queue → `[unintelligible]`; segment < 100 ms discarded; two utterances in
+  one window joined; commit mid-utterance returns a prefix and the next commit the rest (union == text); empty
+  commit → ""; word timings monotone, first word start = body start (segment start + 0.18 s), spacing entries;
+  feed with sizes not multiple of 20 ms equals single feed; vad auto-commit after threshold silence;
+  entities (email, 16-digit card with spaces, category filtering); decode_chunk per format (pcm LE, ulaw).
+- `test_stt_params.py`: defaults, each invalid param reason text, keyterms/entity_detection repeated, config_json
+  echo key order.
+- `test_stt_ws.py` (real sockets, RealtimeClock, `realtime_state()` stt_final_ms 10): session_started echo
+  (incl. keyterms list); auth missing/invalid → auth_error frame + 1008; invalid query → invalid_request + 1008;
+  μ-law 8 kHz end-to-end: audio in 100 ms chunks, partials arrive, commit → committed_transcript text ==
+  registered text, with timestamps words reconstruct text; pcm_16000 same; commit latency (stt_final_ms 200 →
+  committed ≥ 0.2 s after commit send, wall clock); include_timestamps false → no timestamps frame; entity frame
+  when entity_detection=pii&entity_detection=pci; input_error cases (invalid JSON, wrong type, bad base64,
+  sample_rate mismatch, odd pcm bytes, previous_text on 2nd chunk) keep the socket usable; chunk_size_exceeded;
+  previous_text recorded; script queue via control route used for markerless audio; faults: parametrized over all
+  14 kinds + disconnect asserting frame/close code (fatal vs non-fatal), commit_throttled swallows one commit then
+  next commit carries the text, after_ms respected, times consumed; `/sim/reset` with an open socket → 1012 and
+  record end_reason reset and `state.tasks.pending == 0`; session record fields after close.
+- `test_control_elevenlabs.py`: stt sessions/fault/transcripts routes (validation 422 shared control format,
+  GET/DELETE), reset clears them; STT routes absent on the telnyx port (404); `test_state.py` snapshot keys.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (va_sim coverage ≥ 85 %, jscpd 0, spec refs);
+`uvx radon cc -s -a packages/va_sim/src` (new functions ≤ B); `uv export --no-emit-workspace --frozen | uvx
+pip-audit --strict`; `corepack pnpm audit --audit-level high`. No e2e. build.done payload keys: `tests, lint,
+typecheck, audit, coverage, complexity, duplication, specs`.
+
+### Risks
+- RealtimeClock for socket tests (accelerated clock races on socket waits, see memories); only pure stream tests
+  are clock-free.
+- Marker decode needs the pre-roll: the first voiced frame can be the sync tone itself; keep 40 ms pre-roll and
+  ≥ 260 ms after so decode_marker's 12 ms sync search fits. μ-law decode of synthesized audio must recover ids
+  (P03-T03a guarantees it at 8 kHz and 16 kHz; other rates untested — fine).
+- The −12 dB body floor keeps utterances one segment; the caller's DTMF in-band runs become `[unintelligible]`
+  segments (documented, acceptable).
+- tts_ws refactor into ws_io must not change TTS behaviour (its 97 tests must stay green).
+- Close reasons ≤ 123 bytes.
+
+## Build P03-T05a (Builder, 2026-10-29)
+
+Implemented per plan with these recorded deviations (all in specs/30 §3.3 Decision P03-T05a):
+- STT state lives in a composed `stt_store.SttStore` (`ElevenLabsStore.stt`) — store.py would pass 250 lines.
+- Expected duration for marker segments = `utterance_ms(text, 70)` (it already includes the 180 ms preamble; the
+  plan's `MARKER_MS + utterance_ms` double-counted).
+- A segment resolves (decode + resolver/script pop) only once it has >= 100 ms voiced audio, so clicks never
+  consume a script text. A commit does not force-resolve an open segment whose 260 ms marker window is incomplete
+  (a partial preamble misdecodes and would pop the script); its words join a later commit.
+- `end_reason` has no `invalid` value (invalid queries fail before auth, so they are never recorded).
+- `audio_ms` counts whole 20 ms frames analysed (a partial frame waits for the next message).
+- `ws_io.py` holds receive_json/close_quietly/close_reason + close codes; tts_ws uses it (TTS tests unchanged
+  except snapshot assertions that now see the stt keys).
+Files: elevenlabs/{ws_io,stt_params,stt_stream,stt_text,stt_store,stt_ws,stt_control}.py, routes/store/auth/tts_ws,
+state.py; tests elevenlabs/test_stt_{stream,params,ws}.py, test_control_elevenlabs.py, support/stt_helpers.py.
+Gate evidence: make fmt/lint/typecheck/placeholders exit 0 (mypy 525 files, 0 placeholder findings);
+va_sim + apps/sim pytest 771 passed, va_sim coverage 98% (stt_* 97-100%); full `make test` (pre-dedupe run)
+4182 passed, 5 failed + 11 errors all apps/api DB integration tests on pytest-timeout >60 s under load (open task
+fix:api-test-timeout-load) — those 77 tests pass alone in 25 s; make test-ts exit 0; openapi drift current;
+check_spec_refs 0 problems; jscpd packages/va_sim apps/sim 0 clones (STT/TTS send moved to ws_io.send_json, STT
+fault route uses one method-dispatch handler); radon: no new function above B; pip-audit + pnpm audit clean.
+
+## Plan P03-T05a (re-plan after build.blocked: missing backpressure evidence, Planner, 2026-10-29)
+
+The blocker is about format, not substance. The build is complete (see Build P03-T05a above). The build.done payload left out
+the required backpressure keys. No split or prerequisite is needed. Builder: do not change the design. Re-run the gates on
+the current working tree and fix only what fails:
+1. `make fmt lint typecheck placeholders` -> lint/typecheck.
+2. `uv run pytest packages/va_sim apps/sim --cov=va_sim` -> tests + coverage (>= 85 %). Then run full `make test`. Known
+   unrelated flake: apps/api DB integration tests hitting the 60 s pytest-timeout under host load (open task
+   fix:api-test-timeout-load). If those fail, re-run just those tests (`uv run pytest apps/api -x`) and report both results.
+3. `make check` (spec refs, jscpd) -> duplication/specs; `uvx radon cc -s -a packages/va_sim/src` -> complexity (average
+   grade + worst new function).
+4. `uv export --no-emit-workspace --frozen | uvx pip-audit --strict` and `corepack pnpm audit --audit-level high` -> audit.
+Emit build.done with exactly these keys in the payload, using the real results:
+`tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass (<pct>), complexity: <avg grade/score>,
+duplication: pass, specs: pass`. If any gate genuinely fails after a fix, emit build.blocked naming the gate.
+
+## Build P03-T05a gate re-run for evidence (Builder, 2026-10-29)
+
+No code changes; I re-ran the gates on the current working tree:
+- make fmt / lint / typecheck / placeholders: all exit 0 (0 placeholder findings).
+- `uv run pytest packages/va_sim apps/sim --cov=va_sim`: 771 passed in 31.8 s, va_sim coverage 98 % (stt_* 97-100 %, ws_io 87 %).
+- Full `make test`: 4185 passed, 13 errors. Every error is a "Timeout (>60.0s) from pytest-timeout" in apps/api DB
+  fixture setup (test_ip_allowlist_integration 11, test_dev_seed 2), which is the open task fix:api-test-timeout-load.
+  Re-running just those two modules gave 26 passed in 9.9 s.
+- make test-ts exit 0; check_openapi_drift current; check_spec_refs 0 problems; jscpd packages/va_sim apps/sim 0 clones.
+- radon cc va_sim average A (2.31); no new stt_*/ws_io function graded C or worse.
+- pip-audit --strict and pnpm audit --audit-level high: both report no known vulnerabilities.
+
+## Review P03-T05a (Reviewer, 2026-10-29)
+
+Approved. Gates re-run: make lint/typecheck/placeholders exit 0 (0 findings); `pytest packages/va_sim apps/sim --cov=va_sim`
+771 passed, 98 % coverage; full `make test` 4174 passed with 24 errors, all "Timeout (>60.0s)" in
+apps/api/tests/test_org_integration.py fixture setup (open task fix:api-test-timeout-load, unrelated to va_sim);
+that module re-run alone: 27 passed in 9.8 s. check_spec_refs 0 problems; jscpd packages/va_sim apps/sim 0 clones.
+Diff review: query validation, session_started echo, chunk validation (input_error / chunk_size_exceeded, previous_text
+first-chunk rule), segmentation/marker/partial/vad logic, commit latency on the sim clock, timestamps/entities frames,
+fault kinds with 1008/1011/non-fatal split, commit_throttled swallowing, reset 1012, and records all match the Decision
+P03-T05a rules. The vad minimum of 0.3 s is >= the 300 ms segment gap, so an auto-commit always sees the segment closed.
+The ws_io refactor keeps TTS behaviour, except that close reasons are now truncated to 123 bytes (safe). Tests contain no sleeps.

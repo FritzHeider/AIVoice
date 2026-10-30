@@ -395,7 +395,9 @@ async def test_reset_closes_open_sockets_1012() -> None:
     async with served(state) as base, tts_socket(base, ULAW) as ws:
         await send(ws, {"text": "x ", "context_id": "a", "flush": True})
         await recv_json(ws)
-        assert state.snapshot()["elevenlabs"] == {"tts_requests": 1, "tts_sockets": 1}
+        snapshot = state.snapshot()["elevenlabs"]
+        assert isinstance(snapshot, dict)
+        assert (snapshot["tts_requests"], snapshot["tts_sockets"]) == (1, 1)
         state.reset()
         closed = await wait_closed(ws)
     assert (closed.code, closed.reason) == (1012, "simulator reset")
