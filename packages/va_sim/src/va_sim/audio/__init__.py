@@ -1,7 +1,8 @@
 """Synthetic caller audio for the simulators (specs/30-testing-and-evals.md §3.1).
 
 The simulator's own G.711 μ-law codec and L16 helpers, the utterance marker preamble and its decoder, formant
-caller speech, and DTMF tones. Nothing here imports ``va_sim.state`` (the state imports the marker limits).
+caller speech, DTMF tones, and WAV input. Nothing here imports ``va_sim.state`` (the state imports the marker
+limits).
 """
 
 from va_sim.audio.codec import (
@@ -25,11 +26,13 @@ from va_sim.audio.synth import (
     utterance_ms,
     vowel_sequence,
 )
+from va_sim.audio.wav_input import MAX_WAV_MS, read_wav_pcm
 
 __all__ = [
     "DTMF_FREQS",
     "MARKER_MS",
     "MAX_UTTERANCE_ID",
+    "MAX_WAV_MS",
     "PCM16_TO_ULAW",
     "ULAW_SILENCE",
     "ULAW_TO_PCM16",
@@ -41,6 +44,7 @@ __all__ = [
     "l16be_to_pcm",
     "marker_preamble",
     "pcm_to_l16be",
+    "read_wav_pcm",
     "synthesize_dtmf",
     "synthesize_pcm16",
     "synthesize_utterance",

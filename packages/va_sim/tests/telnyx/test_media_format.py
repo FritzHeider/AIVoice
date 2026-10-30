@@ -137,3 +137,17 @@ async def test_streaming_start_rejects_unsupported_stream_params(
         assert detail["stream"] is None
         assert [c["name"] for c in detail["commands"]] == ["dial"]
         assert "streaming.started" not in [event for event, _ in events(transport, ccid)]
+
+
+@pytest.mark.parametrize(
+    ("fmt", "frame_bytes"),
+    [(MediaFormat("PCMU", 8000), 160), (MediaFormat("L16", 8000), 320), (MediaFormat("L16", 16000), 640)],
+)
+def test_encode_round_trips(fmt: MediaFormat, frame_bytes: int) -> None:
+    t = np.arange(fmt.sample_rate // 50) / fmt.sample_rate
+    pcm = np.rint(9000 * np.sin(2 * np.pi * 440 * t)).astype(np.int16)
+    wire = fmt.encode(pcm)
+    assert len(wire) == frame_bytes
+    decoded = fmt.to_pcm(wire).astype(np.int32)
+    tolerance = 400 if fmt.encoding == "PCMU" else 0
+    assert np.max(np.abs(decoded - pcm.astype(np.int32))) <= tolerance

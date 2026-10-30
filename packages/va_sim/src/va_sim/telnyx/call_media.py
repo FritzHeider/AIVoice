@@ -1,5 +1,6 @@
-"""Media features of a FakeTelnyx call: streaming, recording, playback, and answering machine detection
-(specs/30-testing-and-evals.md §3.2, Decision 2026-10-29 P03-T02b rules 8, 10, 11).
+"""Media features of a FakeTelnyx call: streaming, the scenario caller runner, recording, playback, and
+answering machine detection (specs/30-testing-and-evals.md §3.2 and §3.5, Decision 2026-10-29 P03-T02b rules
+8, 10, 11 and P03-T03c rule 1).
 
 Recordings are always WAV (specs/06 §10.2 Decision: no MP3 encoder): 8 kHz PCM16, channel 0 the caller track
 and channel 1 the agent track (``single``: their clipped sum), padded with silence to the recording's
@@ -15,6 +16,7 @@ from typing import Final, Literal
 
 from va_sim.clock import iso_z
 from va_sim.telnyx.call_events import CallEvents, Outgoing
+from va_sim.telnyx.caller_script import CallerScript
 from va_sim.telnyx.calls import ActiveRecording, Call, Playback, StreamState
 from va_sim.telnyx.media_session import MediaSession
 from va_sim.wav import pcm16_wav
@@ -107,6 +109,44 @@ class CallMedia(CallEvents):
             stream_url=stream.params["stream_url"],
             failure_reason=reason,
         )
+
+    # Scenario caller runner.
+
+    def media_connected(self, call: Call, session: MediaSession) -> None:
+        """A media session of ``call`` connected: start the leg's caller script on it (once per leg), and the
+        script of a bridged transfer leg that has no stream of its own."""
+        if call.script is None:
+            self._start_script(call, session)
+        if call.bridged_with is not None:
+            self.run_transfer_script(call.bridged_with, call)
+
+    def run_transfer_script(self, leg: Call, peer: Call) -> None:
+        """Run transfer leg ``leg``'s script on ``peer``'s connected media session when ``leg`` has no stream:
+        the platform hears the transfer target on the original call's stream."""
+        if not leg.transfer_leg or leg.script is not None or leg.stream is not None:
+            return
+        session = peer.stream.session if peer.stream is not None else None
+        if session is not None and session.connected:
+            self._start_script(leg, session)
+
+    def _start_script(self, call: Call, session: MediaSession) -> None:
+        """Start ``call``'s scenario script on ``session``: greeting and ``steps`` for the caller, only
+        ``transfer_target.steps`` for a transfer leg; nothing when there is nothing to run."""
+        scenario = self._state.scenarios.get(call.scenario_id or "")
+        if scenario is None:
+            return
+        if call.transfer_leg:
+            target = scenario.transfer_target
+            steps = () if target is None else target.steps
+            if not steps:
+                return
+            script = CallerScript(self._state, call, "transfer_target", steps, None)
+        else:
+            if not scenario.steps and scenario.greeting_audio is None:
+                return
+            script = CallerScript(self._state, call, "caller", scenario.steps, scenario.greeting_audio)
+        call.script = script
+        script.start(session)
 
     # Playback.
 

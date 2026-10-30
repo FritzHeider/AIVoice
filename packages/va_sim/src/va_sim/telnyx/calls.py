@@ -3,7 +3,8 @@
 A :class:`Call` is one leg. Only :class:`va_sim.telnyx.call_engine.CallEngine` mutates it; handlers read it to
 validate commands and the control API serialises it with :meth:`Call.summary`. ``audio``, ``stream``,
 ``caller_dtmf``, and ``timeline_utterances`` are filled by the media session of the stream
-(:mod:`va_sim.telnyx.media_session`).
+(:mod:`va_sim.telnyx.media_session`); ``script`` is the scenario caller runner of the leg
+(:mod:`va_sim.telnyx.caller_script`).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from va_sim.scenario import Answer, TransferTarget
 from va_sim.telnyx.store import Record
 
 if TYPE_CHECKING:
+    from va_sim.telnyx.caller_script import CallerScript
     from va_sim.telnyx.media_session import MediaSession
 
 __all__ = [
@@ -211,6 +213,10 @@ class Call:
     audio: CallAudio = field(default_factory=CallAudio)
     timeline_utterances: list[dict[str, Any]] = field(default_factory=list)
     caller_dtmf: list[dict[str, str]] = field(default_factory=list)
+    # Dialled on behalf of another leg (transfer, or ``link_to`` without a scenario of its own): its far end
+    # follows the scenario's ``transfer_target``.
+    transfer_leg: bool = False
+    script: CallerScript | None = None
 
     @property
     def ended(self) -> bool:
@@ -298,7 +304,12 @@ class Call:
             "caller_dtmf": [dict(entry) for entry in self.caller_dtmf],
             "stream": None if self.stream is None else self.stream.summary(),
             "conference_id": None if self.conference is None else self.conference.conference_id,
+            "script": self.script_summary(),
         }
+
+    def script_summary(self) -> Record | None:
+        """The summary and timeline ``script``: role, status, greeting, step outcomes (None: no runner)."""
+        return None if self.script is None else self.script.summary()
 
     def timeline(self) -> Record:
         """``GET /sim/telnyx/calls/{ccid}/timeline`` (sim ``virtual_ms``)."""
@@ -308,6 +319,7 @@ class Call:
             "answered_ms": self.answered_ms,
             "ended_ms": self.ended_ms,
             "utterances": list(self.timeline_utterances),
+            "script": self.script_summary(),
         }
 
 

@@ -55,6 +55,7 @@ __all__ = [
     "TransferTarget",
     "WaitAgentSpeech",
     "WaitAgentSpeechStep",
+    "is_wav_path",
     "issues_from_validation",
     "load_scenario",
     "load_scenario_file",
@@ -420,16 +421,26 @@ def _compose(text: str, source: str) -> yaml.Node:
     return root
 
 
-def _resolve_rules(scenario: Scenario, base_dir: Path) -> Scenario:
-    rules = tuple(
-        rule if Path(rule).is_absolute() else (base_dir / rule).resolve().as_posix()
-        for rule in scenario.llm_rules
-    )
-    return scenario.model_copy(update={"llm_rules": rules})
+def is_wav_path(greeting_audio: str) -> bool:
+    """Whether a ``greeting_audio`` value names a WAV file (``.wav``, any case) rather than text to speak."""
+    return greeting_audio.lower().endswith(".wav")
+
+
+def _resolve(path: str, base_dir: Path) -> str:
+    return path if Path(path).is_absolute() else (base_dir / path).resolve().as_posix()
+
+
+def _resolve_paths(scenario: Scenario, base_dir: Path) -> Scenario:
+    update: dict[str, Any] = {"llm_rules": tuple(_resolve(rule, base_dir) for rule in scenario.llm_rules)}
+    greeting = scenario.greeting_audio
+    if greeting is not None and is_wav_path(greeting):
+        update["greeting_audio"] = _resolve(greeting, base_dir)
+    return scenario.model_copy(update=update)
 
 
 def load_scenario(text: str, *, source: str = "<string>", base_dir: Path | None = None) -> Scenario:
-    """Parse and validate one YAML scenario; relative ``llm_rules`` resolve against ``base_dir`` when given.
+    """Parse and validate one YAML scenario; relative ``llm_rules`` and a relative WAV ``greeting_audio``
+    resolve against ``base_dir`` when given.
 
     Raises :class:`ScenarioError` listing every issue with its path, line, and column.
     """
@@ -442,7 +453,7 @@ def load_scenario(text: str, *, source: str = "<string>", base_dir: Path | None 
         scenario = Scenario.model_validate(data)
     except ValidationError as exc:
         raise ScenarioError(source, issues_from_validation(exc, root)) from exc
-    return _resolve_rules(scenario, base_dir) if base_dir is not None else scenario
+    return _resolve_paths(scenario, base_dir) if base_dir is not None else scenario
 
 
 def load_scenario_file(path: Path) -> Scenario:

@@ -316,3 +316,17 @@ def test_json_schema_describes_the_dsl() -> None:
     assert {"id", "match", "steps", "assertions"} <= set(schema["properties"])
     assert schema["required"] == ["id", "match"]
     assert {"Say", "Dtmf", "Answer", "TransferTarget"} <= set(schema["$defs"])
+
+
+def test_relative_wav_greeting_resolves_against_base_dir(tmp_path: Path) -> None:
+    scenario = load_scenario(BASE + "greeting_audio: audio/Hello.WAV\n", base_dir=tmp_path)
+    assert scenario.greeting_audio == (tmp_path / "audio" / "Hello.WAV").resolve().as_posix()
+
+
+def test_text_greeting_and_absolute_wav_are_kept(tmp_path: Path) -> None:
+    text = load_scenario(BASE + 'greeting_audio: "Hello? Who is this.wav-free"\n', base_dir=tmp_path)
+    assert text.greeting_audio == "Hello? Who is this.wav-free"
+    absolute = load_scenario(BASE + "greeting_audio: /srv/hello.wav\n", base_dir=tmp_path)
+    assert absolute.greeting_audio == "/srv/hello.wav"
+    unresolved = load_scenario(BASE + "greeting_audio: hello.wav\n")
+    assert unresolved.greeting_audio == "hello.wav"

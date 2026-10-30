@@ -179,6 +179,22 @@ async def test_say_on_wideband_stream(media_agent: MediaAgent) -> None:
         assert state.utterances[body["utterance_id"]].language == "de"
 
 
+async def test_say_on_narrowband_l16_stream(media_agent: MediaAgent) -> None:
+    state = telnyx_state(RecordingTransport())
+    async with telnyx_client(state) as client:
+        ccid = await streaming(
+            client, state, media_agent, stream_codec="L16", stream_bidirectional_sampling_rate=8000
+        )
+        response = await client.post(f"/sim/telnyx/calls/{ccid}/say", json={"text": "narrow"})
+        assert response.status_code == 202, response.text
+        body = response.json()
+        assert body["duration_ms"] == 180 + len("narrow") * 70
+        sent_before = len(media_agent.media())
+        await media_agent.wait_media(sent_before + body["duration_ms"] // 20 + 2)
+        audio = b"".join(payload_of(f) for f in media_agent.media()[sent_before:])
+        assert decode_marker(l16be_to_pcm(audio), 8000) == body["utterance_id"]
+
+
 async def test_agent_audio_plays_out_and_mark_is_echoed_after_it(media_agent: MediaAgent) -> None:
     state = telnyx_state(RecordingTransport())
     async with telnyx_client(state) as client:

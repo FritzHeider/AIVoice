@@ -2,18 +2,23 @@
 
 Simulators schedule delayed work (number order completion, message lifecycle events, webhook retries) as tasks
 owned by one :class:`Supervisor`. A failing task is logged, never re-raised into the request that spawned it;
-``/sim/reset`` cancels everything pending and shutdown awaits the cancellation.
+``/sim/reset`` cancels everything pending and shutdown awaits the cancellation. :func:`hold_clock` keeps an
+accelerated clock at the current instant while CPU work runs in a worker thread.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
-from typing import Any, Final
+import contextlib
+from collections.abc import AsyncIterator, Coroutine
+from typing import TYPE_CHECKING, Any, Final
 
 from va_common.logging import get_logger
 
-__all__ = ["Supervisor"]
+if TYPE_CHECKING:
+    from va_sim.clock import SimClock
+
+__all__ = ["Supervisor", "hold_clock"]
 
 _log: Final = get_logger(__name__)
 
@@ -63,3 +68,26 @@ class Supervisor:
             # gather returns without yielding when every task is already done; give their done callbacks
             # (which remove them from the set) a loop turn so this cannot spin.
             await asyncio.sleep(0)
+
+
+@contextlib.asynccontextmanager
+async def hold_clock(clock: SimClock, tasks: Supervisor, *, name: str) -> AsyncIterator[None]:
+    """Keep an accelerated ``clock`` at the current instant inside the block (no-op on a realtime clock).
+
+    Virtual time moves only while the event loop is idle, and awaiting real I/O or a worker thread leaves it
+    idle; a holder task sleeping zero seconds in a loop is always the earliest sleeper, so the clock never
+    jumps past it until the block exits.
+    """
+    if clock.mode != "accelerated":
+        yield
+        return
+
+    async def hold() -> None:
+        while True:
+            await clock.sleep(0)
+
+    holder = tasks.spawn(hold(), name=name)
+    try:
+        yield
+    finally:
+        holder.cancel()

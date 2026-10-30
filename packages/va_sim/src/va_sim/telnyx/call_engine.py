@@ -139,6 +139,8 @@ class CallEngine(CallMedia):
         call.ended_at = self._state.clock.now()
         call.ended_ms = self._state.clock.virtual_ms()
         call.hangup_cause, call.hangup_source = cause, source
+        if call.script is not None:
+            call.script.wake()
         items.append(
             self.event(
                 call,
@@ -185,6 +187,8 @@ class CallEngine(CallMedia):
         a.state = b.state = "bridged"
         a.park_after_unbridge = park
         self.send([self.event(a, "call.bridged"), self.event(b, "call.bridged")])
+        self.run_transfer_script(a, b)
+        self.run_transfer_script(b, a)
 
     def transfer(self, account: Account, a: Call, outcome: LegOutcome, timeout_s: float, **leg: Any) -> Call:
         """Dial leg B for answered leg ``a``; B bridges to ``a`` when it answers."""
@@ -198,6 +202,7 @@ class CallEngine(CallMedia):
             outcome=outcome,
             scenario_id=a.scenario_id,
             bridge_on_answer=a,
+            transfer_leg=True,
             **leg,
         )
         a.transfers.append(TransferEntry(b.call_control_id, b.to, b.from_, iso_z(self._state.clock.now())))

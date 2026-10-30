@@ -88,12 +88,21 @@ class CallerQueue:
         self._sent = 0
         self._spans: deque[_Span] = deque()
 
-    def push(self, audio: bytes, entry: dict[str, object] | None = None) -> None:
-        """Queue ``audio``; ``entry`` (an utterance timeline entry) is reported when it starts and ends."""
+    @property
+    def sent(self) -> int:
+        """Bytes taken into frames so far (the caller stream offset of the next byte)."""
+        return self._sent
+
+    def push(self, audio: bytes, entry: dict[str, object] | None = None) -> int:
+        """Queue ``audio``; ``entry`` (an utterance timeline entry) is reported when it starts and ends.
+
+        Returns the stream offset just past ``audio``: it has been sent once :attr:`sent` reaches it.
+        """
         start = self._sent + len(self._queue)
         self._queue.extend(audio)
         if entry is not None and audio:
             self._spans.append(_Span(entry, start, start + len(audio)))
+        return start + len(audio)
 
     def next_frame(self) -> CallerFrame:
         """The next 20 ms frame (silence-padded when the queue runs short)."""

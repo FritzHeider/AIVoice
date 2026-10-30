@@ -54,13 +54,14 @@ def call_routes(state: SimState) -> list[BaseRoute]:
     engine = state.call_engine
     actions = call_actions(state)
 
-    def outcome(body: DialRequest, link: Call | None) -> tuple[LegOutcome, str | None]:
+    def outcome(body: DialRequest, link: Call | None) -> tuple[LegOutcome, str | None, bool]:
+        """(outcome, scenario id, transfer leg); a ``link_to`` leg without a scenario is a transfer leg."""
         scenario = state.scenario_for_destination(body.to)
         if scenario is not None:
-            return outcome_of(scenario.answer), scenario.id
+            return outcome_of(scenario.answer), scenario.id, False
         if link is not None:
-            return transfer_outcome(state, link), link.scenario_id
-        return outcome_of(None), None
+            return transfer_outcome(state, link), link.scenario_id, True
+        return outcome_of(None), None, False
 
     async def dial(request: Request, account: Account) -> Response:
         body = await parse_body(request, DialRequest)
@@ -79,7 +80,7 @@ def call_routes(state: SimState) -> list[BaseRoute]:
         link = account.calls.get(body.link_to) if body.link_to is not None else None
         if body.link_to is not None and link is None:
             return invalid(f"Call {body.link_to!r} does not exist.", "/link_to")
-        leg_outcome, scenario_id = outcome(body, link)
+        leg_outcome, scenario_id, transfer_leg = outcome(body, link)
         call = engine.new_call(
             account,
             call_session_id=None if link is None else link.call_session_id,
@@ -97,6 +98,7 @@ def call_routes(state: SimState) -> list[BaseRoute]:
             time_limit_s=float(body.time_limit_secs),
             pending=pending_media(body),
             bridge_on_answer=link if body.bridge_on_answer else None,
+            transfer_leg=transfer_leg,
         )
         log_command(state, call, "dial", body.command_id, duplicate=False)
         if body.command_id is not None:

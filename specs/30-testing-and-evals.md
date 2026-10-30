@@ -542,6 +542,45 @@ recording deliveries with signature verification), then evaluates `assertions` p
 > position of the offending key, or of the deepest existing parent for a missing field), e.g.
 > `scenarios/x.yaml:9:15: steps[3].silence.ms: Input should be greater than or equal to 0`.
 
+> Decision (2026-10-29): scenario caller runner (P03-T03c). (1) Start: one `CallerScript` per leg
+> (`va_sim.telnyx.caller_script`), started once, when a media session of the leg has sent `connected` and `start`,
+> if the leg has a scenario with something to run; a restarted stream does not restart it. Outgoing and inbound legs
+> (role `caller`) speak `greeting_audio` and then run `steps`; transfer legs (role `transfer_target`: legs created
+> by `transfer`, and `link_to` legs dialled to a number without a scenario of its own, which already follow the
+> linked call's `transfer_target`) run only `transfer_target.steps`. A transfer leg without its own stream runs on
+> its bridged peer's connected session (the platform hears the transfer target on the original call's stream),
+> started at the bridge or when the peer's stream connects. No media → no script (`script: null`). (2) All audio
+> (each utterance registered in document order as `register_utterance(text, language, text.split())`, synthesized
+> at the stream rate with seed `utterance_seed(id)`; in-band DTMF tones; the greeting WAV) is rendered in one worker
+> thread while the accelerated clock is held (`va_sim.tasks.hold_clock`), so preparation takes no virtual time. An
+> exhausted utterance id space fails that step. (3) `MediaFormat.encode` writes the stream encoding (μ-law, or L16
+> big-endian at 8 or 16 kHz); `POST /sim/telnyx/calls/{ccid}/say` shares the renderer, so L16 8 kHz streams now get
+> L16 audio. (4) `greeting_audio` ending in `.wav` (any case) is a 16-bit PCM WAV path (any channel count, averaged;
+> any rate, linearly resampled; ≤ 60 s); otherwise it is text spoken in `en`. A relative WAV path resolves against
+> the scenario file's directory (scenarios POSTed to the control API keep the path as given). A missing or invalid
+> WAV fails the greeting (`detail` says why) and the steps still run; a WAV greeting's timeline entry has
+> `utterance_id: null` and `text` = the file name. (5) Agent speech: a 20 ms frame of played-out agent audio
+> (8 kHz) is speech when its RMS exceeds 256. Per step a fresh detector tracks the current turn (speech ms; silent
+> gaps shorter than the gap keep the turn, speech after a longer silence starts a new turn) and the silence since
+> the last speech frame. (6) Steps record `{index, type, status, started_ms, ended_ms, detail}` (+ `utterance_id`
+> for `say`, set when queued), status `pending | running | ok | timeout | failed | cancelled`, times in sim
+> `virtual_ms`; a timeout or failure is recorded and the next step runs. `wait_agent_speech`: gap =
+> `then_silence_ms`; ok when the turn is ≥ max(`min_ms`, 20) ms and the silence ≥ `then_silence_ms` (0: as soon as
+> the turn qualifies), else `timeout` after `timeout_ms`. `say`: queued at once, or with `barge_in_after_agent_ms`
+> N on the tick after the agent's turn (gap 700 ms) reaches max(N, 20) ms — `timeout` (nothing spoken) when that
+> does not happen within 10 000 ms; ok when its last byte has been sent (`ended_ms` = the timeline `end_ms`).
+> `dtmf`: digits split at `w`; each run is sent (one `dtmf` event per tick, or with `inband: true` only tones: per
+> digit 100 ms tone + 100 ms silence as caller audio) and each `w` then waits 500 ms; ok once the last digit has gone
+> out. `silence`: the caller stays quiet for `ms`. `expect_hangup`: ok when the leg ends by `by` (`agent` ⇔
+> `hangup_source` is the platform side: `caller` for outgoing legs, `callee` for incoming; `caller` ⇔ the remote
+> side; `any`), `failed` with `detail: "hung up by <hangup_source>"` otherwise, `timeout` after `timeout_ms`.
+> `hangup`: the far end hangs up (`normal_clearing`, `hangup_source` = the remote side: `callee` outgoing, `caller`
+> inbound). (7) When the leg ends, every running or pending step (and greeting) becomes `cancelled` with `detail:
+> "call ended"`; when the session the script runs on stops while the leg is up, `"media stream stopped"`. Script
+> status `running` → `done` | `cancelled`; `/sim/reset` cancels scripts. (8) The call summary and timeline add
+> `script: null | {role, status, greeting: null | {source: "text" | "wav", status, utterance_id, started_ms,
+> ended_ms, detail}, steps: [...]}`.
+
 ## 4. Unit/integration requirements per package (minimum)
 
 | Package | Must cover |

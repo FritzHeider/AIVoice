@@ -7,7 +7,8 @@ of queued agent audio, echoes due marks, sends pending frames (errors, injected 
 sends one caller ``media`` frame; and a receive loop that parses agent ``media``/``mark``/``clear`` frames.
 Only the tick loop writes to the socket, so frame order and sequence numbers stay consistent. On an
 accelerated clock virtual time does not move while the session connects (the handshake takes no simulated
-time).
+time). Listeners (the scenario caller runner, Decision 2026-10-29 P03-T03c) hear about every tick, with
+whether the agent frame it played was speech, and about the end of the session.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import Counter, deque
-from typing import TYPE_CHECKING, Any, Final
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import numpy as np
 import orjson
@@ -24,6 +26,8 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from va_common.logging import get_logger
 from va_sim.clock import iso_z
+from va_sim.tasks import hold_clock
+from va_sim.telnyx.agent_speech import AGENT_SPEECH_LEVEL, is_speech
 from va_sim.telnyx.keys import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from va_sim.telnyx.media_format import FRAME_MS, TRACK_RATE, agent_format, stream_format
 from va_sim.telnyx.media_frames import (
@@ -48,10 +52,8 @@ if TYPE_CHECKING:
     from va_sim.telnyx.call_media import CallMedia
     from va_sim.telnyx.calls import Call, StreamState
 
-__all__ = ["AGENT_SPEECH_LEVEL", "MediaSession"]
+__all__ = ["AgentTick", "MediaListener", "MediaSession"]
 
-# An agent media message with a sample louder than this counts as speech for the timeline latency.
-AGENT_SPEECH_LEVEL: Final = 256
 _FRAME_S: Final = FRAME_MS / 1000
 _OPEN_TIMEOUT_S: Final = 5.0
 _CLOSE_TIMEOUT_S: Final = 2.0
@@ -63,6 +65,22 @@ type Frame = dict[str, Any]
 
 class _PeerClosedError(Exception):
     """The agent closed the WebSocket before the stream was stopped."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTick:
+    """One tick of the session: its sim time and whether the agent frame it played out was speech."""
+
+    at_ms: int
+    speech: bool
+
+
+class MediaListener(Protocol):
+    """Told about every tick and about the end of the session; must return at once (O(1) work)."""
+
+    def on_tick(self, tick: AgentTick) -> None: ...
+
+    def on_media_end(self) -> None: ...
 
 
 def _dumps(frame: Frame) -> str:
@@ -99,6 +117,9 @@ class MediaSession:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._stopping = False
+        self._listeners: list[MediaListener] = []
+        self._ended = False
+        self._dtmf_queued = 0
         self.frames_sent = 0
         self.marks_echoed = 0
         self.received: Counter[str] = Counter()
@@ -109,6 +130,23 @@ class MediaSession:
     def connected(self) -> bool:
         """Connected and not stopping: caller audio can be queued."""
         return self._ws is not None and not self._stopping
+
+    @property
+    def caller_sent(self) -> int:
+        """Caller audio bytes sent so far (compare with the offset :meth:`queue_caller` returns)."""
+        return self._caller.sent
+
+    @property
+    def dtmf_sent(self) -> int:
+        """DTMF digits sent so far (compare with the count :meth:`queue_dtmf` returns)."""
+        return self._dtmf_queued - len(self._dtmf)
+
+    def add_listener(self, listener: MediaListener) -> None:
+        self._listeners.append(listener)
+
+    def remove_listener(self, listener: MediaListener) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
 
     def start(self) -> None:
         self._task = self._state.tasks.spawn(self._run(), name=f"telnyx-media-{self._stream.stream_id}")
@@ -122,14 +160,16 @@ class MediaSession:
             self._task.cancel()
         else:
             self._stop.set()
+        self._end()
 
     async def wait_closed(self) -> None:
         """Wait until the session has ended (the socket is closed)."""
         if self._task is not None and not self._task.done():
             await asyncio.wait({self._task})
 
-    def queue_caller(self, wire: bytes, utterance: tuple[int, str] | None = None) -> None:
-        """Queue caller audio in the stream format; an ``(id, text)`` utterance gets a timeline entry."""
+    def queue_caller(self, wire: bytes, utterance: tuple[int | None, str] | None = None) -> int:
+        """Queue caller audio in the stream format; an ``(id, text)`` utterance gets a timeline entry (id
+        None: a WAV file). Returns the offset :attr:`caller_sent` reaches once the audio has been sent."""
         entry: dict[str, Any] | None = None
         if utterance is not None:
             entry = {
@@ -141,11 +181,14 @@ class MediaSession:
                 "latency_ms": None,
             }
             self._call.timeline_utterances.append(entry)
-        self._caller.push(wire, entry)
+        return self._caller.push(wire, entry)
 
-    def queue_dtmf(self, digits: str) -> None:
-        """One ``dtmf`` event per digit, at successive ticks."""
+    def queue_dtmf(self, digits: str) -> int:
+        """One ``dtmf`` event per digit, at successive ticks; returns the :attr:`dtmf_sent` count reached once
+        these digits have been sent."""
         self._dtmf.extend(digits)
+        self._dtmf_queued += len(digits)
+        return self._dtmf_queued
 
     def inject(self, frame: Frame) -> None:
         """Send ``frame`` verbatim before the next caller media frame."""
@@ -162,7 +205,21 @@ class MediaSession:
 
     # Connection.
 
+    def _end(self) -> None:
+        """Tell the listeners, once, that the session is over (stopped, closed by the agent, or failed)."""
+        if self._ended:
+            return
+        self._ended = True
+        for listener in tuple(self._listeners):
+            listener.on_media_end()
+
     async def _run(self) -> None:
+        try:
+            await self._session()
+        finally:
+            self._end()
+
+    async def _session(self) -> None:
         try:
             ws = await self._connect()
         except (OSError, TimeoutError, WebSocketException) as exc:
@@ -190,12 +247,8 @@ class MediaSession:
         return headers
 
     async def _connect(self) -> ClientConnection:
-        hold = (
-            self._state.tasks.spawn(self._hold_clock(), name=f"telnyx-media-hold-{self._stream.stream_id}")
-            if self._state.clock.mode == "accelerated"
-            else None
-        )
-        try:
+        name = f"telnyx-media-hold-{self._stream.stream_id}"
+        async with hold_clock(self._state.clock, self._state.tasks, name=name):
             return await connect(
                 str(self._stream.params["stream_url"]),
                 additional_headers=self._headers(),
@@ -206,19 +259,12 @@ class MediaSession:
                 ping_interval=None,
                 proxy=None,
             )
-        finally:
-            if hold is not None:
-                hold.cancel()
-
-    async def _hold_clock(self) -> None:
-        """Keep an accelerated clock at the current instant (a sleeper due now is always the earliest)."""
-        while True:
-            await self._state.clock.sleep(0)
 
     async def _serve(self, ws: ClientConnection) -> None:
         self._align_tracks()
         await ws.send(_dumps(connected_frame()))
         await ws.send(_dumps(start_frame(self._identity, self.fmt)))
+        self._events.media_connected(self._call, self)
         async with asyncio.TaskGroup() as group:
             loops = (group.create_task(self._receive_loop(ws)), group.create_task(self._tick_loop(ws)))
             await self._stop.wait()
@@ -301,7 +347,8 @@ class MediaSession:
         """One 20 ms step: the frames to send, in order."""
         stream_id = self._stream.stream_id
         played, marks = self._playout.tick()
-        self._call.audio.agent.extend(self.agent_fmt.decode_pcm8k(played))
+        agent_pcm = self.agent_fmt.decode_pcm8k(played)
+        self._call.audio.agent.extend(agent_pcm)
         frames = [mark_frame(stream_id, self._next_sequence(), name) for name in marks]
         self.marks_echoed += len(marks)
         frames.extend(self._outbox)
@@ -312,6 +359,9 @@ class MediaSession:
             frames.append(dtmf_frame(stream_id, self._next_sequence(), digit, occurred_at))
             self._call.caller_dtmf.append({"digit": digit, "at": occurred_at})
         frames.extend(self._caller_frames())
+        tick = AgentTick(self._state.clock.virtual_ms(), is_speech(agent_pcm))
+        for listener in tuple(self._listeners):
+            listener.on_tick(tick)
         return frames
 
     def _caller_frames(self) -> list[Frame]:

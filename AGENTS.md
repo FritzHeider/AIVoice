@@ -703,3 +703,12 @@ Grafana 3001
   whenever the loop waits on socket I/O — assert orders and counts, not virtual ms of socket-driven events; never
   `state.tasks.drain()` with a live stream (stop it or hang up first). Unsupported stream codecs (PCMA, G722, OPUS,
   AMR-WB, other rates, `mp3` mode) are 422 `10015` on dial/answer/streaming_start.
+- 2026-10-29 (P03-T03c): scenario caller runner = `va_sim.telnyx.caller_script.CallerScript` (steps in
+  `caller_steps.py`, spec: specs/30 §3.5 Decision P03-T03c); `Call.script` / summary+timeline `script`. It starts
+  from `CallMedia.media_connected` (called by `MediaSession` after `start`) and listens to the session
+  (`add_listener`: `on_tick(AgentTick)`, `on_media_end`); listeners must stay O(1). Waits race the session ticks
+  against a sim-clock deadline; offsets from `queue_caller`/`queue_dtmf` vs `caller_sent`/`dtmf_sent` tell when
+  audio has gone out. CPU work that must not cost virtual time runs inside `va_sim.tasks.hold_clock(clock, tasks,
+  name=...)` + `asyncio.to_thread`. Tests: `tests/telnyx/test_caller_script.py` (`until(state, predicate)` sleeps
+  on the sim clock; assert step times relative to played agent frames, never socket arrival times). Two
+  `telnyx_client(...)` blocks streaming to media agents in ONE test hang (pre-existing); use separate tests.

@@ -1146,3 +1146,206 @@ state.tasks with cancellation closing the socket, synthesis via to_thread, and t
 in `say`. Tests use condition waits (no polling sleeps) apart from the one realtime pacing test. The unrelated
 va_api capture_logs flake fix is deterministic. Non-blocking note: `say` registers the utterance id before the
 post-synthesis re-check, so a call that ends mid-synthesis consumes an id without queuing audio (harmless).
+
+## Plan P03-T03c — FakeTelnyx scenario caller runner (Planner, 2026-10-29)
+
+Goal: when a leg's media session connects, a supervised `CallerScript` plays the scenario `greeting_audio`, then runs
+`steps` (transfer legs: `transfer_target.steps`) against the stream, recording per-step outcomes in the call summary
+and timeline. Spec refs: specs/30 §3.2 media WS client, §3.5 steps/greeting/transfer_target/barge-in.
+
+### Decisions (Builder writes ONE `> Decision (2026-10-29): scenario caller runner (P03-T03c).` block at the end of
+specs/30 §3.5, and a one-line pointer in the P03-T03b §3.2 Decision is NOT needed — just replace nothing)
+1. Start: one script per leg, started once, on the first `MediaSession` connect of that leg (after `connected`+`start`
+   are sent) when the leg has a scenario with a greeting or steps. Outgoing/inbound legs run `greeting_audio` then
+   `steps` (role `caller`); transfer legs (created by `CallEngine.transfer`, new `Call.transfer_leg: bool`) run only
+   `transfer_target.steps` (role `transfer_target`, no greeting). A transfer leg without its own stream runs on its
+   bridged peer's media session: started in `CallEngine.bridge` when the transfer leg has no script and the peer has a
+   connected session (the platform hears the transfer target on the original call's stream). No media → no script
+   (summary `script: null`). A restarted stream does not restart a script.
+2. Audio preparation: at script start every utterance (greeting text and each `say`, in document order) is registered
+   (`state.register_utterance(text, language, tuple(text.split()))` → deterministic ids) and synthesized in the stream
+   format, and in-band DTMF tones / the greeting WAV are rendered, all in ONE `asyncio.to_thread` call while the
+   accelerated clock is held (generalize MediaSession's `_hold_clock` into `va_sim.tasks.hold_clock(clock, tasks, *,
+   name)` async context manager, no-op for realtime; MediaSession `_connect` uses it). So step timing on the
+   accelerated clock does not depend on thread speed. Utterance-limit ValueError → that step `failed`.
+3. Encoding: new `MediaFormat.encode(pcm: NDArray[np.int16]) -> bytes` (PCMU μ-law, else L16 big-endian at its rate).
+   Synthesis = `synthesize_pcm16(id, text, sample_rate=fmt.sample_rate, seed=state.utterance_seed(id))` → `fmt.encode`.
+   This also fixes the existing `/say` route for L16 8 kHz streams (synthesize_wire(8000) produced μ-law): the route
+   and the script share `va_sim.telnyx.caller_audio.render_utterance(state_seed_fn..)` (see Files) — no copies (jscpd).
+4. `greeting_audio`: a value ending in `.wav` (case-insensitive) is a WAV path, else text spoken like `say` (language
+   `en`). `load_scenario(..., base_dir=)` resolves a relative WAV path against the scenario file directory (rename
+   `_resolve_rules` → `_resolve_paths`, also covers `llm_rules`); scenarios POSTed to `/sim/telnyx/scenarios` keep the
+   path as given (relative to the sim process working directory). WAV: PCM16 (sampwidth 2) only, any channel count
+   (averaged to mono), any rate (linear `np.interp` resample to the stream rate), ≤ 60 s; read with stdlib `wave`
+   inside the preparation thread. Missing/invalid file → greeting `failed` with `detail`, steps still run. Timeline
+   entry for a WAV greeting: `utterance_id: null`, `text: <file name>` (`MediaSession.queue_caller` accepts
+   `tuple[int | None, str]`).
+5. Agent speech detection (`va_sim.telnyx.agent_speech`): a 20 ms frame of *played-out* agent audio (8 kHz PCM16, the
+   frame the playout tick just played) is speech when its RMS > `AGENT_SPEECH_LEVEL` (256). `SpeechDetector(gap_ms)`
+   fed one bool per tick keeps `turn_ms` (speech ms of the current turn; silent gaps shorter than `gap_ms` keep the
+   turn) and `silence_ms` (silence since the last speech frame); a silence of ≥ `gap_ms` before the turn qualifies
+   resets `turn_ms` to 0. A fresh detector starts with each step (speech before the step is not counted).
+6. Steps (each entry `{index, type, status, started_ms, ended_ms, detail}` + `utterance_id` for `say`; status
+   `pending | running | ok | timeout | failed | cancelled`; times = sim `virtual_ms`). A timeout or failure is
+   recorded and the script continues with the next step.
+   - `wait_agent_speech {min_ms, then_silence_ms, timeout_ms}`: detector `gap_ms = then_silence_ms`; ok when
+     `turn_ms ≥ max(min_ms, 20)` and `silence_ms ≥ then_silence_ms` (then_silence 0 → ok as soon as the turn
+     qualifies); timeout after `timeout_ms` from step start.
+   - `say {text, language, barge_in_after_agent_ms}`: null → queue now; N → detector `gap_ms = 700`, queue on the tick
+     after `turn_ms ≥ N` (N = 0: first speech frame); no qualifying speech within 10 000 ms (`BARGE_IN_TIMEOUT_MS`) →
+     `timeout`, nothing spoken. ok when the utterance's last byte has been sent (`ended_ms` = its timeline `end_ms`).
+   - `dtmf {digits, inband}`: digits split at `w`; each run is sent then `w` waits 500 ms on the sim clock after the
+     run has gone out. `inband: false` → `MediaSession.queue_dtmf` (one Telnyx `dtmf` event per tick); `inband: true`
+     → tones only (no `dtmf` events): per digit 100 ms `synthesize_dtmf`-equivalent tone rendered in the stream
+     format (`synthesize_dtmf(..., sample_rate)` for PCMU 8k/L16 16k; for L16 8k decode+`fmt.encode` — simplest: add
+     a pcm variant or decode via `MediaFormat`) followed by 100 ms silence, queued as caller audio. ok once the last
+     digit/tone is sent.
+   - `silence {ms}`: the caller stays quiet: sim-clock sleep of `ms`; ok.
+   - `expect_hangup {by, timeout_ms}`: waits for the leg to end; `agent` ⇔ `hangup_source == call.platform_side`,
+     `caller` ⇔ `call.remote_side`, `any` always; mismatch → `failed` `detail: "hung up by <source>"`; not ended within
+     `timeout_ms` → `timeout`.
+   - `hangup {}`: `engine.hang_up(call, "normal_clearing", call.remote_side)`; ok.
+7. Ending: when the leg ends, a running `expect_hangup` resolves (ok/failed) and every other running or pending step
+   becomes `cancelled` (`detail: "call ended"`); when the media session the script uses stops while the leg is up
+   (streaming_stop, peer close, failed), running/pending steps become `cancelled` (`detail: "media stream stopped"`).
+   Script `status`: `running` → `done` (all steps ran) | `cancelled`. `/sim/reset` cancels scripts (state.tasks).
+8. Summary and timeline add `script: null | {role, status, greeting: null | {source: "text"|"wav", status,
+   utterance_id, started_ms, ended_ms, detail}, steps: [...]}`.
+
+### Files
+- `packages/va_sim/src/va_sim/tasks.py` — `hold_clock(clock: SimClock, tasks: Supervisor, *, name: str)` async CM.
+- `packages/va_sim/src/va_sim/telnyx/media_session.py` — use `hold_clock`; listener hooks: `add_listener(l)`,
+  `remove_listener(l)` with Protocol `MediaListener { on_tick(tick: AgentTick) -> None; on_media_end() -> None }`,
+  `AgentTick(at_ms: int, speech: bool)` emitted at the end of every `_tick` (speech from `agent_speech.is_speech` on
+  the played 8 kHz frame); `on_media_end` from `stop()` and when `_run` ends (connect failure / peer close);
+  `queue_caller(...) -> int` returns the end byte offset; `caller_sent` property (bytes sent, via new
+  `CallerQueue.sent`); `dtmf_pending` property; after `start` is sent call `self._events.media_connected(call, self)`.
+- `packages/va_sim/src/va_sim/telnyx/playout.py` — `CallerQueue.sent` property.
+- `packages/va_sim/src/va_sim/telnyx/media_format.py` — `MediaFormat.encode(pcm)`.
+- `packages/va_sim/src/va_sim/telnyx/agent_speech.py` — `is_speech(pcm8k: bytes) -> bool`, `SpeechDetector`.
+- `packages/va_sim/src/va_sim/audio/wav_input.py` — `read_wav_pcm(path: Path, sample_rate: int, *, max_ms=60_000)
+  -> NDArray[np.int16]` (ValueError with a readable message on non-PCM16, empty, too long; OSError passes through).
+  Export from `va_sim.audio`. (audio must not import va_sim.state.)
+- `packages/va_sim/src/va_sim/telnyx/caller_audio.py` — pure CPU helpers: `render_text(utterance_id, text, fmt,
+  seed) -> bytes`, `render_dtmf_tones(digits, fmt) -> bytes`, `render_wav(path, fmt) -> bytes`; used by the `/say`
+  route (keep its register → to_thread → re-check flow) and by the script's preparation.
+- `packages/va_sim/src/va_sim/telnyx/caller_script.py` — `CallerScript(state, call, steps, greeting, role)`:
+  `start(session)` (spawn on state.tasks, name `telnyx-script-<ccid>`), `wake()` (called by the engine on hang-up),
+  `MediaListener` impl, `summary() -> Record`; internal `_prepare()` (decision 2), `_run_step(index, step)` per type
+  (a match on the step model classes from `va_sim.scenario`), `_wait(predicate, deadline_ms)` that waits on an
+  `asyncio.Event` set by ticks/wake/media end, raced with `clock.sleep(remaining)` (cancel the loser), and a
+  `_media()` accessor (the session the script was started with; ended → `None`). If it passes ~250 lines split the
+  step implementations into `caller_steps.py`. Radon ≤ B per function.
+- `packages/va_sim/src/va_sim/telnyx/calls.py` — `Call.script: CallerScript | None` (TYPE_CHECKING), `transfer_leg:
+  bool = False`; `summary()`/`timeline()` add `script`.
+- `packages/va_sim/src/va_sim/telnyx/call_media.py` — `media_connected(call, session)`: build the script from
+  `state.scenarios[call.scenario_id]` per decision 1 (no-op if `call.script` exists, no scenario, or nothing to run).
+- `packages/va_sim/src/va_sim/telnyx/call_engine.py` — `transfer()` sets `transfer_leg=True`; `bridge()` starts a
+  transfer leg's script on the peer's session (decision 1); `hang_up()` calls `call.script.wake()` after the state
+  change (and on the bridged peer it hangs up, naturally via its own hang_up).
+- `packages/va_sim/src/va_sim/telnyx/media_control.py` — `/say` uses `caller_audio.render_text`.
+- `packages/va_sim/src/va_sim/scenario.py` — `_resolve_paths` (decision 4).
+- specs/30 §3.5 Decision; AGENTS.md P03-T03c note (script lifecycle, preparation under hold_clock, test helper);
+  a Ralph memory.
+
+### Tests
+- `tests/telnyx/test_agent_speech.py` (pure): is_speech threshold (RMS 255 vs 257 sine/DC frames); detector: turn
+  qualifies + silence → ready; short blip then gap ≥ gap_ms resets; gaps < gap_ms keep the turn; then_silence 0.
+- `tests/audio/test_wav_input.py`: 8 kHz mono round trip (pcm16_wav → read), 16 kHz stereo averaged + resampled to
+  8 kHz (tone frequency preserved via goertzel_power), 8-bit WAV / empty / > max → ValueError, missing → OSError.
+- `tests/telnyx/test_media_format.py` add `encode` for PCMU, L16 8k, L16 16k (decode(encode(x)) ≈ x).
+- `tests/test_scenario.py`: relative `.wav` greeting resolves against base_dir; text greeting untouched; absolute kept.
+- `tests/telnyx/test_media_session.py` add: `/say` on an L16 8 kHz stream decodes via `decode_marker(l16, 8000)`.
+- `tests/test_tasks.py`: `hold_clock` freezes accelerated time while a worker thread runs; no-op on realtime.
+- `tests/telnyx/test_caller_script.py` (accelerated clock, `telnyx_helpers` + `media_agent`; a support helper
+  `until(state, predicate, limit_s)` looping `await state.clock.sleep(0.02)` up to a virtual limit — sim-clock
+  waits, no wall sleeps; and a loud-agent-audio builder (μ-law sine at −12 dBFS via `va_sim.audio.codec`)):
+  greeting text first in timeline + caller media decode to its marker id + greeting ok and started on the first
+  media frame after connect (no virtual time lost to preparation); greeting WAV (tmp_path file, PCMU and L16 16 kHz
+  stream) → caller audio carries the tone; missing WAV → greeting failed, steps still run; wait_agent_speech ok after
+  agent 600 ms speech then silence (ended_ms − end of played speech ≥ then_silence_ms, < +40); blip shorter than
+  min_ms → timeout and next step runs; say ok with ended_ms == timeline end_ms; barge-in 500 → utterance start_ms −
+  first played agent speech ms (from agent track offset + answered_ms) in [500, 540] while agent audio is still
+  playing; barge-in with a silent agent → timeout, no utterance queued; dtmf "12w3" → dtmf frames 1,2 at successive
+  ticks, 3 ≥ 500 ms later, caller_dtmf logged; inband "5" → no dtmf frames, caller audio has the 770/1336 Hz tones;
+  silence 1000 → next say starts ≥ 1000 ms after the previous ended; expect_hangup by agent with platform hangup → ok;
+  by caller with platform hangup → failed "hung up by caller"; timeout → timeout; hangup step → call.hangup with
+  `hangup_source: callee`, cause normal_clearing, script done; inbound scenario hangup step → `hangup_source: caller`;
+  transfer: transfer_target.steps say runs on A's stream after bridge, B summary `script.role: transfer_target`;
+  platform hang-up mid-wait → running+pending cancelled, script cancelled; streaming_stop mid-script → cancelled
+  "media stream stopped"; scenario without steps/greeting and call without scenario → `script: null`; `/sim/reset`
+  mid-script → agent sees close and `state.tasks.pending == 0` after the stream's tasks finish; timeline `script`
+  equals summary `script`.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (va_sim coverage ≥ 85 %, jscpd 0, spec refs); `uvx radon
+cc -s -a packages/va_sim/src` (new functions ≤ B); `uvx pip-audit --strict` on `uv export`; `corepack pnpm audit
+--audit-level high`. No e2e (no platform flow yet). build.done payload must carry every key: tests, lint, typecheck,
+audit, coverage, complexity, duplication, specs.
+
+### Risks
+- Accelerated clock + sockets: agent frames arrive at racy virtual times; assert relative to *playout* (agent track
+  offsets, step started/ended ms), never absolute arrival ms. Stop the stream / hang up before any `tasks.drain()`.
+- The runner must never block the tick loop: listeners only set an Event / feed a detector (O(1) per tick).
+- Two scripts can share A's session (A's steps + transfer target): both queue into one CallerQueue (sequential audio)
+  — offsets from `queue_caller` keep each script's completion check correct.
+- `hang_up` order: the script's `wake()` runs after `call.state = "hangup"` and hangup_source are set, so an awaiting
+  `expect_hangup` sees the source; session `on_media_end` fires earlier in the same hang_up but the script checks
+  `call.ended` first when it resumes.
+- Existing `test_call_control` INBOUND_YAML (`steps: [hangup]`, no stream) must stay unaffected (no media → no script).
+
+## Build P03-T03c (Builder, 2026-10-29, after empty review.rejected)
+
+The review.rejected event carried no payload and no `## Review P03-T03c` findings were written (the previous
+build iteration left no Build section or build.done event either), so this activation re-verified the uncommitted
+P03-T03c implementation against the plan: CallerScript (caller_script.py 192 lines) + ScriptSteps
+(caller_steps.py 250 lines), agent_speech, caller_audio, wav_input, hold_clock, MediaFormat.encode, listeners on
+MediaSession, `script` in summary/timeline, `_resolve_paths`, specs/30 §3.5 Decision, AGENTS.md note. No code
+changes were needed.
+Gates (all run this iteration): make fmt 0, lint 0, typecheck 0, placeholders 0; va_sim pytest 575 passed;
+make check 0 (4012 passed, coverage 97.94 %, vitest widget 22 / dashboard 52 / sdk 48, openapi drift current,
+spec refs 0 problems); new modules coverage 97-100 %; radon va_sim avg A (2.20), only C is pre-existing
+`scenario._locate`; jscpd va_sim src+tests 0 clones; `uv export --no-emit-workspace` + `uvx pip-audit --strict`
+no known vulns (plain `uv export` fails: pip-audit cannot install workspace editables); pnpm audit high: none.
+
+## Plan P03-T03c (re-plan after build.blocked: missing backpressure evidence, Planner, 2026-10-29)
+
+Blocker is not a code problem: the Builder's `build.done` for P03-T03c lacked the required evidence keys (same
+pattern as P03-T02b/T03b). The full P03-T03c implementation (caller_script.py, caller_steps.py, agent_speech.py,
+caller_audio.py, audio/wav_input.py, tasks.hold_clock, MediaFormat.encode, MediaSession listeners, `script` in
+summary/timeline, scenario `_resolve_paths`, specs/30 §3.5 Decision, AGENTS.md note, tests) is in the working tree
+and its last gate run was green. No split is needed; the task stays as planned above.
+
+Builder actions (no new design):
+1. Re-run all gates on the current tree and capture real output: `make fmt lint typecheck placeholders test`,
+   `make check`, `uvx radon cc -s -a packages/va_sim/src` (record average grade/score; new functions ≤ B),
+   jscpd over va_sim src+tests, `uv export --no-emit-workspace` | `uvx pip-audit --strict`, and
+   `corepack pnpm audit --audit-level high`.
+2. If anything fails, fix it inside P03-T03c scope only (or deterministically fix a pre-existing flake).
+3. Append a short "Build P03-T03c gate re-run for evidence" note here, then emit build.done with EVERY required key,
+   exactly in this form (values from the real runs), as one plain string:
+   `ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, complexity: <radon avg e.g. A (2.20)>, duplication: pass, specs: pass - P03-T03c scenario caller runner"`
+   Do not drop, rename, or reorder keys; `performance` is optional.
+
+## Build P03-T03c gate re-run for evidence (Builder, 2026-10-29)
+
+No code changes. Gates on the current tree: make fmt 0, lint 0, typecheck 0, placeholders 0 (0 findings).
+First `make check` run: 1 failed / 4011 passed - `apps/api/tests/test_dev_seed.py::test_first_run_creates_org_owner_credit_and_working_keys`
+hit the 60 s pytest-timeout with host load avg ~7.9 (stack ended in the coverage tracer, not in an I/O wait). The test
+is outside P03-T03c scope, passed 3/3 in isolation (15 passed, ~6 s each). Second `make check`: exit 0, 4012 passed,
+coverage 97.94 %, vitest widget 22 / dashboard 52 / sdk 48, openapi drift current, spec refs 0 problems.
+radon va_sim avg A (2.20), only C is pre-existing `scenario._locate`; jscpd va_sim src+tests 0 clones;
+`uv export --no-emit-workspace --frozen` + `uvx pip-audit --strict` no known vulns; pnpm audit high: none.
+
+## Review P03-T03c (Reviewer, 2026-10-29)
+
+Approved. Re-ran: make lint 0, typecheck 0 (mypy 497 files), placeholders 0. make test run 1: 1 failed / 4011
+passed - `apps/api/tests/test_cross_tenant_routes.py::test_every_tenant_route_is_isolated` hit the 60 s
+pytest-timeout at host load ~11 (no apps/ files in the diff; passes in 4.8 s alone). Run 2: 4012 passed, exit 0.
+Same load-driven timeout pattern as the Builder's test_dev_seed failure -> logged as a separate fix task.
+radon: only pre-existing C `scenario._locate`. Diff matches specs/30 §3.5 Decision P03-T03c rules 1-8; waits are
+sim-clock/tick driven, listeners O(1), prep under hold_clock + to_thread, error paths (missing WAV, id exhaustion,
+timeouts, interruption, reset) tested.
+Notes (not blocking, consistent with the Decision text): a pending `expect_hangup` is cancelled (not ok) when the
+leg ends during an earlier step, and a running `expect_hangup` is cancelled "media stream stopped" if the platform
+stops streaming before hanging up; revisit if scenario assertions need it.

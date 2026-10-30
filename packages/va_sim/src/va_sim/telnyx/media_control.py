@@ -17,11 +17,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_sim.audio.synth import synthesize_wire
 from va_sim.control import json_body, sim_error
 from va_sim.telnyx.call_control import find_call
 from va_sim.telnyx.call_media import RECORDING_SAMPLE_RATE
 from va_sim.telnyx.call_models import CallerDtmf, CallerSay, InjectFrame
+from va_sim.telnyx.caller_audio import render_text
 from va_sim.telnyx.calls import Call
 from va_sim.telnyx.media_session import MediaSession
 from va_sim.wav import pcm16_wav
@@ -58,11 +58,7 @@ def media_control_routes(state: SimState) -> list[BaseRoute]:
         except ValueError as exc:
             return sim_error(409, "utterance_limit", str(exc))
         wire = await asyncio.to_thread(
-            synthesize_wire,
-            utterance_id,
-            body.text,
-            sample_rate=session.fmt.sample_rate,
-            seed=state.utterance_seed(utterance_id),
+            render_text, utterance_id, body.text, session.fmt, state.utterance_seed(utterance_id)
         )
         # The call may have ended or the stream stopped while the audio was synthesized.
         current = session_of(request)

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793330327-17d9
+> va_sim caller runner: CallerScript (telnyx/caller_script.py + caller_steps.py) starts via CallMedia.media_connected after the media start frame; MediaSession.add_listener(on_tick(AgentTick)/on_media_end) must stay O(1); completion via queue_caller/queue_dtmf offsets vs caller_sent/dtmf_sent; CPU prep under va_sim.tasks.hold_clock + to_thread costs no virtual time
+<!-- tags: sim, testing, clock | created: 2026-10-30 -->
+
 ### mem-1793327751-3934
 > va_sim media WS: tests giving a stream a stream_url must use the media_agent fixture (tests/telnyx/conftest.py, support/media_agent.py); MediaSession tick loop always sleeps 20 ms ahead so accelerated virtual time races during socket waits - assert orders/counts; never tasks.drain() with a live stream; the session freezes accelerated time while connecting via a sleep(0) holder task
 <!-- tags: sim, testing, clock | created: 2026-10-30 -->
@@ -153,6 +157,22 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793333516-86db
+> make test flake: apps/api integration tests (test_cross_tenant_routes, test_dev_seed) can exceed the 60 s pytest-timeout at host load avg ~8-11 with coverage on; they pass alone in ~5 s - re-run before rejecting unrelated work, tracked as task fix:api-test-timeout-load
+<!-- tags: testing, api, tooling | created: 2026-10-30 -->
+
+### mem-1793332692-ff3b
+> flake: apps/api/tests/test_dev_seed.py::test_first_run_creates_org_owner_credit_and_working_keys can hit the 60 s pytest-timeout in make check when host load avg is ~8 (stack ends in coverage tracer, not an I/O wait); it passes in ~6 s alone - re-run before treating it as a regression
+<!-- tags: testing, api | created: 2026-10-30 -->
+
+### mem-1793331520-1dbe
+> pip-audit on this repo: uv export --no-hashes --no-emit-workspace --format requirements-txt > /var/tmp/req.txt; uvx pip-audit --strict -r /var/tmp/req.txt (without --no-emit-workspace pip-audit fails installing workspace editables)
+<!-- tags: tooling, audit | created: 2026-10-30 -->
+
+### mem-1793330327-5c3f
+> va_sim tests: two telnyx_client blocks streaming to MediaAgents inside ONE test hang until pytest-timeout (pre-existing, reproduced on old code); split into separate tests
+<!-- tags: sim, testing | created: 2026-10-30 -->
 
 ### mem-1793328571-1e58
 > va_api tests: structlog capture_logs misses cached module loggers in the full xdist suite (test passes alone, fails in make check); monkeypatch the module's _log with a small recording object instead

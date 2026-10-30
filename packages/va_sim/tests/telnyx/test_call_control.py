@@ -141,7 +141,9 @@ async def test_listing_detail_and_timeline() -> None:
             "answered_ms": 1000,
             "ended_ms": 2000,
             "utterances": [],
+            "script": None,
         }
+        assert detail["script"] is None
         assert (await client.get("/sim/telnyx/calls/v3:none")).status_code == 404
         assert (await client.get("/sim/telnyx/calls/v3:none/timeline")).status_code == 404
 

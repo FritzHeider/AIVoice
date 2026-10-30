@@ -18,7 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 from starlette.responses import JSONResponse
 
-from va_sim.audio.codec import ULAW_SILENCE, l16be_to_pcm, ulaw_decode
+from va_sim.audio.codec import ULAW_SILENCE, l16be_to_pcm, pcm_to_l16be, ulaw_decode, ulaw_encode
 from va_sim.telnyx.call_models import StreamFields
 from va_sim.telnyx.errors import invalid
 
@@ -71,6 +71,10 @@ class MediaFormat:
     def to_pcm(self, wire: bytes) -> NDArray[np.int16]:
         """Samples at the native rate."""
         return ulaw_decode(wire) if self.encoding == "PCMU" else l16be_to_pcm(wire)
+
+    def encode(self, pcm: NDArray[np.int16]) -> bytes:
+        """Wire bytes for samples at the native rate: μ-law (PCMU) or big-endian int16 (L16)."""
+        return ulaw_encode(pcm) if self.encoding == "PCMU" else pcm_to_l16be(pcm)
 
     def decode_pcm8k(self, wire: bytes) -> bytes:
         """PCM16 little-endian at 8 kHz for the call tracks (16 kHz: the mean of each sample pair)."""
