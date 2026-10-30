@@ -26,6 +26,7 @@ __all__ = [
     "CHAR_MS",
     "CHUNK_MS",
     "OUTPUT_FORMATS",
+    "TONE_CLASSES",
     "Alignment",
     "OutputFormat",
     "TtsChunk",
@@ -36,6 +37,8 @@ __all__ = [
     "parse_output_format",
     "pcm_samples",
     "synthesize",
+    "tone_class",
+    "tone_class_frequencies",
 ]
 
 CHAR_MS: Final = 60
@@ -43,7 +46,7 @@ CHUNK_MS: Final = 200
 TONE_DBFS: Final = -10.0
 _BASE_HZ: Final = 300
 _STEP_HZ: Final = 25
-_TONES: Final = 12
+TONE_CLASSES: Final = 12
 _MS_PER_S: Final = 1000
 
 type Codec = Literal["ulaw", "pcm", "mp3"]
@@ -92,11 +95,22 @@ def parse_output_format(name: str) -> OutputFormat:
     return found
 
 
-def char_frequency(char: str) -> int | None:
-    """Tone frequency of ``char`` in Hz; ``None`` for whitespace (silence)."""
+def tone_class(char: str) -> int | None:
+    """The tone class (0..11) of ``char``; ``None`` for whitespace (silence)."""
     if char.isspace():
         return None
-    return _BASE_HZ + (ord(char) % _TONES) * _STEP_HZ
+    return ord(char) % TONE_CLASSES
+
+
+def tone_class_frequencies() -> tuple[int, ...]:
+    """The frequency in Hz of every tone class, by class."""
+    return tuple(_BASE_HZ + k * _STEP_HZ for k in range(TONE_CLASSES))
+
+
+def char_frequency(char: str) -> int | None:
+    """Tone frequency of ``char`` in Hz; ``None`` for whitespace (silence)."""
+    k = tone_class(char)
+    return None if k is None else _BASE_HZ + k * _STEP_HZ
 
 
 def duration_ms(text: str) -> int:

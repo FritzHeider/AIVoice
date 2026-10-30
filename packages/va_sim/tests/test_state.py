@@ -124,7 +124,13 @@ def test_snapshot_shape() -> None:
             "phone_numbers": 0,
             "webhook_deliveries": 0,
         },
-        "elevenlabs": {"tts_requests": 0, "tts_sockets": 0, "stt_sessions": 0, "stt_sockets": 0},
+        "elevenlabs": {
+            "tts_requests": 0,
+            "tts_sockets": 0,
+            "stt_sessions": 0,
+            "stt_sockets": 0,
+            "stt_batch": 0,
+        },
     }
 
 

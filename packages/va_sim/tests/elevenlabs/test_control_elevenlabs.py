@@ -73,6 +73,7 @@ async def test_reset_clears_records_keys_and_fault() -> None:
             "tts_sockets": 0,
             "stt_sessions": 0,
             "stt_sockets": 0,
+            "stt_batch": 0,
         }
         assert (await client.post("/sim/reset")).status_code == 204
     assert state.elevenlabs.tts_requests == []
@@ -175,3 +176,36 @@ async def test_stt_routes_are_absent_on_the_telnyx_port() -> None:
     async with telnyx_client(new_state()) as client:
         assert (await client.get("/sim/elevenlabs/stt/sessions")).status_code == 404
         assert (await client.get("/sim/elevenlabs/stt/transcripts")).status_code == 404
+
+
+async def test_batch_fault_put_get_delete() -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        assert (await client.get("/sim/elevenlabs/stt/batch/fault")).json() == {"fault": None}
+        put = await client.put(
+            "/sim/elevenlabs/stt/batch/fault", json={"kind": "delay", "delay_ms": 300, "times": 3}
+        )
+        assert put.status_code == 204
+        assert (await client.get("/sim/elevenlabs/stt/batch/fault")).json() == {
+            "fault": {"kind": "delay", "delay_ms": 300, "remaining": 3}
+        }
+        assert state.elevenlabs.stt.fault is None  # the realtime fault is separate
+        assert (await client.delete("/sim/elevenlabs/stt/batch/fault")).status_code == 204
+        assert state.elevenlabs.stt.batch_fault is None
+        assert (await client.get("/sim/elevenlabs/stt/batch")).json() == {"requests": []}
+
+
+async def test_batch_fault_body_is_validated() -> None:
+    async with rest_client(new_state()) as client:
+        responses = [
+            await client.put("/sim/elevenlabs/stt/batch/fault", json=body)
+            for body in (
+                {"kind": "disconnect"},
+                {"kind": "delay", "delay_ms": -1},
+                {"kind": "error", "times": 0},
+                {"kind": "error", "after_ms": 1},
+            )
+        ]
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"

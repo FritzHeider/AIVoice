@@ -197,6 +197,7 @@ class SimState:
                 "tts_sockets": len(self.elevenlabs.sockets),
                 "stt_sessions": len(self.elevenlabs.stt.sessions),
                 "stt_sockets": len(self.elevenlabs.stt.sockets),
+                "stt_batch": len(self.elevenlabs.stt.batch),
             },
         }
 

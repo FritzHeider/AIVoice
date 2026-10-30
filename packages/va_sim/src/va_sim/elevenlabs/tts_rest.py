@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
 
 from va_sim.elevenlabs.auth import API_KEY_HEADER, detail_error, rest_auth_error
+from va_sim.elevenlabs.rest_io import error_item, unprocessable, validation_errors
 from va_sim.elevenlabs.store import FaultKind, TtsRequest
 from va_sim.elevenlabs.tts_audio import (
     OutputFormat,
@@ -64,16 +65,6 @@ class _Accepted:
     fmt: OutputFormat
 
 
-def _unprocessable(errors: list[dict[str, object]]) -> JSONResponse:
-    return JSONResponse({"detail": errors}, status_code=422)
-
-
-def _validation_errors(exc: ValidationError) -> list[dict[str, object]]:
-    return [
-        {"loc": ["body", *error["loc"]], "msg": error["msg"], "type": error["type"]} for error in exc.errors()
-    ]
-
-
 async def _accept(state: SimState, request: Request) -> _Accepted | Response:
     key = request.headers.get(API_KEY_HEADER)
     denied = rest_auth_error(key, state.elevenlabs.accepts(key))
@@ -82,16 +73,16 @@ async def _accept(state: SimState, request: Request) -> _Accepted | Response:
     try:
         fmt = parse_output_format(request.query_params.get("output_format", DEFAULT_OUTPUT_FORMAT))
     except ValueError as exc:
-        return _unprocessable([{"loc": ["query", "output_format"], "msg": str(exc), "type": "enum"}])
+        return unprocessable([error_item(["query", "output_format"], str(exc), "enum")])
     raw = await request.body()
     try:
         payload = orjson.loads(raw)
     except orjson.JSONDecodeError as exc:
-        return _unprocessable([{"loc": ["body"], "msg": str(exc), "type": "json_invalid"}])
+        return unprocessable([error_item(["body"], str(exc), "json_invalid")])
     try:
         body = TtsBody.model_validate(payload)
     except ValidationError as exc:
-        return _unprocessable(_validation_errors(exc))
+        return unprocessable(validation_errors(exc))
     return _Accepted(body=body, fmt=fmt)
 
 

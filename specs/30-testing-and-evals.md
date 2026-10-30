@@ -565,6 +565,70 @@ Behavioural rules:
 > 11. No server inactivity timeout and no spontaneous limit errors; errors come only from faults. Analysis runs in
 >    a worker thread inside `va_sim.tasks.hold_clock`.
 
+> Decision (2026-10-29): FakeElevenLabs batch STT (P03-T05b). Contract from the ElevenLabs speech-to-text/convert
+> docs.
+> 1. `POST /v1/speech-to-text`, multipart/form-data, header `xi-api-key` (401 `needs_authorization` /
+>    `invalid_api_key`). Fields: `model_id` (required, non-empty); exactly one of `file` (upload),
+>    `cloud_storage_url`, `source_url` (http/https URLs); `language_code` `^[a-z]{2,3}$`; `timestamps_granularity`
+>    `none|word|character` (default `word`); `diarize`, `use_multi_channel`, `tag_audio_events` (`true|false` in any
+>    case; defaults false, false, true); `num_speakers` 1..32; `multichannel_output_style` `separate|combined`
+>    (default `separate`); `keyterms` repeated (≤ 1 000, each 1..49 chars, ≤ 5 words, none of `<>{}[]\`);
+>    `entity_detection` repeated (`all|pii|phi|pci|other|offensive_language`); `file_format` `pcm_s16le_16|other`
+>    (default `other`). Query `enable_logging` `true|false` (default true). Unknown fields are ignored. Invalid
+>    input → 422 `{"detail": [{"loc": ["body", <field>, ...] | ["query", "enable_logging"] | ["body"], "msg",
+>    "type"}]}`; `["body"]` covers the source count, `combined` with `timestamps_granularity=none` or with
+>    `entity_detection`, a non-multipart body, and a multipart parse failure (more than one file included).
+> 2. Audio: `pcm_s16le_16` is raw signed 16-bit LE mono 16 kHz; otherwise a 16-bit PCM WAV at ≥ 8 kHz, else 400
+>    `{"detail": {"status": "invalid_audio", "message": "Only 16-bit PCM WAV or pcm_s16le_16 audio is supported by
+>    the simulator"}}`. More than 5 channels with `use_multi_channel` → 400 `too_many_channels`; under 100 ms → 400
+>    `audio_too_short`; over 100 MB (upload or fetched) → 400 `file_too_large`. Without `use_multi_channel` the
+>    channels are down-mixed (clipped sum, as FakeTelnyx `single`), so overlapping speakers do not reconstruct.
+> 3. URL sources: a URL whose path is `/sim/recordings/<id>.wav` with `<id>` stored is read in-process whatever the
+>    host; any other URL is fetched (10 s timeout, no redirects). Non-200, transport error, or timeout → 400
+>    `invalid_source_url` with message `Could not fetch audio from <url> (<HTTP nnn | timed out | error class>)`.
+> 4. Each channel is cut with the realtime constants (`stt_stream`): 20 ms frames voiced at RMS ≥ -40 dBFS,
+>    segments split by ≥ 300 ms unvoiced, dropped under 100 ms voiced, spanning first to last voiced frame.
+> 5. Agent speech first: from the onset (first sample with |x| ≥ 64, minus one) 60 ms slots are read; a quiet slot
+>    is a space and the onset is searched again after it; a voiced slot is the tone class with the largest Goertzel
+>    power and counts only at ≥ 60 % of the slot energy, else the segment is not agent speech. The class string is
+>    looked up in every TTS record's `generated_text` (mapped the same way, whitespace runs → one space; record
+>    order, earliest offset); its original characters give the words and the slots the times. When the whole
+>    string matches nowhere, the longest word-aligned prefix that matches is taken and the rest matched again
+>    (back-to-back generations in one segment); unmatched runs become `[unintelligible]` spanning their slots, and
+>    a segment matching nothing is one `[unintelligible]` spanning the segment. Short strings can match the wrong
+>    record (12 classes); the first match wins, deterministically.
+> 6. Otherwise caller speech: the marker is decoded from 40 ms pre-roll plus 260 ms from the segment start
+>    (zero-padded); a registered utterance gives its words timed at 70 ms/char from segment start + 180 ms, in its
+>    language; an unknown id, no marker, DTMF, or other audio is one `[unintelligible]` spanning the segment.
+>    Batch transcription never consumes the realtime transcript script.
+> 7. Words `{"text", "start", "end", "type": "word", "speaker_id", "logprob": 0.0}` in file-relative seconds
+>    (3 decimals), with a `{"text": " ", "type": "spacing", "start": previous end, "end": next start, "speaker_id":
+>    previous speaker, "logprob": 0.0}` entry between consecutive words of one channel. `character` granularity adds
+>    `characters: [{"text", "start", "end"}]` to each word (agent: per slot; caller: 70 ms per char;
+>    `[unintelligible]`: one entry spanning the word); `none` returns `words: []` with `text` filled. `speaker_id`:
+>    multichannel `speaker_<channel>`; mono with `diarize` caller `speaker_0`, agent `speaker_1`; else `speaker_0`.
+>    Words (and spacing) carry `channel_index` only with `use_multi_channel`. `text` joins the words with single
+>    spaces; `language_code` is the first caller utterance language heard, else the request `language_code`, else
+>    `en`; `language_probability` 1.0.
+> 8. Shapes: without `use_multi_channel` `{language_code, language_probability, text, words, transcription_id,
+>    audio_duration_secs, entities?}`; `separate` `{transcripts: [{language_code, language_probability, text, words,
+>    channel_index, entities?}], transcription_id, audio_duration_secs}` (a mono file gives one transcript);
+>    `combined` the single-channel shape with every channel's entries ordered by (start, channel_index, original
+>    order) and `language_code` from the first channel that heard a caller utterance. `transcription_id` is 32 hex
+>    characters; `audio_duration_secs` is rounded to 3 decimals. `entities` (per transcript or top level) only
+>    when `entity_detection` was sent, from the realtime regex rules.
+> 9. Records: `GET /sim/elevenlabs/stt/batch` → `{"requests": [{transcription_id, model_id, source (file|url),
+>    source_url, file_format, channels, use_multi_channel, multichannel_output_style, diarize, num_speakers,
+>    timestamps_granularity, language_code, keyterms, entity_detection, enable_logging, audio_duration_secs,
+>    received_ms}]}`, written only for successful requests.
+> 10. Fault: `PUT /sim/elevenlabs/stt/batch/fault {"kind": "error"|"rate_limited"|"delay", "delay_ms" = 0,
+>    "times" = 1}` (204), `GET` → `{"fault": null|{kind, delay_ms, remaining}}`, `DELETE` (204). Checked after auth
+>    and before validation: `error` → 500 `internal_error` "Simulated batch STT failure", `rate_limited` → 429
+>    `too_many_concurrent_requests`, `delay` waits `delay_ms` on the sim clock and serves normally; each firing
+>    consumes one of `times`. `/sim/reset` clears records and fault; `GET /sim/state` `elevenlabs` adds `stt_batch`.
+> 11. Analysis (decoding, segmentation, tones, markers) runs in a worker thread inside `va_sim.tasks.hold_clock` on
+>    snapshots of the utterance registry and the TTS generated texts.
+
 ### 3.4 FakeLLM (port 9300, OpenAI-compatible at `/v1`)
 
 - `POST /v1/chat/completions`: supports `model`, `messages`, `stream`, `tools`, `tool_choice`, `temperature`,

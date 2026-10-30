@@ -208,6 +208,11 @@ produce a higher-accuracy transcript aligned to the recording for citations, eva
   message `retranscription_ready`). The realtime `call_turns` remain the canonical conversation log; citations and
   evals prefer the retranscribed utterances when present because their timestamps align with the recording.
 
+> Decision (2026-10-29): FakeElevenLabs serves this endpoint as specified in specs/30 §3.3 Decision "FakeElevenLabs
+> batch STT (P03-T05b)". ElevenLabs rejects `entity_detection` together with `multichannel_output_style=combined`
+> (and `combined` with `timestamps_granularity=none`), and the simulator answers 422 to match; when redaction needs
+> entities, the client requests `separate` and merges the channels' words itself by start time.
+
 ## 9. Metering
 
 - `stt_seconds` usage event (cost only; price 0 in plans) per call = session audio duration sent (frames × 20 ms),

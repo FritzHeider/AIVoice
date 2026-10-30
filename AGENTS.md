@@ -732,3 +732,14 @@ Grafana 3001
   registers + synthesizes an utterance in any audio format, `chunked`, `send_audio`, `recv_type`). A segment
   resolves only after 100 ms voiced audio AND 260 ms of marker window, so commit-mid-utterance tests must commit
   at least ~300 ms into the utterance; markerless test speech = loud μ-law codes (`b"\x10\x90" * n`).
+- 2026-10-29 (P03-T05b): FakeElevenLabs batch STT `POST /v1/speech-to-text` (spec: specs/30 §3.3 Decision
+  P03-T05b): `stt_batch` (route: auth → batch fault → multipart form → source → thread analysis → record),
+  `stt_batch_params` (pydantic `BatchForm` over the form fields, `parse_enable_logging`), pure `stt_batch_audio`
+  (WAV/raw PCM reading, `voiced_segments`, caller marker path, `transcribe`), pure `stt_batch_tones` (TTS tone
+  decoding, matching against `tts_requests[*].generated_text`), `stt_batch_json` (single/separate/combined bodies).
+  `rest_io` holds the ElevenLabs 422 helpers shared with REST TTS. Starlette form parsing needs `python-multipart`
+  (a va-sim dependency). Tests: `tests/elevenlabs/test_stt_batch*.py`, helpers `tests/support/batch_helpers.py`
+  (`agent_track`, `caller_track`, `place`, `wav_file`, `multipart`/`post_batch`, `served_app` for a real HTTP
+  source). httpx sends `data=` alone as urlencoded: send URL-only batch requests as `files=[(name, (None, v))]`.
+  REST TTS calls cost `tts_ttfa_ms` of sim time, so a test that synthesizes before dialing a FakeTelnyx call sees
+  the answer later than 1 s; extend `call.audio` only after the answer or the recording offset skips it.

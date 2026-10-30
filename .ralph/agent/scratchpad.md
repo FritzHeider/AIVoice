@@ -1767,3 +1767,217 @@ first-chunk rule), segmentation/marker/partial/vad logic, commit latency on the 
 fault kinds with 1008/1011/non-fatal split, commit_throttled swallowing, reset 1012, and records all match the Decision
 P03-T05a rules. The vad minimum of 0.3 s is >= the 300 ms segment gap, so an auto-commit always sees the segment closed.
 The ws_io refactor keeps TTS behaviour, except that close reasons are now truncated to 123 bytes (safe). Tests contain no sleeps.
+
+## Plan P03-T05b — FakeElevenLabs batch STT (Planner, 2026-10-29)
+
+Split: the old P03-T05b (batch STT + voices + subscription) is now P03-T05b (batch STT) and P03-T05c (voice registry,
+voices REST, TTS `voice_not_found`, subscription). plan/phase-03.md is updated, and T11/T12 dependencies are adjusted. The
+contract comes from ElevenLabs docs fetched today (speech-to-text/convert): the multipart fields and the single-channel
+`{language_code, language_probability, text, words[{text, start, end, type, speaker_id, logprob, characters?,
+channel_index?}], transcription_id, audio_duration_secs, entities?}`. Multichannel `separate` (the default) returns
+`{transcripts: [{language_code, language_probability, text, words, channel_index, entities?}], transcription_id,
+audio_duration_secs}`. `combined` returns the single-channel shape with words sorted by start, each carrying
+`channel_index`; it requires timestamps and does not support entity detection.
+
+### Decisions (Builder writes ONE `> Decision (2026-10-29): FakeElevenLabs batch STT (P03-T05b).` block at the end of specs/30 §3.3, plus a one-line pointer Decision at the end of specs/08 §8)
+1. `POST /v1/speech-to-text`, multipart/form-data, header `xi-api-key` (401 `needs_authorization` /
+   `invalid_api_key` via `auth.rest_auth_error`). Form fields: `model_id` (required, non-empty); exactly one of
+   `file` (upload), `cloud_storage_url`, `source_url` (http/https URL); `language_code` `^[a-z]{2,3}$`;
+   `timestamps_granularity` `none|word|character` (default `word`); `diarize`, `use_multi_channel`,
+   `tag_audio_events` booleans (`true|false` case-insensitive; defaults false, false, true); `num_speakers` 1..32;
+   `multichannel_output_style` `separate|combined` (default `separate`); `keyterms` repeated (≤ 1000, each 1..49 chars,
+   ≤ 5 words, none of `<>{}[]\`); `entity_detection` repeated (`all|pii|phi|pci|other|offensive_language`);
+   `file_format` `pcm_s16le_16|other` (default `other`). Query `enable_logging` `true|false` (default true). Other
+   fields are ignored. Validation failures → 422 `{"detail": [{"loc": ["body", <field>], "msg", "type"}]}`
+   (query: `["query", "enable_logging"]`), with the same helper as REST TTS. `combined` with
+   `timestamps_granularity=none` or with `entity_detection` → 422. A body that is not multipart → 422 with loc
+   `["body"]`.
+2. Audio: `file_format=pcm_s16le_16` → raw signed 16-bit LE mono 16 kHz. Otherwise the bytes must be a 16-bit PCM
+   WAV (1..5 channels when `use_multi_channel`; any count otherwise; any rate ≥ 8000), else 400
+   `{"detail": {"status": "invalid_audio", "message": "Only 16-bit PCM WAV or pcm_s16le_16 audio is supported by the
+   simulator"}}`. Duration < 100 ms → 400 `audio_too_short`. More than 5 channels with `use_multi_channel` → 400
+   `too_many_channels`. Upload cap 100 MB → 400 `file_too_large`. Without `use_multi_channel`, multi-channel audio
+   is down-mixed to one channel (sample-wise clipped sum, the same as FakeTelnyx `single`). Overlapping speakers then
+   do not reconstruct; use `use_multi_channel`.
+3. URL sources: when the URL path is `/sim/recordings/<id>.wav` and `<id>` is in `state.recordings`, the stored WAV is
+   used directly, whatever the host. Otherwise the sim fetches it with `httpx.AsyncClient(timeout=10.0,
+   follow_redirects=False)`, streaming with the 100 MB cap. Non-200 status, transport error, or timeout → 400
+   `{"detail": {"status": "invalid_source_url", "message": "Could not fetch audio from <url> (<why>)"}}`.
+4. Segmentation per channel (pure numpy, new module): 20 ms frames, voiced when RMS ≥ `VOICED_RMS`. Segments are
+   separated by ≥ `SEGMENT_GAP_MS` (300) unvoiced. A segment with < `MIN_SPEECH_MS` voiced audio is dropped. A
+   segment spans from its first voiced frame start to its last voiced frame end. Import the constants from
+   `stt_stream`; do not copy them.
+5. Agent tones first. Starting at the segment start, find the onset: the first sample with |x| ≥ 64, minus 1,
+   clamped. Then read consecutive 60 ms slots (`tts_audio.CHAR_MS`) up to the segment end. A slot whose RMS is below
+   `VOICED_RMS` is a space; after a space, the next onset is searched again from the slot end, so gaps that are not
+   a multiple of 60 ms resync. A voiced slot takes the tone class k ∈ 0..11 (frequency `300 + 25k`, from a new public
+   `tts_audio.tone_class_frequencies()` or equivalent, so the formula is not duplicated) with the largest
+   `goertzel_power`. The slot counts as a tone only if purity = best power / slot energy ≥ 0.6. Any impure voiced
+   slot means the segment is not agent speech. A trailing partial slot (< 60 ms) is ignored.
+   Agent text resolution: decoded string = classes as `chr(ord("a") + k)`, spaces collapsed to one, stripped.
+   Candidates = every `TtsRequest.generated_text` in `state.elevenlabs.tts_requests` order, mapped the same way
+   (whitespace runs → one space; other chars → class of `ord(c) % 12`) with an index map back to the original. The
+   first candidate (record order, then earliest offset) containing the decoded string as a substring wins. Its
+   original substring gives the words, and the decoded slot start times give the times (non-space chars align one
+   to one): word start = first char slot start, end = last char slot end. Tone segments with no match → one word
+   `"[unintelligible]"` (`stt_stream.UNINTELLIGIBLE`) spanning the segment. Snapshot the records list before the
+   worker thread starts (`tuple(r.generated_text for r in ...)`) so the thread never touches live state.
+6. Otherwise, the caller path. `decode_marker` runs on the 40 ms pre-roll + 260 ms from the segment start
+   (zero-padded) at the channel rate: a registered id (`state.utterances`, snapshot as `{id: (text, language)}`
+   before the thread) → `timed_words(text, segment_start + MARKER_MS)`, language = the utterance language. An
+   unregistered id or no marker → one `"[unintelligible]"` word spanning the segment. Batch never pops the
+   realtime transcript script. DTMF and other non-tone, non-marker audio become `[unintelligible]` (documented).
+7. Words: entries `{"text", "start", "end", "type": "word", "speaker_id", "logprob": 0.0}`, with seconds rounded
+   to 3 decimals, relative to the file start. A `{"text": " ", "type": "spacing", "start": prev.end, "end":
+   next.start, ...}` entry goes between consecutive words of one channel (start=end when they touch). With
+   `character` granularity, each word gets `"characters": [{"text", "start", "end"}]` (agent: per slot; caller:
+   70 ms per char from the word start, `stt_text.CALLER_MS_PER_CHAR`). `none` → `words: []` (text still filled).
+   `speaker_id`: multichannel → `speaker_<channel_index>`; mono with `diarize` → caller-path segments
+   `speaker_0`, agent-path `speaker_1`; mono without diarize → `speaker_0`. Words carry `channel_index` only in
+   multichannel responses. `text` = word texts in order joined by single spaces. `language_code` = the first
+   caller utterance language heard on that transcript, else the request `language_code`, else `"en"`;
+   `language_probability` 1.0.
+8. Response: `use_multi_channel` false → the single-channel shape. True + `separate` → `transcripts` (one per
+   channel, a mono file gives one) with `channel_index`. True + `combined` → the single-channel shape with all
+   channels' entries merged by `(start, channel_index, original order)`, `text` from the merged words, and
+   `language_code` from the first transcript that heard a caller utterance. `transcription_id` = 32 hex
+   (`state.ids.token(16)`); `audio_duration_secs` = file duration rounded to 3. `entities` (per transcript /
+   top level) only when `entity_detection` was sent, via `stt_text.find_entities(text, categories)` (`phi`,
+   `other`, `offensive_language` find nothing).
+9. Records: `store.stt.batch: list[SttBatchRecord]`, served at `GET /sim/elevenlabs/stt/batch` →
+   `{"requests": [{transcription_id, model_id, source ("file"|"url"), source_url, file_format, channels,
+   use_multi_channel, multichannel_output_style, diarize, num_speakers, timestamps_granularity, language_code,
+   keyterms, entity_detection, enable_logging, audio_duration_secs, received_ms}]}`. Records are written after a
+   successful analysis; failed requests are not recorded.
+10. Fault: `PUT /sim/elevenlabs/stt/batch/fault {"kind": "error"|"rate_limited"|"delay", "delay_ms" = 0,
+    "times" = 1}` (204), `GET` → `{"fault": null|{kind, delay_ms, remaining}}`, `DELETE` 204. Checked after
+    auth and before validation. `error` → 500 `{"detail": {"status": "internal_error", "message": "Simulated batch
+    STT failure"}}`; `rate_limited` → 429 `{"detail": {"status": "too_many_concurrent_requests", ...}}`; `delay` →
+    waits `delay_ms` on the sim clock, then serves normally. Each firing consumes one of `times`. Reset clears the
+    batch records and the fault; the snapshot `elevenlabs` adds `"stt_batch": n`.
+11. Analysis (WAV decode, segmentation, tone and marker decoding) runs in `asyncio.to_thread` inside
+    `va_sim.tasks.hold_clock`, as in TTS REST synthesis.
+
+### Files
+- `packages/va_sim/pyproject.toml`: add `python-multipart` (Starlette `request.form()` needs it; `uv add
+  --package va-sim python-multipart`, then `uv lock`). Use `request.form(max_files=1, max_fields=2000,
+  max_part_size=100 MB)`. Check Starlette 1.x `form()` kwargs; `max_part_size` applies to non-file fields, so
+  enforce the file cap on the `UploadFile` size.
+- `packages/va_sim/src/va_sim/elevenlabs/stt_batch_params.py`: `BatchParams` (frozen dataclass or pydantic model)
+  + `parse_batch_form(form, query) -> BatchParams | list[dict]` (422 detail items).
+- `.../elevenlabs/stt_batch_audio.py`: pure. `read_batch_audio(data: bytes, file_format) -> BatchAudio(channels:
+  tuple[NDArray[int16], ...], rate, duration_ms)` raising `BatchAudioError(status, message)`; `voiced_segments`;
+  `decode_tones(samples, rate, start, end) -> list[TonedChar] | None`; `match_agent_text(chars, candidates) ->
+  ...`; `transcribe_channel(samples, rate, *, utterances, candidates, language) -> list[BatchSegment]` (segment =
+  words with times, path "caller"|"agent", language). If > ~250 lines, put tone decode + matching in
+  `stt_batch_tones.py`.
+- `.../elevenlabs/stt_batch.py`: route handler `batch_routes(state)`: auth, fault, form parse, source load (URL
+  fetch), thread analysis, response JSON building (single/separate/combined, speaker ids, spacing, characters,
+  entities), record.
+- `.../elevenlabs/rest_io.py` (new, shared): move `_unprocessable` / `_validation_errors` out of `tts_rest.py`
+  (public names), with both modules using them (jscpd).
+- `.../elevenlabs/tts_audio.py`: export the tone class frequency helper (keep `char_frequency` behaviour).
+- `.../elevenlabs/stt_store.py`: `SttBatchRecord`, `BatchFault`, `batch`, `batch_fault`, arm/take, reset.
+- `.../elevenlabs/stt_control.py`: `/sim/elevenlabs/stt/batch` GET and `/sim/elevenlabs/stt/batch/fault`
+  PUT/GET/DELETE (reuse the method-dispatch pattern of the realtime fault route; avoid clones).
+- `.../elevenlabs/routes.py`: add the batch route; `state.py`: snapshot key.
+- specs/30 §3.3 Decision, specs/08 §8 pointer Decision, AGENTS.md (batch STT test notes), Ralph memory.
+
+### Tests (`packages/va_sim/tests/elevenlabs/`; helpers in `tests/support/batch_helpers.py`, reusing
+stt_helpers/tts_helpers, no copies: `agent_track(text, offset_ms)` = μ-law round trip of
+`tts_audio.pcm_samples(text, 8000)`, `caller_track(state, text)`, `place(tracks, length_ms)`,
+`multipart(...)`, `post_batch(client, files/data)`)
+- `test_stt_batch_audio.py` (pure): WAV mono/stereo/5-channel decode; pcm_s16le_16; invalid WAV (8-bit, garbage)
+  → invalid_audio; < 100 ms → audio_too_short. `voiced_segments` boundaries (gap 280 ms joins, 320 ms splits,
+  < 100 ms dropped). `decode_tones` recovers class strings for text with single and double spaces at 8 kHz after
+  μ-law round trip and at 16 kHz; resync after a 90 ms gap between two generations; formant caller speech
+  (synthesize_utterance) → None. Matching: substring in the second candidate; mid-text start; no match →
+  `[unintelligible]`. Caller marker segment → registered text with body start + 180 ms; unregistered id and plain
+  noise → `[unintelligible]`.
+- `test_stt_batch.py` (ASGI httpx client over `Starlette(routes=simulator_routes("elevenlabs", ...))` like
+  test_control_elevenlabs, accelerated or realtime clock as tts REST tests do):
+  * Acceptance: a FakeTelnyx call with `record` (dual), `call.audio.caller` filled with two decoded caller
+    utterances and `call.audio.agent` with μ-law-round-tripped TTS tones of two texts first generated through
+    `POST /v1/text-to-speech/{voice}` (so `tts_requests` has them), interleaved in time; hang up; POST the
+    recording WAV (file upload) with `use_multi_channel=true`, `multichannel_output_style=combined`,
+    `timestamps_granularity=word`. Assert that the words in start order rebuild caller text, agent text, caller, agent;
+    channel_index 0 → caller, 1 → agent; speaker ids; start times within 70 ms of the placement offsets; sorted.
+  * `separate` shape (2 transcripts, channel_index, per-channel text); single-channel shape (no use_multi_channel,
+    mono file); mono + diarize speaker split; `character` granularity; `none` → words [];
+    entity_detection pii+pci entities on a caller utterance "my email is jo@acme.io" (separate/single only).
+  * `cloud_storage_url` pointing at `http://anything/sim/recordings/<id>.wav` (in-process shortcut);
+    `source_url` fetched over a real socket (`running_sims`, the telnyx port `GET` of a served WAV such as
+    `/sim/recordings/<id>.wav` on another host spelling would hit the shortcut, so use the media control
+    `agent_audio.wav` route or a tiny Starlette app served by uvicorn in the test); unreachable URL / 404 → 400
+    `invalid_source_url`.
+  * Validation 422 matrix: missing model_id, both/neither file and URL, bad granularity, bad bool, num_speakers 0,
+    keyterm too long / 6 words / `<`, bad entity category, combined+none, combined+entity_detection, bad
+    enable_logging; 401 missing/invalid key; 400 invalid_audio / too_many_channels / audio_too_short.
+  * Faults: error 500, rate_limited 429, delay (sim clock: response after delay_ms), times consumed.
+  * Records at `/sim/elevenlabs/stt/batch` (keyterms, enable_logging false, source); reset clears records and
+    fault; snapshot key.
+- `test_control_elevenlabs.py`: batch fault route validation (422 shared control format), GET/DELETE.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (va_sim coverage ≥ 85 %, jscpd 0, spec refs);
+`uvx radon cc -s -a packages/va_sim/src` (new functions ≤ B); `uv export --no-emit-workspace --frozen | uvx
+pip-audit --strict` (the new python-multipart dependency must be clean); `corepack pnpm audit --audit-level high`.
+No e2e. build.done payload keys: `tests, lint, typecheck, audit, coverage, complexity, duplication, specs`.
+Known unrelated flake: apps/api DB tests time out under load (task fix:api-test-timeout-load). Re-run those modules
+alone and report both results.
+
+### Risks
+- Tone purity on μ-law: the quantisation noise of a −10 dBFS tone is far below 40 % of the energy, but verify that
+  the 0.6 threshold works at 8 kHz μ-law and at 16 kHz. The slot grid must align (onset −1 sample); a misaligned
+  slot that straddles two chars lowers purity. If tests show straddling, refine the onset (search the sign change
+  before the threshold crossing) rather than lowering the threshold.
+- Short agent strings (≤ 3 chars) can match the wrong candidate (12 classes). First match wins, which is
+  deterministic and documented.
+- Starlette `request.form()` limits: the default `max_part_size` (1 MB) applies to non-file fields only. Uploads
+  spool to disk; read them with `await upload.read()`, which is fine at the 100 MB cap.
+- Do not mutate `state.elevenlabs`/`state.utterances` from the worker thread: snapshot first.
+- Existing TTS REST 422 tests must stay green after the `rest_io` move.
+
+## Build P03-T05b (Builder, 2026-10-29)
+
+Implemented per plan. New: `elevenlabs/stt_batch.py` (route), `stt_batch_params.py` (pydantic BatchForm over the
+multipart form), `stt_batch_audio.py` (pure: WAV/raw PCM, voiced_segments, caller marker path, transcribe),
+`stt_batch_tones.py` (pure: tone decode + match vs TTS generated_text), `stt_batch_json.py` (single/separate/
+combined bodies), `rest_io.py` (shared 422 helpers, tts_rest now uses them). `tts_audio.tone_class` +
+`tone_class_frequencies`; `SttStore.batch` / `batch_fault`; stt_control `_fault_route` helper shared by the
+realtime and batch faults; snapshot `stt_batch`. Dependency `python-multipart` added to va-sim.
+Deviations / additions (recorded in the specs/30 Decision):
+- Back-to-back generations in one segment: when the whole decoded string matches nothing, the longest word-aligned
+  prefix is matched and the rest matched again; unmatched runs become `[unintelligible]`.
+- `transcription_id` = `ids.uuid()` without dashes (32 hex; ids.token is base64).
+- A truncated multipart body parses as an empty form (python-multipart), so it yields the model_id 422.
+- specs/08 §8 conflict: the platform spec sends `combined` + `entity_detection`; ElevenLabs rejects that, and so does
+  the sim. The pointer Decision tells the client to request `separate` and merge when entities are needed.
+Gates: fmt/lint/typecheck/placeholders pass; va_sim 825 passed; `make check` test step: 4192 passed, 2 failed + 68
+errors, all apps/api pytest-timeout/container timeouts under -n auto (known fix:api-test-timeout-load); those 7
+modules re-run alone: 122 passed. Coverage total 97.73% (new modules 94-100%). test-ts pass; spec refs 0
+problems; openapi drift current; jscpd 0 clones; radon: new functions ≤ B (avg A 2.40); pip-audit no known
+vulnerabilities; pnpm audit clean.
+
+## Plan P03-T05b (re-plan after build.blocked: missing backpressure evidence, Planner, 2026-10-29)
+
+The implementation is complete in the working tree (see Build P03-T05b above). The block came from the build.done
+payload format, not from a code defect. Do not split the task and do not change the design.
+Builder: do not redo the implementation. Re-run the gates in this iteration and emit build.done with exactly these
+keys, using real results:
+- `make fmt lint typecheck placeholders` → `lint: pass`, `typecheck: pass`
+- `make check` → `tests: pass` (apps/api pytest-timeout errors under -n auto are the known
+  fix:api-test-timeout-load flake; re-run the affected modules alone and report both numbers in the scratchpad),
+  `coverage: pass` (va_sim ≥ 85 %), `duplication: pass` (jscpd 0), `specs: pass` (spec refs 0 problems)
+- `uvx radon cc -s -a packages/va_sim/src` → `complexity: <avg grade/score>` (new functions ≤ B)
+- `uv export --no-emit-workspace --frozen | uvx pip-audit --strict` and `corepack pnpm audit --audit-level high`
+  → `audit: pass`
+Example: `ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass,
+complexity: A (2.40), duplication: pass, specs: pass"`. If a gate really fails, fix it before emitting.
+
+## Build P03-T05b gate re-run for evidence (Builder, 2026-10-29)
+
+No code changes. Gates re-run this iteration: `make fmt lint typecheck placeholders` exit 0 (mypy 534 files clean,
+0 placeholder findings). `make check` exit 0: 4262 passed (no api timeouts this run), coverage 98.00 %, test-ts
+pass (22/52/48), openapi drift current, spec refs 0 problems. jscpd 0 clones (770 files). radon avg A (2.40), no
+C+ functions in va_sim.elevenlabs. pip-audit --strict: no known vulnerabilities; pnpm audit: clean.

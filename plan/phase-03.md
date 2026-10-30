@@ -56,17 +56,27 @@
     the registered utterance text; every error message type reproducible via the fault control route.
   - Split from P03-T05 (2026-10-29, Planner): realtime STT alone is a TTS-sized task.
 
-- [ ] P03-T05b FakeElevenLabs batch STT, voices REST, and subscription
-  - Spec refs: specs/30-testing-and-evals.md §3.3 (REST); specs/08-stt-elevenlabs.md §8; specs/15-voices.md (vendor endpoints)
-  - Depends on: P03-T05a
-  - Deliverables: `/v1/speech-to-text` batch (multipart `file` or `cloud_storage_url`, `use_multi_channel`, `diarize`,
-    `timestamps_granularity`; caller-channel markers and agent-channel tone-character reverse mapping, word
-    timestamps, `speaker_id`/`channel_index`), voice registry seeded with premade voices (incl. `Karen`),
-    `/v2/voices`, `/v1/voices/add`, `/v1/voices/{id}`, `/v1/voices/{id}/edit`, `/v1/voices/{id}/settings`,
-    `/v1/voices/{id}/settings/edit`, `DELETE /v1/voices/{id}`, TTS `voice_not_found` for unknown voices,
-    `GET /v1/user/subscription`
-  - Acceptance: batch output shape matches spec and reconstructs both sides of a FakeTelnyx dual-channel recording;
-    voice clone rejects samples < 1 s with `invalid_sample`.
+- [ ] P03-T05b FakeElevenLabs batch STT
+  - Spec refs: specs/30-testing-and-evals.md §3.3 (REST `POST /v1/speech-to-text`); specs/08-stt-elevenlabs.md §8
+  - Depends on: P03-T05a, P03-T04 (TTS request records for agent-channel text), P03-T02b (recordings)
+  - Deliverables: `POST /v1/speech-to-text` (multipart `file` or `cloud_storage_url`/`source_url`, `model_id`,
+    `use_multi_channel`, `multichannel_output_style` separate|combined, `diarize`, `timestamps_granularity`
+    none|word|character, `language_code`, `keyterms`, `entity_detection`, query `enable_logging`), caller-channel
+    marker decoding and agent-channel tone-character decoding resolved against TTS records, word timestamps,
+    `speaker_id`/`channel_index`, entities, batch request records, batch fault route, reset
+  - Acceptance: batch output shape matches the ElevenLabs contract and reconstructs both sides of a FakeTelnyx
+    dual-channel recording (caller utterance text from markers, agent text from TTS tones).
+  - Split from P03-T05b (2026-10-29, Planner): batch STT and the voice registry are separate TTS-sized tasks.
+
+- [ ] P03-T05c FakeElevenLabs voices REST and subscription
+  - Spec refs: specs/30-testing-and-evals.md §3.3 (REST voices, subscription); specs/15-voices.md §2, §3.2-§3.4, §7
+  - Depends on: P03-T05b
+  - Deliverables: voice registry seeded with premade voices (incl. `Karen` and 10 others with labels), `/v2/voices`
+    (pagination, search, category), `/v1/voices/add`, `/v1/voices/{id}`, `/v1/voices/{id}/edit`,
+    `/v1/voices/{id}/settings`, `/v1/voices/{id}/settings/edit`, `DELETE /v1/voices/{id}`, TTS `voice_not_found`
+    for unknown voices (WS and REST), `GET /v1/user/subscription`
+  - Acceptance: voice clone rejects samples < 1 s with `invalid_sample`; TTS with an unknown voice fails with
+    `voice_not_found`; `/v2/voices` pages with `next_page_token` until `has_more=false`.
 
 - [ ] P03-T06 FakeLLM (OpenAI-compatible) and embeddings
   - Spec refs: specs/30-testing-and-evals.md (FakeLLM rules file); specs/10-llm-gateway.md
@@ -100,13 +110,13 @@
 
 - [ ] P03-T11 `va_elevenlabs` STT WebSocket client
   - Spec refs: specs/08-stt-elevenlabs.md (client, messages, errors, reconnection, keyterms, language mapping)
-  - Depends on: P03-T05
+  - Depends on: P03-T05a
   - Deliverables: `SttSession` (connect with query params, `send_audio(frame, commit=False)`, `commit()`, async iterator of `Partial/Committed` events), error classification, buffered reconnect
   - Acceptance: contract tests for every server message type and error type.
 
 - [ ] P03-T12 `va_elevenlabs` REST client
   - Spec refs: specs/09-tts-elevenlabs.md (REST convert for phrase cache); specs/08-stt-elevenlabs.md (batch re-transcription); specs/15-voices.md (voices, cloning)
-  - Depends on: P03-T05
+  - Depends on: P03-T05b, P03-T05c
   - Deliverables: `ElevenLabsRest` (tts_convert, list_voices v2 with pagination, add_voice multipart, edit_voice, get/update voice settings, delete_voice, batch_transcribe)
   - Acceptance: contract tests against FakeElevenLabs; multipart encoding verified.
 

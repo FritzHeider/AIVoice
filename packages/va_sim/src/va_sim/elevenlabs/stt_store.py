@@ -1,5 +1,6 @@
-"""FakeElevenLabs realtime STT state (Decision P03-T05a rules 7-10): session records, the transcript script,
-the armed fault, and the live sockets.
+"""FakeElevenLabs STT state (Decisions P03-T05a rules 7-10, P03-T05b rules 9-10): realtime session records,
+the transcript script, the armed realtime fault, the live sockets, batch transcription records, and the armed
+batch fault.
 
 Composed into ``ElevenLabsStore.stt``. Sessions are recorded once they authenticate. ``script`` holds the
 texts that markerless speech segments take in order; the socket pops from it in a worker thread while control
@@ -16,9 +17,13 @@ if TYPE_CHECKING:
     from va_sim.elevenlabs.store import LiveSocket
 
 __all__ = [
+    "BATCH_FAULT_KINDS",
     "FATAL_1008",
     "FATAL_1011",
     "STT_FAULT_KINDS",
+    "BatchFault",
+    "BatchFaultKind",
+    "SttBatchRecord",
     "SttEndReason",
     "SttFault",
     "SttFaultKind",
@@ -28,6 +33,7 @@ __all__ = [
 ]
 
 type SttEndReason = Literal["disconnect", "fault", "reset"]
+type BatchFaultKind = Literal["error", "rate_limited", "delay"]
 type SttFaultKind = Literal[
     "error",
     "auth_error",
@@ -47,6 +53,7 @@ type SttFaultKind = Literal[
 ]
 
 STT_FAULT_KINDS: Final[tuple[SttFaultKind, ...]] = get_args(SttFaultKind.__value__)
+BATCH_FAULT_KINDS: Final[tuple[BatchFaultKind, ...]] = get_args(BatchFaultKind.__value__)
 # Fault kinds that close the socket after their frame, by close code; the rest leave it open.
 FATAL_1008: Final[frozenset[SttFaultKind]] = frozenset(
     {
@@ -113,14 +120,54 @@ class SttFault:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class SttBatchRecord:
+    """One successful batch transcription as served at ``GET /sim/elevenlabs/stt/batch``."""
+
+    transcription_id: str
+    model_id: str
+    source: Literal["file", "url"]
+    source_url: str | None
+    file_format: str
+    channels: int
+    use_multi_channel: bool
+    multichannel_output_style: str
+    diarize: bool
+    num_speakers: int | None
+    timestamps_granularity: str
+    language_code: str | None
+    keyterms: list[str]
+    entity_detection: list[str]
+    enable_logging: bool
+    audio_duration_secs: float
+    received_ms: int
+
+    def to_json(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class BatchFault:
+    """An armed batch STT fault: fires on the next ``remaining`` authenticated requests."""
+
+    kind: BatchFaultKind
+    delay_ms: int
+    remaining: int
+
+    def to_json(self) -> dict[str, object]:
+        return asdict(self)
+
+
 class SttStore:
-    """Realtime STT session records, transcript script, armed fault, and live sockets."""
+    """Realtime STT session records, transcript script, armed fault, live sockets, and the batch state."""
 
     def __init__(self) -> None:
         self.sessions: list[SttSessionRecord] = []
         self.sockets: set[LiveSocket] = set()
         self.script: deque[str] = deque()
         self.fault: SttFault | None = None
+        self.batch: list[SttBatchRecord] = []
+        self.batch_fault: BatchFault | None = None
 
     def arm_fault(self, kind: SttFaultKind, *, after_ms: int, times: int) -> None:
         self.fault = SttFault(kind=kind, after_ms=after_ms, remaining=times)
@@ -136,11 +183,26 @@ class SttStore:
             self.fault = None
         return fault
 
+    def arm_batch_fault(self, kind: BatchFaultKind, *, delay_ms: int, times: int) -> None:
+        self.batch_fault = BatchFault(kind=kind, delay_ms=delay_ms, remaining=times)
+
+    def take_batch_fault(self) -> BatchFault | None:
+        """Fire the armed batch fault (each firing consumes one of its ``times``)."""
+        fault = self.batch_fault
+        if fault is None:
+            return None
+        fault.remaining -= 1
+        if fault.remaining == 0:
+            self.batch_fault = None
+        return fault
+
     def reset(self) -> None:
-        """Close every live socket (code 1012), forget sessions, the script, and the fault."""
+        """Close every live socket (code 1012), forget sessions, the script, batch records, and the faults."""
         for socket in tuple(self.sockets):
             socket.close_for_reset()
         self.sockets.clear()
         self.sessions.clear()
         self.script.clear()
         self.fault = None
+        self.batch.clear()
+        self.batch_fault = None
