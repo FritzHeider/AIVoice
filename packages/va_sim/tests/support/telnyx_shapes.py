@@ -229,6 +229,92 @@ class WebhookEnvelope(_Shape):
     meta: EventMeta
 
 
+class DialResponse(_Shape):
+    record_type: Literal["call"]
+    call_control_id: str = Field(pattern=r"^v3:[A-Za-z0-9_-]+$")
+    call_leg_id: str
+    call_session_id: str
+    is_alive: bool
+    client_state: str | None
+
+
+class CommandResult(_Shape):
+    result: Literal["ok"]
+
+
+class Conference(_Shape):
+    id: str
+    name: str
+    record_type: Literal["conference"]
+    status: Literal["init", "in_progress", "completed"]
+    connection_id: str
+    created_at: str
+    expires_at: str
+    region: str
+
+
+class CallEventPayload(_Shape):
+    """Fields every call.* webhook payload carries (specs/30 §3.2 Webhooks)."""
+
+    model_config = ConfigDict(extra="allow", strict=True, populate_by_name=True)
+
+    call_control_id: str
+    call_leg_id: str
+    call_session_id: str
+    connection_id: str
+    client_state: str | None
+    from_: str = Field(alias="from")
+    to: str
+    direction: Literal["incoming", "outgoing"]
+    state: Literal["bridging", "parked", "answered", "bridged", "hangup"]
+    start_time: str
+
+
+class HangupPayload(CallEventPayload):
+    hangup_cause: Literal[
+        "normal_clearing",
+        "originator_cancel",
+        "timeout",
+        "time_limit",
+        "user_busy",
+        "not_found",
+        "no_answer",
+        "call_rejected",
+        "unspecified",
+    ]
+    hangup_source: Literal["caller", "callee", "unknown"]
+    sip_hangup_cause: str
+    end_time: str
+
+
+class RecordingUrls(_Shape):
+    wav: str | None
+    mp3: str | None
+
+
+class RecordingSavedPayload(CallEventPayload):
+    recording_id: str
+    channels: Literal["single", "dual"]
+    format: Literal["wav", "mp3"]
+    recording_started_at: str
+    recording_ended_at: str
+    recording_urls: RecordingUrls
+    public_recording_urls: RecordingUrls
+
+
+class AmdPayload(CallEventPayload):
+    result: str
+
+
+class ConferenceEventPayload(_Shape):
+    conference_id: str
+    call_control_id: str
+    call_leg_id: str
+    call_session_id: str
+    client_state: str | None
+    connection_id: str
+
+
 class PageMeta(_Shape):
     page_number: int
     page_size: int

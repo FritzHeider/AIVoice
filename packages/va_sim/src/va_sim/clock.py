@@ -4,6 +4,12 @@
 returns as soon as no earlier sleeper is pending, and virtual time jumps to the sleeper's deadline. Concurrent
 sleepers wake in deadline order (ties in registration order), so long flows finish in milliseconds while their
 virtual timestamps stay exactly as they would be in real time.
+
+Virtual time moves only while the event loop is idle: as long as any other callback is runnable (an
+in-process request, a webhook delivery to an in-process receiver) the pump waits, so a command sent in the
+middle of a call is handled at the virtual time it was sent. Work blocked on real I/O leaves the loop idle
+and does not hold time back. Event loops without an inspectable ready queue (uvloop) fall back to a fixed
+number of settle turns.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ DEFAULT_START: Final = datetime(2026, 1, 1, tzinfo=UTC)
 # Event-loop turns an accelerated sleeper waits before virtual time moves, so tasks woken by the previous
 # deadline can register their next sleep first (a sleep issued right after a wake-up needs one turn).
 _SETTLE_ROUNDS: Final = 3
+# Consecutive turns with an empty ready queue before the loop counts as idle.
+_IDLE_ROUNDS: Final = 2
 
 
 class SimClock(Clock, Protocol):
@@ -112,9 +120,9 @@ class AcceleratedClock:
         await waiter
 
     async def _run_pump(self) -> None:
+        loop = asyncio.get_running_loop()
         while self._sleepers:
-            for _ in range(_SETTLE_ROUNDS):
-                await asyncio.sleep(0)
+            await _quiesce(loop)
             if not self._sleepers:
                 break
             deadline, _, waiter = heapq.heappop(self._sleepers)
@@ -122,6 +130,19 @@ class AcceleratedClock:
                 continue
             self._elapsed = max(self._elapsed, deadline)
             waiter.set_result(None)
+
+
+async def _quiesce(loop: asyncio.AbstractEventLoop) -> None:
+    """Yield until no other callback is runnable (CPython keeps runnable callbacks in ``loop._ready``)."""
+    for _ in range(_SETTLE_ROUNDS):
+        await asyncio.sleep(0)
+    ready = getattr(loop, "_ready", None)
+    if ready is None:
+        return
+    idle = 0
+    while idle < _IDLE_ROUNDS:
+        await asyncio.sleep(0)
+        idle = 0 if ready else idle + 1
 
 
 def clock_for(mode: ClockMode) -> SimClock:

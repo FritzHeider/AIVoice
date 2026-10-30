@@ -54,6 +54,8 @@ async def test_state_snapshot_counts_telnyx_resources() -> None:
     assert snapshot.json()["telnyx"] == {
         "accounts": 2,
         "messages": 0,
+        "calls": 0,
+        "conferences": 0,
         "phone_numbers": 0,
         "webhook_deliveries": 0,
     }

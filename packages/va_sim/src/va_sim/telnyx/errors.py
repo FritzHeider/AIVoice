@@ -15,14 +15,17 @@ from starlette.responses import JSONResponse
 
 __all__ = [
     "AUTHENTICATION_FAILED",
+    "CALL_ENDED",
     "INVALID_FROM",
     "INVALID_VALUE",
     "NOT_FOUND",
     "NUMBER_NOT_AVAILABLE",
     "TelnyxIssue",
+    "call_ended",
     "invalid",
     "invalid_from",
     "invalid_parameter",
+    "invalid_state",
     "issues_from_validation",
     "not_found",
     "telnyx_error",
@@ -34,6 +37,7 @@ NOT_FOUND: Final = "10005"
 INVALID_VALUE: Final = "10015"
 INVALID_FROM: Final = "40305"
 NUMBER_NOT_AVAILABLE: Final = "85001"
+CALL_ENDED: Final = "90018"
 
 _TITLES: Final = {
     AUTHENTICATION_FAILED: "Authentication failed",
@@ -41,6 +45,7 @@ _TITLES: Final = {
     INVALID_VALUE: "Invalid value",
     INVALID_FROM: "Invalid 'from' address",
     NUMBER_NOT_AVAILABLE: "Number not available",
+    CALL_ENDED: "Call has already ended",
 }
 
 
@@ -84,6 +89,18 @@ def invalid(detail: str, pointer: str) -> JSONResponse:
 
 def invalid_parameter(detail: str, parameter: str) -> JSONResponse:
     return telnyx_error(422, TelnyxIssue(INVALID_VALUE, detail, parameter=parameter))
+
+
+def invalid_state(detail: str) -> JSONResponse:
+    """``10015`` without a source: the command does not fit the state of the call or conference."""
+    return telnyx_error(422, TelnyxIssue(INVALID_VALUE, detail))
+
+
+def call_ended(call_control_id: str) -> JSONResponse:
+    return telnyx_error(
+        422,
+        TelnyxIssue(CALL_ENDED, f"Call {call_control_id!r} has already ended and accepts no more commands."),
+    )
 
 
 def invalid_from(phone_number: str) -> JSONResponse:

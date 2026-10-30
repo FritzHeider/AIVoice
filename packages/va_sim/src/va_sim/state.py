@@ -18,6 +18,7 @@ from va_sim.ids import SimIds
 from va_sim.scenario import Scenario
 from va_sim.settings import PROFILES, Latencies, ProfileName, WebhookDefaults
 from va_sim.tasks import Supervisor
+from va_sim.telnyx.call_engine import CallEngine
 from va_sim.telnyx.keys import SigningKey
 from va_sim.telnyx.store import TelnyxStore
 from va_sim.telnyx.webhooks import WebhookEmitter
@@ -39,9 +40,9 @@ class Utterance:
 class SimState:
     """Scenarios, recordings, utterances, latencies, clock, and the seeded RNG shared by the simulators.
 
-    FakeTelnyx adds its resource store, the webhook signing key (kept across resets), the webhook emitter, and
-    the supervisor owning every simulator background task. ``webhook_transport`` lets tests receive webhooks
-    in-process (an ``httpx`` transport) instead of over the network.
+    FakeTelnyx adds its resource store, the webhook signing key (kept across resets), the webhook emitter,
+    the call engine, and the supervisor owning every simulator background task. ``webhook_transport`` lets
+    tests receive webhooks in-process (an ``httpx`` transport) instead of over the network.
     """
 
     def __init__(  # noqa: PLR0913 - keyword-only collaborators and test seams
@@ -77,14 +78,17 @@ class SimState:
         self.utterances: dict[int, Utterance] = {}
         self._by_destination: dict[str, str] = {}
         self._by_inbound: dict[str, str] = {}
+        self.call_engine = CallEngine(self)
 
     def reset(self, seed: int | None = None) -> None:
         """Forget everything but the signing key; restore latencies; reseed (same seed when None).
 
-        Scenarios, recordings, utterances, FakeTelnyx resources, and webhook deliveries are dropped and every
-        pending background task is cancelled.
+        Scenarios, recordings, utterances, FakeTelnyx resources (calls and conferences included), and
+        webhook deliveries are dropped and every pending background task (call progress, timers, deliveries)
+        is cancelled.
         """
         self.tasks.cancel_all()
+        self.call_engine.reset()
         self.telnyx.reset()
         self.webhooks.clear()
         if seed is not None:
@@ -169,6 +173,8 @@ class SimState:
             "telnyx": {
                 "accounts": len(self.telnyx.accounts),
                 "messages": sum(len(account.messages) for account in self.telnyx.accounts.values()),
+                "calls": sum(len(account.calls) for account in self.telnyx.accounts.values()),
+                "conferences": sum(len(account.conferences) for account in self.telnyx.accounts.values()),
                 "phone_numbers": sum(len(account.numbers) for account in self.telnyx.accounts.values()),
                 "webhook_deliveries": len(self.webhooks.deliveries),
             },

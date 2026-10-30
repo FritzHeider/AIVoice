@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793323959-b262
+> va_sim AcceleratedClock advances only when loop._ready is empty; tests drive FakeTelnyx calls with telnyx_helpers.at(state, s)/settle(state) (both also await state.call_engine.idle() since recording WAVs encode in a thread); a test busy-polling asyncio.sleep(0) freezes accelerated time; an in-process ASGI request can finish without yielding, so settle (clock.sleep(0)) before sleeping to a tie deadline
+<!-- tags: sim, testing, clock | created: 2026-10-30 -->
+
 ### mem-1793318126-f3a5
 > va_sim: control API /sim/* via va_sim.server.simulator_routes(sim, state); tests use running_sims(state) (real uvicorn, ephemeral ports) or httpx.ASGITransport over Starlette(routes=simulator_routes(...)); sim_helpers (packages/va_sim/tests/support) has new_state/scenario_yaml and the shared autouse isolated_env fixture that both va_sim and apps/sim conftests re-export; dist names va-sim (lib) / va-sim-server (apps/sim)
 <!-- tags: sim, testing | created: 2026-10-29 -->

@@ -16,6 +16,7 @@ from sim_helpers import LATENCIES
 from starlette.applications import Starlette
 
 from va_sim.clock import AcceleratedClock
+from va_sim.scenario import load_scenario
 from va_sim.server import simulator_routes
 from va_sim.settings import WebhookDefaults
 from va_sim.state import SimState
@@ -145,3 +146,111 @@ async def own_number(
     [record] = listed.json()["data"]
     number: dict[str, Any] = record
     return number
+
+
+CALLER: Final = "+14155552000"
+CALLEE: Final = "+14155550101"
+
+
+async def at(state: SimState, seconds: float) -> None:
+    """Sleep on the sim clock until virtual time ``seconds``; everything due by then (and every in-process
+    webhook it triggers) has run when this returns.
+
+    The first zero sleep lets tasks spawned by the last request register their timers, so a timer due exactly
+    at ``seconds`` is ordered before this sleeper (an in-process request can finish without yielding to them).
+    """
+    await state.clock.sleep(0)
+    await state.clock.sleep(max(0.0, seconds - state.clock.virtual_ms() / 1000))
+    await state.call_engine.idle()
+
+
+async def settle(state: SimState) -> None:
+    """Let in-flight work finish: everything runnable now, then every scheduled call webhook (a recording is
+    encoded in a worker thread, which leaves the loop idle, so the clock alone does not wait for it)."""
+    await state.clock.sleep(0)
+    await state.call_engine.idle()
+
+
+def register(state: SimState, yaml_text: str) -> str:
+    """Register a scenario given as YAML; returns its id."""
+    scenario = load_scenario(yaml_text)
+    state.register_scenario(scenario)
+    return scenario.id
+
+
+async def dial(client: httpx.AsyncClient, connection_id: str, **overrides: Any) -> dict[str, Any]:
+    """``POST /v2/calls`` from :data:`CALLER` to :data:`CALLEE` (overridable); returns ``data``."""
+    body = {"connection_id": connection_id, "to": CALLEE, "from": CALLER, **overrides}
+    response = await client.post("/v2/calls", json=body)
+    assert response.status_code == 200, response.text
+    call: dict[str, Any] = response.json()["data"]
+    return call
+
+
+async def command(client: httpx.AsyncClient, ccid: str, action: str, **body: Any) -> httpx.Response:
+    return await client.post(f"/v2/calls/{ccid}/actions/{action}", json=body)
+
+
+async def ok(client: httpx.AsyncClient, ccid: str, action: str, **body: Any) -> None:
+    """Run a call command that must succeed."""
+    response = await command(client, ccid, action, **body)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"data": {"result": "ok"}}
+
+
+async def summary(client: httpx.AsyncClient, ccid: str) -> dict[str, Any]:
+    response = await client.get(f"/sim/telnyx/calls/{ccid}")
+    assert response.status_code == 200, response.text
+    found: dict[str, Any] = response.json()
+    return found
+
+
+def events(transport: RecordingTransport, ccid: str | None = None) -> list[tuple[str, int]]:
+    """(event type, arrival virtual ms) of the call webhooks received, optionally for one leg."""
+    return [
+        (item.event_type, item.virtual_ms)
+        for item in transport.received
+        if "call_control_id" in item.envelope["data"]["payload"]
+        and (ccid is None or item.envelope["data"]["payload"]["call_control_id"] == ccid)
+    ]
+
+
+def payloads(transport: RecordingTransport, event_type: str) -> list[dict[str, Any]]:
+    return [item.envelope["data"]["payload"] for item in transport.of_type(event_type)]
+
+
+INBOUND_NUMBER: Final = "+14155552001"
+
+
+async def inbound_call(
+    client: httpx.AsyncClient, state: SimState, connection_id: str, **body: Any
+) -> dict[str, Any]:
+    """Own :data:`INBOUND_NUMBER` on ``connection_id`` and place a call to it from :data:`CALLEE`."""
+    if state.telnyx.owner_of(INBOUND_NUMBER) is None:
+        await own_number(client, state, INBOUND_NUMBER, connection_id=connection_id)
+    response = await client.post("/sim/telnyx/inbound", json={"to": INBOUND_NUMBER, "from": CALLEE, **body})
+    assert response.status_code == 202, response.text
+    ids: dict[str, Any] = response.json()
+    return ids
+
+
+async def answered_call(client: httpx.AsyncClient, state: SimState, **dial_fields: Any) -> tuple[str, str]:
+    """An outgoing call answered at 1 s (no scenario); returns (connection id, call_control_id)."""
+    app = await create_app(client)
+    call = await dial(client, app["id"], **dial_fields)
+    await at(state, 1.0)
+    return app["id"], call["call_control_id"]
+
+
+async def ringing_call(client: httpx.AsyncClient) -> str:
+    """An outgoing call that is not answered yet (default outcome: answered at 1 s); its call_control_id."""
+    app = await create_app(client)
+    ccid: str = (await dial(client, app["id"]))["call_control_id"]
+    return ccid
+
+
+async def ringing_inbound(client: httpx.AsyncClient, state: SimState) -> str:
+    """An inbound call waiting for the platform's first command; its call_control_id."""
+    app = await create_app(client)
+    ccid: str = (await inbound_call(client, state, app["id"]))["call_control_id"]
+    return ccid

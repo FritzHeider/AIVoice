@@ -673,3 +673,15 @@ Grafana 3001
   `telnyx_helpers.verify_signature` (pynacl, independent of the sim). All sim ids come from `state.ids`
   (seeded); background work goes through `state.tasks.spawn` (never bare `create_task`). Python 3.12
   `asyncio.gather` over already-done tasks does not yield — loops over it need an `await asyncio.sleep(0)`.
+- 2026-10-29 (P03-T02b): FakeTelnyx call control: `va_sim.telnyx.call_engine.CallEngine` (on `SimState.call_engine`)
+  is the only code that mutates calls/conferences (`calls.Call`, per account in `Account.calls`/`conferences`);
+  handlers in `call_routes`/`call_actions` (dispatch table of `Action(model, needs, run, check)`), `conferences`,
+  and `call_control` validate and call one engine method. Webhooks go through `CallEvents.send` (chained per call
+  session and per conference, so order is deterministic); timers through `CallEvents.later` (cancelled on hang-up).
+  Hooks for the P03-T03 media client: `Call.audio` (PCM16 8 kHz caller/agent tracks, recorded into WAVs),
+  `Call.stream` (stream params), `Call.timeline_utterances`. The accelerated clock now advances only when the event
+  loop is idle, so tests drive calls with `telnyx_helpers.at(state, seconds)` (absolute virtual time; it also waits
+  for queued webhooks) and `settle(state)`; `state.tasks.drain()` runs every call to its end (time limit
+  14 400 s virtual — instant). A test that busy-polls with `asyncio.sleep(0)` keeps the loop non-idle and freezes
+  accelerated time. Builders: `dial`, `command`, `ok`, `summary`, `events`, `payloads`, `register`,
+  `inbound_call`, `answered_call`, `ringing_call`, `ringing_inbound` in `tests/support/telnyx_helpers.py`.

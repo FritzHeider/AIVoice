@@ -486,3 +486,293 @@ Approved. Both earlier findings are fixed (`"failure"` entry status in numbers.p
 Decision (6) id wording). Gates: lint, typecheck and placeholders (0 findings) all passed. The first `make test` run
 had 1 failure and 11 errors in apps/api testcontainers fixtures, all Docker daemon read timeouts with nothing to do
 with va_sim. Those 4 files passed on their own (77 passed). A second full `make test` passed: 3615 tests, coverage 97.87 %.
+
+## Plan P03-T02b — FakeTelnyx call control and scenario-driven call progress (Planner, 2026-10-29)
+
+Scope: Telnyx call REST (dial + every action in specs/06 §2.1), conferences, scenario-driven progress (ring →
+answered | busy | no_answer | rejected | failed), AMD events, transfer/bridge legs, recordings (`call.recording.saved`
++ WAV), streaming/playback state + events, inbound calls, call control API. **Out of scope (P03-T03):** the media WS
+client (connecting to `stream_url`, frames, marks, caller `steps`, `greeting_audio`, DTMF steps, agent_audio.wav). T02b
+keeps per-call stream params and empty PCM16 track buffers (`CallAudio.caller` / `.agent`) and an empty
+`timeline_utterances` list so T03 only fills them.
+
+### Decisions (Builder writes ONE `> Decision (2026-10-29): FakeTelnyx call control (P03-T02b).` block at the end of specs/30 §3.2)
+1. Ids: `call_control_id` = `"v3:" + state.ids.token(24)`; `call_leg_id`, `call_session_id`, conference id, recording
+   id, stream id = `state.ids.uuid()`. A transfer leg or a dial with `link_to` shares the linked call's `call_session_id`.
+2. Command responses: every call action answers 200 `{"data": {"result": "ok"}}`; conference create 200 `{"data":
+   conference}`. State changes happen synchronously in the handler; the resulting webhooks are emitted by a supervised
+   task after the response, in per-call order (one `asyncio.Lock` per call, FIFO). A command's `client_state`
+   (when sent) replaces the leg's client_state for later events.
+3. `command_id` dedup: per call (dial: per account). A repeated `command_id` answers the same 200 without
+   re-executing and is logged with `duplicate: true`.
+4. Errors: unknown ccid or another account's ccid → 404 `10005`; call already hung up → 422 `90018` "Call has
+   already ended"; command invalid for the leg's state (answer/reject on an outgoing or already answered leg,
+   record/stream/playback/transfer/bridge before answer, bridge with itself) → 422 `10015` with the detail "Call is
+   not in a state that accepts <action>." (real Telnyx code for this not verified; va_telnyx maps any other 4xx to
+   CARRIER_ERROR anyway); bad `connection_id` / `link_to` / bridge `call_control_id` → 422 `10015` with pointer.
+   `from` is not checked against owned numbers (verified caller ids / BYO). `to` accepts E.164 or `sip:` URIs.
+5. Webhook target: the leg's `webhook_url` (dial/answer/transfer body; a transfer leg inherits the A leg's when the
+   body has none), else the app (`connection_id`) `webhook_event_url`, else `SIM_EDGE_WEBHOOK_URL`.
+6. Outcome: the scenario bound to the dialled `to` (§3.5 `answer`); a dial with `link_to` and no scenario for `to`
+   uses the linked call's scenario `transfer_target`; a transfer leg uses the A leg's scenario `transfer_target`;
+   with no scenario: answered after 1 000 ms, `answered_by: human_residence`. Timings on the sim clock from the dial:
+   `call.initiated` (state `bridging`) at once; answered → `call.answered` at `after_ms`; busy → `call.hangup`
+   `user_busy`/sip `486`/source `callee` at 500 ms; rejected → `call_rejected`/`603`/`callee` at 500 ms; failed →
+   `unspecified`/`503`/`unknown` at 500 ms; no_answer → `timeout`/`487`/`unknown` after the dial `timeout_secs`
+   (default 30). An answered leg is hung up `time_limit`/source `unknown` after `time_limit_secs` (default 14 400).
+7. Hangup sides: a platform `hangup` on a leg the platform dialled (outgoing) has `hangup_source: caller`, on an
+   incoming leg `callee`; cause `normal_clearing` (sip `200`) once answered, `originator_cancel` (sip `487`) before.
+   `POST /sim/telnyx/calls/{ccid}/hangup {"cause"?: <hangup cause>, default normal_clearing}` is the remote party:
+   the opposite source. Hangup order: `streaming.stopped` (if streaming), `call.playback.ended` (`status:
+   "call_hangup"`, if playing), `conference.participant.left`, `call.hangup`, `call.recording.saved` (if
+   recording). When a bridged leg hangs up its peer is hung up too (`normal_clearing`, the peer's opposite side)
+   unless the bridge command had `park_after_unbridge: "self"` (the peer goes back to `parked`, no event).
+8. AMD (from answer): `premium` → `call.machine.premium.detection.ended` `{result: answered_by}` at +1 800 ms and, for
+   `machine` with `beep_at_ms`, `call.machine.premium.greeting.ended` `{result: "beep_detected"}` at
+   +`beep_at_ms` (events in time order). `detect`, `detect_beep`, `detect_words`, `greeting_end` →
+   `call.machine.detection.ended` `{result: human|machine|not_sure}` (human_* → human, machine → machine,
+   silence/fax_detected → not_sure) at +1 800 ms, and for `detect_beep`/`greeting_end` with a beep
+   `call.machine.greeting.ended` `{result: "beep_detected"}`. `disabled` → none.
+9. Transfer: needs an answered A leg; creates leg B (`direction: outgoing`, `from`/`to` of the body, client_state =
+   `target_leg_client_state`) → B `call.initiated`; answered → B `call.answered` then `call.bridged` on A then B;
+   not answered → B `call.hangup` per rule 6 and A stays answered. `bridge` → `call.bridged` on both legs (A
+   first); `bridge_on_answer: true` with `link_to` bridges on answer.
+10. Recordings: `record_start` (or dial/answer `record: "record-from-answer"`) needs an answered leg; `record_stop`
+   or hangup emits `call.recording.saved` `{recording_id, channels ("dual" default | "single"), format,
+   recording_started_at, recording_ended_at, recording_urls: {"wav": "<base>/sim/recordings/<id>.wav", "mp3": null},
+   public_recording_urls: same}`. Recordings are always WAV (no MP3 encoder, as specs/06 §10.2 Decision): `mp3` is
+   null even when `format: "mp3"` was requested. `<base>` is the base URL of the request that created the call
+   (dial or `/sim/telnyx/inbound`) so URLs resolve wherever the sim runs. The WAV is 8 kHz PCM16, channel 0 the caller
+   track and channel 1 the agent track (single: mixed sum, clipped) from `CallAudio`, padded with silence to the
+   recording's sim-clock duration; built with `asyncio.to_thread(pcm16_wav, ...)`.
+11. Streaming/playback: `streaming_start` (answered leg) stores the stream (stream_id uuid) and emits
+   `streaming.started` `{stream_url}`; dial/answer with `stream_url` start the stream on answer; `streaming_stop`
+   emits `streaming.stopped`. The WS connection itself arrives in P03-T03. `playback_start` → `call.playback.started`
+   `{media_url, overlay}`; `playback_stop` → `call.playback.ended` `{media_url, overlay, status: "cancelled"}`;
+   playbacks end only by stop or hangup. `send_dtmf` records `{digits, duration_millis, at}` (digits `^[0-9A-Da-d*#wW]+$`,
+   duration 100–500, default 250).
+12. Conferences: `POST /v2/conferences` needs an answered leg → `{id, name, record_type: "conference", status:
+   "in_progress", connection_id, created_at, expires_at (+24 h), region: "sim"}`; `conference.created` then
+   `conference.participant.joined` for the creating leg. `join` (answered leg, not already in it) →
+   `conference.participant.joined`; `leave` or participant hangup → `conference.participant.left`; when the last
+   participant leaves, or one that joined with `end_conference_on_exit: true` leaves, `status: "completed"` and
+   `conference.ended` (`reason: "all_left"` | `"host_left"`). Conference events carry `{conference_id,
+   call_control_id, call_leg_id, call_session_id, client_state, connection_id}` and go to the participant leg's
+   webhook URL. Unknown conference → 404 `10005`; ended conference → 422 `10015`.
+13. Inbound: `POST /sim/telnyx/inbound {to, from, scenario?}`: `to` must be a number owned by an account with a
+   `connection_id` (else 422 `invalid_request`); `scenario` (registered id, else 404 `not_found`) or the scenario bound
+   by `inbound_from`. Creates an incoming leg (state `parked`) on the owning account, emits `call.initiated`
+   (`direction: incoming`) to the app's `webhook_event_url` (rule 5) and answers 202 `{"call_control_id",
+   "call_leg_id", "call_session_id"}`. When the app has `first_command_timeout` and no command arrives within
+   `first_command_timeout_secs`, the leg is hung up `timeout`/source `unknown`.
+14. Control API: `GET /sim/telnyx/calls` → `{"calls": [summary...]}` (every account, creation order) and `GET
+   /sim/telnyx/calls/{ccid}` → summary `{call_control_id, call_leg_id, call_session_id, connection_id, direction,
+   from, to, state, is_alive, scenario_id, client_state, created_at, answered_at, ended_at, hangup_cause,
+   hangup_source, commands: [{name, command_id, at, duplicate}], events: [{event_type, event_id, at}], dtmf_sent,
+   transfers: [{call_control_id, to, from, at}], recordings: [ids], stream: {...}|null, conference_id}` (`at` ISO Z);
+   `GET /sim/telnyx/calls/{ccid}/timeline` → `{call_control_id, initiated_ms, answered_ms, ended_ms, utterances: []}`
+   (sim `virtual_ms`; utterances filled by the P03-T03 caller); `POST /sim/telnyx/calls/{ccid}/hangup` → 202
+   summary; unknown → 404 `not_found`; already ended → 409 `call_ended` (new control error code).
+   Payload states: `bridging` (outgoing initiated), `parked` (incoming initiated / unbridged), `answered`,
+   `bridged`, `hangup`. `is_alive` is false until answered and after hangup.
+
+### Files
+- `packages/va_sim/src/va_sim/telnyx/call_models.py` — request models (all `_Body`-style `extra="forbid"`; reuse
+  `E164`, `WebhookUrl`, `Name` from `telnyx.models` — import them, no copies): `CallTarget` type (`E164 | sip:\S+`),
+  `StreamFields` mixin (stream_url, stream_track `inbound_track|outbound_track|both_tracks` = inbound_track,
+  stream_codec `PCMU|PCMA|G722|OPUS|AMR-WB|L16|default` = default, stream_bidirectional_mode `mp3|rtp`|None,
+  stream_bidirectional_codec, stream_bidirectional_sampling_rate `8000|16000|22050|24000|48000`,
+  stream_bidirectional_target_legs `both|self|opposite`, stream_auth_token, send_silence_when_idle=False),
+  `RecordFields` (record `record-from-answer`|None, record_channels `single|dual`=dual, record_format `wav|mp3`=wav,
+  record_track `both|inbound|outbound`=both, record_max_length 0–14400), `CommandFields` (command_id, client_state ≤
+  4096 chars), `CustomHeader{name,value}`, `AmdConfig` (the 10 Telnyx config ints, all optional),
+  `DialRequest` (connection_id, to, from, from_display_name, timeout_secs 5–600=30, time_limit_secs 30–14400=14400,
+  answering_machine_detection `premium|detect|detect_beep|detect_words|greeting_end|disabled`=disabled,
+  answering_machine_detection_config, webhook_url, webhook_url_method `POST|GET`=POST, custom_headers, link_to,
+  bridge_intent=False, bridge_on_answer=False + stream/record/command fields), `AnswerRequest`, `RejectRequest`
+  (cause `CALL_REJECTED|USER_BUSY`), `HangupRequest`, `TransferRequest` (to, from, from_display_name, timeout_secs,
+  time_limit_secs, early_media=True, target_leg_client_state, webhook_url, answering_machine_detection,
+  custom_headers, record), `BridgeRequest` (call_control_id, park_after_unbridge `self`|None),
+  `SendDtmfRequest`, `RecordStartRequest` (format, channels, play_beep, max_length, timeout_secs, trim?, command
+  fields), `RecordStopRequest`, `StreamingStartRequest`, `StreamingStopRequest` (stream_id), `PlaybackStartRequest`
+  (audio_url, loop `int ≥1 | "infinity"`="infinity", overlay, target_legs `self|opposite|both`), `PlaybackStopRequest`
+  (stop `all|current`=all, overlay), `ConferenceCreate` (call_control_id, name, beep_enabled
+  `always|never|on_enter|on_exit`=never, client_state, command_id, start_conference_on_create=True, comfort_noise?),
+  `ConferenceJoin` (call_control_id, start_conference_on_enter, end_conference_on_exit=False, hold, mute,
+  client_state, command_id), `ConferenceLeave` (call_control_id, command_id), control bodies `InboundCall` (to, from
+  alias, scenario | None), `RemoteHangup` (cause literal of the §3.2 hangup causes = normal_clearing).
+- `packages/va_sim/src/va_sim/telnyx/calls.py` — dataclasses (slots, mutable): `CallAudio(caller: bytearray, agent:
+  bytearray)`, `StreamState(stream_id, params: dict)`, `ActiveRecording(recording_id, channels, format,
+  started_at, caller_offset, agent_offset)`, `Playback(media_url, overlay)`, `CommandEntry`, `EventEntry`, `Call`
+  (fields of decision 14 + account api_key, webhook_url, base_url, amd, outcome, bridged_with, park_after_unbridge,
+  timers: list[asyncio.Task[None]], lock: asyncio.Lock, command_ids set, audio, timeline_utterances list),
+  `Conference` (record dict + participants dict ccid→end_on_exit). `Call.summary() -> Record`, `Call.payload(**extra)`
+  (decision 14 payload base: call_control_id, call_leg_id, call_session_id, connection_id, client_state, from, to,
+  direction, state, start_time + extras). Account gains `calls`, `conferences`, `dial_commands: dict[str, str]`;
+  TelnyxStore gains `call(ccid) -> tuple[Account, Call] | None` and `all_calls()` (store.py edits).
+- `packages/va_sim/src/va_sim/telnyx/call_engine.py` — `class CallEngine(state)`: the only place that mutates call
+  state and schedules progress. `outcome_for(...) -> LegOutcome` (frozen: result, ring_s, answered_by, beep_at_s);
+  `NON_ANSWER: Final[Mapping[result, HangupSpec(cause, sip, source, delay_s|None)]]`; `start_outgoing(call, outcome,
+  timeout_s)` (spawns progress), `answer(call)` (state, stream/record-from-answer, AMD timers, time limit,
+  bridge_on_answer), `hang_up(call, cause, source, sip)` (decision 7 order, cancels timers except the current task,
+  conference leave, peer handling, recording save), `bridge(a, b, park)`, `transfer(a, body) -> Call`,
+  `start_recording/stop_recording`, `start_stream/stop_stream`, `start_playback/stop_playback`, `emit(call,
+  event_type, **extra)` (per-call lock, appends EventEntry, `state.webhooks.emit(call.webhook_url, ...)`),
+  `later(call, delay_s, coro_factory)` (supervised timer registered on the call). Conference join/leave helpers live in
+  `conferences.py` but leave-on-hangup is invoked from `hang_up` through a small callback to avoid a cycle (or put the
+  participant-left logic in the engine; Builder's choice, no duplication).
+- `packages/va_sim/src/va_sim/telnyx/call_routes.py` — `call_routes(state) -> list[BaseRoute]`: `POST /v2/calls`,
+  `POST /v2/calls/{call_control_id}/actions/{action}` dispatch table (answer, reject, hangup, transfer, bridge,
+  send_dtmf, record_start, record_stop, streaming_start, streaming_stop, playback_start, playback_stop); shared helper
+  `_command(request, account, model, handler)` doing lookup → 404/90018 → parse → dedup → client_state update →
+  handler. Unknown action → 404 `10005`.
+- `packages/va_sim/src/va_sim/telnyx/conferences.py` — `conference_routes(state)`: `POST /v2/conferences`, `GET
+  /v2/conferences/{id}` (record), `POST /v2/conferences/{id}/actions/join|leave`.
+- `packages/va_sim/src/va_sim/telnyx/call_control.py` — `call_control_routes(state)`: `POST /sim/telnyx/inbound`,
+  `GET /sim/telnyx/calls`, `GET /sim/telnyx/calls/{ccid}`, `GET .../timeline`, `POST .../hangup`.
+- `telnyx/errors.py` — `CALL_ENDED = "90018"` ("Call has already ended") + `call_ended()`; `invalid_state(action)`.
+- `telnyx/routes.py` — add call, conference, call control routes. `state.py` snapshot `telnyx` adds `calls`,
+  `conferences` counts (reset already clears accounts). `store.py` per above.
+- `specs/30-testing-and-evals.md` §3.2 Decision block; AGENTS.md P03-T02b note (call control API, engine as the single
+  mutation point, T03 hooks: `Call.audio`, `Call.stream`, `Call.timeline_utterances`).
+
+### Tests (`packages/va_sim/tests/telnyx/`, existing `telnyx_helpers` client/RecordingTransport + AcceleratedClock;
+add `dial(client, **overrides)` / `command(client, ccid, action, **body)` / `register(state, yaml)` helpers to
+telnyx_helpers.py; add Telnyx shapes to telnyx_shapes.py: `DialResponse`, `CommandResult`, `Conference`,
+`CallEventPayload`, `HangupPayload`, `RecordingSavedPayload`, `AmdPayload`, `ConferenceEventPayload`)
+- `test_calls_dial.py`: dial requires connection_id/to/from (pointers), unknown connection → 10015 `/connection_id`,
+  unknown field → 10015; response shape (`v3:`, is_alive false, client_state echoed); per-outcome event sequences with
+  `virtual_ms` (answered at after_ms; busy/rejected/failed at 500 ms with causes/sip/source; no_answer at
+  timeout_secs; default outcome without scenario); webhook URL precedence (decision 5); signatures verify
+  (`verify_signature`); time_limit hangup; dial command_id dedup returns same ccid; same seed → same ids.
+- `test_calls_actions.py`: answer/reject of inbound legs (reject USER_BUSY → user_busy); hangup before answer →
+  originator_cancel, after → normal_clearing with decision-7 source; 90018 after hangup; 404 unknown/other account;
+  invalid-state 10015; command_id dedup (one event, `duplicate: true` in log); client_state replacement echoed;
+  send_dtmf log + bad digits/duration; streaming start/stop events and stream on answer via dial `stream_url`;
+  playback start/stop/hangup status; hangup event order with streaming+playback+recording.
+- `test_calls_amd.py`: premium human/machine+beep (both orders: beep before/after 1 800 ms)/silence/fax; standard
+  detect mapping; disabled → none.
+- `test_calls_transfer.py`: transfer answered → B initiated/answered, bridged A then B, B client_state =
+  target_leg_client_state, same session id; transfer_target busy/no_answer → B hangup and A alive; transfer before
+  answer → 10015; bridge both + 90018 for ended peer + pointer for unknown; bridged peer hangup cascades;
+  `park_after_unbridge: self` keeps peer; dial `link_to` + `bridge_on_answer` bridges, link_to uses transfer_target.
+- `test_calls_recording.py`: record_start/stop → `call.recording.saved` shape, URL fetch via `/sim/recordings/<id>.wav`
+  returns 2-channel 8 kHz WAV whose frame count = sim duration × 8000 (wave module); `record-from-answer` on dial;
+  saved on hangup; single channel; mp3 null; record_start before answer → 10015.
+- `test_conferences.py`: create → shape, events created + joined; join/leave events; host_left with
+  end_conference_on_exit; all_left; participant hangup → left; unknown 404; join ended conference 10015.
+- `test_call_control.py`: inbound initiated payload (incoming, parked) to app URL; inbound needs owned number with
+  connection (422), unknown scenario 404, scenario by inbound_from bound; first_command_timeout hangup; calls listing
+  + detail summary (commands, events, dtmf, transfers); timeline ms values; remote hangup source opposite + 409 when
+  ended + 404; `/sim/reset` cancels pending progress (supervisor pending 0) and drops calls; snapshot counts.
+
+### Gates
+`make fmt lint typecheck placeholders test`; `make check` (jscpd 0 clones, va_sim coverage ≥ 85 %); radon on
+`packages/va_sim/src` (keep handler functions at A/B: dispatch tables, not if-chains); pip-audit + pnpm audit as in
+T02a. No e2e (no platform flow yet).
+
+### Risks
+- Ordering: spawn one emission task per state change; all emits go through `CallEngine.emit` (per-call lock) or
+  events of one leg can interleave. Hang-up cancels the leg's timers — never cancel the task currently running
+  `hang_up` (`asyncio.current_task()` check).
+- Accelerated clock: tests advance via `clock.sleep`/`advance` then `await state.tasks.drain()`; assert `virtual_ms`
+  of `RecordingTransport.received`, never wall time. Default `time_limit_secs` 14 400 s timers must not make `drain()`
+  wait forever in accelerated mode — tests that drain must hang up calls first or cancel; document in AGENTS.md (or
+  give `drain` no part in it: prefer helper `settle(state)` = advance to a given virtual time + drain).
+- jscpd: the 12 action handlers must share the `_command` wrapper; the hangup-cause tables live once in call_engine.
+- Do not import `va_telnyx` / `va_domain`; the simulator builds payloads itself.
+- Keep files < ~350 lines and functions < radon C; split engine helpers if needed.
+
+## Build P03-T02b (Builder, 2026-10-29)
+
+Implemented per plan; deviations (all in the specs/30 §3.2 Decision (2026-10-29) P03-T02b block or AGENTS.md):
+- Files: `telnyx/call_models.py`, `calls.py` (Call/Conference dataclasses, summary/timeline/payloads, outcome_of),
+  `call_events.py` (CallEvents: ordered delivery chains + timers), `call_media.py` (CallMedia: stream, playback,
+  recording WAV, AMD), `call_engine.py` (CallEngine(CallMedia): progress, answer, hang_up, bridge, transfer,
+  conferences), `call_actions.py` (action table), `call_routes.py` (dial + dispatcher), `conferences.py`,
+  `call_control.py`; store/errors/routes/state edits. Engine lives on `SimState.call_engine`.
+- Ordering: deliveries chained per call session AND per conference (conference events of different legs would
+  otherwise race). Conference participants are keyed by Call object.
+- `park_after_unbridge: "self"` applies to the commanding leg: it parks when its peer hangs up.
+- Clock change (decision 15): AcceleratedClock pump advances only when `loop._ready` is empty (idle), else
+  mid-call commands from in-process tests raced the 14 400 s time-limit timer. uvloop (no `_ready`) keeps the old
+  fixed settle turns. Existing clock/sim tests unchanged and passing.
+- Test helpers `at()` / `settle()` also await `call_engine.idle()`: the recording WAV is encoded in a worker
+  thread (`asyncio.to_thread`), which leaves the loop idle.
+- SIP table and `end_time` on call.hangup; ring longer than timeout_secs → no-answer; first-command timeout sip 408
+  not used (timeout → 487 from the table).
+Tests: tests/telnyx/test_calls_dial|actions|amd|transfer|recording.py, test_conferences.py, test_call_control.py
+(+ snapshot count updates in test_state/test_control_telnyx); helpers/shapes in tests/support.
+Gates (real runs): make fmt 0; make lint 0; make typecheck 0 (mypy 467 files + tsc); make placeholders 0 findings;
+make check 0: 3687 pytest passed, total coverage 97.91 % (new call modules 97–100 %), TS vitest passed, openapi
+drift + spec refs clean. radon average A (2.11; only C is pre-existing scenario._locate). jscpd 0 clones.
+pip-audit + pnpm audit high: no known vulnerabilities. va_sim suite stable over repeated -n 4 runs with coverage.
+
+## Review P03-T02b (Reviewer, 2026-10-29)
+
+Gates re-run: make lint 0, make typecheck 0, make placeholders 0 findings, make test 0 (3687 passed).
+Spec decision block, store/errors/state edits, ordering design (per-session/per-conference chains), and the
+action dispatch table are good. Rejected for:
+
+1. `packages/va_sim/src/va_sim/telnyx/call_engine.py` `hang_up` / `_unbridge` (and `transfer`): when leg A
+   hangs up while its transfer leg B is still ringing (`b.bridge_on_answer is a`, not yet bridged), B is left
+   running. Probe (dial scenario callee, answer at 1 s, transfer with `transfer_target: {answer_after_ms: 4000}`,
+   `hangup` A at 2 s, advance to 10 s): B summary `state: answered, is_alive: true`, events
+   `[call.initiated, call.answered]`, with no bridge and nothing else until the 14 400 s time limit. Real Telnyx
+   cancels the transfer leg when the originating leg goes away, and the platform never gets a hang-up for a leg it
+   cannot control. Required: on hang-up of a leg, every unanswered leg whose `bridge_on_answer` is that leg is hung up
+   `originator_cancel`, source `caller`, with SIP 487 and `call.hangup`. That covers transfer legs and `link_to` +
+   `bridge_on_answer` dials. A leg that answers after its peer ended is also hung up rather than left orphaned.
+   Write this into Decision (9) and test it in test_calls_transfer.py (A hangs up during B ring → B `call.hangup`
+   originator_cancel; same for link_to + bridge_on_answer).
+2. `packages/va_sim/src/va_sim/telnyx/call_media.py` `stop_recording.store`: `mix_tracks(caller, agent)` (a pure-
+   Python per-sample generator over the whole recording) is evaluated on the event loop, because the list is built
+   before `asyncio.to_thread` runs. A 10-minute single-channel recording is 4.8 M samples and blocks the loop for
+   seconds, which breaks MASTER_PROMPT rule 7 (CPU work via `asyncio.to_thread`). Required: do the mix inside the
+   worker thread (e.g. one helper `_encode(channels, caller, agent)` passed to `to_thread`).
+
+## Fix P03-T02b review findings (Builder, 2026-10-29)
+
+1. Orphaned ringing legs: `Call.waiting_legs` (registered in `CallEngine.new_call` when `bridge_on_answer` is set,
+   so transfer legs and `link_to` + `bridge_on_answer` dials both count). `hang_up` → `_cancel_waiting_legs` after
+   `_unbridge`: each still-ringing leg whose `bridge_on_answer` is the ended leg gets `call.hangup`
+   originator_cancel / caller / 487. `answer` checks the peer first: peer ended → `call.answered` then
+   `call.hangup` normal_clearing / caller (platform_side), no media/AMD/limit. Written into specs/30 Decision (9).
+   Tests (test_calls_transfer.py): transfer ring cancelled, link_to ring cancelled, link_to an ended call hung up on
+   answer — all 3 fail with the fix disabled.
+2. Recording mix: `call_media._encode(channels, caller, agent)` (mix + WAV) runs inside `asyncio.to_thread`.
+   Test test_single_channel_mix_runs_off_the_event_loop asserts `mix_tracks` runs off the main thread (fails when
+   the mix is done on the loop).
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 findings, make check 0 (3691 passed, coverage 97.93 %, TS
+vitest passed).
+
+## Plan P03-T02b (re-plan after build.blocked: missing backpressure evidence, Planner, 2026-10-29)
+
+Blocker is not a code problem: the Builder's last `build.done` (after fixing review findings 1–2) lacked the required
+evidence keys, so the loop rejected it. Code for P03-T02b, including both review fixes, is in the working tree.
+No split is needed; the task stays as planned above.
+
+Builder actions (no new design):
+1. Re-run all gates on the current tree and capture real output: `make fmt lint typecheck placeholders test`,
+   `make check` (pytest + coverage ≥ 85 % per package, jscpd, openapi drift, TS vitest), `uv run radon cc -a -s
+   packages/va_sim/src` (record the average grade/score), `uv run pip-audit` + `corepack pnpm audit --audit-level high`
+   as in T02a.
+2. If anything fails, fix it inside P03-T02b scope only.
+3. Emit build.done with EVERY required key, exactly in this form (values from the real runs):
+   `ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, complexity: <radon avg e.g. A (2.11)>, duplication: pass, specs: pass — P03-T02b review fixes (waiting-leg cancel, off-loop mix)"`
+   Do not drop any key; `performance` is optional and may be omitted.
+
+## Build P03-T02b gate re-run for evidence (Builder, 2026-10-29)
+
+Nothing changed in the code. Gates re-run on the current tree: make fmt 0, lint 0, typecheck 0, placeholders 0
+findings. make check 0: 3691 pytest passed, coverage 97.93 %, TS vitest passed (22+52+48), openapi drift current,
+check_spec_refs 0 problems. `uvx radon cc -s -a packages/va_sim/src`: average A (2.13). `npx jscpd@4` va_sim src+tests:
+0 clones. `uvx pip-audit --strict` on `uv export` and `corepack pnpm audit --audit-level high`: no known vulnerabilities.
+
+## Review P03-T02b re-check (Reviewer, 2026-10-29)
+
+Gates re-run: make lint 0, make typecheck 0, make placeholders 0, make test 0 (3691 passed, coverage 97.93 %).
+Finding 1 fixed: `Call.waiting_legs` + `CallEngine._cancel_waiting_legs` (originator_cancel / caller / 487) after
+`_unbridge`; `answer` hangs up a leg whose peer already ended; Decision (9) in specs/30 updated; 3 transfer tests.
+Finding 2 fixed: `call_media._encode` (mix + WAV) runs inside `asyncio.to_thread`; off-loop test present.
+Approved; task ticked and committed.

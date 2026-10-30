@@ -1,17 +1,21 @@
 """FakeTelnyx resource store (specs/30-testing-and-evals.md §3.2): accounts and their resources.
 
-Each API key is an account owning its applications, profiles, numbers, orders, and messages; another account's
-ids are invisible (404). Records are stored response-shaped so handlers serve them as they are.
+Each API key is an account owning its applications, profiles, numbers, orders, messages, calls, and
+conferences; another account's ids are invisible (404). Records are stored response-shaped so handlers serve
+them as they are.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from va_sim.telnyx.inventory import AvailableNumber, seed_inventory
 from va_sim.telnyx.models import TelnyxSimConfig
+
+if TYPE_CHECKING:
+    from va_sim.telnyx.calls import Call, Conference
 
 __all__ = ["DEFAULT_API_KEY", "Account", "Record", "TelnyxStore"]
 
@@ -29,6 +33,10 @@ class Account:
     numbers: dict[str, Record] = field(default_factory=dict)
     orders: dict[str, Record] = field(default_factory=dict)
     messages: dict[str, Record] = field(default_factory=dict)
+    calls: dict[str, Call] = field(default_factory=dict)
+    conferences: dict[str, Conference] = field(default_factory=dict)
+    # Dial command_id → call_control_id (dial dedup is per account: there is no call yet).
+    dial_commands: dict[str, str] = field(default_factory=dict)
 
     def number_by_e164(self, phone_number: str) -> Record | None:
         return next((n for n in self.numbers.values() if n["phone_number"] == phone_number), None)
@@ -72,6 +80,19 @@ class TelnyxStore:
             if record is not None:
                 return account, record
         return None
+
+    def call(self, call_control_id: str) -> tuple[Account, Call] | None:
+        """The account owning ``call_control_id`` and the call."""
+        for account in self.accounts.values():
+            found = account.calls.get(call_control_id)
+            if found is not None:
+                return account, found
+        return None
+
+    def all_calls(self) -> Iterator[Call]:
+        """Every account's calls in creation order per account."""
+        for account in self.accounts.values():
+            yield from account.calls.values()
 
     def all_messages(self) -> Iterator[Record]:
         for account in self.accounts.values():

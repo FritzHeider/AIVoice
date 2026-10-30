@@ -1,0 +1,164 @@
+"""Media features of a FakeTelnyx call: streaming, recording, playback, and answering machine detection
+(specs/30-testing-and-evals.md §3.2, Decision 2026-10-29 P03-T02b rules 8, 10, 11).
+
+Recordings are always WAV (specs/06 §10.2 Decision: no MP3 encoder): 8 kHz PCM16, channel 0 the caller track
+and channel 1 the agent track (``single``: their clipped sum), padded with silence to the recording's
+sim-clock duration, and served at ``<base>/sim/recordings/<id>.wav``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from array import array
+from collections.abc import Mapping
+from typing import Final, Literal
+
+from va_sim.clock import iso_z
+from va_sim.telnyx.call_events import CallEvents, Outgoing
+from va_sim.telnyx.calls import ActiveRecording, Call, Playback, StreamState
+from va_sim.wav import pcm16_wav
+
+__all__ = [
+    "AMD_DETECTION_S",
+    "BEEP_EVENTS",
+    "RECORDING_SAMPLE_RATE",
+    "STANDARD_AMD_RESULT",
+    "CallMedia",
+    "mix_tracks",
+]
+
+RECORDING_SAMPLE_RATE: Final = 8000
+AMD_DETECTION_S: Final = 1.8
+_BYTES_PER_MS: Final = RECORDING_SAMPLE_RATE * 2 // 1000
+_PCM16_MAX: Final = 32_767
+_PCM16_MIN: Final = -32_768
+
+# Standard detection reports human | machine | not_sure for the scenario's answered_by.
+STANDARD_AMD_RESULT: Final[Mapping[str, str]] = {
+    "human_residence": "human",
+    "human_business": "human",
+    "machine": "machine",
+    "silence": "not_sure",
+    "fax_detected": "not_sure",
+}
+# Detection mode → (detection event, greeting event or None when the mode does not report the beep).
+BEEP_EVENTS: Final[Mapping[str, tuple[str, str | None]]] = {
+    "premium": ("call.machine.premium.detection.ended", "call.machine.premium.greeting.ended"),
+    "detect": ("call.machine.detection.ended", None),
+    "detect_words": ("call.machine.detection.ended", None),
+    "detect_beep": ("call.machine.detection.ended", "call.machine.greeting.ended"),
+    "greeting_end": ("call.machine.detection.ended", "call.machine.greeting.ended"),
+}
+
+
+def mix_tracks(caller: bytes, agent: bytes) -> bytes:
+    """The sample-wise sum of two PCM16 tracks, clipped; the shorter one is padded with silence."""
+    length = max(len(caller), len(agent))
+    left = array("h", caller.ljust(length, b"\x00"))
+    right = array("h", agent.ljust(length, b"\x00"))
+    mixed = array("h", (max(_PCM16_MIN, min(_PCM16_MAX, a + b)) for a, b in zip(left, right, strict=True)))
+    return mixed.tobytes()
+
+
+def _encode(channels: Literal["single", "dual"], caller: bytes, agent: bytes) -> bytes:
+    """The recording WAV; CPU-bound (the mix walks every sample), so it runs in a worker thread."""
+    tracks = [caller, agent] if channels == "dual" else [mix_tracks(caller, agent)]
+    return pcm16_wav(tracks, RECORDING_SAMPLE_RATE)
+
+
+class CallMedia(CallEvents):
+    """Streams, recordings, playbacks, and AMD timers of call legs."""
+
+    # Streaming.
+
+    def start_stream(self, call: Call, params: dict[str, object]) -> None:
+        call.stream = StreamState(self._state.ids.uuid(), params)
+        self.emit(call, "streaming.started", stream_url=params["stream_url"])
+
+    def stop_stream(self, call: Call) -> Outgoing | None:
+        """Close the stream; returns its ``streaming.stopped`` event (None when not streaming)."""
+        if call.stream is None:
+            return None
+        url = call.stream.params["stream_url"]
+        call.stream = None
+        return self.event(call, "streaming.stopped", call.payload(stream_url=url))
+
+    # Playback.
+
+    def start_playback(self, call: Call, media_url: str, *, overlay: bool) -> None:
+        call.playbacks.append(Playback(media_url, overlay))
+        self.emit(call, "call.playback.started", media_url=media_url, overlay=overlay)
+
+    def stop_playbacks(
+        self, call: Call, status: Literal["cancelled", "call_hangup"], *, overlay: bool | None, current: bool
+    ) -> list[Outgoing]:
+        """End matching playbacks (all, or the latest when ``current``); one ``call.playback.ended`` each."""
+        matching = [p for p in call.playbacks if overlay is None or p.overlay == overlay]
+        stopped = matching[-1:] if current else matching
+        call.playbacks = [p for p in call.playbacks if all(p is not s for s in stopped)]
+        return [
+            self.event(
+                call,
+                "call.playback.ended",
+                call.payload(media_url=p.media_url, overlay=p.overlay, status=status),
+            )
+            for p in stopped
+        ]
+
+    # Recording.
+
+    def start_recording(
+        self, call: Call, channels: Literal["single", "dual"], record_format: Literal["wav", "mp3"]
+    ) -> None:
+        call.recording = ActiveRecording(
+            recording_id=self._state.ids.uuid(),
+            channels=channels,
+            format=record_format,
+            started_at=self._state.clock.now(),
+            started_ms=self._state.clock.virtual_ms(),
+            caller_offset=len(call.audio.caller),
+            agent_offset=len(call.audio.agent),
+        )
+
+    def stop_recording(self, call: Call) -> Outgoing | None:
+        """Finish the recording; returns ``call.recording.saved`` whose ``prepare`` stores the WAV."""
+        recording = call.recording
+        if recording is None:
+            return None
+        call.recording = None
+        call.recordings.append(recording.recording_id)
+        duration = (self._state.clock.virtual_ms() - recording.started_ms) * _BYTES_PER_MS
+        caller = bytes(call.audio.caller[recording.caller_offset :]).ljust(duration, b"\x00")
+        agent = bytes(call.audio.agent[recording.agent_offset :]).ljust(duration, b"\x00")
+        url = f"{call.base_url}/sim/recordings/{recording.recording_id}.wav"
+        urls = {"wav": url, "mp3": None}
+
+        async def store() -> None:
+            wav = await asyncio.to_thread(_encode, recording.channels, caller, agent)
+            self._state.store_recording(recording.recording_id, wav)
+
+        payload = call.payload(
+            recording_id=recording.recording_id,
+            channels=recording.channels,
+            format=recording.format,
+            recording_started_at=iso_z(recording.started_at),
+            recording_ended_at=iso_z(self._state.clock.now()),
+            recording_urls=urls,
+            public_recording_urls=dict(urls),
+        )
+        return self.event(call, "call.recording.saved", payload, prepare=store)
+
+    # Answering machine detection.
+
+    def schedule_amd(self, call: Call) -> None:
+        """Detection events for an answered outgoing leg, driven by its scenario outcome."""
+        events = BEEP_EVENTS.get(call.amd)
+        if events is None:
+            return
+        detection, greeting = events
+        answered_by = call.outcome.answered_by
+        result = answered_by if call.amd == "premium" else STANDARD_AMD_RESULT[answered_by]
+        self.later(call, AMD_DETECTION_S, lambda: self.emit(call, detection, result=result), name="amd")
+        beep_at = call.outcome.beep_at_s
+        if greeting is not None and beep_at is not None:
+            self.later(call, beep_at, lambda: self.emit(call, greeting, result="beep_detected"), name="beep")

@@ -94,7 +94,14 @@ def test_snapshot_shape() -> None:
         "scenarios": ["a", "b"],
         "recordings": 1,
         "utterances": 0,
-        "telnyx": {"accounts": 1, "messages": 0, "phone_numbers": 0, "webhook_deliveries": 0},
+        "telnyx": {
+            "accounts": 1,
+            "messages": 0,
+            "calls": 0,
+            "conferences": 0,
+            "phone_numbers": 0,
+            "webhook_deliveries": 0,
+        },
     }
 
 

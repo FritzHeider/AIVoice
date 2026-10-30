@@ -224,6 +224,96 @@ Behavioural rules:
 > record with `status: "deleted"` and releases the number; `PATCH /v2/phone_numbers/{id}/messaging` answers
 > `{record_type: "messaging_phone_number", id, phone_number, messaging_profile_id, updated_at}`.
 
+> Decision (2026-10-29): FakeTelnyx call control (P03-T02b). (1) Ids: `call_control_id` is `"v3:"` + 24 seeded
+> random bytes as url-safe base64; `call_leg_id`, `call_session_id`, conference, recording, and stream ids are seeded
+> UUIDs. A transfer leg and a dial with `link_to` share the linked call's `call_session_id`. (2) Every call action
+> answers 200 `{"data": {"result": "ok"}}`, conference create 200 `{"data": <conference>}`. State changes happen in
+> the handler; their webhooks follow after the response, ordered per call session and per conference (a delivery
+> waits for the previous delivery of every session or conference it touches, so `call.bridged` arrives on A then
+> B and conference events in the order they happened). A command's `client_state` replaces the leg's state for
+> its own and later events. (3) `command_id` dedup is per call (per account for dial); a repeat answers the same
+> success without running again and is logged with `duplicate: true`; dedup is checked before the ended-call check
+> so a retried `hangup` stays a success. (4) Errors: unknown call, another account's call, or unknown action → 404
+> `10005`; a command for a call that has hung up → 422 `90018` "Call has already ended"; a command that does not
+> fit the leg (answer/reject on an outgoing or already answered leg; transfer, bridge, record, streaming, playback,
+> DTMF before answer; a second `record_start` or `streaming_start`; `record_stop`/`streaming_stop` with nothing
+> running; bridging with itself, an unanswered leg, or an already bridged leg) → 422 `10015` without a `source`;
+> unknown `connection_id`, `link_to`, or bridge/conference `call_control_id` → 422 `10015` with that pointer
+> (an ended bridge peer or conference participant → `90018`). `streaming_start` needs `stream_url`; a
+> `streaming_stop` `stream_id` must match the active stream (`/stream_id`). `from` is not checked against owned
+> numbers; `to` accepts E.164 or `sip:` URIs. `playback_stop` with nothing playing is a no-op success.
+> (5) Webhook target: the leg's `webhook_url` (dial, answer, or transfer body; a transfer leg inherits the A leg's),
+> else the application's `webhook_event_url`, else `SIM_EDGE_WEBHOOK_URL`. (6) Outcomes: the scenario bound to the
+> dialled `to` (§3.5 `answer`); a dial with `link_to` and no scenario of its own, and every transfer leg, use the
+> linked/A leg's scenario `transfer_target`; without a scenario a leg is answered after 1 000 ms by
+> `human_residence`. On the sim clock from the dial: `call.initiated` (state `bridging`) at once; answered →
+> `call.answered` at `after_ms` (a ring longer than `timeout_secs` is a no-answer); busy → `call.hangup`
+> `user_busy`/source `callee` at 500 ms; rejected → `call_rejected`/`callee` at 500 ms; failed →
+> `unspecified`/`unknown` at 500 ms; no_answer → `timeout`/`unknown` at `timeout_secs` (default 30). An answered
+> leg is hung up `time_limit`/`unknown` after `time_limit_secs` (default 14 400). `sip_hangup_cause` per cause:
+> normal_clearing 200, originator_cancel 487, timeout 487, time_limit 200, user_busy 486, not_found 404,
+> no_answer 480, call_rejected 603, unspecified 503 (the sim's table; production values are checked by the live
+> smoke test of specs/06 §5.1). `call.hangup` also carries `end_time`. (7) Hang-up sides: a platform `hangup` has
+> `hangup_source: caller` on legs the platform dialled and `callee` on inbound legs, cause `normal_clearing` once
+> answered, else `originator_cancel`; `reject` is `call_rejected` (`CALL_REJECTED`) or `user_busy` (`USER_BUSY`),
+> source `callee`. `POST /sim/telnyx/calls/{ccid}/hangup {"cause"?}` (default `normal_clearing`) is the far end
+> (the opposite source) and answers 202 with the call summary, 404 `not_found`, or 409 `call_ended`. Hang-up order:
+> `streaming.stopped`, `call.playback.ended` (`status: "call_hangup"`), `conference.participant.left` (and
+> `conference.ended`), `call.hangup`, `call.recording.saved`. When a bridged leg hangs up its peer is hung up too
+> (`normal_clearing`, the peer's far-end source) unless the peer issued the bridge with
+> `park_after_unbridge: "self"`; then the peer goes back to `parked` without an event. (8) AMD from answer:
+> `premium` → `call.machine.premium.detection.ended` `{result: <answered_by>}` at +1 800 ms and, for `machine` with
+> `beep_at_ms`, `call.machine.premium.greeting.ended` `{result: "beep_detected"}` at +`beep_at_ms`; `detect`,
+> `detect_words` → `call.machine.detection.ended` `{result}` (`human_*` → `human`, `machine` → `machine`,
+> `silence`/`fax_detected` → `not_sure`), and `detect_beep`/`greeting_end` add `call.machine.greeting.ended`
+> `{result: "beep_detected"}` for a beep; events are emitted in time order; `disabled` sends none; a hang-up
+> cancels pending detection events. (9) Transfer (answered A leg only) creates leg B (`outgoing`, `from` defaults to
+> A's `from`, `client_state` = `target_leg_client_state`) → B `call.initiated`; answered → B `call.answered`, then
+> `call.bridged` on A then B; not answered → B `call.hangup` per (6) and A stays up. The summary of A lists the
+> transfer. `bridge` sends `call.bridged` on the commanding leg then the other; `link_to` + `bridge_on_answer: true`
+> bridges on answer. A leg that would bridge on answer (transfer leg B, or a `link_to` + `bridge_on_answer`
+> dial) and is still ringing when its peer hangs up is cancelled right after the peer's events: `call.hangup`
+> `originator_cancel`, source `caller`, SIP 487. A leg that answers when its peer has already ended (a dial
+> `link_to` an ended call) sends `call.answered` then `call.hangup` `normal_clearing`, source `caller`, with no
+> media started. (10) Recordings (`record_start`, or `record: "record-from-answer"` on dial/answer, or
+> `record` on transfer for leg B) end on `record_stop` or hang-up with `call.recording.saved` `{recording_id,
+> channels, format, recording_started_at, recording_ended_at, recording_urls: {"wav":
+> "<base>/sim/recordings/<id>.wav", "mp3": null}, public_recording_urls}` — always WAV (specs/06 §10.2: no MP3
+> encoder), so `mp3` is null even for `format: "mp3"`; `<base>` is the base URL of the request that created the
+> call. The WAV is 8 kHz PCM16, channel 0 the caller track and channel 1 the agent track (`single`: their clipped
+> sum), padded with silence to the recording's sim-clock duration, and is stored before the event is sent.
+> (11) `streaming_start` (or dial/answer `stream_url`, started on answer) → `streaming.started` `{stream_url}`;
+> `streaming_stop` → `streaming.stopped`; the WS connection arrives with the media client (P03-T03).
+> `playback_start` → `call.playback.started` `{media_url, overlay}`; `playback_stop` (`stop: "all"` or the latest
+> with `"current"`, filtered by `overlay`) → `call.playback.ended` `{status: "cancelled"}`. `send_dtmf` is logged
+> `{digits, duration_millis, at}`. (12) Conferences: `POST /v2/conferences` (answered leg not in a conference) →
+> `{id, name, record_type: "conference", status: "in_progress", connection_id, created_at, expires_at (+24 h),
+> region: "sim"}`, `conference.created` then `conference.participant.joined`; `join` (answered leg not in a
+> conference) → `conference.participant.joined`; `leave` or a participant hang-up → `conference.participant.left`;
+> when the last participant leaves, or one that joined with `end_conference_on_exit: true`, the conference becomes
+> `completed`, `conference.ended` (`reason: "all_left"` | `"host_left"`) is sent, and the remaining participants
+> get `conference.participant.left` (their calls stay up). Conference events carry `{conference_id,
+> call_control_id, call_leg_id, call_session_id, client_state, connection_id}` and go to the participant leg's
+> webhook URL. Unknown conference → 404 `10005`; joining a completed one → 422 `10015`. (13) `POST
+> /sim/telnyx/inbound {to, from, scenario?}`: `to` must be owned by an account and assigned to a connection (else
+> 422 `invalid_request`); `scenario` must be registered (else 404 `not_found`), otherwise the scenario bound by
+> `inbound_from` applies. The incoming leg (state `parked`) emits `call.initiated` to the application's
+> `webhook_event_url` and the route answers 202 `{call_control_id, call_leg_id, call_session_id}`. With the
+> application's `first_command_timeout`, a leg that receives no command within `first_command_timeout_secs` is hung
+> up `timeout`/`unknown`. (14) Control API: `GET /sim/telnyx/calls` → `{"calls": [summary]}` (creation order) and
+> `GET /sim/telnyx/calls/{ccid}` → `{call_control_id, call_leg_id, call_session_id, connection_id, direction, from,
+> to, state, is_alive, scenario_id, client_state, created_at, answered_at, ended_at, hangup_cause, hangup_source,
+> commands: [{name, command_id, at, duplicate}], events: [{event_type, event_id, at}], dtmf_sent, transfers:
+> [{call_control_id, to, from, at}], recordings, stream, conference_id}`; `GET .../timeline` → `{call_control_id,
+> initiated_ms, answered_ms, ended_ms, utterances}` (sim `virtual_ms`; utterances come with the media client).
+> Payload `state`: `bridging` (outgoing initiated), `parked` (incoming initiated, or after unbridge), `answered`,
+> `bridged`, `hangup`; `is_alive` is true only between answer and hang-up. `GET /sim/state` `telnyx` adds `calls`
+> and `conferences` counts; `/sim/reset` drops calls and conferences and cancels pending progress. (15) Accelerated
+> clock: virtual time moves only when the event loop is idle (no runnable callback), so a command sent through an
+> in-process client mid-call is handled at the virtual time it was sent and in-process webhook deliveries finish
+> before time moves; work blocked on real I/O (sockets, worker threads) leaves the loop idle and does not hold time
+> back.
+
 ### 3.3 FakeElevenLabs (port 9200)
 
 - **TTS multi-context WS** `GET /v1/text-to-speech/{voice_id}/multi-stream-input`: validates `xi-api-key` header (or
