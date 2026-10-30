@@ -16,6 +16,7 @@ from typing import Final, Literal
 from va_sim.clock import iso_z
 from va_sim.telnyx.call_events import CallEvents, Outgoing
 from va_sim.telnyx.calls import ActiveRecording, Call, Playback, StreamState
+from va_sim.telnyx.media_session import MediaSession
 from va_sim.wav import pcm16_wav
 
 __all__ = [
@@ -72,16 +73,40 @@ class CallMedia(CallEvents):
     # Streaming.
 
     def start_stream(self, call: Call, params: dict[str, object]) -> None:
-        call.stream = StreamState(self._state.ids.uuid(), params)
+        """``streaming.started``, then a media session connects to ``stream_url`` in the background."""
+        stream = StreamState(self._state.ids.uuid(), params)
+        call.stream = stream
         self.emit(call, "streaming.started", stream_url=params["stream_url"])
+        stream.session = MediaSession(self._state, call, stream, self)
+        stream.session.start()
 
     def stop_stream(self, call: Call) -> Outgoing | None:
-        """Close the stream; returns its ``streaming.stopped`` event (None when not streaming)."""
-        if call.stream is None:
+        """Close the stream; returns its ``streaming.stopped`` event (None when not streaming), sent once the
+        media session has sent ``stop`` and closed the socket."""
+        stream = call.stream
+        if stream is None:
             return None
-        url = call.stream.params["stream_url"]
         call.stream = None
-        return self.event(call, "streaming.stopped", call.payload(stream_url=url))
+        session = stream.session
+        if session is not None:
+            session.stop()
+        prepare = session.wait_closed if session is not None else None
+        return self.event(
+            call, "streaming.stopped", call.payload(stream_url=stream.params["stream_url"]), prepare
+        )
+
+    def stream_failed(self, call: Call, stream: StreamState, reason: str) -> None:
+        """The media session could not connect or the agent closed it: ``streaming.failed``, no stream."""
+        if call.stream is not stream:
+            return
+        call.stream = None
+        self.emit(
+            call,
+            "streaming.failed",
+            stream_id=stream.stream_id,
+            stream_url=stream.params["stream_url"],
+            failure_reason=reason,
+        )
 
     # Playback.
 

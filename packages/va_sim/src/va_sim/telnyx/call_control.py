@@ -23,7 +23,16 @@ from va_sim.telnyx.calls import Call
 if TYPE_CHECKING:
     from va_sim.state import SimState
 
-__all__ = ["call_control_routes"]
+__all__ = ["call_control_routes", "find_call"]
+
+
+def find_call(state: SimState, request: Request) -> Call | JSONResponse:
+    """The call of the path's ``call_control_id`` on any account, else a 404 ``not_found``."""
+    call_control_id = request.path_params["call_control_id"]
+    found = state.telnyx.call(call_control_id)
+    if found is None:
+        return sim_error(404, "not_found", f"no call with call_control_id {call_control_id!r}")
+    return found[1]
 
 
 def call_control_routes(state: SimState) -> list[BaseRoute]:
@@ -31,11 +40,7 @@ def call_control_routes(state: SimState) -> list[BaseRoute]:
     engine = state.call_engine
 
     def lookup(request: Request) -> Call | JSONResponse:
-        call_control_id = request.path_params["call_control_id"]
-        found = store.call(call_control_id)
-        if found is None:
-            return sim_error(404, "not_found", f"no call with call_control_id {call_control_id!r}")
-        return found[1]
+        return find_call(state, request)
 
     def inbound_scenario(body: InboundCall) -> Scenario | JSONResponse | None:
         if body.scenario is None:

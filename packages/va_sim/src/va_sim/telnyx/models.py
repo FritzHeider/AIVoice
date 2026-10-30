@@ -151,6 +151,7 @@ class TelnyxSimConfig(_Body):
     force_duplicate_webhooks: bool = False
     fail_number_orders: bool = False
     failing_message_destinations: tuple[E164, ...] = ()
+    media_jitter: bool = False
 
 
 class TelnyxConfigPatch(_Body):
@@ -159,6 +160,7 @@ class TelnyxConfigPatch(_Body):
     force_duplicate_webhooks: bool | None = None
     fail_number_orders: bool | None = None
     failing_message_destinations: tuple[E164, ...] | None = None
+    media_jitter: bool | None = None
 
 
 class InboundMessage(_Body):

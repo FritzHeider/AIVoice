@@ -31,6 +31,7 @@ async def test_config_read_patch_validation_and_reset() -> None:
         "force_duplicate_webhooks": False,
         "fail_number_orders": False,
         "failing_message_destinations": [],
+        "media_jitter": False,
     }
     assert initial.json() == defaults
     assert patched.json() == {**defaults, "force_duplicate_webhooks": True}

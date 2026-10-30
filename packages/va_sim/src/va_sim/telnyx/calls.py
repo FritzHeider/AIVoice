@@ -1,8 +1,9 @@
 """FakeTelnyx call state (specs/30-testing-and-evals.md §3.2, Decision 2026-10-29 P03-T02b).
 
 A :class:`Call` is one leg. Only :class:`va_sim.telnyx.call_engine.CallEngine` mutates it; handlers read it to
-validate commands and the control API serialises it with :meth:`Call.summary`. ``audio``, ``stream``, and
-``timeline_utterances`` are the hooks the media WS client (P03-T03) fills.
+validate commands and the control API serialises it with :meth:`Call.summary`. ``audio``, ``stream``,
+``caller_dtmf``, and ``timeline_utterances`` are filled by the media session of the stream
+(:mod:`va_sim.telnyx.media_session`).
 """
 
 from __future__ import annotations
@@ -10,11 +11,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from va_sim.clock import iso_z
 from va_sim.scenario import Answer, TransferTarget
 from va_sim.telnyx.store import Record
+
+if TYPE_CHECKING:
+    from va_sim.telnyx.media_session import MediaSession
 
 __all__ = [
     "CONFERENCE_LIFETIME",
@@ -81,6 +85,16 @@ class CallAudio:
 class StreamState:
     stream_id: str
     params: dict[str, object]
+    session: MediaSession | None = None
+
+    def summary(self) -> Record:
+        """The summary ``stream``: id, streaming parameters, and media session counters."""
+        stats: Record = (
+            self.session.stats()
+            if self.session is not None
+            else {"connected": False, "frames_sent": 0, "received": {}, "marks_echoed": 0}
+        )
+        return {"stream_id": self.stream_id, **self.params, **stats}
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +210,7 @@ class Call:
     timers: set[asyncio.Task[None]] = field(default_factory=set)
     audio: CallAudio = field(default_factory=CallAudio)
     timeline_utterances: list[dict[str, Any]] = field(default_factory=list)
+    caller_dtmf: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def ended(self) -> bool:
@@ -280,9 +295,8 @@ class Call:
                 for t in self.transfers
             ],
             "recordings": list(self.recordings),
-            "stream": None
-            if self.stream is None
-            else {"stream_id": self.stream.stream_id, **self.stream.params},
+            "caller_dtmf": [dict(entry) for entry in self.caller_dtmf],
+            "stream": None if self.stream is None else self.stream.summary(),
             "conference_id": None if self.conference is None else self.conference.conference_id,
         }
 

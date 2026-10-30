@@ -24,11 +24,17 @@
   - Deliverables: numpy G.711 μ-law codec and L16 helpers built independently in the simulator; `synthesize_utterance` (180 ms sync + 16-bit FSK marker preamble, Rosenberg-pulse formant voiced body with ±3 % jitter, raised-cosine syllables, deterministic vowels, peaks −12/−6 dBFS) at 8 kHz μ-law and natively at 16 kHz PCM16 for hd_audio; `decode_marker` (Goertzel sync search then bits); `synthesize_dtmf`; `SimState.utterance_seed` and a 16-bit cap on utterance ids
   - Acceptance: the marker decoder recovers 100 % of 20 seeded random ids after μ-law round trip, after resampling to 16 kHz, from native 16 kHz audio, and behind random leading silence plus −40 dBFS noise; codec known vectors and full-range round trip; synthesis deterministic per seed. The Silero detection requirement of §3.1 (`test_synth_detected_by_silero`) is verified in P04-T03 once `SileroVad` exists.
 
-- [ ] P03-T03b FakeTelnyx media WebSocket client
-  - Spec refs: specs/30-testing-and-evals.md §3.2 (media WS client, clock, control API agent audio/timeline), §3.5 (steps, greeting_audio); specs/06-telephony-telnyx.md §4.2 (stream signature), §8 (media WS protocol)
+- [x] P03-T03b FakeTelnyx media WebSocket client (transport, playout clock, agent audio) — lint/typecheck/placeholders 0, make test 3964 passed (coverage 97.94 %), 22 loopback media session tests + format/frames/playout units
+  - Spec refs: specs/30-testing-and-evals.md §3.2 (media WS client, clock, control API agent audio/timeline); specs/06-telephony-telnyx.md §4.2 (stream signature), §8 (media WS protocol)
   - Depends on: P03-T02b, P03-T03a
-  - Deliverables: on answer, connects to `stream_url` with signature headers; sends `connected`, `start`, `media` frames (μ-law 20 ms) from scenario audio (WAV files or synthesized marker audio), `dtmf`, `stop`; accepts outbound `media`, `mark`, `clear`; echoes marks per Telnyx semantics; records agent audio per call; supports out-of-order frame injection for tests
-  - Acceptance: loopback test with a minimal test WS server proves framing, mark echo after playback, clear behaviour.
+  - Deliverables: when a stream starts (dial/answer `stream_url` on answer, or `streaming_start`) a supervised media session connects to `stream_url` with Ed25519 signature headers (and `Authorization: Bearer <stream_auth_token>`); sends `connected`, `start` (media_format from the stream codec/rate), `media` frames every 20 ms on the sim clock (160-byte PCMU or 640-byte L16 16 kHz) from a caller audio queue, silence when idle, `dtmf`, `stop` on streaming_stop/hang-up; accepts outbound `media`, `mark`, `clear` with a virtual playout clock (mark echo when played, `clear` drops queued audio and echoes pending marks), Telnyx `error` frames for malformed input; caller and agent tracks feed recordings; `streaming.failed` on connect failure or peer close; jitter mode (adjacent frames swapped) and raw frame injection; control API `POST /sim/telnyx/calls/{ccid}/say`, `/dtmf`, `/media/inject`, `GET .../agent_audio.wav`; timeline utterances with first agent audio
+  - Acceptance: loopback test with a minimal test WS server proves signature headers, framing, mark echo after playback, clear behaviour, jitter order, L16 16 kHz, recording tracks, and timeline latency fields.
+
+- [ ] P03-T03c FakeTelnyx scenario caller runner
+  - Spec refs: specs/30-testing-and-evals.md §3.2 (media WS client), §3.5 (steps, greeting_audio, transfer_target.steps, barge_in_after_agent_ms)
+  - Depends on: P03-T03b
+  - Deliverables: per-call runner started when the media session is up: `greeting_audio` (text, or a `.wav` path relative to the scenario file), then the scenario `steps` (`wait_agent_speech` with an energy detector over played-out agent audio, `say` incl. `barge_in_after_agent_ms`, `dtmf` incl. `w` pauses and in-band tones, `silence`, `expect_hangup`, `hangup`); transfer legs run `transfer_target.steps`; step outcomes (ok / timeout) in the call summary and timeline
+  - Acceptance: accelerated-clock tests with a scripted test WS agent cover every step type, timeouts, barge-in timing, and caller hang-up.
 
 - [ ] P03-T04 FakeElevenLabs TTS (WS multi-context + REST)
   - Spec refs: specs/30-testing-and-evals.md (FakeElevenLabs); specs/09-tts-elevenlabs.md (WS protocol, REST convert)

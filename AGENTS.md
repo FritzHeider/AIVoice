@@ -693,3 +693,13 @@ Grafana 3001
   only via `va_sim.audio.AudioRng` (raw PCG64). Synthesis is CPU-bound: call it through `asyncio.to_thread` from
   async code. `va_sim.audio` must not import `va_sim.state` (the state imports `MAX_UTTERANCE_ID`). The Silero
   check of §3.1 lives in P04-T03.
+- 2026-10-29 (P03-T03b): FakeTelnyx media WS client = `va_sim.telnyx.media_session.MediaSession` (one per stream,
+  `StreamState.session`; spec: specs/30 §3.2 Decision P03-T03b). API the caller runner reuses: `queue_caller(wire,
+  (utterance_id, text))`, `queue_dtmf(digits)`, `inject(frame)`, `connected`, `fmt` (stream `MediaFormat`). Only the
+  tick loop writes to the socket. Any test that gives a stream a `stream_url` must point it at the `media_agent`
+  fixture (`tests/telnyx/conftest.py`, `tests/support/media_agent.py`: `wait_for(predicate)`, `wait_media(n)`,
+  `send`, `send_raw`, `close`, `reject=True`), otherwise the sim connects for real and adds `streaming.failed`.
+  Accelerated clock + sockets: while a stream runs the tick loop always sleeps 20 ms ahead, so virtual time races
+  whenever the loop waits on socket I/O — assert orders and counts, not virtual ms of socket-driven events; never
+  `state.tasks.drain()` with a live stream (stop it or hang up first). Unsupported stream codecs (PCMA, G722, OPUS,
+  AMR-WB, other rates, `mp3` mode) are 422 `10015` on dial/answer/streaming_start.

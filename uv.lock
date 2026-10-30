@@ -2631,6 +2631,7 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "va-common" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -2645,6 +2646,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "websockets", specifier = ">=17.0" },
 ]
 
 [[package]]

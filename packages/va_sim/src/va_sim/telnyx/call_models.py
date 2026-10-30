@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PositiveInt, StringConstraints
 
 from va_sim.telnyx.models import E164, Name, WebhookUrl
 
@@ -20,6 +20,8 @@ __all__ = [
     "AnswerRequest",
     "BridgeRequest",
     "CallTarget",
+    "CallerDtmf",
+    "CallerSay",
     "CommandFields",
     "ConferenceCreate",
     "ConferenceJoin",
@@ -29,6 +31,7 @@ __all__ = [
     "HangupCause",
     "HangupRequest",
     "InboundCall",
+    "InjectFrame",
     "PlaybackStartRequest",
     "PlaybackStopRequest",
     "RecordFields",
@@ -246,3 +249,22 @@ class RemoteHangup(_Body):
     """``POST /sim/telnyx/calls/{ccid}/hangup``: the remote party hangs up."""
 
     cause: HangupCause = "normal_clearing"
+
+
+class CallerSay(_Body):
+    """``POST /sim/telnyx/calls/{ccid}/say``: the caller speaks ``text`` (synthetic marker audio)."""
+
+    text: Annotated[str, StringConstraints(pattern=r"\S", max_length=2000)]
+    language: Annotated[str, StringConstraints(min_length=2, max_length=16)] = "en"
+
+
+class CallerDtmf(_Body):
+    """``POST /sim/telnyx/calls/{ccid}/dtmf``: the caller presses ``digits`` (media ``dtmf`` events)."""
+
+    digits: Annotated[str, StringConstraints(pattern=r"^[0-9A-D*#]+$", max_length=64)]
+
+
+class InjectFrame(_Body):
+    """``POST /sim/telnyx/calls/{ccid}/media/inject``: a frame sent verbatim on the media WebSocket."""
+
+    frame: dict[str, JsonValue]

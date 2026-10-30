@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from media_agent import MediaAgent
 from telnyx_helpers import (
     APP_URL,
     RecordingTransport,
@@ -26,12 +27,13 @@ from telnyx_shapes import CallEventPayload, HangupPayload, assert_shape
 
 from va_sim.telnyx.store import DEFAULT_API_KEY
 
+# Commands that must fail before a stream starts; streams that do start connect to the media_agent fixture.
 STREAM_URL = "wss://media.sim/ws/telnyx?call_id=1"
 HOLD_URL = "https://api.sim/static/hold/hold_music.wav"
 OTHER_KEY = "other-account-key"
 
 
-async def test_answer_inbound_leg() -> None:
+async def test_answer_inbound_leg(media_agent: MediaAgent) -> None:
     transport = RecordingTransport()
     state = telnyx_state(transport)
     async with telnyx_client(state) as client:
@@ -42,7 +44,8 @@ async def test_answer_inbound_leg() -> None:
         [initiated] = payloads(transport, "call.initiated")
         parsed = assert_shape(CallEventPayload, initiated)
         assert (parsed.direction, parsed.state, parsed.connection_id) == ("incoming", "parked", app["id"])
-        await ok(client, ccid, "answer", client_state="YW5zd2Vy", stream_url=STREAM_URL)
+        await ok(client, ccid, "answer", client_state="YW5zd2Vy", stream_url=media_agent.url)
+        await media_agent.wait_media(1)
         await settle(state)
         assert [event for event, _ in events(transport, ccid)] == [
             "call.initiated",
@@ -51,9 +54,9 @@ async def test_answer_inbound_leg() -> None:
         ]
         [answered] = payloads(transport, "call.answered")
         assert (answered["state"], answered["client_state"]) == ("answered", "YW5zd2Vy")
-        assert payloads(transport, "streaming.started")[0]["stream_url"] == STREAM_URL
+        assert payloads(transport, "streaming.started")[0]["stream_url"] == media_agent.url
         detail = await summary(client, ccid)
-        assert detail["stream"]["stream_url"] == STREAM_URL
+        assert detail["stream"]["stream_url"] == media_agent.url
         assert detail["stream"]["stream_track"] == "inbound_track"
         answer_again = await command(client, ccid, "answer")
         assert error_of(answer_again)[:2] == (422, "10015")
@@ -202,15 +205,15 @@ async def test_send_dtmf_is_logged_and_validated() -> None:
         assert error_of(too_long) == (422, "10015", "/duration_millis")
 
 
-async def test_streaming_start_stop_and_errors() -> None:
+async def test_streaming_start_stop_and_errors(media_agent: MediaAgent) -> None:
     transport = RecordingTransport()
     state = telnyx_state(transport)
     async with telnyx_client(state) as client:
         _, ccid = await answered_call(client, state)
         assert error_of(await command(client, ccid, "streaming_start")) == (422, "10015", "/stream_url")
         assert error_of(await command(client, ccid, "streaming_stop")) == (422, "10015", None)
-        await ok(client, ccid, "streaming_start", stream_url=STREAM_URL, stream_bidirectional_mode="rtp")
-        assert error_of(await command(client, ccid, "streaming_start", stream_url=STREAM_URL))[:2] == (
+        await ok(client, ccid, "streaming_start", stream_url=media_agent.url, stream_bidirectional_mode="rtp")
+        assert error_of(await command(client, ccid, "streaming_start", stream_url=media_agent.url))[:2] == (
             422,
             "10015",
         )
@@ -218,17 +221,19 @@ async def test_streaming_start_stop_and_errors() -> None:
         assert stream["stream_bidirectional_mode"] == "rtp"
         wrong = await command(client, ccid, "streaming_stop", stream_id="not-it")
         assert error_of(wrong) == (422, "10015", "/stream_id")
+        await media_agent.wait_media(1)
         await ok(client, ccid, "streaming_stop", stream_id=stream["stream_id"])
         await settle(state)
+        assert media_agent.close_code == 1000
         assert [event for event, _ in events(transport)][-2:] == ["streaming.started", "streaming.stopped"]
         assert (await summary(client, ccid))["stream"] is None
 
 
-async def test_dial_stream_url_starts_streaming_on_answer() -> None:
+async def test_dial_stream_url_starts_streaming_on_answer(media_agent: MediaAgent) -> None:
     transport = RecordingTransport()
     state = telnyx_state(transport)
     async with telnyx_client(state) as client:
-        _, ccid = await answered_call(client, state, stream_url=STREAM_URL, stream_codec="PCMU")
+        _, ccid = await answered_call(client, state, stream_url=media_agent.url, stream_codec="PCMU")
         assert events(transport, ccid) == [
             ("call.initiated", 0),
             ("call.answered", 1000),
@@ -254,11 +259,11 @@ async def test_playback_start_stop() -> None:
         assert [(p["overlay"], p["status"]) for p in ended] == [(True, "cancelled"), (False, "cancelled")]
 
 
-async def test_hangup_side_effects_are_ordered() -> None:
+async def test_hangup_side_effects_are_ordered(media_agent: MediaAgent) -> None:
     transport = RecordingTransport()
     state = telnyx_state(transport)
     async with telnyx_client(state) as client:
-        _, ccid = await answered_call(client, state, stream_url=STREAM_URL)
+        _, ccid = await answered_call(client, state, stream_url=media_agent.url)
         await ok(client, ccid, "playback_start", audio_url=HOLD_URL)
         await ok(client, ccid, "record_start")
         await at(state, 3.0)

@@ -20,6 +20,7 @@ from va_sim.telnyx.call_models import DialRequest
 from va_sim.telnyx.calls import Call, CommandEntry, LegOutcome, outcome_of
 from va_sim.telnyx.errors import call_ended, invalid, not_found
 from va_sim.telnyx.http import authenticated, data, parse_body
+from va_sim.telnyx.media_format import check_stream_params
 from va_sim.telnyx.store import Account, Record
 
 if TYPE_CHECKING:
@@ -72,6 +73,9 @@ def call_routes(state: SimState) -> list[BaseRoute]:
         app = account.apps.get(body.connection_id)
         if app is None:
             return invalid(f"Connection {body.connection_id!r} does not exist.", "/connection_id")
+        unsupported = check_stream_params(body)
+        if unsupported is not None:
+            return unsupported
         link = account.calls.get(body.link_to) if body.link_to is not None else None
         if body.link_to is not None and link is None:
             return invalid(f"Call {body.link_to!r} does not exist.", "/link_to")

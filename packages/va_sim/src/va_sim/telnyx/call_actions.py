@@ -33,6 +33,7 @@ from va_sim.telnyx.call_models import (
 )
 from va_sim.telnyx.calls import Call, DtmfEntry, LegOutcome, PendingMedia, outcome_of
 from va_sim.telnyx.errors import call_ended, invalid, invalid_state
+from va_sim.telnyx.media_format import check_stream_params
 from va_sim.telnyx.store import Account
 
 if TYPE_CHECKING:
@@ -87,6 +88,9 @@ def transfer_outcome(state: SimState, call: Call) -> LegOutcome:
 def call_actions(state: SimState) -> Mapping[str, Action]:
     """The action table, closed over the shared state and call engine."""
     engine = state.call_engine
+
+    def check_answer(_account: Account, _call: Call, body: AnswerRequest) -> JSONResponse | None:
+        return check_stream_params(body)
 
     def answer(_account: Account, call: Call, body: AnswerRequest) -> None:
         if body.webhook_url is not None:
@@ -148,7 +152,9 @@ def call_actions(state: SimState) -> Mapping[str, Action]:
     ) -> JSONResponse | None:
         if body.stream_url is None:
             return invalid("is required", "/stream_url")
-        return None if call.stream is None else invalid_state("Call is already streaming.")
+        if call.stream is not None:
+            return invalid_state("Call is already streaming.")
+        return check_stream_params(body)
 
     def streaming_start(_account: Account, call: Call, body: StreamingStartRequest) -> None:
         engine.start_stream(call, body.stream_params())
@@ -174,7 +180,7 @@ def call_actions(state: SimState) -> Mapping[str, Action]:
         )
 
     return {
-        "answer": Action(AnswerRequest, "ringing_incoming", answer),
+        "answer": Action(AnswerRequest, "ringing_incoming", answer, check_answer),
         "reject": Action(RejectRequest, "ringing_incoming", reject),
         "hangup": Action(HangupRequest, "any", hangup),
         "transfer": Action(TransferRequest, "answered", transfer),

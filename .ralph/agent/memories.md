@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793327751-3934
+> va_sim media WS: tests giving a stream a stream_url must use the media_agent fixture (tests/telnyx/conftest.py, support/media_agent.py); MediaSession tick loop always sleeps 20 ms ahead so accelerated virtual time races during socket waits - assert orders/counts; never tasks.drain() with a live stream; the session freezes accelerated time while connecting via a sleep(0) holder task
+<!-- tags: sim, testing, clock | created: 2026-10-30 -->
+
 ### mem-1793326334-2ae5
 > va_sim.audio: synthetic caller audio (synthesize_utterance/pcm16/wire, decode_marker, goertzel_power, synthesize_dtmf, own G.711 codec); seed with SimState.utterance_seed(id); utterance ids 16-bit; audio must not import va_sim.state; synthesis is CPU-bound -> asyncio.to_thread; body envelope has a -12 dB floor so VAD sees continuous speech
 <!-- tags: sim, audio | created: 2026-10-30 -->
@@ -149,6 +153,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793328571-1e58
+> va_api tests: structlog capture_logs misses cached module loggers in the full xdist suite (test passes alone, fails in make check); monkeypatch the module's _log with a small recording object instead
+<!-- tags: api, testing | created: 2026-10-30 -->
 
 ### mem-1793321388-bb1d
 > pip-audit gate: run 'uv export --no-hashes --no-emit-workspace > /var/tmp/req.txt && uvx --python 3.12 pip-audit --strict -r /var/tmp/req.txt'; without --python 3.12 uvx uses 3.13 and fails on workspace packages (requires-python <3.13)

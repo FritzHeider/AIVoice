@@ -312,7 +312,7 @@ Behavioural rules:
 > call. The WAV is 8 kHz PCM16, channel 0 the caller track and channel 1 the agent track (`single`: their clipped
 > sum), padded with silence to the recording's sim-clock duration, and is stored before the event is sent.
 > (11) `streaming_start` (or dial/answer `stream_url`, started on answer) → `streaming.started` `{stream_url}`;
-> `streaming_stop` → `streaming.stopped`; the WS connection arrives with the media client (P03-T03).
+> `streaming_stop` → `streaming.stopped`; the WS connection arrives with the media client (P03-T03b).
 > `playback_start` → `call.playback.started` `{media_url, overlay}`; `playback_stop` (`stop: "all"` or the latest
 > with `"current"`, filtered by `overlay`) → `call.playback.ended` `{status: "cancelled"}`. `send_dtmf` is logged
 > `{digits, duration_millis, at}`. (12) Conferences: `POST /v2/conferences` (answered leg not in a conference) →
@@ -342,6 +342,59 @@ Behavioural rules:
 > in-process client mid-call is handled at the virtual time it was sent and in-process webhook deliveries finish
 > before time moves; work blocked on real I/O (sockets, worker threads) leaves the loop idle and does not hold time
 > back.
+
+> Decision (2026-10-29): FakeTelnyx media WebSocket client (P03-T03b). (1) Library `websockets` (asyncio client,
+> no compression, no pings, 5 s open timeout, 4 MiB max message); one `MediaSession` per stream
+> (`va_sim.telnyx.media_session`), started by `CallMedia.start_stream` on the supervisor right after
+> `streaming.started`. (2) Handshake headers: `telnyx-signature-ed25519` = base64 Ed25519 signature of
+> `"{timestamp}|{stream_url}"` (the URL exactly as given, query included), `telnyx-timestamp` = sim clock unix
+> seconds, and `Authorization: Bearer <stream_auth_token>` when the stream has one. On the accelerated clock virtual
+> time does not move while the session connects. (3) Codecs: caller audio is PCMU 8 kHz (`stream_codec` `PCMU` or
+> `default`) or L16 big-endian (`L16`) at `stream_bidirectional_sampling_rate` when that is 8 000 or 16 000, else
+> 16 000; agent audio is parsed in `stream_bidirectional_codec` (default: the stream encoding) at the bidirectional
+> rate, else the stream rate (PCMU is always 8 kHz). Frames are 20 ms: 160 B PCMU, 320 B L16 8 kHz, 640 B L16 16 kHz.
+> When a stream is requested (`stream_url` on dial/answer, or `streaming_start`), `stream_codec` or
+> `stream_bidirectional_codec` PCMA/G722/OPUS/AMR-WB, a bidirectional rate other than 8 000/16 000, or
+> `stream_bidirectional_mode: "mp3"` answer 422 `10015` with pointer `/stream_codec`,
+> `/stream_bidirectional_codec`, `/stream_bidirectional_sampling_rate`, or `/stream_bidirectional_mode` before any
+> state change. (4) Frames sent (JSON text): `{"event":"connected","version":"1.0.0"}`; `start` `{sequence_number:
+> "1", start: {user_id (seeded uuid per stream), call_control_id, call_session_id, from, to, tags: [], client_state,
+> media_format: {encoding, sample_rate, channels: 1}}, stream_id}`; `media` `{sequence_number, media: {track:
+> "inbound", chunk: "<n from 1>", timestamp: "<20·(n−1)>", payload: <base64>}, stream_id}`; `dtmf` `{stream_id,
+> occurred_at, sequence_number, dtmf: {digit}}`; `mark` `{stream_id, sequence_number, mark: {name}}`; `error`
+> `{payload: {code, title, detail}, stream_id}` (no sequence number); `stop` `{sequence_number, stop: {user_id,
+> call_control_id}, stream_id}` then close 1000. `sequence_number` is a per-stream decimal string counter (`start` =
+> "1"). (5) A tick loop on the sim clock (absolute schedule, one tick per 20 ms) is the only writer: each tick plays
+> one frame of queued agent audio (padded with silence; silence when idle) into the agent track, sends the marks now
+> due, then pending `error` and injected frames, then at most one DTMF digit, then one caller `media` frame (queued
+> caller audio, else silence 0xFF / zeros) whose 8 kHz decode goes to the caller track (L16 16 kHz is decimated to
+> 8 kHz by averaging sample pairs). At connect both tracks are padded with silence to the time since answer, so
+> recordings stay aligned with the sim clock. (6) Agent frames: text only; binary, invalid JSON, a non-object, an
+> unknown or missing `event`, or `mark` without a non-empty string `mark.name` → `error` `100003`
+> `malformed_frame`; `media` without a string `media.payload`, invalid base64, empty, an odd length for L16, or more
+> than 30 s of audio → `100004` `invalid_media`; the connection stays open. `media` is queued for playout; `mark` is
+> due once all audio queued before it has played (with nothing queued: at the next tick, before its media frame);
+> `clear` drops the queued audio and makes every pending mark due, in order. Errors and immediate marks therefore go
+> out at the next tick (≤ 20 ms). (7) `streaming_stop` and hang-up stop the session: it sends `stop` and closes with
+> 1000, and `streaming.stopped` is delivered once the socket is closed (so it still precedes `call.hangup`); a
+> stop while connecting cancels the attempt silently. A failed connect (refused, timeout, rejected handshake) →
+> `streaming.failed` `{stream_id, stream_url, failure_reason: "connection_failed"}` and the agent closing first →
+> `failure_reason: "connection_closed"`; both leave the call without a stream (a later `streaming_stop` is 422).
+> `/sim/reset` cancels sessions and closes their sockets. (8) `GET /sim/telnyx/calls/{ccid}/agent_audio.wav` → the
+> agent track as mono 8 kHz PCM16 WAV (`audio/wav`; 404 `not_found` for an unknown call). (9) Control API caller
+> audio (409 `call_ended` for an ended call, 409 `not_streaming` without a connected session, 404 unknown call, 422
+> body errors): `POST .../say {text, language="en"}` registers the utterance, synthesizes it in the stream format
+> (`synthesize_wire`, seed `utterance_seed(id)`, in a worker thread), queues it, and answers 202 `{utterance_id,
+> duration_ms}`; `POST .../dtmf {digits}` (`^[0-9A-D*#]+$`) → one `dtmf` event per digit at successive ticks, logged
+> in the summary `caller_dtmf: [{digit, at}]`, 202 `{digits}`; `POST .../media/inject {frame: {...}}` → the frame
+> verbatim before the next media frame, 202 `{queued: true}`. Telnyx config `media_jitter` (default false) sends media
+> frames in swapped adjacent pairs (2, 1, 4, 3, …) with their original `chunk`, `timestamp`, and `sequence_number`.
+> (10) Timeline utterances `{utterance_id, text, start_ms, end_ms, first_agent_audio_ms, latency_ms}`: `start_ms`
+> when the frame with the utterance's first byte is sent, `end_ms` with its last byte, `first_agent_audio_ms` the
+> arrival of the first agent `media` message after `end_ms` with a sample louder than |256|, `latency_ms` their
+> difference (null until then). (11) The summary `stream` adds `{connected, frames_sent, received: {media | mark |
+> clear | invalid: count}, marks_echoed}`; the summary adds `caller_dtmf`. The scenario step runner (greeting,
+> steps, barge-in) is P03-T03c.
 
 ### 3.3 FakeElevenLabs (port 9200)
 

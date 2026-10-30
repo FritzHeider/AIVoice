@@ -13,6 +13,7 @@ from va_sim.telnyx.call_control import call_control_routes
 from va_sim.telnyx.call_routes import call_routes
 from va_sim.telnyx.conferences import conference_routes
 from va_sim.telnyx.control import telnyx_control_routes
+from va_sim.telnyx.media_control import media_control_routes
 from va_sim.telnyx.messages import message_routes
 from va_sim.telnyx.numbers import number_routes
 from va_sim.telnyx.resources import resource_routes
@@ -33,4 +34,5 @@ def telnyx_routes(state: SimState) -> list[BaseRoute]:
         *conference_routes(state),
         *telnyx_control_routes(state),
         *call_control_routes(state),
+        *media_control_routes(state),
     ]

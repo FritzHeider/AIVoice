@@ -24,7 +24,6 @@ from session_helpers import (
     write_headers,
 )
 from sqlalchemy import func, select, text
-from structlog.testing import capture_logs
 
 from va_api.auth import api_keys as api_keys_module
 from va_api.idempotency import DbIdempotencyStore
@@ -382,11 +381,19 @@ async def test_cache_invalidation_failure_is_logged(
     async def unavailable(redis: object, prefix: str) -> None:
         raise RedisConnectionError(prefix)
 
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    class RecordingLog:
+        """Stands in for the module logger: structlog capture_logs misses cached loggers in the full suite."""
+
+        def warning(self, event: str, **fields: Any) -> None:
+            warnings.append((event, fields))
+
     monkeypatch.setattr(api_keys_module, "invalidate_api_key_cache", unavailable)
-    with capture_logs() as logs:
-        response = await client.post(f"{ORGS}/{child['org_id']}/suspend", headers=write_headers(client))
+    monkeypatch.setattr(api_keys_module, "_log", RecordingLog())
+    response = await client.post(f"{ORGS}/{child['org_id']}/suspend", headers=write_headers(client))
     assert response.status_code == 200, response.text
-    assert [entry["key_prefix"] for entry in logs if entry["event"] == "api_key_cache_unavailable"] == [
+    assert [fields["key_prefix"] for event, fields in warnings if event == "api_key_cache_unavailable"] == [
         api_key_prefix(child["api_key"])
     ]
 
