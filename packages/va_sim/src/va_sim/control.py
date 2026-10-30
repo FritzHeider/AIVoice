@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
-from datetime import datetime
 from typing import Final
 
 import orjson
@@ -20,12 +19,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_common.time import ensure_utc
+from va_sim.clock import iso_z
 from va_sim.scenario import Scenario, ScenarioError, ScenarioIssue, issues_from_validation, load_scenario
 from va_sim.settings import ProfileName, SimName
 from va_sim.state import SimState
 
-__all__ = ["YAML_MEDIA_TYPES", "control_routes"]
+__all__ = ["YAML_MEDIA_TYPES", "control_routes", "invalid_request", "json_body", "sim_error"]
 
 YAML_MEDIA_TYPES: Final = frozenset({"application/yaml", "application/x-yaml", "text/yaml", "text/x-yaml"})
 _JSON_MEDIA_TYPE: Final = "application/json"
@@ -57,33 +56,29 @@ class LlmConfig(_Strict):
 _CONFIG_MODELS: Final[Mapping[SimName, type[_Strict]]] = {"elevenlabs": ElevenLabsConfig, "llm": LlmConfig}
 
 
-def _error(status: int, code: str, message: str, issues: Sequence[ScenarioIssue] = ()) -> JSONResponse:
+def sim_error(status: int, code: str, message: str, issues: Sequence[ScenarioIssue] = ()) -> JSONResponse:
     error: dict[str, object] = {"code": code, "message": message}
     if issues:
         error["issues"] = [asdict(issue) for issue in issues]
     return JSONResponse({"error": error}, status_code=status)
 
 
-def _invalid(message: str, issues: Sequence[ScenarioIssue]) -> JSONResponse:
-    return _error(422, "invalid_request", message, issues)
+def invalid_request(message: str, issues: Sequence[ScenarioIssue]) -> JSONResponse:
+    return sim_error(422, "invalid_request", message, issues)
 
 
-def _iso_z(moment: datetime) -> str:
-    return ensure_utc(moment).isoformat().replace("+00:00", "Z")
-
-
-async def _json_body[M: BaseModel](
-    request: Request, model: type[M], *, allow_empty: bool
-) -> M | JSONResponse:
+async def json_body[M: BaseModel](request: Request, model: type[M], *, allow_empty: bool) -> M | JSONResponse:
     raw = await request.body()
     if not raw.strip() and allow_empty:
         return model()
     try:
         return model.model_validate(orjson.loads(raw))
     except orjson.JSONDecodeError as exc:
-        return _invalid("the request body is not valid JSON", [ScenarioIssue("", None, None, str(exc))])
+        return invalid_request(
+            "the request body is not valid JSON", [ScenarioIssue("", None, None, str(exc))]
+        )
     except ValidationError as exc:
-        return _invalid("the request body is invalid", issues_from_validation(exc))
+        return invalid_request("the request body is invalid", issues_from_validation(exc))
 
 
 def _media_type(request: Request) -> str:
@@ -92,7 +87,7 @@ def _media_type(request: Request) -> str:
 
 def _common_routes(state: SimState) -> list[BaseRoute]:
     async def reset(request: Request) -> Response:
-        body = await _json_body(request, ResetBody, allow_empty=True)
+        body = await json_body(request, ResetBody, allow_empty=True)
         if isinstance(body, JSONResponse):
             return body
         state.reset(body.seed)
@@ -102,7 +97,7 @@ def _common_routes(state: SimState) -> list[BaseRoute]:
         return JSONResponse(
             {
                 "mode": state.clock.mode,
-                "now": _iso_z(state.clock.now()),
+                "now": iso_z(state.clock.now()),
                 "virtual_ms": state.clock.virtual_ms(),
             }
         )
@@ -131,14 +126,14 @@ def _config_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
         return current()
 
     async def patch(request: Request) -> Response:
-        body = await _json_body(request, model, allow_empty=False)
+        body = await json_body(request, model, allow_empty=False)
         if isinstance(body, JSONResponse):
             return body
         state.update_latencies(**body.model_dump(exclude_none=True))
         return current()
 
     async def profile(request: Request) -> Response:
-        body = await _json_body(request, ProfileBody, allow_empty=False)
+        body = await json_body(request, ProfileBody, allow_empty=False)
         if isinstance(body, JSONResponse):
             return body
         state.apply_profile(body.profile)
@@ -158,15 +153,17 @@ async def _parse_scenario(request: Request) -> Scenario | JSONResponse:
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            return _invalid("the scenario is not UTF-8 text", [ScenarioIssue("", None, None, str(exc))])
+            return invalid_request(
+                "the scenario is not UTF-8 text", [ScenarioIssue("", None, None, str(exc))]
+            )
         try:
             return await asyncio.to_thread(load_scenario, text, source=_SCENARIO_SOURCE)
         except ScenarioError as exc:
-            return _invalid("the scenario is invalid", exc.issues)
+            return invalid_request("the scenario is invalid", exc.issues)
     if media_type == _JSON_MEDIA_TYPE:
-        return await _json_body(request, Scenario, allow_empty=False)
+        return await json_body(request, Scenario, allow_empty=False)
     accepted = ", ".join(sorted({*YAML_MEDIA_TYPES, _JSON_MEDIA_TYPE}))
-    return _error(415, "unsupported_media_type", f"send the scenario as one of: {accepted}")
+    return sim_error(415, "unsupported_media_type", f"send the scenario as one of: {accepted}")
 
 
 def _telnyx_routes(state: SimState) -> list[BaseRoute]:
@@ -187,14 +184,14 @@ def _telnyx_routes(state: SimState) -> list[BaseRoute]:
         scenario_id = request.path_params["scenario_id"]
         scenario = state.scenarios.get(scenario_id)
         if scenario is None:
-            return _error(404, "not_found", f"no scenario with id {scenario_id!r}")
+            return sim_error(404, "not_found", f"no scenario with id {scenario_id!r}")
         return JSONResponse(scenario.model_dump(mode="json"))
 
     async def recording(request: Request) -> Response:
         recording_id = request.path_params["recording_id"]
         wav = state.recordings.get(recording_id)
         if wav is None:
-            return _error(404, "not_found", f"no recording with id {recording_id!r}")
+            return sim_error(404, "not_found", f"no recording with id {recording_id!r}")
         return Response(wav, media_type="audio/wav")
 
     return [

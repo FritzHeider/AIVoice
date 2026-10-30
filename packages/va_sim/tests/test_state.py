@@ -94,4 +94,17 @@ def test_snapshot_shape() -> None:
         "scenarios": ["a", "b"],
         "recordings": 1,
         "utterances": 0,
+        "telnyx": {"accounts": 1, "messages": 0, "phone_numbers": 0, "webhook_deliveries": 0},
     }
+
+
+async def test_reset_keeps_the_signing_key_and_drops_telnyx_accounts() -> None:
+    state = new_state()
+    key = state.signing_key.public_key_b64
+    state.telnyx.account("byo-key")
+    first_id = state.ids.uuid()
+    state.reset()
+    assert state.signing_key.public_key_b64 == key
+    assert set(state.telnyx.accounts) == {"sim-telnyx-key"}
+    assert state.ids.uuid() == first_id
+    await state.aclose()

@@ -660,3 +660,16 @@ Grafana 3001
   `source:line:col: path: message` line per issue. Step union discriminator tags (`step:<key>`) appear in pydantic
   `loc` and are stripped from paths. `va_common.service.ReadyServer` (a `ManagedServer` with `ready` and `url`) is
   the production twin of the test helper `RecordingServer` (now an alias).
+- 2026-10-29 (P03-T02a): FakeTelnyx lives in `va_sim.telnyx` (`routes.telnyx_routes(state)` is added by
+  `simulator_routes("telnyx", ...)`; keep `va_sim.telnyx/__init__.py` import-free — `va_sim.state` imports
+  `telnyx.store`/`webhooks`/`keys`, so handler modules import `SimState` only under `TYPE_CHECKING`). REST auth is
+  `Authorization: Bearer sim-telnyx-key` (more keys: `POST /sim/telnyx/accounts {"api_key"}`), resources are per
+  key. Knobs: `PATCH /sim/telnyx/config` (`force_duplicate_webhooks`, `fail_number_orders`,
+  `failing_message_destinations`); delivery log `GET /sim/telnyx/webhooks`; public key `GET /sim/telnyx/public-key`
+  and `.sim/telnyx_public_key` (written by `apps/sim` at startup). Tests: `telnyx_helpers.telnyx_state(transport)`
+  passes `webhook_transport=RecordingTransport([...status or None...])` so webhooks arrive in-process with the
+  sim clock's `virtual_ms`; after triggering delayed work (orders, message lifecycle, retries) `await
+  state.tasks.drain()` — the accelerated clock advances on its own. Verify signatures with
+  `telnyx_helpers.verify_signature` (pynacl, independent of the sim). All sim ids come from `state.ids`
+  (seeded); background work goes through `state.tasks.spawn` (never bare `create_task`). Python 3.12
+  `asyncio.gather` over already-done tasks does not yield — loops over it need an `await asyncio.sleep(0)`.

@@ -20,6 +20,8 @@ from va_sim.clock import clock_for
 from va_sim.control import control_routes
 from va_sim.settings import SIMULATORS, SimName, SimSettings
 from va_sim.state import DEFAULT_SEED, SimState
+from va_sim.telnyx.keys import SigningKey
+from va_sim.telnyx.routes import telnyx_routes
 
 __all__ = [
     "BASE_PORT",
@@ -43,12 +45,24 @@ def ports_from(base: int) -> dict[SimName, int]:
 
 def simulator_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
     """Every route simulator ``sim`` serves over the shared ``state``."""
-    return control_routes(sim, state)
+    routes = control_routes(sim, state)
+    if sim == "telnyx":
+        routes.extend(telnyx_routes(state))
+    return routes
 
 
 def build_state(settings: SimSettings, *, seed: int = DEFAULT_SEED) -> SimState:
-    """A fresh state with the clock mode and latencies of ``settings``."""
-    return SimState(clock=clock_for(settings.sim_clock), latencies=settings.latencies(), seed=seed)
+    """A fresh state with the clock mode, latencies, signing key, and webhook targets of ``settings``."""
+    secret = settings.sim_ed25519_private_key.get_secret_value() if settings.sim_ed25519_private_key else ""
+    # Blank (the .env.example value) means "generate a keypair", like an unset variable.
+    signing_key = SigningKey.from_base64(secret) if secret.strip() else None
+    return SimState(
+        clock=clock_for(settings.sim_clock),
+        latencies=settings.latencies(),
+        seed=seed,
+        signing_key=signing_key,
+        webhook_defaults=settings.webhook_defaults(),
+    )
 
 
 async def _await_ready(sim: SimName, ready: asyncio.Event, serving: asyncio.Task[None]) -> None:
@@ -97,6 +111,7 @@ async def running_sims(
     finally:
         stop.request("running_sims.exit")
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await state.aclose()
     # Reached only when neither startup nor the caller's block raised: report a server that crashed meanwhile.
     for result in results:
         if isinstance(result, Exception):

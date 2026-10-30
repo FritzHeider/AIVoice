@@ -169,6 +169,61 @@ Behavioural rules:
   each utterance → used to compute measured voice-to-voice latency), `POST /sim/telnyx/calls/{ccid}/hangup`,
   `POST /sim/reset`.
 
+> Decision (2026-10-29): FakeTelnyx REST, auth, and webhooks (P03-T02a). (1) Error codes: `10009` "Authentication
+> failed" (401), `10005` "Resource not found" (404), `10015` "Invalid value" (422: missing, invalid, or unknown body
+> field — every body model forbids unknown fields so client typos fail contract tests; body fields are located with
+> `source.pointer` JSON pointers such as `/phone_numbers/0/phone_number`, query parameters with
+> `source.parameter` such as `filter[limit]`), `40305` "Invalid 'from' address" (422, `/from`, the sender is not a
+> number of the account), `85001` "Number not available" (422) for ordering a number that is not in the inventory,
+> already owned, or reserved by a pending order; `90018` belongs to the call endpoints. (2) Resources are per
+> account: `sim-telnyx-key` is built in and `POST /sim/telnyx/accounts {"api_key"}` → 201 `{"api_key"}` (idempotent)
+> registers more; another account's id is a 404; `/sim/reset` drops registered accounts and every resource. The
+> Bearer scheme is case-insensitive. (3) Webhook targets: an outbound message's events go to the messaging profile
+> `webhook_url` when `use_profile_webhooks` is true (default) and the profile has one, otherwise to the request
+> `webhook_url`, otherwise to `SIM_MESSAGING_WEBHOOK_URL`; `number_order.complete` goes to the `webhook_event_url`
+> of the order's `connection_id` application, else `SIM_EDGE_WEBHOOK_URL`; inbound `message.received` goes to the
+> owning number's messaging profile `webhook_url`, else `SIM_MESSAGING_WEBHOOK_URL`. (4) Retries: the first attempt
+> is sent inline (events of one resource stay ordered); after a non-2xx answer or a transport error the event is
+> re-sent 1 s after attempt 1 and 3 s after attempt 2 on the sim clock (`meta.attempt` 2 and 3, same event `id`, the
+> payload as it was when emitted, re-signed with a fresh timestamp), then dropped. `force_duplicate_webhooks` sends
+> each successful first attempt a second time (same id, `meta.attempt` 1). Every attempt is listed by
+> `GET /sim/telnyx/webhooks` → `{"deliveries": [{event_id, event_type, url, attempt, status_code, error,
+> delivered_at}]}` (last 10 000). (5) Signing key: `SIM_ED25519_PRIVATE_KEY` is base64 of the 32-byte Ed25519
+> seed (the 64-byte seed + public key form is accepted when the halves match; blank means unset); otherwise a key is
+> generated when the state is created and kept across `/sim/reset`. `GET /sim/telnyx/public-key` →
+> `{"public_key"}` (base64 of the raw 32 bytes); `apps/sim` writes it plus a newline to `.sim/telnyx_public_key`
+> (relative to its working directory) before serving. The signature timestamp is the sim clock's unix time.
+> (6) Number search: `filter[limit]` default 10, 1–50 (else `10015`); `filter[phone_number_type]` must be `local`,
+> `toll_free`, `mobile`, or `national`; repeated `filter[features][]` values must all be present; locality and
+> administrative area match case-insensitively; owned and reserved numbers are excluded; `meta` is
+> `{"total_results", "best_effort_results": 0}`. The inventory is 50 numbers per block: `+14155552000`–`2049`
+> (San Francisco, CA), `+12125552000`–`2049` (New York, NY), `+18885552000`–`2049` (toll-free, voice/sms), and
+> `+442079460000`–`0049` (London, national, voice). `filter[name]` on messaging profiles is exact; the
+> `[contains]` filters of applications and outbound voice profiles are case-insensitive substrings. Lists page with
+> `page[number]` (default 1) and `page[size]` (default 20, at most 250), `meta {"page_number", "page_size",
+> "total_pages", "total_results"}`. Creating an application or outbound voice profile answers 201, a messaging
+> profile or number order 200. A PATCH merges the body into the stored fields (nested objects key-wise) and
+> re-validates the result like a create; omitted application fields take the specs/06 §2.1 values
+> (`webhook_api_version "2"`, `webhook_timeout_secs 25`, `first_command_timeout true`, `first_command_timeout_secs
+> 30`, `anchorsite_override "Latency"`, `dtmf_type "RFC 2833"`). Application, outbound voice profile, and phone number ids
+> are 19-digit numeric strings; message, messaging profile, number order, order-entry, and webhook event ids are
+> UUIDs; all are drawn from the seeded state RNG. (7) Message `parts`: GSM-7 (basic
+> plus extension table, extension characters count 2) 160 septets single / 153 per part, otherwise UCS-2 70 / 67
+> UTF-16 code units; `encoding` is `GSM-7` or `UCS-2`; `type` is `MMS` when `media_urls` is non-empty. Messages
+> need `text` or `media_urls` (`10015` `/text`) and a messaging profile from the request or the sending number
+> (`10015` `/messaging_profile_id`). `message.sent` is emitted 200 ms after the request and `message.finalized`
+> 600 ms after it (`delivered`, or `delivery_failed` with error `40008` "Undeliverable" for destinations in the
+> telnyx config `failing_message_destinations`). `POST /sim/telnyx/messages/inbound {from, to, text?, media_urls?}`
+> emits `message.received` (`to[0].status: "webhook_delivered"`) and answers 202 `{"id"}`, or 422 when `to` is
+> not owned; `GET /sim/telnyx/messages` lists every account's messages. (8) Number orders finish 1 s (sim clock)
+> after creation: `success` (the numbers become `phone_number` records with the order's `connection_id`,
+> `messaging_profile_id`, and `customer_reference`) or `failure` (numbers return to the inventory) when the telnyx
+> config `fail_number_orders` is true. `GET`/`PATCH /sim/telnyx/config` carries `force_duplicate_webhooks`,
+> `fail_number_orders`, and `failing_message_destinations` (partial PATCH, reset by `/sim/reset`). The
+> `SimState.force_duplicate_webhooks` named above is this config field. `DELETE /v2/phone_numbers/{id}` answers the
+> record with `status: "deleted"` and releases the number; `PATCH /v2/phone_numbers/{id}/messaging` answers
+> `{record_type: "messaging_phone_number", id, phone_number, messaging_profile_id, updated_at}`.
+
 ### 3.3 FakeElevenLabs (port 9200)
 
 - **TTS multi-context WS** `GET /v1/text-to-speech/{voice_id}/multi-stream-input`: validates `xi-api-key` header (or

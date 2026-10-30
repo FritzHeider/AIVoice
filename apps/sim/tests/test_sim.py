@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -69,7 +70,9 @@ async def test_each_app_serves_the_control_api_next_to_probes(sim: SimName) -> N
     assert scenarios.status_code == (200 if sim == "telnyx" else 404)
 
 
-async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_serves_all_simulators_until_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     servers: list[RecordingServer] = []
     all_created = asyncio.Event()
 
@@ -82,6 +85,7 @@ async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.Monke
     monkeypatch.setattr(sim_main, "run_server", partial(run_server, server_factory=factory))
     stop = StopController()
     container = FakeContainer({"redis": ok_check})
+    key_file = tmp_path / ".sim" / "telnyx_public_key"
     task = asyncio.ensure_future(
         run(
             settings_of(SimSettings),
@@ -91,6 +95,7 @@ async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.Monke
             container_factory=container,
             init_observability=False,
             install_signals=False,
+            public_key_file=key_file,
         )
     )
     await asyncio.wait_for(all_created.wait(), timeout=10)
@@ -108,6 +113,13 @@ async def test_run_serves_all_simulators_until_stopped(monkeypatch: pytest.Monke
         # All four servers share one SimState.
         snapshot = await client.get(f"{servers[-1].url}/sim/state")
         assert snapshot.json()["scenarios"] == ["shared"]
+        # FakeTelnyx serves its REST API with the simulator key and signs with the key written at startup.
+        balance = await client.get(
+            f"{servers[0].url}/v2/balance", headers={"authorization": "Bearer sim-telnyx-key"}
+        )
+        assert balance.json()["data"]["record_type"] == "balance"
+        public_key = await client.get(f"{servers[0].url}/sim/telnyx/public-key")
+        assert key_file.read_text(encoding="utf-8") == f"{public_key.json()['public_key']}\n"
     stop.request("test")
     await asyncio.wait_for(task, timeout=10)
     assert container.closed == 1

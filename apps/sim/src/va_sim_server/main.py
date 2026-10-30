@@ -3,8 +3,10 @@
 One process serves the four simulators of specs/01-architecture.md §1 on consecutive ports (fake Telnyx 9100,
 fake ElevenLabs 9200, fake Telnyx Inference 9300, fake Stripe 9400), each with ``/healthz``, ``/readyz``, and
 ``/metrics``. Readiness checks the shared state Redis only when ``SIM_STATE_REDIS_URL`` is set. The simulator
-routes (control API under ``/sim/*``, later the vendor APIs) come from ``packages/va_sim``
-(specs/30-testing-and-evals.md §3); all four apps share one ``SimState``.
+routes (control API under ``/sim/*`` and the vendor APIs) come from ``packages/va_sim``
+(specs/30-testing-and-evals.md §3); all four apps share one ``SimState``. Before serving, the FakeTelnyx
+public key is written to ``.sim/telnyx_public_key`` (MASTER_PROMPT §9) so local services can verify its
+webhooks.
 """
 
 from __future__ import annotations
@@ -13,10 +15,13 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Final
 
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
+from va_common.logging import get_logger
 from va_common.metrics import new_registry
 from va_common.service import (
     ContainerFactory,
@@ -33,9 +38,12 @@ from va_common.service import (
 from va_sim.server import BASE_PORT, SIMULATORS, SimName, build_state, ports_from, simulator_routes
 from va_sim.settings import SimSettings
 from va_sim.state import SimState
+from va_sim.telnyx.keys import PUBLIC_KEY_FILE
 from va_sim_server import __version__
 
 __all__ = ["BASE_PORT", "SIMULATORS", "build_container", "create_app", "main", "ports_from", "run"]
+
+_log: Final = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -71,19 +79,25 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
     container_factory: ContainerFactory[SimSettings] = build_container,
     init_observability: bool = True,
     install_signals: bool = True,
+    public_key_file: Path = PUBLIC_KEY_FILE,
 ) -> None:
     """Serve every simulator until ``stop`` is requested; signals are routed once for all servers."""
     state = build_state(settings)
-    with observed(settings.service_name, settings, version=__version__, enabled=init_observability):
-        async with container_factory(settings) as source:
-            signals = shutdown_signals(stop) if install_signals else contextlib.nullcontext()
-            with signals:
-                async with asyncio.TaskGroup() as group:
-                    for sim, port in ports.items():
-                        app = create_app(source, sim, state)
-                        group.create_task(
-                            run_server(app, host=host, port=port, stop=stop, install_signals=False)
-                        )
+    try:
+        with observed(settings.service_name, settings, version=__version__, enabled=init_observability):
+            await asyncio.to_thread(state.signing_key.write_public_key, public_key_file)
+            _log.info("sim.public_key_written", path=str(public_key_file))
+            async with container_factory(settings) as source:
+                signals = shutdown_signals(stop) if install_signals else contextlib.nullcontext()
+                with signals:
+                    async with asyncio.TaskGroup() as group:
+                        for sim, port in ports.items():
+                            app = create_app(source, sim, state)
+                            group.create_task(
+                                run_server(app, host=host, port=port, stop=stop, install_signals=False)
+                            )
+    finally:
+        await state.aclose()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

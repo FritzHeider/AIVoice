@@ -6,15 +6,21 @@
   - Deliverables: `va_sim.server` (multi-app runner on ports 9100–9400), `va_sim.scenario` (pydantic models for the YAML DSL, loader, validation errors with line numbers), `va_sim.clock` (real-time and accelerated), control API (`/sim/telnyx/scenarios`, `/sim/recordings/{id}.wav`, `/sim/reset`, `/sim/clock`, `/sim/state`, per-sim `/sim/{sim}/config`; specs/30 §3 Decision 2026-10-29)
   - Acceptance: DSL examples from specs/30 load; invalid documents produce precise errors.
 
-- [ ] P03-T02 FakeTelnyx REST and webhook emitter
-  - Spec refs: specs/30-testing-and-evals.md (FakeTelnyx); specs/06-telephony-telnyx.md (REST operations, webhook envelope, signature)
+- [x] P03-T02a FakeTelnyx REST resources, auth, and signed webhook emitter — Ed25519 keys + public key file, per-account Bearer auth, Telnyx-shaped errors, balance/apps/OVPs/messaging profiles/number search+orders/phone numbers/messages, signed webhook emitter with 1 s/3 s retries, duplicate mode, delivery log, supervised tasks; lint+typecheck+placeholders clean, 3615 passed, cov 97.87% (va_sim 99.3%)
+  - Spec refs: specs/30-testing-and-evals.md §3, §3.2 (FakeTelnyx REST, auth, webhooks); specs/06-telephony-telnyx.md §2.1 (non-call operations), §4.1 (signature); specs/21-messaging-sms.md §2 step 6, §5 (message events)
   - Depends on: P03-T01
-  - Deliverables: endpoints for calls (dial) and every call action used, conferences, call control applications, outbound voice profiles, messaging profiles, available numbers, number orders, phone numbers, messages; Ed25519 keypair generation with public key written to `.sim/telnyx_public_key`; signed webhook delivery with retries; scenario-driven call progress (ringing, answered, busy, no answer, voicemail AMD results, hangup causes)
-  - Acceptance: responses validate against the response models in specs/06; signatures verify with an independent pynacl check.
+  - Deliverables: Ed25519 keypair (`SIM_ED25519_PRIVATE_KEY` or generated) with `GET /sim/telnyx/public-key` and the public key written to `.sim/telnyx_public_key` by `apps/sim`; Bearer auth (`sim-telnyx-key` + `POST /sim/telnyx/accounts`) with per-account resources; Telnyx-shaped errors; `GET /v2/balance`; call control applications, outbound voice profiles, messaging profiles (create/list with filters/get/patch); available numbers search over a seeded inventory; number orders (pending → success/failure after 1 s, `number_order.complete`); phone numbers (list/get/patch/messaging patch/delete); messages (`message.sent` +200 ms, `message.finalized` +600 ms, inbound `message.received` via control API); webhook emitter (envelope, `telnyx-signature-ed25519`/`telnyx-timestamp`, retries after 1 s and 3 s, duplicate mode, delivery log); supervised background tasks
+  - Acceptance: responses validate against the Telnyx shapes of specs/30 §3.2 (test-local models); signatures verify with an independent pynacl check; retries and duplicates reproduced.
+
+- [ ] P03-T02b FakeTelnyx call control and scenario-driven call progress
+  - Spec refs: specs/30-testing-and-evals.md §3.2 (call endpoints, AMD, inbound, control API), §3.5 (answer/transfer_target); specs/06-telephony-telnyx.md §2.1 (call operations), §5 (event types), §5.1 (hangup causes), §10 (transfer sequences)
+  - Depends on: P03-T02a
+  - Deliverables: `POST /v2/calls` (dial) and every call action used (answer, reject, hangup, transfer, bridge, streaming_start/stop, record_start/stop, send_dtmf, playback_start/stop), conferences (create/join/leave), `command_id` deduplication, `90018` for ended calls; scenario-driven progress (call.initiated, ringing → answered | busy | no answer | rejected | failed with the hangup causes of specs/06 §5.1), premium AMD events, `call.recording.saved` with sim recording URLs, transfer legs from `transfer_target`; inbound `POST /sim/telnyx/inbound`; control API `GET /sim/telnyx/calls`, `/sim/telnyx/calls/{ccid}/timeline`, `POST /sim/telnyx/calls/{ccid}/hangup`
+  - Acceptance: event sequences per scenario outcome asserted in accelerated clock; responses validate against the Telnyx shapes; webhooks signed as in P03-T02a.
 
 - [ ] P03-T03 FakeTelnyx media WebSocket client
   - Spec refs: specs/30-testing-and-evals.md (FakeTelnyx media); specs/06-telephony-telnyx.md (media WS protocol)
-  - Depends on: P03-T02
+  - Depends on: P03-T02b
   - Deliverables: on answer, connects to `stream_url` with signature headers; sends `connected`, `start`, `media` frames (μ-law 20 ms) from scenario audio (WAV files or synthesized marker audio), `dtmf`, `stop`; accepts outbound `media`, `mark`, `clear`; echoes marks per Telnyx semantics; records agent audio per call; supports out-of-order frame injection for tests
   - Acceptance: loopback test with a minimal test WS server proves framing, mark echo after playback, clear behaviour.
 
@@ -44,7 +50,7 @@
 
 - [ ] P03-T08 `va_telnyx` REST client
   - Spec refs: specs/06-telephony-telnyx.md (REST client operations, error mapping, retries, rate limiting, client_state, command_id)
-  - Depends on: P03-T02
+  - Depends on: P03-T02b
   - Deliverables: `TelnyxClient` with typed methods for every operation, per-account credentials (platform or BYO), `command_id` support, error mapping, retry on 429/5xx for idempotent operations, token-bucket rate limiter, metrics/tracing
   - Acceptance: contract tests against FakeTelnyx for every method; respx tests for error mapping.
 

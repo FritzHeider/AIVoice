@@ -142,6 +142,14 @@
 
 ## Fixes
 
+### mem-1793321388-bb1d
+> pip-audit gate: run 'uv export --no-hashes --no-emit-workspace > /var/tmp/req.txt && uvx --python 3.12 pip-audit --strict -r /var/tmp/req.txt'; without --python 3.12 uvx uses 3.13 and fails on workspace packages (requires-python <3.13)
+<!-- tags: tooling, audit | created: 2026-10-30 -->
+
+### mem-1793319405-8587
+> Python 3.12 asyncio.gather on already-done tasks completes synchronously (no loop yield): a 'while tasks: await gather(*tasks)' drain loop spins forever before done callbacks run - add await asyncio.sleep(0) per iteration (va_sim.tasks.Supervisor.drain)
+<!-- tags: async, testing, sim | created: 2026-10-30 -->
+
 ### mem-1793294019-7281
 > email_validator.validate_email(check_deliverability=False, test_environment=True) accepts the reserved .test domain but REJECTS special-use .local (and dotless hosts); dev seed owner is dev@voiceagents.test. make recipes echo their command to stdout - prefix with @ when stdout must be machine-readable (make seed ARGS=--json)
 <!-- tags: api, tooling | created: 2026-10-29 -->

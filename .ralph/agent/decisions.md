@@ -86,3 +86,18 @@ Template:
   failures (embedding provider down) report 500 deliberately.
 - **Reversibility:** yes — change one entry in `CODES`/`ALTERNATE_STATUSES` and the spec note.
 - **Timestamp:** 2026-10-25T00:00:00Z
+
+## DEC-005 — Split P03-T02 (FakeTelnyx) into REST/webhooks and call control
+
+- **Decision:** P03-T02 covers ~40 endpoints, the signed webhook emitter, and scenario-driven call progress; too
+  large for one Builder activation with full tests.
+- **Chosen Option:** P03-T02a (keys, auth/accounts, errors, provisioning/number/message REST, webhook emitter,
+  supervised tasks) then P03-T02b (dial, call actions, conferences, scenario progress, AMD, inbound, call control
+  API). P03-T03 and P03-T08 now depend on P03-T02b.
+- **Confidence:** 85
+- **Alternatives Considered:**
+  - One task — rejected: P03-T01 (smaller) already filled an activation; a blocked build costs a full cycle.
+  - Split by HTTP family only — rejected: call control needs the emitter and keys first, so they go in T02a.
+- **Reasoning:** T02a is self-contained and testable (messages and number orders exercise the emitter end to end).
+- **Reversibility:** yes — the plan ids are the only artefact.
+- **Timestamp:** 2026-10-29T00:00:00Z

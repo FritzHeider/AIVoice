@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "VoiceAgents vendor simulators: scenario DSL, simulator clock and state, /sim control API, in-process runner"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "cryptography>=50.0.2",
+    "httpx>=0.28.1",
     "orjson>=3.13.0",
     "pydantic>=2.9",
     "pydantic-settings>=2.16.1",

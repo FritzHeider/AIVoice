@@ -17,7 +17,18 @@ from pydantic import Field, SecretStr
 
 from va_common.settings import RedisSettings
 
-__all__ = ["PROFILES", "SIMULATORS", "ClockMode", "Latencies", "ProfileName", "SimName", "SimSettings"]
+__all__ = [
+    "DEFAULT_EDGE_WEBHOOK_URL",
+    "DEFAULT_MESSAGING_WEBHOOK_URL",
+    "PROFILES",
+    "SIMULATORS",
+    "ClockMode",
+    "Latencies",
+    "ProfileName",
+    "SimName",
+    "SimSettings",
+    "WebhookDefaults",
+]
 
 type ClockMode = Literal["realtime", "accelerated"]
 type ProfileName = Literal["fast", "realistic"]
@@ -25,6 +36,10 @@ type SimName = Literal["telnyx", "elevenlabs", "llm", "stripe"]
 
 # Port order (specs/01 §1): fake Telnyx 9100, ElevenLabs 9200, Telnyx Inference 9300, Stripe 9400.
 SIMULATORS: Final[tuple[SimName, ...]] = ("telnyx", "elevenlabs", "llm", "stripe")
+
+# specs/02 §6 defaults of SIM_EDGE_WEBHOOK_URL and SIM_MESSAGING_WEBHOOK_URL.
+DEFAULT_EDGE_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/voice"
+DEFAULT_MESSAGING_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/messaging"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +60,14 @@ PROFILES: Final[Mapping[ProfileName, Latencies]] = MappingProxyType(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class WebhookDefaults:
+    """Webhook targets FakeTelnyx falls back to when neither the request nor a resource names one."""
+
+    voice_url: str = DEFAULT_EDGE_WEBHOOK_URL
+    messaging_url: str = DEFAULT_MESSAGING_WEBHOOK_URL
+
+
 class SimSettings(RedisSettings):
     """Simulator process settings; the defaults are the realtime-mode values of specs/02 §6."""
 
@@ -58,8 +81,8 @@ class SimSettings(RedisSettings):
     sim_llm_rules: str = ""
     # Empty → a fresh keypair is generated when FakeTelnyx starts.
     sim_ed25519_private_key: SecretStr | None = None
-    sim_edge_webhook_url: str = "http://localhost:8100/telnyx/voice"
-    sim_messaging_webhook_url: str = "http://localhost:8100/telnyx/messaging"
+    sim_edge_webhook_url: str = DEFAULT_EDGE_WEBHOOK_URL
+    sim_messaging_webhook_url: str = DEFAULT_MESSAGING_WEBHOOK_URL
     sim_stripe_webhook_url: str = "http://localhost:8000/v1/billing/stripe/webhook"
     # Empty → in-process state only, and no readiness check.
     sim_state_redis_url: str = ""
@@ -77,4 +100,10 @@ class SimSettings(RedisSettings):
             tts_ttfa_ms=self.sim_tts_ttfa_ms,
             ttft_ms=self.sim_llm_ttft_ms,
             tokens_per_s=self.sim_llm_tokens_per_s,
+        )
+
+    def webhook_defaults(self) -> WebhookDefaults:
+        """The FakeTelnyx webhook fallbacks configured through the environment."""
+        return WebhookDefaults(
+            voice_url=self.sim_edge_webhook_url, messaging_url=self.sim_messaging_webhook_url
         )

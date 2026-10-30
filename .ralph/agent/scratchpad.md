@@ -206,3 +206,283 @@ Approved. Re-ran make lint/typecheck/placeholders (exit 0) and make test (3519 p
 Diff checked against specs/30 §3 table (all SIM_* vars, defaults per specs/02 §6), §3.5 DSL (every field present,
 spec example loads), and the control API paths in §3/§3.2. No placeholders, swallowed exceptions, or blocking I/O
 (YAML parse goes through asyncio.to_thread). Error-path tests cover each validation rule with exact line/column.
+
+## Plan P03-T02a — FakeTelnyx REST resources, auth, and signed webhook emitter (Planner, 2026-10-29)
+
+P03-T02 was split (DEC-005, plan/phase-03.md): T02a = keys + auth/accounts + errors + provisioning/number/message
+REST + webhook emitter + supervised tasks; T02b = dial/call actions/conferences/scenario progress/AMD/inbound/call
+control API. T02a must leave the emitter, id generation, task supervisor, and error helpers ready for T02b.
+
+### Decisions (Builder writes them as one `> Decision (2026-10-29):` block at the end of specs/30 §3.2)
+1. Error codes (Telnyx-shaped `{"errors":[{"code","title","detail","source"?:{"pointer"}}]}`): `10009`
+   "Authentication failed" (401), `10005` "Resource not found" (404), `10015` "Invalid value" (422, missing/invalid/
+   unknown field; pointer = JSON pointer e.g. `/phone_numbers/0/phone_number`), `10007` "Unexpected error" not used,
+   `40305` "Invalid 'from' address" (422, `/from`), `85001` "Number not available" (422) for ordering a number
+   that is not in the inventory. `90018` "Call has already ended" belongs to T02b. Unknown body fields are
+   rejected with `10015` (strict, so client typos fail contract tests).
+2. Resources are per account: each API key (`sim-telnyx-key` built in, plus keys added with
+   `POST /sim/telnyx/accounts {"api_key"}` → 201 `{"api_key"}`) owns its apps/profiles/numbers/orders/messages;
+   another account's id → 404. `/sim/reset` drops registered accounts and all resources.
+3. Webhook targets: messages → request `webhook_url` (when `use_profile_webhooks` is false or the profile has no URL),
+   else the messaging profile `webhook_url`, else `SIM_MESSAGING_WEBHOOK_URL`; `number_order.complete` → the order's
+   call control application `webhook_event_url` when `connection_id` names one, else `SIM_EDGE_WEBHOOK_URL`.
+   Inbound `message.received` → owning number's messaging profile `webhook_url`, else `SIM_MESSAGING_WEBHOOK_URL`.
+4. Retries: first attempt inline (keeps per-resource event order); on non-2xx or transport error the emitter
+   re-sends after 1 s and then 3 s on the sim clock (attempts 2, 3; `meta.attempt` increments; re-signed with a
+   fresh timestamp; same event `id`), then gives up. `force_duplicate_webhooks` sends every successful first attempt
+   a second time (same id, `meta.attempt` 1).
+5. Signing key: `SIM_ED25519_PRIVATE_KEY` is base64 of the 32-byte Ed25519 seed (64-byte seed+public also accepted
+   when the public half matches); otherwise generated with `os.urandom` at state creation and kept across
+   `/sim/reset`. Public key = base64 raw 32 bytes, `GET /sim/telnyx/public-key` → `{"public_key"}`; `apps/sim`
+   writes it (+ `\n`) to `.sim/telnyx_public_key` relative to the working directory at startup.
+6. `filter[limit]` default 10, max 50 (>50 → 10015). `filter[name]` on messaging profiles is exact; the other
+   `[contains]` filters are case-insensitive substring. Lists use `page[number]` (default 1) / `page[size]`
+   (default 20, max 250) with `meta {"page_number","page_size","total_pages","total_results"}`.
+7. Message `parts`: GSM-7 (basic + extension table, extension chars count 2) 160/153 septets, else UCS-2 70/67
+   UTF-16 code units; `encoding` `GSM-7`|`UCS-2`. Computed locally in the sim (not imported from va_domain).
+8. Number orders finish 1 s (sim clock) after creation: `success` (numbers become owned `phone_number`s with the
+   order's `connection_id`/`messaging_profile_id`/`customer_reference`) or `failure` when the telnyx config
+   `fail_number_orders` is true (numbers return to inventory).
+
+### Files
+- `packages/va_sim/pyproject.toml`: add deps `cryptography>=50.0.2`, `httpx[http2]>=0.28.1`.
+  Root `pyproject.toml` dev group: add `pynacl>=1.5` (test-only independent verifier; listed in specs/02 §5 as
+  allowed). `uv lock && uv sync`.
+- `src/va_sim/tasks.py` — `class Supervisor`: `spawn(coro, *, name) -> asyncio.Task[None]` (keeps a set, done
+  callback removes and logs non-cancel exceptions via structlog `sim.task_failed` with name; never re-raises),
+  `cancel_all() -> None` (sync, for reset), `async aclose()` (cancel + `asyncio.gather(..., return_exceptions=True)`),
+  `pending -> int`, `async drain()` (await until no tasks remain, for tests; loops because tasks spawn tasks).
+- `src/va_sim/ids.py` — `SimIds(rng)`: `uuid() -> str` (`uuid.UUID(int=rng.getrandbits(128), version=4)`),
+  `token(n) -> str` (url-safe base64 of rng bytes; T02b uses it for `v3:` ccids). All ids come from the seeded rng.
+- `src/va_sim/telnyx/__init__.py` — docstring, `telnyx_routes(state) -> list[BaseRoute]` (REST under `/v2` + the
+  telnyx control routes below; `control._telnyx_routes` stays for scenarios/recordings).
+- `src/va_sim/telnyx/keys.py` — `PUBLIC_KEY_FILE: Final = Path(".sim/telnyx_public_key")`;
+  `class SigningKey` (wraps `cryptography` `Ed25519PrivateKey`): `generate()`, `from_base64(secret: str)`
+  (ValueError on bad length/base64/mismatch), `public_key_b64 -> str`, `sign(message: bytes) -> str` (base64),
+  `signature_headers(timestamp: int, body: bytes) -> dict[str, str]` (`telnyx-signature-ed25519` over
+  `f"{timestamp}|".encode() + body`, `telnyx-timestamp`), `write_public_key(path) -> None` (mkdir parents).
+- `src/va_sim/telnyx/errors.py` — `TelnyxIssue(code, title, detail, pointer|None)`, `telnyx_error(status, *issues)
+  -> JSONResponse`, helpers `not_found(kind, id)`, `unauthorized()`, `invalid(detail, pointer)`, and
+  `issues_from_validation(ValidationError) -> list[TelnyxIssue]` (loc → `/a/0/b`, missing → "is required",
+  extra_forbidden → "is not a recognised parameter").
+- `src/va_sim/telnyx/http.py` — `data(obj, status=200)`, `page(items, request)` (pagination per decision 6),
+  `parse_body(request, model) -> M | JSONResponse` (empty/invalid JSON → 10015 pointer ""), `authenticated(store)`
+  decorator or `account_for(request, store) -> Account | JSONResponse` (Bearer header, case-insensitive scheme).
+- `src/va_sim/telnyx/models.py` — request pydantic models (`extra="forbid"`): `CallControlAppCreate/Update`
+  (fields of specs/06 §2.1 row incl. nested `inbound {channel_limit, sip_subdomain_receive_settings, ...}` and
+  `outbound {outbound_voice_profile_id, channel_limit}`; Literal sets: `webhook_api_version` "1"|"2",
+  `dtmf_type` "RFC 2833"|"Inband"|"SIP INFO", `anchorsite_override` "Latency"|"Chicago, IL"|"Ashburn, VA"|
+  "San Jose, CA"|"Amsterdam, Netherlands"|"London, UK"|"Toronto, Canada"|"Sydney, Australia",
+  `webhook_timeout_secs` 0–30, `first_command_timeout_secs` 0–300), `OutboundVoiceProfileCreate/Update`
+  (`traffic_type` conversational|short_duration, `service_plan` global|us|international, `concurrent_call_limit`
+  ≥1|None, `whitelisted_destinations` ISO-3166 alpha-2 list, `enabled`, `tags`), `MessagingProfileCreate/Update`
+  (`name`, `webhook_url`, `webhook_failover_url`, `webhook_api_version` "1"|"2"|"2010-04-01",
+  `whitelisted_destinations` required on create, `enabled`), `NumberOrderCreate` (`phone_numbers` 1..20 of
+  `{phone_number: E164}`, `connection_id`, `messaging_profile_id`, `customer_reference`), `PhoneNumberUpdate`
+  (`connection_id`, `tags`, `customer_reference`, `external_pin`), `PhoneNumberMessagingUpdate`
+  (`messaging_profile_id`), `MessageCreate` (`from_` alias from, `to`, `text`, `media_urls`, `subject`, `type`
+  SMS|MMS, `messaging_profile_id`, `webhook_url`, `webhook_failover_url`, `use_profile_webhooks`=True, `auto_detect`;
+  model_validator: text or media_urls required), sim control models `AccountCreate`, `TelnyxSimConfig`
+  (`force_duplicate_webhooks: bool`, `fail_number_orders: bool`, `failing_message_destinations: tuple[E164,...]`),
+  `InboundMessage` (`from_`, `to`, `text`, `media_urls`). E164 = `^\+[1-9]\d{6,14}$` (define locally; do not import
+  va_domain).
+- `src/va_sim/telnyx/store.py` — `@dataclass Account(api_key, apps, voice_profiles, messaging_profiles,
+  numbers (by id), orders, messages: dict[str, dict]` storing response-shaped JSON dicts) and `TelnyxStore`:
+  `accounts: dict[str, Account]` (seeded with `DEFAULT_API_KEY = "sim-telnyx-key"`), `config: TelnyxSimConfig`,
+  `inventory: dict[str, AvailableNumber]` built by `inventory.seed_inventory()`, `reserved: set[str]`,
+  `owner_of(e164) -> tuple[Account, dict] | None`, `reset()`.
+- `src/va_sim/telnyx/inventory.py` — `AvailableNumber` frozen dataclass (phone_number, country_code, ndc,
+  phone_number_type, locality, administrative_area, features, monthly_cost, upfront_cost) and
+  `seed_inventory() -> tuple[AvailableNumber, ...]`: 50 each of `+1415555` (San Francisco, CA, local, voice/sms/mms),
+  `+1212555` (New York, NY, local, voice/sms/mms), `+1888555` (toll_free, voice/sms; locality None), `+4420` 7946
+  `0xxx` (London, GB, national, voice); suffixes 2000–2049 for US (`+14155552000`…), `+442079460000`…; deterministic
+  (no rng). `to_json(n) -> dict` per specs/30 §3.2 (`record_type: available_phone_number`, `features` list of
+  `{"name"}`, `cost_information {monthly_cost, upfront_cost, currency:"USD"}`, `region_information`
+  `[{region_type: country_code|state|location|rate_center, region_name}]`, `best_effort:false`, `quickship:true`,
+  `reservable:true`, `vanity_format:""`). `search(numbers, filters) -> list`.
+- `src/va_sim/telnyx/resources.py` — route handlers for: `GET /v2/balance` (`record_type: balance`, `balance
+  "100.00"`, `credit_limit "0.00"`, `available_credit "100.00"`, `pending "0.00"`, `currency "USD"`);
+  `/v2/call_control_applications` POST/GET + `/{id}` GET/PATCH (defaults from specs/06 §2.1 when omitted;
+  outbound_voice_profile_id must exist in the account → 10015 `/outbound/outbound_voice_profile_id`; response adds
+  `id` (numeric string, Telnyx style: 19 digits from rng), `record_type: call_control_application`, `active: true`,
+  `created_at`/`updated_at` ISO Z from `state.clock.now()`; nested PATCH merges);
+  `/v2/outbound_voice_profiles` POST/GET + `/{id}` GET/PATCH (`record_type: outbound_voice_profile`,
+  `connections_count` = apps referencing it, `usage_payment_method: "rate-deck"`, `daily_spend_limit_enabled:false`);
+  `/v2/messaging_profiles` POST/GET + `/{id}` GET/PATCH (`record_type: messaging_profile`, uuid id, `v1_secret`
+  omitted); `GET /v2/available_phone_numbers` (filters of specs/06 §2.1 search_numbers row; `filter[features][]`
+  repeated → all must be present; unknown `filter[phone_number_type]` → 10015; owned/reserved excluded;
+  `meta {"total_results","best_effort_results":0}`); `POST /v2/number_orders` (validate numbers available, not
+  duplicated; reserve; 200 `{"data": order}`, order `status: pending`, each `phone_numbers[i] {id, record_type:
+  number_order_phone_number, phone_number, status: pending, regulatory_requirements: []}`; spawn completion task:
+  `await clock.sleep(1.0)` → success/failure → emit `number_order.complete` with payload = order);
+  `GET /v2/number_orders/{id}`; `GET /v2/phone_numbers` (`filter[phone_number]` exact, `filter[tag]`,
+  pagination), `GET/PATCH/DELETE /v2/phone_numbers/{id}` (connection_id must be an app of the account; DELETE → 200
+  data with `status: "deleted"`, number released to inventory), `PATCH /v2/phone_numbers/{id}/messaging`
+  (profile must exist → 10015; response `record_type: messaging_phone_number`, `id`, `phone_number`,
+  `messaging_profile_id`, `updated_at`; also updates the number).
+- `src/va_sim/telnyx/messages.py` — `segment_count(text) -> tuple[encoding, parts]` (decision 7);
+  `POST /v2/messages`: `from` must be owned by the account (else 40305 `/from`); profile = request
+  `messaging_profile_id` or the number's (missing both → 10015 `/messaging_profile_id`); response message per
+  specs/30 §3.2 (`record_type: message`, `direction: outbound`, `id` uuid, `type` (MMS when media_urls),
+  `from {phone_number, carrier: "Telnyx", line_type: "Wireless"}`, `to: [{phone_number, status: "queued", carrier,
+  line_type}]`, `text`, `subject`, `media: [{url, content_type: null, sha256: null, size: null}]`, `messaging_profile_id`,
+  `webhook_url`, `webhook_failover_url`, `encoding`, `parts`, `tags: []`, `cost: null`, `received_at`, `sent_at: null`,
+  `completed_at: null`, `valid_until` (+24 h), `errors: []`); spawn lifecycle: +200 ms `message.sent`
+  (status `sent`, `sent_at`) then +400 ms `message.finalized` (`delivered`, `completed_at`) or, when `to` is in
+  `failing_message_destinations`, `delivery_failed` with `errors: [{"code": "40008", "title": "Undeliverable",
+  "detail": "The destination carrier rejected the message."}]`; message stored and updated in place.
+  `GET /v2/messages/{id}`. Control: `POST /sim/telnyx/messages/inbound` → emits `message.received` (direction
+  inbound, `to[0].status: "webhook_delivered"`, `from.phone_number`), 202 `{"id"}`; 422 when `to` is not owned.
+- `src/va_sim/telnyx/webhooks.py` — `WebhookDelivery` frozen dataclass (event_id, event_type, url, attempt,
+  status_code|None, error|None, delivered_at ISO); `class WebhookEmitter(state-free: signing_key, clock, ids,
+  supervisor, config getter, transport: httpx.AsyncBaseTransport | None)`: `async emit(url, event_type, payload)
+  -> str` builds envelope `{"data":{"record_type":"event","id","event_type","occurred_at","payload"},
+  "meta":{"attempt","delivered_to"}}` (orjson bytes, signed per attempt with `int(clock.now().timestamp())`),
+  POSTs with `httpx.AsyncClient(timeout=httpx.Timeout(5.0), transport=transport)` (lazily created, `aclose()`),
+  records each attempt in `deliveries` (bounded deque 10 000), schedules retries (decision 4) via supervisor.
+- `src/va_sim/telnyx/control.py` — telnyx-only control routes: `GET /sim/telnyx/public-key`,
+  `POST /sim/telnyx/accounts`, `GET/PATCH /sim/telnyx/config` (TelnyxSimConfig, partial patch, 422
+  `invalid_request` with issues via the existing `{"error":...}` sim format), `GET /sim/telnyx/webhooks`
+  (`{"deliveries":[...]}`), `GET /sim/telnyx/messages` (`{"messages":[...]}` all accounts),
+  `POST /sim/telnyx/messages/inbound`. Reuse control.py `_error`/`_json_body` (make them public:
+  `sim_error`, `json_body` in `va_sim.control` — no copies, jscpd).
+- `src/va_sim/state.py`: constructor gains `signing_key: SigningKey | None = None` (generate when None),
+  `webhook_defaults: WebhookDefaults = WebhookDefaults()` (frozen dataclass in `va_sim.settings`: `voice_url`,
+  `messaging_url` defaults = specs/02 §6 values), `webhook_transport: httpx.AsyncBaseTransport | None = None`;
+  attributes `tasks: Supervisor`, `ids: SimIds`, `telnyx: TelnyxStore`, `webhooks: WebhookEmitter`.
+  `reset()` also `tasks.cancel_all()`, `telnyx.reset()`, `webhooks.clear()` (key kept). New `async aclose()`
+  (supervisor + emitter client). `snapshot()` adds `"telnyx": {"accounts", "messages", "phone_numbers",
+  "webhook_deliveries"}` counts.
+- `src/va_sim/server.py`: `simulator_routes("telnyx", ...)` = control routes + `telnyx_routes(state)`;
+  `build_state(settings)` passes `SigningKey.from_base64(secret)` when `sim_ed25519_private_key` is set and
+  `WebhookDefaults` from settings; `running_sims` awaits `state.aclose()` in `finally` after servers stop.
+- `apps/sim/src/va_sim_server/main.py`: `run()` writes the public key (`await asyncio.to_thread(
+  state.signing_key.write_public_key, public_key_file)`; new keyword `public_key_file: Path = PUBLIC_KEY_FILE`)
+  before serving, logs `sim.public_key_written`, and `await state.aclose()` on exit (try/finally).
+- AGENTS.md: FakeTelnyx notes (auth key, accounts, `/sim/telnyx/config` knobs, `webhook_transport` injection for
+  tests, `state.tasks.drain()`, public key file).
+
+### Tests (`packages/va_sim/tests/telnyx/`, httpx `ASGITransport` over `Starlette(routes=simulator_routes(
+"telnyx", state))` with `AcceleratedClock`; helper `telnyx_client(state)` + `RecordingTransport` (httpx
+`MockTransport` with a programmable status list, records `(url, headers, body)`) in `tests/support/telnyx_helpers.py`;
+test-local response shapes in `tests/support/telnyx_shapes.py` (pydantic `extra="allow"` models of every resource
+listed above, used by `assert_shape(model, response)`)
+- `test_keys.py`: generated key signs; pynacl `VerifyKey(b64decode(pub)).verify(f"{ts}|".encode()+body, sig)`
+  passes; `from_base64` 32 and 64 byte forms, mismatched 64-byte → ValueError, bad base64 → ValueError;
+  `write_public_key` creates parent dir; same seed b64 → same public key.
+- `test_auth.py`: missing header / wrong key → 401 `10009` shape; registered account works; resources isolated
+  across accounts (404 for other account's app id); reset drops accounts.
+- `test_provisioning.py`: create app with only required fields → defaults of specs/06 §2.1; unknown field → 422
+  10015 with pointer; bad `dtmf_type` → pointer `/dtmf_type`; outbound profile id unknown → 10015; list filter
+  `[application_name][contains]` case-insensitive; PATCH merges nested `outbound`; OVP create/list/patch,
+  `connections_count`; messaging profile create requires `whitelisted_destinations`, `filter[name]` exact; 404s.
+- `test_numbers.py`: search by country/ndc/contains/features/type/locality/limit; limit 51 → 10015; order →
+  pending, then after `clock` advance + `state.tasks.drain()` success, number owned, gone from search,
+  `number_order.complete` delivered and signed; `fail_number_orders` → failure + numbers back in inventory; ordering
+  an unavailable/duplicate number → 85001/10015; phone_numbers filter/patch (connection_id must exist, tags)/
+  messaging patch/delete (released to search).
+- `test_messages.py`: segment counts (160/161 GSM, extension char, 70/71 UCS-2, emoji); send → queued response
+  shape; `message.sent` then `message.finalized delivered` in order with timestamps 200/600 ms after send (accelerated
+  clock `virtual_ms`); failing destination → `delivery_failed` + errors; webhook URL precedence (decision 3);
+  from not owned → 40305; neither text nor media → 10015; inbound control route emits `message.received` to the
+  profile URL; `GET /v2/messages/{id}` reflects final status.
+- `test_webhooks.py`: envelope shape; headers verify with pynacl; tampered body fails pynacl; receiver 500 then
+  200 → attempts 1 and 2 at +1 s, same event id, `meta.attempt` 2; always 500 → 3 attempts (+1 s, +3 s) then stop;
+  transport error retried; `force_duplicate_webhooks` → two identical-id deliveries; delivery log endpoint; reset
+  cancels pending retries (supervisor pending == 0).
+- `test_tasks.py`: failing task logged not raised; `cancel_all`/`aclose`/`drain`.
+- `test_control_telnyx.py`: public-key endpoint matches state key; config GET/PATCH + unknown key 422; accounts 201;
+  telnyx control routes absent on the llm app.
+- Update `test_state.py` (snapshot shape, reset keeps key), `test_server.py` (running_sims closes state;
+  `build_state` with `SIM_ED25519_PRIVATE_KEY` uses that key), `apps/sim/tests/test_sim.py` (run writes the public
+  key file to `tmp_path`, `/v2/balance` served by the telnyx app with the sim key).
+
+### Gates
+`uv lock && uv sync`; `make fmt lint typecheck placeholders test`; `make check` (jscpd clean, coverage va_sim
+≥ 85 %). No e2e needed (no call/SMS platform flow yet).
+
+### Risks
+- Determinism: never use `uuid4()`/`secrets` for ids — only `state.ids` (rng); key generation is the one exception.
+- Accelerated clock + background tasks: tests must `await state.tasks.drain()` after advancing; retries sleep on
+  `state.clock`, so `AcceleratedClock` makes 1 s/3 s instant — assert `virtual_ms` deltas, never wall time.
+- jscpd: resource CRUD handlers for three profile types are near-identical — write one generic
+  `ResourceCollection` (create/list/get/patch parameterised by models, record_type, id factory, filters, defaults)
+  rather than three copies.
+- `check_no_placeholders` flags `example.com` — use `+1415555xxxx` numbers and `http://localhost`/`edge` hosts.
+- Keep the simulator independent of va_telnyx/va_domain (no shared message construction).
+
+## Build P03-T02a (Builder, 2026-10-29)
+
+Implemented per plan; deviations (all recorded in the specs/30 §3.2 Decision block or AGENTS.md):
+- `telnyx_routes` lives in `va_sim/telnyx/routes.py` (package `__init__` stays import-free: `va_sim.state` imports
+  `telnyx.store/webhooks/keys`, and handler modules import `SimState` only under TYPE_CHECKING → no cycle).
+  `simulator_routes` appends it for `telnyx`; `va_sim.control` exports `sim_error`, `invalid_request`, `json_body`.
+- REST split into `resources.py` (balance + generic `Collection[M]` for apps/OVPs/messaging profiles: PATCH =
+  deep-merge into stored fields + re-validate with the create model, so no Update models), `numbers.py` (search,
+  orders, phone numbers), `messages.py`. Query-parameter errors use `source.parameter` (body errors `pointer`).
+- `httpx` dep without the `[http2]` extra (the emitter needs plain HTTP/1.1). `pynacl>=1.5` in the root dev group.
+- Retry timing: attempt 2 is 1 s after attempt 1, attempt 3 is 3 s after attempt 2 (virtual 0/1000/4000 ms);
+  payloads are deep-copied at emit so a retry carries the payload as emitted.
+- `SimSettings.webhook_defaults()` + `WebhookDefaults` (settings); blank `SIM_ED25519_PRIVATE_KEY` (the .env.example
+  value) means generate. `iso_z` moved to `va_sim.clock` (shared by control + telnyx).
+- `Supervisor.drain` yields a loop turn per iteration: Python 3.12 `gather` over done tasks does not yield (busy loop).
+- Inbound `message.received` is emitted inline before the 202 (first attempt), retries via the supervisor.
+Tests: packages/va_sim/tests/telnyx/ (keys, auth, provisioning, numbers, messages, webhooks, control), test_tasks,
+test_ids, updated test_state/test_server/apps/sim test_sim; support telnyx_helpers.py + telnyx_shapes.py.
+
+## Review P03-T02a (Reviewer, 2026-10-29)
+
+Gates re-run: `make lint` clean, `make typecheck` (mypy 451 files, tsc x3) clean, `make placeholders` 0 findings;
+`make test` 3615 passed, coverage 97.87 %. Design, supervision, signing, retries, determinism and tests otherwise look good.
+
+Rejected — findings:
+1. `packages/va_sim/src/va_sim/telnyx/numbers.py` `complete_order`: a failed order sets each
+   `phone_numbers[i].status` to `"failed"`. Telnyx `NumberOrderPhoneNumber.status` is
+   `pending | success | failure` (same set as the order status; verified on developers.telnyx.com "Retrieve a number
+   order"; specs/06 §2.1 `get_number_order` lists `pending`/`success`/`failure`). Use `"failure"`. The wrong value is
+   also in the test contract: `tests/support/telnyx_shapes.py:129` (`Literal["pending","success","failed"]`) and
+   `tests/telnyx/test_numbers.py:172`. Fix both, otherwise `va_telnyx` (P03-T08) gets contract-tested against a
+   status Telnyx never sends.
+2. `specs/30-testing-and-evals.md` §3.2 Decision (2026-10-29), item (6): it says "Application and outbound voice
+   profile ids are 19-digit numeric strings, other ids UUIDs", but `phone_number` record ids come from
+   `state.ids.digits()` (numeric, which matches real Telnyx). Make the Decision text match: phone number ids are
+   numeric too; message, messaging profile, number order, and order-entry ids are UUIDs.
+
+## Fix P03-T02a review findings (Builder, 2026-10-29)
+
+1. Failed number order entries now carry `status: "failure"` (numbers.py `complete_order`), shape Literal and
+   test_numbers assertion updated.
+2. specs/30 §3.2 Decision (6): application, OVP and phone number ids are 19-digit numeric; message, messaging
+   profile, number order, order-entry and webhook event ids are UUIDs.
+Gates: fmt/lint/typecheck clean, placeholders 0, make test 3615 passed, coverage 97.87 %.
+
+## Plan P03-T02a (re-plan after build.blocked, Planner, 2026-10-29)
+
+The block is not a design blocker. The loop's backpressure check rejected the build.done that followed the review
+fixes because its payload had no evidence keys (AGENTS.md P00-T01 note). The code fixes for both review findings are
+already in the working tree. The task does not need splitting.
+
+Builder, do only this:
+1. Confirm the two review fixes are present: `status: "failure"` in numbers.py `complete_order` plus the shape Literal
+   and test assertion, and the specs/30 §3.2 Decision (6) id wording.
+2. Re-run the gates for real: `make fmt lint typecheck placeholders test` and `make check`. Audit: `uv export
+   --no-hashes > /var/tmp/req.txt && uvx pip-audit --strict -r /var/tmp/req.txt` plus `corepack pnpm audit
+   --audit-level high`. Complexity: `uvx radon cc -s -a packages/va_sim/src`. Duplication: `npx --yes jscpd@4 --silent`
+   (0 clones). Coverage: va_sim ≥ 85 %.
+3. Emit a PLAIN string (no --json) that contains: `tests: pass, lint: pass, typecheck: pass, audit: pass, coverage:
+   pass, complexity: <radon average>, duplication: pass, specs: pass`, plus the test count and coverage %.
+If a gate actually fails, fix the cause inside P03-T02a scope before emitting.
+
+## Build P03-T02a gate re-run (Builder, 2026-10-29)
+
+Both review fixes are confirmed present. Gates were re-run for real: fmt/lint/typecheck/placeholders all exited 0
+(placeholders found 0). `make check` exited 0: 3615 pytest passed, total coverage 97.87 % (va_sim 99.3 %), TS vitest
+122 passed. pip-audit (`--no-emit-workspace`, `uvx --python 3.12`) found no known vulnerabilities. pnpm audit
+high found no known vulnerabilities. radon average is A (2.17). jscpd found 0 clones.
+
+## Review P03-T02a re-check (Reviewer, 2026-10-29)
+
+Approved. Both earlier findings are fixed (`"failure"` entry status in numbers.py, shapes and tests; specs/30 §3.2
+Decision (6) id wording). Gates: lint, typecheck and placeholders (0 findings) all passed. The first `make test` run
+had 1 failure and 11 errors in apps/api testcontainers fixtures, all Docker daemon read timeouts with nothing to do
+with va_sim. Those 4 files passed on their own (77 passed). A second full `make test` passed: 3615 tests, coverage 97.87 %.

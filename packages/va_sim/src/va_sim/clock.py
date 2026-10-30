@@ -19,7 +19,7 @@ from typing import Final, Protocol
 from va_common.time import Clock, ensure_utc, utcnow
 from va_sim.settings import ClockMode
 
-__all__ = ["DEFAULT_START", "AcceleratedClock", "RealtimeClock", "SimClock", "clock_for"]
+__all__ = ["DEFAULT_START", "AcceleratedClock", "RealtimeClock", "SimClock", "clock_for", "iso_z"]
 
 # Virtual epoch of an accelerated clock unless a test picks another one.
 DEFAULT_START: Final = datetime(2026, 1, 1, tzinfo=UTC)
@@ -129,3 +129,8 @@ def clock_for(mode: ClockMode) -> SimClock:
     if mode == "accelerated":
         return AcceleratedClock()
     return RealtimeClock()
+
+
+def iso_z(moment: datetime) -> str:
+    """``moment`` as ISO-8601 UTC with a ``Z`` suffix (the timestamp format of every simulator response)."""
+    return ensure_utc(moment).isoformat().replace("+00:00", "Z")
