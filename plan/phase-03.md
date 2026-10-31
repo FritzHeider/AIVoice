@@ -56,7 +56,7 @@
     the registered utterance text; every error message type reproducible via the fault control route.
   - Split from P03-T05 (2026-10-29, Planner): realtime STT alone is a TTS-sized task.
 
-- [ ] P03-T05b FakeElevenLabs batch STT
+- [x] P03-T05b FakeElevenLabs batch STT — `POST /v1/speech-to-text` (file / cloud_storage_url / source_url, multichannel separate|combined, diarize, granularity, entities, keyterms, enable_logging), marker + TTS-tone decoding, batch records/fault/reset; dual-channel acceptance test; make test 4262 passed, coverage 98.01 %, lint/typecheck/placeholders clean, jscpd 0
   - Spec refs: specs/30-testing-and-evals.md §3.3 (REST `POST /v1/speech-to-text`); specs/08-stt-elevenlabs.md §8
   - Depends on: P03-T05a, P03-T04 (TTS request records for agent-channel text), P03-T02b (recordings)
   - Deliverables: `POST /v1/speech-to-text` (multipart `file` or `cloud_storage_url`/`source_url`, `model_id`,
