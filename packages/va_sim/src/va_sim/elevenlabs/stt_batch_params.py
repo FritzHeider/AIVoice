@@ -24,7 +24,7 @@ from starlette.datastructures import FormData, QueryParams, UploadFile
 
 from va_sim.elevenlabs.rest_io import error_item, validation_errors
 
-__all__ = ["BatchForm", "BatchParams", "parse_batch_form", "parse_enable_logging"]
+__all__ = ["BatchForm", "BatchParams", "FormBool", "form_bool", "parse_batch_form", "parse_enable_logging"]
 
 MAX_KEYTERMS: Final = 1000
 _MAX_KEYTERM_CHARS: Final = 49
@@ -48,7 +48,7 @@ _SCALAR_FIELDS: Final = (
 _LIST_FIELDS: Final = ("keyterms", "entity_detection")
 
 
-def _form_bool(value: object) -> object:
+def form_bool(value: object) -> object:
     """``true``/``false`` in any case; booleans pass through (pydantic reports everything else)."""
     if isinstance(value, str) and value.lower() in {"true", "false"}:
         return value.lower() == "true"
@@ -76,7 +76,7 @@ def _keyterm(value: str) -> str:
     return value
 
 
-type FormBool = Annotated[bool, BeforeValidator(_form_bool)]
+type FormBool = Annotated[bool, BeforeValidator(form_bool)]
 type HttpUrl = Annotated[str, AfterValidator(_http_url)]
 type Keyterm = Annotated[str, Field(min_length=1, max_length=_MAX_KEYTERM_CHARS), AfterValidator(_keyterm)]
 type EntityCategory = Literal["all", "pii", "phi", "pci", "other", "offensive_language"]
@@ -139,7 +139,7 @@ def parse_enable_logging(query: QueryParams) -> bool | dict[str, object]:
     if raw is None:
         return True
     try:
-        value = _form_bool(raw)
+        value = form_bool(raw)
     except ValueError as exc:
         return error_item(["query", "enable_logging"], str(exc), "bool_parsing")
     return bool(value)

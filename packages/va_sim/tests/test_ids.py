@@ -35,3 +35,19 @@ def test_id_formats() -> None:
 def test_digits_rejects_empty_ids() -> None:
     with pytest.raises(ValueError, match="at least one digit"):
         SimIds(_rng(0)).digits(0)
+
+
+def test_alnum_ids_are_seeded_letters_and_digits() -> None:
+    ids, again = SimIds(_rng(7)), SimIds(_rng(7))
+    first = ids.alnum()
+    assert first == again.alnum()
+    assert len(first) == 20
+    assert first.isascii()
+    assert first.isalnum()
+    assert len(ids.alnum(5)) == 5
+    assert ids.alnum() != first
+
+
+def test_alnum_rejects_empty_ids() -> None:
+    with pytest.raises(ValueError, match="at least one character"):
+        SimIds(_rng(0)).alnum(0)

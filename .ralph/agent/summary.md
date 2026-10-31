@@ -1,8 +1,8 @@
 # Loop Summary
 
-**Status:** Completed successfully
-**Iterations:** 91
-**Duration:** 10h 57m 14s
+**Status:** Failed: too many consecutive failures
+**Iterations:** 5
+**Duration:** 23m 58s
 
 ## Tasks
 
@@ -14,4 +14,4 @@ _No events recorded._
 
 ## Final Commit
 
-04d628a: docs(readme): mark phase 02 complete
+e01fc6f: feat(sim): FakeElevenLabs batch STT with multipart/URL sources, multichannel separate and combined output, marker and TTS-tone decoding, records, faults, and reset

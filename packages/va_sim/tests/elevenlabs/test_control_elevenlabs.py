@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from sim_helpers import new_state
 from telnyx_helpers import telnyx_client
-from tts_helpers import rest_client
+from tts_helpers import VOICE_ID, rest_client
 
 from va_sim.elevenlabs.stt_store import SttFault, SttSessionRecord
 
-CONVERT = "/v1/text-to-speech/v/with-timestamps"
+CONVERT = f"/v1/text-to-speech/{VOICE_ID}/with-timestamps"
 
 
 async def test_requests_lists_records() -> None:
@@ -20,7 +20,7 @@ async def test_requests_lists_records() -> None:
     (record,) = response.json()["requests"]
     assert record["id"] == "ttsreq_1"
     assert record["transport"] == "rest"
-    assert record["voice_id"] == "v"
+    assert record["voice_id"] == VOICE_ID
 
 
 async def test_fault_put_get_delete() -> None:
@@ -74,6 +74,7 @@ async def test_reset_clears_records_keys_and_fault() -> None:
             "stt_sessions": 0,
             "stt_sockets": 0,
             "stt_batch": 0,
+            "voices": 11,
         }
         assert (await client.post("/sim/reset")).status_code == 204
     assert state.elevenlabs.tts_requests == []
@@ -84,7 +85,7 @@ async def test_reset_clears_records_keys_and_fault() -> None:
 async def test_elevenlabs_routes_are_absent_on_the_telnyx_port() -> None:
     async with telnyx_client(new_state()) as client:
         assert (await client.get("/sim/elevenlabs/tts/requests")).status_code == 404
-        assert (await client.post("/v1/text-to-speech/v", json={"text": "x"})).status_code == 404
+        assert (await client.post(f"/v1/text-to-speech/{VOICE_ID}", json={"text": "x"})).status_code == 404
 
 
 async def test_stt_sessions_lists_records() -> None:

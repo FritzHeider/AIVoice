@@ -743,3 +743,13 @@ Grafana 3001
   source). httpx sends `data=` alone as urlencoded: send URL-only batch requests as `files=[(name, (None, v))]`.
   REST TTS calls cost `tts_ttfa_ms` of sim time, so a test that synthesizes before dialing a FakeTelnyx call sees
   the answer later than 1 s; extend `call.audio` only after the answer or the recording offset skips it.
+- 2026-10-31 (P03-T05c): FakeElevenLabs voices (spec: specs/30 §3.3 Decision P03-T05c): `voice_catalog` (11 premade,
+  `KAREN_VOICE_ID`), `voice_store.VoiceStore` on `ElevenLabsStore.voices` (reseeded by reset), pure `voice_samples`,
+  `voice_params`, `voice_json`, `voice_rest`, `voice_control`. TTS (WS and REST) now rejects unknown voices with
+  `voice_not_found`: tests must use a seeded id (`tts_helpers.VOICE_ID` = `KAREN_VOICE_ID`). Control:
+  `/sim/elevenlabs/voices`, `/voices/requests`, `/voices/fault` (same body as the batch fault),
+  `/sim/elevenlabs/subscription` (GET/PATCH), `/previews/{id}.mp3`. Shared REST helpers in `rest_io`:
+  `parse_json_body(raw, Model)` and `multipart_form(request, max_files=)` (raises `InvalidBodyError` with a 422
+  `["body"]` response); fault routes via `stt_control.fault_route`; `BatchFault.consume()`; `SimIds.alnum(n)`.
+  Tests: `tests/support/voice_helpers.py` (`wav_sample`, `mp3_sample`, `id3_tag`, `add_voice(client, name|None,
+  files=..., path=..., **fields)`: text fields go as name-less parts so the body is multipart even with no files).

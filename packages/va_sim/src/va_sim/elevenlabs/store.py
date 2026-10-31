@@ -1,5 +1,6 @@
-"""FakeElevenLabs state (specs/30 §3.3; Decisions P03-T04, P03-T05a): accepted keys, TTS request records,
-fault, sockets, and the realtime STT state (``stt``, see ``stt_store``).
+"""FakeElevenLabs state (specs/30 §3.3; Decisions P03-T04, P03-T05a, P03-T05c): accepted keys, TTS request
+records, fault, sockets, the STT state (``stt``, see ``stt_store``), and the voice registry (``voices``, see
+``voice_store``).
 
 ``api_keys`` empty (the default) accepts every non-empty key. Every TTS context (WebSocket) or REST request is
 recorded as a :class:`TtsRequest`. One :class:`TtsFault` can be armed at a time; each firing consumes one of
@@ -12,6 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Final, Literal, Protocol
 
 from va_sim.elevenlabs.stt_store import SttStore
+from va_sim.elevenlabs.voice_store import VoiceStore
 
 __all__ = ["ElevenLabsStore", "EndReason", "FaultKind", "LiveSocket", "Transport", "TtsFault", "TtsRequest"]
 
@@ -74,7 +76,8 @@ class LiveSocket(Protocol):
 
 
 class ElevenLabsStore:
-    """Accepted API keys, TTS request records, the armed TTS fault, live TTS sockets, and the STT state."""
+    """Accepted API keys, TTS request records, the armed TTS fault, live TTS sockets, the STT state, and the
+    voice registry."""
 
     def __init__(self) -> None:
         self.api_keys: tuple[str, ...] = ()
@@ -82,6 +85,7 @@ class ElevenLabsStore:
         self.fault: TtsFault | None = None
         self.sockets: set[LiveSocket] = set()
         self.stt = SttStore()
+        self.voices = VoiceStore()
 
     def accepts(self, key: str | None) -> bool:
         """Whether ``key`` authenticates: any non-empty key unless an allow list is set."""
@@ -127,8 +131,10 @@ class ElevenLabsStore:
         return fault
 
     def reset(self) -> None:
-        """Close every live socket (code 1012), forget records, keys, faults, and the STT state."""
+        """Close every live socket (code 1012), forget records, keys, faults, and the STT state; reseed the
+        voices."""
         self.stt.reset()
+        self.voices.reset()
         for socket in tuple(self.sockets):
             socket.close_for_reset()
         self.sockets.clear()

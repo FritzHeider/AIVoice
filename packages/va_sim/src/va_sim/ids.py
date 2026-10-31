@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import base64
 import random
+import string
 import uuid
+from typing import Final
 
 __all__ = ["SimIds"]
 
+_ALNUM: Final = string.ascii_letters + string.digits
+
 
 class SimIds:
-    """UUIDs, url-safe tokens, and numeric ids drawn from ``rng``."""
+    """UUIDs, url-safe tokens, numeric and alphanumeric ids drawn from ``rng``."""
 
     def __init__(self, rng: random.Random) -> None:
         self._rng = rng
@@ -34,3 +38,10 @@ class SimIds:
             msg = f"a numeric id needs at least one digit, got {n}"
             raise ValueError(msg)
         return str(self._rng.randrange(10 ** (n - 1), 10**n))
+
+    def alnum(self, n: int = 20) -> str:
+        """``n`` characters of ``[A-Za-z0-9]`` (ElevenLabs voice and sample ids are 20)."""
+        if n < 1:
+            msg = f"an alphanumeric id needs at least one character, got {n}"
+            raise ValueError(msg)
+        return "".join(self._rng.choices(_ALNUM, k=n))

@@ -130,6 +130,7 @@ def test_snapshot_shape() -> None:
             "stt_sessions": 0,
             "stt_sockets": 0,
             "stt_batch": 0,
+            "voices": 11,
         },
     }
 

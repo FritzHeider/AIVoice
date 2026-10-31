@@ -91,7 +91,7 @@ class SimState:
         Scenarios, recordings, utterances, FakeTelnyx resources (calls and conferences included), and
         webhook deliveries are dropped and every pending background task (call progress, timers, deliveries)
         is cancelled. Live FakeElevenLabs TTS and STT sockets close with code 1012 and its records, keys,
-        faults, and STT transcript script are dropped.
+        faults, and STT transcript script are dropped; the voice registry is reseeded.
         """
         self.tasks.cancel_all()
         self.call_engine.reset()
@@ -198,6 +198,7 @@ class SimState:
                 "stt_sessions": len(self.elevenlabs.stt.sessions),
                 "stt_sockets": len(self.elevenlabs.stt.sockets),
                 "stt_batch": len(self.elevenlabs.stt.batch),
+                "voices": len(self.elevenlabs.voices),
             },
         }
 

@@ -154,6 +154,11 @@ class BatchFault:
     delay_ms: int
     remaining: int
 
+    def consume(self) -> BatchFault | None:
+        """Count one firing: the fault that stays armed afterwards (``None`` once ``remaining`` hits 0)."""
+        self.remaining -= 1
+        return self if self.remaining > 0 else None
+
     def to_json(self) -> dict[str, object]:
         return asdict(self)
 
@@ -189,11 +194,8 @@ class SttStore:
     def take_batch_fault(self) -> BatchFault | None:
         """Fire the armed batch fault (each firing consumes one of its ``times``)."""
         fault = self.batch_fault
-        if fault is None:
-            return None
-        fault.remaining -= 1
-        if fault.remaining == 0:
-            self.batch_fault = None
+        if fault is not None:
+            self.batch_fault = fault.consume()
         return fault
 
     def reset(self) -> None:

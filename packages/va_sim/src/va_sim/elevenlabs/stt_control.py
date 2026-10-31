@@ -23,7 +23,7 @@ from va_sim.elevenlabs.stt_store import BatchFaultKind, SttFaultKind
 if TYPE_CHECKING:
     from va_sim.state import SimState
 
-__all__ = ["BatchFaultBody", "SttFaultBody", "TranscriptsBody", "stt_control_routes"]
+__all__ = ["BatchFaultBody", "SttFaultBody", "TranscriptsBody", "fault_route", "stt_control_routes"]
 
 
 class SttFaultBody(BaseModel):
@@ -48,7 +48,7 @@ class TranscriptsBody(BaseModel):
     texts: Annotated[list[Annotated[str, StringConstraints(min_length=1)]], Field(min_length=1)]
 
 
-def _fault_route[B: BaseModel](
+def fault_route[B: BaseModel](
     path: str,
     model: type[B],
     *,
@@ -110,7 +110,7 @@ def stt_control_routes(state: SimState) -> list[BaseRoute]:
 
     return [
         Route("/sim/elevenlabs/stt/sessions", sessions, methods=["GET"]),
-        _fault_route(
+        fault_route(
             "/sim/elevenlabs/stt/fault",
             SttFaultBody,
             armed=lambda: None if store.fault is None else store.fault.to_json(),
@@ -121,7 +121,7 @@ def stt_control_routes(state: SimState) -> list[BaseRoute]:
         Route("/sim/elevenlabs/stt/transcripts", get_transcripts, methods=["GET"]),
         Route("/sim/elevenlabs/stt/transcripts", delete_transcripts, methods=["DELETE"]),
         Route("/sim/elevenlabs/stt/batch", batch, methods=["GET"]),
-        _fault_route(
+        fault_route(
             "/sim/elevenlabs/stt/batch/fault",
             BatchFaultBody,
             armed=lambda: None if store.batch_fault is None else store.batch_fault.to_json(),

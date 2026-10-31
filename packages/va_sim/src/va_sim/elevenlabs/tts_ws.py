@@ -1,10 +1,11 @@
-"""FakeElevenLabs TTS multi-context WebSocket (specs/30 §3.3, specs/09 §2-§3, §8; Decision P03-T04 3-10).
+"""FakeElevenLabs TTS multi-context WebSocket (specs/30 §3.3, specs/09 §2-§3, §8; Decisions P03-T04 3-10,
+P03-T05c rule 9).
 
 ``GET /v1/text-to-speech/{voice_id}/multi-stream-input``. The socket is always accepted; failures close it
-with code 1008 (and 1011 for injected faults, 1012 on ``/sim/reset``). Each context has a worker task that
-generates its triggered texts in order; contexts interleave freely and every frame goes out under one send
-lock. The first chunk of a context's first generation waits ``tts_ttfa_ms`` on the sim clock after its
-trigger.
+with code 1008 (an unknown voice after a ``voice_not_found`` error frame; 1011 for injected faults, 1012 on
+``/sim/reset``). Each context has a worker task that generates its triggered texts in order; contexts
+interleave freely and every frame goes out under one send lock. The first chunk of a context's first
+generation waits ``tts_ttfa_ms`` on the sim clock after its trigger.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from va_sim.elevenlabs.store import EndReason, FaultKind
 from va_sim.elevenlabs.tts_audio import chunks
 from va_sim.elevenlabs.tts_context import MAX_CONTEXTS, TtsContext, parse_schedule
 from va_sim.elevenlabs.tts_params import TtsParams, parse_params
+from va_sim.elevenlabs.voice_json import voice_not_found_message
 from va_sim.elevenlabs.ws_io import (
     INTERNAL_ERROR,
     NORMAL_CLOSURE,
@@ -37,10 +39,11 @@ from va_sim.tasks import hold_clock
 if TYPE_CHECKING:
     from va_sim.state import SimState
 
-__all__ = ["INACTIVITY_MESSAGE", "TtsSocket", "tts_websocket"]
+__all__ = ["INACTIVITY_MESSAGE", "VOICE_NOT_FOUND", "TtsSocket", "tts_websocket"]
 
 INACTIVITY_MESSAGE: Final = "Have not received a new text input within the timeout of {seconds} seconds."
 DEFAULT_CONTEXT: Final = "default"
+VOICE_NOT_FOUND: Final = "voice_not_found"
 _INVALID_MESSAGE: Final = "invalid message"
 _WS_FAULTS: Final[frozenset[FaultKind]] = frozenset({"disconnect", "error", "delay"})
 _MS_PER_S: Final = 1000
@@ -314,7 +317,7 @@ class TtsSocket:
 
 
 async def tts_websocket(state: SimState, ws: WebSocket) -> None:
-    """Accept, validate the query and the API key, then serve the socket."""
+    """Accept, validate the query, the API key, and the voice, then serve the socket."""
     await ws.accept()
     try:
         params = parse_params(ws.query_params)
@@ -335,4 +338,10 @@ async def tts_websocket(state: SimState, ws: WebSocket) -> None:
     if not state.elevenlabs.accepts(key):
         await close_quietly(ws, POLICY_VIOLATION, INVALID_API_KEY)
         return
-    await TtsSocket(ws, state, ws.path_params["voice_id"], params).run(first)
+    voice_id: str = ws.path_params["voice_id"]
+    if state.elevenlabs.voices.get(voice_id) is None:
+        frame = _error_frame(voice_not_found_message(voice_id), VOICE_NOT_FOUND, POLICY_VIOLATION)
+        if await send_json(ws, frame):
+            await close_quietly(ws, POLICY_VIOLATION, VOICE_NOT_FOUND)
+        return
+    await TtsSocket(ws, state, voice_id, params).run(first)

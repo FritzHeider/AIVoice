@@ -37,7 +37,7 @@ from telnyx_helpers import (
     telnyx_client,
     telnyx_state,
 )
-from tts_helpers import rest_client
+from tts_helpers import VOICE_ID, rest_client
 
 from va_sim.audio.codec import ulaw_decode
 from va_sim.elevenlabs import stt_batch
@@ -59,7 +59,7 @@ def texts_of(words: list[dict[str, Any]]) -> str:
 async def spoken(client: httpx.AsyncClient, text: str) -> np.ndarray:
     """``text`` synthesized through REST TTS as μ-law (recorded in ``tts_requests``), decoded."""
     response = await client.post(
-        "/v1/text-to-speech/voice-1", params={"output_format": "ulaw_8000"}, json={"text": text}
+        f"/v1/text-to-speech/{VOICE_ID}", params={"output_format": "ulaw_8000"}, json={"text": text}
     )
     assert response.status_code == 200
     return ulaw_decode(response.content)
@@ -137,7 +137,7 @@ def two_sided(state: SimState) -> bytes:
 
 
 async def tts(client: httpx.AsyncClient, text: str) -> None:
-    assert (await client.post("/v1/text-to-speech/voice-1", json={"text": text})).status_code == 200
+    assert (await client.post(f"/v1/text-to-speech/{VOICE_ID}", json={"text": text})).status_code == 200
 
 
 async def test_separate_lists_one_transcript_per_channel() -> None:

@@ -1,9 +1,10 @@
-"""FakeElevenLabs REST synthesis (specs/30 §3.3, specs/09 §9; Decision P03-T04 rule 11).
+"""FakeElevenLabs REST synthesis (specs/30 §3.3, specs/09 §9; Decisions P03-T04 rule 11, P03-T05c rule 9).
 
 ``POST /v1/text-to-speech/{voice_id}`` (whole audio), ``.../stream`` (the 200 ms pieces, first after
 ``tts_ttfa_ms``), and ``.../with-timestamps`` (``audio_base64`` plus absolute alignment in seconds). Same
-audio generator as the WebSocket. Errors follow ElevenLabs: 401 ``{"detail": {"status", "message"}}`` and
-422 ``{"detail": [{"loc", "msg", "type"}]}``; an armed ``error`` fault answers 500, ``delay`` adds latency.
+audio generator as the WebSocket. Errors follow ElevenLabs: 401 ``{"detail": {"status", "message"}}``, 422
+``{"detail": [{"loc", "msg", "type"}]}``, and 404 ``voice_not_found`` for an unknown voice (not recorded); an
+armed ``error`` fault answers 500, ``delay`` adds latency.
 """
 
 from __future__ import annotations
@@ -14,14 +15,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-import orjson
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import BaseRoute, Route
 
 from va_sim.elevenlabs.auth import API_KEY_HEADER, detail_error, rest_auth_error
-from va_sim.elevenlabs.rest_io import error_item, unprocessable, validation_errors
+from va_sim.elevenlabs.rest_io import error_item, parse_json_body, unprocessable
 from va_sim.elevenlabs.store import FaultKind, TtsRequest
 from va_sim.elevenlabs.tts_audio import (
     OutputFormat,
@@ -32,6 +32,7 @@ from va_sim.elevenlabs.tts_audio import (
     synthesize,
 )
 from va_sim.elevenlabs.tts_params import DEFAULT_OUTPUT_FORMAT
+from va_sim.elevenlabs.voice_json import voice_not_found
 from va_sim.tasks import hold_clock
 
 if TYPE_CHECKING:
@@ -74,15 +75,12 @@ async def _accept(state: SimState, request: Request) -> _Accepted | Response:
         fmt = parse_output_format(request.query_params.get("output_format", DEFAULT_OUTPUT_FORMAT))
     except ValueError as exc:
         return unprocessable([error_item(["query", "output_format"], str(exc), "enum")])
-    raw = await request.body()
-    try:
-        payload = orjson.loads(raw)
-    except orjson.JSONDecodeError as exc:
-        return unprocessable([error_item(["body"], str(exc), "json_invalid")])
-    try:
-        body = TtsBody.model_validate(payload)
-    except ValidationError as exc:
-        return unprocessable(validation_errors(exc))
+    body = parse_json_body(await request.body(), TtsBody)
+    if isinstance(body, JSONResponse):
+        return body
+    voice_id = request.path_params["voice_id"]
+    if state.elevenlabs.voices.get(voice_id) is None:
+        return voice_not_found(voice_id)
     return _Accepted(body=body, fmt=fmt)
 
 

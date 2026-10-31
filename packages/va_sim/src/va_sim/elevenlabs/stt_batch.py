@@ -16,14 +16,12 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
 import httpx
-from starlette.exceptions import HTTPException
-from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
 from va_sim.elevenlabs.auth import API_KEY_HEADER, detail_error, rest_auth_error
-from va_sim.elevenlabs.rest_io import error_item, unprocessable
+from va_sim.elevenlabs.rest_io import InvalidBodyError, multipart_form, unprocessable
 from va_sim.elevenlabs.stt_batch_audio import (
     BatchAudio,
     BatchAudioError,
@@ -43,8 +41,6 @@ __all__ = ["FETCH_TIMEOUT_S", "MAX_UPLOAD_BYTES", "batch_routes"]
 
 MAX_UPLOAD_BYTES: Final = 100 * 1024 * 1024
 FETCH_TIMEOUT_S: Final = 10.0
-_MAX_FIELDS: Final = 2000
-_MULTIPART: Final = "multipart/form-data"
 _RECORDING_PATH: Final = re.compile(r"^/sim/recordings/(?P<id>[^/]+)\.wav$")
 _MS_PER_S: Final = 1000
 
@@ -158,20 +154,14 @@ class _BatchRequest:
         failed = await self.fault()
         if failed is not None:
             return failed
-        content_type = self.request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if content_type != _MULTIPART:
-            return unprocessable(
-                [error_item(["body"], "the body must be multipart/form-data", "value_error")]
-            )
         try:
-            async with self.request.form(max_files=1, max_fields=_MAX_FIELDS) as form:
+            async with multipart_form(self.request, max_files=1) as form:
                 params = parse_batch_form(form, self.request.query_params)
                 if isinstance(params, list):
                     return unprocessable(params)
                 data = await self.source(params)
-        except (HTTPException, MultiPartException) as exc:
-            message = exc.detail if isinstance(exc, HTTPException) else exc.message
-            return unprocessable([error_item(["body"], str(message), "value_error")])
+        except InvalidBodyError as exc:
+            return exc.response
         except BatchAudioError as exc:
             return detail_error(400, exc.status, exc.message)
         return await self.transcribe(params, data)

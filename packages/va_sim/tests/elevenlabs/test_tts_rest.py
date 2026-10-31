@@ -139,3 +139,23 @@ async def test_fault_delay_adds_latency_and_disconnect_does_not_apply() -> None:
         response = await client.post(CONVERT, json={"text": TEXT})
     assert response.status_code == 200
     assert state.elevenlabs.fault is not None
+
+
+@pytest.mark.parametrize("suffix", ["", "/stream", "/with-timestamps"])
+async def test_unknown_voice_is_404_voice_not_found_without_a_record(suffix: str) -> None:
+    state = new_state()
+    async with rest_client(state) as client:
+        await client.put("/sim/elevenlabs/tts/fault", json={"kind": "error"})
+        response = await client.post(f"/v1/text-to-speech/nobody{suffix}", json={"text": TEXT})
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": {"status": "voice_not_found", "message": "A voice with the voice_id nobody was not found."}
+    }
+    assert state.elevenlabs.tts_requests == []
+    assert state.elevenlabs.fault is not None
+
+
+async def test_validation_comes_before_the_voice_lookup() -> None:
+    async with rest_client(new_state()) as client:
+        response = await client.post("/v1/text-to-speech/nobody", json={"text": ""})
+    assert response.status_code == 422

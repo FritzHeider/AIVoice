@@ -68,7 +68,7 @@
     dual-channel recording (caller utterance text from markers, agent text from TTS tones).
   - Split from P03-T05b (2026-10-29, Planner): batch STT and the voice registry are separate TTS-sized tasks.
 
-- [ ] P03-T05c FakeElevenLabs voices REST and subscription
+- [x] P03-T05c FakeElevenLabs voices REST and subscription — 11 premade voices (Karen + 10 labelled), `/v2/voices` paging/search/category/sort, add (WAV/MP3/FLAC measured, < 1 s `invalid_sample`), get/edit/settings/settings-edit/delete, TTS WS+REST `voice_not_found`, `/v1/user/subscription`, voices fault/records/reset; make test 4377 passed, coverage 98.06 %, lint/typecheck/placeholders clean, jscpd 0
   - Spec refs: specs/30-testing-and-evals.md §3.3 (REST voices, subscription); specs/15-voices.md §2, §3.2-§3.4, §7
   - Depends on: P03-T05b
   - Deliverables: voice registry seeded with premade voices (incl. `Karen` and 10 others with labels), `/v2/voices`

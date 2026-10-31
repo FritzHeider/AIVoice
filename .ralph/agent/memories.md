@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793442554-94a4
+> va_sim FakeElevenLabs voices: TTS WS/REST now 404/1008 voice_not_found for unknown voice ids - tests must use seeded ids (tts_helpers.VOICE_ID = voice_catalog.KAREN_VOICE_ID); multipart parsing via rest_io.multipart_form (InvalidBodyError.response), JSON bodies via rest_io.parse_json_body; voice tests use voice_helpers.add_voice/wav_sample/mp3_sample
+<!-- tags: sim, testing, elevenlabs | created: 2026-10-31 -->
+
 ### mem-1793337252-fee0
 > va_sim FakeElevenLabs STT: va_sim.elevenlabs stt_ws/stt_stream(pure)/stt_store (ElevenLabsStore.stt); tests use stt_helpers.caller_audio(state,text,fmt)+chunked+send_audio+recv_type on realtime_state; segment resolves after 100 ms voiced + 260 ms marker window, so mid-utterance commits need >=300 ms of speech; markerless test speech = b'\x10\x90'*n μ-law
 <!-- tags: sim, testing, elevenlabs | created: 2026-10-30 -->

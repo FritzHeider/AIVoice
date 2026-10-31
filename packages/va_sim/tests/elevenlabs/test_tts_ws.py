@@ -25,10 +25,12 @@ from tts_helpers import (
 
 from va_sim.clock import AcceleratedClock
 from va_sim.elevenlabs.tts_audio import parse_output_format
+from va_sim.elevenlabs.voice_catalog import PREMADE_VOICES
 from va_sim.settings import Latencies
 from va_sim.state import SimState
 
 ULAW = {"output_format": "ulaw_8000"}
+GEORGE = next(voice.voice_id for voice in PREMADE_VOICES if voice.name == "George")
 LONG_TEXT = "The quick brown fox jumps over the lazy dog. " * 4  # 180 chars, 10.8 s, 54 chunks
 
 
@@ -70,6 +72,29 @@ async def test_missing_key_closes_1008() -> None:
         await send(ws, {"text": " ", "context_id": "a"})
         closed = await wait_closed(ws)
     assert (closed.code, closed.reason) == (1008, "Invalid API key")
+
+
+async def test_unknown_voice_sends_voice_not_found_and_closes_1008() -> None:
+    state = realtime_state()
+    async with served(state) as base, tts_socket(base, ULAW, voice_id="no-such-voice") as ws:
+        closed = await wait_closed(ws)
+    assert (closed.code, closed.reason) == (1008, "voice_not_found")
+    assert closed.frames == (
+        {
+            "message": "A voice with the voice_id no-such-voice was not found.",
+            "error": "voice_not_found",
+            "code": 1008,
+        },
+    )
+    assert state.elevenlabs.tts_requests == []
+
+
+async def test_a_voice_removed_from_the_registry_is_unknown_to_tts() -> None:
+    state = realtime_state()
+    state.elevenlabs.voices.delete(GEORGE)
+    async with served(state) as base, tts_socket(base, ULAW, voice_id=GEORGE) as ws:
+        closed = await wait_closed(ws)
+    assert closed.reason == "voice_not_found"
 
 
 async def test_allow_list_rejects_other_keys() -> None:
@@ -410,7 +435,7 @@ async def test_records_capture_text_and_generation() -> None:
     state = realtime_state()
     async with (
         served(state) as base,
-        tts_socket(base, {**ULAW, "model_id": "eleven_turbo_v2_5"}, voice_id="Karen") as ws,
+        tts_socket(base, {**ULAW, "model_id": "eleven_turbo_v2_5"}, voice_id=GEORGE) as ws,
     ):
         await send(ws, {"text": "One ", "context_id": "r"})
         await send(ws, {"text": "two. ", "context_id": "r", "flush": True})
@@ -421,7 +446,7 @@ async def test_records_capture_text_and_generation() -> None:
     assert record == {
         "id": "ttsreq_1",
         "transport": "ws",
-        "voice_id": "Karen",
+        "voice_id": GEORGE,
         "model_id": "eleven_turbo_v2_5",
         "output_format": "ulaw_8000",
         "context_id": "r",

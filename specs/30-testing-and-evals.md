@@ -629,6 +629,94 @@ Behavioural rules:
 > 11. Analysis (decoding, segmentation, tones, markers) runs in a worker thread inside `va_sim.tasks.hold_clock` on
 >    snapshots of the utterance registry and the TTS generated texts.
 
+> Decision (2026-10-31): FakeElevenLabs voices and subscription (P03-T05c). Contract from the ElevenLabs voices
+> (v2 search, add IVC, edit, settings, delete) and user/subscription docs and specs/15 §2-§3, §7. Modules
+> `va_sim.elevenlabs.voice_catalog`, `voice_store` (`ElevenLabsStore.voices`), `voice_samples` (pure),
+> `voice_params`, `voice_json`, `voice_rest`, `voice_control`. Supersedes P03-T04 rule 3 "Any voice id is
+> accepted" and closes the last sentence of P03-T04 rule 11.
+> 1. Registry: seeded on construction and on `/sim/reset` with 11 premade voices with fixed 20-character
+>    `[A-Za-z0-9]` ids; the first is `Karen` (`KAREN_VOICE_ID`, labels `{"accent": "american", "description":
+>    "warm", "age": "young", "gender": "female", "use_case": "conversational"}`), then Aria, Roger, Sarah, Laura,
+>    Charlie, George, Callum, River, Liam, Charlotte, all with the five label keys. Every voice verifies English;
+>    Aria also verifies `es`, Charlotte `de`. `verified_languages` items are `{language, model_id:
+>    "eleven_flash_v2_5", accent, locale, preview_url: null}`. Clone and sample ids are seeded `SimIds.alnum(20)`.
+> 2. Voice object: `{voice_id, name, samples, category ("premade"|"cloned"), labels, description, preview_url,
+>    available_for_tiers: [], settings, sharing: null, high_quality_base_model_ids (premade
+>    ["eleven_flash_v2_5", "eleven_multilingual_v2"], clone []), verified_languages (clone []), is_owner (clone
+>    true), is_legacy: false, is_mixed: false, created_at_unix (premade null; clone the sim clock's Unix second at
+>    add)}`. `samples`: premade null; clone `[{sample_id, file_name, mime_type, size_bytes, hash (sha256 hex),
+>    duration_secs (3 decimals or null)}]`. Premade `preview_url` is `<base>/sim/elevenlabs/previews/<id>.mp3`,
+>    clone null. Settings default `{stability 0.5, similarity_boost 0.75, style 0.0, use_speaker_boost true,
+>    speed 1.0}`.
+> 3. Order of checks on every voices route: `xi-api-key` (401 `needs_authorization` / `invalid_api_key`), the
+>    armed voices fault (rule 11), validation (422 `{"detail": [{"loc": ["query", name] | ["body", name, ...] |
+>    ["body"], "msg", "type"}]}`), lookup (404 `{"detail": {"status": "voice_not_found", "message": "A voice with
+>    the voice_id <id> was not found."}}`), then the operation.
+> 4. `GET /v2/voices`: `page_size` 1..100 (default 10), `next_page_token`, `search` (case-insensitive substring of
+>    name, description, any label value, or category), `sort` `created_at_unix|name` (default
+>    `created_at_unix`), `sort_direction` `asc|desc` (default `desc` for `created_at_unix`, `asc` for `name`),
+>    `voice_type` (`default` → premade; `personal`, `workspace`, `non-default` → cloned; `community`, `saved` →
+>    none), `category` `premade|cloned|generated|professional`, `voice_ids` repeated (≤ 100),
+>    `include_total_count` `true|false` (default true); unknown parameters are ignored. `created_at_unix` order is
+>    the creation sequence (seed order, then clones); `name` order is the casefolded name, ties by sequence. The
+>    token is the unpadded url-safe base64 of the next offset in decimal; anything else is 422
+>    `["query", "next_page_token"]`. Response `{voices, has_more, total_count (null when include_total_count is
+>    false), next_page_token (null when !has_more)}`. Paging is offset-based over the filtered, sorted list at
+>    request time, so concurrent deletes may shift pages.
+> 5. `GET /v1/voices` → `{"voices": [...]}` in sequence order; `GET /v1/voices/{id}` → the voice (`with_settings`
+>    ignored); `GET /v1/voices/{id}/settings` → the settings; `POST /v1/voices/{id}/settings/edit` JSON with any
+>    subset of the five settings (stability, similarity_boost, style in [0, 1]; speed in [0.7, 1.2];
+>    use_speaker_boost a JSON boolean; `null` and unknown fields ignored), merged into the stored settings for any
+>    voice → `{"status": "ok"}`; invalid JSON or a non-object → 422 `["body"]`.
+> 6. `POST /v1/voices/add`, multipart: `name` 1..256 characters, `files` repeated uploads 1..25 (missing, non-file,
+>    or more than 25 → 422 `["body", "files"]`; more than 26 is a parse failure → 422 `["body"]`), `description` ≤
+>    500, `labels` a JSON object of string → string (else 422 `["body", "labels", ...]`),
+>    `remove_background_noise` `true|false` in any case (default false). A non-multipart body → 422 `["body"]`.
+>    Then the samples (rule 7), then the voice limit: cloned voices ≥ `voice_limit` → 400 `{"detail": {"status":
+>    "voice_limit_reached", "message": "You have reached your maximum amount of custom voices (<n> / <n>)."}}`.
+>    Success → `{"voice_id": "<new>", "requires_verification": false}`.
+> 7. Samples (400 `{"detail": {"status": "invalid_sample", "message": ...}}`): over 25 MB → "Sample '<file>' is
+>    larger than 25 MB"; RIFF/WAVE (stdlib `wave`), MP3 (optional ID3v2 tag skipped by its syncsafe size and
+>    footer flag, then MPEG-1/2/2.5 Layer III frames walked to the first non-header or truncated frame, summing
+>    samples per frame / rate), and FLAC (STREAMINFO total samples / rate; total 0 = unmeasured) are measured;
+>    Ogg (`OggS`), MP4/M4A (`ftyp` at offset 4), and WebM (EBML `1A45DFA3`) are accepted unmeasured; anything
+>    else or a broken WAV/MP3/FLAC → "Sample '<file>' could not be read as audio"; a measured duration under 1 s →
+>    "Sample '<file>' is shorter than 1 second". `mime_type` comes from detection (`audio/wav`, `audio/mpeg`,
+>    `audio/flac`, `audio/ogg`, `audio/mp4`, `audio/webm`). Parsing runs in one worker thread under `hold_clock`.
+> 8. `POST /v1/voices/{id}/edit`, multipart: the add fields with `files` optional (0..25; when present they
+>    replace the whole sample set, pass rule 7, and count as an add/edit); `description` is replaced by what was
+>    sent (absent clears it), `labels` only when sent. Premade → 400 `{"detail": {"status":
+>    "voice_not_editable", "message": "Premade voices cannot be edited or deleted"}}`; validation precedes the
+>    lookup. → `{"status": "ok"}`. `DELETE /v1/voices/{id}`: premade → 400 `voice_not_editable`, clone removed →
+>    `{"status": "ok"}`.
+> 9. TTS: the WebSocket checks the voice after the query and the key: an unknown voice gets the frame
+>    `{"message": "A voice with the voice_id <id> was not found.", "error": "voice_not_found", "code": 1008}`,
+>    then close 1008 `voice_not_found`, no record. REST synthesis (all three routes): auth → 422 → 404
+>    `voice_not_found` (no record, fault not consumed) → TTS fault → synthesis. Batch STT is unaffected.
+> 10. `GET /v1/user/subscription` → `{tier, character_count (sum of TTS record characters), character_limit,
+>    can_extend_character_limit: false, allowed_to_extend_character_limit: false, next_character_count_reset_unix
+>    (sim clock Unix second + 30 days), voice_slots_used (cloned count), professional_voice_slots_used: 0,
+>    voice_limit, max_voice_add_edits, voice_add_edit_counter (adds plus edits with files),
+>    professional_voice_limit: 0, can_extend_voice_limit: false, can_use_instant_voice_cloning: true,
+>    can_use_professional_voice_cloning: false, currency: "usd", status: "active", billing_period:
+>    "monthly_period", character_refresh_period: "monthly_period"}`. Defaults: tier `creator`, character_limit
+>    100 000, voice_limit 30, max_voice_add_edits 95. Only `voice_limit` is enforced.
+> 11. Fault: `PUT /sim/elevenlabs/voices/fault {"kind": "error"|"rate_limited"|"delay", "delay_ms" = 0, "times" =
+>    1}` (204), `GET` → `{"fault": null|{kind, delay_ms, remaining}}`, `DELETE` (204). Applies to every rule 4-8
+>    and 10 route after auth (not TTS): `error` → 500 `internal_error` "Simulated voices failure",
+>    `rate_limited` → 429 `too_many_concurrent_requests` "Simulated rate limit", `delay` waits `delay_ms` on the
+>    sim clock and serves normally; each firing consumes one of `times`.
+> 12. Control: `GET /sim/elevenlabs/voices` → `{"voices": [voice object + remove_background_noise, edits]}`;
+>    `GET /sim/elevenlabs/voices/requests` → `{"requests": [{id ("voicereq_<n>"), operation
+>    (add|edit|delete|settings_edit), voice_id, name, description, labels (null for delete/settings_edit and when
+>    not sent), files ([{file_name, mime_type, size_bytes, hash, duration_secs}]), remove_background_noise,
+>    settings (settings_edit only: the merged settings), received_ms}]}` for successful mutations only;
+>    `GET /sim/elevenlabs/subscription` → the rule 10 body, `PATCH` `{tier? (non-empty), character_limit? ≥ 0,
+>    voice_limit? ≥ 0, max_voice_add_edits? ≥ 0}` (unknown fields 422) → 200 with the body;
+>    `GET /sim/elevenlabs/previews/{id}.mp3` → `audio/mpeg`, the TTS generator's audio of "Hi, this is
+>    <name>." (unknown → 404 `not_found`). `/sim/reset` reseeds the voices and clears clones, records, the fault,
+>    the add/edit counter, and subscription changes; `GET /sim/state` `elevenlabs` adds `voices` (registry size).
+
 ### 3.4 FakeLLM (port 9300, OpenAI-compatible at `/v1`)
 
 - `POST /v1/chat/completions`: supports `model`, `messages`, `stream`, `tools`, `tool_choice`, `temperature`,

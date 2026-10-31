@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed
 from va_sim.audio.codec import ulaw_decode
 from va_sim.clock import RealtimeClock
 from va_sim.elevenlabs.tts_audio import OutputFormat
+from va_sim.elevenlabs.voice_catalog import KAREN_VOICE_ID
 from va_sim.server import running_sims, simulator_routes
 from va_sim.settings import Latencies
 from va_sim.state import SimState
@@ -52,7 +53,7 @@ __all__ = [
 ]
 
 API_KEY: Final = "sim-elevenlabs-key"
-VOICE_ID: Final = "voice-1"
+VOICE_ID: Final = KAREN_VOICE_ID
 RECV_TIMEOUT_S: Final = 10.0
 
 type Frame = dict[str, Any]
