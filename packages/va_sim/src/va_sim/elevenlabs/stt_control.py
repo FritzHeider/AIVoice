@@ -9,7 +9,6 @@ format.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, NonNegativeInt, PositiveInt, StringConstraints
@@ -17,13 +16,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_sim.control import json_body
+from va_sim.control import fault_route, json_body
 from va_sim.elevenlabs.stt_store import BatchFaultKind, SttFaultKind
 
 if TYPE_CHECKING:
     from va_sim.state import SimState
 
-__all__ = ["BatchFaultBody", "SttFaultBody", "TranscriptsBody", "fault_route", "stt_control_routes"]
+__all__ = ["BatchFaultBody", "SttFaultBody", "TranscriptsBody", "stt_control_routes"]
 
 
 class SttFaultBody(BaseModel):
@@ -46,31 +45,6 @@ class TranscriptsBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     texts: Annotated[list[Annotated[str, StringConstraints(min_length=1)]], Field(min_length=1)]
-
-
-def fault_route[B: BaseModel](
-    path: str,
-    model: type[B],
-    *,
-    armed: Callable[[], dict[str, object] | None],
-    arm: Callable[[B], None],
-    clear: Callable[[], None],
-) -> Route:
-    """``PUT`` (arm from a ``model`` body), ``GET`` (``{"fault": ...}``), and ``DELETE`` at ``path``."""
-
-    async def endpoint(request: Request) -> Response:
-        if request.method == "GET":
-            return JSONResponse({"fault": armed()})
-        if request.method == "DELETE":
-            clear()
-            return Response(status_code=204)
-        body = await json_body(request, model, allow_empty=False)
-        if isinstance(body, JSONResponse):
-            return body
-        arm(body)
-        return Response(status_code=204)
-
-    return Route(path, endpoint, methods=["PUT", "GET", "DELETE"])
 
 
 def stt_control_routes(state: SimState) -> list[BaseRoute]:

@@ -43,6 +43,7 @@ dev = [
   "pre-commit>=4.7.0",
   "aiosmtpd>=1.4.6",
   "pynacl>=1.5",
+  "openai>=2",
 ]
 
 [tool.uv]

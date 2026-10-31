@@ -19,6 +19,7 @@ from va_common.settings import RedisSettings
 
 __all__ = [
     "DEFAULT_EDGE_WEBHOOK_URL",
+    "DEFAULT_LLM_MODELS",
     "DEFAULT_MESSAGING_WEBHOOK_URL",
     "PROFILES",
     "SIMULATORS",
@@ -40,6 +41,15 @@ SIMULATORS: Final[tuple[SimName, ...]] = ("telnyx", "elevenlabs", "llm", "stripe
 # specs/02 §6 defaults of SIM_EDGE_WEBHOOK_URL and SIM_MESSAGING_WEBHOOK_URL.
 DEFAULT_EDGE_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/voice"
 DEFAULT_MESSAGING_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/messaging"
+
+# specs/02 §6 defaults: LLM_DIALOGUE_MODEL (= LLM_ROUTER_MODEL), LLM_ANALYSIS_MODEL, LLM_FALLBACK_MODEL,
+# EMBEDDINGS_MODEL.
+DEFAULT_LLM_MODELS: Final[tuple[str, ...]] = (
+    "zai-org/GLM-5.3-Flash",
+    "zai-org/GLM-5.3",
+    "moonshotai/Kimi-K2.6",
+    "Qwen/Qwen3-Embedding-8B",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +97,28 @@ class SimSettings(RedisSettings):
     # Empty → in-process state only, and no readiness check.
     sim_state_redis_url: str = ""
     sim_workers: int = Field(default=1, ge=1)
+    # Model ids FakeLLM lists at GET /v1/models (shared specs/02 §6 variables, specs/30 §3.4).
+    llm_dialogue_model: str = DEFAULT_LLM_MODELS[0]
+    llm_router_model: str = DEFAULT_LLM_MODELS[0]
+    llm_analysis_model: str = DEFAULT_LLM_MODELS[1]
+    llm_fallback_model: str = DEFAULT_LLM_MODELS[2]
+    embeddings_model: str = DEFAULT_LLM_MODELS[3]
 
     @property
     def llm_rule_paths(self) -> tuple[Path, ...]:
         """``SIM_LLM_RULES`` split on commas, blanks dropped."""
         return tuple(Path(part.strip()) for part in self.sim_llm_rules.split(",") if part.strip())
+
+    def llm_model_ids(self) -> tuple[str, ...]:
+        """The dialogue, router, analysis, fallback, and embeddings model ids (blanks, duplicates dropped)."""
+        ids = (
+            self.llm_dialogue_model,
+            self.llm_router_model,
+            self.llm_analysis_model,
+            self.llm_fallback_model,
+            self.embeddings_model,
+        )
+        return tuple(dict.fromkeys(model.strip() for model in ids if model.strip()))
 
     def latencies(self) -> Latencies:
         """The latencies configured through the environment."""

@@ -78,11 +78,33 @@
   - Acceptance: voice clone rejects samples < 1 s with `invalid_sample`; TTS with an unknown voice fails with
     `voice_not_found`; `/v2/voices` pages with `next_page_token` until `has_more=false`.
 
-- [ ] P03-T06 FakeLLM (OpenAI-compatible) and embeddings
-  - Spec refs: specs/30-testing-and-evals.md (FakeLLM rules file); specs/10-llm-gateway.md
+- [x] P03-T06a FakeLLM chat completions, rules engine, faults, and models — va_sim.llm (chat/rules/faults/models/control), openai SDK acceptance tests; review re-run: lint/typecheck/placeholders pass, make test 4478 passed, coverage 98.13 %
+  - Spec refs: specs/30-testing-and-evals.md §3 (env table, profiles), §3.4 (chat, rules engine, default dialogue,
+    `/v1/models`, control API), §10; specs/10-llm-gateway.md §2, §2.1, §12
   - Depends on: P03-T01
-  - Deliverables: `/v1/chat/completions` (stream and non-stream, tool calls incl. forced `tool_choice`, usage), configurable TTFT/tokens-per-second, error injection (429, 500, timeout), `/v1/embeddings` deterministic normalized 1024-dim vectors, `/v1/models`
-  - Acceptance: the official `openai` Python SDK works against it unmodified (test).
+  - Deliverables: `va_sim.llm` package; `POST /v1/chat/completions` (Bearer auth, OpenAI error bodies, request
+    validation, stream and non-stream, `stream_options.include_usage` usage chunk, `[DONE]`, tool calls from rules
+    incl. forced `tool_choice`, `finish_reason` stop/tool_calls/length via `max_tokens`), TTFT + tokens-per-second
+    pacing on the sim clock with per-rule `ttft_ms`/`delay_ms`, default dialogue reply, YAML rules engine
+    (`SIM_LLM_RULES` files loaded at startup, `POST/GET/DELETE /sim/llm/rules`, priority + registration order,
+    `system_contains`, `last_user_regex`, `tool_name`, `model`, `call_index`, `call_id` via `X-VA-Call-Id`),
+    error injection (rule `error`, `/sim/llm/fault` for 429 with `Retry-After`, 500/502/503, timeout before headers or
+    stall after n tokens, malformed tool arguments), `GET /v1/models` from the env-configured model ids,
+    `/sim/llm/requests` log, reset
+  - Acceptance: the official `openai` Python SDK works against it unmodified for streaming text, non-streaming, and
+    streamed tool-call delta assembly (test); every fault kind reproducible via the control route.
+  - Split from P03-T06 (2026-10-31, Planner): chat + rules + faults alone is a TTS-sized task.
+
+- [ ] P03-T06b FakeLLM structured-call heuristics and embeddings
+  - Spec refs: specs/30-testing-and-evals.md §3.4 (built-in structured-call heuristics, embeddings); specs/10-llm-gateway.md §3, §9, §10, §12
+  - Depends on: P03-T06a
+  - Deliverables: forced-tool heuristics for every specs/10 §3 registered function name (router `select_path`, loop
+    `score_condition`, `extract_variables`, `classify_answer`, `evaluate_guard_rails`, disposition, summary, analysis
+    schema / citations, `grade` evals, the remaining names with schema-valid defaults) producing arguments valid
+    against the request's tool `parameters` schema; `POST /v1/embeddings` (string or list input, `dimensions`
+    default 1024, blake2b signed-bucket L2-normalized vectors, `encoding_format` float|base64, usage)
+  - Acceptance: `openai` SDK forced tool call returns schema-valid heuristic arguments for each registered name;
+    embeddings are deterministic, unit-norm, 1024-d by default, and similar texts score higher cosine (test).
 
 - [ ] P03-T07 FakeStripe
   - Spec refs: specs/30-testing-and-evals.md (FakeStripe); specs/24-billing-and-limits.md (Stripe objects and webhooks)
@@ -122,13 +144,13 @@
 
 - [ ] P03-T13 `va_llm` gateway: providers, streaming, fallback
   - Spec refs: specs/10-llm-gateway.md (provider registry, model roles, streaming, TTFT, fallback, circuit breaker, retries, token metering)
-  - Depends on: P03-T06
+  - Depends on: P03-T06a
   - Deliverables: `LlmGateway` with `stream_chat(role, messages, tools, temperature)` yielding deltas with timing, `complete(...)`, per-org provider overrides (encrypted API keys), fallback model policy, circuit breaker, usage accounting hooks
   - Acceptance: tests for TTFT measurement, fallback on 5xx/timeout, breaker open/half-open/close.
 
 - [ ] P03-T14 `va_llm` structured outputs and embeddings
   - Spec refs: specs/10-llm-gateway.md (structured outputs via forced tool call, embeddings client)
-  - Depends on: P03-T13
+  - Depends on: P03-T13, P03-T06b
   - Deliverables: `structured(role, prompt_messages, schema: type[BaseModel])` with forced tool call, jsonschema validation, one repair retry; `Embeddings.embed(texts)` batching 64 with `dimensions=1024`
   - Acceptance: tests for valid, invalid-then-repaired, and unrecoverable outputs.
 

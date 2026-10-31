@@ -132,6 +132,7 @@ def test_snapshot_shape() -> None:
             "stt_batch": 0,
             "voices": 11,
         },
+        "llm": {"requests": 0, "rules": 0, "models": 4, "held": 0},
     }
 
 

@@ -9,7 +9,7 @@ scenario registration (``/sim/telnyx/scenarios``) and recordings (``/sim/recordi
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from typing import Final
 
@@ -24,7 +24,15 @@ from va_sim.scenario import Scenario, ScenarioError, ScenarioIssue, issues_from_
 from va_sim.settings import ProfileName, SimName
 from va_sim.state import SimState
 
-__all__ = ["YAML_MEDIA_TYPES", "control_routes", "invalid_request", "json_body", "sim_error"]
+__all__ = [
+    "YAML_MEDIA_TYPES",
+    "control_routes",
+    "fault_route",
+    "invalid_request",
+    "json_body",
+    "sim_error",
+    "yaml_or_json_body",
+]
 
 YAML_MEDIA_TYPES: Final = frozenset({"application/yaml", "application/x-yaml", "text/yaml", "text/x-yaml"})
 _JSON_MEDIA_TYPE: Final = "application/json"
@@ -146,29 +154,60 @@ def _config_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
     ]
 
 
-async def _parse_scenario(request: Request) -> Scenario | JSONResponse:
+async def yaml_or_json_body[M: BaseModel](
+    request: Request, model: type[M], load_yaml: Callable[[str], M], *, what: str
+) -> M | JSONResponse:
+    """A ``model`` document sent as YAML (parsed by ``load_yaml``, which raises :class:`ScenarioError`) or
+    JSON; 415 for another content type, 422 with issues for an invalid document."""
     media_type = _media_type(request)
-    raw = await request.body()
     if media_type in YAML_MEDIA_TYPES:
+        raw = await request.body()
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            return invalid_request(
-                "the scenario is not UTF-8 text", [ScenarioIssue("", None, None, str(exc))]
-            )
+            return invalid_request(f"the {what} is not UTF-8 text", [ScenarioIssue("", None, None, str(exc))])
         try:
-            return await asyncio.to_thread(load_scenario, text, source=_SCENARIO_SOURCE)
+            return await asyncio.to_thread(load_yaml, text)
         except ScenarioError as exc:
-            return invalid_request("the scenario is invalid", exc.issues)
+            return invalid_request(f"the {what} is invalid", exc.issues)
     if media_type == _JSON_MEDIA_TYPE:
-        return await json_body(request, Scenario, allow_empty=False)
+        return await json_body(request, model, allow_empty=False)
     accepted = ", ".join(sorted({*YAML_MEDIA_TYPES, _JSON_MEDIA_TYPE}))
-    return sim_error(415, "unsupported_media_type", f"send the scenario as one of: {accepted}")
+    return sim_error(415, "unsupported_media_type", f"send the {what} as one of: {accepted}")
+
+
+def fault_route[B: BaseModel](
+    path: str,
+    model: type[B],
+    *,
+    armed: Callable[[], dict[str, object] | None],
+    arm: Callable[[B], None],
+    clear: Callable[[], None],
+) -> Route:
+    """``PUT`` (arm from a ``model`` body), ``GET`` (``{"fault": ...}``), and ``DELETE`` at ``path``."""
+
+    async def endpoint(request: Request) -> Response:
+        if request.method == "GET":
+            return JSONResponse({"fault": armed()})
+        if request.method == "DELETE":
+            clear()
+            return Response(status_code=204)
+        body = await json_body(request, model, allow_empty=False)
+        if isinstance(body, JSONResponse):
+            return body
+        arm(body)
+        return Response(status_code=204)
+
+    return Route(path, endpoint, methods=["PUT", "GET", "DELETE"])
+
+
+def _load_request_scenario(text: str) -> Scenario:
+    return load_scenario(text, source=_SCENARIO_SOURCE)
 
 
 def _telnyx_routes(state: SimState) -> list[BaseRoute]:
     async def register(request: Request) -> Response:
-        scenario = await _parse_scenario(request)
+        scenario = await yaml_or_json_body(request, Scenario, _load_request_scenario, what="scenario")
         if isinstance(scenario, JSONResponse):
             return scenario
         state.register_scenario(scenario)

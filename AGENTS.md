@@ -750,6 +750,21 @@ Grafana 3001
   `/sim/elevenlabs/voices`, `/voices/requests`, `/voices/fault` (same body as the batch fault),
   `/sim/elevenlabs/subscription` (GET/PATCH), `/previews/{id}.mp3`. Shared REST helpers in `rest_io`:
   `parse_json_body(raw, Model)` and `multipart_form(request, max_files=)` (raises `InvalidBodyError` with a 422
-  `["body"]` response); fault routes via `stt_control.fault_route`; `BatchFault.consume()`; `SimIds.alnum(n)`.
+  `["body"]` response); fault routes via `va_sim.control.fault_route`; `BatchFault.consume()`; `SimIds.alnum(n)`.
   Tests: `tests/support/voice_helpers.py` (`wav_sample`, `mp3_sample`, `id3_tag`, `add_voice(client, name|None,
   files=..., path=..., **fields)`: text fields go as name-less parts so the body is multipart even with no files).
+- 2026-10-31 (P03-T06a): FakeLLM = `va_sim.llm` (spec: specs/30 §3.4 Decision P03-T06a): pure `params` (OpenAI
+  request model, `parse_chat` → 400 with `param` path), `rules` (`RuleBook`, `load_rules` raising `RulesError`, a
+  `ScenarioError` subclass), `reply` (tokens, default reply, truncation, usage), `wire` (chunk/completion builders,
+  `Emission.paced`); `chat` (endpoint, faults, pacing), `store.LlmStore` on `SimState.llm`, `control`. Shared
+  control helpers now live in `va_sim.control`: `fault_route` and `yaml_or_json_body(request, Model, load_yaml,
+  what=...)`; `va_sim.scenario.compose_document(text, source=, what=)` parses any YAML mapping document with
+  positioned issues. `build_state` loads `SIM_LLM_RULES` files and the model ids (`SimSettings.llm_model_ids()`,
+  shared `LLM_*_MODEL`/`EMBEDDINGS_MODEL` variables). Tests: `tests/support/llm_helpers.py` (`llm_state` accelerated
+  for virtual-ms pacing asserts, `realtime_llm_state` + `served_llm` for sockets/SDK, `llm_client` in-process,
+  `chat_body`, `sse_events`, `deltas`, `add_rules`, `wait_held(state, n)` for `timeout` faults — never poll). A
+  ``timeout`` hold races the store's release event against `http.disconnect` from `request.receive`; the
+  `disconnect` fault raises `SimulatedDisconnect` inside the response body (uvicorn logs it and drops the socket;
+  httpx sees `RemoteProtocolError`). The `openai` SDK (root dev dependency) is the acceptance client
+  (`AsyncOpenAI(base_url=f"{url}/v1", api_key="sim-llm-key", max_retries=0)`). `ruff check --select X --fix` with
+  `RUF100` in the selection strips every `noqa` for unselected rules — never combine them.

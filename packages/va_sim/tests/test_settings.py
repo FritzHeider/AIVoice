@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 from service_helpers import settings_of
 
-from va_sim.settings import PROFILES, SIMULATORS, Latencies, SimSettings
+from va_sim.settings import DEFAULT_LLM_MODELS, PROFILES, SIMULATORS, Latencies, SimSettings
 
 
 def test_defaults_match_specs_02_section_6() -> None:
@@ -23,6 +23,22 @@ def test_defaults_match_specs_02_section_6() -> None:
     assert settings.sim_messaging_webhook_url == "http://localhost:8100/telnyx/messaging"
     assert settings.sim_stripe_webhook_url == "http://localhost:8000/v1/billing/stripe/webhook"
     assert (settings.sim_state_redis_url, settings.sim_workers) == ("", 1)
+    assert settings.llm_model_ids() == (
+        "zai-org/GLM-5.3-Flash",
+        "zai-org/GLM-5.3",
+        "moonshotai/Kimi-K2.6",
+        "Qwen/Qwen3-Embedding-8B",
+    )
+    assert settings.llm_model_ids() == DEFAULT_LLM_MODELS
+
+
+def test_llm_model_ids_come_from_the_shared_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_DIALOGUE_MODEL", "acme/dialogue")
+    monkeypatch.setenv("LLM_ROUTER_MODEL", "acme/dialogue")
+    monkeypatch.setenv("LLM_ANALYSIS_MODEL", " ")
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "acme/fallback")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "acme/embed")
+    assert settings_of(SimSettings).llm_model_ids() == ("acme/dialogue", "acme/fallback", "acme/embed")
 
 
 def test_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

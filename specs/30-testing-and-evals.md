@@ -769,6 +769,81 @@ rules:
 - `GET /v1/models`: lists the env-configured model ids.
 - Control API: `/sim/llm/requests` (full request log incl. messages for prompt assertions), `/sim/llm/rules`, `/sim/reset`.
 
+> Decision (2026-10-31): FakeLLM chat completions, rules, faults, and models (P03-T06a). Built from the OpenAI
+> contract independently of `va_llm`. Numbered rules:
+> 1. Auth: `Authorization: Bearer <key>` on `/v1/*`; `sim-llm-key` (the specs/02 §6 `LLM_DEFAULT_API_KEY` dev value)
+>    always authenticates, plus keys added with `POST /sim/llm/api-keys {"api_key"}`. Every error body is OpenAI's
+>    `{"error": {"message", "type", "param", "code"}}`; a missing key is 401 type `invalid_request_error`, code null;
+>    a wrong key 401 code `invalid_api_key` (the key is not echoed).
+> 2. Check order: auth → JSON body (400, code null, for invalid JSON or a non-object) → validation (400; `param` is
+>    the field path such as `messages[0].role`; code `missing_required_parameter` or `invalid_value`) → model (404
+>    `model_not_found`, param `model`) → armed fault → rule match → reply.
+> 3. Request: unknown parameters are accepted. Validated: `model`; `messages` (≥ 1; roles system, developer, user,
+>    assistant, tool; content string, list of parts (only `text` parts contribute text), or null for an assistant
+>    message with `tool_calls`; a tool message needs `tool_call_id`); `stream`; `stream_options.include_usage`;
+>    `tools` (type `function`, name `^[a-zA-Z0-9_-]{1,64}$`); `tool_choice` `none`/`auto`/`required`/named function
+>    (`required` or a named function needs `tools`, and the name must be one of them); `temperature` 0–2;
+>    `max_tokens`/`max_completion_tokens` ≥ 1 (the latter wins); `response_format.type` text/json_object/json_schema;
+>    `n` must be 1.
+> 4. `GET /v1/models` → `{"object": "list", "data": [{"id", "object": "model", "created", "owned_by": "sim"}]}` with
+>    the shared specs/02 §6 variables `LLM_DIALOGUE_MODEL`, `LLM_ROUTER_MODEL`, `LLM_ANALYSIS_MODEL`,
+>    `LLM_FALLBACK_MODEL`, `EMBEDDINGS_MODEL` (in that order, blanks and duplicates dropped; read by
+>    `SimSettings`, no new variables), plus models added with `POST /sim/llm/models {"id"}`.
+> 5. Tokens: `re.findall(r"\S+\s*", text)` with leading whitespace glued to the first token. Usage:
+>    `prompt_tokens` = whitespace words of every message's text and tool-call arguments plus the tool definitions'
+>    JSON; `completion_tokens` = content tokens + per tool call (1 + words of its argument JSON). `max_tokens` keeps
+>    the first n content tokens, then whole tool calls that still fit; any cut gives `finish_reason: "length"`.
+> 6. Pacing (sim clock): a streamed reply sends the role chunk at once, then its first token after `ttft_ms` (rule
+>    override, else the configured value) + rule `delay_ms`, then one token every `1 / tokens_per_s` s; content
+>    tokens, tool-call header chunks, and argument chunks each count as one token. A non-streamed reply waits as
+>    long as the stream would and then answers.
+> 7. Stream wire (`text/event-stream`, `data: <json>\n\n`): every chunk has `id` (`chatcmpl-` + 29 alphanumerics,
+>    one per response), `object: "chat.completion.chunk"`, `created` (sim clock, s), `model` (echo),
+>    `system_fingerprint: "fp_sim"`, `choices: [{index: 0, delta, logprobs: null, finish_reason}]`. Order: delta
+>    `{"role": "assistant", "content": ""}`; one `{"content": token}` per token; per tool call a header
+>    `{"tool_calls": [{"index", "id": "call_" + 24 alphanumerics, "type": "function", "function": {"name",
+>    "arguments": ""}}]}` and the argument string in at most three `{"tool_calls": [{"index", "function":
+>    {"arguments"}}]}` parts; an empty delta with `finish_reason` (`stop`/`tool_calls`/`length`); with
+>    `include_usage` every earlier chunk carries `"usage": null` and a last chunk has `"choices": []` and `usage`;
+>    then `data: [DONE]`. Non-streamed: `object: "chat.completion"`, `choices[0].message` `{role, content (null when
+>    only tool calls), refusal: null, tool_calls?}`, `logprobs: null`, `finish_reason`, `usage`.
+> 8. Replies: the winning rule's `content`/`tool_calls` (a rule with neither answers the default reply with its own
+>    timing); no rule with a named or `required` `tool_choice` calls the named (or first) tool with arguments `{}`
+>    (P03-T06b replaces this with the structured-call heuristics); otherwise `"Okay. You said: {last user text,
+>    stripped}."`, or `"Hello! How can I help you today?"` without a user message. `tool_choice: "none"` drops every
+>    tool call, a rule's included.
+> 9. Rules: YAML `{rules: [...]}` as above plus `match.call_id` (compared with the `X-VA-Call-Id` header, specs/10
+>    §12). `system_contains` needs every string in the system and developer messages joined by newlines;
+>    `last_user_regex` is `re.search` on the last user message (an invalid regex is a load error); `tool_name`
+>    matches the named `tool_choice` function, or any offered tool when none is named; `model` is exact.
+>    `call_index` n fires only on the n-th (0-based) request that met the rule's other conditions, counted per
+>    (rule id, `X-VA-Call-Id` or none) for every rule whose other conditions held, even when an earlier rule won.
+>    `respond.tool_calls[].arguments` is an object (sent as compact JSON) or a string (sent verbatim, e.g. malformed
+>    JSON); `respond.error` `{status 400–599, body?, headers?}` answers after `delay_ms` (default body: an OpenAI
+>    error whose type follows the status: 401 `authentication_error`, 403 `permission_error`, 429
+>    `rate_limit_error`, ≥ 500 `server_error`, else `invalid_request_error`). Unknown keys and duplicate ids within
+>    one document are load errors (`RulesError` issues `{path, line, column, message}` like scenarios); registering
+>    an id that exists replaces the earlier rule at the new position. `SIM_LLM_RULES` files load at startup (an
+>    invalid file stops the simulator) and survive reset.
+> 10. Faults: `PUT`/`GET`/`DELETE /sim/llm/fault`, body `{kind, times = 1, status?, retry_after_s?, after_tokens?}`
+>    (each extra field only for its kind). `rate_limit`: 429 code `rate_limit_exceeded`, `Retry-After:
+>    retry_after_s` (default 1). `server_error`: `status` 500 (default), 502, or 503. `timeout`: without
+>    `after_tokens` (or on a non-streamed request) no response headers are sent until the client disconnects or
+>    the simulator resets (then 504 code `timeout`); with `after_tokens` n a stream sends the role chunk and n tokens
+>    and stalls the same way. `disconnect`: a stream closes the connection after the role chunk without `[DONE]`; a
+>    non-streamed request sends its headers and closes before the body. `malformed_tool_args`: the next reply with
+>    tool calls has every argument string cut to its first half (invalid JSON); replies without tool calls leave it
+>    armed. `rate_limit`, `server_error`, and a header-less `timeout` answer before rule matching and never advance
+>    a `call_index` counter. Every firing consumes one of `times`.
+> 11. Control: `GET`/`DELETE /sim/llm/requests` (`{"requests": [{id, received_at, model, call_id, stream, messages,
+>    tools, tool_choice, temperature, max_tokens, response_format, rule_id, fault, status, finish_reason}]}`, one
+>    entry per request that passed validation); `GET /sim/llm/rules` (`{"rules": [... rule, "source": file path or
+>    "runtime"]}` in match order); `POST /sim/llm/rules` (YAML or JSON `{rules: [...]}` → 201 `{"ids"}`; 415/422 as
+>    for scenarios); `DELETE /sim/llm/rules` (runtime rules); `DELETE /sim/llm/rules/{id}` (404 `not_found`);
+>    `GET`/`POST /sim/llm/api-keys`; `GET`/`POST /sim/llm/models`. `GET /sim/state` adds `llm` counts (`requests`,
+>    `rules`, `models`, `held`). `POST /sim/reset` drops runtime rules, `call_index` counters, the log, the fault,
+>    and added keys and models, and releases held requests; file rules stay.
+
 ### 3.5 Scenario DSL (YAML) — `tests_e2e/scenarios/*.yaml`
 
 ```yaml

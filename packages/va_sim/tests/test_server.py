@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import socket
+from pathlib import Path
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from sim_helpers import new_state, scenario_yaml
 
 from va_common.service import ServerStartupError
 from va_sim.clock import AcceleratedClock, RealtimeClock
+from va_sim.llm.rules import RulesError
 from va_sim.server import SIMULATORS, build_state, ports_from, running_sims
 from va_sim.settings import SimSettings, WebhookDefaults
 
@@ -45,6 +47,29 @@ def test_build_state_signing_key_and_webhook_targets(monkeypatch: pytest.MonkeyP
     assert blank.signing_key.public_key_b64 != expected
     monkeypatch.delenv("SIM_MESSAGING_WEBHOOK_URL")
     assert build_state(settings_of(SimSettings)).webhook_defaults == WebhookDefaults()
+
+
+def test_build_state_loads_llm_rule_files_and_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    first = tmp_path / "first.yaml"
+    first.write_text("rules:\n  - id: a\n  - id: b\n    priority: 2\n", encoding="utf-8")
+    second = tmp_path / "second.yaml"
+    second.write_text("rules:\n  - id: c\n", encoding="utf-8")
+    monkeypatch.setenv("SIM_LLM_RULES", f"{first},{second}")
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "acme/fallback")
+    state = build_state(settings_of(SimSettings))
+    listing = [(entry.rule.id, entry.source) for entry in state.llm.rules.ordered()]
+    assert listing == [("b", str(first)), ("a", str(first)), ("c", str(second))]
+    assert "acme/fallback" in state.llm.models
+    state.reset()
+    assert len(state.llm.rules) == 3
+
+
+def test_build_state_rejects_an_invalid_rule_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("rules:\n  - id: x\n    respond: {colour: red}\n", encoding="utf-8")
+    monkeypatch.setenv("SIM_LLM_RULES", str(broken))
+    with pytest.raises(RulesError, match=r"broken\.yaml:3:.*rules\[0\]\.respond\.colour"):
+        build_state(settings_of(SimSettings))
 
 
 async def _block_forever() -> None:

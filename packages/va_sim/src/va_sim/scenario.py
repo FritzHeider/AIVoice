@@ -55,6 +55,7 @@ __all__ = [
     "TransferTarget",
     "WaitAgentSpeech",
     "WaitAgentSpeechStep",
+    "compose_document",
     "is_wav_path",
     "issues_from_validation",
     "load_scenario",
@@ -402,23 +403,32 @@ def _syntax_issue(exc: yaml.YAMLError) -> ScenarioIssue:
     return ScenarioIssue("", None, None, f"invalid YAML: {exc}")
 
 
-def _compose(text: str, source: str) -> yaml.Node:
+def compose_document(text: str, *, source: str, what: str = "scenario") -> tuple[yaml.Node, Any]:
+    """The composed node tree (for issue positions) and the loaded data of a YAML mapping document.
+
+    Raises :class:`ScenarioError` for invalid YAML, an empty document, a non-mapping root, or duplicate keys;
+    ``what`` names the document in those messages.
+    """
     try:
         root = yaml.compose(text, Loader=yaml.SafeLoader)
     except yaml.YAMLError as exc:
         raise ScenarioError(source, [_syntax_issue(exc)]) from exc
     if root is None:
-        raise ScenarioError(source, [ScenarioIssue("", 1, 1, "the scenario document is empty")])
+        raise ScenarioError(source, [ScenarioIssue("", 1, 1, f"the {what} document is empty")])
     if not isinstance(root, yaml.MappingNode):
         line, column = _position(root.start_mark)
         kind = "a sequence" if isinstance(root, yaml.SequenceNode) else "a scalar"
         raise ScenarioError(
-            source, [ScenarioIssue("", line, column, f"the scenario must be a mapping, got {kind}")]
+            source, [ScenarioIssue("", line, column, f"the {what} must be a mapping, got {kind}")]
         )
     duplicates = _duplicate_keys(root)
     if duplicates:
         raise ScenarioError(source, duplicates)
-    return root
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ScenarioError(source, [_syntax_issue(exc)]) from exc
+    return root, data
 
 
 def is_wav_path(greeting_audio: str) -> bool:
@@ -444,11 +454,7 @@ def load_scenario(text: str, *, source: str = "<string>", base_dir: Path | None 
 
     Raises :class:`ScenarioError` listing every issue with its path, line, and column.
     """
-    root = _compose(text, source)
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise ScenarioError(source, [_syntax_issue(exc)]) from exc
+    root, data = compose_document(text, source=source)
     try:
         scenario = Scenario.model_validate(data)
     except ValidationError as exc:

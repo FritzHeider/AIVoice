@@ -7,6 +7,7 @@ two states built with the same seed and driven by the same requests behave ident
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Final
 
@@ -17,8 +18,9 @@ from va_sim.audio.marker import MAX_UTTERANCE_ID
 from va_sim.clock import SimClock
 from va_sim.elevenlabs.store import ElevenLabsStore
 from va_sim.ids import SimIds
+from va_sim.llm.store import LlmStore
 from va_sim.scenario import Scenario
-from va_sim.settings import PROFILES, Latencies, ProfileName, WebhookDefaults
+from va_sim.settings import DEFAULT_LLM_MODELS, PROFILES, Latencies, ProfileName, WebhookDefaults
 from va_sim.tasks import Supervisor
 from va_sim.telnyx.call_engine import CallEngine
 from va_sim.telnyx.keys import SigningKey
@@ -58,6 +60,7 @@ class SimState:
         signing_key: SigningKey | None = None,
         webhook_defaults: WebhookDefaults | None = None,
         webhook_transport: httpx.AsyncBaseTransport | None = None,
+        llm_models: Sequence[str] = DEFAULT_LLM_MODELS,
     ) -> None:
         self.clock = clock
         self._base_latencies = latencies
@@ -69,6 +72,7 @@ class SimState:
         self.webhook_defaults = webhook_defaults if webhook_defaults is not None else WebhookDefaults()
         self.telnyx = TelnyxStore()
         self.elevenlabs = ElevenLabsStore()
+        self.llm = LlmStore(llm_models)
         self.webhooks = WebhookEmitter(
             signing_key=self.signing_key,
             clock=clock,
@@ -91,13 +95,16 @@ class SimState:
         Scenarios, recordings, utterances, FakeTelnyx resources (calls and conferences included), and
         webhook deliveries are dropped and every pending background task (call progress, timers, deliveries)
         is cancelled. Live FakeElevenLabs TTS and STT sockets close with code 1012 and its records, keys,
-        faults, and STT transcript script are dropped; the voice registry is reseeded.
+        faults, and STT transcript script are dropped; the voice registry is reseeded. FakeLLM drops runtime
+        rules, ``call_index`` counters, its request log, fault, and added keys and models, and releases every
+        request a ``timeout`` fault holds (``SIM_LLM_RULES`` file rules stay).
         """
         self.tasks.cancel_all()
         self.call_engine.reset()
         self.telnyx.reset()
         self.webhooks.clear()
         self.elevenlabs.reset()
+        self.llm.reset()
         if seed is not None:
             self.seed = seed
         self.rng.seed(self.seed)
@@ -200,9 +207,17 @@ class SimState:
                 "stt_batch": len(self.elevenlabs.stt.batch),
                 "voices": len(self.elevenlabs.voices),
             },
+            "llm": {
+                "requests": len(self.llm.requests),
+                "rules": len(self.llm.rules),
+                "models": len(self.llm.models),
+                "held": self.llm.held,
+            },
         }
 
     async def aclose(self) -> None:
-        """Cancel background tasks and close the webhook HTTP client (simulator shutdown)."""
+        """Release held FakeLLM requests, cancel background tasks, and close the webhook HTTP client
+        (simulator shutdown)."""
+        self.llm.release_held()
         await self.tasks.aclose()
         await self.webhooks.aclose()

@@ -268,11 +268,11 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `ELEVENLABS_BATCH_STT_MODEL` | worker | `scribe_v2` | |
 | `LLM_DEFAULT_BASE_URL` | media, worker, api | `http://localhost:9300/v1` (sim) | real: `https://api.telnyx.com/v2/ai/openai` |
 | `LLM_DEFAULT_API_KEY` | same | `sim-llm-key` | real: Telnyx API key |
-| `LLM_DIALOGUE_MODEL` | same | `zai-org/GLM-5.3-Flash` | |
+| `LLM_DIALOGUE_MODEL` | media, worker, api, sim | `zai-org/GLM-5.3-Flash` | |
 | `LLM_ROUTER_MODEL` | same | `zai-org/GLM-5.3-Flash` | classification/routing/extraction |
-| `LLM_ANALYSIS_MODEL` | worker | `zai-org/GLM-5.3` | post-call analysis (quality over speed) |
+| `LLM_ANALYSIS_MODEL` | worker, sim | `zai-org/GLM-5.3` | post-call analysis (quality over speed) |
 | `LLM_FALLBACK_MODEL` | same | `moonshotai/Kimi-K2.6` | |
-| `EMBEDDINGS_MODEL` | worker, media, api | `Qwen/Qwen3-Embedding-8B` | |
+| `EMBEDDINGS_MODEL` | worker, media, api, sim | `Qwen/Qwen3-Embedding-8B` | |
 | `EMBEDDINGS_DIMENSIONS` | same | `1024` | must match `vector(1024)` columns |
 | `STRIPE_API_BASE` | api, worker | `http://localhost:9400` (sim) | real: `https://api.stripe.com` |
 | `STRIPE_SECRET_KEY` | same | `sk_test_sim` | |

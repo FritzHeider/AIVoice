@@ -16,8 +16,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_sim.control import json_body, sim_error
-from va_sim.elevenlabs.stt_control import BatchFaultBody, fault_route
+from va_sim.control import fault_route, json_body, sim_error
+from va_sim.elevenlabs.stt_control import BatchFaultBody
 from va_sim.elevenlabs.tts_audio import parse_output_format, synthesize
 from va_sim.elevenlabs.voice_json import subscription_json, voice_json
 from va_sim.tasks import hold_clock

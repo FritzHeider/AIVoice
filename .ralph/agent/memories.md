@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793444234-6f82
+> va_sim FakeLLM: va_sim.llm (params/rules/reply/wire pure; chat/store/control); tests use llm_helpers llm_state (accelerated, virtual-ms pacing) / realtime_llm_state+served_llm (sockets, openai SDK) / wait_held(state,n) for timeout faults; fault_route + yaml_or_json_body live in va_sim.control; never run ruff --fix with a narrowed --select incl RUF100 (strips other noqa)
+<!-- tags: sim, testing, llm | created: 2026-10-31 -->
+
 ### mem-1793442554-94a4
 > va_sim FakeElevenLabs voices: TTS WS/REST now 404/1008 voice_not_found for unknown voice ids - tests must use seeded ids (tts_helpers.VOICE_ID = voice_catalog.KAREN_VOICE_ID); multipart parsing via rest_io.multipart_form (InvalidBodyError.response), JSON bodies via rest_io.parse_json_body; voice tests use voice_helpers.add_voice/wav_sample/mp3_sample
 <!-- tags: sim, testing, elevenlabs | created: 2026-10-31 -->

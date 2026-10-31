@@ -19,6 +19,8 @@ from va_common.service import ReadyServer, ServerStartupError, StopController, r
 from va_sim.clock import clock_for
 from va_sim.control import control_routes
 from va_sim.elevenlabs.routes import elevenlabs_routes
+from va_sim.llm.routes import llm_routes
+from va_sim.llm.rules import load_rule_file
 from va_sim.settings import SIMULATORS, SimName, SimSettings
 from va_sim.state import DEFAULT_SEED, SimState
 from va_sim.telnyx.keys import SigningKey
@@ -51,21 +53,29 @@ def simulator_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
         routes.extend(telnyx_routes(state))
     elif sim == "elevenlabs":
         routes.extend(elevenlabs_routes(state))
+    elif sim == "llm":
+        routes.extend(llm_routes(state))
     return routes
 
 
 def build_state(settings: SimSettings, *, seed: int = DEFAULT_SEED) -> SimState:
-    """A fresh state with the clock mode, latencies, signing key, and webhook targets of ``settings``."""
+    """A fresh state with the clock mode, latencies, signing key, webhook targets, LLM model ids, and the
+    ``SIM_LLM_RULES`` rule files of ``settings`` (raises :class:`va_sim.llm.rules.RulesError` for an invalid
+    rule file and ``OSError`` for an unreadable one; called before the event loop serves anything)."""
     secret = settings.sim_ed25519_private_key.get_secret_value() if settings.sim_ed25519_private_key else ""
     # Blank (the .env.example value) means "generate a keypair", like an unset variable.
     signing_key = SigningKey.from_base64(secret) if secret.strip() else None
-    return SimState(
+    state = SimState(
         clock=clock_for(settings.sim_clock),
         latencies=settings.latencies(),
         seed=seed,
         signing_key=signing_key,
         webhook_defaults=settings.webhook_defaults(),
+        llm_models=settings.llm_model_ids(),
     )
+    for path in settings.llm_rule_paths:
+        state.llm.rules.add(load_rule_file(path).rules, source=str(path))
+    return state
 
 
 async def _await_ready(sim: SimName, ready: asyncio.Event, serving: asyncio.Task[None]) -> None:
