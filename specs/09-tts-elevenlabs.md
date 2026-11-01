@@ -167,6 +167,20 @@ overlaps):
 The original (unreplaced) clause text is what is stored in the transcript; alignment maps back via an offset map
 produced by the applier (`OffsetMap.to_original(index)`), so truncation on barge-in uses original text positions.
 
+> Decision (2026-11-01): P04-T07 — `PronunciationApplier(rules)` accepts any object with `word`, `pronunciation`,
+> `case_sensitive`, `spaced` (structural typing; `va_voice` does not depend on the API models) and compiles one
+> pattern per applier (one per call). Rules with an empty or whitespace-only `word`, and non-spaced rules with an empty
+> `pronunciation`, are ignored instead of failing a call on persisted config. Rules are stable-sorted by `len(word)`
+> descending, so for a duplicated word the earlier rule wins. Overlaps resolve as the regex scans: the leftmost match
+> wins, and the longest rule wins at one position (rules `York City` and `New York` on "New York City" give
+> "New York" replaced + " City"). Each rule is one alternative `((?<!\w)(?i:word)(?!\w))`, with the `(?i:)` scope only
+> on case-insensitive rules; `\w` is Unicode. `spaced` joins the non-whitespace characters of the pronunciation (or,
+> when that is empty or whitespace-only, of the matched text as written) with single spaces (`spell_out`). The applier
+> runs per clause, so a rule never matches across a clause boundary. `apply(text)` returns `PronouncedText(text,
+> original, offsets)`; `OffsetMap.to_original(i)` maps a sent position to the original one, and a position strictly
+> inside a replaced span maps to the span's original start (a partly spoken replacement counts as not spoken);
+> `to_original_ceil(i)` maps it to the span's original end. TTS character billing counts the sent text.
+
 ## 7. Alignment timeline (`va_voice.text.alignment.AlignmentTimeline`)
 
 Per utterance:

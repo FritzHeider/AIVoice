@@ -1002,3 +1002,10 @@ Grafana 3001
   `va_voice.text.markdown.normalize_text` (reference) + `MarkdownStripper` (streaming twin, `space_pending` tells the
   chunker that whitespace follows the released text); hypothesis tests require identical output for every split of
   the input, so any rule change must keep both in step.
+- 2026-11-01 (P04-T07): pronunciation guide = `va_voice.text.pronunciation.PronunciationApplier(rules)` (rules: specs/09
+  §6 Decision P04-T07): any object with `word`/`pronunciation`/`case_sensitive`/`spaced` works (`PronunciationRuleLike`
+  protocol; in-package `PronunciationRule` dataclass). `apply(clause) -> PronouncedText(text, original, offsets)`;
+  `offsets.to_original(i)` (floor: inside a replaced span → span start) / `to_original_ceil(i)` map sent positions to
+  the original text for the alignment timeline and barge-in truncation; `replace(text)` for static phrases. Tests
+  compare against a naive reference scan in `tests/text/test_pronunciation.py`; note `C++C` is not a `C++` match
+  (`(?!\w)` sees the `C`).

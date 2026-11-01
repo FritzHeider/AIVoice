@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793543716-f7d6
+> P04-T07: va_voice.text.pronunciation.PronunciationApplier compiles one alternation regex (stable longest-first, (?i:) scoped per rule); OffsetMap.to_original floor (inside replaced span -> span start), to_original_ceil; tests compare with naive reference scan; C++C is not a C++ match because of the (?!\w) lookahead
+<!-- tags: voice, pronunciation, testing | created: 2026-11-01 -->
+
 ### mem-1793543142-df5b
 > P04-T06: va_voice.text.chunker ClauseChunker uses MarkdownStripper.space_pending to fire end-of-buffer boundaries; hypothesis split-invariance tests (tests/support/text_helpers.split_at); Write tool may turn \uXXXX escapes in string literals into literal chars -> RUF001, re-escape
 <!-- tags: voice, chunker, testing | created: 2026-11-01 -->

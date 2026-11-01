@@ -36,7 +36,7 @@
   - Deliverables: `ClauseChunker.feed(delta) -> list[str]`, `flush()`, abbreviation and number handling, min words / max chars rules
   - Acceptance: golden tests from the spec examples plus hypothesis test that concatenated chunks equal input.
 
-- [ ] P04-T07 Pronunciation guide application
+- [x] P04-T07 Pronunciation guide application — PronunciationApplier (one combined regex, longest-first, scoped (?i:), spaced spell_out) + OffsetMap floor/ceil; 31 tests incl. hypothesis naive-reference equivalence; make test 7061 passed / 7 skipped (98.5 %, pronunciation.py 100 %); lint/typecheck/placeholders/spec refs pass
   - Spec refs: specs/09-tts-elevenlabs.md (pronunciation_guide application)
   - Depends on: P00-T05
   - Deliverables: `PronunciationApplier` (case_sensitive, spaced, word-boundary regex, precompiled per call)

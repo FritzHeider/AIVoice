@@ -739,3 +739,103 @@ Checked against specs/09 §5: abbreviation set verbatim (test), min words 2/3 fi
 cap at last space before 160, punctuation-only drop, numbers never split. Probed spec-like inputs by hand (Dr./p.m.,
 No. 5, ellipsis, markdown list, $1,250.50/3.14/10:30) – correct. Known limitation (consistent with the spec's
 "followed by whitespace" rule, not a defect): a terminator inside closing quotes (`there." She`) is not a boundary.
+
+## Plan P04-T07 (Planner, 2026-11-01)
+Pronunciation guide applier, specs/09 §6 (consumer: specs/07 §8 step 4, chunker clause → applier → `TtsSocket.send`;
+also static/cached texts; offsets feed the T08 alignment/truncation via `OffsetMap.to_original`). Pure, sync, stdlib
+`re` only, no new deps. va_voice does NOT depend on va_domain/va_api: rules are accepted structurally.
+
+### Files
+1. `packages/va_voice/src/va_voice/text/pronunciation.py`:
+   - `class PronunciationRuleLike(Protocol)`: read-only attributes `word: str`, `pronunciation: str`,
+     `case_sensitive: bool`, `spaced: bool` (the specs/05 §4.4 pydantic `PronunciationRule` satisfies it; declare
+     them as `@property` in the Protocol so frozen/pydantic models type-check).
+   - `@dataclass(frozen=True, slots=True) class PronunciationRule` (same 4 fields, defaults False/False) — the
+     in-package concrete type used by tests and callers without pydantic.
+   - `@dataclass(frozen=True, slots=True) class Replacement`: `sent_start, sent_end, original_start, original_end`.
+   - `class OffsetMap`: built from the source length, sent length and an ordered tuple of `Replacement`s.
+     `to_original(index) -> int` (floor: an index strictly inside a replaced span maps to the span's
+     `original_start` — a partially spoken replacement counts as not spoken; `index == sent_end` maps to
+     `original_end`; outside spans identity plus the accumulated length delta), `to_original_ceil(index)`
+     (inside a span → `original_end`), `replacements` property, `identity(length)` classmethod. `ValueError` for
+     index < 0 or > sent length. Lookup with `bisect` on the span starts (O(log n)).
+   - `@dataclass(frozen=True, slots=True) class PronouncedText`: `text` (sent), `original`, `offsets: OffsetMap`.
+   - `class PronunciationApplier`:
+     - `__init__(rules: Iterable[PronunciationRuleLike])`: drop rules whose `word` is empty/whitespace-only, and
+       rules with an empty `pronunciation` and `spaced=False` (no-op). Stable-sort the rest by `len(word)` desc
+       (ties keep input order ⇒ for a duplicate word the earlier rule wins). Build ONE combined pattern: each rule
+       is a capturing group `((?<!\w)(?i:<escaped>)(?!\w))` (scoped `(?i:...)` only for case-insensitive rules,
+       plain for case-sensitive), joined with `|`; keep a parallel tuple of replacement specs indexed by
+       `match.lastindex - 1`. Compiled once in the constructor ("precompiled per call"). No rules → `_pattern = None`.
+     - `__bool__` / `rule_count` property.
+     - `apply(text: str) -> PronouncedText`: `finditer` over the text (leftmost match, alternation order = longest
+       first at a given position); build the output with list joins and collect `Replacement`s. Replacement text:
+       `pronunciation`, or if `spaced`: `" ".join(ch for ch in (pronunciation or matched) if not ch.isspace())`
+       (empty pronunciation spaces the matched text as written). Replacements are never re-scanned (single pass).
+       Fast path: no pattern or no match → `PronouncedText(text, text, OffsetMap.identity(len(text)))`.
+     - `replace(text: str) -> str`: `apply(text).text` (for static/cached phrases).
+   - `spell_out(text: str) -> str` module-level helper (the spaced rule), exported.
+2. specs/09 §6: `> Decision (2026-11-01): P04-T07 ...` recording: rules accepted structurally; empty/whitespace
+   word and empty non-spaced pronunciation rules ignored (never crash a call on persisted config); ties in length
+   keep input order, so for duplicate words the earlier rule wins; overlap resolution = leftmost match first, then
+   longest rule at that position ("York City" vs "New York" on "New York City" ⇒ "New York" + "City"); spaced
+   drops whitespace before joining; case-insensitive matches only the rule, the `(?i:)` scope; `\w` is Unicode;
+   applied per clause so a rule cannot match across a clause boundary; `OffsetMap.to_original` floor semantics
+   (partially spoken replacement = not spoken) and `to_original_ceil`; billing chars = `len(PronouncedText.text)`.
+3. `packages/va_voice/src/va_voice/text/__init__.py` docstring: mention pronunciation (no imports).
+4. AGENTS.md bullet (P04-T07).
+
+### Tests `packages/va_voice/tests/text/test_pronunciation.py`
+- Per flag: case-insensitive default (`"sql"` rule replaces `SQL`, `Sql`); `case_sensitive=True` replaces only exact
+  case; word boundaries (`"cat"` not in `concatenate`, `cat's` → replaced before `'`, `cat_x` not replaced since `_`
+  is `\w`, `cat1` not replaced); words with punctuation (`"Dr."`, `"C++"`, `"#1"`) escaped and matched; `spaced`
+  (`"ABC123"` → `"A B C 1 2 3"`; empty pronunciation + spaced spells the matched text keeping its case; whitespace
+  in the pronunciation dropped); empty pronunciation non-spaced ignored; empty/whitespace word ignored.
+- Ordering/overlap: longest first (`"New York City"` before `"New York"` regardless of input order); leftmost wins
+  over longer later match (the York City case); duplicates: earlier rule wins; replacement not re-matched (rule A
+  `"AI"` → `"A I"` and rule B `"A"` → `"ay"` ⇒ `"A I"` stays); mixed case-sensitivity in one pattern (a sensitive
+  rule `"US"` and insensitive `"us"`-free text).
+- Unicode: `"café"` matched case-insensitively (`CAFÉ`); `\w` boundary with accented neighbours.
+- OffsetMap: explicit example (`"Call SQL now"` → `"Call sequel now"`): `to_original` at 0, inside the span, at span
+  end, at end of text; `to_original_ceil`; out-of-range ValueError; identity map when nothing matched; `bool(applier)`
+  false for no rules; `replace` equals `apply().text`.
+- Hypothesis (texts from a small alphabet `"ab AB.-_é"` + words drawn from rule words; rules from short words over
+  `"abAB"` with random flags):
+  1. Unchanged chars map exactly: for every sent index i not inside a replacement,
+     `text[i] == original[to_original(i)]`.
+  2. `to_original` and `to_original_ceil` are monotone non-decreasing, `to_original(0) == 0`,
+     `to_original(len(sent)) == len(original)`, floor ≤ ceil.
+  3. Equivalence with a naive reference implementation in the test (scan left to right, at each position try rules
+     in longest-first order with boundary checks, copy the char otherwise).
+  4. No rules ⇒ identity.
+- Performance smoke (not timing-based): 200 rules compile, and applying to a 160-char clause is a single pass
+  (assert result correct; no timing assert).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (pronunciation.py 100 %), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a packages/va_voice/src`,
+pip-audit + pnpm audit (no new deps).
+
+### Risks
+- Python `re` group count: 200 capturing groups is fine (limit removed in 3.5); test 200 rules.
+- `(?i:...)` scoped flag with lookarounds outside the scope is fine; keep lookarounds outside it.
+- Protocol with `@property` members so pydantic models and frozen dataclasses both satisfy mypy.
+- The Write tool may turn `\uXXXX` escapes into literal chars (RUF001): use `é` via escapes carefully or allow it in
+  test data with literal chars only where RUF001 doesn't fire (é is not confusable; fine).
+
+## Build P04-T07 (Builder, 2026-11-01)
+Implemented per plan: `va_voice/text/pronunciation.py` (`PronunciationRuleLike` protocol, `PronunciationRule`,
+`Replacement`, `OffsetMap` with bisect floor/ceil mapping, `PronouncedText`, `PronunciationApplier` = one combined
+regex, stable longest-first, scoped `(?i:)`, `spell_out`), `text/__init__.py` docstring, specs/09 §6 Decision P04-T07,
+AGENTS bullet. Spaced rule with whitespace-only pronunciation spells the matched text (decision). Tests
+`tests/text/test_pronunciation.py` (31: flags, escaping, spaced, ignored rules, overlap/longest/leftmost, duplicates,
+no re-match, unicode, adjacent spans, OffsetMap example, structural rules, 200 rules; hypothesis: naive reference
+equivalence, offset-map monotonic/exact-char properties, identity). Note `C++C` is not a `C++` match (lookahead).
+Gates: fmt ok; lint pass; typecheck pass (847 files); placeholders 0; spec refs 0; make test 7061 passed / 7 skipped
+(98 %; pronunciation.py 100 %); jscpd 0 clones; radon A (2.04); pip-audit no known vulns; pnpm audit 3 moderate (no high).
+
+## Review P04-T07 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 7061 passed / 7 skipped (98.50 %;
+pronunciation.py 100 %). Checked against specs/09 §6: pattern `(?<!\w)` + escape + `(?!\w)` per rule, IGNORECASE
+scoped per rule, longest-first, single combined pass (no re-match), spaced spelling incl. empty pronunciation →
+matched word; OffsetMap.to_original as the spec requires. Decision note covers ignored rules / tie order / overlaps.
