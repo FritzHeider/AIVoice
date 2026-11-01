@@ -486,3 +486,99 @@ Approved. Re-ran: lint pass, typecheck pass (837 files), placeholders 0, make te
 endpointing.py + text_norm.py 100 %). Checked against specs/07 §6 rules 1-7: base table, pause range 120-1500 / last 20,
 p90 at ≥4 samples, adaptive clamp 250-1500, short-answer / continuation sets verbatim, number rule, timeout clamp
 250-2000, non-empty partial requirement + silent discard, ivr floor 900, eot_ms. Decision documents the ambiguities.
+
+## Plan P04-T05 (Planner, 2026-11-01)
+Interruptibility policy + backchannels — specs/07 §7 (level table, backchannel set, effective level), §13 (DTMF barge-in
+at levels ≥ 1), specs/05 (`interruptibility` 0–4 default 2, `block_interruptions` wins), specs/11 (node
+`interruptibility` 0–3 or null; `Say(..., interruptible: bool | None)`). Pure, sync, no clock: caller passes
+`speech_ms` (duration of the CURRENT continuous VAD speech segment = now − last `speech_start`; "continuous" per §7).
+
+### Files
+1. `packages/va_voice/src/va_voice/interrupt.py` (`__all__` everything public):
+   - `InterruptLevel = Literal[0, 1, 2, 3, 4]`; constants `DEFAULT_LEVEL = 2`, `BLOCK, DIFFICULT, BALANCED, EASY,
+     ALWAYS = 0..4`; `BACKCHANNELS: Final[tuple[str, ...]]` = §7 list verbatim (29 entries, raw spelling incl.
+     `uh-huh`, `mm-hmm`). `_PHRASES: frozenset[tuple[str, ...]]` = `{text_norm.tokens(b) for b in BACKCHANNELS}`
+     (so `uh-huh` and `uh huh` collapse to ("uh","huh")); `_MAX_PHRASE = max(len)`.
+   - Thresholds as a frozen table `LEVEL_RULES: Mapping[int, LevelRule]` with
+     `@dataclass(frozen=True, slots=True) LevelRule(min_speech_ms: float | None, min_words: int, speech_only_ms: float | None)`:
+     1 → (1200, words ≥ 4 & not all backchannel, None) ; 2 → (500, 2 non-bc, 900) ; 3 → (250, 1 non-bc, 600) ;
+     4 → (None, 0, 150) ; 0 → never. Simplest: implement explicit per-level functions in a dict dispatch to keep
+     radon ≤ B; but table must make values greppable for tests.
+   - `effective_level(*, call_level: int = 2, node_level: int | None = None, block_interruptions: bool = False,
+     interruptible: bool | None = None) -> InterruptLevel`: validates call 0–4, node 0–3 (ValueError otherwise);
+     order: `block_interruptions` → 0; `interruptible is False` (a `Say(interruptible=False)` / max-duration message)
+     → 0; node level if not None; else call level. `interruptible=True` does not raise the level (Decision).
+   - `@dataclass(frozen=True, slots=True) BackchannelMatch(words: tuple[str, ...], backchannel_words: int)` with
+     properties `total_words`, `content_words` (= total − backchannel), `all_backchannel` (total > 0 and content == 0).
+   - `class BackchannelClassifier` (stateless; `__init__(phrases: Iterable[str] = BACKCHANNELS)` precomputes token
+     tuples, rejects empty phrases with ValueError):
+     - `classify(text_or_words: str | Sequence[str]) -> BackchannelMatch` — tokens via `text_norm.tokens` when str,
+       else lowercased given tokens; greedy left-to-right longest-phrase match (try length `_MAX_PHRASE` down to 1);
+       matched tokens count as backchannel, others as content. E.g. "uh-huh" → 2 tokens both bc; "all right, go on" →
+       bc 2 content 2; "I see the problem" → "i see" bc, "the problem" content 2; "okay okay" → all bc.
+     - `is_backchannel(text) -> bool` = `all_backchannel`.
+   - `@dataclass(frozen=True, slots=True) InterruptDecision(interrupt: bool, reason: str)` — reasons
+     (Literal): `"not_speaking"`, `"blocked"`, `"speech_and_words"`, `"long_speech"`, `"any_speech"`, `"insufficient"`;
+     `__bool__` returns `interrupt` so callers may `if policy.should_interrupt(...)`.
+   - `class InterruptPolicy(classifier: BackchannelClassifier | None = None)`:
+     - `should_interrupt(speech_ms: float, words: Sequence[str] | None, text: str, level: int, agent_speaking: bool)
+       -> InterruptDecision` — `words` = pre-tokenized partial (STT word list when available; None → tokenize
+       `text`). Order: not agent_speaking → no ("not_speaking"); level 0 → no ("blocked"); level 4 → speech ≥ 150;
+       level 1 → speech ≥ 1200 AND total ≥ 4 AND not all_backchannel; level 2 → (speech ≥ 500 AND content ≥ 2) OR
+       speech ≥ 900; level 3 → (speech ≥ 250 AND content ≥ 1) OR speech ≥ 600. Invalid level / negative speech →
+       ValueError. Boundaries inclusive (≥).
+     - `should_interrupt_dtmf(level: int, agent_speaking: bool) -> InterruptDecision` — interrupt iff agent_speaking
+       and level ≥ 1 (reason `"dtmf"`; `blocked` at 0).
+2. specs/07 §7 `> Decision (2026-11-01): P04-T05`: module/API; speech_ms = current continuous segment; level-1 reading
+   "≥ 4 tokens total and at least one non-backchannel token"; non-backchannel words = tokens not covered by a greedy
+   longest-phrase backchannel match on `text_norm.tokens` (hyphenated entries ≡ spaced); boundaries inclusive;
+   effective-level order block → `interruptible=False` → node → call; DTMF rule; no interrupt when agent not speaking.
+   Also fix specs/30 §5 `interruptibility_levels` row ("≥ 3 words" → "≥ 4 words", 07 is the contract) in the same commit.
+3. `va_voice/__init__.py`: only if it re-exports modules (check; endpointing pattern decides).
+4. AGENTS.md bullet (P04-T05).
+
+### Tests `packages/va_voice/tests/test_interrupt.py`
+- `test_backchannel_set_verbatim`: BACKCHANNELS equals the §7 list parsed from specs/07 (parse the paragraph after
+  "Backchannel set" up to the period, backticked items) — keeps spec and code in lockstep.
+- classifier table: "uh-huh", "Uh huh.", "mm-hmm", "mhm", "Okay okay!", "all right", "alright", "got it", "I see" →
+  all_backchannel; "I see the problem" (bc 2, content 2); "yeah but wait" (content 2); "" → total 0, not all_bc;
+  "right now please" (content 2); token-sequence input path; custom phrase set; empty phrase → ValueError.
+- `test_matrix` parametrized over levels 0–4 × scenarios exactly per spec: backchannel ("uh-huh", 400 ms),
+  backchannel long ("yeah", 1000 ms), short content ("wait", 300 ms), two words ("wait stop", 600 ms), long sentence
+  ("hold on I have a question", 1300 ms), long silence-text (no partial "", 950 ms), 4 backchannels ("okay okay
+  yeah right", 1300 ms) → expected bool table written out literally (+ reason).
+- boundary tests per level (just below / at each threshold: 149/150, 249/250, 499/500, 599/600, 899/900, 1199/1200),
+  level-1 3 words vs 4 words.
+- `agent_speaking=False` → never, every level; `words` override beats `text`.
+- `effective_level` table incl. validation errors (call 5, node 4, call -1); `interruptible=True` keeps node/call.
+- DTMF: levels 0..4 × speaking.
+- hypothesis property: monotonic in speech_ms (if interrupt at t then at t' > t for same text/level) and in level
+  1→4 for levels 2..4 (level k interrupt ⇒ level k+1 interrupt for k ≥ 2; note level 1 vs 2 also monotone since
+  1200∧4words ⊂ 900 rule) — assert for all k in 1..3.
+- ValueError on level 5 / negative speech_ms.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (interrupt.py 100 %), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a packages/va_voice/src`,
+pip-audit + pnpm audit (no new deps).
+
+### Risks
+- Monotonic-in-level property: level 1 requires ≥4 tokens & speech ≥1200 → level 2 then true by speech ≥ 900. OK.
+- Keep `should_interrupt` radon ≤ B: dispatch dict of per-level predicates.
+
+## Build P04-T05 (Builder, 2026-11-01)
+Implemented per plan: `va_voice/interrupt.py` (BACKCHANNELS verbatim, LEVEL_RULES table, effective_level,
+BackchannelClassifier greedy longest phrase on text_norm.tokens, InterruptDecision truthy + reason, InterruptPolicy
+should_interrupt / should_interrupt_dtmf). Deviations: `LevelRule` fields are min_speech_ms/min_total_words/
+min_content_words/speech_only_ms; word lists are re-tokenized (punctuation/hyphens split); bool levels rejected;
+effective_level validates node level even when blocked. specs/07 §7 Decision P04-T05; specs/30 interruptibility_levels
+row fixed (≥ 4 words); AGENTS bullet. Tests `tests/test_interrupt.py` (134: spec-parsed backchannel set, 12-scenario
+× 5-level matrix with reasons, inclusive boundaries, hypothesis monotonicity in speech and level, DTMF, effective level).
+Gates: fmt ok; lint 0; typecheck 0; placeholders 0; spec refs 0; make test 6893 passed / 7 skipped (98.48 %;
+interrupt.py 100 %); jscpd 0 clones; radon A (1.95); pip-audit clean; pnpm audit 3 moderate (no high).
+
+## Review P04-T05 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint pass, typecheck pass, placeholders 0, make test 6893 passed / 7 skipped (98.48 %; interrupt.py
+100 %). Checked against specs/07 §7 table (levels 1-4 thresholds, inclusive), backchannel set (spec-parsed test),
+effective level order (block → interruptible=False → node 0-3 → call 0-4), §13 DTMF barge-in at levels ≥ 1. Decision
+note covers ambiguities; specs/30 interruptibility_levels row aligned to 07 (≥ 4 words).

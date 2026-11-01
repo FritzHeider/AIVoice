@@ -24,7 +24,7 @@
   - Deliverables: `Endpointer` combining VAD silence, partial-transcript completeness heuristic, adaptive per-caller timeout, per-node resumption speed, max-wait cap; emits `EndOfTurn(at, reason)`
   - Acceptance: table-driven tests for every rule and the adaptation algorithm with fake clock.
 
-- [ ] P04-T05 Interruptibility policy and backchannels
+- [x] P04-T05 Interruptibility policy and backchannels — va_voice.interrupt (InterruptPolicy, BackchannelClassifier, effective_level, DTMF rule), 134 tests incl. spec-parsed backchannel set + level matrix; make test 6893 passed / 7 skipped (98.48 %, interrupt.py 100 %), lint/typecheck/placeholders clean
   - Spec refs: specs/07-media-pipeline.md (interruptibility levels 0–4, backchannel list, block_interruptions)
   - Depends on: P04-T03
   - Deliverables: `InterruptPolicy.should_interrupt(speech_ms, words, text, level, agent_speaking)` and `BackchannelClassifier`

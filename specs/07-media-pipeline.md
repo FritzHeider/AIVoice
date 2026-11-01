@@ -222,6 +222,20 @@ Backchannel set (matched on normalized partial tokens; multi-word entries match 
 `mm-hmm`, `mhm`, `mm`, `hmm`, `yeah`, `yep`, `yes`, `ok`, `okay`, `right`, `sure`, `got it`, `i see`, `alright`,
 `all right`, `oh`, `ah`, `cool`, `great`, `nice`, `uh`, `um`, `wow`, `true`, `exactly`, `perfect`, `gotcha`.
 
+> Decision (2026-11-01): P04-T05. `va_voice.interrupt` is pure and synchronous.
+> `InterruptPolicy.should_interrupt(speech_ms, words, text, level, agent_speaking)` returns an `InterruptDecision`
+> (truthy when playback must stop; `reason` one of `not_speaking`, `blocked`, `speech_and_words`, `long_speech`,
+> `any_speech`, `insufficient`). `speech_ms` is the duration of the current continuous VAD speech segment (now minus
+> the last `speech_start`), measured by the caller. `words` (the STT word list) wins over `text` when given; both are
+> split with `va_voice.text_norm.tokens`, so `uh-huh` ≡ `uh huh`. Non-backchannel words are the tokens not covered by
+> a greedy left-to-right longest-phrase match against the backchannel set (`BackchannelClassifier`). Level 1 reads
+> "≥ 4 tokens in total and at least one of them not a backchannel". All thresholds are inclusive (≥). Nothing
+> interrupts while the agent is not speaking. `effective_level(call_level, node_level, block_interruptions,
+> interruptible)`: `block_interruptions` → 0, then a non-interruptible utterance (`Say(interruptible=False)`) → 0,
+> then the node level (0–3) when set, else the call level (0–4); `interruptible=True` never raises the level; out-of-
+> range levels are `ValueError`. DTMF (§13): `should_interrupt_dtmf(level, agent_speaking)` interrupts iff the agent is
+> speaking and the level is ≥ 1.
+
 Barge-in sequence (target ≤ 120 ms from decision to `clear`):
 
 1. Decision at time `t_i`. Emit nothing yet.

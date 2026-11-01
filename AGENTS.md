@@ -989,3 +989,9 @@ Grafana 3001
   input, `poll(now_ms)` → `EndOfTurn | TurnDiscarded | None`. No clock inside: tests drive time with explicit ms
   values. `va_voice.text_norm` (`tokens`, `normalized`, `ends_sentence`, `ends_with_digit`) is the shared transcript
   normalizer (P04-T05 backchannels reuse it).
+- 2026-11-01 (P04-T05): interruptibility = `va_voice.interrupt` (pure; spec: specs/07 §7 Decision P04-T05):
+  `InterruptPolicy().should_interrupt(speech_ms, words, text, level, agent_speaking)` → truthy `InterruptDecision`
+  (`reason`), `should_interrupt_dtmf(level, agent_speaking)`, `effective_level(call_level=, node_level=,
+  block_interruptions=, interruptible=)`, `BackchannelClassifier.classify(text | words)` (greedy longest phrase on
+  `text_norm.tokens`). `BACKCHANNELS` is checked verbatim against the specs/07 §7 paragraph by `test_interrupt.py`;
+  thresholds live in `LEVEL_RULES`. The caller measures `speech_ms` of the current continuous VAD segment.

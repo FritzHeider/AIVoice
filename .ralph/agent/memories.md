@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793542103-8376
+> P04-T05: va_voice.interrupt InterruptPolicy.should_interrupt -> truthy InterruptDecision(reason); BACKCHANNELS checked verbatim against specs/07 §7 paragraph in test_interrupt.py; level thresholds in LEVEL_RULES; effective_level block->interruptible False->node->call
+<!-- tags: voice, interrupt, testing | created: 2026-11-01 -->
+
 ### mem-1793541550-b3f7
 > P04-T04: va_voice.endpointing.Endpointer is pure ms-timeline (on_vad/on_partial, deadline_ms, poll -> EndOfTurn|TurnDiscarded); va_voice.text_norm shared tokenizer for T05 backchannels; mypy narrows Endpointer properties across asserts -> use snapshot(ep) tuple helper in tests; apps/sim test_sim_shared_redis can flake under full-suite load (exit -15)
 <!-- tags: voice, endpointing, testing | created: 2026-11-01 -->
