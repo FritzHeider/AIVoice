@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793545684-8d30
+> P04-T09: va_voice.outbound FramePacer anchors targets at max(0,n-lead)*20 after the anchor, re-anchors when drained (now >= anchor+sent*20), mark_gap so the wait after idle is not lateness; OutboundAudio clear() uses a generation counter for frames in flight; SpectralGate returns whole 256-sample hops (input delayed 256), Rayleigh p20->mean scale 1.876 gives -11.6 dB; ManualClock float ms noise ~1e-14, so round sink timestamps
+<!-- tags: voice, outbound, testing | created: 2026-11-01 -->
+
 ### mem-1793544526-4d65
 > P04-T08: va_voice.playback.PlaybackTracker owns text.alignment.AlignmentTimeline (played_text); timeline uses prefix-max end bisect + lazy trailing-gap interpolation; test Alignment dataclass shared in tests/support/text_helpers.py (jscpd flagged duplicate)
 <!-- tags: voice, playback, testing | created: 2026-11-01 -->

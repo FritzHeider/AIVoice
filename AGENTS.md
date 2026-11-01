@@ -1015,3 +1015,11 @@ Grafana 3001
   `add_chunk(audio, alignment | None)`, `text_until(ms)`); barge-in text via `truncate_assistant_message(timeline,
   played_ms)`. Rules: specs/07 §9 and specs/09 §7 Decisions P04-T08. Alignments are structural (tests use a local
   frozen dataclass with `chars`/`char_start_ms`/`char_duration_ms`).
+- 2026-11-01 (P04-T09): outbound = `va_voice.outbound` (rules: specs/07 §9/§10.2 Decisions P04-T09): pure
+  `FramePacer` (ms; `next_send_ms`, `on_sent -> lateness`, `mark_gap`, `reset`, `throttle`), `FrameMixer(fmt,
+  background=, gain_db=, wire_byte_order=)` (`speech(frame)`, `idle()`), `OutboundAudio(sink, mixer, clock=)` with
+  `start_utterance(tracker)`/`push_audio`/`end_segment(chars)`/`finish_utterance()`/`clear()`/`rate_limited()` and
+  `run()` (supervise it). Background loops: `va_voice.background.BackgroundLibrary(assets_dir).loop(track, fmt)`.
+  VAD-path noise gate: `va_voice.noise.SpectralGate` (`process` returns whole 256-sample hops, output = input
+  delayed 256 samples; `set_speech` from VAD events). Tests drive `OutboundAudio` on `ManualClock`
+  (`wait_for_sleep(0.02)` before `run_for`); sink timestamps need rounding (float ms noise ~1e-14).

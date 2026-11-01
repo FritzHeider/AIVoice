@@ -1,0 +1,467 @@
+"""Outbound pacing and background mixing (specs/07-media-pipeline.md §9, §10.2, §15).
+
+:class:`FramePacer` is the pure, ms-based schedule: frames are due at ``t0 + (n - lead) x 20`` from an anchor
+``t0`` (targets are computed from the anchor, never by accumulating sleeps, so they do not drift), which keeps
+at most ``lead`` frames (3 = 60 ms) queued at Telnyx ahead of playback. Once wall-clock time passes the end of
+what was sent (Telnyx has drained) the next frame re-anchors the schedule; ``reset`` after a clear does the
+same.
+
+:class:`FrameMixer` turns a 20 ms TTS frame into a wire frame: μ-law speech without background is passed
+through untouched; otherwise speech is decoded, the background frame is added at unit gain, clipped to int16,
+and encoded to the leg codec (μ-law, or L16 in ``TELNYX_L16_BYTE_ORDER`` for hd_audio). Agent speech is never
+ducked and the background never goes to the STT.
+
+:class:`OutboundAudio` runs the loop: it re-frames TTS audio, sends one frame per due slot (an idle frame of
+background when no speech is queued, nothing when there is no background), sends a segment's mark right after
+the segment's last frame, and reports every frame to the utterance's
+:class:`~va_voice.playback.PlaybackTracker`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import math
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Final, Protocol
+
+import numpy as np
+from numpy.typing import NDArray
+
+from va_common.time import Clock
+from va_voice.audio import (
+    FRAME_MS,
+    PCM16LE_16000,
+    ULAW_8000,
+    AudioFormat,
+    Framer,
+    L16ByteOrder,
+    gain_for_db,
+    pcm16le_to_pcm,
+    pcm_to_l16,
+    ulaw_decode,
+    ulaw_encode,
+)
+from va_voice.background import BackgroundLoop
+from va_voice.playback import PlaybackTracker
+
+__all__ = [
+    "LATE_THRESHOLD_MS",
+    "LEAD_FRAMES",
+    "RATE_LIMIT_PAUSE_MS",
+    "RATE_LIMIT_WINDOW_MS",
+    "THROTTLED_LEAD_FRAMES",
+    "FrameMixer",
+    "FramePacer",
+    "OutboundAudio",
+    "OutboundSink",
+    "OutboundStats",
+]
+
+LEAD_FRAMES: Final = 3
+"""Frames sent ahead of the playback position (60 ms)."""
+
+THROTTLED_LEAD_FRAMES: Final = 1
+"""Lead while backing off after a Telnyx rate-limit error (``100005``)."""
+
+RATE_LIMIT_PAUSE_MS: Final = 100
+"""Sends pause this long after a rate-limit error."""
+
+RATE_LIMIT_WINDOW_MS: Final = 5000
+"""The reduced lead lasts this long after a rate-limit error."""
+
+LATE_THRESHOLD_MS: Final = 30
+"""A frame sent more than this past its target counts as late (specs/07 §21)."""
+
+_INT16_MIN: Final = -32_768
+_INT16_MAX: Final = 32_767
+_DUE_EPSILON_MS: Final = 0.01
+_MS_PER_SECOND: Final = 1000.0
+
+
+class FrameMixer:
+    """Mixes a background loop under 20 ms TTS frames and encodes them for the wire."""
+
+    __slots__ = ("_background", "_decode", "_encode", "_format", "_gain", "_passthrough")
+
+    def __init__(
+        self,
+        fmt: AudioFormat,
+        *,
+        background: BackgroundLoop | None = None,
+        gain_db: float = 0.0,
+        wire_byte_order: L16ByteOrder = "big",
+    ) -> None:
+        self._format = fmt
+        self._decode, self._encode, self._passthrough = _codec_for(fmt, wire_byte_order)
+        if background is not None and background.frame_samples != fmt.frame_samples:
+            have, need = background.frame_samples, fmt.frame_samples
+            message = f"background frames have {have} samples, {fmt.name} needs {need}"
+            raise ValueError(message)
+        self._background = background
+        self._gain = gain_for_db(gain_db)
+
+    @property
+    def format(self) -> AudioFormat:
+        """The TTS format the mixer accepts."""
+        return self._format
+
+    @property
+    def has_background(self) -> bool:
+        return self._background is not None
+
+    def speech(self, frame: bytes) -> bytes:
+        """The wire frame for one TTS frame (mixed with the next background frame when there is one)."""
+        if len(frame) != self._format.frame_bytes:
+            message = f"expected a {self._format.frame_bytes}-byte frame, got {len(frame)}"
+            raise ValueError(message)
+        if self._background is None:
+            return frame if self._passthrough else self._encode(self._decode(frame))
+        mixed = self._decode(frame).astype(np.int32) + self._background_frame(self._background)
+        return self._encode(_clip(mixed))
+
+    def idle(self) -> bytes:
+        """A background-only wire frame (only with a background: check :attr:`has_background`)."""
+        if self._background is None:
+            message = "no background: idle frames are not sent"
+            raise RuntimeError(message)
+        return self._encode(_clip(self._background_frame(self._background)))
+
+    def _background_frame(self, background: BackgroundLoop) -> NDArray[np.int32]:
+        frame = background.next_frame().astype(np.int32)
+        if self._gain == 1.0:
+            return frame
+        return np.rint(frame * self._gain).astype(np.int32)
+
+
+def _clip(x: NDArray[np.int32]) -> NDArray[np.int16]:
+    return np.clip(x, _INT16_MIN, _INT16_MAX).astype(np.int16)
+
+
+type _Decode = Callable[[bytes], NDArray[np.int16]]
+type _Encode = Callable[[NDArray[np.int16]], bytes]
+
+
+def _codec_for(fmt: AudioFormat, byte_order: L16ByteOrder) -> tuple[_Decode, _Encode, bool]:
+    """(decode, encode, passthrough) of a TTS format; ``passthrough``: TTS bytes already are wire bytes."""
+    if fmt == ULAW_8000:
+        return ulaw_decode, ulaw_encode, True
+    if fmt == PCM16LE_16000:
+
+        def encode(x: NDArray[np.int16]) -> bytes:
+            return pcm_to_l16(x, byte_order)
+
+        return pcm16le_to_pcm, encode, byte_order == "little"
+    message = f"unsupported TTS format {fmt.name}: expected ulaw_8000 or pcm_16000"
+    raise ValueError(message)
+
+
+class FramePacer:
+    """The drift-free send schedule with a bounded lead, re-anchored whenever Telnyx's buffer is empty."""
+
+    __slots__ = ("_anchor", "_frame_ms", "_gap", "_lead", "_paused_until", "_sent", "_throttled_until")
+
+    def __init__(self, *, frame_ms: int = FRAME_MS, lead_frames: int = LEAD_FRAMES) -> None:
+        if lead_frames < 0:
+            message = f"lead_frames must be >= 0, got {lead_frames}"
+            raise ValueError(message)
+        self._frame_ms = frame_ms
+        self._lead = lead_frames
+        self._anchor: float | None = None
+        self._sent = 0
+        self._gap = True
+        self._paused_until = -math.inf
+        self._throttled_until = -math.inf
+
+    @property
+    def anchor_ms(self) -> float | None:
+        """Send time of the first frame since the last (re-)anchor."""
+        return self._anchor
+
+    @property
+    def sent_since_anchor(self) -> int:
+        return self._sent
+
+    def lead_frames_at(self, now_ms: float) -> int:
+        """The lead in effect: reduced for :data:`RATE_LIMIT_WINDOW_MS` after :meth:`throttle`."""
+        return THROTTLED_LEAD_FRAMES if now_ms < self._throttled_until else self._lead
+
+    def drained(self, now_ms: float) -> bool:
+        """Nothing is queued at Telnyx any more (or nothing was ever sent since the last anchor)."""
+        return self._anchor is None or now_ms >= self._anchor + self._sent * self._frame_ms
+
+    def next_send_ms(self, now_ms: float) -> float:
+        """When the next frame may go out (``now_ms`` or earlier means now)."""
+        if self._anchor is None or self.drained(now_ms):
+            return max(now_ms, self._paused_until)
+        return max(self._nominal(self._anchor, now_ms), self._paused_until)
+
+    def on_sent(self, now_ms: float) -> float:
+        """Record a frame sent at ``now_ms``; returns its lateness vs. the target (0 after a gap/reset)."""
+        lateness = 0.0
+        if self._anchor is not None and not self._gap:
+            lateness = max(0.0, now_ms - max(self._nominal(self._anchor, now_ms), self._paused_until))
+        if self.drained(now_ms):
+            self._anchor = now_ms
+            self._sent = 0
+        self._sent += 1
+        self._gap = False
+        return lateness
+
+    def mark_gap(self) -> None:
+        """Nothing was available to send: the next frame's wait is not lateness."""
+        self._gap = True
+
+    def reset(self) -> None:
+        """Telnyx's buffer was cleared: the next frame goes out at once and the lead restarts at 0."""
+        self._anchor = None
+        self._sent = 0
+        self._gap = True
+
+    def throttle(self, now_ms: float) -> None:
+        """Telnyx rate limit (``100005``): pause 100 ms and keep a 1-frame lead for 5 s."""
+        self._paused_until = now_ms + RATE_LIMIT_PAUSE_MS
+        self._throttled_until = now_ms + RATE_LIMIT_WINDOW_MS
+
+    def _nominal(self, anchor: float, now_ms: float) -> float:
+        return anchor + max(0, self._sent - self.lead_frames_at(now_ms)) * self._frame_ms
+
+
+class OutboundSink(Protocol):
+    """Where wire frames and marks go (the transport encodes them as Telnyx/widget messages)."""
+
+    async def send_audio(self, frame: bytes) -> None:
+        """Send one 20 ms wire frame."""
+        ...
+
+    async def send_mark(self, name: str) -> None:
+        """Send a playback mark (echoed by the far end once everything before it has played)."""
+        ...
+
+
+@dataclass(slots=True)
+class OutboundStats:
+    """Counters of one outbound stream."""
+
+    frames_sent: int = 0
+    speech_frames: int = 0
+    idle_frames: int = 0
+    marks_sent: int = 0
+    late_frames: int = 0
+    max_lateness_ms: float = 0.0
+    dropped_frames: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    tracker: PlaybackTracker
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _SegmentEnd:
+    tracker: PlaybackTracker
+    chars: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Finish:
+    tracker: PlaybackTracker
+
+
+type _Item = _Frame | _SegmentEnd | _Finish
+
+
+class OutboundAudio:
+    """The outbound clock of one leg: paced 20 ms frames, background bed, marks and playback tracking."""
+
+    __slots__ = (
+        "_clock",
+        "_framer",
+        "_generation",
+        "_mixer",
+        "_open",
+        "_pacer",
+        "_pending_chars",
+        "_queue",
+        "_queued_frames",
+        "_segment_frames",
+        "_sink",
+        "_stats",
+        "_wake",
+    )
+
+    def __init__(
+        self, sink: OutboundSink, mixer: FrameMixer, *, clock: Clock, pacer: FramePacer | None = None
+    ) -> None:
+        self._sink = sink
+        self._mixer = mixer
+        self._clock = clock
+        self._pacer = pacer if pacer is not None else FramePacer()
+        self._framer = Framer(mixer.format)
+        self._queue: deque[_Item] = deque()
+        self._queued_frames = 0
+        self._open: PlaybackTracker | None = None
+        self._segment_frames = 0
+        self._pending_chars = 0
+        self._generation = 0
+        self._stats = OutboundStats()
+        self._wake = asyncio.Event()
+
+    @property
+    def stats(self) -> OutboundStats:
+        return self._stats
+
+    @property
+    def pacer(self) -> FramePacer:
+        return self._pacer
+
+    @property
+    def tracker(self) -> PlaybackTracker | None:
+        """The utterance currently accepting audio."""
+        return self._open
+
+    @property
+    def buffered_frames(self) -> int:
+        """Speech frames queued locally (not yet sent)."""
+        return self._queued_frames
+
+    @property
+    def buffered_ms(self) -> int:
+        return self._queued_frames * FRAME_MS
+
+    def start_utterance(self, tracker: PlaybackTracker) -> None:
+        """Following audio belongs to ``tracker`` (the previous utterance must be finished or cleared)."""
+        if self._open is not None:
+            message = "the previous utterance is still open: finish_utterance or clear first"
+            raise RuntimeError(message)
+        self._open = tracker
+        self._framer.reset()
+        self._segment_frames = 0
+        self._pending_chars = 0
+
+    def push_audio(self, chunk: bytes) -> None:
+        """Queue TTS audio of any size (re-framed to 20 ms; a partial frame waits for more)."""
+        tracker = self._require_open()
+        for frame in self._framer.feed(chunk):
+            self._queue.append(_Frame(tracker, frame))
+            self._queued_frames += 1
+            self._segment_frames += 1
+        self._wake.set()
+
+    def end_segment(self, chars: int) -> None:
+        """Close the segment queued since the last boundary; its mark follows its last frame.
+
+        A segment without whole frames carries its characters into the next one (a segment never is empty).
+        """
+        tracker = self._require_open()
+        if self._segment_frames == 0:
+            self._pending_chars += chars
+            return
+        self._queue.append(_SegmentEnd(tracker, self._pending_chars + chars))
+        self._segment_frames = 0
+        self._pending_chars = 0
+        self._wake.set()
+
+    def finish_utterance(self) -> None:
+        """No more audio: pad the last partial frame, close the trailing segment, then finish the tracker."""
+        tracker = self._require_open()
+        tail = self._framer.flush()
+        if tail is not None:
+            self._queue.append(_Frame(tracker, tail))
+            self._queued_frames += 1
+            self._segment_frames += 1
+        if self._segment_frames:
+            self._queue.append(_SegmentEnd(tracker, self._pending_chars))
+        self._queue.append(_Finish(tracker))
+        self._open = None
+        self._segment_frames = 0
+        self._pending_chars = 0
+        self._wake.set()
+
+    def clear(self) -> int:
+        """Barge-in: drop queued frames and marks (the caller stops the trackers); returns frames dropped."""
+        dropped = self._queued_frames
+        self._queue.clear()
+        self._queued_frames = 0
+        self._framer.reset()
+        self._open = None
+        self._segment_frames = 0
+        self._pending_chars = 0
+        self._generation += 1
+        self._pacer.reset()
+        self._stats.dropped_frames += dropped
+        return dropped
+
+    def rate_limited(self) -> None:
+        """Telnyx answered ``100005``: back off (pause, then a reduced lead)."""
+        self._pacer.throttle(self._now_ms())
+
+    async def run(self) -> None:
+        """Send frames until cancelled (run it under a supervisor/task group)."""
+        while True:
+            await self._send_controls(self._generation)
+            if self._queued_frames == 0 and not self._mixer.has_background:
+                self._pacer.mark_gap()
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+            now = self._now_ms()
+            wait_ms = self._pacer.next_send_ms(now) - now
+            if wait_ms > _DUE_EPSILON_MS:
+                await self._clock.sleep(wait_ms / _MS_PER_SECOND)
+                continue
+            await self._send_frame(now)
+
+    async def _send_frame(self, now: float) -> None:
+        generation = self._generation
+        speech = self._queue[0] if self._queue else None
+        if isinstance(speech, _Frame):
+            self._queue.popleft()
+            self._queued_frames -= 1
+            wire = self._mixer.speech(speech.data)
+        else:
+            speech = None
+            wire = self._mixer.idle()
+        await self._sink.send_audio(wire)
+        if generation != self._generation:
+            return
+        lateness = self._pacer.on_sent(now)
+        self._count(lateness, speech=speech is not None)
+        if isinstance(speech, _Frame):
+            speech.tracker.frame_sent(now)
+        await self._send_controls(generation)
+
+    async def _send_controls(self, generation: int) -> None:
+        """Marks and finishes at the head of the queue, in order (stops early when a clear intervenes)."""
+        while self._queue and not isinstance(self._queue[0], _Frame) and generation == self._generation:
+            item = self._queue.popleft()
+            if item.tracker.stopped:
+                continue
+            if isinstance(item, _SegmentEnd):
+                name = item.tracker.end_segment(item.chars)
+                await self._sink.send_mark(name)
+                self._stats.marks_sent += 1
+            else:
+                item.tracker.finish()
+
+    def _count(self, lateness: float, *, speech: bool) -> None:
+        stats = self._stats
+        stats.frames_sent += 1
+        if speech:
+            stats.speech_frames += 1
+        else:
+            stats.idle_frames += 1
+        if lateness > LATE_THRESHOLD_MS:
+            stats.late_frames += 1
+        stats.max_lateness_ms = max(stats.max_lateness_ms, lateness)
+
+    def _require_open(self) -> PlaybackTracker:
+        if self._open is None:
+            message = "no open utterance: call start_utterance first"
+            raise RuntimeError(message)
+        return self._open
+
+    def _now_ms(self) -> float:
+        return self._clock.monotonic() * _MS_PER_SECOND

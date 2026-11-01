@@ -48,7 +48,7 @@
   - Deliverables: `PlaybackTracker` (absolute alignment timeline per context, frames-sent clock, Telnyx mark correlation, `played_text(at)`), `truncate_assistant_message`
   - Acceptance: tests with synthetic alignments verify truncation at word boundaries for interrupts at arbitrary times.
 
-- [ ] P04-T09 Outbound pacer and background mixer
+- [x] P04-T09 Outbound pacer and background mixer — va_voice.outbound (FramePacer drift-free anchor schedule, lead 3, throttle; FrameMixer unit-gain mix + μ-law passthrough + L16 byte order; OutboundAudio marks after last frame, clear with generation guard), va_voice.background (BackgroundLibrary per-rate assets, levels ±1 dB), va_voice.noise SpectralGate (−11.6 dB, gated Silero recall 100 %); specs/07 §9/§10.1/§10.2 Decisions; make test 7199 passed / 7 skipped (98.54 %, new modules 100 %), lint/typecheck/placeholders/spec refs 0, jscpd 0, radon A
   - Spec refs: specs/07-media-pipeline.md (outbound pacing, background track mixing, noise_cancellation handling)
   - Depends on: P04-T01, P00-T10
   - Deliverables: `OutboundAudio` (20 ms pacing with lead buffer, clear(), background loop mixing at configured level, pure passthrough when background is `none`), noise handling module as specified

@@ -978,3 +978,165 @@ playback.py + alignment.py 100 %). Checked against specs/07 §7 step 6 / §9 (pl
 is_playing until last echo or total+200, history `text_spoken—`) and specs/09 §7 (chunk-relative → absolute, sequential
 whitespace-insensitive matching, OffsetMap mapping, word-boundary text_until, missing-alignment interpolation per
 Decision). Pure ms API, no sleeps; hypothesis reference tests for word-boundary truncation.
+
+## Plan P04-T09 (Planner, 2026-11-01)
+Outbound pacer + background mixer + `noise_cancellation` VAD-path gate. Specs: specs/07 §9 (OutboundClock: drift-
+corrected targets, idle frames, lead ≤ 3 frames, lead reset after clear, marks after a segment's last frame, 100005
+backoff), §10.1 (SpectralGate), §10.2 (tracks, levels, unit-gain mixing, clip, no ducking, outbound only), §15
+(hd: PCM16LE TTS in, L16 wire byte order out), §21/§22. No new deps (numpy only). va_voice stays transport-agnostic.
+
+### Files
+1. `packages/va_voice/src/va_voice/background.py`
+   - `BackgroundTrack = Literal["office", "cafe", "restaurant", "none", "phone_static"] | None`.
+   - `resolve_background(track: str | None) -> str | None`: `None`/`"phone_static"` → `"static"` (org default name,
+     specs/04 §7), `"none"` → `None`, office/cafe/restaurant → itself, anything else `ValueError`.
+   - `class BackgroundAssetError(Exception)`.
+   - `class BackgroundLoop(samples: NDArray[np.int16], frame_samples: int)`: read-only loop, `next_frame() ->
+     NDArray[np.int16]` (wraps around the seam, copies across the seam only), `position` (sample index), `reset()`;
+     empty samples or frame_samples ≤ 0 → ValueError.
+   - `class BackgroundLibrary(assets_dir: Path)`: `async loop(track: str | None, fmt: AudioFormat) ->
+     BackgroundLoop | None` (None for `"none"`); 8 kHz formats read `<name>.ulaw` (ulaw_decode), 16 kHz read
+     `<name>.pcm16k` (LE int16); decoded arrays cached per (name, rate) and shared (`flags.writeable=False`), each
+     call returns a fresh loop (own position); file read + decode in `asyncio.to_thread`; missing/empty/odd-length
+     file → `BackgroundAssetError`. Path comes from the caller (media worker passes `VA_ASSETS_DIR`/`assets` later).
+2. `packages/va_voice/src/va_voice/outbound.py`
+   - Constants: `LEAD_FRAMES: Final = 3`, `THROTTLED_LEAD_FRAMES: Final = 1`, `RATE_LIMIT_PAUSE_MS: Final = 100`,
+     `RATE_LIMIT_WINDOW_MS: Final = 5000`, `MAX_CATCHUP_FRAMES: Final = 5`.
+   - `class FrameMixer(fmt: AudioFormat, *, background: BackgroundLoop | None = None, gain_db: float = 0.0,
+     wire_byte_order: L16ByteOrder = "big")`: `fmt` is the TTS format (`ULAW_8000` → μ-law wire; `PCM16LE_16000` →
+     L16 wire in `wire_byte_order`; other formats ValueError). `speech(frame: bytes) -> bytes` (len must equal
+     `fmt.frame_bytes`, else ValueError): no background + μ-law ⇒ exact passthrough (no decode); otherwise decode →
+     int32 add `bg × gain` → clip int16 → encode. `idle() -> bytes | None`: background-only frame, `None` when no
+     background. The background advances one frame per call of either method (continuous bed). `has_background`.
+   - `class FramePacer(*, frame_ms=20, lead_frames=LEAD_FRAMES)` (pure, ms): anchor `t0`, `sent` since anchor.
+     `next_send_ms(now) -> float`: if not anchored or Telnyx has drained (`now ≥ t0 + sent×20`) ⇒ `now` (re-anchor
+     happens in `on_sent`); else `max(t0 + (sent − lead)×20, paused_until)`. `on_sent(now)`: re-anchor when needed
+     (`t0 = now, sent = 0`), and when `now − target > MAX_CATCHUP_FRAMES×20` (loop stalled) re-anchor too (no burst);
+     `sent += 1`; returns lateness ms (`now − target`, ≥ 0). `reset()` (after clear: Telnyx buffer empty, lead
+     restarts at 0 ⇒ next frame immediately, burst of up to `lead` frames again). `throttle(now)`: pause until
+     now+100, lead = 1 until now+5000 (then back to configured). Lead in effect: `lead_frames_at(now)`.
+   - `class OutboundSink(Protocol)`: `async send_audio(frame: bytes) -> None`, `async send_mark(name: str) -> None`
+     (T12 Transport satisfies it; base64/JSON is the transport's job).
+   - `@dataclass OutboundStats`: `frames_sent`, `speech_frames`, `idle_frames`, `marks_sent`, `late_frames`
+     (lateness > 0 ms... use > `LATE_THRESHOLD_MS = 30`, specs/07 §21), `max_lateness_ms`, `dropped_frames`.
+   - `class OutboundAudio(sink, mixer: FrameMixer, *, clock: Clock, pacer: FramePacer | None = None)`:
+     - `start_utterance(tracker: PlaybackTracker)`: subsequent audio belongs to it (ValueError if tracker.format ≠
+       mixer fmt is not needed — skip; RuntimeError if an utterance is open and not finished).
+     - `push_audio(chunk: bytes)`: through an internal `Framer` into the queue (requires open utterance).
+     - `end_segment(chars: int)`: queue a segment-end item; when the clock reaches it right after sending the
+       segment's last frame (same tick) it calls `tracker.end_segment(chars)` and `sink.send_mark(name)`. A segment
+       with no frames since the previous one carries its chars into the next segment end (never an empty segment).
+     - `finish_utterance()`: flush the Framer (pad), close the trailing segment (carried chars), queue finish →
+       `tracker.finish()` after the last mark. Utterance closed for new audio.
+     - `clear() -> int`: drop queued frames + Framer + control items, detach the tracker (caller calls
+       `tracker.stop`), `pacer.reset()`, `stats.dropped_frames += n`, return n (sync; barge-in, sends nothing —
+       transport.clear is the pipeline's call, T12).
+     - `rate_limited()`: `pacer.throttle(now)` (Telnyx 100005).
+     - `run()`: loop until cancelled: when the queue is empty and the mixer has no background, wait on an
+       `asyncio.Event` (set by push/finish/end_segment); else `target = pacer.next_send_ms(now)`; if target > now →
+       `await clock.sleep((target − now)/1000)` and re-check (a clear during the sleep is respected); else pop a
+       speech frame (`mixer.speech`) or build `mixer.idle()`; `await sink.send_audio(frame)`;
+       `lateness = pacer.on_sent(now)`; speech frames call `tracker.frame_sent(now)`; then process control items at
+       the head (marks/finish) in order. Time in ms from `clock.monotonic() × 1000`.
+     - properties `buffered_frames`, `buffered_ms`, `idle` (no queued speech), `stats`, `tracker`.
+3. `packages/va_voice/src/va_voice/noise.py` — `SpectralGate` (16 kHz int16 streaming):
+   - Constants: `FFT_SIZE = 512`, `HOP = 256`, `GAIN_FLOOR = 0.25`, `OVER_SUBTRACTION = 1.5`, `NOISE_PERCENTILE = 20`,
+     `PROFILE_WINDOW_S = 1.5` (⇒ 94 frames), `SMOOTHING = 0.6`, `MIN_PROFILE_FRAMES = 16` (0.25 s), `LATENCY_MS = 16`,
+     `PERCENTILE_TO_MEAN = sqrt(pi/2) / sqrt(-2 ln 0.8)` (≈ 1.876, Rayleigh mean / p20).
+   - Periodic Hann analysis window (sums to 1 at 50 % overlap ⇒ plain overlap-add reconstructs exactly with g = 1).
+   - `process(pcm16k: NDArray[int16]) -> NDArray[int16]`: any chunk size, output has exactly `len(input)` samples,
+     delayed by 256 samples (first 256 output samples are zeros); `set_speech(active: bool)` (VAD feedback: profile
+     ring updated only while False); `reset()`; `profile_ready`.
+   - Per frame: `mag = |rfft(frame × w)|`; if not speech append mag to a ring (94); profile =
+     `PERCENTILE_TO_MEAN × percentile(ring, 20, axis=0)` recomputed only when the ring changed; until
+     `MIN_PROFILE_FRAMES` frames: g = 1; `g_raw = max(0.25, 1 − 1.5 × noise / max(mag, ε))`;
+     `g = 0.6 × g_prev + 0.4 × g_raw`; `irfft(X × g)` overlap-added; output rounded + clipped to int16.
+   - Pure CPU, vectorised; caller runs it on the VAD path (T12 wires it in and feeds VAD events to `set_speech`).
+4. `va_voice/__init__.py` docstring if it lists modules (check). specs/07 Decisions (2026-11-01) P04-T09:
+   - §9: `FramePacer`/`OutboundAudio` semantics above (targets from anchor via the injected Clock's monotonic, lead =
+     burst of up to 3 frames after an (re)anchor = Telnyx queue empty, drained/idle ⇒ re-anchor, stall >5 frames ⇒
+     re-anchor instead of a burst, marks in the same tick as the last frame, empty segments merged, clear is local,
+     late frame = > 30 ms past target).
+   - §10.1: the spec formula with the raw 20th percentile only reaches ≈ −8 dB on stationary Gaussian noise (Rayleigh
+     magnitudes: p20 ≈ 0.53 × mean), short of §22's ≥ 10 dB; the profile is therefore the p20 scaled by the
+     Rayleigh mean/p20 ratio 1.876 (≈ −11.6 dB measured); smoothing is `g = α g_prev + (1−α) g_raw` with α = 0.6;
+     unity gain until 0.25 s of non-speech; output length = input length, 256-sample delay.
+   - §10.2: `phone_static` (org default enum) ≡ null ⇒ `static`; `BackgroundLibrary` file choice per rate; gain 0 dB.
+5. AGENTS.md bullet (P04-T09).
+
+### Tests (`packages/va_voice/tests/`)
+- `test_background.py`: resolve table (+ ValueError); library loads every track for ULAW_8000 and PCM16LE_16000 from
+  repo `assets/audio` (path via `Path(__file__).parents[3] / "assets" / "audio"`), cache shares the array (`is`) but
+  loops have independent positions; `"none"` → None; missing/odd-length file → BackgroundAssetError (tmp_path);
+  loop wraps exactly at the seam (concatenated frames over 2 loops == tile of samples); level: RMS of a full loop of
+  idle frames for office/cafe/restaurant −22 ± 1 dBFS and static −40 ± 1 (both formats) — acceptance ±1 dB.
+- `test_outbound_mixer.py`: μ-law passthrough identity (bytes object equal, no background); mix = clip(speech + bg)
+  for PCM16LE → L16 big and little byte orders (exact); μ-law mixed decode within 1 quantization step of the
+  int16 sum; clipping at ±32767/−32768; gain_db −6 halves bg (≈); mixed speech+office RMS within 1 dB of the power
+  sum of the parts; wrong frame length ValueError; unsupported format ValueError; idle() None without background.
+- `test_outbound_pacer.py` (pure FramePacer, explicit ms): first 3 frames immediately then every 20 ms (targets
+  0,0,0,0?? → frames 0..3 at t0 since lead 3 means frame n due at t0+(n−3)×20 for n≥3: n=0..3 at t0, n=4 at t0+20);
+  no drift: targets depend on anchor only (simulate jittery wake-ups, the 1000th target is exactly t0 + 997×20);
+  drained ⇒ re-anchor; stall > 100 ms ⇒ re-anchor (no burst), lateness reported; reset ⇒ immediate next send;
+  throttle ⇒ pause 100 ms then lead 1 for 5 s then back to 3.
+- `test_outbound_audio.py` (async, `ManualClock` from clock_helpers, recording sink with `(t_ms, kind, value)`):
+  utterance of 10 frames: first 3 sent at t=0 and rest at 20 ms cadence (`wait_for_sleep`/`run_for`), mark
+  `seg:1:0` sent right after the segment's last frame and before any later frame, tracker `frames_sent`,
+  `segments`, `finished`; arbitrary chunk sizes re-framed (padded last frame on finish); empty segment chars carry
+  forward; with background: idle frames every 20 ms before/after speech, speech frames mixed; without background:
+  no frames while idle (loop parks on the event, no sleeper), speech after idle re-anchors (burst again);
+  `clear()` mid-utterance drops the rest (returned count, dropped_frames), no further speech frames or marks of that
+  utterance, next utterance starts with a burst (lead reset); rate_limited pauses 100 ms; push without utterance
+  RuntimeError; stats (speech/idle/marks, late_frames 0 with ManualClock); cancellation of `run()` is clean.
+- `test_noise.py`: unity reconstruction (no profile / speech flag on) output == input delayed by 256 (±1 LSB);
+  output length == input length for random chunk splits (hypothesis or param list) and chunking-invariant output;
+  stationary noise (PCG64 Gaussian, seeded via `numpy.random.PCG64(seed).random_raw()` or default_rng is fine in
+  tests — not committed data) reduced ≥ 10 dB after the profile window (measure 1.5 s → end); profile not updated
+  while speech flag on (loud tone during speech is not learned: gain stays 1 for it afterwards… assert profile array
+  unchanged); reset clears; real-model recall: speech fixture (`read_fixture("speech.wav")`) + stationary noise at
+  −40 dBFS (its static gaps already noisy), gate in front of `SileroVad` with VAD events driving `set_speech`, speech
+  recall vs `SPEECH_SEGMENTS_MS` ≥ 95 % (shift detections by LATENCY_MS); module skips like test_vad_silero when
+  the model is absent (reuse its fixtures/conftest pattern).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (new modules 100 %), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a packages/va_voice/src`,
+pip-audit + pnpm audit (no new deps).
+
+### Risks
+- ManualClock + event waits: assert with `wait_for_sleep` before `run_for`; the no-background idle path must park
+  on the Event (no zero-length sleeps → no busy loop).
+- Per-frame CPU: mixing ≈ µs; gate ≈ one rfft/irfft per 16 ms — fine; percentile only when the ring changes.
+- jscpd: share a recording sink/helpers in `tests/support/` if two test modules need them.
+- μ-law level of static at −40 dBFS is near μ-law quantization: the asset was levelled per format already (decision
+  2026-10-25), so ±1 dB holds; if not, measure and report rather than loosening.
+
+## Build P04-T09 (Builder, 2026-11-01)
+Implemented per plan with these deviations (all recorded in specs/07 §9/§10.1/§10.2 Decisions P04-T09):
+- `FramePacer`: no separate MAX_CATCHUP stall rule. With lead 3, a frame more than 60 ms late already means Telnyx
+  has drained, so the drained re-anchor covers stalls. Burst targets are clamped at the anchor (`max(0, n - lead)`),
+  so burst frames are not counted late. `mark_gap()` (called when the loop parks with nothing to send) means the
+  next frame's wait is not counted as lateness.
+- `FrameMixer.idle()` raises RuntimeError when there is no background (check `has_background` first) instead of
+  returning None, which removes a dead branch in the loop.
+- `SpectralGate.process` returns whole 256-sample hops: the output is the input delayed by exactly 256 samples, but
+  each call's output is not the same length as its input. Exact per-call length would need a 512-sample delay;
+  SileroVad accepts any chunk size.
+- A partial frame stays in the Framer across segment boundaries (no padding until finish_utterance), so a mark can
+  trail its clause by up to 20 ms. clear() uses a generation counter, so a frame that was in flight during the clear
+  does not count.
+Files: va_voice/{background,outbound,noise}.py; tests test_{background,outbound_mixer,outbound_pacer,outbound_audio,noise}.py;
+specs/07 Decisions; AGENTS bullet.
+Measured: gate -11.6 dB on -30 dBFS Gaussian noise, 0.49 ms CPU per 20 ms frame. Gated Silero finds both fixture
+segments, recall 100 %. Asset levels are within 0.13 dB of target in both formats.
+Gates: fmt ok; lint pass; typecheck pass (859 files); placeholders 0; spec refs 0; va_voice 679 passed (the 3 new
+modules at 100 %); make test 7199 passed / 7 skipped (98.54 %); jscpd 0 clones; radon A (2.10 va_voice); pip-audit
+no known vulns; pnpm audit: 3 moderate, no high.
+
+## Review P04-T09 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 7199 passed / 7 skipped (98.54 %),
+jscpd 0 clones, radon A (2.01 on the new modules). Checked against specs/07 §9 (≤ 3 frames ahead of playback, lead
+reset after clear, mark after a segment's last frame, 100005 pause 100 ms + lead 1 for 5 s), §10.1 (STFT 512/256
+Hann, p20 profile over 1.5 s non-speech, floor 0.25, α 0.6; Rayleigh scale recorded as a Decision for §22 ≥ 10 dB),
+§10.2 (asset per rate, unit gain, clip, no ducking, outbound only), §15 (L16 wire byte order). Tests run on
+ManualClock with events (no sleeps); clear-in-flight and stopped-tracker paths covered; real-Silero recall test.

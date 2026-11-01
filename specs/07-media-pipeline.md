@@ -309,6 +309,23 @@ is concatenated to the previous user turn text (`"{prev} {new}"`) before re-runn
 
 Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms and reduces lead to 1 frame for 5 s.
 
+> Decision (2026-11-01): P04-T09. `va_voice.outbound` splits the clock into a pure ms schedule and the loop.
+> `FramePacer` anchors at the first frame sent while Telnyx's buffer is empty (`t0`) and schedules frame `n` since
+> the anchor at `t0 + max(0, n − lead) × 20` (lead 3, so a burst of up to 4 frames goes out at once and the queue at
+> Telnyx never exceeds 60 ms beyond the frame playing); targets come from the anchor and the injected `Clock`'s
+> monotonic time, never from summed sleeps. Once wall-clock time reaches `t0 + sent × 20` Telnyx has drained and the
+> next frame re-anchors (after an underrun or a stalled loop the burst restarts instead of catching up). `reset()`
+> after a clear re-anchors at once ("lead resets to 0"). A frame is late when it goes out more than 30 ms past its
+> target (§21); the wait after a stretch with nothing to send is not lateness. `100005`: sends pause until
+> `now + 100 ms` and the lead is 1 until `now + 5 s`. `OutboundAudio(sink, FrameMixer, clock=)` re-frames TTS audio
+> per utterance (`start_utterance(PlaybackTracker)`, `push_audio`, `end_segment(chars)`, `finish_utterance()`;
+> a partial frame stays in the framer across a segment boundary, so a mark can trail its clause by < 20 ms, and only
+> `finish_utterance` pads), sends a segment's mark in the same tick as its last frame, carries the characters of a
+> segment without whole frames into the next one, and calls `tracker.finish()` after the last mark. `clear()` is
+> local: it drops queued frames/marks of every utterance and resets the pacer; the caller sends `transport.clear` and
+> stops the trackers (marks of stopped trackers are never sent; a frame in flight during a clear does not count).
+> Without background the loop parks on an event while nothing is queued (no sleeps, no idle frames).
+
 ## 10. Audio conditioning
 
 ### 10.1 `noise_cancellation`
@@ -320,6 +337,16 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
   magnitude over the trailing 1.5 s of non-speech windows (updated only during VAD non-speech); gain per bin
   `g = max(0.25, 1 − (1.5 × noise / max(mag, ε)))` (floor −12 dB), smoothed over time with α = 0.6; inverse STFT with
   overlap-add. Added VAD latency 16 ms (accounted in `eot_ms`). When `noise_cancellation=false` the gate is bypassed.
+
+> Decision (2026-11-01): P04-T09. With the raw 20th percentile as the noise estimate the gate only reaches ≈ −8 dB
+> on stationary Gaussian noise (Rayleigh magnitudes: the 20th percentile is ≈ 0.53 × the mean), short of the §22
+> target of ≥ 10 dB. `va_voice.noise.SpectralGate` therefore scales the per-bin 20th percentile by the Rayleigh
+> mean/20th-percentile ratio `sqrt(π/2) / sqrt(−2 ln 0.8)` ≈ 1.876 (measured ≈ −11.6 dB at −30 dBFS). The window is
+> the periodic Hann (it sums to 1 at 50 % overlap, so unit gains reconstruct the input exactly); the profile ring
+> holds the last 94 non-speech frames (1.5 s) and gains stay 1 until 16 of them (0.25 s) were seen; smoothing is
+> `g = 0.6 × g_prev + 0.4 × g_raw`. `process()` accepts any chunk size and returns the samples that are final, in
+> whole hops: the output stream is the input delayed by exactly 256 samples, so VAD times on the gated stream are
+> 16 ms late in stream time (subtract `LATENCY_MS`). VAD decisions are fed back with `set_speech(active)`.
 
 ### 10.2 Background tracks
 
@@ -346,6 +373,15 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 > drift check: committed files must be byte-identical to a regeneration.
 - Mixing: decode TTS frame to int16, add `background_frame × gain`, clip to int16, encode. Agent speech is not ducked.
 - Background never goes to the STT (it is outbound only).
+
+> Decision (2026-11-01): P04-T09. `background_track` values resolve with `va_voice.background.resolve_background`:
+> `null` and the org-settings value `phone_static` (`04` §7) → asset `static`, `office`/`cafe`/`restaurant` → their
+> asset, `"none"` → no track (anything else is an error). `BackgroundLibrary(assets_dir).loop(track, fmt)` reads
+> `<asset>.ulaw` for 8 kHz legs and `<asset>.pcm16k` for 16 kHz legs (decoded once per process and shared
+> read-only; each call gets its own loop position). `FrameMixer` accepts the TTS formats `ulaw_8000` and `pcm_16000`
+> and applies unit gain by default (assets carry their level); μ-law speech without background is passed through
+> byte for byte, `pcm_16000` is converted to the `TELNYX_L16_BYTE_ORDER` wire order (§15). The background advances
+> one frame per frame sent, speech or idle, so the bed is continuous.
 
 ## 11. Greeting logic
 
