@@ -9,6 +9,7 @@ attached to the customer.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from va_sim.stripe.errors import invalid_request
@@ -17,9 +18,10 @@ from va_sim.stripe.params import check_known, mapping, metadata, string
 from va_sim.stripe.payment_methods import require_customer, resolve_payment_method
 
 if TYPE_CHECKING:
+    from va_sim.state import SimState
     from va_sim.stripe.http import StripeCall
 
-__all__ = ["create_customer", "retrieve_customer", "update_customer"]
+__all__ = ["create_customer", "new_customer_json", "retrieve_customer", "update_customer"]
 
 _CUSTOMER_ID_LENGTH: Final = 14
 _SCALARS: Final = ("email", "name", "description", "phone")
@@ -65,10 +67,16 @@ def _apply_scalars(call: StripeCall, customer: dict[str, Any]) -> None:
         customer["metadata"] = patch.apply(customer["metadata"])
 
 
+def new_customer_json(state: SimState, fields: Mapping[str, Any]) -> dict[str, Any]:
+    """A new customer object with a seeded id (not stored)."""
+    customer_id = f"cus_{state.ids.alnum(_CUSTOMER_ID_LENGTH)}"
+    return customer_json(customer_id, int(state.clock.now().timestamp()), fields)
+
+
 async def create_customer(call: StripeCall) -> dict[str, Any]:
     check_known(call.params, _CREATE_PARAMS)
-    customer_id = f"cus_{call.state.ids.alnum(_CUSTOMER_ID_LENGTH)}"
-    customer = customer_json(customer_id, call.now, {})
+    customer = new_customer_json(call.state, {})
+    customer_id = customer["id"]
     _apply_scalars(call, customer)
     # Validate everything before anything is stored, so a rejected create leaves no trace.
     settings = mapping(call.params, "invoice_settings")

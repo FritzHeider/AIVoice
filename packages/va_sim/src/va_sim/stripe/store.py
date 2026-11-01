@@ -1,4 +1,5 @@
-"""FakeStripe state (specs/30 §4.1 Decision P03-T07a rules 1, 4, 6-11): accepted keys, objects, the event log,
+"""FakeStripe state (specs/30 §4.1 Decisions P03-T07a rules 1, 4, 6-11 and P03-T07b rule 8): accepted keys,
+objects (customers, payments, catalog, checkout, subscriptions, invoices), the event log,
 the idempotency cache, and the control config.
 
 Objects are global to the simulator (Stripe accounts are not modelled). ``reset`` drops everything and
@@ -63,6 +64,17 @@ class StripeStore:
         self.cards: dict[str, CardSpec] = {}
         self.payment_intents: dict[str, dict[str, Any]] = {}
         self.portal_sessions: dict[str, dict[str, Any]] = {}
+        self.products: dict[str, dict[str, Any]] = {}
+        self.prices: dict[str, dict[str, Any]] = {}
+        self.checkout_sessions: dict[str, dict[str, Any]] = {}
+        # Per checkout session: its line ``item`` objects and the payment_intent_data / subscription_data.
+        self.checkout_items: dict[str, list[dict[str, Any]]] = {}
+        self.checkout_options: dict[str, dict[str, Any]] = {}
+        self.setup_intents: dict[str, dict[str, Any]] = {}
+        self.subscriptions: dict[str, dict[str, Any]] = {}
+        # Per subscription: proration lines waiting for the next invoice.
+        self.pending_lines: dict[str, list[dict[str, Any]]] = {}
+        self.invoices: dict[str, dict[str, Any]] = {}
         self.events: dict[str, dict[str, Any]] = {}
         self.idempotency: dict[tuple[str, str], IdempotencyEntry] = {}
 
@@ -93,5 +105,17 @@ class StripeStore:
         self.cards.clear()
         self.payment_intents.clear()
         self.portal_sessions.clear()
+        for billing in (
+            self.products,
+            self.prices,
+            self.checkout_sessions,
+            self.checkout_items,
+            self.checkout_options,
+            self.setup_intents,
+            self.subscriptions,
+            self.pending_lines,
+            self.invoices,
+        ):
+            billing.clear()
         self.events.clear()
         self.idempotency.clear()

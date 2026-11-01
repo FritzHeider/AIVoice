@@ -119,7 +119,7 @@
     attaches a payment method, confirms an off-session PaymentIntent, gets `CardError` `card_declined` when declining is
     armed, and `stripe.Webhook.construct_event` verifies every emitted webhook (tests).
 
-- [ ] P03-T07b FakeStripe checkout, subscriptions, invoices, and lifecycle events
+- [x] P03-T07b FakeStripe checkout, subscriptions, invoices, and lifecycle events — products/prices, checkout payment|subscription|setup + hosted page, subscriptions with prorations, invoices + pay, renewal control; stripe SDK acceptance + construct_event on every webhook; 5062 tests pass, coverage 98.18% (va_sim.stripe 99%), jscpd 0, radon avg A
   - Spec refs: specs/30-testing-and-evals.md §4.1 (FakeStripe); specs/24-billing-and-limits.md §7 (top-up and subscription checkout, plan change, cancel)
   - Depends on: P03-T07a
   - Deliverables: prices/products needed by `price_data`/`price` line items, checkout sessions (`mode` payment |

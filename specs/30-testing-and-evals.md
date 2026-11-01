@@ -1107,6 +1107,96 @@ returns `card_declined`), `GET /v1/payment_intents/{id}`, `POST /v1/subscription
 >    (`{"deliveries"}`). `/sim/reset` drops every object, event, idempotency entry, added key and delivery and restores
 >    the config; `/sim/state` adds `stripe: {customers, payment_methods, payment_intents, events, webhook_deliveries}`.
 
+> Decision (2026-11-01): FakeStripe checkout, subscriptions, invoices (P03-T07b). Builds on the P03-T07a pipeline
+> (auth, form decoding, idempotency, `card_error` declines, signed events). Current API shapes: subscription period
+> dates live on the items; invoices reference their subscription through `parent.subscription_details`.
+> 1. Seeded ids: `prod_`+14, `price_`+24, `cs_test_`+58, `li_`+24 (checkout item), `seti_`+24, `sub_`+24, `si_`+14,
+>    `in_`+24, `il_`+24. Every object has `id`, `object`, `created` (sim clock), `livemode: false`.
+> 2. `POST /v1/products` (`name` required; optional custom `id`, duplicate → 400 `resource_already_exists`;
+>    `description`, `metadata`, `active`), `GET /v1/products/{id}`. `POST /v1/prices`: `currency` (lowercased),
+>    `unit_amount` ≥ 0, exactly one of `product` | `product_data[name, description, metadata]`, optional
+>    `recurring[interval]` day|week|month|year with `recurring[interval_count]` 1..(365|52|12|1) (licensed only),
+>    `nickname`, `lookup_key` (unique; a duplicate is 400 unless `transfer_lookup_key=true` moves it), `metadata`,
+>    `active`. `GET /v1/prices/{id}`, `GET /v1/prices` (filters `product`, `active`, `type`, `lookup_keys[]`; paging
+>    as P03-T07a rule 6). A referenced object that does not exist is 404 `resource_missing` (as P03-T07a).
+> 3. `POST /v1/checkout/sessions`: `mode` payment|subscription|setup and `success_url` required; `cancel_url`;
+>    `customer` (must exist) or `customer_email` (not both); `client_reference_id`; `metadata`;
+>    `line_items[n]{price | price_data{currency, unit_amount, product | product_data, recurring?}, quantity ≥ 1}`;
+>    `payment_intent_data{setup_future_usage, description, metadata}` (payment mode only);
+>    `subscription_data{description, metadata}` (subscription mode only); `currency`; `payment_method_types[]`;
+>    `expires_at` (30 min..24 h ahead, default +24 h, reported but not enforced). Payment mode needs ≥ 1 line and only
+>    one-time prices; subscription mode needs ≥ 1 recurring price, all recurring prices on one interval and count
+>    (one-time items are billed on the first invoice); setup mode takes no line items and needs `currency` or
+>    `payment_method_types`; all lines share one currency. Stored prices must be active; `price_data` is stored as an
+>    inactive price only after the whole request validated (a rejected request stores nothing). The session's `url`
+>    is `{request base}/sim/stripe/checkout/{id}`; `amount_total` = Σ `unit_amount`×`quantity` (null in setup mode).
+>    Line items are listed by `GET /v1/checkout/sessions/{id}/line_items` (`item` objects embedding the full price).
+>    `POST /v1/checkout/sessions/{id}/expire` (open only, else 400) → `expired`, `url: null`,
+>    `checkout.session.expired`.
+> 4. Hosted page `GET /sim/stripe/checkout/{id}` (control route): unknown → 404 `not_found`, not open → 409
+>    `conflict`; no `outcome` → 200 HTML; `outcome=cancel` expires it (`checkout.session.expired`) and answers 303 to
+>    `cancel_url` (200 HTML without one); `outcome=success[&card=<P03-T07a magic id>]` (default `pm_card_visa`;
+>    unknown → 400) completes it and answers 303 to `success_url` with `{CHECKOUT_SESSION_ID}` substituted; any other
+>    outcome → 400. The page passes 3-D Secure, so authentication cards succeed; a decline (the card or the armed
+>    `decline` config; setup mode never declines) answers 402 HTML naming the decline code and creates nothing. The
+>    customer is the session's, else a new one with `customer_email`; the card becomes a new `pm_…`. Payment mode: a
+>    `succeeded` PaymentIntent with `payment_intent_data` fields (`payment_intent.succeeded`); the payment method is
+>    attached to the customer only with `setup_future_usage` and the customer's default never changes. Subscription
+>    mode: the payment method is attached and becomes the subscription's `default_payment_method`; rule 5 with
+>    `subscription_data` (`customer.subscription.created`, `invoice.paid`). Setup mode: the payment method is attached;
+>    a `succeeded` off-session SetupIntent (`GET /v1/setup_intents/{id}`; `setup_intent.succeeded`). Then
+>    `checkout.session.completed` (session `complete`, `payment_status` paid | no_payment_required, `url: null`,
+>    `customer`, `customer_details`, and `payment_intent` | `subscription` + `invoice` | `setup_intent`). Page events
+>    carry `request: {id: null, idempotency_key: null}`.
+> 5. `POST /v1/subscriptions`: `customer` and `items[n]{price, quantity}` required (active recurring prices on one
+>    interval, count and currency); `default_payment_method` (attached to the customer); `metadata`; `description`;
+>    `cancel_at_period_end`; `payment_behavior` allow_incomplete (default) | default_incomplete | error_if_incomplete;
+>    `off_session`, `proration_behavior` accepted. The first period is `[now, now + interval×count)` (months and years
+>    keep the anchor day, clamped to the month end: Jan 31 → Feb 28 → Mar 31). It is invoiced at once
+>    (`subscription_create`) and charged to `default_payment_method`, else the customer's invoice default (API charges
+>    are off-session: an authentication card declines with `authentication_required`). Nothing due → paid without a
+>    charge; no payment method or `default_incomplete` → `incomplete`, invoice open, no invoice event; a decline under
+>    `error_if_incomplete` → 402 `card_error` (400 without a payment method) storing nothing; another decline →
+>    `incomplete`, invoice open with `attempt_count` 1 (`invoice.payment_failed`); success → `active`
+>    (`invoice.paid`). `customer.subscription.created` (final status) precedes the invoice event. `GET
+>    /v1/subscriptions/{id}`; `GET /v1/subscriptions` (filters `customer`, `price`, `status`: default excludes
+>    canceled, `all`, `ended` = canceled, or one status). `POST /v1/subscriptions/{id}` (not canceled, else 400):
+>    `items[n]{id (required, an item of the subscription), price, quantity}` — a new price must be recurring with the
+>    same interval, count, and currency (else 400 `parameter_invalid`, a sim limitation; adding or removing items is
+>    not supported) —, `proration_behavior` create_prorations (default) | none | always_invoice,
+>    `cancel_at_period_end` (`cancel_at` = period end and `canceled_at` = now, or both null), `metadata` (merge rules
+>    of customers), `default_payment_method` (attached; empty unsets), `description`. A changed item prorates
+>    unless `none`: a credit −round_half_up(old×qty×f) and a charge +round_half_up(new×qty×f), f = unused share of the
+>    item's period; `create_prorations` keeps them for the next invoice, `always_invoice` bills them (plus pending
+>    lines) now (`subscription_update`; a failed charge makes the subscription `past_due`). A change emits
+>    `customer.subscription.updated` with `previous_attributes` holding the old values of the changed top-level
+>    fields (`items` = the whole old items list); `always_invoice` emits the invoice event first; a no-op emits
+>    nothing. `DELETE /v1/subscriptions/{id}` (`invoice_now`, `prorate`, `cancellation_details{comment, feedback}`
+>    accepted; parameters come from the query string and the form body) → `canceled`, `canceled_at` = `ended_at` =
+>    now, pending prorations dropped, `customer.subscription.deleted`; already canceled → 400.
+> 6. Invoices: status open | paid; `total` = Σ lines; the customer's `balance` (negative = credit) is applied when
+>    the invoice opens (`amount_due` = max(total + balance, 0), the rest stays as credit; `starting_balance` /
+>    `ending_balance`); lines carry `pricing.price_details` and `parent.subscription_item_details{subscription,
+>    subscription_item (null for one-time checkout items), proration}`; `number` = `{invoice_prefix}-NNNN`. `GET
+>    /v1/invoices/{id}`, `GET /v1/invoices` (filters `customer`, `subscription`, `status`; paging), `POST
+>    /v1/invoices/{id}/pay` (`payment_method` resolved like P03-T07a rule 6 for the invoice's customer, else the
+>    subscription's; open only, else 400 "Invoice is already paid"; none → 400): success → paid (`invoice.paid`) and a
+>    `past_due`/`incomplete` subscription becomes `active` (`customer.subscription.updated`); a decline → 402
+>    `card_error` with `invoice`, `attempt_count`+1, `invoice.payment_failed`. Invoice charges create no
+>    PaymentIntent and no `payment_intent.*` event (sim simplification).
+> 7. Control: `POST /sim/stripe/subscriptions/{id}/renew` with optional strict body `{"fail": bool}` (default false;
+>    422 `invalid_request` otherwise) ends the current period of an `active`/`past_due` subscription (other statuses
+>    → 409 `conflict`, unknown → 404 `not_found`); the sim clock does not move. `cancel_at_period_end` → `canceled`,
+>    `ended_at` = period end, `customer.subscription.deleted`, answer `{"subscription", "invoice": null}`. Otherwise
+>    every item moves to `[old end, old end + interval)` (anchor day kept) and a `subscription_cycle` invoice (items
+>    plus pending prorations) is charged off-session (`fail: true` forces `generic_decline`; the armed config, the
+>    card, or no payment method also fail): paid → `active`; failed → `past_due`, invoice open. Events: the invoice
+>    event, then `customer.subscription.updated` (`previous_attributes`: `items`, plus `status` when it changed).
+>    Answer 200 `{"subscription", "invoice"}`.
+> 8. `/sim/reset` also drops products, prices, checkout sessions, setup intents, subscriptions, pending prorations,
+>    and invoices; `/sim/state` `stripe` adds `products`, `prices`, `checkout_sessions`, `subscriptions`, `invoices`,
+>    `setup_intents`.
+
 ## 5. End-to-end flows (simulator, `tests_e2e/test_<flow>.py`)
 
 Every flow runs against the compose `e2e` stack through the public API with a fresh org (created via the internal

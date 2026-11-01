@@ -1,7 +1,9 @@
 """FakeStripe control routes (specs/30 §4.1; Decision P03-T07a rule 11), served on the FakeStripe port only.
 
 ``GET``/``PATCH /sim/stripe/config``, ``POST /sim/stripe/api-keys``, ``GET``/``POST /sim/stripe/events``
-(list oldest first; fire an arbitrary signed event), and ``GET /sim/stripe/webhooks`` (delivery log).
+(list oldest first; fire an arbitrary signed event), ``GET /sim/stripe/webhooks`` (delivery log), the
+billing portal and hosted checkout pages, and ``POST /sim/stripe/subscriptions/{id}/renew`` (Decision P03-T07b
+rule 7).
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_sim.control import json_body
+from va_sim.control import json_body, sim_error
+from va_sim.stripe.checkout_page import checkout_page
 from va_sim.stripe.events import emit_event
 from va_sim.stripe.portal import portal_page
+from va_sim.stripe.renewal import renew_subscription
 from va_sim.stripe.store import StripeConfig
 
 if TYPE_CHECKING:
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["stripe_control_routes"]
 
 _KEY_PREFIX: Final = "sk_"
+_RENEWABLE: Final = frozenset({"active", "past_due"})
 
 
 class _Strict(BaseModel):
@@ -47,6 +52,12 @@ class ApiKeyBody(_Strict):
 class FireBody(_Strict):
     type: str = Field(min_length=1)
     object: dict[str, Any]
+
+
+class RenewBody(_Strict):
+    """``fail: true`` declines the renewal charge."""
+
+    fail: bool = False
 
 
 def _config_json(config: StripeConfig) -> JSONResponse:
@@ -89,6 +100,22 @@ def stripe_control_routes(state: SimState) -> list[BaseRoute]:
     async def portal(request: Request) -> Response:
         return await portal_page(state, request)
 
+    async def checkout(request: Request) -> Response:
+        return await checkout_page(state, request)
+
+    async def renew(request: Request) -> Response:
+        body = await json_body(request, RenewBody, allow_empty=True)
+        if isinstance(body, JSONResponse):
+            return body
+        sub_id = request.path_params["sub_id"]
+        subscription = state.stripe.subscriptions.get(sub_id)
+        if subscription is None:
+            return sim_error(404, "not_found", f"no subscription with id {sub_id!r}")
+        if subscription["status"] not in _RENEWABLE:
+            return sim_error(409, "conflict", f"subscription {sub_id} is {subscription['status']}")
+        invoice = await renew_subscription(state, subscription, fail=body.fail)
+        return JSONResponse({"subscription": subscription, "invoice": invoice})
+
     return [
         Route("/sim/stripe/config", read_config, methods=["GET"]),
         Route("/sim/stripe/config", patch_config, methods=["PATCH"]),
@@ -96,4 +123,6 @@ def stripe_control_routes(state: SimState) -> list[BaseRoute]:
         Route("/sim/stripe/events", events, methods=["GET", "POST"]),
         Route("/sim/stripe/webhooks", webhooks, methods=["GET"]),
         Route("/sim/stripe/portal/{session_id}", portal, methods=["GET"]),
+        Route("/sim/stripe/checkout/{session_id}", checkout, methods=["GET"]),
+        Route("/sim/stripe/subscriptions/{sub_id}/renew", renew, methods=["POST"]),
     ]

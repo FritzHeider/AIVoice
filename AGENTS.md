@@ -791,3 +791,13 @@ Grafana 3001
   `*_async(params, options)`) posts with httpx `data=<bytes>`, a DeprecationWarning (error here): SDK tests ignore
   exactly that message with a module `pytestmark` filter, and must `await http_client.close_async()` (untyped:
   `# type: ignore[no-untyped-call]`) or the socket leaks into a later test.
+- 2026-11-01 (P03-T07b): FakeStripe billing (spec: specs/30 §4.1 Decision P03-T07b): `catalog` (products/prices;
+  `parse_price` → `PriceDraft`, `store_price` only after the whole request validated), `checkout` (sessions,
+  line items, expire), `checkout_complete` + `checkout_page` (hosted page `GET /sim/stripe/checkout/{id}?outcome=
+  success|cancel[&card=pm_card_…]`), `subscriptions` (`start_subscription(state, PlannedSubscription, call=)` shared
+  with checkout), `subscription_update` (prorations), `invoicing` (lines as plain dicts, `open_invoice` applies the
+  customer balance, `apply_attempt` + `announce`), `invoices`, `renewal` (control `POST /sim/stripe/subscriptions/
+  {id}/renew {"fail"}`), pure `periods`/`billing_objects`, and `charging` (`decide`, `ChargeDecision.error()`,
+  `new_id`; payment intents use it too). DELETE handlers read query + form params (the SDK sends DELETE params as a
+  query). Tests: `stripe_helpers` `ok`, `monthly_price`, `checkout`, `visit`, `renew`, `subscribed_customer`,
+  `event_types`; proration tests move time with `state.clock.advance(s)` on the accelerated clock.

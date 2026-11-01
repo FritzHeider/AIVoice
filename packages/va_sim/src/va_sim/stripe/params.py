@@ -20,11 +20,15 @@ __all__ = [
     "Params",
     "boolean",
     "check_known",
+    "currency",
+    "hash_list",
     "integer",
     "limit",
     "mapping",
     "metadata",
+    "new_metadata",
     "string",
+    "string_list",
 ]
 
 type Params = Mapping[str, FormValue]
@@ -35,6 +39,7 @@ _FALSE: Final = "false"
 _MAX_LIMIT: Final = 100
 _DEFAULT_LIMIT: Final = 10
 _METADATA_MAX_KEYS: Final = 50
+_CURRENCY: Final = re.compile(r"[a-z]{3}")
 
 
 def _name(prefix: str, name: str) -> str:
@@ -64,29 +69,43 @@ def string(params: Params, name: str, *, required: bool = False, prefix: str = "
     return value
 
 
-def integer(params: Params, name: str, *, required: bool = False) -> int | None:
+def integer(params: Params, name: str, *, required: bool = False, prefix: str = "") -> int | None:
     """A base-10 integer (``parameter_invalid_integer`` otherwise)."""
-    raw = string(params, name, required=required)
+    raw = string(params, name, required=required, prefix=prefix)
     if raw is None:
         return None
     if _INTEGER.fullmatch(raw) is None:
         msg = f"Invalid integer: {raw}"
-        raise invalid_request(msg, code="parameter_invalid_integer", param=name)
+        raise invalid_request(msg, code="parameter_invalid_integer", param=_name(prefix, name))
     return int(raw)
 
 
-def boolean(params: Params, name: str) -> bool | None:
+def boolean(params: Params, name: str, *, prefix: str = "") -> bool | None:
     """``true``/``false`` (``parameter_invalid_boolean`` otherwise)."""
-    raw = string(params, name)
+    raw = string(params, name, prefix=prefix)
     if raw is None:
         return None
     if raw not in {_TRUE, _FALSE}:
         msg = f"Invalid boolean: {raw}"
-        raise invalid_request(msg, code="parameter_invalid_boolean", param=name)
+        raise invalid_request(msg, code="parameter_invalid_boolean", param=_name(prefix, name))
     return raw == _TRUE
 
 
-def mapping(params: Params, name: str) -> Mapping[str, FormValue] | None:
+def currency(
+    params: Params, name: str = "currency", *, required: bool = True, prefix: str = ""
+) -> str | None:
+    """A three-letter ISO currency code, lowercased."""
+    raw = string(params, name, required=required, prefix=prefix)
+    if raw is None:
+        return None
+    value = raw.lower()
+    if _CURRENCY.fullmatch(value) is None:
+        msg = f"Invalid currency: {raw}"
+        raise invalid_request(msg, code="parameter_invalid_string", param=_name(prefix, name))
+    return value
+
+
+def mapping(params: Params, name: str, *, prefix: str = "") -> Mapping[str, FormValue] | None:
     """A nested hash (``name[key]=...``); an indexed list is read as a hash keyed ``"0"``, ``"1"``, ..."""
     value = params.get(name)
     if value is None:
@@ -94,9 +113,32 @@ def mapping(params: Params, name: str) -> Mapping[str, FormValue] | None:
     if isinstance(value, list):
         return {str(index): item for index, item in enumerate(value)}
     if isinstance(value, str):
-        msg = f"Invalid object: {name} must be a hash"
-        raise invalid_request(msg, param=name)
+        full = _name(prefix, name)
+        msg = f"Invalid object: {full} must be a hash"
+        raise invalid_request(msg, param=full)
     return value
+
+
+def hash_list(params: Params, name: str) -> list[Mapping[str, FormValue]] | None:
+    """An indexed list of hashes (``name[0][key]=...``); None when absent."""
+    value = params.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        msg = f"Invalid array: {name} must be a list of hashes"
+        raise invalid_request(msg, param=name)
+    return [item for item in value if isinstance(item, dict)]
+
+
+def string_list(params: Params, name: str) -> list[str] | None:
+    """An indexed list of strings (``name[0]=a`` or ``name[]=a``); None when absent."""
+    value = params.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        msg = f"Invalid array: {name}"
+        raise invalid_request(msg, param=name)
+    return [item for item in value if isinstance(item, str)]
 
 
 def limit(params: Params) -> int:
@@ -131,20 +173,27 @@ class MetadataPatch:
         return merged
 
 
-def metadata(params: Params) -> MetadataPatch | None:
+def metadata(params: Params, *, prefix: str = "") -> MetadataPatch | None:
     """The ``metadata`` parameter as a patch (None when absent)."""
     if params.get("metadata") == "":
         return MetadataPatch(clear=True)
-    hash_ = mapping(params, "metadata")
+    hash_ = mapping(params, "metadata", prefix=prefix)
     if hash_ is None:
         return None
+    full = _name(prefix, "metadata")
     values: dict[str, str] = {}
     for key, item in hash_.items():
         if not isinstance(item, str):
-            msg = f"Invalid metadata[{key}]: values must be strings"
-            raise invalid_request(msg, param=f"metadata[{key}]")
+            msg = f"Invalid {full}[{key}]: values must be strings"
+            raise invalid_request(msg, param=f"{full}[{key}]")
         values[key] = item
     if len(values) > _METADATA_MAX_KEYS:
-        msg = f"Invalid metadata: at most {_METADATA_MAX_KEYS} keys are allowed"
-        raise invalid_request(msg, param="metadata")
+        msg = f"Invalid {full}: at most {_METADATA_MAX_KEYS} keys are allowed"
+        raise invalid_request(msg, param=full)
     return MetadataPatch(values=values)
+
+
+def new_metadata(params: Params, *, prefix: str = "") -> dict[str, str]:
+    """``metadata`` of a newly created object (empty when absent)."""
+    patch = metadata(params, prefix=prefix)
+    return patch.apply({}) if patch is not None else {}

@@ -81,6 +81,12 @@ async def test_reset_drops_everything_and_restores_the_config() -> None:
         "customers": 1,
         "payment_methods": 1,
         "payment_intents": 0,
+        "products": 0,
+        "prices": 0,
+        "checkout_sessions": 0,
+        "subscriptions": 0,
+        "invoices": 0,
+        "setup_intents": 0,
         "events": 1,
         "webhook_deliveries": 0,
     }

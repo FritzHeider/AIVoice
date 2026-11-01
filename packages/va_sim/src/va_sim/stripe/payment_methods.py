@@ -17,11 +17,14 @@ from va_sim.stripe.objects import TEST_CARDS, payment_method_json
 from va_sim.stripe.params import check_known, string
 
 if TYPE_CHECKING:
+    from va_sim.state import SimState
     from va_sim.stripe.http import StripeCall
+    from va_sim.stripe.objects import CardSpec
     from va_sim.stripe.store import StripeStore
 
 __all__ = [
     "attach_payment_method",
+    "create_card_method",
     "customer_payment_methods",
     "require_customer",
     "resolve_payment_method",
@@ -41,6 +44,16 @@ def require_customer(store: StripeStore, customer_id: str, *, param: str = "cust
     return customer
 
 
+def create_card_method(state: SimState, card: CardSpec, *, customer: str | None) -> dict[str, Any]:
+    """Store a new ``pm_...`` for a test card (its behaviour remembered in ``StripeStore.cards``)."""
+    now = state.clock.now()
+    pm_id = f"pm_{state.ids.alnum(_PM_ID_LENGTH)}"
+    method = payment_method_json(pm_id, int(now.timestamp()), card, customer=customer, year=now.year)
+    state.stripe.payment_methods[pm_id] = method
+    state.stripe.cards[pm_id] = card
+    return method
+
+
 def resolve_payment_method(
     call: StripeCall, pm_id: str, *, customer: str | None, param: str = "payment_method"
 ) -> dict[str, Any]:
@@ -51,12 +64,7 @@ def resolve_payment_method(
     store = call.store
     card = TEST_CARDS.get(pm_id)
     if card is not None:
-        new_id = f"pm_{call.state.ids.alnum(_PM_ID_LENGTH)}"
-        year = call.state.clock.now().year
-        method = payment_method_json(new_id, call.now, card, customer=customer, year=year)
-        store.payment_methods[new_id] = method
-        store.cards[new_id] = card
-        return method
+        return create_card_method(call.state, card, customer=customer)
     stored = store.payment_methods.get(pm_id)
     if stored is None:
         raise resource_missing("PaymentMethod", pm_id, param=param)

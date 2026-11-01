@@ -100,16 +100,16 @@ def _auth_error(key: str, store: StripeStore) -> StripeError | None:
 
 
 async def _decoded_params(request: Request) -> dict[str, Any]:
-    if request.method == "GET":
-        pairs = request.query_params.multi_items()
-    else:
+    # GET reads the query string; DELETE reads both (the SDKs send its parameters as a query).
+    pairs = request.query_params.multi_items() if request.method in {"GET", "DELETE"} else []
+    if request.method != "GET":
         raw = await request.body()
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             msg = "The request body is not valid UTF-8."
             raise invalid_request(msg) from exc
-        pairs = parse_qsl(text, keep_blank_values=True)
+        pairs += parse_qsl(text, keep_blank_values=True)
     try:
         decoded = decode_form(pairs)
     except FormError as exc:

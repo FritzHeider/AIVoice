@@ -29,14 +29,21 @@ __all__ = [
     "API_KEY",
     "SECRET",
     "WEBHOOK_URL",
+    "checkout",
     "encode",
+    "event_types",
     "events_of",
+    "monthly_price",
+    "ok",
     "post",
     "realtime_stripe_state",
+    "renew",
     "served_stripe",
     "signature_ok",
     "stripe_client",
     "stripe_state",
+    "subscribed_customer",
+    "visit",
 ]
 
 API_KEY: Final = "sk_test_sim"
@@ -135,3 +142,53 @@ def events_of(transport: RecordingTransport, event_type: str | None = None) -> l
     """Webhook bodies the receiver got (optionally of one type)."""
     events = [orjson.loads(item.body) for item in transport.received]
     return [event for event in events if event_type is None or event["type"] == event_type]
+
+
+def event_types(transport: RecordingTransport) -> list[str]:
+    """Types of the webhooks the receiver got, in order."""
+    return [event["type"] for event in events_of(transport)]
+
+
+def ok(response: httpx.Response, status: int = 200) -> dict[str, Any]:
+    """The JSON body of a response that must have ``status``."""
+    assert response.status_code == status, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+async def monthly_price(
+    client: httpx.AsyncClient, amount: int = 2000, *, interval: str | None = "month", name: str = "Build plan"
+) -> dict[str, Any]:
+    """A price with a fresh product (recurring every ``interval`` unless None)."""
+    params: dict[str, Any] = {"currency": "usd", "unit_amount": amount, "product_data": {"name": name}}
+    if interval is not None:
+        params["recurring"] = {"interval": interval}
+    return ok(await post(client, "/v1/prices", params))
+
+
+async def checkout(client: httpx.AsyncClient, **params: Any) -> dict[str, Any]:
+    """Create a checkout session (``success_url`` defaults to a dashboard URL with the session template)."""
+    body = {"success_url": "http://localhost:3000/billing?session={CHECKOUT_SESSION_ID}", **params}
+    return ok(await post(client, "/v1/checkout/sessions", body))
+
+
+async def visit(client: httpx.AsyncClient, session: Mapping[str, Any], **query: str) -> httpx.Response:
+    """GET the hosted checkout page of ``session`` (no redirects followed)."""
+    return await client.get(f"/sim/stripe/checkout/{session['id']}", params=query)
+
+
+async def renew(client: httpx.AsyncClient, sub_id: str, **body: Any) -> httpx.Response:
+    return await client.post(f"/sim/stripe/subscriptions/{sub_id}/renew", json=body)
+
+
+async def subscribed_customer(
+    client: httpx.AsyncClient, price: Mapping[str, Any], card: str = "pm_card_visa", **params: Any
+) -> tuple[str, dict[str, Any]]:
+    """A customer paying with ``card`` by default, subscribed to ``price``: (customer id, create body)."""
+    cus = ok(await post(client, "/v1/customers", {"email": "owner@acme.test"}))["id"]
+    pm = ok(await post(client, f"/v1/payment_methods/{card}/attach", {"customer": cus}))["id"]
+    await post(client, f"/v1/customers/{cus}", {"invoice_settings": {"default_payment_method": pm}})
+    response = await post(
+        client, "/v1/subscriptions", {"customer": cus, "items": [{"price": price["id"]}], **params}
+    )
+    return cus, response.json()
