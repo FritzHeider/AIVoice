@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793561163-497e
+> P05-T03c: Send Call loader va_api.services.call_inputs.load_call_inputs(session, ctx, request, org=, encrypted_key=, models=, va_env=) + resolve_inputs; parts call_runners/call_pathways(PathwayFields)/call_refs/caller_id; va_common.nanp reads generated data/npa_states.json (scripts/generate_npa_states.py --check); tests use apps/api/tests/support/call_input_rows.Seed (row() via RowFactory, random_e164 since phone_numbers.e164 unique across orgs, agent versions need explicit created_at); never pkill -f pytest from the Bash tool (kills its own shell)
+<!-- tags: calls, api, testing | created: 2026-11-01 -->
+
 ### mem-1793559625-a229
 > P05-T03b: va_domain.call_resolution merge_layers -> MergedParameters then resolve_call_config(org, request, runner, refs, now) -> CallResolution; org must come from load_settings (fields_set decides layered default_*); test builders packages/va_domain/tests/support/resolution_helpers.py; resolved snapshots apps/api/tests/fixtures/bland_send_call_resolved regenerated via PYTHONPATH=packages/va_domain/tests/support uv run python apps/api/tests/support/resolved_snapshots.py --write; pydantic union loc adds tags like constrained-str to field paths
 <!-- tags: calls, domain, testing | created: 2026-11-01 -->

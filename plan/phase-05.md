@@ -30,7 +30,7 @@
   - Deliverables: `va_domain.call_resolution.resolve_call_config(org, request, runner, refs, now)` (pure; layers platform → org `call_defaults` → runner defaults (task, pathway `global_config.call_defaults`; persona/agent layer shapes ready for P13-T07) → explicit fields), request_data/metadata replacement, tools union, dispositions + built-ins, guard rails union, record forcing, ivr_mode effects, model mapping, start_time localization/window
   - Acceptance: ≥ 40-case precedence table; snapshot of resolved configs for the 12 Bland fixtures.
 
-- [ ] P05-T03c Send Call input loading: runner, voice, tools, from number
+- [x] P05-T03c Send Call input loading: runner, voice, tools, from number — va_api.services (call_inputs/call_runners/call_pathways/call_refs/caller_id), va_common.nanp + generated npa_states.json, pathway_call_defaults; 49 new api tests (unit + Postgres), new modules 100 % line+branch; make lint/typecheck/placeholders/test pass (8383 passed, 7 skipped, 98.63 %), jscpd 0 clones, radon ≤ B, npa --check clean
   - Spec refs: specs/05-calls-api.md §3.1–§3.4, §4.1 steps 4, 5, 7, 8; specs/16-phone-numbers.md §8 (local selection)
   - Depends on: P05-T03b
   - Deliverables: `apps/api/src/va_api/services/call_inputs.py` loading everything `resolve_call_config` needs inside one `tenant_session`: pathway + version semantics (production/staging/integer fallback, draft for test calls, warnings), voice by name/id (org first, then platform; org default voice), tool/KB existence, `encrypted_key` account, destination parse (`INVALID_PHONE_NUMBER`), `from` ownership + `local` dialing strategy (`va_common.nanp`), `AGENT_REQUIRES_ORG_KEY`, `test_call`/`test_mode` permission checks

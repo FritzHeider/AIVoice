@@ -52,7 +52,7 @@ Unknown top-level fields are ignored (logged at debug) for Bland forward-compati
 | `persona_id` | uuid | — | must exist | Persona runner (preset). May be combined with `pathway_id`/`pathway_version` to override the persona's pathway. |
 | `persona_version` | `"production"` \| `"draft"` \| integer | `"production"` | | `draft` falls back to production when the persona has no draft distinct from production. |
 | `persona_settings` | object | `{}` | keys from SendCallConfig | Per-call overrides applied **after** persona config and pathway override (highest priority for versioned personas). |
-| `agent_id` | uuid | — | must exist | Agent runner. Cannot be combined with `persona_id` or `pathway_id` (`400 RUNNER_CONFLICT`). `task` must be omitted (`400 RUNNER_CONFLICT`). Requires an org-scoped API key (`api_keys.scopes` contains `*` or `agents:run`), else `403 AGENT_REQUIRES_ORG_KEY`. |
+| `agent_id` | uuid | — | must exist | Agent runner. Cannot be combined with `persona_id` or `pathway_id` (`400 RUNNER_CONFLICT`). `task` must be omitted (`400 RUNNER_CONFLICT`). Requires an org-scoped API key (`api_keys.scopes` contains `*`, `agents:read`, or `agents:write`; dashboard sessions hold these through their role), else `403 AGENT_REQUIRES_ORG_KEY`. |
 | `agent_version` | string | production pin | `"production"`, `"staging"`, `"dev"`, `"latest"`, semver `^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`, or `"branch:<name>"` with name 1–64 chars `[A-Za-z0-9._/-]` | Omitted → production pin **and eligible for experiment routing** (§4.2). Explicit values never enter experiments. `dev`/`latest` → newest `agent_versions` row on branch `main`. `branch:x` → newest on branch `x`. Missing → `404 NOT_FOUND`. |
 
 ### 3.2 Basic
@@ -220,6 +220,42 @@ Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATU
    `experiment_id`, `experiment_arm_id`, `agent_version_id`. Weights must sum to 100 (validated on experiment start).
 2. No running experiment → `agents.env_pins.production` (semver). Missing pin → newest version on branch `main`.
 3. Explicit `production`/`staging`/`dev` → `env_pins[...]`; `latest` = `dev` behaviour; semver exact; `branch:x`.
+
+> Decision (2026-11-01): Send Call input loading (P05-T03c). `va_api.services.call_inputs.load_call_inputs(session,
+> ctx, request, *, org, encrypted_key, models, va_env)` runs §4.1 steps 4-8 inside the caller's `tenant_session`
+> (`org` is read beforehand with `OrgSettingsReader`; `encrypted_key` is the §2 header) and returns `CallInputs`
+> (runner, merged layers, `ResolvedRefs`, BYO account id + Call Control App, destination ISO region, loader
+> warnings); `resolve_inputs(inputs, request, now)` returns the `CallResolution` with the loader warnings first.
+> Every failure is an `AppError`; va_domain `CallRequestError`s keep code, message and field. Step 4 order:
+> `RETRY_NOT_PROVIDED`, `RUNNER_CONFLICT`, `AGENT_REQUIRES_ORG_KEY` (the §2.3 scope table of specs/04 has no
+> `agents:run`: `*`, `agents:read` or `agents:write`), `test_call` without `pathways:write` (403 `FORBIDDEN`, field
+> `test_call`), `test_mode` without a test key (403 `FORBIDDEN`, field `test_mode`), a test key outside
+> `VA_ENV` local/test (403 `FORBIDDEN`, specs/04 §2.2). Step 5 order: runner (agent, persona, pathway), then
+> voice, tools/KBs (`tools[i]`; `TOOL_NOT_FOUND` / `NOT_FOUND`, first missing in list order), citation schemas
+> (`citation_schema_ids[i]`), post-call eval setup (`post_call_evals.<key>`), memory, number pool
+> (`dialing_strategy.pool_id`); every check reads the merged layers, so an org default that names a missing
+> resource fails the call too. Pathway versions: omitted/0/`production` → production pin, else the draft with
+> warning `PATHWAY_UNPUBLISHED`; an absent integer → production + `PATHWAY_VERSION_FALLBACK` (404
+> `PATHWAY_VERSION_NOT_FOUND` when production is null); `staging` → staging pin else the production rule;
+> `draft` → only with `test_call` (else 400 `INVALID_INPUT` field `pathway_version`). Persona versions follow the
+> same rules (`PERSONA_UNPUBLISHED`, `PERSONA_VERSION_FALLBACK`, 404 `NOT_FOUND` field `persona_version`); a
+> persona's pathway is the request `pathway_id` when sent, else `config.pathway_id` of a `runner: "pathway"`
+> config (errors under `persona.config.*`). Agent versions: omitted/`production`/`staging`/`dev` → that
+> `env_pins` semver, a missing pin → newest version on branch `main`; `latest` → newest on `main`; `branch:x` →
+> newest on `x`; semver exact; missing → 404 `NOT_FOUND` field `agent_version`; experiments (§4.2 step 1) are
+> P13-T07. An agent version's `pathway_version` is exact (missing → `PATHWAY_VERSION_NOT_FOUND`, field
+> `agent_version`). The pathway layer is `pathway_call_defaults(global_config)`: `defaultVoice`/`defaultLanguage`/
+> `defaultTemperature` (non-null) as `voice`/`language`/`temperature`, then `global_config.call_defaults` over them;
+> `errorPhrase` and the `isStart` node fill `PathwayRef`; a `start_node_id` that is not a node of the chosen version
+> is 400 `INVALID_INPUT`. Voice: merged `voice`, else org `default_voice_id`, else `default_voice`; a UUID matches
+> the id, a name matches case-insensitively with the org's voice before a platform voice; deleted voices and clones
+> `processing`/`failed` → 404 `VOICE_NOT_FOUND` field `voice`. Step 6 uses `plans.features` of the principal's plan
+> on the merged values: citations → `citations`, any custom guard rail → `custom_guard_rails` (then more than 5 →
+> 400 `GUARD_RAIL_LIMIT`), `local` → `local_presence`, `custom_pooling` → `number_pools`; failures are 403
+> `FEATURE_NOT_IN_PLAN` with the parameter as field. Step 7: an unknown, other-org, or `deleted` handle → 400
+> `INVALID_ENCRYPTED_KEY`; `pending`/`error` → 502 `CARRIER_CONNECTION_ERROR`. Step 8: the destination is parsed
+> with the merged `country`; an unparseable number is 400 `INVALID_PHONE_NUMBER` field `phone_number`; caller ID per
+> specs/16 §6.2 Decision P05-T03c.
 
 ### 4.3 Config precedence (lowest → highest)
 

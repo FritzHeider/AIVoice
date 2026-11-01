@@ -30,6 +30,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Pre-commit hooks | `uv run pre-commit install` once; `uv run pre-commit run --all-files` (ruff, placeholders, prettier, actionlint, gitleaks) |
 | Lint CI workflows | `uv run actionlint` |
 | Telnyx bootstrap | `uv run python scripts/telnyx_bootstrap.py --env-file .env [--write-env] [--json]` (sim by default; ids on stdout) |
+| Regenerate NPA → state table | `uv run python scripts/generate_npa_states.py` (`--check` for drift; commit `packages/va_common/src/va_common/data/npa_states.json`) |
 | Phase progress | `scripts/ralph/status.sh` |
 | Run a script on the EC2 Ralph runner | `echo 'uptime' \| scripts/ralph/ssm.sh "<comment>"` (SSM; profile `aivoice`, finds the instance by tag; env overrides in the script header) |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
@@ -1127,3 +1128,15 @@ Grafana 3001
   `PYTHONPATH=packages/va_domain/tests/support uv run python apps/api/tests/support/resolved_snapshots.py --write`
   and prettier the JSON (the test compares
   parsed JSON, so formatting does not matter).
+- 2026-11-01 (P05-T03c): Send Call input loading = `va_api.services.call_inputs.load_call_inputs(session, ctx, request,
+  *, org, encrypted_key, models, va_env)` (§4.1 steps 4-8 in the caller's `tenant_session`; rules: specs/05 §4.2
+  Decision P05-T03c) then `resolve_inputs(inputs, request, now)`. Pieces: `call_runners.load_runner` (agent/persona/
+  pathway versions), `call_pathways.load_pathway` (`PathwayFields` names the error fields per source),
+  `call_refs` (voice, tools/KBs, citations/evals/memory/pool, plan features, BYO account), `caller_id` (destination,
+  `local_order`, read-only caller-ID selection; specs/16 §6.2 Decision). `va_common.nanp` (`npa`, `state_for_npa`,
+  `same_state`) reads the generated `va_common/data/npa_states.json`. `va_domain.call_resolution.pathway_call_defaults`
+  maps a version's `global_config` to the pathway layer. Tests: `apps/api/tests/support/call_input_rows.py` (`Seed`
+  = an org on the module DB with builders `pathway`/`persona`/`agent`/`voice(platform=)`/`number`/`pool`/generic
+  `row(Model, **values)` via `RowFactory`, `load(body, org=, ctx=, encrypted_key=)`; `make_ctx(org_id, scopes=,
+  environment=, plan_id=)`; `random_e164(npa)` because `phone_numbers.e164` is unique among active rows across
+  orgs). Agent versions need explicit increasing `created_at` (rows inserted in one transaction share `now()`).

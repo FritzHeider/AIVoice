@@ -26,6 +26,7 @@ __all__ = [
     "check_call_defaults",
     "org_layer",
     "parse_layer",
+    "pathway_call_defaults",
     "persona_layer",
     "persona_prompt",
 ]
@@ -43,6 +44,13 @@ _BACKGROUND_TRACKS: Final[Mapping[str, str | None]] = {
     "cafe": "cafe",
     "restaurant": "restaurant",
 }
+# GlobalConfig keys (specs/11 §3.4) that seed the pathway layer under a call parameter name.
+_PATHWAY_GLOBALS: Final[Mapping[str, str]] = {
+    "defaultVoice": "voice",
+    "defaultLanguage": "language",
+    "defaultTemperature": "temperature",
+}
+_PATHWAY_DEFAULTS_MESSAGE: Final = "call_defaults must be an object."
 # PersonaConfig keys that are call parameters under the same name (specs/20 §3.1).
 _PERSONA_DIRECT: Final = (
     "first_sentence",
@@ -203,6 +211,26 @@ def org_layer(org: OrgSettings) -> dict[str, Any]:
         **_derived_org_defaults(org),
         **parse_layer(org.call_defaults, "call_defaults"),
     }
+
+
+def pathway_call_defaults(global_config: Mapping[str, Any]) -> dict[str, Any]:
+    """The raw pathway layer of a version's `global_config`: `defaultVoice`/`defaultLanguage`/
+    `defaultTemperature` (when not null) as `voice`/`language`/`temperature`, then `call_defaults` over them.
+
+    Values are validated later with the other layers (`merge_layers`, prefix `pathway.call_defaults`); a
+    `call_defaults` that is present but not an object raises `INVALID_INPUT` here.
+    """
+    values = {
+        name: global_config[key]
+        for key, name in _PATHWAY_GLOBALS.items()
+        if global_config.get(key) is not None
+    }
+    defaults = global_config.get("call_defaults")
+    if defaults is None:
+        return values
+    if not isinstance(defaults, Mapping):
+        raise _invalid(_PATHWAY_DEFAULTS_MESSAGE, "pathway.call_defaults")
+    return {**values, **defaults}
 
 
 def _is_unset(value: Any) -> bool:

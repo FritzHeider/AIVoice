@@ -730,3 +730,191 @@ Re-ran make lint typecheck placeholders (exit 0) and make test (8307 passed, 7 s
 specs/05 §4.3: layer orders per runner, request_data/metadata replacement, tools union/dedupe, dispositions plus
 built-ins, guard rails keyed by type+name, record forcing, ivr_mode, model mapping, start_time localization and the 90-day
 window. Spec Decision and specs/04 item 3 are updated. Approved.
+
+## Plan P05-T03c — Send Call input loading (Planner, 2026-11-01)
+
+Goal: one async loader that, inside the caller's `tenant_session`, runs §4.1 steps 4–8 in spec order and returns
+everything `resolve_call_config` needs. No endpoint yet (P05-T05 wires it); no limits/DNC/holds (P05-T04).
+
+### Decisions (write as `> Decision (2026-11-01): Send Call input loading (P05-T03c).` under specs/05 §4.2, before §4.3)
+1. Entry point `va_api.services.call_inputs.load_call_inputs(session, ctx, request, *, org, encrypted_key, models,
+   va_env) -> CallInputs`, then `resolve_inputs(inputs, request, now) -> CallResolution` (calls
+   `resolve_call_config` and prepends the loader warnings). The loader raises `AppError` only (a
+   `CallRequestError` from va_domain is converted 1:1: code, message, field). `encrypted_key` is the **request
+   header** (§2 table), not a body field. `org` is `OrgSettings` read by the caller with `OrgSettingsReader`
+   *before* the tenant session opens (the reader opens its own session).
+2. Step 4 (no DB), in this order: `request.check_rules()` (RETRY_NOT_PROVIDED, RUNNER_CONFLICT) →
+   `AGENT_REQUIRES_ORG_KEY` (403, field `agent_id`) when `agent_id` and the principal holds neither `*` nor any
+   `agents:*` scope. The §2.3 scope table has no `agents:run`; "org-scoped key" (specs/20 §3.3) = a key that is not
+   restricted away from agents. Update the specs/05 §3.1 `agent_id` row to say `*` or `agents:read`/`agents:write`.
+   → `test_call` needs `pathways:write` (403 `FORBIDDEN`, field `test_call`, "test_call requires the pathways:write
+   scope or a developer role.") → `test_mode` needs `ctx.environment == "test"` (403 `FORBIDDEN`, field `test_mode`,
+   "test_mode requires a test environment API key.") → per specs/04 §2.2 a `test` principal when `va_env` is not
+   `local`/`test` gets 403 `FORBIDDEN` "Test keys cannot place live calls, send SMS, or purchase numbers." (field
+   None).
+3. Step 5 resource existence, in order (each a batched `select` filtered by `org_id` and `deleted_at IS NULL` where
+   the table has it):
+   a. Runner (`va_api/services/call_runners.py`, `load_runner(session, ctx, request) -> LoadedRunner(runner,
+      warnings)`):
+      - pathway: `Pathway` absent → 404 `NOT_FOUND` field `pathway_id` ("Pathway not found."). Version: omitted/0/
+        `"production"` → `production_version`; null → `draft_version` + warning `PATHWAY_UNPUBLISHED`. Integer N ≥ 1
+        → that `pathway_versions` row; absent → production + `PATHWAY_VERSION_FALLBACK`; production null → 404
+        `PATHWAY_VERSION_NOT_FOUND` field `pathway_version`. `"staging"` → `staging_version`, else the production
+        rule (incl. draft + PATHWAY_UNPUBLISHED). `"draft"` → only with `test_call` (else 400 `INVALID_INPUT` field
+        `pathway_version`, "pathway_version \"draft\" requires test_call."), uses `draft_version`.
+        `PathwayRef`: `call_defaults` = pure `pathway_call_defaults(global_config)` (new in
+        `va_domain.call_resolution.layers`, exported): `defaultVoice`→`voice`, `defaultLanguage`→`language`,
+        `defaultTemperature`→`temperature` (non-null only), then `global_config["call_defaults"]` (object) over them;
+        `error_phrase` = `errorPhrase`; `start_node_id` = id of the node whose `data.isStart` is true. A request
+        `start_node_id` (or persona config one) not among the version's node ids → 400 `INVALID_INPUT` field
+        `start_node_id` ("start_node_id does not exist in pathway version N.").
+      - persona: `Persona` absent → 404 `NOT_FOUND` field `persona_id`. Version: `"production"`/omitted →
+        `production_version`; null → `draft_version` + `PERSONA_UNPUBLISHED`; integer → that row else production +
+        `PERSONA_VERSION_FALLBACK` (production null → 404 `NOT_FOUND` field `persona_version`); `"draft"` → only with
+        `test_call` (same INVALID_INPUT shape), uses `draft_version` (the "identical hash" fallback is a no-op here:
+        the draft row *is* production when unchanged). `legacy` = `config.get("legacy") is True`. Persona pathway:
+        request `pathway_id` (+`pathway_version`) when sent, else `config.pathway_id`/`pathway_version`/
+        `start_node_id` when `config.runner == "pathway"`; loaded with the pathway rules above (field prefix
+        `persona.config.pathway_id` for a missing config pathway). `routing` is not evaluated (P13).
+      - agent: `Agent` absent → 404 `NOT_FOUND` field `agent_id`. Version (§4.2 steps 2–3; experiment routing is
+        P13-T07, so omitted = production pin and `experiment_*` stay None): omitted/`production`/`staging`/`dev`
+        → `env_pins[env]` semver row (missing pin for omitted/production → newest on branch `main`; for
+        staging/dev → `dev`/`latest` rule = newest on `main`); `latest` → newest on `main`; semver → exact;
+        `branch:x` → newest on `x`. Missing → 404 `NOT_FOUND` field `agent_version`. Its `pathway_id`/
+        `pathway_version` (integer, exact; missing row → 404 `PATHWAY_VERSION_NOT_FOUND`) give the PathwayRef.
+      - task → `TaskRunner()`. Runner precedence as P05-T03a: agent, persona, pathway, task.
+   b. `merged = merge_layers(org, request, runner)` (pure; may raise CallRequestError → AppError).
+   c. Voice (`va_api/services/call_refs.py`, `load_voice(session, org_id, merged.voice, org) -> ResolvedVoice`):
+      requested = `merged.voice` else `str(org.default_voice_id)` when set else `org.default_voice` ("Karen").
+      UUID-shaped → `Voice.id` (org row or platform `org_id IS NULL`; RLS `platform_read` allows it); otherwise
+      `lower(name) = lower(:v)` org rows first, then platform rows. Excluded: `deleted_at` set, `clone_status` in
+      (`processing`,`failed`). None → 404 `VOICE_NOT_FOUND` field `voice` ("Voice <v> not found."). Settings via
+      `VoiceSettings.model_validate(row.settings)`.
+   d. Tools/KBs from `merged.tools`: `TL-` → `Tool` rows (404 `TOOL_NOT_FOUND` field `tools[i]`, "Tool TL-… not
+      found."), `KB-` → `KnowledgeBase` rows (404 `NOT_FOUND` field `tools[i]`, "Knowledge base KB-… not found.").
+      One query per kind; first missing in list order reported.
+   e. `citation_schema_ids` (merged) → `CitationSchema` (404 `NOT_FOUND` field `citation_schema_ids[i]`);
+      `post_call_evals` → `EvalSetup` by `workbench_setup_id` or `EvalSetupVersion` by `workbench_setup_version_id`
+      (404 `NOT_FOUND` field `post_call_evals.<key>`); `memory_id` → `Memory` (404 `NOT_FOUND` field `memory_id`).
+   f. `dialing_strategy.type == "custom_pooling"` → `NumberPool` (404 `NOT_FOUND` field `dialing_strategy.pool_id`).
+4. Step 6 plan features (`plans.features` for `ctx.plan_id`, read in the same session; `plans` is system scope,
+   select-granted to va_app): `citation_schema_ids` non-empty needs `citations`; any `custom` guard rail needs
+   `custom_guard_rails` then > 5 custom → 400 `GUARD_RAIL_LIMIT` (field `guard_rails`); `local` strategy needs
+   `local_presence`; `custom_pooling` needs `number_pools`. Failure 403 `FEATURE_NOT_IN_PLAN` with the parameter as
+   field. Guard rails/citations counted on the merged values (all layers).
+5. Step 7 `encrypted_key`: `TelnyxAccount` by `encrypted_key_handle` (tenant session ⇒ own org only); absent or
+   `status == "deleted"` → 400 `INVALID_ENCRYPTED_KEY` "Invalid `encrypted_key`."; status `pending`/`error` → 502
+   `CARRIER_CONNECTION_ERROR` "Error in creating Telnyx connection.".
+6. Step 8 (`va_api/services/caller_id.py`):
+   - destination: `normalize_e164(request.phone_number, merged.country)` (merged country already includes org
+     `default_country` when set; else "US"); `InvalidPhoneNumberError` → 400 `INVALID_PHONE_NUMBER` field
+     `phone_number`.
+   - candidate filter everywhere: org row, `deleted_at IS NULL`, `status='active'`, `'voice' = ANY(capabilities)`,
+     `telnyx_account_id` = account id with `encrypted_key`, `IS NULL` without (a BYO number cannot be dialed with the
+     platform key).
+   - explicit `merged.from_` → that row else 400 `INVALID_INPUT` field `from` ("`from` must be an active
+     voice-capable number of this organization."); with `encrypted_key` and no `from` → 400 `INVALID_INPUT` field
+     `from` ("`from` is required with `encrypted_key`.").
+   - `local` → all candidates, `local_order(candidates, destination)` = exact NPA matches, then same state
+     (`va_common.nanp`), ties by e164 ascending; first wins; none → default rule.
+   - `custom_pooling` → active voice members of the pool ordered `last_used_at NULLS FIRST, phone_number_id`;
+     none → default rule. (Rotation strategies, daily caps and usage updates: P10.)
+   - default rule: `org.default_from_number` when set → must pass the candidate filter (else 400 `INVALID_INPUT`
+     field `default_from_number`, "The org default_from_number is not an active voice number."); else, until the
+     platform pool exists (`PLATFORM_POOL_ORG_ID`, specs/16 phase P10), the org's own candidates by
+     `local_order` + remaining by e164; none → 400 `INVALID_INPUT` field `from` ("No caller ID available: pass
+     `from`, set default_from_number, or add a phone number."). Record this fallback in a specs/16 §6.2 Decision.
+   - The selection is read-only (no `last_used_at`/Redis writes; P10 adds rotation bookkeeping).
+7. `CallInputs` (frozen dataclass in `call_inputs.py`): `runner`, `merged`, `refs: ResolvedRefs` (`phone_number`,
+   `from_number`, `phone_number_id`, `telnyx_account_id`, `voice`, `models`; consent facts default False until
+   P05-T04), `telnyx_account: ByoAccount | None` (id, call_control_app_id — never the key), `warnings`
+   (loader warnings), `country` (ISO region of the destination via `phonenumbers.region_code_for_number`, for
+   P05-T04 international policy).
+8. `va_common.nanp`: `npa(e164) -> str | None` (`+1` + 10 digits only), `state_for_npa(npa) -> str | None`
+   (USPS/province two-letter code), `same_state(a_e164, b_e164) -> bool`. Data
+   `packages/va_common/src/va_common/data/npa_states.json` (sorted keys, `{"201": "NJ", ...}`, trailing newline)
+   generated by `scripts/generate_npa_states.py` from the `phonenumbers` geocoder: for each NPA 200–999 sample NXX
+   200..999 step 37 (valid numbers only), map description suffix (full state/province/territory name or two-letter
+   code after ", ") to a code, majority vote; NPAs with no description (toll-free etc.) omitted. `--check` exits 1
+   on drift. Read with `importlib.resources` once (`functools.cache`). The specs/16 §6.3 neighbour table remains P10.
+9. `ApiSettings` gains `llm_dialogue_model`/`llm_router_model` (same defaults as `LlmSettings`; env table already
+   lists api); the caller builds `PlatformModels` from them.
+
+### Files
+- create `apps/api/src/va_api/services/__init__.py` (docstring only), `call_inputs.py`, `call_runners.py`,
+  `call_refs.py`, `caller_id.py` (each < ~250 lines, radon ≤ B).
+- modify `packages/va_domain/src/va_domain/call_resolution/layers.py` + `__init__.py` (`pathway_call_defaults`).
+- create `packages/va_common/src/va_common/nanp.py`, `packages/va_common/src/va_common/data/npa_states.json`,
+  `scripts/generate_npa_states.py`.
+- modify `apps/api/src/va_api/settings.py` (two model fields).
+- specs/05 §4.2 Decision + §3.1 `agent_id` scope wording; specs/16 §6.2 Decision (platform-pool fallback, local
+  selection read-only, nanp module); AGENTS.md learning line (+ command table row for the generator).
+
+### Tests
+- `packages/va_common/tests/test_nanp.py`: 415→CA, 212→NY, 416→ON, 787→PR, 800→None, non-+1 → npa None,
+  same_state(+1415…, +1650…) true, (+1415…, +1212…) false; JSON keys sorted, all values 2 uppercase letters.
+- `scripts/tests/test_generate_npa_states.py`: regeneration byte-identical to the committed JSON; `--check` exit 0;
+  tampered copy (tmp path arg) → exit 1.
+- `packages/va_domain/tests/test_call_resolution_layers.py` (extend): `pathway_call_defaults` mapping, null skip,
+  `call_defaults` over the mapped keys, non-object `call_defaults` → INVALID_INPUT field
+  `pathway.call_defaults`.
+- `apps/api/tests/test_call_inputs_unit.py`: step-4 order (rules → AGENT_REQUIRES_ORG_KEY → test_call → test_mode →
+  test key outside local/test), `local_order` (exact NPA, same state, fallback order, non-NANP destination), version
+  selection helpers if written pure.
+- `apps/api/tests/test_call_inputs_db.py` (module Postgres via `session_helpers.migrated_postgres()`; rows seeded
+  per test with unique ids/e164s; ctx built directly): one test per error code/body (field + message) for every
+  step-5..8 case above; pathway version matrix (production, null production → draft + PATHWAY_UNPUBLISHED, integer
+  hit, integer miss → fallback warning, miss + null production → 404, staging hit/fallback, draft with/without
+  test_call, start_node_id valid/invalid); persona versions + legacy flag + persona pathway + request pathway
+  override; agent version selectors (omitted, production pin missing → newest main, semver, branch:x, latest,
+  missing → 404); voice: org name beats platform name (case-insensitive), uuid of platform voice, deleted/failed
+  clone → 404, org default_voice_id, default "Karen" platform voice; tools/KB/citations/evals/memory/pool 404s;
+  plan feature gates (start plan rejects citations/custom rails/local/pool; enterprise accepts; 6 custom rails →
+  GUARD_RAIL_LIMIT); BYO: unknown/deleted → 400, pending → 502, from required, BYO from must belong to that account,
+  platform from rejected with key and vice versa; from: explicit ok/inactive/released/sms-only/other org →
+  INVALID_INPUT `from`; local picks exact NPA then same state then default; pool LRU; default_from_number valid/
+  invalid; fallback to own number; no numbers → INVALID_INPUT `from`. **Order tests**: a request failing at several
+  steps reports the earliest (e.g. missing voice + bad phone → VOICE_NOT_FOUND; bad encrypted_key + bad phone →
+  INVALID_ENCRYPTED_KEY; unknown tool + plan feature → TOOL_NOT_FOUND; AGENT_REQUIRES_ORG_KEY before missing agent).
+  Happy path: `resolve_inputs` returns a `SendCallConfig` with the loaded voice/from/pathway ids and loader warnings
+  first. Cross-tenant: another org's pathway/voice/tool/number/account → the same 404/400 as absent.
+
+### Gates
+`make fmt lint typecheck placeholders test`, spec refs, `npx --yes jscpd@4 --silent` (0 clones), radon, coverage
+(va_api, va_common, va_domain ≥ 85 %). No call flow runs yet → no e2e.
+
+### Risks
+- Many seed helpers: put them in `apps/api/tests/support/call_input_rows.py` (pathway/version, persona, agent,
+  voice, tool, kb, number, account builders) to keep jscpd at 0; reuse `va_db` `call_rows`/`model_factories`
+  where they fit.
+- `plans` read from va_app: confirm the grant exists (0001 grants every table); if not, read through a system repo
+  listed in specs/03 §2 — prefer the existing grant.
+- phonenumbers geocoder output can change between versions: the drift test pins it; regenerate deliberately.
+- RLS: platform voices are visible through `platform_read`; never use `system_session` here.
+- Shared module DB: unique e164s per test (`+1415555` + random 4 digits from `secrets`, not parametrized).
+
+## Build P05-T03c (Builder, 2026-11-01)
+Implemented per plan. Files:
+- new `apps/api/src/va_api/services/` (`call_inputs.py` orchestration + step 4 `check_call_permissions` + `CallInputs`
+  (carries `org` so `resolve_inputs(inputs, request, now)` keeps the planned signature) + `ByoAccount`;
+  `call_runners.py` (agent/persona/pathway/task; `load_runner(session, org_id, request)`); `call_pathways.py`
+  (split out of runners: `load_pathway`, `PathwayFields` error-field sets for request / persona config / agent);
+  `call_refs.py` (voice, tools/KBs, citations/evals/memory/pool, plan features, BYO account); `caller_id.py`).
+- `va_common.nanp` + generated `va_common/data/npa_states.json` (421 NPAs) + `scripts/generate_npa_states.py`.
+- `va_domain.call_resolution.pathway_call_defaults` (exported); `ApiSettings.llm_dialogue_model/llm_router_model`.
+- specs/05 §3.1 agent_id scope wording + §4.2 Decision P05-T03c; specs/16 §6.2 Decision; AGENTS.md row + learning.
+Deviations/choices: knowledge_base_ids need no separate check (explicit_fields folds them into `tools`); a persona
+config `start_node_id` error is reported as `persona.config.start_node_id` unless the request sent one; the
+INVALID_PHONE_NUMBER message is fixed ("phone_number is not a valid, dialable phone number.") so the number is not
+echoed; FEATURE_NOT_IN_PLAN message "<parameter> is not available on your plan.".
+Tests: `test_call_inputs_unit.py` (9), `test_call_inputs_runners_db.py` (19), `test_call_inputs_refs_db.py` (21),
+`va_common/tests/test_nanp.py`, `scripts/tests/test_generate_npa_states.py`, layers tests (+3). Helpers in
+`apps/api/tests/support/call_input_rows.py`. New modules 100 % line+branch coverage; radon all ≤ B; jscpd 0 clones;
+pip-audit clean; pnpm audit 3 moderate (unchanged).
+
+## Review P05-T03c (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (pass, 0 findings) and make test (8383 passed, 7 skipped, 98.63 %);
+new modules 100 % line+branch; jscpd 0 clones; radon nothing ≥ C; generate_npa_states --check clean. Error codes and
+statuses match specs/31; step order matches specs/05 §4.1 steps 4-8; Decisions recorded in specs/05 §4.2 and specs/16
+§6.2. Note: specs/05 §3.1 says `dev` → newest on main while §4.2 step 3 says env_pins[dev]; the Decision picks the pin
+(missing pin → newest main), which is consistent with §4.2.

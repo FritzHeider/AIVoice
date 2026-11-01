@@ -27,6 +27,7 @@ from va_domain.call_resolution import (
     TaskRunner,
     check_call_defaults,
     merge_layers,
+    pathway_call_defaults,
     persona_layer,
 )
 from va_domain.calls import CallRequestError, DialingStrategy, InlineTool, SendCallRequest
@@ -262,3 +263,30 @@ def test_blank_persona_prompt_leaves_no_task() -> None:
     runner = PersonaRunner(PERSONA_ID, None, True, {"prompt": "   "})
     config = resolve({"phone_number": "+14155550100", "persona_id": str(PERSONA_ID)}, runner=runner).config
     assert (config.task, config.persona_id, config.runner_type) == (None, PERSONA_ID, "persona")
+
+
+def test_pathway_call_defaults_maps_global_config() -> None:
+    config = {
+        "defaultVoice": "Maya",
+        "defaultLanguage": "es",
+        "defaultTemperature": 0.4,
+        "globalPrompt": "Be brief.",
+    }
+    assert pathway_call_defaults(config) == {"voice": "Maya", "language": "es", "temperature": 0.4}
+
+
+def test_pathway_call_defaults_skips_nulls_and_applies_call_defaults_over_globals() -> None:
+    config = {
+        "defaultVoice": None,
+        "defaultLanguage": "es",
+        "defaultTemperature": 0.7,
+        "call_defaults": {"language": "fr", "record": True},
+    }
+    assert pathway_call_defaults(config) == {"language": "fr", "temperature": 0.7, "record": True}
+    assert pathway_call_defaults({}) == {}
+
+
+def test_pathway_call_defaults_rejects_a_non_object() -> None:
+    with pytest.raises(CallRequestError) as caught:
+        pathway_call_defaults({"call_defaults": ["record"]})
+    assert (caught.value.code, caught.value.field) == ("INVALID_INPUT", "pathway.call_defaults")

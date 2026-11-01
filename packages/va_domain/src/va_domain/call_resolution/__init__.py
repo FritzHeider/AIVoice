@@ -22,6 +22,7 @@ from va_domain.call_resolution.layers import (
     check_call_defaults,
     org_layer,
     parse_layer,
+    pathway_call_defaults,
     persona_layer,
 )
 from va_domain.call_resolution.merge import MergedParameters, merge_layers
@@ -46,6 +47,7 @@ __all__ = [
     "merge_layers",
     "org_layer",
     "parse_layer",
+    "pathway_call_defaults",
     "persona_layer",
     "resolve_call_config",
 ]
