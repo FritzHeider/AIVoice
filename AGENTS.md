@@ -30,6 +30,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Lint CI workflows | `uv run actionlint` |
 | Telnyx bootstrap | `uv run python scripts/telnyx_bootstrap.py --env-file .env [--write-env] [--json]` (sim by default; ids on stdout) |
 | Phase progress | `scripts/ralph/status.sh` |
+| Run a script on the EC2 Ralph runner | `echo 'uptime' \| scripts/ralph/ssm.sh "<comment>"` (SSM; profile `aivoice`, finds the instance by tag; env overrides in the script header) |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
 
 ## Conventions (quick reference)
