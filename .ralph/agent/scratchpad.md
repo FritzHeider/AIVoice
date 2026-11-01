@@ -2904,3 +2904,8 @@ Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6518 passed / 7 skip
 idempotent ON CONFLICT (created_at, id) insert, every org attempted and CallEventWriteError.unwritten re-queued only;
 DB tests for double write + partial org failure/recovery; consumer reads str or bytes payload field (decode_responses
 test). Approved, committed.
+
+## Phase 03 exit gate (Planner, 2026-11-01)
+All P03 tasks ticked. make check EXIT=0 (lint/typecheck/placeholders 0, 6518 passed / 7 skipped, 98.44 %, TS tests pass,
+openapi drift current, spec refs 0). Compose sim healthy (/healthz 200). scripts/telnyx_bootstrap.py against sim exit 0,
+printed TELNYX_CALL_CONTROL_APP_ID / OUTBOUND_VOICE_PROFILE_ID / MESSAGING_PROFILE_ID. README row 03 → complete (69e4ea4).

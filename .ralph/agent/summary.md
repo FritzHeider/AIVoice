@@ -1,8 +1,8 @@
 # Loop Summary
 
-**Status:** Failed: too many consecutive failures
-**Iterations:** 5
-**Duration:** 29m 3s
+**Status:** Completed successfully
+**Iterations:** 65
+**Duration:** 7h 22m 1s
 
 ## Tasks
 
@@ -14,4 +14,4 @@ _No events recorded._
 
 ## Final Commit
 
-948f5ee: feat(sim): FakeLLM chat completions with OpenAI wire format, rules engine, sim-clock pacing, faults, models, and control routes
+7732876: docs(readme): mark phase 03 complete
