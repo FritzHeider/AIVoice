@@ -6,9 +6,55 @@ title = "voiceagents gitleaks config"
 useDefault = true
 
 [[allowlists]]
-description = "plan/phase-20.md prose: 'key rotation, Telnyx/ElevenLabs' matches generic-api-key"
+description = "phase-20 prose 'key rotation, Telnyx/ElevenLabs' (plan and Ralph agent notes quoting it) matches generic-api-key"
 targetRules = ["generic-api-key"]
 regexTarget = "match"
 regexes = ['''key rotation, Telnyx/ElevenLabs''']
-paths = ['''^plan/phase-20\.md$''']
+paths = ['''^plan/phase-20\.md$''', '''^\.ralph/agent/(memories|scratchpad)\.md$''']
+condition = "AND"
+
+[[allowlists]]
+description = "the environment variable NAME SIM_ED25519_PRIVATE_KEY in prose (specs, Ralph notes), not a key value"
+targetRules = ["generic-api-key"]
+regexes = ['''^SIM_ED25519_PRIVATE_KEY$''']
+paths = ['''^specs/[^/]+\.md$''', '''^\.ralph/agent/(memories|scratchpad)\.md$''']
+condition = "AND"
+
+[[allowlists]]
+description = "fixed OpenAPI example values (minted API keys, poll secret, email-link tokens) in schemas, generated specs and types, and the tests that reuse them"
+targetRules = ["generic-api-key"]
+regexes = [
+  '''^va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e$''',
+  '''^va_test_7HcQ2nLpR4vB9mZx1dKf8sWq3yJa6eTg$''',
+  '''^Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE$''',
+  '''^Vq3nT8bLw0eZ5yRk2mXc7hJd4sGa9uPf1oNi6tWe8Bq$''',
+  '''^Xb4LZ0c9qkV2mR7tWn1sYe8pHu3aGj6dKf5oQi2NwTs$''',
+]
+paths = [
+  '''^openapi/(openapi|internal)\.json$''',
+  '''^(apps/dashboard/src/lib/api|sdks/typescript/src)/schema\.d\.ts$''',
+  '''^apps/api/src/va_api/routers/[a-z_]+_schemas\.py$''',
+  '''^apps/api/tests/''',
+]
+condition = "AND"
+
+[[allowlists]]
+description = "api test fixtures: diceware-style passwords (word-word-word-NN) and the idempotency helper's `\"secret\", operation_id=f\"...\"` call"
+targetRules = ["generic-api-key"]
+regexes = ['''^[a-z]+-[a-z]+-[a-z]+-[0-9]{2}$''', '''^operation_id=f$''']
+paths = ['''^apps/api/tests/''']
+condition = "AND"
+
+[[allowlists]]
+description = "dev-seed test asserts the printed curl line with a fake key"
+targetRules = ["curl-auth-header"]
+regexes = ['''^va_test_plaintexttest$''']
+paths = ['''^scripts/tests/test_seed_dev\.py$''']
+condition = "AND"
+
+[[allowlists]]
+description = "FakeStripe test keys: short sk_test_ literals (real Stripe secret keys carry ~99 characters after the prefix)"
+targetRules = ["stripe-access-token"]
+regexes = ['''^sk_test_[a-z0-9]{1,20}$''']
+paths = ['''^packages/va_sim/''']
 condition = "AND"
