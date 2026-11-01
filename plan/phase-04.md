@@ -60,7 +60,7 @@
   - Deliverables: `TurnTimer` marks (user_speech_end, eot, stt_final, llm_first_token, tts_first_audio, first_audio_out), computed metrics dict, OTel span emission, Prometheus histograms
   - Acceptance: metric arithmetic tests; spans exported to an in-memory exporter in tests.
 
-- [ ] P04-T11 Phrase cache
+- [x] P04-T11 Phrase cache — va_voice.phrase_cache (Redis tts:cache key/value per specs/09 §9 Decision, fail-open, single flight, prefetch, hit/miss metrics); 55 tests incl. FakeElevenLabs; make test 7279 passed / 7 skipped, phrase_cache 100 %, lint/typecheck/placeholders/spec refs 0, jscpd 0, radon A (2.41)
   - Spec refs: specs/09-tts-elevenlabs.md (phrase cache); specs/03-data-model.md (Redis keyspace `tts:cache:*`)
   - Depends on: P03-T12
   - Deliverables: `PhraseCache.get_or_render(voice, text, settings, format)` using REST convert, Redis storage, size limits

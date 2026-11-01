@@ -2970,16 +2970,22 @@ source = { editable = "packages/va_voice" }
 dependencies = [
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "orjson" },
+    { name = "redis" },
     { name = "soxr" },
     { name = "va-common" },
+    { name = "va-domain" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.3" },
     { name = "onnxruntime", specifier = ">=1.31.1" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "redis", specifier = ">=5.1" },
     { name = "soxr", specifier = ">=1.1.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
 ]
 
 [[package]]

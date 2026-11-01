@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793547327-d126
+> P04-T11: va_voice.phrase_cache PhraseCache single-flight via cache-owned tasks + asyncio.shield (done callback retrieves exception); log redactor masks any field containing 'key' -> log cache entries as entry=; va_voice tests can import va_elevenlabs test support (rest_client_helpers.sim_rest)
+<!-- tags: voice, tts, testing | created: 2026-11-01 -->
+
 ### mem-1793546380-d277
 > P04-T10: va_voice.latency TurnTimer.intervals() computed once and shared by latency()/TurnTracer.emit so misordered warnings log once; retroactive OTel spans via start_span(start_time=ns)+end(end_time=ns), anchor ns from (clock.now()-epoch)//timedelta(microseconds=1)*1000; va_voice tests/conftest.py re-exports reset_logging; use exactly-representable floats in tests (mypy rejects pytest.approx in tuple equality: comparison-overlap)
 <!-- tags: voice, latency, testing | created: 2026-11-01 -->

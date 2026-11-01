@@ -1452,7 +1452,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `cap:org:{org_id}:concurrency` | sorted set (call_id → expiry ts) | — | Concurrency cap with self-healing expiry |
 | `cap:dest:{org_id}:{e164}` | string | 10 s | Same-number 10-second rule |
 | `media:pods` | hash pod_id → JSON {active_calls, draining, updated_at} | — | Admission control, dashboards |
-| `tts:cache:{voice_id}:{sha256(text+settings)}` | string (base64 μ-law) | 30 d | Pre-rendered phrase cache |
+| `tts:cache:{voice_id}:{sha256(model\|format\|lang\|settings_json\|text)}` | string JSON `{"audio_b64", "alignment", "duration_ms"}` (≤ 2 MB) | 30 d (per-call entries 1 h) | Pre-rendered phrase cache (specs/09 §9) |
 | `dyn:{org_id}:{sha256(request)}` | string JSON | per `cache` setting (default 300 s) | Dynamic data cache |
 | `widget:rl:{widget_id}:{visitor}` | token bucket | 60 s | Widget per-visitor rate limit |
 | `sess:{token_hash}` | string JSON (`session_id`, `user_id`, `active_org_id`, `mfa_passed`, `mfa_passed_at`, `created_at`, `expires_at`) | min(300 s, time to `expires_at`), ≥ 1 s | Session cache (DB is source of truth; specs/04 §4.3); deleted on logout / logout-all / revoke |

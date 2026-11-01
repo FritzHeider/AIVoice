@@ -1254,3 +1254,128 @@ Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 72
 jscpd 0 clones, radon A (2.26). Checked against specs/07 §20 metric table (marks match start/end columns),
 specs/27 §2.1/§3.3/§4, specs/03 call_turns.latency key order, specs/19 call.latency messages. No sleeps; spans
 asserted with exact ns timestamps; misordered path logged once and covered.
+
+## Plan P04-T11 (Planner, 2026-11-01)
+Phrase cache. Specs: specs/09 §9 (request, key, value JSON, 30 d / 1 h TTL, 2 MB cap, prefetch, fallback to socket),
+§14 (key stability, TTL, fallback); specs/03 Redis row `tts:cache:*`; specs/27 §3.3 `va_tts_cache_hits_total` /
+`va_tts_cache_misses_total` (already in the media-worker catalog, no labels).
+
+### Placement decision (record in specs/09 §9 as `> Decision (2026-11-01) P04-T11`)
+`va_voice.phrase_cache` (phase scope lists `phrase_cache` in va_voice). va_voice must NOT import va_elevenlabs
+(specs/09 §7 Decision), so the cache depends on a structural Protocol that `va_elevenlabs.ElevenLabsRest` satisfies
+as-is (`tts_with_timestamps`). Add `va-domain` to va_voice deps (for `VoiceSettings`; pydantic only) +
+`[tool.uv.sources] va-domain = { workspace = true }`; run `uv lock`/`uv sync`.
+Other decisions for the same note:
+1. Key = `tts:cache:{voice_id}:{sha256("model|format|lang|settings_json|text")}` hex; `lang` = `""` when None;
+   `settings_json` = `orjson.dumps(settings.model_dump(mode="json"), option=OPT_SORT_KEYS)` (all fields incl.
+   defaults, so a partial VoiceSettings and the explicit-default one share a key); `"-"`? no — None settings
+   ⇒ `VoiceSettings()` defaults (same as vendor default). Update the specs/03 row to this exact key and value
+   (`string JSON {"audio_b64","alignment","duration_ms"}`, 30 d, per-call 1 h) in the same commit.
+2. Alignment stored = the response `alignment` (original text, not `normalized_alignment`) converted to integer ms:
+   `{"chars": [...], "char_start_ms": [...], "char_duration_ms": [...]}` (round half-up of seconds×1000, duration =
+   max(0, end−start)); null when the vendor sent none. `duration_ms` = len(audio) / bytes_per_ms of the format.
+3. Formats: only `ulaw_8000` and `pcm_16000` (ValueError otherwise) — use va_voice `ULAW_8000` / `PCM16LE_16000`
+   AudioFormat (name = vendor output_format).
+4. Values > 2 MB (`MAX_VALUE_BYTES = 2 * 1024 * 1024`, encoded JSON length) are returned but not stored
+   (warning log `tts.phrase_cache_oversize`).
+5. Redis failures fail open (log `tts.phrase_cache_unavailable` operation get/set, render without cache, no raise);
+   a malformed cached value counts as a miss and is overwritten.
+6. REST failure (any `ElevenLabsError`-like exception — catch `Exception` subclasses from the renderer except
+   `asyncio.CancelledError`) raises `PhraseUnavailableError(text, cause)`; the caller (P04-T12) falls back to the
+   live socket. Not cached.
+7. Single flight: concurrent misses of one key in one process share one render (dict key → `asyncio.Future`;
+   removed when done; a failure propagates to every waiter; a cancelled first caller does not cancel others —
+   run the render in a task owned by the cache, shielded; pending tasks cancelled by `aclose()`).
+8. Hit/miss metrics: hit = served from Redis; miss = rendered (one miss per render, waiters joining a flight count
+   as hits? no — count each get_or_render call: hit when Redis served it, else miss). Keep simple: per call.
+
+### Files
+1. `packages/va_voice/src/va_voice/phrase_cache.py`
+   - Protocols: `RestAlignmentLike` (`characters: Sequence[str]`, `character_start_times_seconds`,
+     `character_end_times_seconds: Sequence[float]`), `TimestampedAudioLike` (`audio: bytes`, `alignment:
+     RestAlignmentLike | None`), `TimestampedSynthesizer` with `async def tts_with_timestamps(self, voice_id: str,
+     text: str, *, model_id: str, output_format: str, voice_settings: VoiceSettings | None = ..., language_code:
+     str | None = ..., apply_text_normalization: Literal["auto","on","off"] = ...) -> TimestampedAudioLike`.
+     (Verify mypy accepts `ElevenLabsRest` for it in a test: `cache = PhraseCache(sim.client, ...)` typed.)
+     Use read-only `@property` members in the result protocols so frozen dataclasses / pydantic models match.
+   - `@dataclass(frozen=True, slots=True) PhraseVoice(voice_id: str, model_id: str, settings: VoiceSettings,
+     language_code: str | None = None)`.
+   - `@dataclass(frozen=True, slots=True) PhraseAlignment(chars: tuple[str, ...], char_start_ms: tuple[int, ...],
+     char_duration_ms: tuple[int, ...])` — satisfies `va_voice.text.alignment.ChunkAlignmentLike` (absolute = chunk
+     relative, one chunk).
+   - `@dataclass(frozen=True, slots=True) CachedPhrase(text, fmt: AudioFormat, audio: bytes, alignment:
+     PhraseAlignment | None, duration_ms: int, cached: bool)` (`cached` = served from Redis).
+   - Constants `SHARED_TTL_S = 30*86400`, `PER_CALL_TTL_S = 3600`, `MAX_VALUE_BYTES`, `STANDARD_FILLERS = ("Sure.",
+     "Got it.", "One moment.", "Let me check that for you.")` (spec §9 list verbatim; test parses the §9 line).
+   - `phrase_cache_key(voice: PhraseVoice, text: str, fmt: AudioFormat) -> str` (pure).
+   - `encode_entry(phrase) -> bytes` / `decode_entry(raw, text, fmt) -> CachedPhrase | None` (pure; None for
+     malformed JSON, wrong types, unequal alignment arrays, bad base64).
+   - `class PhraseCacheMetrics` protocol-free small class: `PhraseCacheMetrics(metrics: ServiceMetrics)` with
+     `hit()`/`miss()` on `va_tts_cache_hits_total`/`va_tts_cache_misses_total` (check how `ServiceMetrics` exposes
+     counters — follow `reorder_metrics.CatalogReorderMetrics`); optional (None = no metrics).
+   - `class PhraseUnavailableError(Exception)` with `.text`, `__cause__` set.
+   - `class PhraseCache(synth: TimestampedSynthesizer, redis: Redis, *, metrics: PhraseCacheMetrics | None = None)`:
+     `async get_or_render(voice, text, fmt, *, ttl_s: int = SHARED_TTL_S) -> CachedPhrase`;
+     `async prefetch(voice, fmt, texts: Iterable[str] = STANDARD_FILLERS, *, ttl_s=SHARED_TTL_S) -> dict[str,
+     CachedPhrase | None]` (gather; failures map to None, logged `tts.phrase_prefetch_failed`); `async aclose()`.
+     Rendering = `synth.tts_with_timestamps(voice.voice_id, text, model_id=voice.model_id,
+     output_format=fmt.name, voice_settings=voice.settings, language_code=voice.language_code,
+     apply_text_normalization="auto")`. Empty/whitespace text ⇒ ValueError.
+2. `packages/va_voice/pyproject.toml` (+va-domain); `uv.lock`.
+3. specs/09 §9 Decision; specs/03 Redis row; AGENTS.md bullet (P04-T11).
+
+### Tests
+- `packages/va_voice/tests/test_phrase_cache_unit.py` (fakeredis `FakeAsyncRedis`, a scripted fake synthesizer
+  recording calls, returning frozen dataclasses with alignment seconds):
+  key stability (golden hex for a fixed input computed independently in the test with hashlib from the documented
+  string), key changes with each of model/format/lang/each settings field/text/voice_id, partial vs explicit-default
+  settings same key; miss renders + stores with TTL 30 d (`redis.ttl` ≈ 2 592 000) and second call is a hit with no
+  synth call (`cached=True`, identical audio/alignment); per-call ttl 3600; alignment ms conversion (rounding,
+  duration from end−start, None alignment stored as null); duration_ms for ulaw (8 bytes/ms) and pcm_16000 (32);
+  unsupported format ValueError; empty text ValueError; malformed cached value ⇒ miss and overwritten; oversize ⇒
+  returned, not stored, warning logged; Redis down (fakeredis `server.connected = False`) ⇒ rendered, no raise,
+  warnings for get and set; synth raises ⇒ PhraseUnavailableError with cause, nothing stored; single flight:
+  10 concurrent get_or_render for one key with a synth gated by an Event ⇒ one synth call, all equal; a cancelled
+  first caller still lets the others finish; failure propagates to all waiters; aclose cancels pending renders;
+  metrics hits/misses counts via `build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))`
+  + `registry.get_sample_value`; prefetch returns all fillers, failures → None + log; STANDARD_FILLERS equals the
+  quoted list in the specs/09 §9 paragraph (parse it); cached alignment feeds `AlignmentTimeline.add_chunk` and
+  `text_until(duration_ms)` returns the full text (integration with T08).
+- `packages/va_voice/tests/test_phrase_cache_sim.py` (FakeElevenLabs via `rest_client_helpers.sim_rest()`, voice
+  `tts_helpers.VOICE_ID`/`KAREN_VOICE_ID`, model from the sim catalog e.g. `eleven_flash_v2_5`): miss then hit
+  asserted via the sim's request log (`await sim.records("/sim/elevenlabs/tts/requests", "requests")` count stays 1
+  after the hit — check the actual record path/key in va_sim control), audio non-empty μ-law with duration matching
+  len/8, alignment chars == text chars; different settings ⇒ second request; sim fault (`/sim/elevenlabs/tts/fault`
+  or REST error status — check the fault body shape) ⇒ PhraseUnavailableError. Also asserts `ElevenLabsRest` is
+  accepted for the protocol (mypy).
+Use fakeredis for Redis in both. No sleeps; events for gating.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (phrase_cache.py 100 %), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src/va_voice/phrase_cache.py`, pip-audit + pnpm audit (no new third-party deps).
+
+### Risks
+- Protocol vs `ElevenLabsRest.tts_with_timestamps` signature: parameter names/defaults must match exactly
+  (keyword-only after `*`); result `TtsTimestamped.alignment` is `RestAlignment | None` (pydantic model) — use
+  property-based protocols so list[str] attrs satisfy Sequence. If mypy rejects, adapt the protocol, not va_elevenlabs.
+- Adding va-domain to va_voice must not create an import cycle (va_domain imports nothing internal) — check.
+- fakeredis TTL asserts: use `ttl` exact ints (fakeredis time is wall clock; assert range [ttl-1, ttl]).
+- Sim REST TTS costs `tts_ttfa_ms` sim time; sim_rest uses realtime state with ttfa 0, fine.
+
+## Build P04-T11 (Builder, 2026-11-01)
+Implemented per plan (specs/09 §9 Decision P04-T11, specs/03 §11 row updated). Deviations:
+- Log field for the cache entry is `entry=` (the log redactor masks any field name containing `key`).
+- Flight joiners count as misses (hit only when Redis served the call); prefetch dedupes texts and re-raises
+  non-PhraseUnavailableError exceptions (e.g. ValueError for empty text).
+- va_voice deps: + orjson, redis, va-domain (uv.lock updated).
+Files: va_voice/phrase_cache.py; tests/test_phrase_cache_unit.py (52), tests/test_phrase_cache_sim.py (3, mypy
+accepts ElevenLabsRest for the protocol); specs/09 §9, specs/03 §11; AGENTS bullet.
+Gates: fmt 0; lint 0; typecheck 0 (865 files); placeholders 0; spec refs 0; make test 7279 passed / 7 skipped
+(98.56 %); phrase_cache.py 100 %; jscpd 0 clones; radon A (2.41); pip-audit no known vulns; pnpm audit 3 moderate.
+
+## Review P04-T11 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 7279 passed / 7 skipped (phrase_cache
+100 %), jscpd 0 clones, radon A (2.41). Checked key material/value JSON/TTLs/2 MB cap against specs/09 §9 and the
+specs/03 §11 row; single-flight race (re-check after the await read), shielded waiters, aclose, fail-open Redis paths
+all tested; no sleeps beyond sleep(0) yields.

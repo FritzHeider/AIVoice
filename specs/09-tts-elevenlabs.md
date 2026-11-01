@@ -231,6 +231,27 @@ fillers/backchannels ("Sure.", "Got it.", "One moment.", "Let me check that for 
 - Fallback: on REST failure, the phrase is synthesized through the live socket instead.
 - The live smoke test `test_tts_with_timestamps_endpoint` asserts the response shape.
 
+> Decision (2026-11-01) P04-T11: the cache is `va_voice.phrase_cache.PhraseCache(synth, redis, metrics=)`.
+> 1. va_voice never imports va_elevenlabs: the renderer is the structural `TimestampedSynthesizer` protocol, which
+>    `va_elevenlabs.ElevenLabsRest.tts_with_timestamps` satisfies as is (checked by mypy in the FakeElevenLabs test).
+> 2. Key material is `model|format|lang|settings_json|text` joined by `|`: `format` is the `output_format`
+>    (`ulaw_8000` or `pcm_16000`; any other format is a `ValueError`), `lang` is `""` when unset, and
+>    `settings_json` is every `VoiceSettings` field including defaults as compact orjson with sorted keys, so a
+>    partial settings object and its explicit-default twin share an entry. The digest is lowercase hex.
+> 3. The stored `alignment` is the response `alignment` (original text, not `normalized_alignment`) converted to
+>    integer ms `{"chars", "char_start_ms", "char_duration_ms"}` (half-up rounding, duration = max(0, end − start)),
+>    or `null` when the vendor sent none; `duration_ms` = audio bytes / bytes per ms of the format, rounded half up.
+>    A value whose JSON exceeds 2 MB is returned but not stored (`tts.phrase_cache_oversize`).
+> 4. Redis failures fail open (rendered without the cache, `tts.phrase_cache_unavailable` with `operation`
+>    `get`/`set`); a malformed stored value is a miss and is overwritten. Logs carry the entry name, never the text.
+> 5. A REST failure raises `PhraseUnavailableError` (cause chained, nothing stored); the caller speaks the phrase
+>    through the live socket. `prefetch(voice, fmt, texts=STANDARD_FILLERS, ttl_s=)` maps such failures to `None`
+>    (`tts.phrase_prefetch_failed`); per-call entries pass `ttl_s=PER_CALL_TTL_S` (3 600 s).
+> 6. Concurrent misses of one key in one process share one render task owned by the cache: a cancelled waiter
+>    does not cancel it (the phrase is still stored), a failure reaches every waiter, `aclose()` cancels renders
+>    in flight. Each `get_or_render` counts `va_tts_cache_hits_total` when Redis served it, else
+>    `va_tts_cache_misses_total`.
+
 ## 10. Standalone TTS product endpoints
 
 | Endpoint | Auth | Request | Response |

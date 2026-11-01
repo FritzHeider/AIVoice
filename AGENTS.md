@@ -1032,3 +1032,10 @@ Grafana 3001
   clients already do. `packages/va_voice/tests/conftest.py` re-exports `reset_logging`, so va_voice tests can use
   `service_helpers.json_log_stream`/`log_events`. Retroactive OTel spans:
   `tracer.start_span(name, context=, start_time=ns)` + `span.end(end_time=ns)`.
+- 2026-11-01 (P04-T11): phrase cache = `va_voice.phrase_cache.PhraseCache(synth, redis, metrics=PhraseCacheMetrics(...))`
+  (rules: specs/09 §9 Decision P04-T11): `get_or_render(PhraseVoice(voice_id, model_id, settings, lang), text, fmt,
+  ttl_s=)` → `CachedPhrase` (`cached` = Redis hit; `alignment` is a `ChunkAlignmentLike` for the timeline), raises
+  `PhraseUnavailableError` → speak through the live socket; `prefetch(...)`; `aclose()`. `synth` is any object with
+  `ElevenLabsRest.tts_with_timestamps`'s signature (va_voice depends on va-domain, never va-elevenlabs). The log
+  redactor replaces any field whose name contains `key` (`cache_key` too): log cache entries as `entry=`.
+  va_voice tests can use the va_elevenlabs test support (`rest_client_helpers.sim_rest`, `tts_helpers.VOICE_ID`).

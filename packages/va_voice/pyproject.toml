@@ -7,11 +7,15 @@ dependencies = [
     "numpy>=2.3",
     "onnxruntime>=1.31.1",
     "soxr>=1.1.0",
+    "orjson>=3.13.0",
+    "redis>=5.1",
     "va-common",
+    "va-domain",
 ]
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-domain = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
