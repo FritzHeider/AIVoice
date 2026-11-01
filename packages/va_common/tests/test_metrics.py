@@ -77,7 +77,7 @@ def _shape(specs: tuple[MetricSpec, ...] | set[MetricSpec]) -> set[tuple[str, Me
 def test_spec_parser_sees_every_section() -> None:
     parsed = parse_spec_catalog()
     assert set(parsed) == set(Service)
-    assert sum(len(specs) for specs in parsed.values()) == 57
+    assert sum(len(specs) for specs in parsed.values()) == 58
 
 
 @pytest.mark.parametrize("service", list(Service))

@@ -843,7 +843,7 @@ Grafana 3001
   tracer_provider=)` (rules: specs/09 §11 Decision P03-T10). `flush(id)` ends an utterance (`close_context` follows
   after the tail grace); `send(..., flush=True)` only forces generation. Client state changes before every write,
   so a write to a dead socket is repaired by the reconnect replay. `va_tts_late_audio_dropped_total` is in the
-  media-worker catalog (`test_metrics` counts 57 spec rows). Never import `va_sim` from `va_elevenlabs` src.
+  media-worker catalog (`test_metrics` counts 58 spec rows). Never import `va_sim` from `va_elevenlabs` src.
   Tests: `tests/support/tts_client_helpers.py` (`RecordingTtsServer` with `reject_status`, `auto_final`,
   `auto_close`; `Connection.next/take/send/close`; `audio_frame`, `final_frame`, `opened`, `collect`, `rig(url)`
   = socket on a `ManualClock` + media-worker registry + memory spans). `ManualClock`
@@ -967,3 +967,10 @@ Grafana 3001
   ignores it and only `va_voice.audio.resample` calls it. soxr LQ streaming emits nothing for the first few 20 ms
   chunks (filter delay) and outputs in blocks: assert totals after `Resampler.flush()`, never per-chunk sizes; chunked
   vs one-shot output differs by ≤ 2 LSB. dBFS everywhere = RMS / 32 767 (`va_voice.audio.rms_dbfs`).
+- 2026-11-01 (P04-T02): inbound reordering = `va_voice.reorder.ReorderBuffer(fmt, window=5, first_chunk=1, max_gap=50,
+  observer=)` (specs/07 §5.1 Decision): `push(int(media.chunk), payload) -> list[OrderedFrame(chunk, payload, filled)]`,
+  `drain()` at stream stop; count-based only (no timer), Telnyx chunks start at 1. Late/repeated chunks are dropped
+  (`stats.duplicates`, no metric); holes wider than `max_gap` resync without silence. Metrics through
+  `va_voice.reorder_metrics.CatalogReorderMetrics(build_metrics(Service.MEDIA_WORKER, ...))`
+  (`va_audio_reorder_total`, `va_audio_gap_frames_total`). va_voice must stay transport-agnostic (never import
+  `va_telnyx`).

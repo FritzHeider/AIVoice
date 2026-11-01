@@ -116,3 +116,103 @@ jscpd 0 clones, radon A (1.325), pip-audit clean, pnpm audit 3 moderate (no high
 Approved. Re-ran: lint pass, typecheck pass (825 files), placeholders 0, make test 6589 passed / 7 skipped (98.45 %),
 va_voice 71 passed 100 % coverage, jscpd 0 clones, spec refs 0. Diff matches specs/07 §4 (tables, L16 BE, soxr LQ
 stream, Framer padding) + Decision note; no findings.
+
+## Plan P04-T02 (Planner, 2026-11-01)
+Reorder buffer — specs/07 §5.1 (+ specs/06 media `chunk`, specs/27 §3.3 `va_audio_reorder_total`). Transport-agnostic:
+va_voice must NOT import va_telnyx (callers pass `int(media.chunk)` + payload). Telnyx chunks start at 1 (FakeTelnyx
+`MediaSession._chunk` 0 → +1 before send; jitter mode sends 2, 1, 4, 3 ...), so expected starts at 1 by default.
+
+### Files
+1. `packages/va_voice/src/va_voice/reorder.py` (pure, sync, no asyncio — called from the media read loop):
+   - `@dataclass(frozen=True, slots=True) class OrderedFrame: chunk: int; payload: bytes; filled: bool`
+     (`filled=True` = synthetic silence for a missing chunk).
+   - `@dataclass(slots=True) class ReorderStats: received: int = 0; emitted: int = 0; reordered: int = 0;
+     gap_frames: int = 0; duplicates: int = 0; resyncs: int = 0` (always kept, read by tests/pipeline).
+   - `class ReorderObserver(Protocol)`: `reordered(self, count: int) -> None`, `gap_filled(self, count: int) -> None`,
+     `duplicate(self, count: int) -> None`. `NULL_OBSERVER` no-op implementation (bodies `return None`).
+   - `class ReorderBuffer`:
+     `__init__(self, fmt: AudioFormat = ULAW_8000, *, window: int = 5, first_chunk: int = 1, max_gap: int = 50,
+     observer: ReorderObserver = NULL_OBSERVER)`; `window >= 1`, `max_gap >= window` else `ValueError`.
+     Silence frame = `bytes([fmt.silence_byte]) * fmt.frame_bytes` built once.
+     `push(chunk: int, payload: bytes) -> list[OrderedFrame]`:
+       - `chunk < expected` or already buffered → duplicate (dropped, stats + observer).
+       - `chunk == expected` → emit it, then emit consecutive buffered successors.
+       - `chunk > expected` → hold it (dict `chunk → payload`), stats.reordered += 1, observer.reordered(1).
+       - then while `len(held) >= window` and `expected` missing: if `min(held) - expected > max_gap` → resync
+         (expected = min(held), no fill, stats.resyncs += 1; protects against chunk-number jumps producing thousands of
+         silence frames) else emit ONE silence `OrderedFrame(expected, silence, filled=True)`, gap_frames += 1,
+         observer.gap_filled(1), expected += 1; after each step emit consecutive held successors. (Multiple missing
+         chunks → one silence per missing chunk, each only while ≥ window frames are held: exactly spec wording.)
+     `drain() -> list[OrderedFrame]`: end of stream (`stop`): emits all held frames in order, filling interior gaps
+       with silence (resync rule applies to gaps > max_gap); buffer empty afterwards, `expected` = last + 1.
+     Properties: `expected: int` (next chunk to emit), `held: int` (buffered count), `stats: ReorderStats`.
+     Use a dict + `min()` only when needed (window is 5 → O(window)); no heap needed.
+   - Timeout: spec is count-based (Telnyx streams frames continuously, silence included), so no wall-clock timer.
+     The plan line "gap fill with silence after timeout" ≈ the window (5 later frames ≈ 100 ms) — record in Decision.
+2. `packages/va_voice/src/va_voice/reorder_metrics.py`: `class CatalogReorderMetrics` (implements ReorderObserver
+   over a media-worker `va_common.metrics.ServiceMetrics`): `va_audio_reorder_total.inc(count)`,
+   `va_audio_gap_frames_total.inc(count)`; duplicates go to stats only (no metric) — `duplicate` returns None.
+3. `packages/va_common/src/va_common/metrics.py`: add `_c("va_audio_gap_frames_total", "Silence frames inserted for
+   missing inbound audio chunks")` right after `va_audio_reorder_total` in MEDIA_WORKER.
+4. `specs/27-observability.md` §3.3: add row `| \`va_audio_gap_frames_total\` | counter | — |` after the reorder row.
+   `packages/va_common/tests/test_metrics.py`: 57 → 58. Also bump any other place asserting the media-worker
+   catalog size (grep "57 spec rows" in AGENTS.md P03-T10 line → update to 58).
+5. `specs/07-media-pipeline.md` §5.1: `> Decision (2026-11-01):` — module `va_voice.reorder.ReorderBuffer(fmt,
+   window=5, first_chunk=1, max_gap=50)`; metric name is `va_audio_gap_frames_total` (specs/27 §3.3; the old
+   `media_gap_frames_total` text is superseded); `va_audio_reorder_total` counts frames that arrived ahead of the
+   expected chunk; duplicates and late frames (chunk ≤ last emitted, incl. frames whose slot was already filled with
+   silence) are dropped and counted in stats only; gaps wider than 50 frames (1 s) resync without filling;
+   `drain()` at stream stop; count-based only (no timer). Update the §5.1 text "counts `media_gap_frames_total`" →
+   keep original sentence, the Decision supersedes (or edit it to the new name — editing is cleaner; do that).
+6. `packages/va_voice/tests/test_reorder.py` (+ `test_reorder_metrics.py`):
+   - in-order stream passes through immediately (1 frame out per push, never held).
+   - jitter pattern 2,1,4,3,...: output strictly 1..n, reordered count = n/2, no gaps.
+   - single missing chunk: push 1, 3,4,5,6 → nothing after 3..6 held(4); push 7 (5 held) → silence(2, filled) then
+     3..7; gap_frames == 1; late arrival of 2 afterwards → dropped, duplicates == 1.
+   - two missing chunks (2,3): exactly two silence frames, released one per window condition.
+   - duplicates: chunk repeated while held, and chunk ≤ last emitted → dropped, stats + observer counts.
+   - first chunk out of order (2 then 1) with default first_chunk=1 → 1, 2.
+   - custom first_chunk; chunk < first_chunk dropped.
+   - L16_16000 fmt: silence frame is 640 zero bytes; ULAW: 160 × 0xFF.
+   - resync: push 1, then 500..504 → no silence flood: resyncs == 1, output 1, 500..504.
+   - drain: fills interior gaps, empties buffer, subsequent push of next chunk continues; drain on empty → [].
+   - constructor validation (window 0, max_gap < window → ValueError).
+   - hypothesis properties: (a) any permutation where each element is displaced < window positions (generate by
+     shuffling within random blocks of size ≤ window, or sorting by index + random offset in [0, window)) of chunks
+     1..n plus `drain()` → output chunks exactly 1..n, no filled frames, payloads preserved; (b) random subset
+     dropped + local shuffle → output after drain is contiguous first..last with filled exactly at dropped chunks
+     (when drops are isolated ≤ max_gap), every payload length = frame_bytes for fills; (c) random duplicates
+     injected never appear twice in output; output chunks always strictly increasing by 1 (also across pushes).
+   - metrics: `CatalogReorderMetrics(build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False)))`
+     wired as observer; after a jittered stream with one gap the registry values of `va_audio_reorder_total` and
+     `va_audio_gap_frames_total` equal stats (read via `registry.get_sample_value`).
+   - Avoid jscpd clones with existing tests: build streams with small helpers (`frames(chunks)` → payload = chunk
+     number encoded in bytes so payload preservation is checkable).
+
+### Docs
+- AGENTS.md: P04-T02 bullet (ReorderBuffer API, count-based, drain at stop, gap metric, chunks start at 1); update the
+  P03-T10 "57 spec rows" phrase to 58.
+
+### Gates
+`make fmt`, `make lint`, `make typecheck`, `make placeholders`, `uv run pytest packages/va_voice packages/va_common
+-q`, `make test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a`
+on reorder.py (keep push/drain ≤ B by extracting `_release()`), pip-audit + pnpm audit.
+
+### Risks
+- Other tests asserting media-worker metric names/count (grep `va_audio_reorder_total` and `57`) — update together.
+- hypothesis permutation generator must truly keep displacement < window, else gap fills appear legitimately; drain
+  covers residual held frames.
+
+## Build P04-T02 (Builder, 2026-11-01)
+Implemented as planned: `va_voice.reorder` (ReorderBuffer/OrderedFrame/ReorderStats/ReorderObserver/NULL_OBSERVER),
+`va_voice.reorder_metrics.CatalogReorderMetrics`, `va_audio_gap_frames_total` in MEDIA_WORKER catalog + specs/27 §3.3
+row (test_metrics 57→58, AGENTS P03-T10 phrase updated), specs/07 §5.1 metric name edited + Decision, AGENTS bullet.
+Tests: packages/va_voice/tests/test_reorder.py (19 tests incl. 3 hypothesis properties: bounded jitter → no fills,
+drops → silence exactly at missing chunks, injected repeats never emitted + output contiguous across pushes).
+Gates: fmt ok, lint pass, mypy pass (828 files), placeholders 0, spec refs 0, make test 6610 passed / 7 skipped
+(98.45 %), va_voice 100 % coverage, jscpd 0 clones, radon A (1.56), pip-audit clean, pnpm audit 3 moderate (no high).
+
+## Review P04-T02 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint pass, typecheck pass (828 files), placeholders 0, make test 6610 passed / 7 skipped (98.45 %),
+va_voice 92 passed 100 % coverage, jscpd 0 clones, radon A (1.65), spec refs 0. Diff matches specs/07 §5.1 (window 5,
+one silence per missing chunk, duplicates ≤ last emitted dropped) + Decision; metric added to specs/27 §3.3 and catalog.

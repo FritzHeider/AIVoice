@@ -6,7 +6,7 @@
   - Deliverables: `va_voice.audio` (μ-law encode/decode via numpy lookup tables, PCM16 helpers, L16 big-endian conversions, soxr resample 8k↔16k, frame splitter/joiner, RMS/dBFS)
   - Acceptance: round-trip error bounds; golden vectors for μ-law (ITU-T G.711 table spot checks); resample length correctness.
 
-- [ ] P04-T02 Reorder buffer
+- [x] P04-T02 Reorder buffer — va_voice.reorder.ReorderBuffer (count-based window 5, silence fill, resync > 50, drain) + CatalogReorderMetrics, va_audio_gap_frames_total in specs/27 §3.3 + catalog; 19 tests incl. 3 hypothesis properties, va_voice 100 % coverage; make test 6610 passed / 7 skipped, lint/typecheck/placeholders/jscpd clean
   - Spec refs: specs/07-media-pipeline.md (reorder buffer); specs/06-telephony-telnyx.md (media `chunk` ordering)
   - Depends on: P04-T01
   - Deliverables: `ReorderBuffer(window_frames=5)` emitting in-order frames, gap fill with silence after timeout, duplicate drop, metrics counters

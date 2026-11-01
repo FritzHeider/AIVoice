@@ -152,6 +152,7 @@ CATALOG: Final[Mapping[Service, tuple[MetricSpec, ...]]] = {
         _h("va_barge_in_reaction_ms", "Barge-in reaction time in ms"),
         _c("va_audio_underruns_total", "Outbound audio underruns"),
         _c("va_audio_reorder_total", "Inbound audio frames reordered"),
+        _c("va_audio_gap_frames_total", "Silence frames inserted for missing inbound audio chunks"),
         _c("va_tool_calls_total", "Custom tool calls", "status_class"),
         _h("va_tool_duration_ms", "Custom tool call duration in ms"),
         _c("va_route_decisions_total", "Pathway routing decisions", "kind"),

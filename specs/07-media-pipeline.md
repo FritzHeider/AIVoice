@@ -93,8 +93,19 @@ silence (`0xFF` for μ-law, zeros for L16).
 
 Telnyx does not guarantee order. `ReorderBuffer(window=5)` keyed on `int(media.chunk)`: emits in order; if the next
 expected chunk is missing while 5 later chunks are buffered (≈ 100 ms), it inserts one silence frame for the gap and
-continues (counts `media_gap_frames_total`). Duplicates (chunk ≤ last emitted) are dropped. Only `track` inbound
+continues (counts `va_audio_gap_frames_total`). Duplicates (chunk ≤ last emitted) are dropped. Only `track` inbound
 frames are processed on primary legs.
+
+> Decision (2026-11-01): `va_voice.reorder.ReorderBuffer(fmt=ULAW_8000, *, window=5, first_chunk=1, max_gap=50,
+> observer=...)` is transport-agnostic (callers pass `int(media.chunk)` and the payload; Telnyx chunks start at 1).
+> `push(chunk, payload)` returns the frames now ready as `OrderedFrame(chunk, payload, filled)`. Gap fill is purely
+> count-based (no timer): while the expected chunk is missing and `window` later chunks are held, one silence frame
+> (format silence byte × 20 ms) is emitted per missing chunk. Late frames (chunk below the next expected one,
+> including chunks whose slot was already filled with silence) and repeats of a held chunk are dropped and counted in
+> `ReorderStats.duplicates` only. A hole wider than `max_gap` chunks (1 s) is skipped without silence (`resyncs`) so a
+> sequence jump cannot flood the pipeline. `drain()` at stream `stop` emits every held frame, filling interior gaps.
+> Metrics (specs/27 §3.3): `va_audio_reorder_total` counts frames that arrived ahead of the expected chunk,
+> `va_audio_gap_frames_total` counts silence fill frames (formerly named `media_gap_frames_total` here).
 
 ### 5.2 Fan-out
 

@@ -154,6 +154,7 @@ named `LAT_MS`.
 | `va_barge_in_reaction_ms` | histogram | — |
 | `va_audio_underruns_total` | counter | — |
 | `va_audio_reorder_total` | counter | — |
+| `va_audio_gap_frames_total` | counter | — |
 | `va_tool_calls_total` | counter | `status_class` (2xx/4xx/5xx/timeout) |
 | `va_tool_duration_ms` | histogram | — |
 | `va_route_decisions_total` | counter | `kind` (edge/global/loop_stay) |
