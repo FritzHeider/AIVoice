@@ -814,3 +814,13 @@ Grafana 3001
   `media_agent` fixture in `tests/conftest.py`. `RecordingClock` now lives in `packages/va_common/tests/clock_helpers.py`.
   `BucketDecision.retry_after_ms` gives the exact wait for in-process waiters. A new `### 3.N` heading in specs/27
   is skipped by `test_metrics.parse_spec_catalog` (it only reads §3.1-§3.5).
+- 2026-11-01 (P03-T08b): `TelnyxClient` = call commands in `client.py` + mixins `provisioning.ProvisioningCommands`,
+  `numbers.NumberCommands`, `messaging.MessagingCommands` (each declares `_transport: TelnyxTransport`). Shared
+  transport pieces: `request_pages(op, path, Model, params=)` (all pages, one metric observation),
+  `download(op, url, path, max_bytes=)` (streamed via `anyio.open_file`, file removed on failure), `parse_items`,
+  `segment(id)`. Rules: specs/06 §2.2 Decision P03-T08b. `TelnyxClientFactory(..., resolve_key=async fn)` caches BYO
+  clients 5 min on the injected clock's `monotonic()`. Tests: `telnyx_client_helpers.sim_http(state)` yields
+  (raw sim client, bare client on the same ASGI app) for factories/BYO clients; a BYO key is registered with
+  `POST /sim/telnyx/accounts`. respx streaming bodies: `httpx.Response(200, stream=<AsyncByteStream>)` (raise
+  `httpx.ReadError` inside `__aiter__` for a mid-body failure). Response models use `coerce_numbers_to_str`
+  (Telnyx numeric ids) and `validation_alias="from"` + `populate_by_name` for the `from` field.

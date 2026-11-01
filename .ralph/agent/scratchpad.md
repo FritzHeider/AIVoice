@@ -651,3 +651,172 @@ jscpd 0 clones, spec refs 0, pip-audit clean, pnpm audit 3 moderate (no high).
 Approved. Re-ran make lint/typecheck/placeholders (0 findings) and make test (5179 passed, 98.24 %). Checked
 client bodies against specs/06 §2.1 rows (defaults, `from` alias, target_legs only on dial/answer per Decision 5),
 §2.2 retry/mapping/rate-limit semantics vs Decision, §3 client_state format, specs/27 §3.6 metrics. No findings.
+
+## Plan P03-T08b (Planner, 2026-11-01)
+Scope: rest of the specs/06 §2.1 table (provisioning, numbers, messaging, download, balance) + `TelnyxClientFactory`
+(specs/06 §1). FakeTelnyx already serves every endpoint (`va_sim.telnyx.resources` apps/OVPs/messaging profiles with
+filters `filter[application_name][contains]`, `filter[name][contains]`, `filter[name]` exact; `numbers.py`
+available/orders/phone_numbers/messaging; `messages.py`; `/v2/balance`; recordings `/sim/recordings/{id}.wav` via
+the control routes). Fix the **sim** only if it rejects a documented field; do not share code with it.
+
+### Spec decision to write: specs/06 §2.2 `> Decision (2026-11-01): provisioning, numbers, messaging, factory (P03-T08b).`
+1. Operations/categories: `search_numbers` → `number_search`; `create_number_order` → `number_order`
+   (non-idempotent); `send_message` → `messaging` (non-idempotent); provisioning POSTs non-idempotent, no category;
+   GET/PATCH/DELETE idempotent, no category (consistent with Decision P03-T08a 1/3).
+2. List methods return every page: follow `meta.total_pages` with `page[number]`, `page[size]=250` (cap 20 pages →
+   stop; Telnyx max page size 250). Name filters are server-side; the bootstrap compares names exactly itself.
+3. `search_numbers` validates `limit` 1–50 and features ⊆ {voice,sms,mms} with `ValueError` before any I/O; always
+   sends `filter[best_effort]=false`; unset filters omitted; features sent as repeated `filter[features][]`.
+4. `get_phone_number_by_e164` returns `None` when `data` is empty. `update_phone_number` sends only the given
+   fields (`ValueError` when none); `number_tags(org_id) -> ["va", f"org:{org_id}"]` builds the §2.1 tags.
+5. `download(url, destination, *, max_bytes=2 GiB)` (specs/06 §11 step 2): absolute URL only (`ValueError` for a
+   relative path), no auth header, streamed to `destination` (truncated on each retry attempt, deleted on final
+   failure), retried like a GET; exceeding `max_bytes` raises `TelnyxDownloadTooLarge` (a `TelnyxError`,
+   `CARRIER_ERROR`, details `{"telnyx_errors": [], "max_bytes": n}`) and removes the file. Returns bytes written.
+6. Factory: `for_call(call)` reads `call.config["telnyx_account_id"]` (None/absent = platform);
+   `for_account(None)` = platform; BYO key from the injected async resolver, cached in process 5 min per account
+   (one in-flight resolve per account via a per-account `asyncio.Lock`); unknown/disabled account → resolver
+   returns `None` → `UnknownTelnyxAccount(LookupError)`; `invalidate(account_id)` drops the cache entry (key
+   rotation/deletion). The client's `account` label is `str(telnyx_account_id)` (rate-limit bucket per account).
+
+### Files
+- `packages/va_telnyx/src/va_telnyx/transport.py`: refactor so the pipeline is shared:
+  `request(...) -> dict` (JSON, unchanged signature) and new `download(operation, url, destination, *, max_bytes)
+  -> int`. Generalize `_send_with_retries(request, span, attempt)` where `attempt: Callable[[], Awaitable[
+  httpx.Response]]`; for download the attempt uses `self._http.stream("GET", url, headers=...)`, on 2xx writes
+  chunks via `anyio.open_file(destination, "wb")` (non-blocking; anyio is already installed via httpx — add it to
+  va-telnyx deps explicitly) counting bytes, raising `TelnyxDownloadTooLarge` when over; on non-2xx reads at most
+  64 KiB of the body for `_mapped_error`. Keep radon ≤ B (split helpers). Add `params` support already present.
+  Also add `paged(operation, path, params, model) -> list[M]` helper (or put it in a small `pagination.py`):
+  loops pages per Decision 2.
+- `src/va_telnyx/errors.py`: `TelnyxDownloadTooLarge(TelnyxError)` (operation, max_bytes; `to_app_error` per
+  Decision 5). Metrics outcome for it: `carrier_error` (falls under `_outcome` default).
+- `src/va_telnyx/provisioning_models.py` (keep models.py < ~250 lines): requests `CallControlAppCreate`
+  (fields/defaults exactly the §2.1 row; `inbound` fixed `{"channel_limit": None, "sip_subdomain_receive_settings":
+  "only_my_connections"}` — note `channel_limit: null` must be SENT, so build that sub-dict explicitly, not via
+  exclude_none), `OutboundVoiceProfileCreate` (`traffic_type="conversational", service_plan="global",
+  concurrent_call_limit=None` sent as null, `enabled=True`, `whitelisted_destinations=("US","CA")` overridable),
+  `MessagingProfileCreate` (`webhook_api_version="2"`, `whitelisted_destinations=("US","CA")`, `enabled=True`);
+  responses (extra="ignore"): `CallControlApp(id, application_name, webhook_event_url, outbound_voice_profile_id`
+  read from `outbound.outbound_voice_profile_id` via a model validator or nested `AppOutbound` model),
+  `OutboundVoiceProfile(id, name, whitelisted_destinations)`, `MessagingProfile(id, name, webhook_url: str|None,
+  whitelisted_destinations)`, `Balance(balance: Decimal, credit_limit: Decimal, available_credit: Decimal,
+  currency: str)`.
+- `src/va_telnyx/number_models.py`: `NumberSearch` (country_code `^[A-Z]{2}$` default "US", national_destination_code,
+  locality, administrative_area, contains, features tuple[Literal["voice","sms","mms"],...]=(), phone_number_type
+  Literal["local","toll_free","mobile","national"]|None, limit 1..50 = 10; `.params() -> dict[str, str|list[str]]`),
+  `AvailableNumber(phone_number, features: tuple[str,...]` parsed from `[{"name":..}]`, `monthly_cost`,
+  `upfront_cost` as Decimal from `cost_information`, `region_information: list[dict]`, best_effort, reservable),
+  `NumberOrder(id, status Literal["pending","success","failure"], phone_numbers: tuple[OrderedNumber(id,
+  phone_number, status)], connection_id, messaging_profile_id, customer_reference)`, `PhoneNumber(id,
+  phone_number, status, connection_id, messaging_profile_id, tags, customer_reference, phone_number_type)`,
+  `PhoneNumberMessaging(id, phone_number, messaging_profile_id)`, `MessageCreate` request (`from_` with
+  `serialization_alias="from"`, `to`, `text|None`, `media_urls: tuple[str,...]|None` (≤ 10), `subject|None`,
+  `messaging_profile_id`, `webhook_url`, `webhook_failover_url|None`, `use_profile_webhooks=False`; model validator:
+  text or media_urls required), `Message` response (id, direction, type, from_ phone_number via validator, to
+  list statuses, parts, encoding, text, messaging_profile_id).
+- `src/va_telnyx/provisioning.py`: mixin `ProvisioningCommands` (attribute `_transport: TelnyxTransport`) with
+  `create_call_control_app(name, webhook_url, *, outbound_voice_profile_id) -> CallControlApp`,
+  `list_call_control_apps(name_contains) -> list[CallControlApp]`, `update_call_control_app(app_id, *,
+  webhook_url=None, outbound_voice_profile_id=None)` (body only given fields: `webhook_event_url`,
+  `outbound.outbound_voice_profile_id`; ValueError when none), `create_outbound_voice_profile(name, *,
+  whitelisted_destinations=("US","CA"))`, `list_outbound_voice_profiles(name)`, `create_messaging_profile(name,
+  webhook_url, *, whitelisted_destinations=("US","CA"))`, `list_messaging_profiles(name)`,
+  `update_messaging_profile(profile_id, *, webhook_url)` (PATCH `/messaging_profiles/{id}` `{"webhook_url"}`),
+  `get_balance() -> Balance` (GET `/balance`).
+- `src/va_telnyx/numbers.py`: mixin `NumberCommands`: `search_numbers(search: NumberSearch) -> list[AvailableNumber]`,
+  `create_number_order(phone_numbers: Sequence[str], *, connection_id, customer_reference, messaging_profile_id=None)
+  -> NumberOrder`, `get_number_order(order_id)`, `get_phone_number_by_e164(e164) -> PhoneNumber | None`,
+  `update_phone_number(number_id, *, connection_id=None, tags=None) -> PhoneNumber`,
+  `update_phone_number_messaging(number_id, messaging_profile_id: str | None) -> PhoneNumberMessaging`,
+  `delete_phone_number(number_id) -> PhoneNumber`, `number_tags(org_id: uuid.UUID) -> list[str]` (module fn),
+  `send_message(message: MessageCreate) -> Message`, `download(url, destination: Path, *, max_bytes=2 GiB) -> int`.
+  (messaging + download may live in `messaging.py` if `numbers.py` passes ~250 lines.)
+- `src/va_telnyx/client.py`: `class TelnyxClient(ProvisioningCommands, NumberCommands[, MessagingCommands])`; keep
+  call commands as is. Mixins type `_transport` as a class-level annotation only (no placeholder-style bodies).
+- `src/va_telnyx/factory.py`: `type KeyResolver = Callable[[uuid.UUID], Awaitable[str | None]]`;
+  `class UnknownTelnyxAccount(LookupError)`; `class TelnyxClientFactory` with `__init__(self, *, base_url, http,
+  limiter, platform_api_key, resolve_key: KeyResolver, metrics=None, clock: Clock | None = None, retry=None,
+  tracer_provider=None, key_ttl_s: float = 300.0)`; `platform` property; `async for_account(telnyx_account_id:
+  uuid.UUID | None) -> TelnyxClient`; `async for_call(call: _HasConfig) -> TelnyxClient` (`Protocol` with
+  `config: Mapping[str, Any]`; value str or UUID, parsed with `uuid.UUID(str(v))`; invalid → ValueError);
+  `invalidate(telnyx_account_id)`. Cache entries `(client, expires_at_monotonic)`; `__repr__` hides keys. Clock
+  `monotonic()` for expiry (FrozenClock/RecordingClock advance in tests).
+- `src/va_telnyx/__init__.py`: export the new models, mixin-free client, factory, `UnknownTelnyxAccount`,
+  `TelnyxDownloadTooLarge`, `number_tags`.
+- `packages/va_telnyx/pyproject.toml`: add `anyio` dependency (same version range as lock).
+- specs/06 §2.2 Decision P03-T08b (above). AGENTS.md bullet (factory, download, list paging, test helpers).
+
+### Tests (packages/va_telnyx/tests/)
+- `test_provisioning_exact.py` (respx `telnyx_api`): exact method/path/query/body (full dict equality) for every
+  provisioning method incl. `inbound.channel_limit: null`, `concurrent_call_limit: null`, `webhook_event_failover_url
+  ""`; update bodies with only given fields; ValueError for an empty update (no request); list paging: two pages
+  (`meta.total_pages=2`) concatenated and `page[number]=2` requested; balance parsing to Decimal.
+- `test_numbers_exact.py` (respx): search query string exact (repeated `filter[features][]`, `filter[best_effort]=
+  false`, omitted unset filters); limit 0/51 and unknown feature → ValueError, route not called; order body exact
+  (no `messaging_profile_id` when None); `get_phone_number_by_e164` → None on empty data; update/messaging/delete
+  bodies and paths; `number_tags`; send_message body exact (`from` alias, `use_profile_webhooks: false`, None
+  omitted); MessageCreate without text/media → ValidationError.
+- `test_non_idempotent_retry.py` (respx + RecordingClock): `create_number_order` and `send_message` with 503 → no
+  retry, CARRIER_ERROR, one request; ReadTimeout → one request, `TelnyxTransportError`; ConnectError then 200 →
+  retried once (sleep 0.1+jitter); `create_call_control_app` 503 not retried; `get_number_order` 503,200 retried;
+  rate-limit categories: search uses `rl:telnyx:platform:number_search`, order `number_order`, message
+  `messaging` (inspect fakeredis keys), provisioning creates no bucket key.
+- `test_download.py` (respx + tmp_path): absolute URL, no `Authorization` header, bytes written equal body, return
+  value = size; 503 then 200 retried and file contains only the second body; 404 → TelnyxApiError (not
+  CallAlreadyEnded) and no file left; body > max_bytes → TelnyxDownloadTooLarge, file removed, `to_app_error()`
+  CARRIER_ERROR with details; relative URL → ValueError; a mid-body `httpx.ReadError` (respx side effect stream
+  that raises) retried and file truncated.
+- `test_factory.py` (respx two keys or a fake resolver + RecordingClock): platform for `None`/absent config; BYO
+  client uses resolver key (Authorization header) and `account == str(id)`; resolver called once within 5 min,
+  again after `clock.advance(301)`; concurrent `for_account` (gather 10) → one resolver call; resolver `None` →
+  UnknownTelnyxAccount; `invalidate` forces re-resolve; `for_call` with str/UUID id; invalid id → ValueError;
+  repr hides keys.
+- `test_contract_provisioning.py` (FakeTelnyx via `sim_clients`): create OVP → create app with it → list by
+  `name_contains` finds it → update webhook → GET shows it (raw client) → messaging profile create/list exact name/
+  update → balance; second account via `POST /sim/telnyx/accounts` + factory BYO client sees none of the platform
+  resources (per-key isolation).
+- `test_contract_numbers.py` (FakeTelnyx): search US local voice+sms limit 3 → 3 numbers; order → pending; `await
+  state.tasks.drain()` (no live streams) → get_number_order success; get_phone_number_by_e164 finds it; update
+  connection_id+tags (`number_tags`) → reflected; messaging update → profile id; send_message from it → Message
+  queued, sim `/sim/telnyx/messages` lists it; delete → status deleted, lookup now None; `fail_number_orders`
+  config → order status failure. Download: dial with `record="record-from-answer"` or record_start on an answered
+  call (reuse T08a contract helpers in `test_contract_calls.py` / va_sim telnyx_helpers), hang up, take
+  `recording_urls.wav` from the `call.recording.saved` webhook payload, `download` it → valid RIFF/WAV header,
+  size equals the sim's served body. The sim URL is absolute on the ASGI app base (`http://sim/...`) — ensure the
+  client's http client resolves it through the same ASGITransport (sim_clients' `http` has no base_url; fine).
+- Coverage va_telnyx stays ≥ 95 % (aim 100 %).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones — provisioning/number models are field lists similar to the sim's: wrap with `# jscpd:ignore-start/end
+(reason)` as models.py already does), `uvx radon cc -s -a packages/va_telnyx/src` (no C+), audit.
+
+### Risks
+- client.py size: keep commands in mixins; `TelnyxClient` stays thin.
+- respx streaming errors mid-body: use `httpx.Response(200, stream=<custom AsyncByteStream raising ReadError>)`.
+- `anyio.open_file` in tests with tmp_path is fine; never `open()` in the event loop (ASYNC230 ruff rule).
+- Sim `GET /phone_numbers` with `filter[phone_number]` uses `+` — httpx encodes `+` as `%2B` in params; verify the
+  sim decodes it (Starlette does).
+- jscpd may flag request/response models vs sim models; prefer distinct structure rather than ignores where easy.
+
+## Build P03-T08b (Builder, 2026-11-01)
+Built per plan. Transport: shared `_observed` (span + metrics + limiter) and `_exchange`; new `request_pages`
+(one observation per list, page[size]=250, ≤ 20 pages), `download` (`_Download.attempt` streams with
+`anyio.open_file`, error bodies ≤ 64 KiB, file removed on any failure), `parse_items`, `segment` (moved from
+client.py). Mixins: `provisioning.py`, `numbers.py`, `messaging.py` (send_message + download); models in
+`provisioning_models.py`, `number_models.py`, `message_models.py`; `models._Request/_Response` renamed public
+`RequestModel/ResponseModel` (ResponseModel now `coerce_numbers_to_str`). `factory.py` TelnyxClientFactory +
+UnknownTelnyxAccount. Deviation from plan: provisioning request bodies are literal dicts in the mixin methods
+(no request models; exact §2.1 field lists, tested by full-dict equality). `TelnyxDownloadTooLarge` in errors.
+anyio added to va-telnyx deps. Test helper `sim_http(state)`. Spec: specs/06 §2.2 Decision P03-T08b; AGENTS.md
+bullet. Gates: make fmt/lint/typecheck/placeholders pass; make test 5240 passed (98.27 %), va_telnyx 100 %;
+radon avg A (no C+); jscpd 0 clones; spec refs 0; pip-audit clean; pnpm audit 3 moderate (no high).
+
+## Review P03-T08b (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (0 findings), make test (5240 passed, 98.27 %), jscpd 0 clones,
+radon no C+, spec refs 0. Checked provisioning create bodies field-for-field against the specs/06 §2.1 rows (nulls
+sent), list filters/paging, number search query, order body, PATCH/DELETE paths, send_message vs specs/21 §2 step 6,
+non-idempotent retry ops, download (no auth, truncation, cleanup, 64 KiB error body), factory cache/lock/invalidate.
+Note for the bootstrap task (P03-T09): specs/21 §5 step 2a says the bootstrap configures the messaging profile with
+Telnyx automatic opt-out replies disabled — not part of the §2.1 create body, handle it there.

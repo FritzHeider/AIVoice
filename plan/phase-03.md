@@ -143,7 +143,7 @@
   - Acceptance: contract tests against FakeTelnyx for every call-command/conference method; respx tests for exact
     bodies, error mapping, retry policy (429 + Retry-After, 503, connect errors), rate limiter wait/raise.
 
-- [ ] P03-T08b `va_telnyx` provisioning, numbers, messaging, download, and client factory
+- [x] P03-T08b `va_telnyx` provisioning, numbers, messaging, download, and client factory — make lint/typecheck/placeholders pass, make test 5240 passed (98.27 %, va_telnyx 100 %), jscpd 0 clones, radon no C+, spec refs 0; specs/06 §2.2 Decision P03-T08b
   - Spec refs: specs/06-telephony-telnyx.md §1, §2.1 (provisioning, number, messaging, download rows), §12 (`GET /balance`); specs/21-messaging-sms.md §2 step 6
   - Depends on: P03-T08a
   - Deliverables: typed methods create/list/update call control apps, create/list outbound voice profiles, create/list

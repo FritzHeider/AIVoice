@@ -1,9 +1,9 @@
 """Telnyx Call Control request and response models (specs/06-telephony-telnyx.md §2.1, §6, §10).
 
-Request models forbid unknown fields and serialize with :meth:`_Request.body`: aliases (``from``), ``None``
-fields omitted, defaults sent, so every body carries exactly the fields of the specs/06 §2.1 row. Streaming
-parameters are a nested :class:`StreamParams` flattened into the body. Response models ignore fields we do not
-read, so Telnyx can add fields without breaking us.
+Request models forbid unknown fields and serialize with :meth:`RequestModel.body`: aliases (``from``),
+``None`` fields omitted, defaults sent, so every body carries exactly the fields of the specs/06 §2.1 row.
+Streaming parameters are a nested :class:`StreamParams` flattened into the body. Response models ignore fields
+we do not read, so Telnyx can add fields without breaking us.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ __all__ = [
     "CustomHeader",
     "DialRequest",
     "DialResult",
+    "RequestModel",
+    "ResponseModel",
     "StreamParams",
     "TransferRequest",
 ]
@@ -33,7 +35,7 @@ type TimeLimitSecs = Annotated[int, Field(ge=30, le=14_400)]
 type RecordFromAnswer = Literal["record-from-answer"]
 
 
-class _Request(BaseModel):
+class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     def body(self) -> dict[str, Any]:
@@ -46,7 +48,7 @@ class _Request(BaseModel):
         return body
 
 
-class StreamParams(_Request):
+class StreamParams(RequestModel):
     """Media streaming parameters (specs/06 §6 step 5). A listen-only stream (specs/06 §10.1 step 4) passes
     ``None`` for the three bidirectional fields."""
 
@@ -59,13 +61,13 @@ class StreamParams(_Request):
     stream_auth_token: str | None = None
 
 
-class CustomHeader(_Request):
+class CustomHeader(RequestModel):
     name: NonEmpty
     value: str
 
 
 # jscpd:ignore-start  (the Telnyx field list; FakeTelnyx declares it on its own, they must not share code)
-class AmdConfig(_Request):
+class AmdConfig(RequestModel):
     """``answering_machine_detection_config`` (specs/06 §6 step 5 sends the premium tuning)."""
 
     total_analysis_time_millis: PositiveInt | None = None
@@ -83,7 +85,7 @@ class AmdConfig(_Request):
 # jscpd:ignore-end  (field list above)
 
 
-class DialRequest(_Request):
+class DialRequest(RequestModel):
     """``POST /calls``. ``webhook_url`` ``None`` = the Call Control App's URL; ``stream`` ``None`` = no
     media."""
 
@@ -112,7 +114,7 @@ class DialRequest(_Request):
     send_silence_when_idle: Literal[True] = True
 
 
-class AnswerRequest(_Request):
+class AnswerRequest(RequestModel):
     """``POST /calls/{ccid}/actions/answer``."""
 
     client_state: str
@@ -125,7 +127,7 @@ class AnswerRequest(_Request):
     send_silence_when_idle: Literal[True] = True
 
 
-class TransferRequest(_Request):
+class TransferRequest(RequestModel):
     """``POST /calls/{ccid}/actions/transfer`` (specs/06 §10.1 step 3)."""
 
     to: NonEmpty
@@ -143,11 +145,11 @@ class TransferRequest(_Request):
     record: RecordFromAnswer | None = None
 
 
-class _Response(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
+class ResponseModel(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, coerce_numbers_to_str=True)
 
 
-class DialResult(_Response):
+class DialResult(ResponseModel):
     """``data`` of a dial response."""
 
     call_control_id: NonEmpty
@@ -157,13 +159,13 @@ class DialResult(_Response):
     record_type: str = "call"
 
 
-class CommandResult(_Response):
+class CommandResult(ResponseModel):
     """``data`` of a call or conference command response (``{"result": "ok"}``)."""
 
     result: str
 
 
-class Conference(_Response):
+class Conference(ResponseModel):
     """``data`` of ``POST /conferences``."""
 
     id: NonEmpty

@@ -28,6 +28,7 @@ __all__ = [
     "CALL_ID",
     "CCID",
     "ORG_ID",
+    "SIM_BASE_URL",
     "MidJitter",
     "RecordingClock",
     "Rig",
@@ -35,6 +36,7 @@ __all__ = [
     "leg_state",
     "rig",
     "sim_clients",
+    "sim_http",
 ]
 
 API_KEY: Final = "KEY-va-telnyx-tests"
@@ -95,8 +97,9 @@ def leg_state(leg: LegRole = "primary") -> str:
 
 
 @asynccontextmanager
-async def sim_clients(state: SimState) -> AsyncIterator[tuple[httpx.AsyncClient, TelnyxClient]]:
-    """(raw FakeTelnyx client for setup and ``/sim`` inspection, :class:`TelnyxClient` on the same app)."""
+async def sim_http(state: SimState) -> AsyncIterator[tuple[httpx.AsyncClient, httpx.AsyncClient]]:
+    """(raw FakeTelnyx client for setup and ``/sim`` inspection, a bare client for va_telnyx clients) on one
+    in-process app; closes the sim state on exit."""
     app = Starlette(routes=simulator_routes("telnyx", state))
     transport = httpx.ASGITransport(app=app)
     headers = {"authorization": f"Bearer {DEFAULT_API_KEY}"}
@@ -105,6 +108,13 @@ async def sim_clients(state: SimState) -> AsyncIterator[tuple[httpx.AsyncClient,
             httpx.AsyncClient(transport=transport, base_url="http://sim", headers=headers) as raw,
             httpx.AsyncClient(transport=transport) as http,
         ):
-            yield raw, rig(http, base_url=SIM_BASE_URL, api_key=DEFAULT_API_KEY).client
+            yield raw, http
     finally:
         await state.aclose()
+
+
+@asynccontextmanager
+async def sim_clients(state: SimState) -> AsyncIterator[tuple[httpx.AsyncClient, TelnyxClient]]:
+    """(raw FakeTelnyx client for setup and ``/sim`` inspection, :class:`TelnyxClient` on the same app)."""
+    async with sim_http(state) as (raw, http):
+        yield raw, rig(http, base_url=SIM_BASE_URL, api_key=DEFAULT_API_KEY).client

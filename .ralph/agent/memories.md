@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793517443-86b9
+> va_telnyx P03-T08b: TelnyxClient = client.py call commands + mixins ProvisioningCommands/NumberCommands/MessagingCommands; transport.request_pages (one metric obs per list), transport.download (streamed, file removed on failure); TelnyxClientFactory resolve_key async fn + 5 min cache on clock.monotonic; tests use telnyx_client_helpers.sim_http(state) for factory/BYO (POST /sim/telnyx/accounts registers BYO key)
+<!-- tags: telnyx, testing | created: 2026-11-01 -->
+
 ### mem-1793516463-a13e
 > va_telnyx: TelnyxClient wraps transport.TelnyxTransport.request(Operation(...)); request models use Field(serialization_alias='from') since mypy has no pydantic plugin (alias= breaks from_=); tests use telnyx_client_helpers.rig(http)/sim_clients(state)/leg_state + telnyx_api respx fixture; RecordingClock shared in packages/va_common/tests/clock_helpers.py
 <!-- tags: telnyx, testing | created: 2026-11-01 -->

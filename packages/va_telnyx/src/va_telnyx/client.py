@@ -1,4 +1,4 @@
-"""``va_telnyx.TelnyxClient``: typed Telnyx Call Control v2 commands (specs/06-telephony-telnyx.md §2, §2.1).
+"""``va_telnyx.TelnyxClient``: typed Telnyx v2 commands (specs/06-telephony-telnyx.md §2, §2.1).
 
 Every call command takes a deterministic ``command_id`` (:func:`va_telnyx.client_state.command_id`) so Telnyx
 deduplicates retries. A command on a call that has already ended raises :class:`CallAlreadyEnded`; ``hangup``
@@ -11,13 +11,13 @@ from __future__ import annotations
 import random
 import re
 from typing import Any, Final, Literal
-from urllib.parse import quote
 
 import httpx
 from opentelemetry.trace import TracerProvider
 
 from va_common.time import Clock, SystemClock
 from va_telnyx.errors import CallAlreadyEnded
+from va_telnyx.messaging import MessagingCommands
 from va_telnyx.metrics import TelnyxMetrics
 from va_telnyx.models import (
     AnswerRequest,
@@ -28,9 +28,11 @@ from va_telnyx.models import (
     StreamParams,
     TransferRequest,
 )
+from va_telnyx.numbers import NumberCommands
+from va_telnyx.provisioning import ProvisioningCommands
 from va_telnyx.rate_limit import TelnyxRateLimiter
 from va_telnyx.retry import RetryPolicy
-from va_telnyx.transport import Operation, TelnyxTransport, parse_data
+from va_telnyx.transport import Operation, TelnyxTransport, parse_data, segment
 
 __all__ = ["DTMF_DIGITS", "PLATFORM_ACCOUNT", "TelnyxClient"]
 
@@ -68,19 +70,15 @@ _COMMANDS: Final = {
 }
 
 
-def _segment(resource_id: str) -> str:
-    """A path segment for a Telnyx id (``v3:…`` call control ids keep their colon)."""
-    return quote(resource_id, safe=":")
-
-
 def _with_state(body: dict[str, Any], client_state: str | None) -> dict[str, Any]:
     if client_state is not None:
         body["client_state"] = client_state
     return body
 
 
-class TelnyxClient:
-    """Telnyx REST client for one API key (the platform account or a BYO account)."""
+class TelnyxClient(ProvisioningCommands, NumberCommands, MessagingCommands):
+    """Telnyx REST client for one API key (the platform account or a BYO account): call control here,
+    provisioning, numbers, and messaging in the mixins."""
 
     def __init__(  # noqa: PLR0913 - the specs/06 §2 positional four plus injectable collaborators
         self,
@@ -122,7 +120,7 @@ class TelnyxClient:
         operation = _COMMANDS[action]
         envelope = await self._transport.request(
             operation,
-            f"/calls/{_segment(call_control_id)}/actions/{action}",
+            f"/calls/{segment(call_control_id)}/actions/{action}",
             json={**body, "command_id": command_id},
             call_control_id=call_control_id,
             command_id=command_id,
@@ -288,7 +286,7 @@ class TelnyxClient:
         }
         envelope = await self._transport.request(
             _CONFERENCE_JOIN,
-            f"/conferences/{_segment(conference_id)}/actions/join",
+            f"/conferences/{segment(conference_id)}/actions/join",
             json=body,
             call_control_id=call_control_id,
             command_id=command_id,
@@ -300,7 +298,7 @@ class TelnyxClient:
     ) -> CommandResult:
         envelope = await self._transport.request(
             _CONFERENCE_LEAVE,
-            f"/conferences/{_segment(conference_id)}/actions/leave",
+            f"/conferences/{segment(conference_id)}/actions/leave",
             json={"call_control_id": call_control_id, "command_id": command_id},
             call_control_id=call_control_id,
             command_id=command_id,

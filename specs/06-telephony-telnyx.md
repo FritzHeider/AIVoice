@@ -111,6 +111,35 @@ Telephony credentials (WebRTC) are **not** used; web voice uses our own WebSocke
 >    stream. `DialRequest.timeout_secs` defaults to 45 (§6 step 5), `TransferRequest.timeout_secs` to 30 (§10.1).
 >    A listen-only stream (§10.1 step 4) passes `None` for the three bidirectional fields.
 
+> Decision (2026-11-01): provisioning, numbers, messaging, download, factory (P03-T08b).
+> 1. Operations and categories: `search_numbers` → `number_search`, `create_number_order` → `number_order`
+>    (non-idempotent), `send_message` → `messaging` (non-idempotent); provisioning POSTs are non-idempotent; every
+>    GET, PATCH, and DELETE is idempotent; provisioning, phone-number management, order status, balance, and
+>    download have no client-side bucket (Decision P03-T08a rules 1 and 3).
+> 2. List methods (`list_call_control_apps`, `list_outbound_voice_profiles`, `list_messaging_profiles`) return every
+>    page: `page[size]=250`, `page[number]` from 1 while below `meta.total_pages` (a list without `meta` is one
+>    page), at most 20 pages. A list counts as one operation (one metric observation, one span). Name filters are
+>    applied by Telnyx (`contains` for apps and outbound voice profiles, exact for messaging profiles); callers that
+>    need an exact name compare it themselves.
+> 3. `NumberSearch` validates before any request (`country_code` two upper-case letters, default `US`; `limit`
+>    1–50, default 10; features ⊆ `voice`/`sms`/`mms`; `phone_number_type` ∈ the four §2.1 values); unset filters
+>    are not sent, features are repeated `filter[features][]`, and `filter[best_effort]=false` is always sent.
+> 4. Create bodies carry exactly the §2.1 fields, `null` values included (`inbound.channel_limit`,
+>    `concurrent_call_limit`); update methods send only the fields given and raise `ValueError` when none is
+>    given. `get_phone_number_by_e164` returns `None` when Telnyx lists no number. `number_tags(org_id)` builds
+>    `["va", "org:{org_id}"]`. `send_message` sends `use_profile_webhooks=false` and requires `text` or 1–10
+>    `media_urls`.
+> 5. `download(url, destination, max_bytes=2 GiB)` (§11 step 2) requires an absolute URL (`ValueError` otherwise),
+>    sends no auth header, streams to `destination` (truncated on every attempt), and retries like a GET. Past
+>    `max_bytes` it raises `TelnyxDownloadTooLarge` (`CARRIER_ERROR`, `details = {"telnyx_errors": [], "max_bytes":
+>    n}`); `destination` is removed whenever the download fails. Error bodies are read up to 64 KiB.
+> 6. `TelnyxClientFactory(base_url, http, limiter, platform_api_key, resolve_key, ...)`: `for_account(None)` and
+>    `for_call` with no `config.telnyx_account_id` return the platform client; a BYO key comes from the injected
+>    async resolver and is cached in process for 5 minutes per account (one resolve in flight per account); a
+>    resolver answering `None` raises `UnknownTelnyxAccount` (a `LookupError`, not cached); `invalidate(id)` drops
+>    the cached key after rotation or deletion. A BYO client's `account` (rate-limit bucket) is
+>    `str(telnyx_account_id)`.
+
 ## 3. `client_state`
 
 Base64 of compact JSON (≤ 1 KB): `{"v":1,"call_id":"<uuid>","leg":"primary|transfer_target|warm_proxy|monitor","org_id":"<uuid>"}`.

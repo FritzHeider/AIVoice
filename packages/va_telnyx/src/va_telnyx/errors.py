@@ -22,6 +22,7 @@ __all__ = [
     "CALL_ENDED_CODE",
     "CallAlreadyEnded",
     "TelnyxApiError",
+    "TelnyxDownloadTooLarge",
     "TelnyxError",
     "TelnyxErrorItem",
     "TelnyxRateLimited",
@@ -139,4 +140,17 @@ class TelnyxTransportError(TelnyxError):
     def to_app_error(self) -> AppError:
         return AppError(
             "CARRIER_ERROR", str(self), details={"telnyx_errors": [], "transport": self.cause_type}
+        )
+
+
+class TelnyxDownloadTooLarge(TelnyxError):  # noqa: N818 - reads as the condition, like the specs/06 names
+    """A download (specs/06 §11 step 2) exceeded its byte limit; the partial file has been removed."""
+
+    def __init__(self, operation: str, max_bytes: int) -> None:
+        super().__init__(f"Telnyx {operation} exceeded {max_bytes} bytes", operation)
+        self.max_bytes = max_bytes
+
+    def to_app_error(self) -> AppError:
+        return AppError(
+            "CARRIER_ERROR", str(self), details={"telnyx_errors": [], "max_bytes": self.max_bytes}
         )
