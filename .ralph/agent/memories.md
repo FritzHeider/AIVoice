@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793518547-0b04
+> va_telnyx P03-T09: inbound Telnyx verification in va_telnyx.signatures (verify_webhook/verify_media_ws, WebhookVerificationError.reason), webhooks.parse_envelope/parse_payload (UnknownEventPayload for unmodelled types e.g. number_order.complete), voice_events one model per specs/06 §5 row (test parses the §5 table), media.parse_media_message fast path; contract tests verify FakeTelnyx webhooks with state.signing_key.public_key_b64 + state.clock.now(); helpers telnyx_client_helpers.provisioned/sms_number
+<!-- tags: telnyx, testing | created: 2026-11-01 -->
+
 ### mem-1793517443-86b9
 > va_telnyx P03-T08b: TelnyxClient = client.py call commands + mixins ProvisioningCommands/NumberCommands/MessagingCommands; transport.request_pages (one metric obs per list), transport.download (streamed, file removed on failure); TelnyxClientFactory resolve_key async fn + 5 min cache on clock.monotonic; tests use telnyx_client_helpers.sim_http(state) for factory/BYO (POST /sim/telnyx/accounts registers BYO key)
 <!-- tags: telnyx, testing | created: 2026-11-01 -->
@@ -189,6 +193,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793518609-68fb
+> va_telnyx signature review: int(timestamp) on attacker headers can raise OverflowError/ValueError (huge digit strings); cap header length before int conversion so every failure is WebhookVerificationError
+<!-- tags: telnyx, security | created: 2026-11-01 -->
 
 ### mem-1793333516-86db
 > make test flake: apps/api integration tests (test_cross_tenant_routes, test_dev_seed) can exceed the 60 s pytest-timeout at host load avg ~8-11 with coverage on; they pass alone in ~5 s - re-run before rejecting unrelated work, tracked as task fix:api-test-timeout-load

@@ -154,7 +154,7 @@
   - Acceptance: contract tests against FakeTelnyx for every method; respx tests for exact query strings/bodies and for
     non-idempotent retry rules (number orders, messages).
 
-- [ ] P03-T09 `va_telnyx` webhooks and media protocol models
+- [x] P03-T09 `va_telnyx` webhooks and media protocol models — signatures (verify_webhook/verify_media_ws, pinned vector, 200-case fuzz, ≤12-digit timestamps), §5 payload models (table-parsed), §8 media models + fast path; FakeTelnyx webhook + media contract tests; make test 5565 passed (98.30 %), va_telnyx 100 %, lint/typecheck/placeholders/spec refs clean
   - Spec refs: specs/06-telephony-telnyx.md (webhook verification, envelope, media WS protocol)
   - Depends on: P03-T08a
   - Deliverables: `verify_webhook(raw_body, headers, public_key, now)`, `verify_media_ws(stream_url, headers, public_key, now)`, event payload models for every voice and messaging event type, media message models (inbound and outbound) with parsing that tolerates unknown fields

@@ -820,3 +820,173 @@ sent), list filters/paging, number search query, order body, PATCH/DELETE paths,
 non-idempotent retry ops, download (no auth, truncation, cleanup, 64 KiB error body), factory cache/lock/invalidate.
 Note for the bootstrap task (P03-T09): specs/21 §5 step 2a says the bootstrap configures the messaging profile with
 Telnyx automatic opt-out replies disabled — not part of the §2.1 create body, handle it there.
+
+## Plan P03-T09 (Planner, 2026-11-01)
+Task: `va_telnyx` webhooks and media protocol models (plan/phase-03.md). Spec: specs/06 §4.1, §4.2 (signature part
+only — the stream-token HMAC is P05-T?? `/ws/telnyx`, specs/28 §6.2, NOT this task), §5 (event list), §8 (media
+models), specs/21 §5 (message.received/sent/finalized). `va_telnyx` must never import `va_sim`; tests may.
+
+### Spec decision to write: specs/06 §4.1 `> Decision (2026-11-01): webhook and media verification API (P03-T09).`
+1. `verify_webhook(raw_body: bytes, headers: Mapping[str, str], public_key: str | VerifyKey, now: datetime) -> None`
+   and `verify_media_ws(stream_url: str, headers, public_key, now) -> None` raise `WebhookVerificationError` with
+   `reason` ∈ `missing_headers` | `malformed_timestamp` | `stale_timestamp` | `invalid_signature`; header names
+   matched case-insensitively; timestamp must be ASCII digits (unix seconds); `abs(now - ts) > 300` → stale (exactly
+   300 accepted; future skew rejected the same way); signature not valid base64 / not 64 bytes / wrong → invalid.
+   Verification happens before any JSON parsing; the caller (edge/media) maps every reason to 401 / close 4401 and
+   counts `telnyx_webhook_invalid_signature_total` (edge task, not here).
+2. `public_key` str = base64 of the 32-byte Ed25519 key (`TELNYX_PUBLIC_KEY`); `load_public_key` raises
+   `ValueError` on bad base64/length (config error, at startup).
+3. Payload models ignore unknown fields and default every field Telnyx may omit; an unknown `event_type` parses as
+   `UnknownEventPayload` (raw dict kept) — never an error. Envelope `meta` optional.
+4. Media parsing: `parse_media_message` dispatches by hand on `event`; `media` → `MediaFrame(chunk, timestamp,
+   payload)` slots dataclass; unknown `event` → `UnknownMediaEvent(event, raw)`; non-JSON / non-object / missing
+   required field / bad base64 → `MediaProtocolError` (a `ValueError`).
+(Put a one-line pointer under §8 to rule 4.)
+
+### Files
+- `packages/va_telnyx/pyproject.toml`: add `"pynacl>=1.5"` (already in the lock via root dev deps). Check mypy: if
+  pynacl lacks types, add a `[[tool.mypy.overrides]] module = "nacl.*"` ignore_missing_imports in root pyproject
+  (va_sim already imports nacl — reuse whatever it does).
+- `src/va_telnyx/signatures.py`: constants `SIGNATURE_HEADER = "telnyx-signature-ed25519"`, `TIMESTAMP_HEADER =
+  "telnyx-timestamp"`, `TOLERANCE_S = 300`; `type VerifyReason = Literal[...]`; `class WebhookVerificationError(
+  Exception)` (`reason`, message without secrets); `load_public_key(b64: str) -> nacl.signing.VerifyKey`;
+  `verify_webhook(...)`, `verify_media_ws(...)` both via private `_verify(signed_suffix: bytes, headers, key, now)`
+  (`f"{ts}|".encode() + suffix`; webhook suffix = raw body bytes, media suffix = stream_url UTF-8). Header lookup:
+  `{k.lower(): v for k, v in headers.items()}` (works for dict and Starlette Headers / websockets Headers).
+  `now` must be timezone-aware (`ValueError` otherwise). `nacl.exceptions.BadSignatureError` → invalid_signature.
+- `src/va_telnyx/webhooks.py`: envelope + dispatch.
+  `WebhookMeta(attempt: int | None, delivered_to: str | None)`; `WebhookEvent(record_type: str = "event",
+  id: str, event_type: str, occurred_at: datetime, payload: dict[str, Any] = {})`; `WebhookEnvelope(data:
+  WebhookEvent, meta: WebhookMeta | None = None)`; `parse_envelope(raw_body: bytes) -> WebhookEnvelope` (orjson +
+  model_validate; failures → `WebhookParseError(ValueError)`); `parse_payload(event: WebhookEvent) -> EventPayload`
+  via `PAYLOAD_MODELS: Mapping[str, type[TelnyxPayload]]` (unknown → `UnknownEventPayload(event_type, raw)`);
+  `VOICE_EVENT_TYPES`, `MESSAGING_EVENT_TYPES` frozensets (= keys).
+- `src/va_telnyx/voice_events.py` (all `ResponseModel`-style: extra ignore, frozen, populate_by_name,
+  `from_` via `validation_alias="from"`): `CallPayload` base (call_control_id: str, call_leg_id, call_session_id,
+  connection_id, client_state, from_, to, direction: str | None ("incoming"/"outgoing" kept as str for tolerance),
+  state, start_time: datetime | None, custom_headers: tuple[CustomHeaderValue, ...] = ()); subclasses:
+  `CallInitiated`, `CallAnswered`, `CallBridged`, `CallHangup(hangup_cause, hangup_source, sip_hangup_cause,
+  end_time)`, `MachineDetectionEnded(result)`, `MachineGreetingEnded(result)`, `PremiumDetectionEnded(result)`,
+  `PremiumGreetingEnded(result)`, `CallScreeningDetected` (base + optional `result`), `DtmfReceived(digit)`,
+  `RecordingSaved(recording_id, channels, format, recording_started_at, recording_ended_at, recording_urls:
+  RecordingUrls(wav: str|None, mp3: str|None), public_recording_urls: RecordingUrls)`, `RecordingError(reason:
+  str|None)`, `PlaybackStarted/PlaybackEnded(media_url, overlay: bool|None, status)`, `StreamingStarted/
+  StreamingStopped(stream_url)`, `StreamingFailed(stream_id, stream_url, failure_reason)`, `ConferencePayload`
+  (conference_id + call fields optional, `reason`), `CallHold`, `CallUnhold`, `DeepfakeResult`, `DeepfakeError`,
+  `ConversationCreated`, `ConversationStartFailed` (base only). Every §5 row's event_type maps to one model
+  (including `call.machine.premium.call_screening.detected`, `call.deepfake_detection.result|.error`,
+  `call.conversation.created|.start_failed`, `call.hold|unhold`, `conference.created|participant.joined|
+  participant.left|ended`, `call.recording.error`, `call.dtmf.received`). Builder: cross-check field names against
+  the Telnyx webhook docs (developers.telnyx.com) and the FakeTelnyx emitters (`va_sim/telnyx/calls.py payload()`,
+  `call_engine.py`, `call_media.py`) — fix the sim only if it violates the documented contract.
+- `src/va_telnyx/message_events.py`: `MessageEventPayload(Message)` adds `record_type`, `errors:
+  tuple[MessageErrorItem(code, title, detail), ...]`, `media: tuple[MessageMedia(url, content_type), ...]`,
+  `cost: MessageCost(amount: Decimal|None, currency)|None`, `received_at/sent_at/completed_at: datetime|None`,
+  `webhook_url`, `subject`; mapped for `message.received`, `message.sent`, `message.finalized`. If extending
+  frozen `Message` is awkward, use composition, but keep `from_`/`to[0].status` semantics identical.
+- `src/va_telnyx/media.py`: the §8 models verbatim (pydantic, extra ignore; `MediaStartInfo.from_` alias "from",
+  `tags: tuple[str, ...] = ()`), `@dataclass(slots=True, frozen=True) MediaFrame(chunk: int, timestamp: int,
+  payload: bytes)`, `UnknownMediaEvent(event: str, raw: dict)`, `class MediaErrorCode(IntEnum)` UNKNOWN_ERROR=100002,
+  MALFORMED_FRAME=100003, INVALID_MEDIA=100004, RATE_LIMIT_REACHED=100005; `type InboundMediaMessage = MediaFrame |
+  MediaConnected | MediaStart | MediaDtmf | MediaStop | MediaError | MediaMark | UnknownMediaEvent`;
+  `parse_media_message(raw: str | bytes) -> InboundMediaMessage` (orjson.loads; `media` fast path reads
+  `frame["media"]["chunk"|"timestamp"|"payload"]`, `int()`, `base64.b64decode(..., validate=True)`; others
+  `Model.model_validate(frame)`; `pydantic.ValidationError`/KeyError/TypeError/binascii.Error → MediaProtocolError);
+  outbound builders returning `bytes` (orjson): `media_message(payload: bytes)` (ValueError on empty),
+  `mark_message(name: str)` (ValueError on empty), `clear_message()`; `segment_mark(turn_index, segment_index) ->
+  "seg:<t>:<s>"` and `parse_segment_mark(name) -> tuple[int, int] | None`.
+- `src/va_telnyx/__init__.py`: export the public names above.
+- specs/06 Decision (above); AGENTS.md bullet (modules, verify API, test vector helpers).
+
+### Tests (packages/va_telnyx/tests/)
+- `test_signatures.py`: keypair generated in test (`nacl.signing.SigningKey.generate()`); valid webhook; wrong key;
+  tampered body (one byte); stale ts 301 s past and 301 s future → stale; exactly 300 → ok; missing each header →
+  missing_headers; non-digit ts → malformed_timestamp; non-base64 / short signature → invalid_signature; upper-case
+  header names accepted; naive `now` → ValueError; `VerifyKey` instance and base64 str both accepted;
+  `load_public_key` bad base64 / 31 bytes → ValueError. **Fixed test vector**: a committed constant vector built
+  from a deterministic seed (`SigningKey(bytes(range(32)))`, fixed ts, fixed body, signature hex literal computed
+  once and pinned — compute the hex at build time and hard-code it; verify it also passes with pynacl directly)
+  so a change in the signed-string format fails. Media: valid signature over URL with query; URL with query changed
+  (`call_id=2`) → invalid; signature over URL without query → invalid. Fuzz: 200 random signatures (parametrize on
+  index, generate inside the test with `os.urandom`) all rejected (specs/06 §14.4).
+- `test_webhook_models.py`: fixture payload per event type (table-driven, one dict per type built in the test from
+  Telnyx-documented shapes) → `parse_payload` returns the expected model class with the expected fields; extra
+  unknown keys ignored; missing optional keys default; unknown event type → `UnknownEventPayload` with raw;
+  `parse_envelope` on invalid JSON / missing `data.id` → WebhookParseError; `meta` optional;
+  `set(PAYLOAD_MODELS)` ⊇ every `event_type` in the specs/06 §5 table (parse the table from the spec file, like
+  other spec-mirroring tests) ∪ {message.received, message.sent, message.finalized}.
+- `test_contract_webhooks.py` (FakeTelnyx, `telnyx_helpers.telnyx_state(RecordingTransport)` from va_sim tests
+  support, or the `sim_clients` helper): drive a call through dial → answer → AMD premium → playback start/stop →
+  record start → streaming start (to the `media_agent` fixture) / stop → conference join/leave → hangup, plus send a
+  message and inject an inbound message (`POST /sim/telnyx/messages/inbound`); for every delivered webhook:
+  `verify_webhook(raw body, headers, sim public key, now=sim clock time)` passes, `parse_envelope` +
+  `parse_payload` gives a non-Unknown model, `client_state` round-trips through `va_telnyx.client_state.decode`,
+  recording_urls.wav is absolute. A tampered copy of one delivered body fails verification.
+- `test_media_models.py`: parse every §8 inbound sample (connected/start/media/dtmf/stop/error/mark) with extra
+  fields tolerated; `media` → MediaFrame with ints and decoded bytes; unknown event → UnknownMediaEvent; malformed:
+  not JSON, JSON array, missing `media.payload`, non-int chunk, bad base64, missing `start.media_format` →
+  MediaProtocolError; outbound builders produce exact JSON (`orjson.loads` equality) and reject empty;
+  `segment_mark`/`parse_segment_mark` round trip and reject `seg:x:1`/`other`; MediaErrorCode values.
+- `test_contract_media.py` (FakeTelnyx `MediaSession` → `media_agent` fixture): answered call with streaming_start
+  to the agent; `verify_media_ws(agent full URL incl. query, agent handshake headers, sim public key, now)` passes
+  (and Bearer header equals `stream_auth_token` when given); every frame the agent received parses via
+  `parse_media_message` (connected, start with media_format PCMU/8000, media frames with increasing chunk, dtmf
+  after `queue_dtmf`, stop on hangup); agent sends `media_message(160 μ-law bytes)`, `mark_message(segment_mark(1,0))`
+  → sim echoes a `mark` that parses to `MediaMark` with that name; `clear_message()` accepted (no `error` frame).
+  Respect AGENTS gotchas: no `state.tasks.drain()` with a live stream; assert order/counts not virtual ms.
+- Coverage va_telnyx stays 100 % (≥ 95 %).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4
+--silent` (media models vs va_sim media_frames may look similar — keep structures distinct; ignore markers only with a
+reason), `uvx radon cc -s -a packages/va_telnyx/src` (no C+; split `parse_media_message` dispatch into a dict of
+per-event parsers), audit (`uvx pip-audit` on `uv export`, `corepack pnpm audit`).
+
+### Risks
+- pydantic `datetime` parsing of Telnyx `occurred_at` with 6-digit fraction + `Z`: fine; `start_time` may be absent.
+- Media fast path must not go through pydantic (spec says hand-written dispatch); keep it O(1) per frame.
+- Fixed vector: generate the pinned signature with the deterministic seed during the build, then hard-code it; never
+  commit a private key string other than the obviously-test `bytes(range(32))` seed (gitleaks).
+- Two `telnyx_client(...)`/media streams in one test hang (AGENTS gotcha) — one stream per test.
+
+## Build P03-T09 (Builder, 2026-11-01)
+Built per plan. New modules: `signatures.py` (verify_webhook / verify_media_ws / load_public_key, reasons
+missing_headers|malformed_timestamp|stale_timestamp|invalid_signature; `_verify` split into header/freshness/decode
+helpers for radon A), `voice_events.py` (one model per specs/06 §5 row, 27 types), `message_events.py`
+(`MessageEventPayload(Message)` + media/errors/cost/timestamps), `webhooks.py` (envelope, PAYLOAD_MODELS,
+UnknownEventPayload, WebhookParseError), `media.py` (§8 models, MediaFrame fast path, UnknownMediaEvent,
+MediaErrorCode, outbound builders, segment marks). pynacl added to va-telnyx deps. Spec: specs/06 §4.1 Decision
+P03-T09 (4 rules) + pointer under §8; AGENTS.md bullet. Tests: test_signatures (pinned vector from seed
+bytes(range(32)), 200-case fuzz), test_webhook_models (parses the §5 table, ⊆/= checks), test_media_models,
+test_contract_webhooks (call lifecycle incl. premium AMD+beep, playback, conference, recording; streaming; SMS
+sent/finalized/received — every FakeTelnyx webhook verifies + parses non-Unknown; tampered body rejected),
+test_contract_media (handshake signature + Bearer, every frame parses, dtmf, media+mark echo, clear, stop).
+Test helpers: `telnyx_client_helpers.provisioned(...)` and `sms_number(...)` (dedup with test_contract_numbers).
+Deviation: none of substance; `number_order.complete` is correctly Unknown (not a voice/messaging event).
+Gates: make fmt/lint/typecheck/placeholders pass; make test 5558 passed (98.30 %), va_telnyx 100 %; radon avg A,
+no C+; jscpd 0 clones; spec refs 0; pip-audit no known vulns; pnpm audit 3 moderate (no high); gitleaks pass.
+
+## Review P03-T09 (Reviewer, 2026-11-01)
+Rejected (1 finding). make lint/typecheck/placeholders pass (0 findings). Models vs specs/06 §5 rows / §8 and the
+Decision text checked; contract tests verify real FakeTelnyx webhooks/media frames; fixed vector + fuzz present.
+
+1. `packages/va_telnyx/src/va_telnyx/signatures.py` `_check_fresh`: an attacker-controlled `telnyx-timestamp` made of
+   many ASCII digits escapes the verifier with a non-`WebhookVerificationError` exception, so the edge would answer
+   500 instead of 401 (specs/06 §4.1 Decision P03-T09 rule 1: every failure is a `WebhookVerificationError` with
+   one of the four reasons). Reproduced: `'9'*400` → `OverflowError: int too large to convert to float`
+   (`now.timestamp() - int(ts)`); `'9'*5000` → `ValueError: Exceeds the limit (4300 digits)`. Fix: give the digit
+   string a length cap (for example ≤ 12 digits, otherwise `malformed_timestamp`), or compare in integers
+   (`abs(int(now.timestamp()) - ts)`) after the cap, and record the cap in Decision rule 1. Add tests for both inputs
+   (400 and 5000 digits) that expect `WebhookVerificationError` with the chosen reason, for `verify_webhook` and
+   `verify_media_ws`.
+
+## Build P03-T09 fix (Builder, 2026-11-01)
+Review finding 1 fixed: `_check_fresh` rejects timestamps longer than 12 ASCII digits as `malformed_timestamp`
+(`_MAX_TIMESTAMP_DIGITS`), so `int()`/float overflow can no longer escape. Decision rule 1 in specs/06 §4.1 now says
+"1–12 ASCII digits". Tests: `test_oversized_timestamps_are_malformed_not_crashes` (13/400/5000 digits × verify_webhook
+and verify_media_ws; 6 fail without the fix) + 12-digit timestamp → stale. Gates: fmt/lint/typecheck/placeholders
+pass, make test 5565 passed (98.30 %), spec refs 0, radon avg A, jscpd 0.
+
+## Review P03-T09 re-review (Reviewer, 2026-11-01)
+Approved. Finding 1 fixed (12-digit cap → malformed_timestamp, Decision rule 1 updated, tests for 13/400/5000 digits on
+both verifiers). Re-ran: lint/typecheck/placeholders pass, make test 5565 passed (98.30 %), spec refs 0.

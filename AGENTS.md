@@ -824,3 +824,13 @@ Grafana 3001
   `POST /sim/telnyx/accounts`. respx streaming bodies: `httpx.Response(200, stream=<AsyncByteStream>)` (raise
   `httpx.ReadError` inside `__aiter__` for a mid-body failure). Response models use `coerce_numbers_to_str`
   (Telnyx numeric ids) and `validation_alias="from"` + `populate_by_name` for the `from` field.
+- 2026-11-01 (P03-T09): Telnyx inbound verification/parsing lives in `va_telnyx.signatures` (`verify_webhook`,
+  `verify_media_ws`, `load_public_key`; `WebhookVerificationError.reason`), `va_telnyx.webhooks`
+  (`parse_envelope`, `parse_payload`, `PAYLOAD_MODELS`, `UnknownEventPayload`), `voice_events` (one model per
+  specs/06 §5 row; `test_webhook_models` parses the §5 table and requires a model for every row, so a new row needs
+  a model), `message_events`, and `media` (`parse_media_message` fast path, `media_message`/`mark_message`/
+  `clear_message`, `segment_mark`). Rules: specs/06 §4.1 Decision P03-T09. Contract tests verify every FakeTelnyx
+  webhook with `state.signing_key.public_key_b64` and `now=state.clock.now()`; `number_order.complete` is not a
+  modelled event (clear `transport.received` after ordering numbers). The fixed signature vector in
+  `test_signatures.py` uses the seed `bytes(range(32))`. Provision app + messaging profile in va_telnyx tests with
+  `telnyx_client_helpers.provisioned(client, voice_url, sms_url)`.

@@ -165,6 +165,32 @@ Routes: `POST /telnyx/voice`, `POST /telnyx/voice/{telnyx_account_id}`, `POST /t
    exceptions are caught, stored in `telnyx_events.process_error`, and re-attempted by the `TelnyxEventReprocessor`
    loop (every 5 s, max 5 attempts) so Telnyx does not need to retry; always `200` after a successful insert.
 
+> Decision (2026-11-01): webhook and media verification API (P03-T09).
+> 1. `va_telnyx.verify_webhook(raw_body, headers, public_key, now)` and
+>    `va_telnyx.verify_media_ws(stream_url, headers, public_key, now)` return `None` or raise
+>    `WebhookVerificationError` whose `reason` is `missing_headers` | `malformed_timestamp` | `stale_timestamp` |
+>    `invalid_signature`. Header names match case-insensitively; an empty header counts as missing; the timestamp
+>    must be 1–12 ASCII digits (unix seconds; a longer value is `malformed_timestamp`); `abs(now - timestamp) > 300` is stale (exactly 300 s is accepted, future
+>    skew is rejected the same way); a signature that is not base64, not 64 bytes, or does not verify is invalid.
+>    `now` must be timezone-aware. Verification runs on the raw bytes before any JSON parsing; the caller maps every
+>    reason to `401` (edge) or close code `4401` (media worker) and counts `telnyx_webhook_invalid_signature_total`.
+>    The stream `token` HMAC of §4.2 is the media worker's check, not part of `verify_media_ws`.
+> 2. `public_key` is the base64 raw 32-byte Ed25519 key (`TELNYX_PUBLIC_KEY`) or a loaded `nacl.signing.VerifyKey`;
+>    `load_public_key` raises `ValueError` on bad base64 or length (a configuration error, raised at startup).
+> 3. `va_telnyx.webhooks.parse_envelope(raw_body)` parses the step 5 envelope (`meta` optional, unknown fields
+>    ignored; failure → `WebhookParseError`). `parse_payload(event)` returns the model of the `event_type`
+>    (`va_telnyx.voice_events` for every §5 row, `va_telnyx.message_events.MessageEventPayload` for
+>    `message.received|sent|finalized`); models ignore unknown fields and default every field Telnyx may omit. An
+>    unknown `event_type` parses as `UnknownEventPayload(event_type, raw)`, never an error; a known type whose
+>    payload lacks a required field (`call_control_id`, `conference_id`, `digit`, message `id`/`direction`/`from`)
+>    raises `WebhookParseError`.
+> 4. Media parsing (§8): `va_telnyx.media.parse_media_message(raw)` dispatches by hand on `event`; `media` →
+>    `MediaFrame(chunk, timestamp, payload)` (slots dataclass, base64 decoded); control frames are validated by the
+>    §8 models (unknown fields ignored); unknown `event` → `UnknownMediaEvent(event, raw)`; non-JSON, non-object,
+>    missing required fields, bad integers, or bad base64 → `MediaProtocolError` (a `ValueError`). Outbound
+>    builders `media_message(payload)`, `mark_message(name)`, `clear_message()` return the JSON bytes;
+>    `segment_mark(turn, segment)` / `parse_segment_mark(name)` handle `seg:<turn_index>:<segment_index>`.
+
 ### 4.2 Media WebSocket verification (in `media-worker`)
 
 Telnyx connects to `stream_url` with headers `telnyx-signature-ed25519` and `telnyx-timestamp`. Signed string:
@@ -311,6 +337,7 @@ Outbound (us → Telnyx):
 
 Parsing uses `orjson.loads` + a hand-written dispatch on `event` (faster than Pydantic for `media`; `media` frames are
 parsed into a lightweight `__slots__` dataclass `MediaFrame(chunk:int, timestamp:int, payload:bytes)`).
+Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 
 ## 9. DTMF
 

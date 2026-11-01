@@ -19,7 +19,7 @@ from starlette.applications import Starlette
 from va_sim.server import simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
-from va_telnyx import ClientState, LegRole, TelnyxClient, TelnyxMetrics, TelnyxRateLimiter
+from va_telnyx import ClientState, LegRole, NumberSearch, TelnyxClient, TelnyxMetrics, TelnyxRateLimiter
 from va_telnyx.client_state import encode
 
 __all__ = [
@@ -34,9 +34,11 @@ __all__ = [
     "Rig",
     "body_of",
     "leg_state",
+    "provisioned",
     "rig",
     "sim_clients",
     "sim_http",
+    "sms_number",
 ]
 
 API_KEY: Final = "KEY-va-telnyx-tests"
@@ -90,6 +92,30 @@ def rig(
 def body_of(request: httpx.Request) -> dict[str, Any]:
     body: dict[str, Any] = orjson.loads(request.content)
     return body
+
+
+async def provisioned(client: TelnyxClient, voice_url: str, sms_url: str) -> tuple[str, str]:
+    """(call control app id, messaging profile id) created through ``client``."""
+    profile = await client.create_outbound_voice_profile("voiceagents-test")
+    app = await client.create_call_control_app(
+        "voiceagents-test", voice_url, outbound_voice_profile_id=profile.id
+    )
+    messaging = await client.create_messaging_profile("voiceagents-test", sms_url)
+    return app.id, messaging.id
+
+
+async def sms_number(client: TelnyxClient, state: SimState, voice_url: str, sms_url: str) -> tuple[str, str]:
+    """(an owned SMS number on a new messaging profile, that profile's id); the number order has completed."""
+    app_id, profile_id = await provisioned(client, voice_url, sms_url)
+    [number] = await client.search_numbers(NumberSearch(features=("sms",), limit=1))
+    await client.create_number_order(
+        [number.phone_number],
+        connection_id=app_id,
+        customer_reference=str(ORG_ID),
+        messaging_profile_id=profile_id,
+    )
+    await state.tasks.drain()
+    return number.phone_number, profile_id
 
 
 def leg_state(leg: LegRole = "primary") -> str:

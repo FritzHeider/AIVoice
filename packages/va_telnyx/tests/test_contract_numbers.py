@@ -7,7 +7,7 @@ import wave
 from pathlib import Path
 
 import httpx
-from telnyx_client_helpers import ORG_ID, leg_state, sim_clients
+from telnyx_client_helpers import ORG_ID, leg_state, provisioned, sim_clients, sms_number
 from telnyx_helpers import CALLEE, CALLER, VOICE_URL, RecordingTransport, at, payloads, telnyx_state
 
 from va_sim.state import SimState
@@ -18,12 +18,7 @@ SMS = "https://edge.example.test/telnyx/messaging"
 
 async def _resources(client: TelnyxClient) -> tuple[str, str]:
     """(call control app id, messaging profile id)."""
-    profile = await client.create_outbound_voice_profile("voiceagents-test")
-    app = await client.create_call_control_app(
-        "voiceagents-test", VOICE_URL, outbound_voice_profile_id=profile.id
-    )
-    messaging = await client.create_messaging_profile("voiceagents-test", SMS)
-    return app.id, messaging.id
+    return await provisioned(client, VOICE_URL, SMS)
 
 
 async def test_search_order_manage_and_delete_a_number() -> None:
@@ -75,18 +70,10 @@ async def test_send_message_from_an_owned_number() -> None:
     transport = RecordingTransport()
     state = telnyx_state(transport)
     async with sim_clients(state) as (raw, client):
-        app_id, profile_id = await _resources(client)
-        [number] = await client.search_numbers(NumberSearch(features=("sms",), limit=1))
-        await client.create_number_order(
-            [number.phone_number],
-            connection_id=app_id,
-            customer_reference=str(ORG_ID),
-            messaging_profile_id=profile_id,
-        )
-        await state.tasks.drain()
+        number, profile_id = await sms_number(client, state, VOICE_URL, SMS)
         sent = await client.send_message(
             MessageCreate(
-                from_=number.phone_number,
+                from_=number,
                 to=CALLEE,
                 text="Your appointment is confirmed.",
                 messaging_profile_id=profile_id,
@@ -96,7 +83,7 @@ async def test_send_message_from_an_owned_number() -> None:
         await state.tasks.drain()
         listed = (await raw.get("/sim/telnyx/messages")).json()["messages"]
     assert sent.direction == "outbound"
-    assert sent.from_ == number.phone_number
+    assert sent.from_ == number
     assert [(r.phone_number, r.status) for r in sent.to] == [(CALLEE, "queued")]
     assert sent.parts == 1
     assert [m["id"] for m in listed] == [sent.id]
