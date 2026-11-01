@@ -244,6 +244,31 @@ creates roles `va_app` and `va_system` (password `va` locally) and database `tem
 >    runs `scripts/dev_down.sh` (`docker compose --profile '*' down --remove-orphans`; `-v` also removes volumes).
 > 8. `01-roles.sql` is idempotent; `temporalio/auto-setup:1.25` accepts the pre-created `temporal` database (verified).
 
+> Decision (2026-11-01): sim image and service (P03-T15b). `infra/docker/python.Dockerfile` and the `sim` service
+> land; the other `build:` services and the `x-py-env` anchor still arrive with their own tasks. Deviations:
+> 1. `python.Dockerfile` keeps the §1.1 text except three lines: (a) uv comes from `ghcr.io/astral-sh/uv:0.13.6`,
+>    because `uv.lock` is lock revision 5 and uv 0.5.4 cannot read it; (b) the builder reads the distribution name
+>    from `apps/${SERVICE}/pyproject.toml` (`name = "..."`) instead of deriving `va-${SERVICE//_/-}`, because
+>    `apps/sim` is `va-sim-server` (`va-sim` is the library); SERVICE stays the app directory, so the compose
+>    build args are unchanged; (c) the runtime stage creates `/app/.sim` owned by uid 10001, so the non-root
+>    simulator can write `.sim/telnyx_public_key` in its working directory. Base-image digests
+>    (`base-images.lock`, `scripts/docker_build.sh`) arrive with the release pipeline; until then the `ARG`
+>    defaults are the pins. `.dockerignore` keeps the context to `pyproject.toml`, `uv.lock`, `packages/`, `apps/`,
+>    `models/`, `assets/` (it drops `.git`, `.venv`, `.env*`, `.sim`, caches, `node_modules`, build output).
+> 2. The `sim` service equals the entry above (build args, profiles, environment, ports, healthcheck test) plus the
+>    repository conventions `restart: unless-stopped` and healthcheck `timeout: 3s`, and
+>    `OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317` (without the `x-py-env` anchor the default
+>    `localhost:4317` would point at the container itself). It has no `env_file`: the host `.env` holds
+>    `localhost` URLs.
+> 3. `docker-compose.e2e.yml` sets only `services.sim.environment.SIM_CLOCK: accelerated`; `scripts/dev_up.sh` passes
+>    `-f docker-compose.yml -f docker-compose.e2e.yml` whenever the profile list contains `e2e`.
+> 4. `dev_up.sh` runs `up -d --wait --build`, so a code change rebuilds the sim image (unchanged layers are cached).
+> 5. After the wait, when `sim` is among the started services, `dev_up.sh` runs `scripts/sim_public_key.py`: it reads
+>    `GET http://localhost:9100/sim/telnyx/public-key` (transport errors retried 30 times, 1 s apart, 5 s timeout
+>    each), checks that the value is base64 of 32 bytes, sets `TELNYX_PUBLIC_KEY` in `.env` in place (comment kept),
+>    and writes the host `.sim/telnyx_public_key`. The simulator generates a new key on each start unless
+>    `SIM_ED25519_PRIVATE_KEY` is set, so the key is rewritten on every `make up`.
+
 ## 3. Kubernetes Helm chart (`infra/helm/voiceagents`)
 
 ### 3.1 values.yaml (key structure, all keys)

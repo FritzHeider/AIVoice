@@ -10,6 +10,8 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Install everything | `make setup` |
 | Toolchain preflight | `uv run --no-project --python 3.12 python scripts/check_toolchain.py --search-path "$PATH"` |
 | Start infra + simulators | `make up` (apps too: `make up PROFILE=apps`) |
+| Build one Python image | `docker build -f infra/docker/python.Dockerfile --build-arg SERVICE=sim --build-arg MODULE=va_sim_server.main -t va-sim:dev .` |
+| Copy sim key into `.env` | `uv run python scripts/sim_public_key.py` (run by `make up` when `sim` starts) |
 | Stop | `make down` |
 | Migrate DB | `make migrate` (SQL only: `uv run alembic -c packages/va_db/alembic.ini upgrade head --sql`; back out: `... downgrade base`) |
 | Seed dev data | `make seed` (prints dev keys `va_live_…`/`va_test_…`, dashboard login, a curl line; `make seed ARGS="--json"`, `--email`, `--reset-password`; needs `make up && make migrate`) |
@@ -920,3 +922,13 @@ Grafana 3001
   Settings subclasses declare `service_name: ClassVar[str]` (a plain field shadows the base ClassVar and pydantic
   warns, an error here). Scripts that call `asyncio.run` are tested end to end with `await asyncio.to_thread(main,
   argv)` while `running_sims(state, ports={"telnyx": 0})` serves FakeTelnyx in the test loop.
+- 2026-11-01 (P03-T15b): `infra/docker/python.Dockerfile` (specs/29 §2 Decision P03-T15b) builds every Python app
+  image: SERVICE = app directory, the distribution comes from `apps/$SERVICE/pyproject.toml`, uv is pinned to the
+  local `0.13.6` (lock revision 5). `scripts/tests/test_dockerfile.py` compares it line for line with the §1.1 block
+  plus the documented deviations, so change the spec and the file together. `.dockerignore` limits the context;
+  never exclude `uv.lock`, `packages/`, `apps/`, `models/`, `assets/`. The compose `sim` service runs in the infra
+  profile; `make up` builds it (`up --wait --build`) and then `scripts/sim_public_key.py` rewrites
+  `TELNYX_PUBLIC_KEY` in `.env` and `.sim/telnyx_public_key` (new key on every sim start). The e2e profile adds
+  `docker-compose.e2e.yml` (`SIM_CLOCK: accelerated`). A host-run sim on 9100-9400 now collides with the container:
+  stop it (`docker compose stop sim`) or run the host sim with `--port 19100`. `env_file.update_env_file` is the
+  shared dotenv updater for scripts.

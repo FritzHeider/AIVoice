@@ -22,6 +22,7 @@ import env_spec as es
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.yml"
+E2E_OVERRIDE_PATH = ROOT / "docker-compose.e2e.yml"
 COLLECTOR_PATH = ROOT / "infra" / "otel" / "collector.yaml"
 PROMETHEUS_PATH = ROOT / "infra" / "prometheus" / "prometheus.yml"
 INIT_SQL_PATH = ROOT / "infra" / "docker" / "postgres-init" / "01-roles.sql"
@@ -41,6 +42,7 @@ INFRA_SERVICES = {
     "minio-init",
     "mailpit",
     "otel-collector",
+    "sim",
 }
 OBSERVABILITY_ONLY = {"jaeger", "prometheus", "grafana"}
 NO_HEALTHCHECK = {"minio-init", "otel-collector"}
@@ -48,6 +50,8 @@ COMPARED_KEYS = ("image", "ports", "environment", "command", "entrypoint", "ulim
 COLLECTOR_EXTRA_PORTS = ["8889:8889", "13133:13133"]
 # Keys the specs/29 §2 Decision adds to services whose spec entry does not set them.
 DOCUMENTED_ADDITIONS = {("grafana", "environment")}
+# The specs/29 §2 Decision P03-T15b: the sim exports OTLP to the collector service.
+SIM_EXTRA_ENVIRONMENT = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317"}
 
 Mapping = dict[str, Any]
 
@@ -101,7 +105,7 @@ def test_image_pins_match_toolchain_table() -> None:
     table = "\n".join(line for line in section.splitlines() if line.startswith("|"))
     pinned = re.findall(r"`([a-z0-9./-]+:[A-Za-z0-9._-]+)`", table)
     assert len(pinned) == 7
-    images = {svc["image"] for svc in SERVICES.values()}
+    images = {svc["image"] for svc in SERVICES.values() if "image" in svc}
     for image in pinned:
         assert image in images, image
 
@@ -136,8 +140,27 @@ def test_profiles_match_spec_with_collector_in_every_stack() -> None:
     assert {"infra", "apps", "e2e"} <= collector
 
 
-def test_no_application_services_yet() -> None:
-    assert not [name for name, svc in SERVICES.items() if "build" in svc]
+def test_build_services_are_sim_only() -> None:
+    assert [name for name, svc in SERVICES.items() if "build" in svc] == ["sim"]
+
+
+def test_sim_matches_spec() -> None:
+    sim, spec = SERVICES["sim"], SPEC_SERVICES["sim"]
+    assert sim["build"] == spec["build"]
+    assert sim["profiles"] == spec["profiles"]
+    assert sim["environment"] == {**spec["environment"], **SIM_EXTRA_ENVIRONMENT}
+    assert sim["ports"] == spec["ports"]
+    assert sim["healthcheck"] == {**spec["healthcheck"], "timeout": "3s"}
+    assert sim["restart"] == "unless-stopped"
+    assert "env_file" not in sim
+    assert (ROOT / sim["build"]["dockerfile"]).is_file()
+
+
+def test_e2e_override_only_accelerates_the_sim_clock() -> None:
+    assert _load_yaml(E2E_OVERRIDE_PATH) == {
+        "services": {"sim": {"environment": {"SIM_CLOCK": "accelerated"}}}
+    }
+    assert SERVICES["sim"]["environment"]["SIM_CLOCK"] == "realtime"
 
 
 def test_infra_profile_services() -> None:
@@ -167,6 +190,10 @@ def test_ports_match_agents_md() -> None:
         "Jaeger 16686": ("jaeger", 16686),
         "Prometheus 9090": ("prometheus", 9090),
         "Grafana 3001": ("grafana", 3001),
+        "fake Telnyx 9100": ("sim", 9100),
+        "fake ElevenLabs 9200": ("sim", 9200),
+        "fake LLM 9300": ("sim", 9300),
+        "fake Stripe 9400": ("sim", 9400),
     }
     flat = " ".join(ports_text.split())
     for phrase, (service, port) in expected.items():
@@ -244,6 +271,11 @@ def test_credentials_match_env_example() -> None:
         ("S3_ENDPOINT_URL", "minio"),
         ("SMTP_URL", "mailpit"),
         ("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector"),
+        ("TELNYX_API_BASE", "sim"),
+        ("ELEVENLABS_API_BASE", "sim"),
+        ("ELEVENLABS_WS_BASE", "sim"),
+        ("LLM_DEFAULT_BASE_URL", "sim"),
+        ("STRIPE_API_BASE", "sim"),
     ],
 )
 def test_env_example_endpoints_are_published(variable: str, service: str) -> None:
@@ -368,12 +400,15 @@ def _bash_interpreters() -> list[str]:
 
 
 def _fake_tools(tmp_path: Path, services: list[str]) -> tuple[dict[str, str], Path]:
+    """Fake docker/curl/uv on PATH; docker and uv append their arguments to one shared log."""
     log = tmp_path / "docker.log"
     docker = tmp_path / "docker"
     docker.write_text(_FAKE_DOCKER.format(log=log, services=" ".join(services)), encoding="utf-8")
     curl = tmp_path / "curl"
     curl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    for tool in (docker, curl):
+    uv = tmp_path / "uv"
+    uv.write_text(f'#!/bin/sh\necho "uv $*" >> "{log}"\n', encoding="utf-8")
+    for tool in (docker, curl, uv):
         tool.chmod(0o755)
     return {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin"}, log
 
@@ -400,6 +435,43 @@ def test_dev_up_runs_one_shot_jobs_after_wait(tmp_path: Path, bash: str) -> None
 
 
 @pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_builds_and_copies_the_sim_key(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["postgres", "sim"])
+    result = _run([bash, str(DEV_UP), "infra"], env=env)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    up = next(i for i, line in enumerate(calls) if " up -d --wait " in line)
+    assert calls[up].startswith("compose --profile infra up -d --wait --build ")
+    assert calls[up].endswith(" postgres sim")
+    assert calls[up + 1] == (
+        "uv run python scripts/sim_public_key.py --url http://localhost:9100 --env-file .env "
+        "--key-file .sim/telnyx_public_key"
+    )
+    assert calls[-1] == "compose --profile infra ps"
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_skips_the_sim_key_without_sim(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["jaeger"])
+    result = _run([bash, str(DEV_UP), "observability"], env=env)
+    assert result.returncode == 0, result.stderr
+    assert "uv " not in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_e2e_adds_the_override_file(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["postgres", "sim"])
+    result = _run([bash, str(DEV_UP), "e2e"], env=env)
+    assert result.returncode == 0, result.stderr
+    compose_calls = [
+        line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("compose ")
+    ]
+    assert compose_calls
+    prefix = "compose -f docker-compose.yml -f docker-compose.e2e.yml --profile e2e "
+    assert all(line.startswith(prefix) for line in compose_calls), compose_calls
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
 def test_dev_up_rejects_empty_profile_list(tmp_path: Path, bash: str) -> None:
     env, log = _fake_tools(tmp_path, [])
     result = _run([bash, str(DEV_UP), ","], env=env)
@@ -416,6 +488,27 @@ needs_docker_cli = pytest.mark.skipif(DOCKER is None, reason="docker CLI not ins
 def test_docker_compose_config_valid() -> None:
     result = _run(["docker", "compose", "--profile", "*", "config", "--quiet"])
     assert result.returncode == 0, result.stderr
+
+
+@needs_docker_cli
+def test_docker_compose_e2e_override_renders_accelerated_sim() -> None:
+    result = _run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.e2e.yml",
+            "--profile",
+            "e2e",
+            "config",
+        ]
+    )
+    assert result.returncode == 0, result.stderr
+    sim = cast("Mapping", yaml.safe_load(result.stdout))["services"]["sim"]
+    assert sim["environment"]["SIM_CLOCK"] == "accelerated"
+    assert sim["environment"]["SIM_EDGE_WEBHOOK_URL"] == "http://edge:8100/telnyx/voice"
 
 
 @needs_docker_cli

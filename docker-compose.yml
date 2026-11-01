@@ -1,5 +1,6 @@
 # Local development stack (specs/29 §2). Profiles: infra (dependencies), apps, e2e, observability.
 # `make up` starts the infra profile; `make up PROFILE=infra,observability` adds Jaeger, Prometheus, and Grafana.
+# The `sim` image is built from infra/docker/python.Dockerfile; `docker-compose.e2e.yml` accelerates its clock.
 name: voiceagents
 
 services:
@@ -128,6 +129,28 @@ services:
     ports: ["1025:1025", "8025:8025"]
     healthcheck:
       test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  sim:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: sim
+        MODULE: va_sim_server.main
+    profiles: [infra, apps, e2e]
+    restart: unless-stopped
+    environment:
+      SIM_CLOCK: realtime
+      SIM_EDGE_WEBHOOK_URL: http://edge:8100/telnyx/voice
+      SIM_MESSAGING_WEBHOOK_URL: http://edge:8100/telnyx/messaging
+      SIM_STRIPE_WEBHOOK_URL: http://api:8000/v1/billing/stripe/webhook
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports: ["9100:9100", "9200:9200", "9300:9300", "9400:9400"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9100/healthz')"]
       interval: 5s
       timeout: 3s
       retries: 20

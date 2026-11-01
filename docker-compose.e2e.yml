@@ -1,0 +1,6 @@
+# e2e override (specs/29 §2): the simulators run on the accelerated clock. `make up PROFILE=e2e` (scripts/dev_up.sh)
+# adds this file whenever the profile list contains `e2e`.
+services:
+  sim:
+    environment:
+      SIM_CLOCK: accelerated

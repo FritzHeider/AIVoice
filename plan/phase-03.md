@@ -228,7 +228,7 @@
   - Acceptance: running twice against FakeTelnyx creates each resource once; webhook/profile drift is patched;
     `--write-env` rewrites the three keys in place keeping comments and other lines.
 
-- [ ] P03-T15b Sim image, compose `sim` service, public key into `.env`
+- [x] P03-T15b Sim image, compose `sim` service, public key into `.env` — python.Dockerfile (specs/29 §1.1 + Decision deviations), compose sim healthy on 9100-9400, e2e override, dev_up --build + scripts/sim_public_key.py; make test 6389 passed (98.41 %), lint/typecheck/placeholders/spec refs/actionlint 0, jscpd 0 clones
   - Spec refs: specs/29-infrastructure.md §1.1, §2; specs/30-testing-and-evals.md §3
   - Depends on: P03-T15a
   - Deliverables: `infra/docker/python.Dockerfile` (SERVICE/MODULE args), compose `sim` service with healthcheck

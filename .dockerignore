@@ -1,0 +1,24 @@
+# Build context for infra/docker/*.Dockerfile (specs/29 §1). The Python images need only pyproject.toml, uv.lock,
+# packages/, apps/, models/, and assets/; everything below is local state, secrets, or build output.
+.git
+.github
+.ralph
+.sim
+.venv
+.env
+.env.*
+!.env.example
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.DS_Store
+**/dist
+**/coverage
+**/htmlcov
+**/.coverage
+**/.coverage.*
+apps/dashboard/.next
+logs
+reports

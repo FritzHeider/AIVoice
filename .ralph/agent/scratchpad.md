@@ -2323,3 +2323,122 @@ against specs/06 §12 steps 1-4 and the 7-rule Decision: names, https webhook UR
 duplicate warning, order voice profile → app → messaging, PATCH only drifted fields, env_values order, stdout/stderr
 split, exit codes, key never logged (tested), atomic env rewrite keeping comments/mode. Defaults match .env.example.
 §13 "bootstrap idempotency" covered (run twice, drift patched). Approved.
+
+## Plan P03-T15b (Planner, 2026-11-01)
+Sim image + compose `sim` service + `make up` writes `TELNYX_PUBLIC_KEY` (specs/29 §1.1, §2; specs/30 §3 intro).
+Only `sim` gets a `build:` service now; api/edge/media/... and the `x-py-env` anchor still arrive with their tasks.
+
+### Spec decision to write: specs/29 §2 (after the P00-T09 Decision) `> Decision (2026-11-01): sim image and service (P03-T15b).`
+1. `python.Dockerfile` keeps the §1.1 text except: (a) uv is `ghcr.io/astral-sh/uv:0.13.6` (the lock is uv revision 5;
+   uv 0.5.4 cannot read it); (b) the distribution is read from `apps/${SERVICE}/pyproject.toml` (`name = "..."`), not
+   `va-${SERVICE//_/-}`, because `apps/sim` is `va-sim-server` (`va-sim` is the library); SERVICE stays the app
+   directory, so the compose block is unchanged (`SERVICE: sim`); (c) the runtime stage creates `/app/.sim` owned by
+   10001 so the sim can write `.sim/telnyx_public_key` (cwd `/app`, non-root). Base-image digests
+   (`base-images.lock`, `scripts/docker_build.sh`) arrive with the release pipeline; until then the `ARG` defaults are
+   the pins.
+2. The `sim` service matches the §2 entry (build args, profiles infra/apps/e2e, environment, ports, healthcheck) plus
+   the repo conventions `restart: unless-stopped` and healthcheck `timeout: 3s`. No `env_file` (the host `.env`
+   holds localhost URLs).
+3. `docker-compose.e2e.yml` only sets `services.sim.environment.SIM_CLOCK: accelerated`. `scripts/dev_up.sh` adds
+   `-f docker-compose.yml -f docker-compose.e2e.yml` when the profile list contains `e2e`.
+4. `dev_up.sh` runs `up -d --wait --build ...` so code changes rebuild the sim image (cached layers otherwise).
+5. After the wait, when `sim` is among the started services, `dev_up.sh` runs
+   `uv run python scripts/sim_public_key.py --url http://localhost:9100 --env-file .env --key-file .sim/telnyx_public_key`:
+   it GETs `/sim/telnyx/public-key` (retries ~30 × 1 s on connect errors, 5 s timeout each), writes
+   `TELNYX_PUBLIC_KEY=<b64>` into `.env` with the shared env-file updater (comment kept), and writes the host
+   `.sim/telnyx_public_key`. The key changes on every sim start unless `SIM_ED25519_PRIVATE_KEY` is set, so it is
+   rewritten on every `make up`.
+
+### Files
+- `infra/docker/python.Dockerfile` (new): §1.1 text with the Decision deviations. Builder stage:
+  `RUN --mount=type=cache,target=/root/.cache/uv package="$(sed -n 's/^name = "\(.*\)"$/\1/p' "apps/${SERVICE}/pyproject.toml" | head -n1)" && test -n "$package" && uv sync --frozen --no-dev --package "$package" --no-editable`.
+  Runtime: add `&& install -d -o 10001 -g 10001 /app/.sim` (after useradd; /app is created by WORKDIR/COPY first —
+  order the RUN after `COPY --from=builder` or use `mkdir -p /app/.sim && chown 10001:10001 /app/.sim`).
+- `.dockerignore` (new): `.git`, `**/node_modules`, `.venv`, `**/__pycache__`, `**/.pytest_cache`, `**/.mypy_cache`,
+  `**/.ruff_cache`, `apps/dashboard/.next`, `**/dist`, `.env`, `.env.*`, `.sim`, `logs`, `reports`, `.ralph`,
+  `coverage*`, `htmlcov`. Must keep `pyproject.toml`, `uv.lock`, `packages/`, `apps/`, `models/`, `assets/`.
+- `docker-compose.yml`: add `sim` service (block layout like the others, multi-line).
+- `docker-compose.e2e.yml` (new, with header comment).
+- `scripts/env_file.py` (new): move `update_env_file` out of `scripts/telnyx_bootstrap.py` (bootstrap imports it;
+  keep its tests passing, move env-file unit tests to `scripts/tests/test_env_file.py` or keep them importing the
+  new module — no duplication for jscpd).
+- `scripts/sim_public_key.py` (new): `fetch_public_key(http: httpx.AsyncClient, url, *, attempts=30, delay_s=1.0,
+  sleep=asyncio.sleep) -> str` (validates 32-byte base64 Ed25519 key, else `ValueError`), `write_key_file(path, key)`,
+  `main(argv) -> int` (0 ok; 1 sim unreachable / bad body, message on stderr; prints nothing secret — it is a
+  public key, printing `TELNYX_PUBLIC_KEY updated` is fine). HTTP via `va_common.http.http_client(settings, timeout=5)`
+  or plain `httpx.AsyncClient(timeout=5)` if no settings object fits (AGENTS says use http_client: build a minimal
+  `BaseSettings` subclass like bootstrap's, `service_name: ClassVar`).
+- `scripts/dev_up.sh`: compose file flags (array, bash 3.2-safe), `--build`, sim key step.
+- `specs/29-infrastructure.md` §2 Decision; `specs/30` §3 Decision line "arrives with P03-T15" → note T15b/T15c split
+  only if text becomes false (Redis state is T15c — leave it).
+- `AGENTS.md`: Ports line add `fake Telnyx 9100 · fake ElevenLabs 9200 · fake LLM 9300 · fake Stripe 9400` already
+  present → keep; add Learned bullet (image build, `.dockerignore`, e2e override, public key step, how to run
+  bootstrap against compose sim).
+
+### Tests
+- `scripts/tests/test_compose.py` updates: `INFRA_SERVICES` += `sim`; replace `test_no_application_services_yet` with
+  `test_build_services_are_sim_only` (build services == {"sim"}) and `test_sim_matches_spec` (build, profiles,
+  environment, ports equal the §2 entry; healthcheck test equal; restart unless-stopped; no env_file);
+  `test_images_match_spec_compose_block` keeps skipping build services; `test_ports_match_agents_md` adds
+  `fake Telnyx 9100`/`fake ElevenLabs 9200`/`fake LLM 9300`/`fake Stripe 9400` → `sim`; `test_e2e_override_sets_accelerated_clock`
+  (YAML: only `services.sim.environment.SIM_CLOCK == "accelerated"`); docker-CLI test: `docker compose -f
+  docker-compose.yml -f docker-compose.e2e.yml --profile e2e config` renders sim with `SIM_CLOCK: accelerated`.
+  dev_up fake-tool tests: `--build` present; e2e profile → `-f ... -f docker-compose.e2e.yml`; with `sim` in the
+  services list a fake `uv` on PATH is called with `run python scripts/sim_public_key.py ...` after the up call;
+  without sim, no `uv` call.
+- `scripts/tests/test_dockerfile.py` (new): parse the §1.1 block; the repo Dockerfile equals it line-for-line except
+  the documented lines (uv image, sync RUN, runtime `.sim` dir) — assert those exact replacements; every
+  `apps/*/pyproject.toml` (Python apps) yields a name via the same sed regex in Python (`^name = "(.*)"$`) and the
+  name is a workspace member in `uv.lock`; `.dockerignore` excludes `.git`/`node_modules`/`.venv`/`.env` and does
+  not exclude `uv.lock`, `models`, `assets`, `packages`, `apps`.
+- `scripts/tests/test_sim_public_key.py`: respx or an httpx MockTransport: success writes `.env` key (comment kept,
+  other lines untouched) and key file; retries on `ConnectError` then succeeds (injected sleep records 1.0 s waits,
+  no real sleep); gives up after attempts → exit 1; malformed key (not 32 bytes) → exit 1, `.env` untouched.
+  End-to-end variant: `running_sims(new_state(), ports={"telnyx": 0})` + `asyncio.to_thread(main, [...])`, key equals
+  `state.signing_key.public_key_b64`.
+- Optional integration (`@pytest.mark.integration`, skip without docker daemon, and skip unless `VA_DOCKER_BUILD=1`
+  so `make test` stays fast): none required — acceptance is manual below.
+
+### Manual acceptance (Builder must run and paste results)
+`make up` (infra profile) → `docker compose ps sim` healthy; `.env` has `TELNYX_PUBLIC_KEY` equal to
+`curl -s localhost:9100/sim/telnyx/public-key`; `uv run python scripts/telnyx_bootstrap.py --env-file .env` prints the
+three ids (second run same ids). Also `docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile e2e config`
+shows accelerated. Leave the stack as found (it was up before? check `docker compose ps` first).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run actionlint`, `uv run python scripts/check_spec_refs.py`,
+`npx --yes jscpd@4 --silent` (0 clones), radon on new scripts, pip-audit + `corepack pnpm audit`.
+
+### Risks
+- Image build needs network (PyPI for uv_build, ghcr.io for uv, Docker Hub for python). If `python:3.12.7-slim-bookworm`
+  lacks something a dependency needs (wheels missing for numpy/onnxruntime → compile), bump to a newer 3.12 slim tag
+  and record it in the Decision.
+- `uv sync --package va-sim-server --no-editable` builds every workspace dependency as a wheel; uv_build includes
+  non-.py data (gz password list etc.) — fine. If `--frozen` complains about missing members, ensure `.dockerignore`
+  does not drop any `apps/*/pyproject.toml` (dashboard/widget have none — fine).
+- Port 9300/9400 on the host also serve worker/dispatcher metrics when those run on the host (known, AGENTS).
+- shellcheck/bash 3.2: empty array expansion under `set -u` — guard as the script already does.
+
+## Build P03-T15b (Builder, 2026-11-01)
+Implemented per plan. `infra/docker/python.Dockerfile` (§1.1 + 3 documented deviations: uv 0.13.6, package name read
+from `apps/$SERVICE/pyproject.toml` via sed, runtime `/app/.sim` owned by 10001), `.dockerignore`, compose `sim`
+service (spec entry + restart/timeout + `OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317` — extra deviation,
+documented as Decision rule 2), `docker-compose.e2e.yml`, `dev_up.sh` (`-f` override for e2e, `--build`, runs
+`scripts/sim_public_key.py` when sim starts). `update_env_file` moved to `scripts/env_file.py` (bootstrap imports it;
+tests moved to test_env_file.py). `scripts/sim_public_key.py` (fetch with retries on transport errors, base64/32-byte
+validation, `--attempts` flag, env + key file writes). specs/29 §2 Decision P03-T15b (5 rules); AGENTS.md 2 command rows +
+Learned bullet. Tests: test_compose.py (sim spec match, e2e override YAML + docker config render, AGENTS ports for 9100-9400,
+.env.example sim endpoints published by sim, dev_up --build/sim key/e2e -f), test_dockerfile.py (13), test_sim_public_key.py (13).
+Gates: lint 0, typecheck 0 (785 files), placeholders 0, make test 6389 passed / 98.41 %, actionlint 0, spec refs 0,
+jscpd 0 clones, radon A (3.4), pip-audit clean, pnpm audit --audit-level high clean (3 pre-existing moderate).
+Manual acceptance: `make up` built the image, sim-1 healthy on 9100-9400, `.env` TELNYX_PUBLIC_KEY == curl
+/sim/telnyx/public-key == .sim/telnyx_public_key, other .env lines unchanged; telnyx_bootstrap.py against the container
+printed 3 ids, second run --json created/updated empty; e2e override config shows SIM_CLOCK accelerated. Stack left up
+(infra now includes sim).
+
+## Review P03-T15b (Reviewer, 2026-11-01)
+Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6389 passed (98.41 %), check_spec_refs 0, actionlint 0,
+jscpd 0 clones. Dockerfile vs specs/29 §1.1: only the 3 documented deviations. Compose sim matches the §2 entry plus the
+documented restart/timeout/OTEL endpoint. Live check: sim-1 healthy, /sim/telnyx/public-key == .env TELNYX_PUBLIC_KEY
+== .sim/telnyx_public_key (comment kept). sim_public_key.py: retries transport errors only, validates 32-byte base64,
+tested with injected sleeps + real-socket e2e. Approved.

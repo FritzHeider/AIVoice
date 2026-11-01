@@ -7,6 +7,7 @@
 set -euo pipefail
 
 readonly COLLECTOR_HEALTH_URL="http://localhost:13133/"
+readonly SIM_URL="http://localhost:9100"
 readonly WAIT_TIMEOUT_S=240
 # Services that run once and exit (they must not be passed to `up --wait`).
 readonly ONE_SHOT_SERVICES=(minio-init)
@@ -49,6 +50,11 @@ for profile in "${profiles[@]}"; do
     profile_flags+=(--profile "$profile")
   fi
 done
+# The e2e profile runs the simulators on the accelerated clock (docker-compose.e2e.yml); the explicit file list
+# is prepended to the profile flags, so every compose call below sees the same project.
+if [[ ${#profile_flags[@]} -gt 0 && " ${profile_flags[*]} " == *" --profile e2e "* ]]; then
+  profile_flags=(-f docker-compose.yml -f docker-compose.e2e.yml "${profile_flags[@]}")
+fi
 # Bash 3.2 (stock macOS) treats expanding an empty array as an unbound variable under `set -u`, so every array
 # expanded below is either checked for emptiness first or guaranteed non-empty.
 if [[ ${#profile_flags[@]} -eq 0 ]]; then
@@ -73,7 +79,8 @@ if [[ ${#services[@]} -eq 0 ]]; then
   exit 2
 fi
 
-docker compose "${profile_flags[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT_S" "${services[@]}"
+# --build rebuilds the images of `build:` services (the sim) from the working tree; unchanged layers are cached.
+docker compose "${profile_flags[@]}" up -d --wait --build --wait-timeout "$WAIT_TIMEOUT_S" "${services[@]}"
 if [[ ${#jobs[@]} -gt 0 ]]; then
   for job in "${jobs[@]}"; do
     docker compose "${profile_flags[@]}" run --rm "$job"
@@ -83,6 +90,11 @@ fi
 if [[ " ${services[*]} " == *" otel-collector "* ]]; then
   curl -fsS --retry 30 --retry-delay 1 --retry-all-errors --max-time 5 "$COLLECTOR_HEALTH_URL" >/dev/null
   echo "dev_up: otel-collector ready on $COLLECTOR_HEALTH_URL"
+fi
+
+# The simulator generates a new Telnyx Ed25519 key on every start; copy it into .env and .sim/ for host services.
+if [[ " ${services[*]} " == *" sim "* ]]; then
+  uv run python scripts/sim_public_key.py --url "$SIM_URL" --env-file .env --key-file .sim/telnyx_public_key
 fi
 
 docker compose "${profile_flags[@]}" ps
