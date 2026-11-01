@@ -161,7 +161,9 @@ jobs:
       - name: pip-audit
         run: |
           uv export --frozen --all-packages --no-hashes --no-emit-workspace -o "$RUNNER_TEMP/requirements.txt"
-          uvx pip-audit --strict -r "$RUNNER_TEMP/requirements.txt"
+          # Audit on the project's Python: on the runner's newest Python (3.14) the pinned
+          # backports-zstd has no distribution and pip-audit's resolve step fails.
+          uvx --python "$(cat .python-version)" pip-audit --strict -r "$RUNNER_TEMP/requirements.txt"
       - name: pnpm audit
         run: pnpm audit --audit-level high
 
