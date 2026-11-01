@@ -20,7 +20,16 @@ from va_sim.elevenlabs.store import ElevenLabsStore
 from va_sim.ids import SimIds
 from va_sim.llm.store import LlmStore
 from va_sim.scenario import Scenario
-from va_sim.settings import DEFAULT_LLM_MODELS, PROFILES, Latencies, ProfileName, WebhookDefaults
+from va_sim.settings import (
+    DEFAULT_LLM_MODELS,
+    PROFILES,
+    Latencies,
+    ProfileName,
+    StripeDefaults,
+    WebhookDefaults,
+)
+from va_sim.stripe.store import StripeStore
+from va_sim.stripe.webhooks import StripeWebhookEmitter
 from va_sim.tasks import Supervisor
 from va_sim.telnyx.call_engine import CallEngine
 from va_sim.telnyx.keys import SigningKey
@@ -47,8 +56,9 @@ class SimState:
 
     FakeTelnyx adds its resource store, the webhook signing key (kept across resets), the webhook emitter,
     the call engine, and the supervisor owning every simulator background task; FakeElevenLabs its store
-    (accepted keys, TTS request records, the armed fault, live TTS sockets). ``webhook_transport`` lets
-    tests receive webhooks in-process (an ``httpx`` transport) instead of over the network.
+    (accepted keys, TTS request records, the armed fault, live TTS sockets); FakeStripe its store and
+    webhook emitter. ``webhook_transport`` lets tests receive webhooks (FakeTelnyx and FakeStripe) in-process
+    (an ``httpx`` transport) instead of over the network.
     """
 
     def __init__(  # noqa: PLR0913 - keyword-only collaborators and test seams
@@ -61,6 +71,7 @@ class SimState:
         webhook_defaults: WebhookDefaults | None = None,
         webhook_transport: httpx.AsyncBaseTransport | None = None,
         llm_models: Sequence[str] = DEFAULT_LLM_MODELS,
+        stripe_defaults: StripeDefaults | None = None,
     ) -> None:
         self.clock = clock
         self._base_latencies = latencies
@@ -73,6 +84,10 @@ class SimState:
         self.telnyx = TelnyxStore()
         self.elevenlabs = ElevenLabsStore()
         self.llm = LlmStore(llm_models)
+        self.stripe = StripeStore(stripe_defaults)
+        self.stripe_webhooks = StripeWebhookEmitter(
+            clock=clock, tasks=self.tasks, config=lambda: self.stripe.config, transport=webhook_transport
+        )
         self.webhooks = WebhookEmitter(
             signing_key=self.signing_key,
             clock=clock,
@@ -97,7 +112,8 @@ class SimState:
         is cancelled. Live FakeElevenLabs TTS and STT sockets close with code 1012 and its records, keys,
         faults, and STT transcript script are dropped; the voice registry is reseeded. FakeLLM drops runtime
         rules, ``call_index`` counters, its request log, fault, and added keys and models, and releases every
-        request a ``timeout`` fault holds (``SIM_LLM_RULES`` file rules stay).
+        request a ``timeout`` fault holds (``SIM_LLM_RULES`` file rules stay). FakeStripe drops its objects,
+        events, idempotency cache, added keys, and webhook deliveries and restores its config to the defaults.
         """
         self.tasks.cancel_all()
         self.call_engine.reset()
@@ -105,6 +121,8 @@ class SimState:
         self.webhooks.clear()
         self.elevenlabs.reset()
         self.llm.reset()
+        self.stripe.reset()
+        self.stripe_webhooks.clear()
         if seed is not None:
             self.seed = seed
         self.rng.seed(self.seed)
@@ -214,11 +232,19 @@ class SimState:
                 "models": len(self.llm.models),
                 "held": self.llm.held,
             },
+            "stripe": {
+                "customers": len(self.stripe.customers),
+                "payment_methods": len(self.stripe.payment_methods),
+                "payment_intents": len(self.stripe.payment_intents),
+                "events": len(self.stripe.events),
+                "webhook_deliveries": len(self.stripe_webhooks.deliveries),
+            },
         }
 
     async def aclose(self) -> None:
-        """Release held FakeLLM requests, cancel background tasks, and close the webhook HTTP client
+        """Release held FakeLLM requests, cancel background tasks, and close the webhook HTTP clients
         (simulator shutdown)."""
         self.llm.release_held()
         await self.tasks.aclose()
         await self.webhooks.aclose()
+        await self.stripe_webhooks.aclose()

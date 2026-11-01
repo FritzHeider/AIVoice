@@ -14,7 +14,7 @@
 
 - [ ] P15-T03 Stripe provider
   - Spec refs: specs/24-billing-and-limits.md (auto-recharge, Stripe Checkout, subscriptions, customer portal, Stripe webhook handling)
-  - Depends on: P03-T07, P15-T02
+  - Depends on: P03-T07b, P15-T02
   - Deliverables: `BillingProvider` protocol + `StripeBillingProvider`, customer creation, checkout sessions, off-session auto-recharge, subscription create/change/cancel, portal sessions, `/v1/billing/stripe/webhook` with signature verification and `stripe_events` dedupe
   - Acceptance: FakeStripe tests for every webhook event type handled.
 

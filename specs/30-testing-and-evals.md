@@ -1040,6 +1040,73 @@ returns `card_declined`), `GET /v1/payment_intents/{id}`, `POST /v1/subscription
 (update/cancel), `GET /v1/invoices/{id}`, events `invoice.paid`, `invoice.payment_failed`,
 `customer.subscription.updated`, `payment_intent.succeeded`, `payment_intent.payment_failed`.
 
+> Decision (2026-11-01): FakeStripe core (P03-T07a). `va_sim.stripe` serves the Stripe subset below on the FakeStripe
+> port; checkout, subscriptions, invoices and their lifecycle events follow in P03-T07b. The simulator never imports
+> `stripe`; the official SDK is only the acceptance client in tests.
+> 1. Auth: `Authorization: Bearer <key>` or Basic (`<key>:` base64, as `curl -u` sends it). `sk_test_sim` (specs/02 §6
+>    `STRIPE_SECRET_KEY`) and keys added through the control API are accepted; missing → 401 `invalid_request_error`
+>    "You did not provide an API key…", unknown → 401 "Invalid API Key provided: sk_test_****<last4>". Objects are global
+>    to the simulator (Stripe accounts are not modelled).
+> 2. Requests: POST bodies and GET query strings are form-encoded with Stripe bracket notation (`metadata[k]=v`,
+>    `a[0][b]=c`, `a[]=x`; keys exactly `0..n-1` form a list; a scalar/nested conflict is 400 with `param`). Values stay
+>    strings except declared integers (`parameter_invalid_integer`) and booleans (`true`/`false`,
+>    `parameter_invalid_boolean`). A parameter an endpoint does not know (nested keys included, e.g.
+>    `invoice_settings[x]`) is 400 `parameter_unknown` "Received unknown parameter: x"; `expand` is accepted and ignored.
+>    Missing required parameters are 400 `parameter_missing` "Missing required param: x.".
+> 3. Responses: objects carry `id`, `object`, `created` (sim clock, unix s), `livemode: false`. Every answer has
+>    `Request-Id: req_<14 alnum>` and `Stripe-Version` (the request's header, else `2026-10-28.endive`, the version
+>    stripe-python 16.1 pins). Errors are `{"error": {type, message, code?, doc_url? (docs.stripe.com/error-codes/…),
+>    decline_code?, param?, …}}`; an unknown id is 404 `resource_missing` "No such <kind>: '<id>'"; any other `/v1` URL,
+>    or a known path with another method, is 404 "Unrecognized request URL (<METHOD>: <path>)…".
+> 4. `Idempotency-Key` (POST only) is stored per API key with a fingerprint of method, path and decoded parameters. A
+>    replay answers the stored status and body with `Idempotent-Replayed: true` and `Original-Request: <request id>` and
+>    creates or emits nothing; the same key with different parameters is 400 `idempotency_error`; a replay while the
+>    first request still runs is 409 `idempotency_error` code `idempotency_key_in_use`. Error answers are stored too
+>    (401 is decided before the key is looked at). A handler crash releases the key. Reset clears the cache.
+> 5. Ids come from the seeded `SimState.ids`: `cus_`+14, `pm_`+24, `pi_`+24, `ch_`+24, `bps_`+24, `evt_`+24 alphanumerics;
+>    client secrets `{pi_id}_secret_`+25.
+> 6. Payment methods: magic ids `pm_card_visa`, `pm_card_mastercard` (succeed), `pm_card_chargeDeclined`
+>    (`generic_decline`), `pm_card_chargeDeclinedInsufficientFunds` (`insufficient_funds`),
+>    `pm_card_authenticationRequired` (needs authentication). Using a magic id (attach, customer `payment_method`,
+>    payment intent `payment_method`) creates a new `pm_…` card (brand/last4/funding from the table, `exp_month` 12,
+>    `exp_year` sim year + 3) that remembers the behaviour. `POST /v1/payment_methods/{id}/attach {customer}` (attaching a
+>    method of another customer is 400), `GET /v1/payment_methods/{id}`, `GET /v1/customers/{id}/payment_methods`
+>    (`type=card` only, newest first, `limit` 1..100 default 10, `starting_after`; `ending_before` is 400).
+> 7. Customers: `POST /v1/customers` (email, name, description, phone, metadata, payment_method,
+>    `invoice_settings[default_payment_method]`; a magic id given as both `payment_method` and the default means the
+>    method just created; a rejected create leaves nothing behind), `GET`/`POST /v1/customers/{id}`. Updates merge
+>    metadata key-wise (empty value deletes a key, `metadata=` clears), an empty string unsets a scalar, and the default
+>    payment method must be attached to the customer (else 400 `resource_missing` on that param). No `customer.*`
+>    events are emitted.
+> 8. Payment intents: `POST /v1/payment_intents` (amount ≥ 50 else `amount_too_small`; currency 3 letters, lowercased;
+>    customer; payment_method; confirm; off_session `true`/`one_off`/`recurring`, only with `confirm=true`; description;
+>    metadata; receipt_email; setup_future_usage; payment_method_types; automatic_payment_methods), `GET
+>    /v1/payment_intents/{id}`. Unconfirmed: `requires_payment_method`, or `requires_confirmation` with a method.
+>    Confirming uses the given method, else the customer's default (none → 400 `parameter_missing` `payment_method`).
+>    Outcome: the armed config `decline` (the `SimState.stripe_decline` switch above) declines with its `decline_code`
+>    (default `generic_decline`); else the card decides. Success → `succeeded`, `amount_received`, `latest_charge`
+>    `ch_…`, event `payment_intent.succeeded`. Decline (or an authentication card off-session, code and decline_code
+>    `authentication_required`) → HTTP 402 `card_error` `card_declined` with `decline_code`, `charge`, `payment_method`,
+>    and the stored intent (`requires_payment_method`, `last_payment_error`), event `payment_intent.payment_failed`. An
+>    authentication card on-session → 200 `requires_action` with `next_action.type = use_stripe_sdk`, no event.
+> 9. `POST /v1/billing_portal/sessions` (customer required and existing, return_url) → `billing_portal.session` whose
+>    `url` is `{base URL the client used}/sim/stripe/portal/{id}`; that page is a small HTML page naming the customer
+>    with a link back to `return_url` (404 `not_found` for an unknown id).
+> 10. Events: `{id, object: "event", api_version, created, data: {object, previous_attributes?}, livemode: false,
+>    pending_webhooks: 1, request: {id, idempotency_key}, type}`; `data.object` is a snapshot at emit time and
+>    `api_version`/`request` come from the causing request. The log (newest 10 000) is served by `GET /v1/events/{id}`
+>    and `GET /v1/events` (`type` filter, paging as rule 6). Each event is POSTed to config `webhook_url` (default
+>    `SIM_STRIPE_WEBHOOK_URL`) with `Content-Type: application/json; charset=utf-8` and `Stripe-Signature:
+>    t=<sim-clock unix s>,v1=<hex HMAC-SHA256(secret bytes, "t.body")>` signed per attempt (secret default
+>    `whsec_sim`); delivery and retries (1 s, then 3 s on the sim clock, then dropped) are the FakeTelnyx rules
+>    (`va_sim.delivery`). `webhook_url: null` disables delivery; events are still logged.
+> 11. Control (FakeStripe port only): `GET`/`PATCH /sim/stripe/config` `{decline, decline_code, webhook_url,
+>    webhook_secret}` (strict, 422 `invalid_request`; only sent fields change), `POST /sim/stripe/api-keys
+>    {"api_key": "sk_…"}` → 204, `GET /sim/stripe/events` (`{"events"}` oldest first), `POST /sim/stripe/events
+>    {"type", "object"}` → 201 the emitted event (for refunds, disputes, …), `GET /sim/stripe/webhooks`
+>    (`{"deliveries"}`). `/sim/reset` drops every object, event, idempotency entry, added key and delivery and restores
+>    the config; `/sim/state` adds `stripe: {customers, payment_methods, payment_intents, events, webhook_deliveries}`.
+
 ## 5. End-to-end flows (simulator, `tests_e2e/test_<flow>.py`)
 
 Every flow runs against the compose `e2e` stack through the public API with a fresh org (created via the internal

@@ -1,0 +1,137 @@
+"""FakeStripe test helpers: states, an in-process client, an independent form encoder and signature check.
+
+Endpoint tests run in-process on an accelerated clock with webhooks delivered to a
+:class:`telnyx_helpers.RecordingTransport`; the official ``stripe`` SDK tests use :func:`served_stripe` on the
+wall clock (so ``stripe.Webhook.construct_event``'s 300 s tolerance holds).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from typing import Any, Final
+from urllib.parse import urlencode
+
+import httpx
+import orjson
+from sim_helpers import LATENCIES
+from starlette.applications import Starlette
+from telnyx_helpers import RecordingTransport
+
+from va_sim.clock import AcceleratedClock, RealtimeClock
+from va_sim.server import running_sims, simulator_routes
+from va_sim.settings import StripeDefaults
+from va_sim.state import SimState
+
+__all__ = [
+    "API_KEY",
+    "SECRET",
+    "WEBHOOK_URL",
+    "encode",
+    "events_of",
+    "post",
+    "realtime_stripe_state",
+    "served_stripe",
+    "signature_ok",
+    "stripe_client",
+    "stripe_state",
+]
+
+API_KEY: Final = "sk_test_sim"
+SECRET: Final = "whsec_sim"  # noqa: S105 - simulator dev value
+WEBHOOK_URL: Final = "http://api:8000/v1/billing/stripe/webhook"
+
+
+def stripe_state(transport: RecordingTransport | None = None, *, seed: int = 0) -> SimState:
+    """An accelerated state delivering FakeStripe webhooks to ``transport`` (a fresh recorder when None)."""
+    clock = AcceleratedClock()
+    receiver = transport if transport is not None else RecordingTransport()
+    receiver.clock = clock
+    return SimState(
+        clock=clock,
+        latencies=LATENCIES,
+        seed=seed,
+        webhook_transport=receiver,
+        stripe_defaults=StripeDefaults(webhook_url=WEBHOOK_URL),
+    )
+
+
+def realtime_stripe_state(transport: httpx.AsyncBaseTransport, webhook_url: str = WEBHOOK_URL) -> SimState:
+    return SimState(
+        clock=RealtimeClock(),
+        latencies=LATENCIES,
+        webhook_transport=transport,
+        stripe_defaults=StripeDefaults(webhook_url=webhook_url),
+    )
+
+
+def _flatten(prefix: str, value: Any, out: list[tuple[str, str]]) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _flatten(f"{prefix}[{key}]", item, out)
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _flatten(f"{prefix}[{index}]", item, out)
+    elif isinstance(value, bool):
+        out.append((prefix, "true" if value else "false"))
+    else:
+        out.append((prefix, str(value)))
+
+
+def encode(params: Mapping[str, Any]) -> str:
+    """Stripe bracket-notation form body, written independently of ``va_sim.stripe.form``."""
+    pairs: list[tuple[str, str]] = []
+    for key, value in params.items():
+        _flatten(key, value, pairs)
+    return urlencode(pairs)
+
+
+async def post(
+    client: httpx.AsyncClient, path: str, params: Mapping[str, Any] | None = None, **headers: str
+) -> httpx.Response:
+    """POST ``params`` form-encoded (header names use ``_`` for ``-``)."""
+    return await client.post(
+        path,
+        content=encode(params or {}),
+        headers={
+            "content-type": "application/x-www-form-urlencoded",
+            **{name.replace("_", "-"): value for name, value in headers.items()},
+        },
+    )
+
+
+@asynccontextmanager
+async def stripe_client(state: SimState, key: str | None = API_KEY) -> AsyncIterator[httpx.AsyncClient]:
+    """An in-process FakeStripe client (Bearer ``key`` unless None); closes the state after."""
+    app = Starlette(routes=simulator_routes("stripe", state))
+    headers = {"authorization": f"Bearer {key}"} if key is not None else {}
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://sim:9400", headers=headers
+        ) as client:
+            yield client
+    finally:
+        await state.aclose()
+
+
+@asynccontextmanager
+async def served_stripe(state: SimState) -> AsyncIterator[str]:
+    """FakeStripe on an ephemeral port; yields its base URL."""
+    async with running_sims(state, ports={"stripe": 0}) as urls:
+        yield urls["stripe"]
+
+
+def signature_ok(body: bytes, header: str, secret: str = SECRET) -> tuple[bool, int]:
+    """Independent check of a ``Stripe-Signature`` header: (valid, timestamp)."""
+    parts = dict(item.split("=", 1) for item in header.split(","))
+    timestamp = parts["t"]
+    expected = hmac.new(secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, parts["v1"]), int(timestamp)
+
+
+def events_of(transport: RecordingTransport, event_type: str | None = None) -> list[dict[str, Any]]:
+    """Webhook bodies the receiver got (optionally of one type)."""
+    events = [orjson.loads(item.body) for item in transport.received]
+    return [event for event in events if event_type is None or event["type"] == event_type]

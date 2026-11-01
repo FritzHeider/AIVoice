@@ -133,6 +133,13 @@ def test_snapshot_shape() -> None:
             "voices": 11,
         },
         "llm": {"requests": 0, "embeddings": 0, "rules": 0, "models": 4, "held": 0},
+        "stripe": {
+            "customers": 0,
+            "payment_methods": 0,
+            "payment_intents": 0,
+            "events": 0,
+            "webhook_deliveries": 0,
+        },
     }
 
 

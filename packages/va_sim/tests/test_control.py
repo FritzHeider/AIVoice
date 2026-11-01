@@ -185,11 +185,9 @@ async def test_routes_are_scoped_to_their_simulator() -> None:
         scenarios = await client.get("/sim/telnyx/scenarios")
         recording = await client.get("/sim/recordings/x.wav")
         other_config = await client.get("/sim/elevenlabs/config")
+        stripe_on_llm = await client.get("/sim/stripe/config")
     async with client_for("stripe", state) as client:
+        llm_on_stripe = await client.get("/sim/llm/config")
         stripe_config = await client.get("/sim/stripe/config")
-    assert [r.status_code for r in (scenarios, recording, other_config, stripe_config)] == [
-        404,
-        404,
-        404,
-        404,
-    ]
+    responses = (scenarios, recording, other_config, stripe_on_llm, llm_on_stripe, stripe_config)
+    assert [r.status_code for r in responses] == [404, 404, 404, 404, 404, 200]

@@ -23,6 +23,7 @@ from va_sim.llm.routes import llm_routes
 from va_sim.llm.rules import load_rule_file
 from va_sim.settings import SIMULATORS, SimName, SimSettings
 from va_sim.state import DEFAULT_SEED, SimState
+from va_sim.stripe.routes import stripe_routes
 from va_sim.telnyx.keys import SigningKey
 from va_sim.telnyx.routes import telnyx_routes
 
@@ -55,13 +56,16 @@ def simulator_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
         routes.extend(elevenlabs_routes(state))
     elif sim == "llm":
         routes.extend(llm_routes(state))
+    else:
+        routes.extend(stripe_routes(state))
     return routes
 
 
 def build_state(settings: SimSettings, *, seed: int = DEFAULT_SEED) -> SimState:
-    """A fresh state with the clock mode, latencies, signing key, webhook targets, LLM model ids, and the
-    ``SIM_LLM_RULES`` rule files of ``settings`` (raises :class:`va_sim.llm.rules.RulesError` for an invalid
-    rule file and ``OSError`` for an unreadable one; called before the event loop serves anything)."""
+    """A fresh state with the clock mode, latencies, signing key, webhook targets (FakeTelnyx and FakeStripe),
+    LLM model ids, and the ``SIM_LLM_RULES`` rule files of ``settings`` (raises
+    :class:`va_sim.llm.rules.RulesError` for an invalid rule file and ``OSError`` for an unreadable one;
+    called before the event loop serves anything)."""
     secret = settings.sim_ed25519_private_key.get_secret_value() if settings.sim_ed25519_private_key else ""
     # Blank (the .env.example value) means "generate a keypair", like an unset variable.
     signing_key = SigningKey.from_base64(secret) if secret.strip() else None
@@ -72,6 +76,7 @@ def build_state(settings: SimSettings, *, seed: int = DEFAULT_SEED) -> SimState:
         signing_key=signing_key,
         webhook_defaults=settings.webhook_defaults(),
         llm_models=settings.llm_model_ids(),
+        stripe_defaults=settings.stripe_defaults(),
     )
     for path in settings.llm_rule_paths:
         state.llm.rules.add(load_rule_file(path).rules, source=str(path))

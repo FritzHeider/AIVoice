@@ -777,3 +777,17 @@ Grafana 3001
   auth/model/fault answers are in `llm/gate.py`. The `openai` SDK requests `encoding_format=base64` by default.
   Faults take `endpoint: chat|embeddings` (default chat). Representative prompts/schemas for all 14 names:
   `tests/support/llm_schemas.py` (`SPEC_CALLS`, `forced_body`).
+- 2026-11-01 (P03-T07a): FakeStripe = `va_sim.stripe` (spec: specs/30 §4.1 Decision P03-T07a): pure `form` (bracket
+  decoding), `params` (typed readers raising `StripeError`, `check_known`, `MetadataPatch`), `errors`, `objects`
+  (JSON builders, `TEST_CARDS` magic ids → `CardSpec`), `signing`; `http.stripe_endpoint(state, handler)` is the
+  pipeline (auth → form → idempotency → handler returning the 200 body or raising `StripeError`); handlers in
+  `customers`, `payment_methods`, `payment_intents`, `portal`, `events` (`emit_event` logs + delivers); table of
+  routes `routes._API` (catch-all 404 last); `store.StripeStore` on `SimState.stripe`, emitter
+  `SimState.stripe_webhooks`. Webhook post/retry/log is shared by FakeTelnyx and FakeStripe in `va_sim.delivery`
+  (`SignedDelivery`, render callback per attempt). Tests: `tests/support/stripe_helpers.py` (`stripe_state(hooks)`
+  with a `RecordingTransport`, `stripe_client`, independent `encode`/`signature_ok`, `events_of`,
+  `realtime_stripe_state` + `served_stripe` for the SDK). stripe-python 16.1 (`StripeClient(key,
+  base_addresses={"api": url}, http_client=stripe.HTTPXClient(), max_network_retries=0)`, async methods
+  `*_async(params, options)`) posts with httpx `data=<bytes>`, a DeprecationWarning (error here): SDK tests ignore
+  exactly that message with a module `pytestmark` filter, and must `await http_client.close_async()` (untyped:
+  `# type: ignore[no-untyped-call]`) or the socket leaks into a later test.

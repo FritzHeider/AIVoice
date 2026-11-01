@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793513723-04da
+> va_sim FakeStripe: va_sim.stripe (http.stripe_endpoint pipeline, handlers raise StripeError, routes._API table + catch-all 404); webhook post/retry shared via va_sim.delivery.SignedDelivery (telnyx too); tests use stripe_helpers stripe_state(RecordingTransport)/stripe_client/encode/signature_ok; stripe SDK HTTPXClient triggers httpx data= DeprecationWarning -> module pytestmark filter + await close_async()
+<!-- tags: sim, stripe, testing | created: 2026-11-01 -->
+
 ### mem-1793445974-9a2b
 > va_sim FakeLLM structured calls: heuristics.structured_arguments -> heuristics_post/heuristics_base, always via schema_fill.SchemaFill.conform (validates against tool parameters, tests cross-check jsonschema); embeddings in llm/embeddings.py + embed_route.py, shared auth/fault answers in llm/gate.py; faults have endpoint chat|embeddings; /sim/state llm snapshot now has embeddings count (test_state, test_llm_control, test_llm_faults assert it)
 <!-- tags: sim, llm, testing | created: 2026-10-31 -->

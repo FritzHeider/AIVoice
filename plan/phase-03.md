@@ -106,11 +106,30 @@
   - Acceptance: `openai` SDK forced tool call returns schema-valid heuristic arguments for each registered name;
     embeddings are deterministic, unit-norm, 1024-d by default, and similar texts score higher cosine (test).
 
-- [ ] P03-T07 FakeStripe
-  - Spec refs: specs/30-testing-and-evals.md (FakeStripe); specs/24-billing-and-limits.md (Stripe objects and webhooks)
+- [x] P03-T07a FakeStripe core: auth, form decoding, customers, payment methods, payment intents, portal, signed events — va_sim.stripe + shared va_sim.delivery; stripe SDK acceptance test (customers, attach, off-session PI, CardError card_declined, construct_event on every webhook); 4965 passed, coverage 98.10%, lint/typecheck/placeholders/spec refs pass, jscpd 0 clones, radon no C+ in new code
+  - Spec refs: specs/30-testing-and-evals.md §4.1 (FakeStripe); specs/24-billing-and-limits.md §7 (auto-recharge, portal, webhooks)
   - Depends on: P03-T01
-  - Deliverables: customers, checkout sessions, payment intents (off-session), subscriptions, billing portal sessions, invoices, webhook emission with `Stripe-Signature`
-  - Acceptance: the official `stripe` Python SDK works against it with `api_base` override (test).
+  - Deliverables: `va_sim.stripe` (Bearer/Basic `sk_` key auth, Stripe bracket form decoding, Stripe error bodies,
+    `Idempotency-Key` replay/mismatch, `Request-Id`), customers create/retrieve/update, payment methods (test magic ids
+    attach, retrieve, list per customer), payment intents create (off-session confirm, `stripe_decline` config and
+    declining/authentication test methods → 402 `card_error`) and retrieve, billing portal sessions, events retrieve,
+    signed webhook emitter (`Stripe-Signature: t=…,v1=HMAC_SHA256(secret, "t.payload")`, retries, delivery log),
+    control routes (`/sim/stripe/config`, `/events` list + fire arbitrary event, `/webhooks`, `/api-keys`), reset, snapshot
+  - Acceptance: the official `stripe` SDK (`StripeClient` with `base_addresses={"api": url}`) creates customers,
+    attaches a payment method, confirms an off-session PaymentIntent, gets `CardError` `card_declined` when declining is
+    armed, and `stripe.Webhook.construct_event` verifies every emitted webhook (tests).
+
+- [ ] P03-T07b FakeStripe checkout, subscriptions, invoices, and lifecycle events
+  - Spec refs: specs/30-testing-and-evals.md §4.1 (FakeStripe); specs/24-billing-and-limits.md §7 (top-up and subscription checkout, plan change, cancel)
+  - Depends on: P03-T07a
+  - Deliverables: prices/products needed by `price_data`/`price` line items, checkout sessions (`mode` payment |
+    subscription | setup; `url` = `{base}/sim/stripe/checkout/{id}`; `?outcome=success|cancel` completes and emits
+    `checkout.session.completed` with metadata), subscriptions create/retrieve/update (price change with
+    `proration_behavior`, `cancel_at_period_end`)/cancel, invoices retrieve, control actions to renew a subscription
+    period (`invoice.paid`) or fail its payment (`invoice.payment_failed`, status `past_due`), events
+    `customer.subscription.updated`/`deleted`
+  - Acceptance: the official `stripe` SDK drives a top-up checkout and a subscription checkout to completion, changes and
+    cancels the subscription, and retrieves invoices; every lifecycle webhook verifies with `stripe.Webhook.construct_event` (tests).
 
 - [ ] P03-T08 `va_telnyx` REST client
   - Spec refs: specs/06-telephony-telnyx.md (REST client operations, error mapping, retries, rate limiting, client_state, command_id)

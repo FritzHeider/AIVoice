@@ -21,6 +21,7 @@ __all__ = [
     "DEFAULT_EDGE_WEBHOOK_URL",
     "DEFAULT_LLM_MODELS",
     "DEFAULT_MESSAGING_WEBHOOK_URL",
+    "DEFAULT_STRIPE_WEBHOOK_URL",
     "PROFILES",
     "SIMULATORS",
     "ClockMode",
@@ -28,6 +29,7 @@ __all__ = [
     "ProfileName",
     "SimName",
     "SimSettings",
+    "StripeDefaults",
     "WebhookDefaults",
 ]
 
@@ -41,6 +43,8 @@ SIMULATORS: Final[tuple[SimName, ...]] = ("telnyx", "elevenlabs", "llm", "stripe
 # specs/02 §6 defaults of SIM_EDGE_WEBHOOK_URL and SIM_MESSAGING_WEBHOOK_URL.
 DEFAULT_EDGE_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/voice"
 DEFAULT_MESSAGING_WEBHOOK_URL: Final = "http://localhost:8100/telnyx/messaging"
+# specs/02 §6 default of SIM_STRIPE_WEBHOOK_URL.
+DEFAULT_STRIPE_WEBHOOK_URL: Final = "http://localhost:8000/v1/billing/stripe/webhook"
 
 # specs/02 §6 defaults: LLM_DIALOGUE_MODEL (= LLM_ROUTER_MODEL), LLM_ANALYSIS_MODEL, LLM_FALLBACK_MODEL,
 # EMBEDDINGS_MODEL.
@@ -78,6 +82,13 @@ class WebhookDefaults:
     messaging_url: str = DEFAULT_MESSAGING_WEBHOOK_URL
 
 
+@dataclass(frozen=True, slots=True)
+class StripeDefaults:
+    """Where FakeStripe delivers webhooks until ``PATCH /sim/stripe/config`` changes it."""
+
+    webhook_url: str = DEFAULT_STRIPE_WEBHOOK_URL
+
+
 class SimSettings(RedisSettings):
     """Simulator process settings; the defaults are the realtime-mode values of specs/02 §6."""
 
@@ -93,7 +104,7 @@ class SimSettings(RedisSettings):
     sim_ed25519_private_key: SecretStr | None = None
     sim_edge_webhook_url: str = DEFAULT_EDGE_WEBHOOK_URL
     sim_messaging_webhook_url: str = DEFAULT_MESSAGING_WEBHOOK_URL
-    sim_stripe_webhook_url: str = "http://localhost:8000/v1/billing/stripe/webhook"
+    sim_stripe_webhook_url: str = DEFAULT_STRIPE_WEBHOOK_URL
     # Empty → in-process state only, and no readiness check.
     sim_state_redis_url: str = ""
     sim_workers: int = Field(default=1, ge=1)
@@ -134,3 +145,7 @@ class SimSettings(RedisSettings):
         return WebhookDefaults(
             voice_url=self.sim_edge_webhook_url, messaging_url=self.sim_messaging_webhook_url
         )
+
+    def stripe_defaults(self) -> StripeDefaults:
+        """The FakeStripe webhook target configured through the environment."""
+        return StripeDefaults(webhook_url=self.sim_stripe_webhook_url)

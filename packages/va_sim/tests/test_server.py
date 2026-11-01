@@ -17,7 +17,7 @@ from va_common.service import ServerStartupError
 from va_sim.clock import AcceleratedClock, RealtimeClock
 from va_sim.llm.rules import RulesError
 from va_sim.server import SIMULATORS, build_state, ports_from, running_sims
-from va_sim.settings import SimSettings, WebhookDefaults
+from va_sim.settings import DEFAULT_STRIPE_WEBHOOK_URL, SimSettings, WebhookDefaults
 
 
 def test_ports_follow_the_spec_layout() -> None:
@@ -47,6 +47,16 @@ def test_build_state_signing_key_and_webhook_targets(monkeypatch: pytest.MonkeyP
     assert blank.signing_key.public_key_b64 != expected
     monkeypatch.delenv("SIM_MESSAGING_WEBHOOK_URL")
     assert build_state(settings_of(SimSettings)).webhook_defaults == WebhookDefaults()
+
+
+def test_build_state_stripe_webhook_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert build_state(settings_of(SimSettings)).stripe.config.webhook_url == DEFAULT_STRIPE_WEBHOOK_URL
+    monkeypatch.setenv("SIM_STRIPE_WEBHOOK_URL", "http://api:8000/v1/billing/stripe/webhook")
+    configured = build_state(SimSettings())
+    assert configured.stripe.config.webhook_url == "http://api:8000/v1/billing/stripe/webhook"
+    configured.stripe.update_config(webhook_url=None)
+    configured.reset()
+    assert configured.stripe.config.webhook_url == "http://api:8000/v1/billing/stripe/webhook"
 
 
 def test_build_state_loads_llm_rule_files_and_models(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

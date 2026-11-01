@@ -46,6 +46,7 @@ dev = [
   "openai>=2",
   "jsonschema>=4.26",
   "types-jsonschema>=4.26.0.20261006",
+  "stripe>=16.1,<17",
 ]
 
 [tool.uv]
