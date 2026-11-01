@@ -166,7 +166,7 @@
   - Deliverables: `TtsSocket` (connect once per call, `open_context`, `send_text`, `flush`, `close_context`, keepalive task, async iterator of `AudioChunk(context_id, audio, alignment)`), reconnection policy
   - Acceptance: contract tests against FakeElevenLabs incl. reconnection mid-utterance.
 
-- [ ] P03-T11 `va_elevenlabs` STT WebSocket client
+- [x] P03-T11 `va_elevenlabs` STT WebSocket client — ElevenLabsRealtimeStt (stt_realtime) + stt_wire/stt_errors/stt_buffer/stt_commits/languages/keyterms, specs/08 §7 Decision; 41 protocol + 9 FakeElevenLabs contract tests cover every §4 row; make test 5828 passed, lint/typecheck/placeholders clean, jscpd 0 clones, radon avg A
   - Spec refs: specs/08-stt-elevenlabs.md (client, messages, errors, reconnection, keyterms, language mapping)
   - Depends on: P03-T05a
   - Deliverables: `SttSession` (connect with query params, `send_audio(frame, commit=False)`, `commit()`, async iterator of `Partial/Committed` events), error classification, buffered reconnect

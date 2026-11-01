@@ -8,12 +8,11 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
 import pytest
+from contract_helpers import SimClient, sim_served
 from tts_client_helpers import collect
-from tts_helpers import API_KEY, VOICE_ID, realtime_state, served
+from tts_helpers import API_KEY, VOICE_ID
 
-from va_common.metrics import Service, build_metrics, new_registry
 from va_elevenlabs import (
     CatalogTtsMetrics,
     TtsAudio,
@@ -25,7 +24,6 @@ from va_elevenlabs import (
     TtsVoiceNotFoundError,
 )
 from va_elevenlabs.tts_models import OutputFormat
-from va_sim.state import SimState
 
 type Until = Callable[[list[TtsAudio]], bool]
 
@@ -41,38 +39,22 @@ def spoken(items: list[TtsAudio]) -> str:
     )
 
 
-class Sim:
-    def __init__(self, state: SimState, ws_base: str, control: httpx.AsyncClient) -> None:
-        self.state = state
-        self.ws_base = ws_base
-        self.control = control
-        self.registry = new_registry(process_collectors=False)
-        self.metrics = CatalogTtsMetrics(build_metrics(Service.MEDIA_WORKER, self.registry))
-
+class Sim(SimClient):
     def socket(self, **config: Any) -> TtsSocket:
         tts_config = TtsConfig(ws_base=self.ws_base, api_key=config.pop("api_key", API_KEY), **config)
-        return TtsSocket(tts_config, metrics=self.metrics)
+        return TtsSocket(tts_config, metrics=CatalogTtsMetrics(self.service_metrics))
 
     async def requests(self) -> list[dict[str, Any]]:
-        response = await self.control.get("/sim/elevenlabs/tts/requests")
-        response.raise_for_status()
-        records: list[dict[str, Any]] = response.json()["requests"]
-        return records
+        return await self.records("/sim/elevenlabs/tts/requests", "requests")
 
     async def fault(self, **fault: Any) -> None:
-        (await self.control.put("/sim/elevenlabs/tts/fault", json=fault)).raise_for_status()
-
-    def metric(self, name: str, **labels: str) -> float:
-        return self.registry.get_sample_value(name, labels) or 0.0
+        await self.put("/sim/elevenlabs/tts/fault", fault)
 
 
 @pytest.fixture
 async def sim() -> AsyncIterator[Sim]:
-    state = realtime_state()
-    async with served(state) as ws_base:
-        http_base = ws_base.replace("ws://", "http://", 1)
-        async with httpx.AsyncClient(base_url=http_base, timeout=5.0) as control:
-            yield Sim(state, ws_base, control)
+    async with sim_served() as parts:
+        yield Sim(*parts)
 
 
 @asynccontextmanager

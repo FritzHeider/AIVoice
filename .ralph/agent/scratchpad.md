@@ -1171,3 +1171,200 @@ ka init/keepalive, max 2 utterance contexts + ka, cancel drops late audio (new m
 catalog), -r{n} replay of unconfirmed clauses only, 50/100/200 ms reconnect with 3-failure limit, 3 s
 watchdog. API key only in header (TtsConfig repr=False). Looked at a close()-during-reconnect leak race:
 not reachable (the reader cannot be parked inside _attach with _ws unset).
+
+## Plan P03-T11 (Planner, 2026-11-01)
+Task: `va_elevenlabs` realtime STT WebSocket client (specs/08 §1-§7, §9 metering counter, §11 tests; simulator
+contract = specs/30 §3.3 Decision P03-T05a). Spec beats plan wording: the class is `ElevenLabsRealtimeStt` in
+`stt_realtime.py` (spec path), the plan's `SttSession` name is not used. Out of scope: `regions` (EU base URL,
+needs org data_region wiring, later phase), batch STT (P03-T12), engine-side `call.error` emission (the client
+yields warning/error `SttEvent`s; the media pipeline maps them later), live smoke (P03-T16).
+
+### Spec decision to write: specs/08 §7 `> Decision (2026-11-01): realtime STT client (P03-T11).` Number the rules:
+1. `ElevenLabsRealtimeStt(conn: SttConnection, *, clock, metrics, tracer_provider)` implements §1 `StreamingStt`
+   (models in `stt_models`; `va_voice` does not exist yet, so the Protocol lives in va_elevenlabs like
+   `StreamingTts`). `open(cfg)` connects (`xi-api-key` header, `proxy=None`, open_timeout 2 s, `ping_interval=None`,
+   `max_size=2**22`, `compression=None`), waits for `session_started` and verifies the echoed `audio_format`,
+   `sample_rate`, `commit_strategy == "manual"` (mismatch → `SttProtocolError`, fatal). Connect errors retry
+   50/100/200 ms (then `SttUnavailableError`); handshake 401/403 → `SttAuthError`.
+2. `SttConfig.include_language_detection` must equal `language_code is None` (validator; §3 derives the param);
+   `sample_rate` must match `audio_format` (8000/16000).
+3. Batching: `send_audio(frame)` takes whole codec frames (PCM16 byte count even, else `ValueError`), accumulates
+   and sends one message once ≥ `batch_ms` (100) of audio is buffered. `commit()` / `send_audio(..., commit=True)`
+   sends the buffer with `"commit": true`, or one 20 ms codec-silence frame (`0xFF`×160 / zeros×640) when empty.
+   Every chunk carries `sample_rate`; `previous_text` only on the first chunk of each session.
+4. Commit throttle: a commit within 250 ms of the previous one is deferred to `last + 0.25 s` (audio keeps flowing
+   in normal batches meanwhile); further commits inside the window merge into the deferred one.
+   `commit_throttled` from the server → resend a commit 250 ms later (same deferral path).
+5. Commits outstanding are a FIFO (EOT time, replay mark). `committed_transcript` opens a 300 ms fallback window;
+   `committed_transcript_with_timestamps` within it emits `SttEvent(committed)` with `words` (type `word` only,
+   `start`/`end` → `start_s`/`end_s`, `logprob`) and `language_code`; when the window expires, the plain text is
+   emitted with `words=[]`. A late timestamp variant after the fallback is dropped. `va_stt_final_ms` = commit()
+   call → committed event. `committed_transcript_entities` re-emits the most recent committed event with equal text
+   as `SttEvent(committed, entities=[...], is_update=True)` (new field `is_update: bool = False`, an extension of §1:
+   the Literal kinds stay as specified); no match → logged and dropped. `edited_transcript` and
+   `insufficient_audio_activity` ignored; unknown message types logged and ignored.
+6. Server message actions (§4 table): `warning` → `SttEvent(warning, error_type="stt_warning", text=error)`;
+   `auth_error` → `SttAuthError`; `quota_exceeded` → `SttQuotaError`; `unaccepted_terms` → `SttTermsError` (all
+   fatal); `invalid_request` → reconnect once with keyterms=[] and entity_detection=[]; a second `invalid_request`
+   → `SttProtocolError` fatal; `rate_limited`, `resource_exhausted`, `transcriber_error` → reconnect with
+   200/400/800 ms backoff; `error`, `session_time_limit_exceeded`, any other close/network error → reconnect with
+   50/100/200 ms; `queue_overflow` → batch 200 ms for the rest of the client's life; `chunk_size_exceeded` → batch
+   50 ms (the server dropped that message; nothing resent); `input_error` → logged at error, counted, continue.
+   Every server error message_type is counted `va_vendor_errors_total{vendor="elevenlabs_stt", code}`. Closes with
+   no preceding error frame: 1008 reason `Invalid API key`/`Missing API key` → `SttAuthError`; 1008 `invalid …` →
+   same as `invalid_request`; everything else reconnects. Malformed frames (not JSON, not an object, missing
+   `message_type`, bad field types) → `SttProtocolError` fatal. A fatal error yields `SttEvent(error,
+   error_type=<code>)`, ends `events()`, and is raised from later `send_audio`/`commit`.
+7. Reactive reconnect (§7): a replay buffer keeps every audio byte sent since the last *acknowledged* commit
+   (commit whose transcript arrived) plus frames produced during the gap, capped at `replay_max_s` (2.0 s, oldest
+   dropped). After the new `session_started` it is sent in `batch_ms` messages, the first carrying
+   `previous_text` = last 300 chars of context text (committed transcripts + `add_context(text)` from the engine);
+   if commits were outstanding one commit is re-sent after the replay. Up to 3 attempts; an attempt fails when it
+   cannot connect or its socket closes before `session_started`; 3 consecutive failures → `SttUnavailableError`.
+   Each attempt counts `va_vendor_ws_reconnects_total{vendor="elevenlabs_stt"}`; each reconnect yields
+   `SttEvent(warning, error_type="stt_reconnect")`.
+8. Proactive rotation: `rotation_due` (session age ≥ `rotate_after_s`, default 1500) is read by the engine, which
+   calls `rotate()` when the user is silent: open a second socket, wait for its `session_started`, switch the sender
+   (first chunk carries `previous_text`), keep reading the old socket for `rotate_drain_s` (0.5) then close it.
+   Events of both sockets go to the same queue. A failed rotation leaves the old session in use and yields a
+   `stt_warning`.
+9. Metering/observability: `audio_seconds` = caller audio accepted by `send_audio` (not replays, not silence
+   commits). Spans `stt.session` (whole client life, attr `va.stt.reconnects`) and `elevenlabs.stt.connect` per
+   attempt (`elevenlabs.model_id`, `elevenlabs.attempt`, `elevenlabs.rotation`).
+
+### Files (packages/va_elevenlabs/src/va_elevenlabs/)
+- `stt_models.py`: `type SttAudioFormat = Literal["ulaw_8000", "pcm_16000"]`; pydantic frozen `SttWord(text,
+  start_s, end_s, logprob: float | None)`, `SttEntity(text, entity_type, start_char, end_char)`, `SttConfig`
+  (§1 fields, defaults: ulaw_8000/8000, language_code None, include_language_detection True, keyterms [],
+  filter_background_audio False, entity_detection [], previous_text None; validators rule 2), `SttEvent` (§1 +
+  `is_update`); `StreamingStt` Protocol verbatim (jscpd ignore if needed); `@dataclass(frozen=True) SttConnection(
+  ws_base, api_key (repr=False), model_id="scribe_v2_realtime", zero_retention=False, keyterms_encoding:
+  Literal["repeated","json"]="repeated", keepalive_interval_ms=5000, batch_ms=100, min_commit_interval_s=0.25,
+  timestamp_grace_s=0.3, reconnect_delays_s=(0.05,0.1,0.2), backoff_delays_s=(0.2,0.4,0.8), replay_max_s=2.0,
+  rotate_after_s=1500.0, rotate_drain_s=0.5, open_timeout_s=2.0, send_timeout_s=5.0)`.
+- `stt_wire.py` (pure, built from specs/08 §3/§4 independently of va_sim): `realtime_url(conn, cfg, *, minimal=False)`
+  (path `/v1/speech-to-text/realtime`; query in §3 table order: model_id, audio_format, commit_strategy=manual,
+  include_timestamps=true, include_language_detection, language_code (when set), keyterms (repeated or one
+  `keyterms=<json array>`), filter_background_audio true|false, entity_detection repeated (omitted when empty),
+  keepalive_interval_ms, enable_logging=false only under zero_retention, no_verbatim=false; trailing slash on
+  ws_base tolerated; `urlencode(..., quote_via=quote_plus)`); `audio_chunk(audio, *, commit, sample_rate,
+  previous_text=None) -> str` (key order as §4 example; previous_text key only when given); `silence_frame(fmt)`;
+  `bytes_per_ms(fmt)`; `parse_message(raw) -> SessionStarted | Partial | Committed | CommittedWords | Entities |
+  ServerError | Ignored` (slots dataclasses; `ServerError(message_type, error)` for every §4 error/warning type;
+  `Ignored(message_type)` for edited_transcript/insufficient_audio_activity/unknown; malformed → `SttProtocolError`).
+- `stt_errors.py`: `SttError(code, message)`, `SttAuthError`, `SttQuotaError`, `SttTermsError`,
+  `SttProtocolError`, `SttUnavailableError`; `type SttAction = Literal["fatal", "reconnect", "backoff",
+  "minimal", "warn", "shrink", "grow", "throttled", "log", "ignore"]`; `ACTIONS: Mapping[str, SttAction]` (every §4
+  row, test parses the §4 table and checks each row has an entry); `fatal_error(message_type, message) -> SttError`;
+  `classify_close(code, reason) -> SttError | Literal["minimal"] | None`.
+- `stt_metrics.py`: `SttMetrics` Protocol (`final_ms(ms)`, `reconnect()`, `vendor_error(code)`),
+  `CatalogSttMetrics(ServiceMetrics)` (`va_stt_final_ms`, `va_vendor_ws_reconnects_total`, `va_vendor_errors_total`
+  with vendor `elevenlabs_stt`), `NullSttMetrics`. To keep jscpd at 0: factor the shared vendor counters into one
+  small `ws_metrics.VendorCounters(metrics, vendor)` used by both `CatalogTtsMetrics` and `CatalogSttMetrics`.
+- `stt_buffer.py` (pure): `AudioBatcher(fmt, batch_ms)` (`add(frame) -> bytes | None`, `drain() -> bytes`,
+  `resize(batch_ms)`); `ReplayBuffer(fmt, max_s)` (`append(chunk)`, `mark() -> int` at commit, `ack(mark)` drops
+  through a mark, `chunks(batch_ms) -> list[bytes]`, `dropped_ms`).
+- `stt_commits.py` (pure): `CommitTracker(min_interval_s, grace_s)`: `request(now) -> float | None` (None = send
+  now, else deferred deadline; merges), `sent(now, mark)`, `plain(text, now)` (opens fallback), `with_words(...)`
+  → resolved commit info (eot time, mark) or None (late), `expired(now)` → fallback commits, `outstanding`,
+  `next_deadline()`.
+- `stt_realtime.py`: `ElevenLabsRealtimeStt` (reader task per socket + one timer task for deferred commit /
+  fallback / rotation drain; send lock; `asyncio.Queue[SttEvent | None]`; `events()` async generator; `close()`
+  idempotent, closes sockets with 1000 and cancels tasks). Properties `session_id`, `reconnects`,
+  `audio_seconds`, `rotation_due`; methods `add_context(text)`, `rotate()`. Keep every method radon ≤ B. Shared
+  connect plumbing with `tts_ws` (header, proxy=None, auth-status → auth error, retryable exception tuple) goes into
+  `ws_connect.py` if it would otherwise duplicate (jscpd).
+- `languages.py` (§5): `LanguageMapping(scribe_code: str | None, detect: bool, tts_code: str | None,
+  tts_choices: frozenset[str] | None)`; `LANGUAGE_MAP` (every §5 row and alias), `TTS_SUPPORTED` (32 flash v2.5
+  codes: en ja zh de hi fr ko pt it es id nl tr fil pl sv bg ro ar cs el fi hr ms sk da ta uk ru hu no vi);
+  `resolve_language(value) -> LanguageMapping` raising `AppError("INVALID_INPUT", ..., field="language")`;
+  `tts_language(mapping, detected) -> str` (babel: detected if in TTS_SUPPORTED else en; auto {en,es}; fluent
+  {en,es,de,fr,pt,it}; fixed codes outside TTS_SUPPORTED → en); `LanguageLock` (`observe(code) -> str | None`:
+  first two committed codes agree → locked, else latest; `locked` property).
+- `keyterms.py` (§6): `Keyterm(text, boost)`; `parse_keyword(item) -> Keyterm` (`word` / `word:boost`, boost int
+  1..10 default 2; ValueError on invalid); `merge_keyterms(sources: Sequence[Iterable[str]], *, cap=100) ->
+  KeytermSet(terms: tuple[str,...], glossary: tuple[str,...], warnings: tuple[str,...])` (validate < 50 chars,
+  ≤ 5 words, none of `<>{}[]\`; dedupe case-insensitively keeping the highest boost at the first position; stable
+  sort by boost desc; cap; glossary = boost ≥ 5); `glossary_line(glossary) -> str | None`
+  ("Important names and terms: a, b").
+- `__init__.py`: export the new public names; package description in pyproject mentions STT.
+- specs/08 §7 Decision (above); specs/08 header line already names `stt_realtime.py`. AGENTS.md bullet.
+
+### Tests (packages/va_elevenlabs/tests/)
+Support: generalise `RecordingTtsServer` into a protocol-neutral `ws_server_helpers.RecordingWsServer` (records
+connections/messages, `reject_status`, an `on_message` hook) used by both the TTS helpers and a new
+`stt_client_helpers.py` (`session_started(cfg_overrides)` frame builder, `auto_start=True` answers each connection
+with `session_started` echoing the query, `committed(text)`/`committed_words(text, words)` builders, `rig(url,
+**conn)` on `ManualClock` + media-worker registry + memory spans, `collect_events(stt, until)`). Avoid jscpd
+clones between TTS and STT helpers by sharing.
+- `test_stt_wire.py`: URL snapshots for option combinations (language set/auto, keyterms repeated vs json,
+  entity_detection, zero_retention, filter on/off, pcm_16000, minimal), chunk JSON vs the §4 example parsed from the
+  spec code block, previous_text omitted when None, parse of every server type (+ malformed cases).
+- `test_stt_errors.py`: parses the specs/08 §4 table; every message_type has an `ACTIONS` entry with the rule-6
+  action; close classification table.
+- `test_stt_buffer.py`, `test_stt_commits.py`: batching 100/200/50 ms, silence frame sizes, replay cap/ack marks,
+  throttle defer/merge, fallback expiry, late timestamp variant dropped.
+- `test_stt_models.py`: validators (detection vs language_code, sample_rate vs format).
+- `test_languages.py`: every §5 row parsed from the spec table maps as specified (aliases incl.); unknown →
+  AppError INVALID_INPUT field language; tts_language for babel/auto/fluent; TTS_SUPPORTED has 32 entries; lock
+  logic (agree → lock, disagree → latest, then third agreeing pair).
+- `test_keyterms.py`: boost parsing, invalid drops with warnings, dedupe, sort, cap 100 (and 1000), glossary.
+- `test_stt_protocol.py` (RecordingWsServer + ManualClock): header + URL; batching 5 frames per message;
+  previous_text only on first chunk; commit with empty buffer sends one silence frame; throttle window (second
+  commit after 100 ms sent at 250 ms, third merged); every §4 server message row handled as rule 6 (fatal → error
+  event + iterator ends + send raises; reconnect rows → second connection, warning `stt_reconnect`, replay buffer
+  resent with previous_text and outstanding commit re-sent; backoff rows wait 200 ms on the ManualClock;
+  invalid_request → minimal URL then fatal on repeat; commit_throttled → resend at +250 ms; queue_overflow → 200 ms
+  messages; chunk_size_exceeded → 50 ms messages; input_error continues; warning event); session_started mismatch
+  fatal; committed fallback after 300 ms vs timestamp variant; entities update `is_update`; 3 failed reconnects →
+  SttUnavailableError event; handshake 401 → SttAuthError; rotation (new socket, switch, old closed after 0.5 s,
+  events from old socket during drain delivered); metrics (`va_stt_final_ms` observed per commit, reconnect and
+  vendor error counters) and spans.
+- `test_stt_contract.py` (FakeElevenLabs `realtime_state()` + `tts_helpers.served`, audio from
+  `stt_helpers.caller_audio`): open + utterance + commit → committed text with words; partials arrive; pcm_16000;
+  sim `/sim/elevenlabs/stt/sessions` shows keyterms/entity_detection/previous_text; entity detection → is_update
+  event with `credit_card_number`; fault `session_time_limit_exceeded` mid-utterance (after_ms inside the utterance)
+  → reconnect, sim shows 2 sessions, committed text equals the full utterance (no audio lost); `commit_throttled`
+  fault → commit resent and transcript arrives; `auth_error` fault / wrong key → SttAuthError; `quota_exceeded` →
+  error event; `disconnect` with times=4 → SttUnavailableError; rotation between two utterances → each committed on
+  its own session, nothing lost.
+- Coverage va_elevenlabs ≥ 95 %.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones: watch TTS/STT metrics, connect plumbing, test servers), `uvx radon cc -s -a packages/va_elevenlabs/src`
+(no C+), audit (`uvx pip-audit` on `uv export`, `corepack pnpm audit`).
+
+### Risks
+- Sim commits resolve only after 100 ms voiced + 260 ms marker window, and a commit does not force an unresolved
+  segment: contract tests commit well after the utterance ends (≥ 300 ms silence) — read AGENTS.md P03-T05a.
+- Contract tests on the wall clock (`realtime_state()`); client timers on SystemClock there, ManualClock in protocol
+  tests (use `wait_for_sleep` before `run_for` when a timer starts after socket I/O).
+- Replay after reconnect must not re-send `previous_text` past the first chunk (server input_error).
+- `filterwarnings=error`: close every socket/server; never leave the reader task pending at test end.
+- Refactoring `RecordingTtsServer`/`CatalogTtsMetrics` must keep the 100 existing TTS tests green.
+
+## Build P03-T11 (Builder, 2026-11-01)
+Implemented per plan, with these deviations, all written into the specs/08 §7 Decision (P03-T11, rules 1-10):
+- `SttAction` has no `ignore`; ignored types are `stt_wire.IGNORED_TYPES`. `test_stt_errors` checks that the §4 rows
+  (21) equal data types ∪ ignored ∪ `ACTIONS`.
+- Reconnect replay re-sends the collapsed outstanding commit at its mark (`ReplayBuffer.split(mark)`), not after
+  the whole replay. Plain transcripts still waiting for their variant are emitted before the replay.
+- `SttConnection.healthy_after_s` (1 s): a session that dies before any transcript frame and within 1 s counts as a
+  failed attempt (needed so `disconnect` x4 → unavailable, like TTS `_healthy`). `context_chars=300`,
+  `close_timeout_s=2.0` were added too.
+- One `stt_reconnect` warning per reconnect (not per attempt); each attempt counts the reconnect metric.
+- Shared plumbing to keep jscpd at 0: `ws_tasks` (run_timer/nap/crash_of/stop_tasks, now used by `tts_ws` too),
+  `ws_metrics.VendorCounters` (CatalogTtsMetrics refactored onto it), tests: `ws_server_helpers.RecordingWsServer`,
+  `rig_helpers.Observed`, `contract_helpers.SimClient`/`sim_served` (test_tts_contract refactored onto them).
+Gates: make fmt/lint/typecheck/placeholders 0; make test 5828 passed (TOTAL 98%, va_elevenlabs stt_realtime 94%,
+other new modules 100%); spec refs 0 problems; jscpd 0 clones; radon avg A (2.47), no C+; pip-audit no known vulns;
+pnpm audit 3 moderate (below high, unchanged; no TS touched).
+
+## Review P03-T11 (Reviewer, 2026-11-01)
+Approved. Re-ran: make lint/typecheck/placeholders 0; make test 5828 passed (stt_realtime 94%, other new modules 100%);
+check_spec_refs 0; jscpd 0 clones; radon no C+. Diff checked against specs/08 §1-§7: URL query order, chunk shape,
+previous_text first-chunk-only, 100 ms batching/silence commit, 250 ms throttle merge, 300 ms timestamp fallback,
+every §4 row (ACTIONS + IGNORED_TYPES), §5 table, §6 keyterms, §7 replay cap/attempts/rotation all match.
+Not blocking (for P04 engine work): an answer for a commit sent on a rotated-out session that never arrives
+within the 0.5 s drain stays in the outstanding FIFO. The engine only rotates during silence, which keeps that unlikely.

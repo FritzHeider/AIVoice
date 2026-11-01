@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793522341-0949
+> va_elevenlabs P03-T11: ElevenLabsRealtimeStt (stt_realtime) keeps all sent audio in ReplayBuffer until a later commit is answered, re-sends the collapsed outstanding commit at its mark after reconnect; tests use stt_client_helpers RecordingSttServer (greetings deque) + stt_rig on ManualClock (wait_for_sleep before run_for for reconnect delays), contract tests via contract_helpers.sim_served; mypy narrows properties across asserts -> compare tuples from a helper fn
+<!-- tags: elevenlabs, testing, stt | created: 2026-11-01 -->
+
 ### mem-1793520581-4eea
 > va_elevenlabs P03-T10: TtsSocket (tts_ws) state-first-then-write under one lock so reconnect replay repairs failed writes; flush(id) = end of utterance (close_context after tail grace), send(flush=True) only forces generation; tests use tts_client_helpers RecordingTtsServer + rig(url) on ManualClock; ManualClock.wait_for_sleep(s) before run_for(s) when the sleeper starts after real socket I/O
 <!-- tags: elevenlabs, testing, clock | created: 2026-11-01 -->

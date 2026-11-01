@@ -186,6 +186,65 @@ pathway), the agent's own name and company from persona config, and the voice na
   messages. If a commit was pending it is re-sent. Attempts: 3 (50, 100, 200 ms); failure → call error path (`07` §19).
 - Every reconnect emits `call.error` level `warning` code `stt_reconnect`.
 
+> Decision (2026-11-01): realtime STT client (P03-T11). `va_elevenlabs.stt_realtime.ElevenLabsRealtimeStt(conn:
+> SttConnection, *, clock, metrics, tracer_provider)` implements §1 (`va_voice` does not exist yet, so the
+> `StreamingStt` Protocol and the models live in `va_elevenlabs.stt_models`, like `StreamingTts`); wire format in
+> `stt_wire`, errors and the §4 action table in `stt_errors`, batching/replay in `stt_buffer`, commit bookkeeping
+> in `stt_commits`, §5 in `languages`, §6 in `keyterms`. The `regions` module (EU base URL) is out of scope here.
+> 1. `open(cfg)` connects (`xi-api-key`, `proxy=None`, `open_timeout` 2 s, `ping_interval=None`, `max_size=2**22`,
+>    `compression=None`), waits for `session_started` (within `open_timeout`) and verifies the echoed
+>    `audio_format`, `sample_rate`, `commit_strategy == "manual"` (mismatch → `SttProtocolError` code
+>    `config_mismatch`, fatal). Connect errors and non-auth handshake statuses retry after 50/100/200 ms (then
+>    `SttUnavailableError`); handshake 401/403 → `SttAuthError`. A fatal open raises and also yields the error event.
+> 2. `SttConfig.include_language_detection` must equal `language_code is None` and `sample_rate` must match
+>    `audio_format` (validators). `received_at` is the injected clock's `monotonic()` (= `loop.time()` in production).
+> 3. `send_audio` takes whole codec frames (odd PCM16 byte counts are `ValueError`) and sends one message once
+>    `batch_ms` (100) is buffered. A commit sends the buffer with `"commit": true`, or one 20 ms codec-silence
+>    frame when it is empty. Every chunk carries `sample_rate`; `previous_text` only the first chunk of each session.
+> 4. A commit within 250 ms of the previous one is deferred to `last + 0.25 s` (full batches keep flowing); more
+>    commits inside the window merge into it. `commit_throttled` drops the newest outstanding commit and defers a
+>    resend by 250 ms (same path).
+> 5. Outstanding commits are a FIFO (request time, replay mark). `committed_transcript` pops the head and waits
+>    300 ms for `committed_transcript_with_timestamps`, which emits `SttEvent(committed)` with `words` (type `word`
+>    only) and `language_code`; on expiry the plain text is emitted with `words=[]` and the late variant is dropped.
+>    `va_stt_final_ms` = commit request → committed event. `committed_transcript_entities` re-emits the most recent
+>    of the last 8 committed events with equal text as `SttEvent(committed, entities=[...], is_update=True)` (new
+>    field `is_update: bool = False`); no match → logged, dropped. Committed text and `add_context(text)` (agent
+>    turns) form the context whose last 300 chars become a new session's `previous_text`.
+> 6. Server rows: `warning` → `SttEvent(warning, error_type="stt_warning", text=error)`; `auth_error`,
+>    `quota_exceeded`, `unaccepted_terms` → `SttAuthError`/`SttQuotaError`/`SttTermsError` (fatal);
+>    `invalid_request` → reconnect once with a minimal config (no keyterms, no entity detection), a second one is a
+>    fatal `SttProtocolError`; `rate_limited`, `resource_exhausted`, `transcriber_error` → reconnect with 200/400/800 ms
+>    delays; `error`, `session_time_limit_exceeded`, and any other close or network error → reconnect with
+>    50/100/200 ms; `queue_overflow` → 200 ms messages from then on; `chunk_size_exceeded` → 50 ms messages (the
+>    dropped message is not resent); `input_error` → logged at error, continue. Every error row is counted in
+>    `va_vendor_errors_total{vendor="elevenlabs_stt", code=<message_type>}`; the same rows during the handshake
+>    are fatal (fatal rows), switch to the minimal config (`invalid_request`), or fail the attempt (others). A close
+>    without an error frame: 1008 `Invalid API key`/`Missing API key` → `SttAuthError`; 1008 `invalid …` → as
+>    `invalid_request`; else reconnect. Malformed frames are a fatal `SttProtocolError` (`invalid_server_frame`).
+>    A fatal error yields `SttEvent(error, error_type=<code>)`, ends `events()`, and is raised by later
+>    `send_audio`/`commit`.
+> 7. Reconnect: the replay buffer keeps every byte sent (and produced during the gap) since the last answered
+>    commit, at most `replay_max_s` (2 s, oldest dropped). After the new `session_started` it is resent in
+>    `batch_ms` pieces, the first with the context as `previous_text`; when commits are outstanding they collapse
+>    into one, re-sent with `commit: true` on the piece ending at the newest commit's mark (a silence frame when that
+>    audio was dropped); plain transcripts still waiting for their variant are emitted first. One
+>    `SttEvent(warning, error_type="stt_reconnect")` per reconnect; each attempt counts
+>    `va_vendor_ws_reconnects_total`. Attempts follow the row's delays; a session that ended before producing a
+>    transcript frame and within `healthy_after_s` (1 s) counts as a failed attempt of the same reconnect, so three
+>    consecutive failures → `SttUnavailableError`.
+> 8. Rotation: the engine reads `rotation_due` (session age ≥ `rotate_after_s`, 1 500 s) and calls `rotate()` while
+>    the user is silent: a second session is opened, the sender switches to it, the old socket keeps delivering
+>    events for `rotate_drain_s` (0.5 s) and is then closed (1000). A failed rotation keeps the old session and
+>    yields `stt_warning`.
+> 9. `audio_seconds` = caller audio accepted by `send_audio` (not replays, not silence commits; §9). Spans:
+>    `stt.session` (the client's life, `va.stt.reconnects`) and `elevenlabs.stt.connect` per attempt
+>    (`elevenlabs.model_id`, `elevenlabs.attempt`, `elevenlabs.rotation`).
+> 10. `languages.resolve_language` is case-insensitive; detection (`babel`, `auto`, `fluent`) picks the TTS
+>     language from `tts_choices` (`TTS_SUPPORTED`, {en, es}, {en, es, de, fr, pt, it}) else `en`; `LanguageLock`
+>     locks when two consecutive committed languages agree. `keyterms.merge_keyterms` keeps the first spelling of a
+>     case-insensitive duplicate with the highest boost; a `:suffix` is a boost only when it is an integer.
+
 ## 8. Post-call batch transcription (`stt_batch.py`)
 
 Used by `PostCallWorkflow` when the org setting `analysis.retranscribe` is true (default true when `record=true`) to

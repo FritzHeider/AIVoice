@@ -49,6 +49,7 @@ from va_elevenlabs.tts_wire import (
     socket_url,
     text_message,
 )
+from va_elevenlabs.ws_tasks import crash_of, run_timer, stop_tasks
 
 __all__ = ["MAX_UTTERANCE_CONTEXTS", "TtsSocket"]
 
@@ -225,7 +226,7 @@ class TtsSocket:
             reader = self._tasks[0] if self._tasks else None
             if reader is not None:
                 await asyncio.wait({reader}, timeout=self._config.close_timeout_s)
-        await self._stop_tasks()
+        await stop_tasks(self._tasks)
         if ws is not None:
             await ws.close()
         for context_id in tuple(self._spans):
@@ -493,22 +494,10 @@ class TtsSocket:
     # Timer.
 
     async def _timer_loop(self) -> None:
-        while not self._closed and self._terminal is None:
-            self._wake.clear()
-            delay = await self._run_due()
-            await self._nap(delay)
+        await run_timer(self._clock, self._wake, self._run_due, self._running)
 
-    async def _nap(self, delay: float | None) -> None:
-        """Sleep on the injected clock for ``delay`` seconds (forever when ``None``) or until woken."""
-        pending: set[asyncio.Task[object]] = {asyncio.create_task(self._wake.wait())}
-        if delay is not None:
-            pending.add(asyncio.create_task(self._clock.sleep(max(delay, 0.0))))
-        try:
-            await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+    def _running(self) -> bool:
+        return not self._closed and self._terminal is None
 
     async def _run_due(self) -> float | None:
         """Run every due timer action; seconds until the next deadline (``None``: none pending)."""
@@ -579,19 +568,10 @@ class TtsSocket:
         self._wake.set()
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
+        exc = crash_of(task)
         if exc is not None:
             _log.error("tts_task_crashed", task=task.get_name(), exc_info=exc)
             self._fail(TtsError("client_error", f"{task.get_name()} task crashed: {type(exc).__name__}"))
-
-    async def _stop_tasks(self) -> None:
-        current = asyncio.current_task()
-        tasks = [task for task in self._tasks if task is not current]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _end_span(self, context_id: str, error: TtsError | None, ctx: ContextState | None = None) -> None:
         span = self._spans.pop(context_id, None)

@@ -1,7 +1,7 @@
 [project]
 name = "va-elevenlabs"
 version = "0.1.0"
-description = "VoiceAgents ElevenLabs client: multi-context TTS WebSocket with keepalive, reconnection, metrics, and tracing"
+description = "VoiceAgents ElevenLabs client: multi-context TTS and realtime STT WebSockets with reconnection, metrics, and tracing"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "websockets>=17.0",

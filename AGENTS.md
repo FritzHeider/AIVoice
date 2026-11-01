@@ -847,3 +847,14 @@ Grafana 3001
   that a task starts after real socket I/O, `await clock.wait_for_sleep(s)` (event-driven, no polling). Prove
   "nothing was sent before X" by issuing a marker message and asserting it is the next one received. Contract
   tests run the socket on the wall clock against `tts_helpers.served(realtime_state())`.
+- 2026-11-01 (P03-T11): realtime STT client = `va_elevenlabs.stt_realtime.ElevenLabsRealtimeStt(SttConnection(...),
+  clock=, metrics=CatalogSttMetrics(...), tracer_provider=)` (rules: specs/08 §7 Decision P03-T11); pure parts in
+  `stt_wire`, `stt_errors` (`ACTIONS` = §4 error rows), `stt_buffer`, `stt_commits`, plus `languages` (§5) and
+  `keyterms` (§6). Shared socket-client plumbing: `ws_tasks` (`run_timer`, `nap`, `crash_of`, `stop_tasks`) and
+  `ws_metrics.VendorCounters`. Test support: `ws_server_helpers.RecordingWsServer` (override `on_connect` /
+  `on_message`; `RecordingTtsServer` and `stt_client_helpers.RecordingSttServer` subclass it; the STT one greets with
+  `session_started` unless `greetings` holds a frame or `None`), `rig_helpers.Observed` (ManualClock + registry +
+  spans; `Rig`/`SttRig` extend it), `contract_helpers.SimClient` + `sim_served()` for FakeElevenLabs contract tests.
+  mypy narrows properties across asserts (`assert x.p is None` makes a later `assert x.p == "a"` unreachable):
+  compare tuples returned by a helper function instead. Contract tests that need "no audio lost" must keep the
+  whole utterance within the 2 s replay cap (the client sends unpaced audio before it sees the fault).

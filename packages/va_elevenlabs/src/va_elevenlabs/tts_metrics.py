@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Final, Protocol
 
 from va_common.metrics import ServiceMetrics
+from va_elevenlabs.ws_metrics import VendorCounters
 
 __all__ = ["VENDOR", "CatalogTtsMetrics", "NullTtsMetrics", "TtsMetrics"]
 
@@ -34,8 +35,7 @@ class CatalogTtsMetrics:
     def __init__(self, metrics: ServiceMetrics) -> None:
         self._ttfa = metrics.histogram("va_tts_ttfa_ms")
         self._characters = metrics.counter("va_tts_characters_total")
-        self._reconnects = metrics.counter("va_vendor_ws_reconnects_total")
-        self._errors = metrics.counter("va_vendor_errors_total")
+        self._vendor = VendorCounters(metrics, VENDOR)
         self._late = metrics.counter("va_tts_late_audio_dropped_total")
 
     def ttfa(self, model: str, ms: float) -> None:
@@ -45,10 +45,10 @@ class CatalogTtsMetrics:
         self._characters.labels(model=model).inc(count)
 
     def reconnect(self) -> None:
-        self._reconnects.labels(vendor=VENDOR).inc()
+        self._vendor.reconnect()
 
     def vendor_error(self, code: str) -> None:
-        self._errors.labels(vendor=VENDOR, code=code).inc()
+        self._vendor.vendor_error(code)
 
     def late_dropped(self) -> None:
         self._late.inc()
