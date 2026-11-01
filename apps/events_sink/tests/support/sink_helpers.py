@@ -8,8 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from ch_support import FakeClickHouse
-
-from va_common.time import FrozenClock
+from clock_helpers import RecordingClock
 
 __all__ = ["FakeConnect", "RecordingClock", "never_connects"]
 
@@ -39,13 +38,3 @@ async def never_connects() -> AsyncIterator[FakeClickHouse]:
     """A connection attempt that hangs until the lifespan cancels it."""
     await asyncio.Event().wait()
     yield FakeClickHouse()
-
-
-class RecordingClock(FrozenClock):
-    def __init__(self) -> None:
-        super().__init__()
-        self.sleeps: list[float] = []
-
-    async def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        await super().sleep(seconds)

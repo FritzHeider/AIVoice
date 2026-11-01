@@ -131,15 +131,32 @@
   - Acceptance: the official `stripe` SDK drives a top-up checkout and a subscription checkout to completion, changes and
     cancels the subscription, and retrieves invoices; every lifecycle webhook verifies with `stripe.Webhook.construct_event` (tests).
 
-- [ ] P03-T08 `va_telnyx` REST client
-  - Spec refs: specs/06-telephony-telnyx.md (REST client operations, error mapping, retries, rate limiting, client_state, command_id)
+- [x] P03-T08a `va_telnyx` transport core and call-control commands — make lint/typecheck/placeholders pass, make test 5179 passed (98 % total, va_telnyx 100 %), FakeTelnyx contract + respx exact-body/retry/error-mapping/rate-limit tests; specs/06 §2.2 + specs/27 §3.6 Decisions
+  - Spec refs: specs/06-telephony-telnyx.md §2, §2.1 (call-command and conference rows), §2.2, §3; specs/27-observability.md §3
   - Depends on: P03-T02b
-  - Deliverables: `TelnyxClient` with typed methods for every operation, per-account credentials (platform or BYO), `command_id` support, error mapping, retry on 429/5xx for idempotent operations, token-bucket rate limiter, metrics/tracing
-  - Acceptance: contract tests against FakeTelnyx for every method; respx tests for error mapping.
+  - Deliverables: package `packages/va_telnyx`; `TelnyxClient` request pipeline (Bearer auth per client, base URL,
+    Pydantic response parsing, `TelnyxApiError`, `CallAlreadyEnded`, `CARRIER_ERROR` mapping, retry policy with
+    Retry-After and jitter, connect-error-only retry for non-idempotent calls), `TelnyxRateLimiter` (Redis token bucket
+    per account and category, waits ≤ 2 s then `TelnyxRateLimited`), metrics + tracing, `client_state` encode/decode,
+    typed call-command methods (dial, answer, reject, hangup, transfer, bridge, send_dtmf, record_start/stop,
+    streaming_start/stop, playback_start/stop, conference_create/join/leave) with deterministic `command_id`
+  - Acceptance: contract tests against FakeTelnyx for every call-command/conference method; respx tests for exact
+    bodies, error mapping, retry policy (429 + Retry-After, 503, connect errors), rate limiter wait/raise.
+
+- [ ] P03-T08b `va_telnyx` provisioning, numbers, messaging, download, and client factory
+  - Spec refs: specs/06-telephony-telnyx.md §1, §2.1 (provisioning, number, messaging, download rows), §12 (`GET /balance`); specs/21-messaging-sms.md §2 step 6
+  - Depends on: P03-T08a
+  - Deliverables: typed methods create/list/update call control apps, create/list outbound voice profiles, create/list
+    messaging profiles (+ update for bootstrap patching), search_numbers, create_number_order, get_number_order,
+    get_phone_number_by_e164, update_phone_number, update_phone_number_messaging, delete_phone_number, send_message,
+    download (absolute URL, no auth header), get_balance; `TelnyxClientFactory` (platform client + BYO clients by
+    account id with an injected key resolver and 5-minute in-process key cache)
+  - Acceptance: contract tests against FakeTelnyx for every method; respx tests for exact query strings/bodies and for
+    non-idempotent retry rules (number orders, messages).
 
 - [ ] P03-T09 `va_telnyx` webhooks and media protocol models
   - Spec refs: specs/06-telephony-telnyx.md (webhook verification, envelope, media WS protocol)
-  - Depends on: P03-T08
+  - Depends on: P03-T08a
   - Deliverables: `verify_webhook(raw_body, headers, public_key, now)`, `verify_media_ws(stream_url, headers, public_key, now)`, event payload models for every voice and messaging event type, media message models (inbound and outbound) with parsing that tolerates unknown fields
   - Acceptance: fixed test vectors; 5-minute tolerance; tampered body rejected.
 
@@ -177,13 +194,13 @@
 
 - [ ] P03-T15 Telnyx bootstrap script and sim service wiring
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)
-  - Depends on: P03-T08
+  - Depends on: P03-T08b
   - Deliverables: `scripts/telnyx_bootstrap.py` (idempotent find-or-create by name, prints env lines), compose `sim` service with healthcheck, `.env` integration for sim public key, Redis-backed SimState sharing when `SIM_STATE_REDIS_URL` is set
   - Acceptance: running twice against the simulator creates resources once; two sim processes see the same registered scenario.
 
 - [ ] P03-T16 Live smoke tests for vendor clients
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)
-  - Depends on: P03-T08, P03-T10, P03-T11, P03-T12, P03-T13, P03-T14
+  - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13, P03-T14
   - Deliverables: `tests_live/test_vendor_clients.py` (Telnyx: list numbers/profiles; ElevenLabs: list voices, short TTS over WS with alignment, Scribe realtime on a committed WAV fixture, batch STT; Telnyx Inference: streaming chat, forced tool call, embeddings with 1024 dims); skipped unless `LIVE_TESTS=1`
   - Acceptance: suite is collected and skipped in CI; documented run command in AGENTS.md.
 

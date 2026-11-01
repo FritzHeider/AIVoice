@@ -1,0 +1,21 @@
+[project]
+name = "va-telnyx"
+version = "0.1.0"
+description = "VoiceAgents Telnyx client: Call Control v2 REST with retries, rate limiting, error mapping, metrics, and tracing"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx[http2]>=0.28.1",
+    "opentelemetry-api>=1.45.1",
+    "orjson>=3.13.0",
+    "prometheus-client>=0.26.0",
+    "pydantic>=2.9",
+    "redis>=5.1",
+    "va-common",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }

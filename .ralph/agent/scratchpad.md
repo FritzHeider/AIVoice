@@ -473,3 +473,181 @@ Approved. Re-ran lint/typecheck/placeholders (pass), make test (5062 passed, 98.
 radon (avg A, no C+). Diff matches specs/30 §4.1 Decision P03-T07b and the plan deliverables (checkout modes + hosted
 page, subscription create/update/cancel with prorations, invoices retrieve/list/pay, renew control with fail →
 past_due, lifecycle events); SDK acceptance test verifies every webhook with construct_event.
+
+## Plan P03-T08a (Planner, 2026-11-01)
+
+P03-T08 was split in plan/phase-03.md: **T08a** = package + transport core + call-control/conference commands;
+**T08b** = provisioning/numbers/messaging/download/balance + `TelnyxClientFactory`. T09 now depends on T08a,
+T15/T16 on T08b. Spec: specs/06 §2, §2.1 (call-command + conference rows), §2.2, §3. va_telnyx must NEVER import
+va_sim (phase constraint: no shared message construction); tests may.
+
+### Spec decision to write: specs/06 §2.2 `> Decision (2026-11-01): va_telnyx transport (P03-T08a).`
+1. Rate-limit categories: `call_command` (every `/calls*` and `/conferences*` POST incl. dial) 50/s burst 100,
+   `number_search` 5/s burst 5, `number_order` 2/s burst 2, `messaging` 20/s burst 20 (burst = rate where the spec
+   gives none). Operations outside these four (provisioning CRUD, phone-number management, order status, balance,
+   download) are not limited client-side. Key `rl:telnyx:{account}:{category}` (spec's `rl:telnyx:{account}` +
+   category suffix, one bucket per category). Wait loop: take → if denied sleep `retry_after_ms` on the injected
+   Clock while the 2 s budget lasts, else raise `TelnyxRateLimited`. Redis errors fail open (log
+   `telnyx_rate_limiter_unavailable`, proceed) — the vendor's own 429 + retries still protect us.
+2. Retry: idempotent = every call command/conference command (they carry command_id) and every GET/PATCH/DELETE.
+   Attempts 3 total? Spec says "3 attempts, delays 100, 400, 1200" → interpret as **up to 3 retries** (4 requests)
+   with delays 100/400/1200 ms + jitter U(0,100) ms; `Retry-After` (seconds int or HTTP-date) replaces the delay
+   when larger, capped at 5 s (beyond the cap → stop retrying and map the error). Retry on httpx.ConnectError /
+   ConnectTimeout / PoolTimeout(no bytes sent) and on 429/500/502/503/504; ReadTimeout on idempotent calls retries too
+   (command_id dedupes); non-idempotent (`POST /number_orders`, `POST /messages`, create-resource POSTs) retry only
+   on ConnectError/ConnectTimeout. Record the attempts interpretation in the Decision.
+3. Error mapping: 422 any error code `90018` → `CallAlreadyEnded`; 404 on a call command (path `/calls/{id}/actions/*`)
+   → `CallAlreadyEnded`; `hangup` swallows `CallAlreadyEnded` (returns normally, result `already_ended`). Other
+   non-2xx → `TelnyxApiError(status, errors)`; `TelnyxApiError.to_app_error()` → `AppError("CARRIER_ERROR",
+   details={"telnyx_errors": [...code,title,detail...]})`; transport failure after retries → `TelnyxUnavailable`
+   (subclass of `TelnyxApiError` with status 0? no — separate `TelnyxTransportError`) whose `to_app_error()` is also
+   `CARRIER_ERROR` (details `{"telnyx_errors": [], "transport": "<exc class>"}`); `TelnyxRateLimited.to_app_error()`
+   → `SERVICE_UNAVAILABLE`. A non-JSON error body becomes one synthetic error `{"code": "http_<status>",
+   "title": reason_phrase, "detail": first 200 chars}`.
+4. Metrics: client-library metrics are not in the per-service CATALOG (names are catalog-unique, the client runs in
+   api/edge/worker). Add specs/27 §3.6 "Vendor client metrics (registered by the client library in any process
+   that builds a client)" with `va_telnyx_requests_total` counter labels `operation`, `outcome`
+   (ok/already_ended/carrier_error/rate_limited/transport_error) and `va_telnyx_request_duration_ms` histogram
+   (LAT_MS) label `operation`, plus a Decision line. Check `test_metrics.parse_spec_catalog` only reads §3.1–§3.5
+   (`_SECTION = ^### 3\.([1-5])`) and the count stays 56 — run it. `va_vendor_errors_total` stays media-only.
+5. Tracing: one span per logical call `telnyx.<operation>` (kind CLIENT) with `telnyx.operation`,
+   `telnyx.call_control_id` (when present), `telnyx.command_id`, `telnyx.status_code` (final), `telnyx.attempts`;
+   error status on failure. httpx spans per attempt come from `va_common.http` instrumentation.
+
+### Files (packages/va_telnyx, dist `va-telnyx`, module `va_telnyx`)
+- `pyproject.toml` (deps: va-common, httpx[http2], pydantic, opentelemetry-api, prometheus-client, redis — mirror
+  versions already in the lock); `src/va_telnyx/py.typed`; workspace wiring per AGENTS.md P00-T05 (root dev group +
+  `[tool.uv.sources]`, mypy `mypy_path` += `packages/va_telnyx/src` + `packages/va_telnyx/tests/support`, `files` +=
+  src/tests, pytest pythonpath += `packages/va_telnyx/tests/support`).
+- `src/va_telnyx/__init__.py`: re-export `TelnyxClient`, errors, request models, `TelnyxRateLimiter`, `client_state`.
+- `errors.py`: `TelnyxError(Exception)` base with `to_app_error() -> AppError`; `TelnyxErrorItem` (frozen dataclass
+  code/title/detail/source: dict|None); `TelnyxApiError(status: int, errors: tuple[TelnyxErrorItem, ...],
+  operation: str)`; `CallAlreadyEnded(TelnyxApiError)`; `TelnyxRateLimited(TelnyxError)` (category, account);
+  `TelnyxTransportError(TelnyxError)` (operation, cause). `parse_error_body(response) -> tuple[TelnyxErrorItem,...]`.
+- `client_state.py`: `ClientState` (pydantic frozen: v: Literal[1]=1, call_id: UUID, leg: Literal["primary",
+  "transfer_target","warm_proxy","monitor"], org_id: UUID); `encode(state) -> str` (compact JSON, base64 std,
+  raises ValueError if > 1024 bytes encoded), `decode(value: str) -> ClientState` raising `ClientStateError`
+  (ValueError subclass) on bad base64/JSON/schema; `command_id(action: str, call_id: UUID|str, leg: str, *parts:
+  str) -> str` = `"-".join([action, str(call_id), leg, *parts])` (deterministic; spec example
+  `hangup-{call_id}-{leg_role}`).
+- `rate_limit.py`: `RateCategory = Literal["call_command","number_search","number_order","messaging"]`,
+  `LIMITS: Mapping[RateCategory, BucketLimit]`, `TelnyxRateLimiter(redis, *, clock: Clock, max_wait_s=2.0)` with
+  `async acquire(account: str, category: RateCategory) -> None`. Needs ms precision: extend
+  `va_common.token_bucket.BucketDecision` with `retry_after_ms: int` (additive; set in `take`; update its unit test).
+  `NullRateLimiter` is NOT needed — tests use fakeredis (`fakeredis[lua]`).
+- `retry.py`: `RetryPolicy(delays_s=(0.1,0.4,1.2), jitter_s=0.1, retry_statuses=frozenset({429,500,502,503,504}),
+  max_retry_after_s=5.0)`, `retry_after_seconds(headers, now) -> float|None` (int or HTTP-date), `next_delay(attempt,
+  response|None, rng, now) -> float|None`. Randomness via injectable `random.Random` (tests seed it).
+- `metrics.py`: `TelnyxMetrics(registry: CollectorRegistry)` creating the two §3.6 metrics with `LAT_MS`
+  (import from va_common.metrics); `observe(operation, outcome, duration_ms)`. Client takes `metrics: TelnyxMetrics |
+  None = None`.
+- `transport.py`: `Operation` (frozen dataclass: name, method, path, category: RateCategory|None, idempotent: bool,
+  call_command: bool) and `TelnyxTransport` that owns `_send(op, *, json=None, params=None, call_control_id=None,
+  command_id=None) -> dict[str, Any]` (rate limit → attempts loop with httpx → error mapping → returns parsed JSON
+  `data`), metrics, span. Keep functions radon ≤ B: split `_attempt`, `_classify(response)`, `_sleep_before_retry`.
+- `models.py`: request models (pydantic, `extra="forbid"`, serialize with `model_dump(mode="json", by_alias=True,
+  exclude_none=True)`; `from_` aliased to `"from"`): `StreamParams` (stream_url, stream_track
+  ("inbound_track"|"outbound_track"|"both_tracks"), stream_codec, stream_bidirectional_mode ("rtp"), 
+  stream_bidirectional_codec ("PCMU"|"L16"), stream_bidirectional_sampling_rate (8000|16000),
+  stream_bidirectional_target_legs="self", stream_auth_token), `RecordParams` (record "record-from-answer"?,
+  record_channels, record_format, record_track, record_max_length), `DialRequest` (spec row fields exactly, defaults
+  webhook_url_method="POST", send_silence_when_idle=True, timeout_secs, time_limit_secs,
+  answering_machine_detection ("disabled"|"detect"|"detect_beep"|"detect_words"|"greeting_end"|"premium"), config
+  dict, custom_headers list[{name,value}], link_to, bridge_intent, bridge_on_answer), `AnswerRequest`,
+  `TransferRequest` (early_media=True, answering_machine_detection="disabled" defaults), `RecordStart` defaults
+  per row, `PlaybackStart`; response models `DialResult` (call_control_id, call_leg_id, call_session_id,
+  is_alive, record_type="call", extra="ignore"), `CommandResult` (result: str, extra ignore),
+  `Conference` (id, name, status?, extra ignore). Read the sim's `call_models.py` only to *compare* field lists —
+  where the sim rejects a spec field (extra_forbidden), fix the **sim** model to follow the Telnyx docs, not the
+  client.
+- `client.py`: `TelnyxClient(api_key, base_url, http, limiter, *, account="platform", metrics=None, clock=SystemClock(),
+  rng=None, retry=RetryPolicy(), tracer_provider=None)`. Auth header added per request (`Authorization: Bearer`),
+  `repr` never shows the key. Methods (all `async`, `command_id: str` keyword-only required, `client_state: str |
+  None = None`): `dial(req: DialRequest) -> DialResult` (command_id inside the model), `answer(ccid, req)`,
+  `reject(ccid, cause: Literal["CALL_REJECTED","USER_BUSY"], *, command_id)`, `hangup(ccid, *, command_id,
+  client_state=None) -> bool` (False when already ended), `transfer(ccid, req)`, `bridge(ccid, other_ccid, *,
+  command_id, client_state, park_after_unbridge=None)`, `send_dtmf(ccid, digits, duration_millis=250, *,
+  command_id)` (validate digits regex `^[0-9A-D*#wW]+$` and 100–500 → `ValueError` before any I/O),
+  `record_start(ccid, *, command_id, client_state, format="wav", channels="dual", play_beep=False, max_length=0,
+  timeout_secs=0)`, `record_stop`, `streaming_start(ccid, stream: StreamParams, *, command_id, client_state)`,
+  `streaming_stop(ccid, *, stream_id=None, command_id, client_state)`, `playback_start(ccid, audio_url,
+  loop="infinity", overlay=False, target_legs="self", *, command_id, client_state)`, `playback_stop(ccid, *,
+  command_id)` (body stop="all"), `conference_create(ccid, name, *, command_id, client_state) -> Conference`
+  (beep_enabled="never", start_conference_on_create=True), `conference_join(conf_id, ccid, *,
+  end_conference_on_exit: bool, command_id, client_state, start_conference_on_enter=True, hold=False, mute=False)`,
+  `conference_leave(conf_id, ccid, *, command_id)`. Commands on an ended call (other than hangup) raise
+  `CallAlreadyEnded` — callers ignore it (document in docstring). Paths built with `urllib.parse.quote(ccid,
+  safe="")` (call_control_ids contain `:`; check Telnyx/sim ids — `v3:...` — quote with safe=":" if the sim route
+  rejects encoded colons; test it).
+- `README`-free; AGENTS.md bullet; specs/06 §2.2 Decision; specs/27 §3.6 + Decision.
+
+### Tests (packages/va_telnyx/tests/, support dir `tests/support/telnyx_client_helpers.py`)
+Helpers: `sim_client(state, api_key=DEFAULT_API_KEY) -> TelnyxClient` over `httpx.ASGITransport` of
+`Starlette(routes=simulator_routes("telnyx", state))` (reuse `telnyx_helpers.telnyx_state(RecordingTransport)`,
+`at`, `settle`, `inbound_call`, `answered_call`, `events`, `summary` from va_sim test support — already on
+pythonpath), fakeredis limiter, FrozenClock; `respx_client(router)`; `client_state_for(...)`.
+- `test_client_state.py`: round trip; compact JSON exact bytes; >1 KB rejected; bad base64/JSON/leg/version → error;
+  `command_id` determinism.
+- `test_errors.py`: parse Telnyx error body, non-JSON body, `to_app_error` → CARRIER_ERROR with
+  `details.telnyx_errors`, rate-limited → SERVICE_UNAVAILABLE, transport → CARRIER_ERROR.
+- `test_requests_exact.py` (respx): for every T08a method assert method, path, Authorization header, and the exact
+  JSON body (full dict equality, incl. defaults: send_silence_when_idle true, target_legs "self",
+  webhook_url_method "POST", early_media true, beep_enabled "never", stop "all", etc.); `from` alias; `None` fields
+  omitted; send_dtmf validation raises before any request (`respx` route not called).
+- `test_retry.py` (respx + FrozenClock recording sleeps + seeded rng): 503,503,200 → success after delays
+  ≈ 0.1+j, 0.4+j; 429 with `Retry-After: 2` → 2 s sleep; Retry-After HTTP-date; Retry-After > cap → no retry,
+  error mapped; 4 consecutive 503 → CARRIER_ERROR after 4 requests; ConnectError retried; ReadTimeout retried for a
+  command; 400 not retried; non-idempotent op (use an internal Operation with idempotent=False via transport) not
+  retried on 503 nor ReadTimeout but retried on ConnectError.
+- `test_error_mapping.py` (respx): 422 90018 → CallAlreadyEnded; 404 on command → CallAlreadyEnded; hangup returns
+  False on both; 404 on conference join → TelnyxApiError (not a call command); 401 → TelnyxApiError CARRIER_ERROR.
+- `test_rate_limit.py` (fakeredis + FrozenClock whose sleep advances time): burst 100 call commands pass with no sleep;
+  101st sleeps ≈ 20 ms then passes; number_search 6th waits; when wait would exceed 2 s → `TelnyxRateLimited` and no
+  HTTP request made; buckets are per account and per category; Redis error → fail open + log event.
+- `test_metrics_tracing.py`: InMemorySpanExporter (`obs_helpers.memory_provider()`) span name/attributes/attempts;
+  metrics counter outcome labels via `new_registry(process_collectors=False)`.
+- `test_contract_calls.py` (FakeTelnyx, accelerated state): dial → DialResult ids, sim summary shows connection/
+  stream params; duplicate command_id dial returns same ccid; answer inbound; reject inbound USER_BUSY; hangup
+  answered → True, then again → False; transfer; bridge two answered calls; send_dtmf; record_start/stop;
+  streaming_start/stop (stream_url pointing nowhere → use `media_agent` fixture or a call without stream and
+  assert sim accepted; follow AGENTS.md P03-T03b: any stream_url needs the media_agent fixture — prefer
+  dialing without stream_url and asserting `streaming.failed`-free via `events`... simplest: use the
+  `media_agent` fixture from va_sim tests/telnyx/conftest.py by importing `media_agent` support), playback
+  start/stop, conference create/join/leave; every webhook from sim carries the encoded client_state that
+  `client_state.decode` reads back. Command on ended call → CallAlreadyEnded.
+- `test_token_bucket.py` (va_common): `retry_after_ms` reported.
+- Coverage ≥ 95 % for va_telnyx.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a packages/va_telnyx/src` (no C+), audit (`uvx pip-audit` on `uv export`,
+`corepack pnpm audit`).
+
+### Risks
+- Sim models may forbid some spec fields (e.g. `send_silence_when_idle`, `stream_bidirectional_target_legs`,
+  `link_to`, `bridge_intent`, `park_after_unbridge`, `answering_machine_detection_config`): fix the sim per Telnyx
+  docs + specs/06 (not the client), keep its tests green.
+- Call control ids with `:` in URL paths — verify quoting with the sim and respx.
+- FrozenClock.sleep semantics (does it advance?) — check `va_common.time.FrozenClock.sleep`; if it doesn't advance,
+  use a recording clock in tests.
+- Streaming contract test + media WS: follow AGENTS.md P03-T03b media_agent rule or the sim adds `streaming.failed`.
+- Don't make `TelnyxClient` a god class: transport in `transport.py`, commands in `client.py` (≤ ~300 lines);
+  T08b adds `provisioning.py`/`numbers.py` mixins or a second module.
+
+## Build P03-T08a (Builder, 2026-11-01)
+Built `packages/va_telnyx` per plan: errors (TelnyxApiError/CallAlreadyEnded/TelnyxRateLimited/TelnyxTransportError
++ to_app_error), client_state (encode/decode/command_id), rate_limit (per account+category buckets, 2 s budget per
+acquire, Redis fail-open), retry (3 retries 100/400/1200 ms + jitter, Retry-After ≤ 5 s), metrics (§3.6), transport
+(Operation + pipeline + span), models (Dial/Answer/Transfer/StreamParams/AmdConfig; `serialization_alias="from"`
+because mypy runs without the pydantic plugin), client (all T08a methods). Deviations from plan: limiter `max_wait`
+is per acquire call (not cumulative); `TelnyxError` base maps to CARRIER_ERROR (no abstract method — placeholder
+gate); no sim model changes were needed (FakeTelnyx accepted every body). Shared `RecordingClock` moved to
+`packages/va_common/tests/clock_helpers.py` (jscpd clone with events_sink). `test_metrics.parse_spec_catalog` now
+resets on any `##`/`###` heading so the new §3.6 table is not parsed as §3.5. `BucketDecision.retry_after_ms` added.
+Spec: specs/06 §2.2 Decision P03-T08a; specs/27 §3.6 + Decision. Coverage va_telnyx 100 %, radon avg A (max B),
+jscpd 0 clones, spec refs 0, pip-audit clean, pnpm audit 3 moderate (no high).
+
+## Review P03-T08a (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (0 findings) and make test (5179 passed, 98.24 %). Checked
+client bodies against specs/06 §2.1 rows (defaults, `from` alias, target_legs only on dial/answer per Decision 5),
+§2.2 retry/mapping/rate-limit semantics vs Decision, §3 client_state format, specs/27 §3.6 metrics. No findings.

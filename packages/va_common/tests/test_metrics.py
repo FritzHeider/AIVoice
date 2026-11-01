@@ -58,8 +58,8 @@ def parse_spec_catalog() -> dict[Service, set[MetricSpec]]:
         if heading:
             section = heading.group("n")
             continue
-        if line.startswith("## ") or not section or not line.startswith("| `va_"):
-            if line.startswith("## "):
+        if line.startswith(("## ", "### ")) or not section or not line.startswith("| `va_"):
+            if line.startswith(("## ", "### ")):
                 section = ""
             continue
         metric_cell, type_cell, label_cell = (cell.strip() for cell in line.strip("|").split("|"))

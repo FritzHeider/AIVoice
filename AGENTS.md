@@ -801,3 +801,16 @@ Grafana 3001
   `new_id`; payment intents use it too). DELETE handlers read query + form params (the SDK sends DELETE params as a
   query). Tests: `stripe_helpers` `ok`, `monthly_price`, `checkout`, `visit`, `renew`, `subscribed_customer`,
   `event_types`; proration tests move time with `state.clock.advance(s)` on the accelerated clock.
+- 2026-11-01 (P03-T08a): `packages/va_telnyx` (dist `va-telnyx`) is the only code that builds Telnyx URLs:
+  `TelnyxClient(api_key, base_url, http, limiter, *, account, metrics, clock, rng, retry, tracer_provider)` wraps
+  `transport.TelnyxTransport.request(Operation(name, method, category, idempotent, call_command), path, json=...)`
+  (rate-limit token → attempts → error mapping; absolute paths go out without the auth header). Retry/limit/mapping
+  rules: specs/06 §2.2 Decision P03-T08a; metrics/spans: specs/27 §3.6. Request models use
+  `Field(serialization_alias="from")` (plain `alias=` makes mypy, which runs without the pydantic plugin, reject
+  `from_=`); bodies come from `model.body()` (None omitted, `StreamParams` flattened). `va_telnyx` must never
+  import `va_sim`; its tests may. Test helpers: `tests/support/telnyx_client_helpers.py` (`rig(http)` = client with
+  fakeredis limiter, separate `RecordingClock`s for retries/limiter waits, `MidJitter`; `sim_clients(state)` =
+  raw FakeTelnyx client + `TelnyxClient` on one app; `leg_state(leg)`), the `telnyx_api` respx fixture, and a
+  `media_agent` fixture in `tests/conftest.py`. `RecordingClock` now lives in `packages/va_common/tests/clock_helpers.py`.
+  `BucketDecision.retry_after_ms` gives the exact wait for in-process waiters. A new `### 3.N` heading in specs/27
+  is skipped by `test_metrics.parse_spec_catalog` (it only reads §3.1-§3.5).

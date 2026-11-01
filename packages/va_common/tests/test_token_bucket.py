@@ -33,7 +33,18 @@ async def test_exhaustion_denies_with_retry_after(redis: fakeredis.FakeAsyncRedi
     bucket = TokenBucket(redis)
     await _drain(bucket, TEN_PER_S, START_MS)
     denied = await bucket.take(KEY, TEN_PER_S, now_ms=START_MS)
-    assert denied == BucketDecision(allowed=False, limit=20, remaining=0, reset_s=2, retry_after_s=1)
+    assert denied == BucketDecision(
+        allowed=False, limit=20, remaining=0, reset_s=2, retry_after_s=1, retry_after_ms=100
+    )
+
+
+async def test_retry_after_ms_is_the_exact_wait(redis: fakeredis.FakeAsyncRedis) -> None:
+    bucket = TokenBucket(redis)
+    limit = BucketLimit(rate_per_s=50, burst=2)
+    await _drain(bucket, limit, START_MS)
+    denied = await bucket.take(KEY, limit, now_ms=START_MS + 5)
+    assert (denied.retry_after_ms, denied.retry_after_s) == (15, 1)
+    assert (await bucket.take(KEY, limit, now_ms=START_MS + 20)).allowed
 
 
 @pytest.mark.parametrize(

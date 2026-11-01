@@ -84,6 +84,33 @@ Telephony credentials (WebRTC) are **not** used; web voice uses our own WebSocke
   hangup and ignored for other commands); `404` on call commands → `CallAlreadyEnded`; other 4xx → `CARRIER_ERROR`
   with `details.telnyx_errors`; 5xx after retries → `CARRIER_ERROR`.
 
+> Decision (2026-11-01): `va_telnyx` transport (P03-T08a).
+> 1. Rate-limit categories: `call_command` (every `/calls` and `/conferences` POST, dial included) 50/s burst 100,
+>    `number_search` 5/s burst 5, `number_order` 2/s burst 2, `messaging` 20/s burst 20 (burst = rate where the
+>    list above names none). One bucket per account and category: `rl:telnyx:{account}:{category}` (the account is
+>    `platform` or the BYO `telnyx_accounts.id`). Other operations (provisioning, phone-number management, order
+>    status, balance, download) are not limited client-side. `acquire` sleeps on the injected clock until a token
+>    arrives; it raises `TelnyxRateLimited` as soon as the waits of one acquire would exceed 2 s. A Redis error
+>    fails open (`telnyx_rate_limiter_unavailable` warning): Telnyx's own `429` and the retry policy still apply.
+> 2. "3 attempts, delays 100 ms, 400 ms, 1 200 ms" means up to three **retries** (four requests), one per delay,
+>    each plus a uniform 0-100 ms jitter. `Retry-After` (delta seconds or HTTP-date) replaces the delay when it is
+>    longer; a `Retry-After` above 5 s ends the retries and the response is mapped as is.
+> 3. Idempotent operations: every call and conference command, `dial` included (all carry `command_id`), and every
+>    GET, PATCH, and DELETE. They retry on `429`/`500`/`502`/`503`/`504` and on any transport error (connect, read,
+>    write, protocol). Non-idempotent operations (`create_number_order`, `send_message`, provisioning POSTs) retry
+>    only on `ConnectError`, `ConnectTimeout`, and `PoolTimeout` (no bytes sent).
+> 4. A `404` counts as `CallAlreadyEnded` only for `/calls/{ccid}/actions/*`; a `404` from a conference command is a
+>    `CARRIER_ERROR` (the conference may be the missing resource), while `422`/`90018` is `CallAlreadyEnded`
+>    everywhere. A transport failure after the retries is `TelnyxTransportError`, also `CARRIER_ERROR` with
+>    `details = {"telnyx_errors": [], "transport": "<exception class>"}`; `TelnyxRateLimited` is
+>    `SERVICE_UNAVAILABLE` with `Retry-After`. An error body that is not a Telnyx error document becomes one item
+>    `{"code": "http_<status>", "title": <reason phrase>, "detail": <first 200 characters>}`; a 2xx body of the wrong
+>    shape is a `TelnyxApiError` with code `invalid_response`.
+> 5. Request models (`DialRequest`, `AnswerRequest`, `TransferRequest`, `StreamParams`) send the defaults of the §2.1
+>    rows and omit `None` fields; `stream_bidirectional_target_legs="self"` is added whenever dial/answer carry a
+>    stream. `DialRequest.timeout_secs` defaults to 45 (§6 step 5), `TransferRequest.timeout_secs` to 30 (§10.1).
+>    A listen-only stream (§10.1 step 4) passes `None` for the three bidirectional fields.
+
 ## 3. `client_state`
 
 Base64 of compact JSON (≤ 1 KB): `{"v":1,"call_id":"<uuid>","leg":"primary|transfer_target|warm_proxy|monitor","org_id":"<uuid>"}`.

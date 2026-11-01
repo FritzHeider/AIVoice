@@ -78,7 +78,8 @@ class BucketDecision:
     """Outcome of one take: ``limit`` = capacity, ``remaining`` = whole tokens left, times in whole seconds.
 
     ``reset_s`` is the delay until the bucket is full again; ``retry_after_s`` is 0 when allowed, else the
-    delay (at least 1 s) until enough tokens have accumulated.
+    delay (at least 1 s) until enough tokens have accumulated. ``retry_after_ms`` is that delay in
+    milliseconds, not rounded up to seconds (0 when allowed), for callers that wait in-process.
     """
 
     allowed: bool
@@ -86,6 +87,7 @@ class BucketDecision:
     remaining: int
     reset_s: int
     retry_after_s: int
+    retry_after_ms: int = 0
 
 
 class TokenBucket:
@@ -109,4 +111,5 @@ class TokenBucket:
             remaining=max(0, int(tokens_milli) // _MILLI),
             reset_s=math.ceil(missing_milli / (limit.rate_per_s * _MILLI)),
             retry_after_s=0 if allowed else max(1, math.ceil(int(retry_ms) / _MILLI)),
+            retry_after_ms=0 if allowed else max(1, int(retry_ms)),
         )

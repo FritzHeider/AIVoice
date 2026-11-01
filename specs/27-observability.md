@@ -186,6 +186,23 @@ named `LAT_MS`.
 | `va_events_sink_lag_seconds` | gauge | `stream` (age of oldest unacked entry) |
 | `va_events_sink_errors_total` | counter | `table` |
 
+### 3.6 Vendor client metrics (registered by the client library in any process that builds a client)
+
+| Metric | Type | Labels |
+|---|---|---|
+| `va_telnyx_requests_total` | counter | `operation`, `outcome` (ok/already_ended/carrier_error/rate_limited/transport_error) |
+| `va_telnyx_request_duration_ms` | histogram (LAT_MS) | `operation` |
+
+> Decision (2026-11-01): vendor clients (`va_telnyx`, later `va_elevenlabs`/`va_llm`) run in several services, so
+> their metrics are not part of the per-service `CATALOG` of §3.1-§3.5: the library registers them in the registry
+> the process passes (`va_telnyx.TelnyxMetrics(registry)`, one instance per registry), and they appear on the
+> `/metrics` of every service that builds a client. One observation per logical operation: `operation` is the
+> specs/06 §2.1 method name, the duration includes retries and rate-limit waits, and `outcome` is the final result
+> (`already_ended` = `CallAlreadyEnded`, including a `hangup` that reports it as success). Every operation also
+> records one `telnyx.<operation>` CLIENT span with `telnyx.operation`, `telnyx.call_control_id` and
+> `telnyx.command_id` (when present), `telnyx.status_code` (last response), and `telnyx.attempts`; it ends with
+> error status when the operation raises. `packages/va_telnyx/tests/test_observability.py` parses this table.
+
 ## 4. Per-call latency events
 
 The media worker emits for each completed turn (see `19` §2 `call.latency`, `07-media-pipeline.md` latency tracer):

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793516463-a13e
+> va_telnyx: TelnyxClient wraps transport.TelnyxTransport.request(Operation(...)); request models use Field(serialization_alias='from') since mypy has no pydantic plugin (alias= breaks from_=); tests use telnyx_client_helpers.rig(http)/sim_clients(state)/leg_state + telnyx_api respx fixture; RecordingClock shared in packages/va_common/tests/clock_helpers.py
+<!-- tags: telnyx, testing | created: 2026-11-01 -->
+
 ### mem-1793513723-04da
 > va_sim FakeStripe: va_sim.stripe (http.stripe_endpoint pipeline, handlers raise StripeError, routes._API table + catch-all 404); webhook post/retry shared via va_sim.delivery.SignedDelivery (telnyx too); tests use stripe_helpers stripe_state(RecordingTransport)/stripe_client/encode/signature_ok; stripe SDK HTTPXClient triggers httpx data= DeprecationWarning -> module pytestmark filter + await close_async()
 <!-- tags: sim, stripe, testing | created: 2026-11-01 -->
