@@ -113,6 +113,12 @@ async def test_reset_restores_llm_state_but_keeps_file_rules() -> None:
         keys = (await client.get("/sim/llm/api-keys")).json()
         fault = (await client.get("/sim/llm/fault")).json()
         requests = (await client.get("/sim/llm/requests")).json()
-    assert snapshot["llm"] == {"requests": 0, "rules": 1, "models": len(DEFAULT_LLM_MODELS), "held": 0}
+    assert snapshot["llm"] == {
+        "requests": 0,
+        "embeddings": 0,
+        "rules": 1,
+        "models": len(DEFAULT_LLM_MODELS),
+        "held": 0,
+    }
     assert [rule["id"] for rule in rules] == ["file-rule"]
     assert (keys, fault, requests) == ({"keys": []}, {"fault": None}, {"requests": []})

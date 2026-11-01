@@ -1,8 +1,10 @@
-"""What FakeLLM answers (specs/30 §3.4 default dialogue response; Decision P03-T06a rules 5, 8).
+"""What FakeLLM answers (specs/30 §3.4 default dialogue response; Decision P03-T06a rules 5, 8; Decision
+P03-T06b).
 
-Pure: the reply text is split into tokens (whitespace-split words with their trailing whitespace); tool
-calls come from the winning rule or, for a forced/required ``tool_choice`` without a rule, call the forced (or
-first) tool with ``{}``. ``max_tokens`` truncates; usage counts whitespace words.
+Pure: the reply text is split into tokens (whitespace-split words with their trailing whitespace); tool calls
+come from the winning rule or, for a forced/required ``tool_choice`` without a rule, call the forced (or
+first) tool with the structured-call heuristic's schema-valid arguments; a summary request without tools
+answers the heuristic summary text. ``max_tokens`` truncates; usage counts whitespace words.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import Final, Literal
 import orjson
 from pydantic import JsonValue
 
+from va_sim.llm.heuristics import structured_arguments, summary_reply
 from va_sim.llm.params import ChatRequest, forced_tool, last_user_text, message_text
 from va_sim.llm.rules import RuleResponse, RuleToolCall
 
@@ -112,12 +115,18 @@ def _arguments(call: RuleToolCall) -> str:
 
 
 def _default_reply(request: ChatRequest) -> tuple[str, list[tuple[str, str]]]:
-    """A call of the named (or, for ``required``, the first) tool with ``{}``, else the default text."""
+    """A call of the named (or, for ``required``, the first) tool with heuristic arguments, else the summary
+    of a summary request, else the default text."""
     forced = forced_tool(request)
     if forced is None and request.tool_choice == "required" and request.tool_names:
         forced = request.tool_names[0]
     if forced is not None:
-        return "", [(forced, "{}")]
+        tool = next(tool for tool in request.tools or () if tool.function.name == forced)
+        arguments = structured_arguments(forced, tool.function.parameters, request)
+        return "", [(forced, orjson.dumps(arguments).decode("utf-8"))]
+    summary = summary_reply(request)
+    if summary is not None:
+        return summary, []
     return default_text(last_user_text(request)), []
 
 

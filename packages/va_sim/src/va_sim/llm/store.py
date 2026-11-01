@@ -3,7 +3,8 @@ request log, the armed fault, and the release signal of requests a ``timeout`` f
 
 ``sim-llm-key`` (the specs/02 §6 ``LLM_DEFAULT_API_KEY`` dev value) always authenticates; more keys and models
 can be added at runtime and are dropped by ``reset``, which also drops runtime rules, ``call_index`` counters,
-the log, and the fault and releases every held request. Rules loaded from ``SIM_LLM_RULES`` files stay.
+the chat and embeddings logs, and the fault and releases every held request. Rules loaded from
+``SIM_LLM_RULES`` files stay.
 """
 
 from __future__ import annotations
@@ -17,23 +18,34 @@ from pydantic import JsonValue
 
 from va_sim.llm.rules import RuleBook
 
-__all__ = ["DEFAULT_API_KEY", "FaultKind", "LlmFault", "LlmRequest", "LlmStore"]
+__all__ = [
+    "DEFAULT_API_KEY",
+    "EmbeddingRecord",
+    "FaultEndpoint",
+    "FaultKind",
+    "LlmFault",
+    "LlmRequest",
+    "LlmStore",
+]
 
 type FaultKind = Literal["rate_limit", "server_error", "timeout", "malformed_tool_args", "disconnect"]
+type FaultEndpoint = Literal["chat", "embeddings"]
 
 DEFAULT_API_KEY: Final = "sim-llm-key"
 _REQUEST_PREFIX: Final = "llmreq_"
+_EMBEDDING_PREFIX: Final = "embreq_"
 
 
 @dataclass(slots=True)
 class LlmFault:
-    """An armed fault: fires ``remaining`` more times."""
+    """An armed fault: fires ``remaining`` more times on requests to ``endpoint``."""
 
     kind: FaultKind
     remaining: int
     status: int | None = None
     retry_after_s: int | None = None
     after_tokens: int | None = None
+    endpoint: FaultEndpoint = "chat"
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
@@ -63,6 +75,23 @@ class LlmRequest:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class EmbeddingRecord:
+    """One embeddings request as served at ``GET /sim/llm/embeddings``."""
+
+    id: str
+    received_at: str
+    model: str
+    inputs: int
+    dimensions: int
+    encoding_format: str
+    status: int | None = None
+    fault: FaultKind | None = None
+
+    def to_json(self) -> dict[str, object]:
+        return asdict(self)
+
+
 class LlmStore:
     """Keys, models, rules, request log, fault, and held-request release for FakeLLM."""
 
@@ -72,6 +101,7 @@ class LlmStore:
         self.api_keys: list[str] = []
         self.rules = RuleBook()
         self.requests: list[LlmRequest] = []
+        self.embedding_requests: list[EmbeddingRecord] = []
         self.fault: LlmFault | None = None
         self.held = 0
         self._release = asyncio.Event()
@@ -91,7 +121,10 @@ class LlmStore:
     def next_request_id(self) -> str:
         return f"{_REQUEST_PREFIX}{len(self.requests) + 1}"
 
-    def arm_fault(
+    def next_embedding_id(self) -> str:
+        return f"{_EMBEDDING_PREFIX}{len(self.embedding_requests) + 1}"
+
+    def arm_fault(  # noqa: PLR0913 - keyword-only fault fields
         self,
         kind: FaultKind,
         *,
@@ -99,15 +132,21 @@ class LlmStore:
         status: int | None = None,
         retry_after_s: int | None = None,
         after_tokens: int | None = None,
+        endpoint: FaultEndpoint = "chat",
     ) -> None:
         self.fault = LlmFault(
-            kind=kind, remaining=times, status=status, retry_after_s=retry_after_s, after_tokens=after_tokens
+            kind=kind,
+            remaining=times,
+            status=status,
+            retry_after_s=retry_after_s,
+            after_tokens=after_tokens,
+            endpoint=endpoint,
         )
 
-    def take_fault(self, kinds: frozenset[FaultKind]) -> LlmFault | None:
-        """Fire the armed fault when its kind is in ``kinds``."""
+    def take_fault(self, kinds: frozenset[FaultKind], *, endpoint: FaultEndpoint = "chat") -> LlmFault | None:
+        """Fire the armed fault when it targets ``endpoint`` and its kind is in ``kinds``."""
         fault = self.fault
-        if fault is None or fault.kind not in kinds:
+        if fault is None or fault.endpoint != endpoint or fault.kind not in kinds:
             return None
         fault.remaining -= 1
         if fault.remaining == 0:
@@ -144,6 +183,7 @@ class LlmStore:
         self.release_held()
         self.rules.reset()
         self.requests.clear()
+        self.embedding_requests.clear()
         self.fault = None
         self.api_keys.clear()
         self.models = list(self._base_models)

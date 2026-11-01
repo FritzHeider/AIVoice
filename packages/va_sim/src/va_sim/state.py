@@ -209,6 +209,7 @@ class SimState:
             },
             "llm": {
                 "requests": len(self.llm.requests),
+                "embeddings": len(self.llm.embedding_requests),
                 "rules": len(self.llm.rules),
                 "models": len(self.llm.models),
                 "held": self.llm.held,

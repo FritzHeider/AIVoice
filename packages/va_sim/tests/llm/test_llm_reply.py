@@ -67,7 +67,7 @@ def test_default_replies() -> None:
     assert plan(ChatRequest.model_validate(chat_body(system="sys"))).content == GREETING
 
 
-def test_forced_and_required_tool_choice_without_a_rule_call_with_empty_arguments() -> None:
+def test_forced_and_required_tools_without_parameters_or_rule_call_with_empty_arguments() -> None:
     forced = plan(
         request("x", tools=TOOLS, tool_choice={"type": "function", "function": {"name": "second_tool"}})
     )

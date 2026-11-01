@@ -22,6 +22,7 @@ event_loop:
   max_iterations: 150
   max_runtime_seconds: 43200        # 12 h per phase run
   idle_timeout_secs: 1800
+  max_consecutive_failures: 50     # Claude Code lingers after each turn; Ralph SIGTERMs it and counts a failure
   checkpoint_interval: 5
 
 core:

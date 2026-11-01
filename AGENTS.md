@@ -768,3 +768,12 @@ Grafana 3001
   httpx sees `RemoteProtocolError`). The `openai` SDK (root dev dependency) is the acceptance client
   (`AsyncOpenAI(base_url=f"{url}/v1", api_key="sim-llm-key", max_retries=0)`). `ruff check --select X --fix` with
   `RUF100` in the selection strips every `noqa` for unselected rules — never combine them.
+- 2026-10-31 (P03-T06b): FakeLLM forced tool calls without a rule use `va_sim.llm.heuristics.structured_arguments`
+  (in-call classifiers there, post-call ones in `heuristics_post`, shared `heuristics_base.Heuristic`, text helpers
+  in `llm.text`); every result goes through `schema_fill.SchemaFill.conform`, so it validates against the tool's
+  `parameters` (tests cross-check with `jsonschema.Draft202012Validator`, a root dev dependency). Spec decision:
+  specs/30 §3.4 Decision P03-T06b. `STRUCTURED_TOOL_NAMES` is the sim's own copy of specs/10 §3 (never import
+  `va_llm` from the sim). `POST /v1/embeddings` lives in `llm/embeddings.py` (pure) + `llm/embed_route.py`; shared
+  auth/model/fault answers are in `llm/gate.py`. The `openai` SDK requests `encoding_format=base64` by default.
+  Faults take `endpoint: chat|embeddings` (default chat). Representative prompts/schemas for all 14 names:
+  `tests/support/llm_schemas.py` (`SPEC_CALLS`, `forced_body`).

@@ -9,7 +9,6 @@ every ``1 / tokens_per_s`` seconds.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -19,33 +18,30 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from va_sim.clock import iso_z
-from va_sim.llm.errors import error_body, openai_error
+from va_sim.llm.errors import error_body
+from va_sim.llm.gate import (
+    TIMEOUT_STATUS,
+    auth_error,
+    fault_response,
+    hold_request,
+    model_not_found,
+    timeout_response,
+)
 from va_sim.llm.params import ChatRequest, forced_tool, last_user_text, parse_chat, system_text
 from va_sim.llm.reply import Reply, malformed, plan_reply, truncate, usage
 from va_sim.llm.rules import InjectedError, MatchContext, RuleResponse
-from va_sim.llm.store import FaultKind, LlmFault, LlmRequest, LlmStore
+from va_sim.llm.store import FaultKind, LlmFault, LlmRequest
 from va_sim.llm.wire import DONE, Emission, Meta, completion_body, paced_count, sse, stream_emissions
 
 if TYPE_CHECKING:
-    from starlette.types import Message, Receive
-
     from va_sim.state import SimState
 
-__all__ = ["CALL_ID_HEADER", "SimulatedDisconnect", "auth_error", "chat_completions", "list_models"]
+__all__ = ["CALL_ID_HEADER", "SimulatedDisconnect", "chat_completions", "list_models"]
 
 CALL_ID_HEADER: Final = "x-va-call-id"
-_BEARER: Final = "bearer "
 _EARLY_FAULTS: Final[frozenset[FaultKind]] = frozenset(
     {"rate_limit", "server_error", "timeout", "disconnect"}
 )
-_MISSING_KEY: Final = (
-    "You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer "
-    "auth (i.e. Authorization: Bearer YOUR_KEY)."
-)
-_SERVER_ERROR: Final = "The server had an error while processing your request. Sorry about that!"
-_DEFAULT_RETRY_AFTER_S: Final = 1
-_DEFAULT_SERVER_STATUS: Final = 500
-_TIMEOUT_STATUS: Final = 504
 _CHAT_ID_LENGTH: Final = 29
 _CALL_ID_LENGTH: Final = 24
 _SSE_HEADERS: Final = {"cache-control": "no-cache"}
@@ -53,19 +49,6 @@ _SSE_HEADERS: Final = {"cache-control": "no-cache"}
 
 class SimulatedDisconnect(Exception):  # noqa: N818 - names the simulated event, not an error condition
     """Raised inside a response body to drop the connection (the ``disconnect`` fault)."""
-
-
-def auth_error(request: Request, store: LlmStore) -> JSONResponse | None:
-    """The 401 answer for a request without an accepted ``Authorization: Bearer`` key, else None."""
-    header = request.headers.get("authorization", "")
-    key = header[len(_BEARER) :].strip() if header.lower().startswith(_BEARER) else ""
-    if not key:
-        return openai_error(401, _MISSING_KEY, error_type="invalid_request_error")
-    if not store.accepts(key):
-        return openai_error(
-            401, "Incorrect API key provided.", error_type="invalid_request_error", code="invalid_api_key"
-        )
-    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,35 +84,6 @@ def _record(state: SimState, request: ChatRequest, call_id: str | None) -> LlmRe
     )
     store.requests.append(record)
     return record
-
-
-async def _until_disconnect(receive: Receive) -> None:
-    while True:
-        message: Message = await receive()
-        if message["type"] == "http.disconnect":
-            return
-
-
-async def _hold(store: LlmStore, request: Request) -> None:
-    """Hold the request until the client disconnects or the store releases it."""
-    watcher = asyncio.ensure_future(_until_disconnect(request.receive))
-    try:
-        await store.hold(watcher)
-    finally:
-        watcher.cancel()
-        await asyncio.gather(watcher, return_exceptions=True)
-
-
-def _fault_response(fault: LlmFault) -> JSONResponse:
-    if fault.kind == "rate_limit":
-        retry_after = fault.retry_after_s if fault.retry_after_s is not None else _DEFAULT_RETRY_AFTER_S
-        return openai_error(
-            429,
-            "Rate limit reached for requests. Please try again later.",
-            code="rate_limit_exceeded",
-            headers={"retry-after": str(retry_after)},
-        )
-    return openai_error(fault.status or _DEFAULT_SERVER_STATUS, _SERVER_ERROR)
 
 
 def _injected(error: InjectedError, rule_id: str) -> JSONResponse:
@@ -215,13 +169,13 @@ class _Exchange:
 
     async def _early(self, fault: LlmFault) -> Response | None:
         if fault.kind in {"rate_limit", "server_error"}:
-            response = _fault_response(fault)
+            response = fault_response(fault)
             self.record.status = response.status_code
             return response
         if fault.kind == "timeout" and (fault.after_tokens is None or not self.chat.stream):
-            await _hold(self.state.llm, self.request)
-            self.record.status = _TIMEOUT_STATUS
-            return openai_error(_TIMEOUT_STATUS, "The simulated timeout was released.", code="timeout")
+            await hold_request(self.state.llm, self.request)
+            self.record.status = TIMEOUT_STATUS
+            return timeout_response()
         return None
 
     def _reply(self, respond: RuleResponse | None) -> Reply:
@@ -259,7 +213,7 @@ class _Exchange:
                 emissions,
                 pacing=pacing,
                 sleep=state.clock.sleep,
-                hold=lambda: _hold(state.llm, self.request),
+                hold=lambda: hold_request(state.llm, self.request),
                 stall_after=fault.after_tokens if fault is not None and fault.kind == "timeout" else None,
                 disconnect=disconnect,
             )
@@ -281,13 +235,7 @@ async def chat_completions(state: SimState, request: Request) -> Response:
     record = _record(state, chat, request.headers.get(CALL_ID_HEADER))
     if chat.model not in store.models:
         record.status = 404
-        return openai_error(
-            404,
-            f"The model `{chat.model}` does not exist or you do not have access to it.",
-            error_type="invalid_request_error",
-            code="model_not_found",
-            param="model",
-        )
+        return model_not_found(chat.model)
     return await _Exchange(state, request, chat, record).respond()
 
 

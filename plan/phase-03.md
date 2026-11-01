@@ -95,7 +95,7 @@
     streamed tool-call delta assembly (test); every fault kind reproducible via the control route.
   - Split from P03-T06 (2026-10-31, Planner): chat + rules + faults alone is a TTS-sized task.
 
-- [ ] P03-T06b FakeLLM structured-call heuristics and embeddings
+- [x] P03-T06b FakeLLM structured-call heuristics and embeddings — heuristics for all 14 specs/10 §3 names via schema_fill (openai SDK forced calls validate with Draft202012Validator), POST /v1/embeddings (blake2b signed buckets, unit-norm, 1024 default, float|base64); make test 4873 passed, 98% coverage; lint/typecheck/placeholders pass
   - Spec refs: specs/30-testing-and-evals.md §3.4 (built-in structured-call heuristics, embeddings); specs/10-llm-gateway.md §3, §9, §10, §12
   - Depends on: P03-T06a
   - Deliverables: forced-tool heuristics for every specs/10 §3 registered function name (router `select_path`, loop
@@ -153,6 +153,8 @@
   - Depends on: P03-T13, P03-T06b
   - Deliverables: `structured(role, prompt_messages, schema: type[BaseModel])` with forced tool call, jsonschema validation, one repair retry; `Embeddings.embed(texts)` batching 64 with `dimensions=1024`
   - Acceptance: tests for valid, invalid-then-repaired, and unrecoverable outputs.
+    Drift test: `va_llm.structured.TOOL_NAMES` equals `va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES` (the simulator
+    keeps its own copy, specs/30 §3.4 Decision P03-T06b; tests may import both, production code never does).
 
 - [ ] P03-T15 Telnyx bootstrap script and sim service wiring
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)

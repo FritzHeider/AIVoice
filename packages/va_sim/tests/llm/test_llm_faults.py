@@ -138,7 +138,7 @@ async def test_reset_releases_a_held_request() -> None:
         await arm(client, kind="timeout")
         held = asyncio.create_task(client.post("/v1/chat/completions", json=chat_body("hi")))
         await wait_held(state, 1)
-        assert state.snapshot()["llm"] == {"requests": 1, "rules": 0, "models": 4, "held": 1}
+        assert state.snapshot()["llm"] == {"requests": 1, "embeddings": 0, "rules": 0, "models": 4, "held": 1}
         assert (await client.post("/sim/reset")).status_code == 204
         response = await held
     assert response.status_code == 504
@@ -247,6 +247,7 @@ async def test_fault_route_reads_and_clears() -> None:
                 "status": None,
                 "retry_after_s": None,
                 "after_tokens": 3,
+                "endpoint": "chat",
             }
         }
         assert (await client.delete("/sim/llm/fault")).status_code == 204

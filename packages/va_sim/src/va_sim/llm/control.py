@@ -1,13 +1,15 @@
-"""FakeLLM control routes (specs/30 §3.4 Control API; Decision P03-T06a rules 10, 11).
+"""FakeLLM control routes (specs/30 §3.4 Control API; Decision P03-T06a rules 10, 11; Decision P03-T06b rule
+6).
 
-``GET``/``DELETE /sim/llm/requests``; ``GET``/``POST``/``DELETE /sim/llm/rules``; ``DELETE
-/sim/llm/rules/{rule_id}``; ``PUT``/``GET``/``DELETE /sim/llm/fault``; ``GET``/``POST /sim/llm/api-keys``;
-``GET``/``POST /sim/llm/models``. Errors use the shared ``{"error": ...}`` control format.
+``GET``/``DELETE /sim/llm/requests``; ``GET``/``DELETE /sim/llm/embeddings``; ``GET``/``POST``/``DELETE
+/sim/llm/rules``; ``DELETE /sim/llm/rules/{rule_id}``; ``PUT``/``GET``/``DELETE /sim/llm/fault``;
+``GET``/``POST /sim/llm/api-keys``; ``GET``/``POST /sim/llm/models``. Errors use the shared ``{"error": ...}``
+control format.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt, StringConstraints, model_validator
 from starlette.requests import Request
@@ -16,12 +18,14 @@ from starlette.routing import BaseRoute, Route
 
 from va_sim.control import fault_route, json_body, sim_error, yaml_or_json_body
 from va_sim.llm.rules import RUNTIME_SOURCE, RuleFile, load_rules
-from va_sim.llm.store import FaultKind
+from va_sim.llm.store import FaultEndpoint, FaultKind
 
 if TYPE_CHECKING:
     from va_sim.state import SimState
 
 __all__ = ["ApiKeyBody", "LlmFaultBody", "ModelBody", "llm_control_routes"]
+
+_EMBEDDING_FAULTS: Final[frozenset[FaultKind]] = frozenset({"rate_limit", "server_error", "timeout"})
 
 type _NonEmpty = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
 
@@ -36,19 +40,30 @@ class LlmFaultBody(_Strict):
     status: Literal[500, 502, 503] | None = None
     retry_after_s: NonNegativeInt | None = None
     after_tokens: NonNegativeInt | None = None
+    endpoint: FaultEndpoint = "chat"
 
     @model_validator(mode="after")
     def _fields_fit_kind(self) -> Self:
-        if self.status is not None and self.kind != "server_error":
-            msg = "status applies to the server_error fault only"
-            raise ValueError(msg)
-        if self.retry_after_s is not None and self.kind != "rate_limit":
-            msg = "retry_after_s applies to the rate_limit fault only"
-            raise ValueError(msg)
-        if self.after_tokens is not None and self.kind != "timeout":
-            msg = "after_tokens applies to the timeout fault only"
-            raise ValueError(msg)
+        for field, kind in (
+            ("status", "server_error"),
+            ("retry_after_s", "rate_limit"),
+            ("after_tokens", "timeout"),
+        ):
+            if getattr(self, field) is not None and self.kind != kind:
+                msg = f"{field} applies to the {kind} fault only"
+                raise ValueError(msg)
+        if self.endpoint == "embeddings":
+            _check_embeddings_fault(self)
         return self
+
+
+def _check_embeddings_fault(body: LlmFaultBody) -> None:
+    if body.kind not in _EMBEDDING_FAULTS:
+        msg = "the embeddings endpoint supports the rate_limit, server_error, and timeout faults only"
+        raise ValueError(msg)
+    if body.after_tokens is not None:
+        msg = "after_tokens does not apply to the embeddings endpoint"
+        raise ValueError(msg)
 
 
 class ApiKeyBody(_Strict):
@@ -103,6 +118,12 @@ def llm_control_routes(state: SimState) -> list[BaseRoute]:
             return Response(status_code=204)
         return JSONResponse({"requests": [record.to_json() for record in store.requests]})
 
+    async def embeddings(request: Request) -> Response:
+        if request.method == "DELETE":
+            store.embedding_requests.clear()
+            return Response(status_code=204)
+        return JSONResponse({"requests": [record.to_json() for record in store.embedding_requests]})
+
     def arm(body: LlmFaultBody) -> None:
         store.arm_fault(
             body.kind,
@@ -110,6 +131,7 @@ def llm_control_routes(state: SimState) -> list[BaseRoute]:
             status=body.status,
             retry_after_s=body.retry_after_s,
             after_tokens=body.after_tokens,
+            endpoint=body.endpoint,
         )
 
     def clear_fault() -> None:
@@ -135,6 +157,7 @@ def llm_control_routes(state: SimState) -> list[BaseRoute]:
 
     return [
         Route("/sim/llm/requests", requests, methods=["GET", "DELETE"]),
+        Route("/sim/llm/embeddings", embeddings, methods=["GET", "DELETE"]),
         *_rules_routes(state),
         fault_route(
             "/sim/llm/fault",

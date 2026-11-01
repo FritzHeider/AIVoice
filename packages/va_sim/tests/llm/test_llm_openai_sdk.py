@@ -6,9 +6,12 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import jsonschema
+import numpy as np
 import openai
 import pytest
 from llm_helpers import API_KEY, MODEL, realtime_llm_state, served_llm
+from llm_schemas import SPEC_CALLS
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolParam
 
 from va_sim.llm.rules import RUNTIME_SOURCE, load_rules
@@ -156,3 +159,37 @@ async def test_errors_map_to_sdk_exceptions() -> None:
     async with sdk_client(realtime_llm_state(), api_key="wrong") as client:
         with pytest.raises(openai.AuthenticationError):
             await client.chat.completions.create(model=MODEL, messages=MESSAGES)
+
+
+async def test_forced_structured_calls_return_schema_valid_arguments() -> None:
+    async with sdk_client(realtime_llm_state()) as client:
+        for call in SPEC_CALLS:
+            completion = await client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": call.system}, {"role": "user", "content": call.user}],
+                tools=[{"type": "function", "function": {"name": call.name, "parameters": call.schema}}],
+                tool_choice={"type": "function", "function": {"name": call.name}},
+                max_tokens=512,
+            )
+            (tool_call,) = completion.choices[0].message.tool_calls or []
+            assert tool_call.type == "function"
+            assert tool_call.function.name == call.name
+            jsonschema.Draft202012Validator(call.schema).validate(json.loads(tool_call.function.arguments))
+
+
+async def test_embeddings_through_the_sdk() -> None:
+    texts = ["book a table for two", "book a table for four", "the invoice is overdue"]
+    async with sdk_client(realtime_llm_state()) as client:
+        packed = await client.embeddings.create(model=DEFAULT_LLM_MODELS[-1], input=texts)
+        floats = await client.embeddings.create(
+            model=DEFAULT_LLM_MODELS[-1], input=texts, encoding_format="float"
+        )
+        narrow = await client.embeddings.create(model=DEFAULT_LLM_MODELS[-1], input="hello", dimensions=64)
+    vectors = [np.array(item.embedding) for item in packed.data]
+    assert [item.index for item in packed.data] == [0, 1, 2]
+    assert all(vector.shape == (1024,) for vector in vectors)
+    assert all(abs(float(np.linalg.norm(vector)) - 1.0) < 1e-6 for vector in vectors)
+    assert [item.embedding for item in floats.data] == [item.embedding for item in packed.data]
+    assert float(vectors[0] @ vectors[1]) > float(vectors[0] @ vectors[2])
+    assert packed.usage.prompt_tokens == 14
+    assert len(narrow.data[0].embedding) == 64

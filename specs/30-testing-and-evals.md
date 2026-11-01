@@ -746,8 +746,9 @@ rules:
       delay_ms: 0
 ```
 
-- **Built-in structured-call heuristics** (used when no rule matches a forced tool call). Tool names are imported from
-  `va_llm.structured.TOOL_NAMES` (defined in `10-llm-gateway.md`) so the simulator never drifts:
+- **Built-in structured-call heuristics** (used when no rule matches a forced tool call). Tool names mirror
+  `va_llm.structured.TOOL_NAMES` (defined in `10-llm-gateway.md`; the simulator keeps its own copy and a drift test
+  compares them, Decision P03-T06b rule 1):
   - edge/route selection: score each option label by token overlap (lowercased, stopwords removed) with the last user
     message; choose max; ties → first; if max overlap = 0 choose the option flagged as fallback if present, else "none".
   - loop condition scoring: 8 if any condition keyword appears in the user text, otherwise 2.
@@ -809,7 +810,7 @@ rules:
 >    only tool calls), refusal: null, tool_calls?}`, `logprobs: null`, `finish_reason`, `usage`.
 > 8. Replies: the winning rule's `content`/`tool_calls` (a rule with neither answers the default reply with its own
 >    timing); no rule with a named or `required` `tool_choice` calls the named (or first) tool with arguments `{}`
->    (P03-T06b replaces this with the structured-call heuristics); otherwise `"Okay. You said: {last user text,
+>    (superseded by the structured-call heuristics of Decision P03-T06b); otherwise `"Okay. You said: {last user text,
 >    stripped}."`, or `"Hello! How can I help you today?"` without a user message. `tool_choice: "none"` drops every
 >    tool call, a rule's included.
 > 9. Rules: YAML `{rules: [...]}` as above plus `match.call_id` (compared with the `X-VA-Call-Id` header, specs/10
@@ -843,6 +844,72 @@ rules:
 >    `GET`/`POST /sim/llm/api-keys`; `GET`/`POST /sim/llm/models`. `GET /sim/state` adds `llm` counts (`requests`,
 >    `rules`, `models`, `held`). `POST /sim/reset` drops runtime rules, `call_index` counters, the log, the fault,
 >    and added keys and models, and releases held requests; file rules stay.
+
+> Decision (2026-10-31): FakeLLM structured-call heuristics and embeddings (P03-T06b). Numbered rules:
+> 1. Names: `va_llm` must not share code with the simulator, so `va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES` is
+>    the simulator's own copy of the 14 specs/10 §3 names (a test parses them from specs/10); P03-T14 adds a test
+>    comparing it with `va_llm.structured.TOOL_NAMES`. Aliases: `select_disposition` → `classify_disposition`,
+>    `record_citations` → `extract_citations` (the names the specs/18 prompts use); `record_analysis` shares the
+>    `extract_analysis_schema` heuristic.
+> 2. A forced (or `required`, first tool) call without a matching rule gets the heuristic's candidate, with keys
+>    outside the tool's `properties` dropped, conformed to the tool's `parameters` (`va_sim.llm.schema_fill`): valid
+>    parts are kept (numbers clamped into their bounds, strings cut to `maxLength`), invalid parts replaced by the
+>    schema default, unknown keys dropped when `additionalProperties` is false, missing `required` keys filled.
+>    A tool without a heuristic gets the schema default; a tool without `parameters` gets `{}`. Supported keywords:
+>    `type` (string or list), `enum`, `const`, `default`, `minimum`/`maximum`/`exclusiveMinimum`/
+>    `exclusiveMaximum`, `minLength`/`maxLength`, `pattern`, `minItems`/`maxItems`, `items`, `prefixItems`,
+>    `properties`, `required`, `additionalProperties`, `anyOf`/`oneOf`/`allOf`, local `$ref` (`#/$defs/…`,
+>    `#/definitions/…`). Schema default: `default` → `const` → enum (null when listed, else the first value) → null
+>    when nullable → a combinator's default → by type (string `examples[0]` or `"x"` × `minLength`; integer/number
+>    0 clamped into the bounds; boolean false; array of `minItems` defaults; object of its `required` defaults).
+> 3. Text sources: words = `[a-z0-9']+` of the lowercased text, content words drop a fixed English stopword set
+>    (yes/no are not stopwords); latest = the quoted `Latest caller message: "…"` of the last user message, else its
+>    text; caller text = the `Caller:`/`user:` lines of the user messages plus the latest message, else every user
+>    message; transcript = the block after a `Transcript:` or `Conversation (…):` line of the last user message,
+>    else every user and assistant message, with role prefixes and `[T{n}|…]` turn ids removed.
+> 4. Heuristics: `select_path` scores each `path_id` enum option (except `stay`) by content-word overlap of its
+>    `- id: … | condition: … | description: …` system line with the latest message; the maximum wins (ties: first),
+>    confidence 8, `alternatives` = other options with overlap (confidence min(10, 2 × overlap)); no overlap picks
+>    `stay`, else an option whose id/label contains "fallback", else `none`, else the first option, confidence 5.
+>    `score_condition`: 8 when a content word of `Completion condition:` occurs in the caller text, else 2; `met` =
+>    score ≥ 7. `extract_variables`, per property type over the caller text: integer = first digits or number word
+>    one–twenty; number = first `-?\d+(\.\d+)?` or number word; boolean = first of yes/yeah/yep/sure/correct/
+>    affirmative/absolutely (true) or no/nope/negative/nah (false); string = the words after "my name is", "this
+>    is", "I'm", "I am", "it's", "it is", else the latest message cut to 80 characters. `classify_answer` reads
+>    `Transcript so far: "…"` (else the latest message): voicemail on the §3.4 regex plus `you've reached|mailbox`,
+>    ivr on `press \d|please (say|enter)|your call is important`, human when non-empty, else unknown; confidence 0.9
+>    (unknown 0.5); boolean properties = is voicemail. `evaluate_guard_rails`: one result per `- name: description`
+>    line of the `Rules:` block; a name containing `opt_out` triggers on `stop calling|do not call|don't call|remove
+>    me|unsubscribe` in the latest message (confidence 0.95, evidence = the match), others never (0.05, "").
+>    Disposition: the `tag` enum value whose words plus its `- TAG: description` line overlap the transcript most,
+>    else `FOLLOW_UP_REQUIRED`, else the first; confidence 0.7. `summarize`: every string property = `Summary: ` +
+>    the first 30 transcript words; a request without tools whose system text contains `You write concise, factual
+>    summaries of phone calls` (specs/18 §3) answers that text as content. Analysis: enums by overlap (else null),
+>    booleans/integers/numbers as above, strings = email / phone (`\+?\d[\d\s().-]{6,}\d`) / date regex when the
+>    name or description says email / phone / starts with `YYYY`, else the name pattern, else null — all over the
+>    transcript. `answer_questions`: one answer per `prefixItems` position (at least `minItems`), a
+>    human/voicemail enum by the voicemail regex. `record_sentiment`: positive minus negative word counts of the
+>    caller text (net ≥ 3 very_positive, > 0 positive, 0 neutral, < 0 negative, ≤ −3 very_negative), score =
+>    clamp(net / 4, −1, 1), frustration on `frustrat|annoy|ridiculous|angry`, no notable moments. Citations: per
+>    `variable_name` enum value an analysis value of the item `value` schema, `turn_numbers` = the first turn line
+>    containing it (number words count for integers; any yes/no word for booleans), topics [], `statement`.
+>    `grade`: booleans true, number fields named `*score*` 80, strings `Simulated evaluation.`, arrays of criteria
+>    `max(minItems, 1)` such objects. `update_memory`: the summary text, `facts_set` `{"name": …}` when the caller
+>    states a name, empty lists. JSON mode (`response_format`) is not heuristic: tests use rules for it.
+> 5. Embeddings `POST /v1/embeddings` (check order: auth → JSON → validation → log entry → model 404 → armed
+>    `embeddings` fault → vectors, no pacing): `model`; `input` = string, 1–2048 strings, a token array, or 1–2048
+>    token arrays (empty strings are 400 `invalid_value` param `input`); `dimensions` 1–4096 (default 1024);
+>    `encoding_format` `float` (default) or `base64` (little-endian float32; the `openai` SDK asks for base64 by
+>    default); unknown parameters accepted. Vector: per word (token ids as strings; no tokens hash `""`)
+>    `blake2b(token, digest_size=8, person=b"va-sim-embed")`, bucket = first 4 bytes big-endian mod dimensions,
+>    sign + when byte 4 is even else −, summed, L2-normalized in float64, emitted as float32. Response `{"object":
+>    "list", "data": [{"object": "embedding", "index", "embedding"}], "model", "usage": {"prompt_tokens",
+>    "total_tokens"}}` with tokens = whitespace words (token arrays: their length).
+> 6. Control: `GET`/`DELETE /sim/llm/embeddings` (`{"requests": [{id, received_at, model, inputs, dimensions,
+>    encoding_format, status, fault}]}`, one per request that passed validation); `/sim/state` `llm` adds
+>    `embeddings`; reset clears the log. The fault body gains `endpoint` `chat` (default) | `embeddings`; an
+>    `embeddings` fault fires only on embeddings requests and allows `rate_limit`, `server_error`, and a
+>    header-less `timeout` (422 otherwise); chat faults never fire on embeddings.
 
 ### 3.5 Scenario DSL (YAML) — `tests_e2e/scenarios/*.yaml`
 

@@ -1,63 +1,53 @@
-# Scratchpad — Phase 03 (resumed run, 2026-10-31)
+# Scratchpad — Phase 03
 
-Earlier entries (P03-T01 to P03-T05c) are in git history: `git show HEAD:.ralph/agent/scratchpad.md`,
-`git show 7afdd0c:.ralph/agent/scratchpad.md`.
+## Plan P03-T06b (Planner, 2026-11-01)
 
-## Plan P03-T06a — FakeLLM chat completions, rules engine, faults, and models (Planner, 2026-10-31, resume)
+Context: the previous loop run died ("too many consecutive failures": Claude Code lingered after each turn and Ralph
+counted SIGTERMs; ralph.yml now has `max_consecutive_failures: 50`). The P03-T06b implementation is already in the
+working tree, UNCOMMITTED and UNREVIEWED. Planner check (2026-11-01): `pytest packages/va_sim/tests/llm
+tests/test_state.py` 504 passed; ruff clean; mypy va_sim clean (168 files); placeholders 0; radon: no C+ blocks in
+va_sim/llm. Do NOT rewrite it. Builder job = verify against the acceptance criteria, close gaps, run full gates.
 
-State: an earlier loop implemented the task and ran `make check` with EXIT=0 (logs/p03t06a_check.log). The loop
-then stopped ("too many consecutive failures") before review or commit. The work is uncommitted in the tree:
-- new: `packages/va_sim/src/va_sim/llm/{__init__,chat,control,errors,params,reply,routes,rules,store,wire}.py`,
-  tests `packages/va_sim/tests/llm/test_llm_{chat,control,faults,openai_sdk,params,reply,rules}.py`,
-  `packages/va_sim/tests/support/llm_helpers.py`
-- modified: va_sim control.py (fault_route, yaml_or_json_body), scenario.py (compose_document), server.py,
-  settings.py (llm_model_ids, SIM_LLM_RULES), state.py (LlmStore), stt_control/voice_control (shared helpers),
-  tests (test_server/test_settings/test_state), pyproject.toml + uv.lock (`openai` root dev dep), specs/02 §6,
-  specs/30 §3.4 `> Decision (2026-10-31) ... (P03-T06a)` at line 772, AGENTS.md P03-T06a entry, plan split
-  T06 → T06a/T06b (already in plan/phase-03.md).
-Planner check this iteration: `uv run pytest packages/va_sim/tests/llm tests/test_server.py tests/test_settings.py
-tests/test_state.py` → 125 passed in 4.9 s.
+Existing files (keep):
+- src/va_sim/llm/heuristics.py (`STRUCTURED_TOOL_NAMES`, `structured_arguments`, in-call classifiers),
+  heuristics_post.py (post-call: disposition/summary/analysis/citations/grade), heuristics_base.py (`Heuristic`),
+  schema_fill.py (`SchemaFill.conform` -> always schema-valid), text.py (text helpers),
+  embeddings.py (pure: blake2b signed buckets, L2 norm, float|base64, dims), embed_route.py (`POST /v1/embeddings`),
+  gate.py (shared auth/model/fault answers); modified chat.py/control.py/params.py/reply.py/routes.py/store.py/state.py
+- tests: test_llm_heuristics.py, test_llm_schema_fill.py, test_llm_text.py, test_llm_embeddings.py,
+  support/llm_schemas.py (`SPEC_CALLS` for all 14 names, `forced_body`), test_llm_openai_sdk.py
+  (`test_forced_structured_calls_return_schema_valid_arguments`, `test_embeddings_through_the_sdk`)
+- specs/30 §3.4 Decision P03-T06b already written; plan P03-T14 drift-test note; AGENTS.md P03-T06b bullet;
+  pyproject dev deps jsonschema + types-jsonschema (uv.lock updated).
 
-Builder: do not redesign or reimplement.
-1. Check the WIP against the plan/phase-03.md P03-T06a deliverables; each needs a test: Bearer auth + OpenAI
-   error bodies; request validation (400 with `param`); stream + non-stream; `stream_options.include_usage` usage
-   chunk; `data: [DONE]`; tool calls from rules incl. forced `tool_choice`; finish_reason stop/tool_calls/length
-   (`max_tokens`); TTFT + tokens/s pacing on the sim clock with per-rule `ttft_ms`/`delay_ms`; default dialogue
-   reply; rules: `SIM_LLM_RULES` loaded at startup, `POST/GET/DELETE /sim/llm/rules`, priority then registration
-   order, matchers `system_contains`, `last_user_regex`, `tool_name`, `model`, `call_index`, `call_id`
-   (`X-VA-Call-Id`); faults: rule `error`, `/sim/llm/fault` 429 + `Retry-After`, 500/502/503, timeout before
-   headers, stall after n tokens, malformed tool args; `GET /v1/models` from env model ids; `/sim/llm/requests`;
-   reset. Acceptance: `openai` SDK streaming text, non-streaming, streamed tool-call delta assembly
-   (test_llm_openai_sdk). Add a missing test and fix only real defects. Check shapes against the specs/30 §3.4
-   Decision P03-T06a text. Scope excludes T06b (structured heuristics, embeddings).
-2. Gates with real results:
-   - `make fmt lint typecheck placeholders`
-   - `make check` (if apps/api shows pytest-timeout errors under load — known task fix:api-test-timeout-load —
-     re-run those modules alone and record both results)
-   - `npx --yes jscpd@4 --silent` (0 clones); `uvx radon cc -s -a packages/va_sim/src/va_sim/llm` (new ≤ B)
-   - `uv export --no-emit-workspace --frozen | uvx pip-audit --strict`; `corepack pnpm audit --audit-level high`
-     (new dep `openai` is dev-only; it must audit clean)
-3. Emit plain text (no --json):
-   `ralph emit "build.done" "tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, complexity: <grade (score)>, duplication: pass, specs: pass"`
+Builder checklist:
+1. Confirm `STRUCTURED_TOOL_NAMES` == the specs/10 §3 registered-name list exactly (every name, character for
+   character); add a test parsing specs/10 §3 if one does not exist (check test_llm_heuristics.py first).
+2. Confirm SDK acceptance test covers EVERY name in `SPEC_CALLS` and validates with
+   `jsonschema.Draft202012Validator`; confirm embeddings tests assert determinism, unit norm, 1024 default,
+   `dimensions` override, similar > dissimilar cosine, base64 decode == float vector, usage tokens.
+3. Check specs/30 §3.4 decision text matches the code (dims default, bucket hashing, encoding formats, fault
+   `endpoint` field, `/sim/state` llm `embeddings` count).
+4. Run gates: `make fmt lint typecheck placeholders test` (record counts + coverage), `uv run python
+   scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent` (0 clones expected), `uvx radon cc -s -a
+   packages/va_sim/src/va_sim/llm`, audit (`uvx pip-audit` on `uv export` — new dep jsonschema).
+   Known flake: apps/api pytest-timeout setup errors under load (fix:api-test-timeout-load); rerun module alone.
+5. Tick nothing (Reviewer ticks). Emit build.done with the backpressure strings.
 
-Risks: host load during `make check` (re-run, never skip). The `disconnect` fault makes uvicorn log an exception;
-make sure no test depends on log silence there. Reviewer commits `feat(sim): FakeLLM ...` with footer
-`Task: P03-T06a`.
+Risks: jscpd clones between heuristics/heuristics_post; schema_fill.py at 472 lines (fine unless radon C).
 
-## Build P03-T06a (Builder, 2026-10-31)
+## Build P03-T06b (Builder, 2026-11-01)
 
-Verified the WIP against every deliverable; each has a test (tests/llm/test_llm_{chat,control,faults,openai_sdk,
-params,reply,rules}.py, plus test_server/test_settings for SIM_LLM_RULES startup loading and model ids). No code
-changes were needed this iteration.
-Gates (real runs, logs/p03t06a_gates.log, logs/p03t06a_check2.log):
-- make fmt/lint/typecheck/placeholders: EXIT 0 (mypy 563 files clean, 0 placeholder findings)
-- make check: EXIT 0, 4478 passed in 109 s, coverage 98.13 %; va_sim.llm modules 99-100 %
-- jscpd: 0 clones; radon va_sim.llm: avg A (2.72), max B (10, params._param_of)
-- pip-audit --strict: no known vulnerabilities; pnpm audit --audit-level high: 3 moderate (pre-existing, TS untouched)
+Verified WIP against checklist, no code changes needed: specs/10 §3 name parse test exists
+(test_llm_heuristics: 14 names == STRUCTURED_TOOL_NAMES == SPEC_CALLS); SDK test validates every SPEC_CALLS entry with
+Draft202012Validator; embeddings tests cover determinism/unit-norm/1024/similarity/encodings/inputs/faults.
+Gates: make fmt 0 (no diff), lint 0, typecheck 0, placeholders 0 findings, check_spec_refs 0, make test 0
+(4873 passed, TOTAL coverage 98%), pip-audit strict: no known vulns, pnpm audit: 3 moderate (< high), jscpd 0 clones,
+radon va_sim/llm avg A (3.26), no C+ blocks.
 
-## Review P03-T06a (Reviewer, 2026-10-31) — approved
+## Review P03-T06b (Reviewer, 2026-11-01)
 
-Re-ran: make lint typecheck placeholders EXIT 0 (0 findings); make test EXIT 0, 4478 passed, coverage 98.13 %.
-Read chat/store/reply/wire/rules/control/errors + shared-helper refactors against specs/30 §3.4 Decision P03-T06a
-rules 1-11: check order, fault semantics (early faults never advance call_index; malformed stays armed until a
-tool-call reply), stream wire order + include_usage, truncation, rules ordering/counters, reset. No findings.
+Approved. Re-ran: make lint/typecheck/placeholders 0; make test 4873 passed, 98.02% coverage. Diff checked against
+specs/30 §3.4 + Decision P03-T06b and plan acceptance (SDK forced call per name schema-valid; embeddings
+deterministic/unit/1024/similarity). Reviewer fix in place: module docstrings cited stale Decision P03-T06b rule
+numbers (decision has rules 1-6); corrected in heuristics*, schema_fill, text, embeddings, embed_route, gate, control.

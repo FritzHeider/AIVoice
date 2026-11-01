@@ -24,10 +24,13 @@ __all__ = [
     "NamedToolChoice",
     "ToolDef",
     "forced_tool",
+    "invalid",
+    "json_object",
     "last_user_text",
     "message_text",
     "parse_chat",
     "system_text",
+    "validation_error",
 ]
 
 _TOOL_NAME_PATTERN: Final = r"^[a-zA-Z0-9_-]{1,64}$"
@@ -167,7 +170,8 @@ def forced_tool(request: ChatRequest) -> str | None:
     return choice.function.name if isinstance(choice, NamedToolChoice) else None
 
 
-def _invalid(message: str, param: str | None, code: str | None = None) -> JSONResponse:
+def invalid(message: str, param: str | None, code: str | None = None) -> JSONResponse:
+    """An OpenAI 400 ``invalid_request_error`` naming ``param``."""
     return openai_error(400, message, param=param, code=code)
 
 
@@ -197,28 +201,29 @@ def _param_of(payload: Any, loc: tuple[int | str, ...], *, missing: bool) -> str
     return path
 
 
-def _validation_error(payload: Any, error: ErrorDetails) -> JSONResponse:
+def validation_error(payload: Any, error: ErrorDetails) -> JSONResponse:
+    """The 400 answer for the first pydantic error of validating ``payload``."""
     missing = error["type"] == "missing"
     param = _param_of(payload, tuple(error["loc"]), missing=missing)
     if missing:
-        return _invalid(f"Missing required parameter: '{param}'.", param, "missing_required_parameter")
+        return invalid(f"Missing required parameter: '{param}'.", param, "missing_required_parameter")
     message = error["msg"].removeprefix("Value error, ")
-    return _invalid(f"Invalid value for '{param}': {message}", param or None, "invalid_value")
+    return invalid(f"Invalid value for '{param}': {message}", param or None, "invalid_value")
 
 
 def _semantic_error(request: ChatRequest) -> JSONResponse | None:
     if request.n is not None and request.n != 1:
-        return _invalid("Invalid value for 'n': the simulator only supports n = 1.", "n", "invalid_value")
+        return invalid("Invalid value for 'n': the simulator only supports n = 1.", "n", "invalid_value")
     choice = request.tool_choice
     if choice == "required" or isinstance(choice, NamedToolChoice):
         if not request.tools:
-            return _invalid(
+            return invalid(
                 "Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.",
                 "tool_choice",
             )
         name = forced_tool(request)
         if name is not None and name not in request.tool_names:
-            return _invalid(
+            return invalid(
                 f"Invalid value for 'tool_choice': function '{name}' is not one of the provided tools.",
                 "tool_choice",
                 "invalid_value",
@@ -226,17 +231,25 @@ def _semantic_error(request: ChatRequest) -> JSONResponse | None:
     return None
 
 
-def parse_chat(raw: bytes) -> ChatRequest | JSONResponse:
-    """``raw`` as a validated :class:`ChatRequest`, or the OpenAI 400 response."""
+def json_object(raw: bytes) -> dict[str, Any] | JSONResponse:
+    """``raw`` parsed as a JSON object, or the OpenAI 400 for invalid JSON / a non-object body."""
     try:
         payload = orjson.loads(raw)
     except orjson.JSONDecodeError:
-        return _invalid(_BAD_JSON, None)
+        return invalid(_BAD_JSON, None)
     if not isinstance(payload, dict):
-        return _invalid(_BAD_JSON, None)
+        return invalid(_BAD_JSON, None)
+    return payload
+
+
+def parse_chat(raw: bytes) -> ChatRequest | JSONResponse:
+    """``raw`` as a validated :class:`ChatRequest`, or the OpenAI 400 response."""
+    payload = json_object(raw)
+    if isinstance(payload, JSONResponse):
+        return payload
     try:
         request = ChatRequest.model_validate(payload)
     except ValidationError as exc:
-        return _validation_error(payload, exc.errors(include_url=False)[0])
+        return validation_error(payload, exc.errors(include_url=False)[0])
     semantic = _semantic_error(request)
     return semantic if semantic is not None else request
