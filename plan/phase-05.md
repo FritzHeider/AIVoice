@@ -24,7 +24,7 @@
   - Deliverables: `va_domain.calls` (`CallParameters`, `SendCallRequest`, every §3 parameter with validation/aliases, `explicit_fields()`, `check_rules()` → `CallRequestError` for `RUNNER_CONFLICT`/`RETRY_NOT_PROVIDED`; `SendCallConfig` + sub-models of §4.4; `InlineTool`, `DynamicDataSpec`), `va_domain.phone.normalize_e164`, language table moved to `va_domain.languages` (va_elevenlabs re-uses it), 12 Bland sample requests in `apps/api/tests/fixtures/bland_send_call/`
   - Acceptance: every parameter valid/invalid boundary parametrized; aliases; unknown fields ignored; §4.4 field-name drift test; all 12 fixtures parse.
 
-- [ ] P05-T03b Pure `resolve_call_config` precedence
+- [x] P05-T03b Pure `resolve_call_config` precedence — va_domain.call_resolution (merge_layers/resolve_call_config, org/pathway/persona/agent layers, forced rails, model mapping, start_time window), call_defaults validated on PATCH; 74-case precedence table + 12 resolved Bland snapshots; make lint/typecheck/placeholders/test green (8307 passed, 98.60 %)
   - Spec refs: specs/05-calls-api.md §4.3, §4.4, §3 (defaults and semantics)
   - Depends on: P05-T03a
   - Deliverables: `va_domain.call_resolution.resolve_call_config(org, request, runner, refs, now)` (pure; layers platform → org `call_defaults` → runner defaults (task, pathway `global_config.call_defaults`; persona/agent layer shapes ready for P13-T07) → explicit fields), request_data/metadata replacement, tools union, dispositions + built-ins, guard rails union, record forcing, ivr_mode effects, model mapping, start_time localization/window

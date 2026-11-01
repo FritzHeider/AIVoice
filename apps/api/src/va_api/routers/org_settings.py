@@ -26,6 +26,8 @@ from va_api.responses import DataResponse
 from va_api.routers.org_sso import ReadOrg, WriteOrg, org_router
 from va_common.errors import AppError
 from va_db.repositories import OrgRepo
+from va_domain.call_resolution import check_call_defaults
+from va_domain.calls import CallRequestError
 from va_domain.org import (
     OrgSettings,
     effective_values,
@@ -98,6 +100,16 @@ def _validated(merged: Mapping[str, Any], prefix: str) -> OrgSettings:
         ) from exc
 
 
+def _check_call_defaults(settings: OrgSettings, paths: set[str], prefix: str) -> None:
+    """A sent ``call_defaults`` must be a valid lower Send Call layer (specs/05 §4.3 Decision P05-T03b)."""
+    if "call_defaults" not in paths:
+        return
+    try:
+        check_call_defaults(settings.call_defaults)
+    except CallRequestError as exc:
+        raise AppError(exc.code, exc.message, field=f"{prefix}{exc.field}") from exc
+
+
 def _check_cross_field(ctx: RequestContext, settings: OrgSettings, paths: set[str], prefix: str) -> None:
     # Only rules whose paths were sent apply, so an unrelated PATCH never fails on state set elsewhere.
     if paths & _HIPAA_PATHS and settings.hipaa_mode and settings.baa_signed_at is None:
@@ -152,7 +164,8 @@ async def apply_settings_patch(
 
     Runs in the caller's global session; the caller writes the audit row and invalidates the cache after
     commit. ``NOT_FOUND`` when the org is gone, ``INVALID_INPUT`` / ``FEATURE_NOT_IN_PLAN`` on rule failures,
-    including a sent ``ip_allowlist`` that would reject ``ip`` (the client address of the request).
+    including a sent ``call_defaults`` that is not a valid Send Call layer and a sent ``ip_allowlist`` that
+    would reject ``ip`` (the client address of the request).
     """
     repo = OrgRepo(session)
     org = await repo.lock(ctx.org_id)
@@ -161,6 +174,7 @@ async def apply_settings_patch(
     stored = dict(org.settings)
     settings = _validated(merge_settings(stored, sent), prefix)
     paths = sent_paths(sent)
+    _check_call_defaults(settings, set(paths), prefix)
     _check_cross_field(ctx, settings, set(paths), prefix)
     _check_keeps_caller(settings, set(paths), ip, prefix)
     sparse = sparse_settings(settings)

@@ -550,3 +550,183 @@ class C 11); make test exit 0 (8175 passed, 7 skipped, 98.46 %); va_domain cover
 Approved. Re-ran make lint typecheck placeholders (0 findings) and make test (8175 passed, 7 skipped, 98.58 %), spec refs.
 Checked §3.1–§3.7 rows vs CallParameters/SendCallRequest, §4.4 drift test, specs/13 §2/§7 shapes; probed aliases,
 voicemail implied action, KB dedupe, start_time forms, country upper-casing, persona_settings key errors.
+
+## Plan P05-T03b — Pure `resolve_call_config` precedence (Planner, 2026-11-01)
+
+Spec: specs/05 §4.3 (layers + special rules), §4.4 (target model), §3 (defaults/semantics); specs/04 §7 org settings;
+specs/20 §3.1/§3.3/§4.3 (persona/agent layer shapes); specs/23 §1.1/§4/§5 (forced rails); specs/11 §3.4.
+Everything is pure (no I/O, no clock reads): DB loading is P05-T03c, which calls `merge_layers` first to learn which
+voice/tools/from to load, then `resolve_call_config`.
+
+### Decisions (write as `> Decision (2026-11-01): call config resolution (P05-T03b).` under specs/05 §4.3)
+1. Module `va_domain.call_resolution` (package: `__init__`, `inputs.py`, `layers.py`, `merge.py`, `resolve.py`,
+   `guard_rails.py`; each < ~300 lines, radon ≤ B). Signature
+   `resolve_call_config(org: OrgSettings, request: SendCallRequest, runner: RunnerInputs, refs: ResolvedRefs,
+   now: datetime) -> CallResolution` where `CallResolution(config: SendCallConfig, warnings: tuple[ResolutionWarning,
+   ...])` (frozen dataclasses). The §4.3 sentence "`-> SendCallConfig`" is satisfied via `.config`; warnings feed the
+   `call.queued` event in T05. `ResolutionWarning(code: str, message: str, field: str | None)`.
+   Failures raise `CallRequestError` (code `INVALID_INPUT` + field) — no new catalog codes.
+2. Org layer (lowest above platform) = the legacy `default_*` org settings **that are explicitly set**
+   (`org.model_fields_set`; `load_settings(stored)` preserves it) mapped to parameters, then
+   `orgs.settings.call_defaults` over them (call_defaults is the newer, more specific mechanism):
+   `default_language`→`language`, `default_record`→`record`, `default_max_duration_min`→`max_duration`,
+   `default_webhook`→`webhook`, `default_webhook_events`→`webhook_events`, `timezone`→`timezone`,
+   `default_country`→`country`, `summary_prompt_default`→`summary_prompt`, `dispositions_default`→`dispositions`,
+   `noise_cancellation_default`→`noise_cancellation`, `background_track_default` (`phone_static`→`None`, `none`→`"none"`,
+   others same)→`background_track`, `amd_default="off"`→`answered_by_enabled=False`, `memory.default_enabled`→
+   `memory_enabled`, `llm.temperature_default`→`temperature` (passed through, 0–2 allowed), `post_call_eval_setup_id`→
+   `post_call_evals={workbench_setup_id}`, `default_guard_rails`→`guard_rails`. `default_voice`/`default_voice_id`/
+   `default_from_number` are not layered here: they are the fallback of `voice`/`from` that T03c applies when
+   `merge_layers(...).voice`/`.from_` is `None` (they need a DB lookup).
+   Org settings dispositions are used as-is (1–100 chars, not the request pattern).
+3. Lower layers are parsed with `CallParameters.model_validate(raw)` and read through `explicit_fields()` (aliases
+   folded, only set keys). `call_defaults` may additionally carry `no_input_timeout_ms` (3 000–30 000),
+   `max_reprompts` (0–5), `greeting_timeout_ms` (1 000–30 000) (the derived §4.4 fields; specs/07 §12) — parsed by
+   `CallDefaults(CallParameters)` with those three extra optional fields and `extra="forbid"` so typos are rejected.
+   Runner fields and `phone_number` in a layer are rejected (not CallParameters fields → forbid). Invalid layer →
+   `CallRequestError("INVALID_INPUT", msg, field="call_defaults.<path>")` (prefix per layer: `call_defaults`,
+   `pathway.call_defaults`, `persona.config`, `agent.call_settings`, `persona_settings`).
+   Also add `va_domain.call_resolution.check_call_defaults(raw)` and call it from
+   `va_api.routers.org_settings.apply_settings_patch` (before writing) when `call_defaults` was sent, mapping the
+   error to `AppError("INVALID_INPUT", field="call_defaults.<path>")` — so bad org defaults fail at PATCH time
+   (specs/04 §7 Decision item 3 said "validated against SendCallRequest when the calls API lands"; update that line).
+4. Runner layer by type (`RunnerInputs` = `TaskRunner | PathwayRunner | PersonaRunner | AgentRunner`, frozen
+   dataclasses in `inputs.py`):
+   - `TaskRunner()` — no layer.
+   - `PathwayRef(pathway_id: UUID, version: int, call_defaults: Mapping[str, JsonValue], error_phrase: str | None,
+     start_node_id: str | None = None)` (version already resolved by T03c); `PathwayRunner(pathway: PathwayRef)` →
+     layer = `call_defaults`; `error_phrase` → config `error_phrase` when set.
+   - `PersonaRunner(persona_id, version: int | None, legacy: bool, config: Mapping[str, JsonValue], pathway:
+     PathwayRef | None)`; `persona_layer(config) -> dict` maps the specs/20 §3.1 `PersonaConfig` JSON:
+     `prompt`→`task`, `first_sentence`, `voice`, `voice_settings`, `language`, `tools`, `knowledge_base_ids`,
+     `memory.enabled`→`memory_enabled`, every `call_settings.*` key, `guard_rails`, `dispositions`, `summary_prompt`,
+     `analysis_schema`, `post_call_evals`, `webhook`, `webhook_events`, `metadata` (null/absent keys skipped; `name`,
+     `role_description`, `runner`, `sms`, `widget`, `routing`, `pathway_*` are not call parameters). The persona's
+     pathway (`pathway` arg, resolved by the caller) supplies pathway_id/version/start_node and its call_defaults
+     below the persona layer.
+     Versioned order: org → pathway.call_defaults → request explicit → persona layer over → request
+     `pathway_id`/`pathway_version`/`start_node_id` (already resolved into `pathway` by T03c when sent) →
+     `persona_settings` (parsed as a layer). Legacy order: org → pathway defaults → persona → request explicit.
+     `task` in the request overrides the persona prompt when the persona has no pathway (§3.1) — also for versioned
+     personas; otherwise `task` is ignored with warning `TASK_IGNORED`.
+   - `AgentRunner(agent_id, agent_version_id, call_settings: Mapping, pathway: PathwayRef | None, experiment_id:
+     UUID | None = None, experiment_arm_id: UUID | None = None)`; layer = `call_settings` (may contain `task`,
+     parsed with a `RunnerLayer(CallDefaults)` that also allows `task`); order org → pathway defaults →
+     call_settings → request explicit.
+   - Task with pathway (`pathway_id` + `task` sent) is a pathway runner; `task` ignored → warning `TASK_IGNORED`.
+   - Pathway-backed runners (pathway, persona/agent with pathway): `transfer_phone_number`/`transfer_list` from
+     any layer are dropped with warning `TRANSFER_IGNORED` (field name) — §3.3 "Ignored for pathway runners".
+   - `start_node_id`: request value, else `pathway.start_node_id`; existence checked in T03c.
+5. Merge rules (`merge.py`, `merge_layers(org, request, runner) -> MergedParameters`, a dict-like frozen view with
+   typed accessors `voice`, `from_`, `dialing_strategy`, `tools`, `country`, `timezone`, `language`): scalars and
+   arrays replace (highest set layer wins); `request_data`/`metadata` replace when the higher layer set them (even
+   `{}`); `voice_settings`, `voicemail`, `warm_transfer`, `retry` merge per sent key (models: `model_fields_set`;
+   `VoicemailRequest.sent()`); `transfer_list` and `analysis_schema` merge per key; `dialing_strategy` and
+   `post_call_evals` replace whole (coupled fields — documented exception to "objects shallow-merge");
+   `tools` = union across all layers in order, dedupe by `TL-`/`KB-` id (first position kept), inline tools keyed by
+   `name` with the higher layer winning in place; `dispositions` = highest layer list, then built-ins
+   (`INTERESTED, NOT_INTERESTED, FOLLOW_UP_REQUIRED, CALL_BACK_SCHEDULED, TRANSFERRED, DO_NOT_CONTACT`, constant
+   `BUILTIN_DISPOSITIONS` in `va_domain.calls`) appended when absent; `guard_rails` = union keyed by
+   `(type, name)`, higher layer replaces in place.
+6. Config derivation (`resolve.py`):
+   - `ResolvedRefs(phone_number: str (E.164), from_number: str, phone_number_id: UUID | None, telnyx_account_id:
+     UUID | None, voice: ResolvedVoice, models: PlatformModels, all_party_consent: bool = False,
+     ai_disclosure_state: bool = False)`; `ResolvedVoice(voice_id: UUID, provider_voice_id: str, settings:
+     VoiceSettings)`; `PlatformModels(dialogue: str, router: str)` (from `LLM_DIALOGUE_MODEL`/`LLM_ROUTER_MODEL`).
+   - `voice_settings` = `refs.voice.settings` → `org.voice_overrides[voice_id]` (whole object, if present) → merged
+     patch keys.
+   - model: `base`/`enhanced` → dialogue = `org.llm.dialogue_model or models.dialogue`; `turbo` → dialogue =
+     `org.llm.router_model or models.router`; `router_model` always `org.llm.router_model or models.router`. Any other
+     value: allowed when it equals one of the platform/org model ids, or when `org.llm.allow_model_override`; else
+     `INVALID_INPUT` field `model` ("Model ... is not allowed for this organization.").
+   - renames: `interruption_threshold`→`interruption_threshold_ms`, `max_duration`→`max_duration_min`,
+     `voicemail_detect_timeout_ms`→`voicemail.detect_timeout_ms`; `tools` split into `tool_ids`/`knowledge_base_ids`
+     (UUID of the suffix) and `inline_tools`; `retry` → `RetryConfig` (wait guaranteed by check_rules; a lower layer
+     retry without wait → INVALID_INPUT `<layer>.retry.wait`).
+   - record forced true when `post_call_evals` or `citation_schema_ids` non-empty.
+   - `ivr_mode` → `voicemail.action = "ignore"`, `voicemail.sensitive = False` (AMD-off and endpointing floor are
+     read from `ivr_mode` by later phases).
+   - guard rails (`guard_rails.py`): after merge, add `{"type":"tcpa:ai_disclosure"}` when absent and
+     (`org.ai_disclosure_required` or policy `always` or (`auto` and `refs.ai_disclosure_state`)); add
+     `{"type":"tcpa:recording_disclosure"}` when absent, `record` is true and (`org.recording_disclosure_required` or
+     policy `always` or (`auto` and `refs.all_party_consent`)). Org `default_guard_rails` items that do not parse as
+     `GuardRail` → `INVALID_INPUT` field `default_guard_rails[i]`. (T03c/T04 compute the two booleans when the
+     consent tables exist; default False.)
+   - `start_time`: naive → localized with the resolved `timezone` (`zoneinfo`, `fold=0`), converted to UTC;
+     must be `> now` and `<= now + 90 days` else `INVALID_INPUT` field `start_time`
+     ("start_time must be in the future" / "... at most 90 days ahead"). `now` must be aware (ValueError otherwise).
+   - derived: `no_input_timeout_ms`, `max_reprompts`, `greeting_timeout_ms` from call_defaults extras else §4.4
+     defaults; `error_phrase` from pathway ref else default.
+   - runner fields: `runner_type` = request.runner_type; `task` (task runner, persona prompt runner, agent
+     call_settings.task); pathway fields from the effective `PathwayRef`; persona/agent ids/versions; experiment ids.
+   - `phone_number`/`from_number`/`phone_number_id`/`telnyx_account_id` from refs; `test_mode` from request.
+   - build with `SendCallConfig.model_validate(dict)` so every field is checked once.
+
+### Files
+- create `packages/va_domain/src/va_domain/call_resolution/{__init__,inputs,layers,merge,resolve,guard_rails}.py`.
+- modify `packages/va_domain/src/va_domain/calls/__init__.py` + `calls/config.py` (or a new `calls/dispositions.py`):
+  `BUILTIN_DISPOSITIONS`, `SYSTEM_DISPOSITIONS` constants.
+- modify `apps/api/src/va_api/routers/org_settings.py` (`check_call_defaults` on PATCH) + a test in the existing
+  org settings API tests (bad key → 400 INVALID_INPUT field `call_defaults.foo`; good dict accepted).
+- create `apps/api/tests/support/resolved_snapshots.py` (fixture → runner inputs/refs with fixed UUIDs, fixed `now`
+  2026-11-15T12:00Z, `--write` regenerates) + `apps/api/tests/fixtures/bland_send_call_resolved/NN_*.json`
+  + extend `apps/api/tests/test_bland_send_call_fixtures.py` with a snapshot test (config
+  `model_dump(mode="json", by_alias=True)` + warnings, byte-identical to the committed file).
+  Fixture 06 `start_time` must be in the future relative to the fixed `now` (adjust fixture if needed).
+- specs/05 §4.3 Decision; specs/04 §7 Decision item 3 line; AGENTS.md learning line.
+
+### Tests (packages/va_domain/tests)
+- `test_call_resolution_precedence.py`: one parametrized table of ≥ 40 cases `(id, org_settings, runner,
+  body_patch, expected_subset)` built from a minimal body `{"phone_number":"+14155550100","task":"Hi"}` and
+  standard refs; covers: platform defaults; each mapped org default_* (set vs unset via fields_set); call_defaults
+  over default_*; pathway call_defaults over org; request over pathway; versioned persona over request; legacy
+  persona under request; persona_settings over persona; agent call_settings + request; request_data/metadata
+  replacement incl. `{}`; voice_settings 3-level merge incl. org voice_overrides; voicemail key merge + implied
+  leave_message + ivr_mode forcing ignore; warm_transfer/retry key merge; transfer_list/analysis_schema per-key;
+  dialing_strategy/post_call_evals replace; tools union/dedupe/inline name clash; KB alias; dispositions replace +
+  built-ins (no duplicates) + org default; guard rails union/replace + forced ai/recording rails per policy matrix;
+  record forced by evals/citations/org post_call_eval_setup_id; model mapping base/turbo/enhanced/org llm models/
+  allowed explicit/rejected; amd_default off; background_track_default mapping; start_time naive localization (DST
+  zone), offset form, past rejected, 90 d boundary (exactly 90 d ok, +1 s rejected); derived extras; pathway
+  transfer warning; task ignored warning; persona prompt vs task.
+- `test_call_resolution_layers.py`: invalid layer values → `CallRequestError` field prefixes; `check_call_defaults`
+  accepts extras/rejects unknown and runner keys; persona_layer mapping table; naive `now` → ValueError.
+- `merge_layers` accessor tests (voice/from_/tools for T03c).
+- Results compared with plain dict subsets of `config.model_dump(mode="json", by_alias=True)`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, spec refs, `npx --yes jscpd@4 --silent` (0 clones), radon. Coverage
+va_domain ≥ 85 %. No call flow → no e2e.
+
+### Risks
+- jscpd on the big case table / persona mapping: keep tables as data, one builder helper.
+- mypy narrowing on unions of runner dataclasses: use `match`/isinstance dispatch in one function.
+- `str_strip_whitespace`/alias `from` when re-validating merged dicts: merge on canonical names, convert `from` →
+  `from_number` explicitly.
+- Fields_set semantics: tests must build org with `load_settings({...})`, never `OrgSettings(**defaults)` with all
+  keys.
+
+## Build P05-T03b (Builder, 2026-11-01)
+Implemented `va_domain.call_resolution` (inputs/layers/merge/guard_rails/resolve) per plan, with these deviations:
+- persona `prompt` is not put into the layer; `persona_prompt(config)` supplies `task` (only for a persona without
+  pathway; request `task` overrides). Persona config keys null or empty list/object count as unset (stored configs
+  dump defaults). Versioned persona: request `request_data`/`metadata` re-applied over the persona layer (specs/20
+  §3.3). `persona_settings` applied last for legacy personas too.
+- request-only keys in any layer (`start_time`, `test_call`, `test_mode`) → INVALID_INPUT.
+- org `default_language`/`default_webhook_events` validated against the language table / webhook event set at
+  resolution (field = setting name); other default_* mapped directly.
+- runner inputs must match `request.runner_type` (ValueError otherwise).
+- `BUILTIN_DISPOSITIONS`/`SYSTEM_DISPOSITIONS` in `va_domain.calls.dispositions`.
+- snapshot test compares parsed JSON (prettier-formatted files); `.jscpd.json` ignores the snapshot dir.
+- `PATCH /v1/org/settings` + `PATCH /v1/org` validate sent `call_defaults` (`_check_call_defaults`).
+Tests: 74-case precedence table, 39 layer/error/warning/merge tests, 12 snapshots + 3 snapshot tests, 3 new API
+settings cases + valid-defaults test. va_domain call_resolution coverage 100 %.
+Gates: fmt 0; lint 0; mypy 948 files clean; placeholders 0; spec refs 0; jscpd 0 clones; radon avg A (3.03, no C);
+make test exit 0 (8307 passed, 7 skipped, 98.60 %); pip-audit clean; pnpm audit 3 moderate (no high, unchanged).
+No call flow touched → no e2e.
+
+## Review P05-T03b (Reviewer, 2026-11-01)
+Re-ran make lint typecheck placeholders (exit 0) and make test (8307 passed, 7 skipped, 98.60 %). Checked the diff against
+specs/05 §4.3: layer orders per runner, request_data/metadata replacement, tools union/dedupe, dispositions plus
+built-ins, guard rails keyed by type+name, record forcing, ivr_mode, model mapping, start_time localization and the 90-day
+window. Spec Decision and specs/04 item 3 are updated. Approved.

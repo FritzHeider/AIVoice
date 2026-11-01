@@ -142,6 +142,9 @@ async def test_values_are_stored_normalized(
         ({"bogus": 1}, "bogus"),
         ({"llm": {"bogus": 1}}, "llm.bogus"),
         ({"voice_overrides": {"not-a-uuid": {}}}, "voice_overrides.not-a-uuid"),
+        ({"call_defaults": {"recrod": True}}, "call_defaults.recrod"),
+        ({"call_defaults": {"max_tokens": 5}}, "call_defaults.max_tokens"),
+        ({"call_defaults": {"test_mode": True}}, "call_defaults.test_mode"),
     ],
 )
 async def test_invalid_settings_name_the_field(
@@ -224,6 +227,15 @@ async def test_only_platform_administrators_set_the_baa(
     response = await patch(client, {"settings": {"baa_signed_at": BAA}}, ORG)
     assert error_of(response) == (403, "FORBIDDEN", "settings.baa_signed_at")
     assert await stored_settings(identity, member.org.id) == {}
+
+
+async def test_valid_call_defaults_are_stored(
+    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    member = await signed_in(client, identity, container)
+    defaults = {"record": True, "amd": True, "no_input_timeout_ms": 6000}
+    assert (await patched(client, {"call_defaults": defaults}))["call_defaults"] == defaults
+    assert await stored_settings(identity, member.org.id) == {"call_defaults": defaults}
 
 
 async def test_hipaa_mode_needs_a_signed_baa(

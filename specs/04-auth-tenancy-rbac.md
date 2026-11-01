@@ -836,8 +836,10 @@ override fields `base_url`, `api_key_ref`, `dialogue_model`, `router_model`, `an
 >    `^[A-Za-z0-9 ]{1,15}$` or null (`16`); `batch_concurrency_share` 0.1–1.0 default 1.0 (`17`); group
 >    `sms: SmsSettings` with `sms.smart_encoding` true (`21`). `ai_disclosure_required=true` forces the AI-disclosure rail
 >    whatever `compliance.ai_disclosure_policy` says.
-> 3. Free-form until their owners land: `call_defaults` is a JSON object (validated against `SendCallRequest` when the
->    calls API lands; `07` reads `call_defaults.no_input_timeout_ms`); `default_guard_rails` items are
+> 3. Free-form until their owners land: `call_defaults` is a JSON object, validated on PATCH as a lower Send Call
+>    layer since P05-T03b (specs/05 §4.3 Decision: call parameters plus `no_input_timeout_ms`, `max_reprompts`,
+>    `greeting_timeout_ms`; unknown and request-only keys are `INVALID_INPUT` `call_defaults.<path>`);
+>    `default_guard_rails` items are
 >    `GuardRailConfig` (`type` one of the five `23` §1.1 types, other keys kept as sent), at most 10, until
 >    `va_compliance.guard_rails.GuardRail` replaces it.
 > 4. Value rules: `timezone` must load with `zoneinfo.ZoneInfo` (the package ships `tzdata`); `default_language` 1–16

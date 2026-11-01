@@ -1,4 +1,5 @@
-"""Bland-style Send Call bodies (one per parameter group) parse with `SendCallRequest` (specs/05 §3, §10)."""
+"""Bland-style Send Call bodies (one per parameter group) parse with `SendCallRequest` (specs/05 §3, §10)
+and resolve to the committed `SendCallConfig` snapshots (specs/05 §4.3)."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from resolved_snapshots import SNAPSHOTS, main, resolved
 
 from va_domain.calls import SendCallRequest, unknown_fields
 from va_domain.phone import normalize_e164
@@ -55,3 +57,26 @@ def test_tools_fixture_merges_knowledge_bases() -> None:
     tools = request.explicit_fields()["tools"]
     assert tools[-1] == "KB-0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b07"
     assert len(tools) == 4
+
+
+@pytest.mark.parametrize("path", FILES, ids=[path.name for path in FILES])
+def test_fixture_resolves_to_its_snapshot(path: Path) -> None:
+    snapshot = json.loads((SNAPSHOTS / path.name).read_text(encoding="utf-8"))
+    assert resolved(path) == snapshot
+
+
+def test_every_snapshot_has_a_request() -> None:
+    assert sorted(p.name for p in SNAPSHOTS.glob("*.json")) == [path.name for path in FILES]
+
+
+def test_snapshot_check_reports_up_to_date() -> None:
+    assert main([]) == 0
+
+
+def test_persona_fixture_applies_persona_settings_last() -> None:
+    config = resolved(FIXTURES / "03_persona_settings.json")["config"]
+    assert (config["first_sentence"], config["max_duration_min"], config["record"]) == (
+        "Hello from the Acme team!",
+        12.0,
+        True,
+    )

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793559625-a229
+> P05-T03b: va_domain.call_resolution merge_layers -> MergedParameters then resolve_call_config(org, request, runner, refs, now) -> CallResolution; org must come from load_settings (fields_set decides layered default_*); test builders packages/va_domain/tests/support/resolution_helpers.py; resolved snapshots apps/api/tests/fixtures/bland_send_call_resolved regenerated via PYTHONPATH=packages/va_domain/tests/support uv run python apps/api/tests/support/resolved_snapshots.py --write; pydantic union loc adds tags like constrained-str to field paths
+<!-- tags: calls, domain, testing | created: 2026-11-01 -->
+
 ### mem-1793556662-6cbd
 > P05-T02: edge carrier handler = va_edge.mapping.plan_effects (pure) + va_edge.carrier.CarrierEventHandler (default registry main.carrier_handlers); CallRepo.transition guarded UPDATE raises CallTransitionError(.current); seed calls via va_db tests support call_rows.py; FrozenClock app clock makes EventProcessor 2s budget fire instantly (HandlerTimeoutError) -> use clock with real sleep; Temporal signal args sent as model_dump(mode=json) (default converter)
 <!-- tags: telnyx, edge, testing | created: 2026-11-01 -->

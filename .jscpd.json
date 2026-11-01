@@ -1,4 +1,11 @@
 {
   "gitignore": true,
-  "ignore": ["**/schema.d.ts", "**/node_modules/**", "**/.next/**", "**/dist/**", "**/coverage/**"]
+  "ignore": [
+    "**/schema.d.ts",
+    "**/bland_send_call_resolved/**",
+    "**/node_modules/**",
+    "**/.next/**",
+    "**/dist/**",
+    "**/coverage/**"
+  ]
 }

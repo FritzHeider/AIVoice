@@ -1,0 +1,122 @@
+{
+  "config": {
+    "runner_type": "agent",
+    "task": "Greet {{first_name}} and book a demo.",
+    "pathway_id": null,
+    "pathway_version": null,
+    "start_node_id": null,
+    "persona_id": null,
+    "persona_version": null,
+    "agent_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b03",
+    "agent_version_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6c06",
+    "experiment_id": null,
+    "experiment_arm_id": null,
+    "phone_number": "+14155550125",
+    "country": "US",
+    "voice_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6c01",
+    "provider_voice_id": "21m00Tcm4TlvDq8ikWAM",
+    "voice_settings": {
+      "stability": 0.3,
+      "similarity_boost": 0.75,
+      "style": 0.0,
+      "use_speaker_boost": true,
+      "speed": 1.0
+    },
+    "first_sentence": null,
+    "wait_for_greeting": false,
+    "greeting_timeout_ms": 6000,
+    "language": "babel-en",
+    "dialogue_model": "zai-org/GLM-5.3-Flash",
+    "router_model": "zai-org/GLM-5.3-Router",
+    "temperature": 0.7,
+    "max_tokens": 200,
+    "pronunciation_guide": [],
+    "interruption_threshold_ms": null,
+    "interruptibility": 2,
+    "block_interruptions": false,
+    "noise_cancellation": true,
+    "background_track": null,
+    "hd_audio": false,
+    "record": true,
+    "max_duration_min": 30.0,
+    "from_number": "+14155550190",
+    "phone_number_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6c02",
+    "telnyx_account_id": null,
+    "dialing_strategy": {
+      "type": "default",
+      "pool_id": null
+    },
+    "timezone": "America/Chicago",
+    "start_time": null,
+    "transfer_phone_number": null,
+    "transfer_list": {},
+    "warm_transfer": {
+      "enabled": false,
+      "briefing_prompt": null,
+      "hold_audio": "music",
+      "timeout_s": 45
+    },
+    "tool_ids": [],
+    "inline_tools": [],
+    "knowledge_base_ids": [],
+    "memory_id": null,
+    "memory_enabled": false,
+    "ivr_mode": false,
+    "answered_by_enabled": true,
+    "voicemail": {
+      "action": "hangup",
+      "message": null,
+      "sms": null,
+      "sensitive": false,
+      "detect_timeout_ms": 10000
+    },
+    "summary_prompt": null,
+    "dispositions": [
+      "CALLBACK_REQUESTED",
+      "INTERESTED",
+      "NOT_INTERESTED",
+      "FOLLOW_UP_REQUIRED",
+      "CALL_BACK_SCHEDULED",
+      "TRANSFERRED",
+      "DO_NOT_CONTACT"
+    ],
+    "analysis_schema": null,
+    "analysis_prompt": null,
+    "citation_schema_ids": [],
+    "post_call_evals": null,
+    "stream_post_transfer_transcript": false,
+    "retry": null,
+    "request_data": {
+      "first_name": "Sam"
+    },
+    "metadata": {},
+    "external_id": "crm-contact-88412",
+    "webhook": null,
+    "webhook_events": [],
+    "dynamic_data": [],
+    "keywords": [],
+    "ignore_button_press": false,
+    "precall_dtmf_sequence": null,
+    "guard_rails": [
+      {
+        "type": "tcpa:ai_disclosure",
+        "name": null,
+        "description": null,
+        "config": {},
+        "action": null
+      },
+      {
+        "type": "tcpa:recording_disclosure",
+        "name": null,
+        "description": null,
+        "config": {},
+        "action": null
+      }
+    ],
+    "test_mode": false,
+    "max_reprompts": 2,
+    "no_input_timeout_ms": 8000,
+    "error_phrase": "I'm sorry, I'm having trouble on my end. Let me get someone to help you."
+  },
+  "warnings": []
+}

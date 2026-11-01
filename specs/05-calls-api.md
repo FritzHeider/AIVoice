@@ -246,6 +246,51 @@ Special rules:
 The resolution function `resolve_call_config(org, body, runner) -> SendCallConfig` is pure (no I/O; inputs loaded
 beforehand) and fully unit-tested with a table of ≥ 40 cases.
 
+> Decision (2026-11-01): call config resolution (P05-T03b). `va_domain.call_resolution.resolve_call_config(org,
+> request, runner, refs, now) -> CallResolution` (`.config` is the `SendCallConfig`, `.warnings` the
+> `ResolutionWarning`s for the `call.queued` event: `TASK_IGNORED`, `TRANSFER_IGNORED`). `runner` is one of
+> `TaskRunner`, `PathwayRunner(PathwayRef)`, `PersonaRunner(persona_id, version, legacy, config, pathway)`,
+> `AgentRunner(agent_id, agent_version_id, call_settings, pathway, experiment_id, experiment_arm_id)`; a
+> `PathwayRef` carries the already-resolved integer version, `global_config.call_defaults`, `error_phrase` and the
+> start node. `refs` holds the lookups (E.164 destination, caller number and its ids, voice row + stored settings,
+> platform dialogue/router model ids, the all-party-consent / AI-disclosure-state facts). `merge_layers(org,
+> request, runner)` runs first in the loader to learn the effective `voice`, `from`, `dialing_strategy`, `tools`.
+> Rules: (1) The org layer is the `default_*` settings that are explicitly set (`load_settings` keeps
+> `model_fields_set`) mapped to parameters (`default_language`, `default_record`, `default_max_duration_min`,
+> `default_webhook`, `default_webhook_events`, `timezone`, `default_country`, `summary_prompt_default`,
+> `dispositions_default` (as stored, not the request pattern), `noise_cancellation_default`,
+> `background_track_default` (`phone_static` → `null`), `amd_default="off"` → `answered_by_enabled=false`,
+> `memory.default_enabled`, `llm.temperature_default` (0–2 kept), `post_call_eval_setup_id`, `default_guard_rails`),
+> then `call_defaults` over them. `default_voice`/`default_voice_id`/`default_from_number` are the loader's
+> fallback when no layer sets `voice`/`from`. (2) Lower layers (`call_defaults`, `pathway.call_defaults`,
+> `persona.config`, `agent.call_settings`, `persona_settings`) parse with the request parameter model with unknown
+> keys rejected; they may also set `no_input_timeout_ms` (3 000–30 000), `max_reprompts` (0–5),
+> `greeting_timeout_ms` (1 000–30 000); `agent.call_settings` may set `task`; `start_time`, `test_call` and
+> `test_mode` are request-only; a layer `retry` needs `wait`. Failures are `INVALID_INPUT` with the layer source as
+> `field` prefix (e.g. `call_defaults.record`, `persona.config.call_settings.temperature`). (3) Orders: task/pathway
+> org → pathway defaults → request; agent org → pathway defaults → call_settings → request; versioned persona org →
+> pathway defaults → request → persona config → request `request_data`/`metadata` (specs/20 §3.3) →
+> `persona_settings`; legacy persona org → pathway defaults → persona → request → `persona_settings`. Persona config
+> keys set to `null` or an empty list/object count as unset; `prompt` becomes `task` only for a persona without
+> pathway (a request `task` overrides it). (4) Merge: scalars and arrays replace; `request_data`/`metadata` replace
+> (even `{}`); `voice_settings`, `voicemail`, `warm_transfer`, `retry` merge per sent key; `transfer_list` and
+> `analysis_schema` per entry; `dialing_strategy` and `post_call_evals` replace whole (their fields are coupled);
+> `tools` is the union over all layers keyed by `TL-`/`KB-` uuid or inline `name` (a higher inline tool replaces
+> in place); `guard_rails` union keyed by `type`+`name` (higher wins in place); built-in dispositions are appended
+> when absent. Pathway-backed calls drop `transfer_phone_number`/`transfer_list` with `TRANSFER_IGNORED`.
+> (5) Derivation: `voice_settings` = voice row settings → `org.voice_overrides[voice_id]` (whole) → merged patch;
+> `base`/`enhanced` → `llm.dialogue_model` or `LLM_DIALOGUE_MODEL`, `turbo` → `llm.router_model` or
+> `LLM_ROUTER_MODEL` (also `router_model` always); another `model` must be a platform or org model id unless
+> `llm.allow_model_override`, else `INVALID_INPUT` field `model`; `record` is forced by `post_call_evals` or
+> `citation_schema_ids`; `ivr_mode` forces `voicemail.action="ignore"` and `sensitive=false`; the AI rail is added
+> (inject mode, empty config) when absent and `ai_disclosure_required` or policy `always` or (`auto` and the
+> AI-disclosure-state fact), the recording rail when absent, `record` and (`recording_disclosure_required` or policy
+> `always` or (`auto` and all-party consent)); a naive `start_time` is localized in the resolved `timezone`
+> (`fold=0`) and every `start_time` must be after `now` and at most 90 days ahead (`INVALID_INPUT` field
+> `start_time`). The 12 Bland fixtures have committed resolved snapshots in
+> `apps/api/tests/fixtures/bland_send_call_resolved/`. `PATCH /v1/org/settings` validates a sent `call_defaults`
+> with the same layer rules (`check_call_defaults`).
+
 ### 4.4 `SendCallConfig` (resolved model persisted in `calls.config`)
 
 ```python
