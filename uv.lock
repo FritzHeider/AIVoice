@@ -2925,13 +2925,21 @@ version = "0.1.0"
 source = { editable = "apps/telephony_edge" }
 dependencies = [
     { name = "fastapi" },
+    { name = "orjson" },
+    { name = "pynacl" },
     { name = "va-common" },
+    { name = "va-db" },
+    { name = "va-telnyx" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.162.0" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "pynacl", specifier = ">=1.5" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
+    { name = "va-telnyx", editable = "packages/va_telnyx" },
 ]
 
 [[package]]

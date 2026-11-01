@@ -191,6 +191,44 @@ Routes: `POST /telnyx/voice`, `POST /telnyx/voice/{telnyx_account_id}`, `POST /t
 >    builders `media_message(payload)`, `mark_message(name)`, `clear_message()` return the JSON bytes;
 >    `segment_mark(turn, segment)` / `parse_segment_mark(name)` handle `seg:<turn_index>:<segment_index>`.
 
+> Decision (2026-11-01): webhook intake (P05-T01).
+> 1. The route selects the verification key, never the body (it is untrusted until verified): `/telnyx/voice` and
+>    `/telnyx/messaging` use `TELNYX_PUBLIC_KEY` (in `VA_ENV=local` an empty value falls back to
+>    `.sim/telnyx_public_key`; the edge refuses to start without a valid key); `/telnyx/{voice|messaging}/{id}` use
+>    the `public_key` of that `telnyx_accounts` row via `TelnyxAccountLookupRepo` (`pending`, `active`, or `error`;
+>    an unknown, `deleted`, or non-UUID id, or a stored key that does not load, answers `401` like a bad
+>    signature). Keys are cached in-process 5 min (unknown accounts 30 s) in two separate LRU caches of at most
+>    10 000 entries each, so a flood of distinct forged account ids (one lookup each) neither grows memory without
+>    bound nor evicts real accounts' keys. `connection_id`/`client_state` are read
+>    only after verification and only for attribution: `org_id` = the BYO account's org on a BYO route, else
+>    `client_state.org_id`; `call_id` = `client_state.call_id` (dropped on a BYO route when the state names another
+>    org); `call_control_id` = `payload.call_control_id`; an undecodable `client_state` is ignored; an org that
+>    does not exist stores NULL `org_id`. The stored `payload` is the whole verified envelope (`data` + `meta`).
+> 1a. Before anything else the raw body is capped at 1 MiB (Telnyx webhooks are a few KiB): a larger
+>    `Content-Length` is refused without reading, a chunked or understated body stops being read at the first chunk
+>    past the cap. Both answer `413 {"error":"payload_too_large"}`, store nothing, and count
+>    `event_type="unverified", result="error"` (not `invalid_signature`: no signature was checked).
+> 2. Step 7 is asynchronous so Telnyx gets a fast `200`: after the insert the edge offers the stored event to an
+>    in-process `EventProcessor` and answers `{"status":"ok"}` (a duplicate answers `{"status":"duplicate"}`).
+>    Events are sharded by `crc32(call_control_id or telnyx_event_id) % 8`, one worker per shard, so one leg's
+>    events are processed in arrival order. Each shard queue holds 256 events; when full the event stays
+>    unprocessed in Postgres and the reprocessor claims it (backpressure never turns into a non-2xx after an
+>    insert, which Telnyx would redeliver as a duplicate). A handler runs within the 2 s budget (then
+>    `HandlerTimeoutError`). Handlers are registered per `event_type` and must be idempotent; a type without a
+>    handler is marked processed. Other answers: `400 {"error":"invalid_payload"}` for a verified body that is not
+>    an envelope (nothing stored), `401 {"error":"invalid_signature"}`, `503 {"error":"unavailable"}` while shutting
+>    down or when the database is unreachable before the insert (Telnyx retries).
+> 3. `TelnyxEventReprocessor` runs every 5 s and claims (`TelnyxEventRepo.claim_retries`, specs/03 §2 Decision)
+>    events never processed for 30 s and failed events (`process_error` set) with fewer than 5 attempts whose last
+>    change is older than 5 s; `telnyx_events.process_attempts` (migration `0005`) counts every attempt, and the
+>    claim's `updated_at` touch is the lease that keeps other edge pods off the row.
+> 4. Metrics: the `telnyx_webhook_invalid_signature_total` of step 4 and the `telnyx_webhook_unhandled_total{type}` of
+>    §5 are the catalog counter `va_telnyx_webhooks_total{event_type,result}` (specs/27 §3.2): rejected requests
+>    count `event_type="unverified", result="invalid_signature"`, unparseable envelopes `event_type="invalid",
+>    result="error"`, then per event `duplicate`, `processed`, `unhandled` (no `va_telnyx` model for the type), or
+>    `error` (parse or handler failure, stored in `process_error`). `va_telnyx_webhook_processing_ms{event_type}`
+>    observes handler plus mark time per processed event.
+
 ### 4.2 Media WebSocket verification (in `media-worker`)
 
 Telnyx connects to `stream_url` with headers `telnyx-signature-ed25519` and `telnyx-timestamp`. Signed string:

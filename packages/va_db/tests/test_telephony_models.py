@@ -115,6 +115,7 @@ _COLUMNS: dict[str, list[tuple[str, bool]]] = {
         ("process_error", True),
         ("created_at", False),
         ("updated_at", False),
+        ("process_attempts", False),
     ],
 }
 
@@ -164,6 +165,7 @@ def test_server_defaults() -> None:
         ("number_pools", "strategy"): "'round_robin'",
         ("number_pools", "max_calls_per_number_per_day"): "100",
         ("number_pool_members", "calls_today"): "0",
+        ("telnyx_events", "process_attempts"): "0",
     }
 
 

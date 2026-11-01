@@ -78,7 +78,12 @@ from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy
 from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
 from va_db.repositories.sso import SsoConnectionLookupRepo, SsoConnectionRepo, SsoDomainClaim
-from va_db.repositories.telnyx_events import NewTelnyxEvent, TelnyxEventRepo
+from va_db.repositories.telnyx_accounts import (
+    WEBHOOK_ACCOUNT_STATUSES,
+    TelnyxAccountLookupRepo,
+    TelnyxWebhookKey,
+)
+from va_db.repositories.telnyx_events import RETRY_CLAIM_LIMIT, NewTelnyxEvent, TelnyxEventRepo
 
 __all__ = [
     "CLAIM_LIMIT",
@@ -96,7 +101,9 @@ __all__ = [
     "PASSWORD_RESET_TTL",
     "PURGE_RULES",
     "REPLAY_WINDOW",
+    "RETRY_CLAIM_LIMIT",
     "SUB_ACCOUNT_REFERENCE",
+    "WEBHOOK_ACCOUNT_STATUSES",
     "ApiKeyLookupRepo",
     "ApiKeyRecord",
     "ApiKeyRepo",
@@ -140,7 +147,9 @@ __all__ = [
     "StoredRow",
     "SystemRepository",
     "Takeover",
+    "TelnyxAccountLookupRepo",
     "TelnyxEventRepo",
+    "TelnyxWebhookKey",
     "TenantRepository",
     "conflict_savepoint",
     "grant_credits",

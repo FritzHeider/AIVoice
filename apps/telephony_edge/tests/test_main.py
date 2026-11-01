@@ -27,4 +27,4 @@ def test_serve_main_parses_args_and_runs(
     assert serve.main(argv) == 0
     from va_edge.main import app  # noqa: PLC0415
 
-    assert seen == [(app, expected, {})]
+    assert seen == [(app, expected, {"stop": app.state.stop})]

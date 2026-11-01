@@ -1,6 +1,6 @@
 # Phase 05 — Telephony Edge, Call Lifecycle, and Task-Mode Calling
 
-- [ ] P05-T01 Telephony edge: webhook intake
+- [x] P05-T01 Telephony edge: webhook intake — va_edge intake/keys/processor/reprocessor, migration 0005 process_attempts, TelnyxAccountLookupRepo, LRU-bounded BYO key caches, 1 MiB body cap (413); make lint/typecheck/placeholders 0, make test 7505 passed 7 skipped, coverage 98.57%
   - Spec refs: specs/06-telephony-telnyx.md (webhook verification, envelope, raw event storage); specs/01-architecture.md §2
   - Depends on: P03-T09, P01-T10
   - Deliverables: `POST /telnyx/voice`, `POST /telnyx/messaging` (stores raw events for later phase handling), signature verification on raw body (platform key and BYO account keys resolved via `connection_id`/`client_state`), dedupe on `telnyx_event_id`, fast 200 ACK then async processing task with backpressure

@@ -20,7 +20,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     bind = parse_bind(argv, default_port=DEFAULT_PORT, description="VoiceAgents telephony edge")
     from va_edge.main import app  # noqa: PLC0415 - `--help` and bad arguments exit before the app is built
 
-    return serve(app, bind)
+    return serve(app, bind, stop=app.state.stop)
 
 
 if __name__ == "__main__":

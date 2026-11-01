@@ -1078,3 +1078,16 @@ Grafana 3001
   (`VA_BENCH_REPORT` overrides the path). `harness(clock=RealtimeClock())` runs the pipeline harness on the wall
   clock; `pipeline_bench.run_conversation(clock=, turns=)` is the scripted zero-latency call. The outbound clock
   sends frames only while speech/background plays (no idle frames without a background track).
+- 2026-11-01 (P05-T01): Telnyx webhook intake = `va_edge.intake.WebhookIntake` (routes from `telnyx_routes()`),
+  `va_edge.keys.WebhookKeys` (route-selected key; BYO via system `TelnyxAccountLookupRepo`), `va_edge.processor.
+  EventProcessor` (8 shards × 256 queue, handler registry `create_app(handlers={event_type: fn})`, 2 s budget,
+  `join()` test seam) and `va_edge.reprocessor.TelnyxEventReprocessor` (`TelnyxEventRepo.claim_retries`; rules:
+  specs/06 §4.1 Decision P05-T01). The edge lifespan needs `TELNYX_PUBLIC_KEY` (local falls back to
+  `.sim/telnyx_public_key`); its container must expose `database` (`va_edge.container.EdgeDependencies`). Tests:
+  `apps/telephony_edge/tests/support/edge_helpers.py` (`Keypair`, `signed_headers`, `envelope`, `event_id_of`,
+  `edge_client(url, key, handlers=)`, `ProbeContainer` for probe tests, `stored_event`, `metric`), session fixture
+  `edge_db_url` (one migrated Postgres per xdist worker, shared by all edge modules: filter by your own ids, and
+  handlers must ignore rows of other tests a reclaim picks up). `updated_at` is always the DB clock (trigger), so
+  reclaim tests pass a `FrozenClock(now + 60 s)` instead of editing timestamps. Never parametrize with random
+  uuids (xdist collection mismatch); FakeTelnyx ids are seeded, so contract tests on a shared DB use
+  `telnyx_state(transport, seed=secrets.randbits(32))`.

@@ -57,7 +57,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
   (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
-  `TelnyxEventRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, `InvitationLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
+  `TelnyxEventRepo`, `TelnyxAccountLookupRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, `InvitationLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
 > role)` logs in with it and sends `role=va_app` / `role=va_system` as a connection startup parameter (asyncpg
@@ -91,6 +91,17 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > because an API key is resolved before any org context exists: `get_by_prefix(prefix)` returns an `ApiKeyRecord`
 > (the key row, revoked or not, joined with `orgs.status` and `orgs.plan_id`; `None` when unknown) and
 > `touch(api_key_id, now)` sets `last_used_at`.
+
+> Decision (2026-11-01): `TelnyxAccountLookupRepo` joins the `va_system` list because a BYO Telnyx webhook
+> (`/telnyx/{voice|messaging}/{telnyx_account_id}`, specs/06 §1) must be verified with the account's key before any
+> org context exists: `webhook_key(account_id)` returns `TelnyxWebhookKey(public_key, org_id)` for a `pending`,
+> `active`, or `error` account and `None` for an unknown or `deleted` one. `TelnyxEventRepo.record` stores NULL
+> `org_id` when the attributed org does not exist (attribution never fails the insert), `mark_processed` also
+> increments `process_attempts` (migration `0005`), and `claim_retries(now=, stale_after=, retry_after=,
+> max_attempts=, limit=200)` claims, oldest first with `FOR UPDATE SKIP LOCKED`, the events never processed whose
+> `updated_at < now - stale_after` plus the failed events (`process_error` set) with `process_attempts <
+> max_attempts` and `updated_at < now - retry_after`; claiming sets `updated_at`, which is the lease that keeps
+> other edge processes off the row (specs/06 §4.1 Decision P05-T01).
 
 > Decision (2026-10-29): the **global identity tables** (`orgs`, `users`, `sessions`, `email_tokens`) have no `org_id`
 > and no RLS; code reaches them through `Database.global_session()` (a `va_app` transaction with `app.org_id` unset,
@@ -377,7 +388,8 @@ CREATE TABLE telnyx_events (                          -- raw inbound Telnyx webh
   processed_at     timestamptz,
   process_error    text,
   created_at       timestamptz NOT NULL DEFAULT now(),
-  updated_at       timestamptz NOT NULL DEFAULT now()
+  updated_at       timestamptz NOT NULL DEFAULT now(),
+  process_attempts integer NOT NULL DEFAULT 0         -- processing attempts (TelnyxEventReprocessor, specs/06 §4.1)
 );
 CREATE INDEX telnyx_events_call_idx ON telnyx_events(call_id);
 CREATE INDEX telnyx_events_ccid_idx ON telnyx_events(call_control_id);

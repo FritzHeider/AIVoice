@@ -1,11 +1,11 @@
 # Session Handoff
 
-_Generated: 2026-11-01 13:11:37 UTC_
+_Generated: 2026-11-01 17:08:11 UTC_
 
 ## Git Context
 
 - **Branch:** `main`
-- **HEAD:** 5446135: chore: auto-commit before merge (loop primary)
+- **HEAD:** 71d123d: chore: auto-commit before merge (loop primary)
 
 ## Tasks
 
@@ -32,11 +32,11 @@ Recently modified:
 - `.ralph/agent/summary.md`
 - `AGENTS.md`
 - `README.md`
-- `apps/sim/pyproject.toml`
-- `apps/sim/src/va_sim_server/main.py`
-- `apps/sim/tests/test_sim.py`
-- `apps/sim/tests/test_sim_shared_redis.py`
-- `packages/va_common/tests/redis_container.py`
+- `packages/va_voice/BENCHMARKS.md`
+- `packages/va_voice/src/va_voice/pipeline/__init__.py`
+- `packages/va_voice/src/va_voice/pipeline/barge_in.py`
+- `packages/va_voice/src/va_voice/pipeline/dtmf.py`
+- `packages/va_voice/src/va_voice/pipeline/models.py`
 
 ## Next Session
 

@@ -1,11 +1,15 @@
 [project]
 name = "va-telephony-edge"
 version = "0.1.0"
-description = "VoiceAgents telephony edge: Telnyx webhook ingress (FastAPI), probes, metrics"
+description = "VoiceAgents telephony edge: Telnyx webhook ingress (FastAPI), event processing, probes, metrics"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.162.0",
+    "orjson>=3.13.0",
+    "pynacl>=1.5",
     "va-common",
+    "va-db",
+    "va-telnyx",
 ]
 
 [build-system]
@@ -17,3 +21,5 @@ module-name = "va_edge"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-db = { workspace = true }
+va-telnyx = { workspace = true }

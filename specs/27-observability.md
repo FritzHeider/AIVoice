@@ -127,7 +127,7 @@ named `LAT_MS`.
 
 | Metric | Type | Labels |
 |---|---|---|
-| `va_telnyx_webhooks_total` | counter | `event_type`, `result` (processed/duplicate/invalid_signature/error) |
+| `va_telnyx_webhooks_total` | counter | `event_type`, `result` (processed/duplicate/invalid_signature/error/unhandled) |
 | `va_telnyx_webhook_processing_ms` | histogram | `event_type` |
 | `va_inbound_calls_total` | counter | `result` (answered/rejected/fallback) |
 | `va_amd_results_total` | counter | `result` |

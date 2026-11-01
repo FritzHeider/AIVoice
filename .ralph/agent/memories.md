@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793554070-998d
+> P05-T01: edge intake = va_edge.intake/keys/processor/reprocessor; edge tests share session fixture edge_db_url (filter by own ids; reclaims pick up other tests' failed rows); telnyx_events.updated_at is DB-clock (trigger) so reclaim tests use FrozenClock(now+60s); FakeTelnyx ids seeded -> seed=secrets.randbits(32) on shared DB; never parametrize random uuids (xdist)
+<!-- tags: telnyx, edge, testing | created: 2026-11-01 -->
+
 ### mem-1793552401-ab71
 > P04-T13: bench tests (pytest.mark.bench) in packages/va_voice/tests/bench are deselected by that conftest unless -m mentions bench; full non-xdist run rewrites packages/va_voice/BENCHMARKS.md; harness(clock=RealtimeClock()) runs on wall clock; outbound sends no idle frames without background
 <!-- tags: voice, pipeline, testing | created: 2026-11-01 -->
@@ -301,6 +305,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793554070-c45d
+> failure: ruff check --fix --select RUF022,RUF100,SIM300 on packages/va_db stripped unrelated noqa comments in 16 files; fix=git checkout untouched files; never include RUF100 in a --select --fix
+<!-- tags: tooling, lint | created: 2026-11-01 -->
 
 ### mem-1793532827-46fa
 > va_llm tests: openai SDK resolves platform via asyncify(thread) before a new client's first request; under xdist+cov this outlasts ManualClock deadlines so the hanging first request is cancelled before respx and scripted answers shift (60 s timeout hangs). Fix: va_llm conftest autouse inline_sdk_platform_lookup patches openai._base_client.asyncify inline

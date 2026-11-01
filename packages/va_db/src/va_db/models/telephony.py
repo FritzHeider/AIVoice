@@ -10,7 +10,18 @@ import uuid
 from datetime import date, datetime
 from typing import Any, Literal, get_args
 
-from sqlalchemy import BigInteger, Date, ForeignKey, Index, LargeBinary, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -179,3 +190,7 @@ class TelnyxEvent(IdMixin, TimestampMixin, Base):
     payload: Mapped[dict[str, Any]] = jsonb_column()
     processed_at: Mapped[datetime | None] = mapped_column(tz())
     process_error: Mapped[str | None] = mapped_column(Text)
+    # Appended by migration 0005, so it sorts after the mixin timestamps (specs/03 §4 lists it last).
+    process_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), sort_order=1
+    )
