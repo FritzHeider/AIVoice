@@ -129,6 +129,29 @@ Algorithm on each delta:
 Property tests (hypothesis): concatenation of emitted clauses equals normalized input; no clause > 200 chars; numbers
 `3.14`, `$1,250.50`, `10:30` never split.
 
+> Decision (2026-11-01): Clause chunker (P04-T06). `va_voice.text.chunker.ClauseChunker` exposes `feed(delta) ->
+> list[str]`, `flush() -> list[str]` (end of utterance; resets `emitted_count` and all state) and
+> `chunk_stream(deltas, chunker=None)` for the async-stream form. Every clause is stripped and ends with exactly one
+> space. Clarifications: (1) every boundary character (sentence, clause, dash) must be followed by whitespace or the
+> end of the stream, so `a,b`, `1,000`, `3.14`, `$1,250.50` and `10:30` never split; this subsumes the
+> digit-on-both-sides rule. (2) ` - ` counts only with whitespace on both sides; `—` only when followed by
+> whitespace. (3) The abbreviation token is the text back to the previous space, trailing `.!?` and leading
+> quotes/brackets removed, lowercased; abbreviations apply to `.` only. `no` counts as an abbreviation only when the
+> next token starts with a digit (`No. 5`), because "No. I can help" is common phone dialogue; while that next token
+> has not arrived the chunker waits. (4) A candidate that fails its minimum-word rule is skipped and the scan goes on,
+> so the earliest *valid* index wins; words are whitespace-separated tokens containing a letter or digit. (5) The
+> length cap hard-cuts at 160 characters when the first 160 contain no space, so no clause exceeds 160 characters
+> plus the trailing space. (6) Any clause without a letter or digit (cap clause or end-of-stream rest) is dropped.
+> (7) Markdown (`va_voice.text.markdown`, per line split at `\n`/`\r`): at line start, after whitespace, every `#`
+> run followed by whitespace or end of line is removed, then at most one list marker (`-`, `*`, `+`, or 1-3 ASCII
+> digits followed by `.`/`)`) that is followed by whitespace; in the rest of the line every backtick and `*` is
+> removed, and a `_` run is removed unless a letter or digit sits on both sides of it (`user_id` stays). Then line
+> breaks become spaces, whitespace collapses, and the text is stripped. `normalize_text` is the reference; the
+> streaming `MarkdownStripper` gives the identical result for any split of the input, holding back only an
+> undecided line start, an `_` run, and trailing whitespace. (8) The property "concatenation equals normalized
+> input" is `"".join(clauses) == normalize_text(text) + " "` whenever every token contains a letter or digit and no
+> 160-character run lacks a space; output is identical for every split of the input into deltas.
+
 ## 6. Pronunciation guide (`va_voice.text.pronunciation.PronunciationApplier`)
 
 Applied to each clause before sending (and to static/cached texts before synthesis).

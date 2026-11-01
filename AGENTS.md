@@ -995,3 +995,10 @@ Grafana 3001
   block_interruptions=, interruptible=)`, `BackchannelClassifier.classify(text | words)` (greedy longest phrase on
   `text_norm.tokens`). `BACKCHANNELS` is checked verbatim against the specs/07 §7 paragraph by `test_interrupt.py`;
   thresholds live in `LEVEL_RULES`. The caller measures `speech_ms` of the current continuous VAD segment.
+- 2026-11-01 (P04-T06): agent-speech text utilities live in the `va_voice.text` subpackage (`__init__` imports
+  nothing; P04-T07 pronunciation and the alignment timeline go there too). `va_voice.text.chunker.ClauseChunker`
+  (`feed(delta)`/`flush()`/`chunk_stream(deltas)`; rules: specs/09 §5 Decision P04-T06) returns clauses with exactly
+  one trailing space, and `flush()` resets the first-clause minimums. Markdown normalization is
+  `va_voice.text.markdown.normalize_text` (reference) + `MarkdownStripper` (streaming twin, `space_pending` tells the
+  chunker that whitespace follows the released text); hypothesis tests require identical output for every split of
+  the input, so any rule change must keep both in step.

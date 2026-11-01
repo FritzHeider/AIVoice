@@ -582,3 +582,160 @@ Approved. Re-ran: lint pass, typecheck pass, placeholders 0, make test 6893 pass
 100 %). Checked against specs/07 §7 table (levels 1-4 thresholds, inclusive), backchannel set (spec-parsed test),
 effective level order (block → interruptible=False → node 0-3 → call 0-4), §13 DTMF barge-in at levels ≥ 1. Decision
 note covers ambiguities; specs/30 interruptibility_levels row aligned to 07 (≥ 4 words).
+
+## Plan P04-T06 (Planner, 2026-11-01)
+Clause chunker, specs/09 §5 (consumer: specs/07 §8 step 4; each clause goes to `TtsSocket.send(ctx, clause, flush=True)`,
+then `flush(ctx)` at the end of the utterance, see the specs/09 §11 Decision P03-T10 item 4). The module is pure and sync,
+with a thin async adapter. specs/09 puts text utilities in `va_voice/text/`, so create that subpackage (T07 adds
+`pronunciation.py` next to it).
+
+### Files
+1. `packages/va_voice/src/va_voice/text/__init__.py`: docstring only, no imports, so importing `va_voice.text.chunker`
+   stays cheap.
+2. `packages/va_voice/src/va_voice/text/markdown.py`: markdown and whitespace normalization.
+   - `normalize_text(raw: str) -> str`: the reference whole-text function. Process line by line (`\r\n`/`\r`/`\n`).
+     At line start (after leading spaces/tabs), drop in a loop: a run of `#` followed by whitespace/EOL, the list markers
+     `- `, `* `, `+ ` and `\d{1,3}[.)] ` (one marker per line, after headings). Remove every backtick. Remove every
+     `*` run. Remove a `_` run unless it has a letter or digit on BOTH sides (`user_id` is kept, `_word_` → `word`).
+     Then newlines become spaces, whitespace runs (any `str.isspace`) collapse to one space, and the result is
+     stripped.
+   - `class MarkdownStripper`: the streaming twin. `feed(raw: str) -> str` returns the normalized text that is now
+     final; `finish() -> str` returns the rest and resets. Contract (hypothesis-tested): for ANY split of a raw string
+     into deltas, `"".join(feed(d) for d in deltas) + finish() == normalize_text(raw)`. Implementation: keep an
+     undecided raw tail and only release text whose normalization can no longer change. Hold back:
+     (a) the current line while its line-start prefix is undecided (only whitespace / `#` / `-*+` / digits seen, or a
+     marker that is not yet followed by its space);
+     (b) a trailing `_`/`*` run, plus one char of lookahead after a `_` run (intraword check needs the next char);
+     (c) a trailing whitespace run. Emit it as a single space only once a non-space char follows; drop it at
+     `finish()`; never emit leading whitespace at stream start.
+     Simplest correct approach: track `_line_start: bool`, `_pending_space: bool`, `_started: bool`, `_prev_char` (last
+     raw non-markup char, for the `_` rule) and the held raw tail. Process char by char in a small loop with helper
+     methods; keep every function radon ≤ B.
+3. `packages/va_voice/src/va_voice/text/chunker.py`:
+   - Constants (`Final`): `ABBREVIATIONS` = the §5 set verbatim (`frozenset`: mr mrs ms dr st jr sr inc ltd co corp vs
+     etc e.g i.e a.m p.m u.s no ave blvd dept approx est mt ft apt); `SENTENCE_END = ".!?"`, `CLAUSE_END = ",;:"`,
+     `EM_DASH = "—"`; `FIRST_SENTENCE_MIN_WORDS = 2`, `SENTENCE_MIN_WORDS = 3`, `FIRST_CLAUSE_MIN_WORDS = 4`,
+     `CLAUSE_MIN_WORDS = 7`, `LENGTH_CAP = 160`.
+   - `class ClauseChunker`, with `__init__()` and state `_stripper: MarkdownStripper`, `_buf: str`,
+     `_emitted_count: int`:
+     - `feed(delta: str) -> list[str]`: run the stripper, append to `_buf`, then repeatedly take the earliest valid
+       boundary. Each returned clause is `buf[:i+1].strip() + " "` (exactly one trailing space, specs/09 §3).
+     - `flush() -> list[str]`: `finish()` the stripper, run the boundary loop once more (end of stream counts as
+       whitespace after the last char), then return the stripped remainder (+ " ") when it has a letter or digit. A
+       punctuation-only remainder is dropped (§5 rule 5). Reset all state so the instance can serve the next utterance.
+     - `emitted_count` property; `pending` property (the current `_buf`, for tests and debugging).
+   - Boundary search, `_boundary(buf, *, final: bool) -> int | None` = min over valid candidates of:
+     - sentence: `buf[i] in ".!?"`, `buf[i+1]` is whitespace (or `i` is the last index and `final`); token before the
+       terminator (chars back to the previous whitespace, the trailing terminator removed, leading opening quotes and
+       brackets stripped, lowercased) is not in ABBREVIATIONS; not a digit on both sides; words(buf[:i+1]) ≥ 2 for the
+       first clause, else ≥ 3.
+     - clause: `buf[i] in ",;:"` or `buf[i] == "—"`, or `buf[i] == "-"` with whitespace before it; also followed by
+       whitespace (or last+final); not digit-on-both-sides; words ≥ 4 for the first clause, else ≥ 7.
+     - cap: `len(buf) >= 160` → `j = buf.rfind(" ", 0, 160)`; when `j > 0` the boundary is `j` (the clause is
+       `buf[:j]`). With no space in the first 160 chars, hard-cut at 159 (clause = `buf[:160]`).
+     - words = whitespace-separated tokens that contain at least one letter or digit.
+     Rescanning from 0 on every delta is acceptable because buf stays ≤ ~160 chars. Keep `_boundary` under radon B by
+     splitting it into `_sentence_ok(buf, i, first)`, `_clause_ok(...)`, `_cap(buf)`.
+   - `async def chunk_stream(deltas: AsyncIterable[str], chunker: ClauseChunker | None = None) -> AsyncIterator[str]`:
+     yields the clauses of each delta, then of `flush()` (the specs/09 §5 "async stream" input form).
+4. specs/09 §5: add `> Decision (2026-11-01): P04-T06 ...` recording:
+   - API: `feed`/`flush`/`chunk_stream`; each clause ends with exactly one space; `flush()` resets.
+   - A boundary char must be followed by whitespace (end of stream counts) for clause and dash boundaries too, not
+     only sentences. Otherwise `a,b` would be split and rejoining would change the text. This also guarantees that
+     `3.14`, `$1,250.50` and `10:30` are never split.
+   - ` - ` counts only with whitespace on both sides. `—` counts only when followed by whitespace.
+   - `no` is treated as an abbreviation only when the next token starts with a digit (`No. 5`), because "No. I can
+     help" is common in phone dialogue. Every other set member always counts.
+   - The abbreviation token is compared after stripping leading quotes/brackets.
+   - A boundary candidate that fails its minimum-word rule is skipped and the scan continues, so the earliest VALID
+     index wins.
+   - The length cap hard-cuts at 160 when the first 160 chars contain no space.
+   - Markdown rules: the exact `*`/`_`/backtick/heading/list-marker rules above, with streaming output equal to the
+     whole-text normalization.
+   - A punctuation-only end-of-stream remainder is dropped, never sent.
+   - The property "concatenation equals normalized input" means `"".join(clauses) == normalize_text(input) + " "`
+     whenever every whitespace-separated token contains a letter or digit and no 160-char run lacks a space.
+5. AGENTS.md bullet (P04-T06): module locations, the `va_voice.text` subpackage (T07 goes there), the trailing-space
+   contract, and that `normalize_text` is the reference for the streaming stripper.
+
+### Tests
+`packages/va_voice/tests/text/test_markdown.py`:
+- Table of `normalize_text` cases: `**bold**`, `*em*`, `_em_`, `snake_case_id` kept, `` `code` ``, `# Title\nText`,
+  `### H`, `- a\n- b`, `* a`, `+ a`, `1. a\n2. b`, `12) x`, `#hashtag` mid-line kept (no space after `#` at line
+  start is also kept), `-5 degrees` at line start kept, `15 people` at line start kept, `\r\n`, tabs, NBSP, leading
+  and trailing whitespace, empty input.
+- Streaming equivalence: hypothesis over text drawn from an alphabet of markdown-heavy chars
+  (`"ab1 _*#-+.)\n\t`"` plus letters) × random split points: the join of `feed`s plus `finish` equals
+  `normalize_text`. Also a char-by-char feed for every table case. `finish()` resets: a second use behaves like a
+  fresh instance.
+
+`packages/va_voice/tests/text/test_chunker.py`:
+- Golden cases (feed the whole text, then flush; and char by char; both must give the same clauses):
+  - "Thanks for calling Acme Dental. How can I help you today?" → 2 clauses.
+  - First-clause rules: "Hi. I'm Sarah from Acme." → one clause, since "Hi." has 1 word < 2. "Hi there. Yes." →
+    "Hi there." | "Yes." (the remainder comes out at flush).
+  - Later sentence needs 3 words: "Hello there. Ok sure. Great, let's go." → "Hello there." | "Ok sure. Great, let's
+    go."
+  - Clause boundaries: first clause at a comma after ≥ 4 words ("Sure thing, my friend, I can..."); later clauses need
+    ≥ 7 words.
+  - Abbreviations: "Dr. Smith will see you at 3 p.m. tomorrow, ok." does not split after "Dr." or "p.m". Also "e.g."
+    and "U.S.". "No. 5 Main St. is open." does not split, while "No. I can't do that today." splits after "No." only
+    if the min-words rule passes. Assert: first clause "No." has 1 word, so no split; a later "No. I can't" has 1
+    word < 3, so no split. Also assert a later "I said no. Then we left." splits after "no." (3 words).
+  - Numbers: "It costs $1,250.50 total, which is 3.14 times more, at 10:30 today." is never split inside the
+    numbers.
+  - Ellipsis: "Well... I think so. Okay then." splits after "Well..." only by the word rules (1 word < 2, so no).
+    "Let me check that... one moment please." gives the clause "Let me check that..." (4 words).
+  - Dashes: "I can help — let me look that up for you right now." (em dash with spaces, 4 words); "well-known"
+    never splits; "a - b" counts.
+  - Length cap: 170 chars of words with no punctuation → the first clause ends at the last space before 160 and is
+    ≤ 160 chars. A 300-char run with no spaces → hard cut at 160.
+  - Markdown stream: "**Sure!** Here are options:\n1. Cleaning\n2. Whitening" → no `*`, no `1.` markers.
+  - Punctuation-only remainder dropped: feed "Hello there friend. " then " ... )" → flush returns []. Whitespace-only
+    input gives [].
+  - Every returned clause ends with exactly one space and has no leading space.
+  - `flush()` resets `emitted_count`: the next utterance applies the first-clause minimums again.
+  - Streaming holds back an undecided terminator: feeding "It is 3." returns [] (or no clause ending in "3."), and
+    feeding "14 now." then yields "It is 3.14 now." only once the rules allow it.
+- Hypothesis properties (`@given` text built from tokens = alnum words (1-12 chars, letters/digits, optionally with
+  embedded `.`/`,`/`:` between digits like `3.14`) + optional trailing punctuation from `.,;:!?`, plus "—" and "-"
+  tokens, joined by random whitespace incl. `\n`; split into random deltas):
+  1. `"".join(all clauses) == normalize_text(input) + " "` (or `[]` when normalized is empty).
+  2. Every clause is ≤ 200 chars (actually ≤ 161 incl. the space).
+  3. Number tokens `3.14`, `$1,250.50`, `10:30` inserted at random positions appear intact inside one clause.
+  4. Split invariance: the clauses are identical for every delta split.
+- `chunk_stream`: an async generator of deltas yields the same clauses as feed + flush, and works with a supplied
+  chunker (pytest-asyncio, already used by the package; check `asyncio_mode` in root pyproject).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (100 % on `text/`), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a packages/va_voice/src`,
+pip-audit and pnpm audit (no new deps).
+
+### Risks
+- The streaming stripper equivalence is the hard part. Write `normalize_text` first, then build the stripper against
+  the hypothesis test with a markdown-heavy alphabet. If a held-back rule is wrong, the property finds it fast.
+- The `_` rule needs the next char, so hold one char. The line-start rule may hold a whole short line: that is fine,
+  because lines are released as soon as a non-marker char arrives.
+- Hypothesis text generation must avoid punctuation-only tokens and spaceless runs ≥ 160 for property 1 (both are
+  covered by unit tests instead).
+
+## Build P04-T06 (Builder, 2026-11-01)
+Implemented per plan: `va_voice/text/__init__.py` (docstring only), `text/markdown.py` (`normalize_text` reference +
+streaming `MarkdownStripper` with `space_pending`; line-start prefix regex + "undecided" regex), `text/chunker.py`
+(`ClauseChunker` feed/flush/emitted_count/pending, `chunk_stream`). Deviations from plan: chunker uses the stripper's
+`space_pending` so a boundary at the buffer end fires as soon as whitespace is known (no need to wait for the next
+word); `no.` with the next token unknown makes the scan wait (split invariance); list markers need following
+whitespace (headings may end the line). specs/09 §5 Decision P04-T06; AGENTS bullet. Tests `tests/text/test_markdown.py`
++ `test_chunker.py` (137: golden incl. char-by-char equality, every abbreviation, no-before-number, cap, punctuation-
+only drop, flush reset, chunk_stream, hypothesis concat/≤160/number/split-invariance properties), shared
+`tests/support/text_helpers.split_at`. Gotcha: the Write tool turned `\uXXXX` escapes into literal chars (RUF001) —
+re-escaped. Gates: fmt ok; lint 0; typecheck 0; placeholders 0; spec refs 0; make test 7030 passed / 7 skipped
+(98.49 %; text/ 100 %); jscpd 0 clones; radon A (2.84); pip-audit clean; pnpm audit 3 moderate (no high).
+
+## Review P04-T06 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint pass, typecheck pass, placeholders 0, make test 7030 passed / 7 skipped (98.49 %; text/ 100 %).
+Checked against specs/09 §5: abbreviation set verbatim (test), min words 2/3 first/later sentence and 4/7 clause,
+cap at last space before 160, punctuation-only drop, numbers never split. Probed spec-like inputs by hand (Dr./p.m.,
+No. 5, ellipsis, markdown list, $1,250.50/3.14/10:30) – correct. Known limitation (consistent with the spec's
+"followed by whitespace" rule, not a defect): a terminator inside closing quotes (`there." She`) is not a boundary.

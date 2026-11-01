@@ -30,7 +30,7 @@
   - Deliverables: `InterruptPolicy.should_interrupt(speech_ms, words, text, level, agent_speaking)` and `BackchannelClassifier`
   - Acceptance: matrix test covering levels × inputs exactly as specified.
 
-- [ ] P04-T06 Clause chunker for streaming TTS
+- [x] P04-T06 Clause chunker for streaming TTS — va_voice.text.chunker ClauseChunker + markdown normalize_text/MarkdownStripper; golden + hypothesis (concat, ≤160, numbers, split invariance); make test 7030 passed / 7 skipped (98.49 %, text/ 100 %); lint/typecheck/placeholders clean
   - Spec refs: specs/09-tts-elevenlabs.md (token → clause chunker algorithm)
   - Depends on: P00-T05
   - Deliverables: `ClauseChunker.feed(delta) -> list[str]`, `flush()`, abbreviation and number handling, min words / max chars rules
