@@ -243,7 +243,7 @@
     `SIM_STATE_REDIS_URL` is set; `SIM_WORKERS` processes
   - Acceptance: two sim processes see the same registered scenario.
 
-- [ ] P03-T16 Live smoke tests for vendor clients
+- [x] P03-T16 Live smoke tests for vendor clients — tests_live/test_vendor_clients.py (7 live tests: Telnyx account read + number search, ElevenLabs voices/TTS WS with alignment + cancel/realtime STT/batch STT with WER ≤ 10 %, Telnyx Inference stream/tool call/structured/1024-dim embeddings) gated by LIVE_TESTS=1 + per-key skips; test_live_gate proves 7 skipped in a child pytest; specs/30 §7 Decision P03-T16; AGENTS.md run command; make test 6434 passed / 7 skipped / 98.42 %
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)
   - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13b, P03-T14b
   - Deliverables: `tests_live/test_vendor_clients.py` (Telnyx: list numbers/profiles; ElevenLabs: list voices, short TTS over WS with alignment, Scribe realtime on a committed WAV fixture, batch STT; Telnyx Inference: streaming chat, forced tool call, embeddings with 1024 dims); skipped unless `LIVE_TESTS=1`

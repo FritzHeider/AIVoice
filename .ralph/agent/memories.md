@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793536549-931f
+> P03-T16: live smoke suite in tests_live/ (support modules live_env/live_clients/live_wer/live_fixture on pytest pythonpath + mypy_path); module pytestmark live+skipif LIVE_TESTS!=1, per-key skip in conftest fixtures; test_live_gate runs child pytest with PYTEST_/COV_CORE_/LIVE_ env stripped and asserts '7 skipped' (update LIVE_TEST_COUNT when adding live tests)
+<!-- tags: testing, live | created: 2026-11-01 -->
+
 ### mem-1793535767-6ed1
 > P03-T15c: SIM_STATE_REDIS_URL shares scenarios/latencies/reset+seed/utterance ids via va_sim.shared.SharedState (Lua writes, sim:state:* keys, pubsub sim:state:events); shared writers use async SimState methods (reset_all/add_scenario/set_latencies/set_profile/allocate_utterance, SharedStateUnavailable->503 state_unavailable), readers await state.sync(); tests = two SimStates on FakeAsyncRedis(server=FakeServer()), server.connected=False for outage, wait_applied(version) for subscriber; redis_container.running_redis_url + sim_helpers.control_client shared helpers
 <!-- tags: sim, redis, testing | created: 2026-11-01 -->

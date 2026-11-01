@@ -20,6 +20,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
 | Simulator end-to-end | `make e2e` (single flow: `uv run pytest tests_e2e -m e2e -k barge_in`) |
 | Dashboard e2e | `make e2e-ui` |
+| Live vendor smoke | `LIVE_TESTS=1 LIVE_TELNYX_API_KEY=… LIVE_ELEVENLABS_API_KEY=… LIVE_LLM_API_KEY=… uv run pytest tests_live -m live -rs` (optional `LIVE_FROM_NUMBER`, `VA_ENV`; commit the generated `tests_live/fixtures/stt_phrase.*` after the first run) |
 | Dashboard dev server | `corepack pnpm --filter dashboard dev` (port 3000; set `NEXT_TELEMETRY_DISABLED=1`) |
 | One TS package's gates | `corepack pnpm --filter <dashboard\|@voiceagents/widget\|@voiceagents/sdk> run <lint\|typecheck\|test\|build>` |
 | Regenerate TS API types | `make openapi` then `corepack pnpm --filter dashboard gen:api` and `corepack pnpm --filter @voiceagents/sdk gen:api` |
@@ -942,3 +943,9 @@ Grafana 3001
   (`tests/test_shared_state.py`), `state.wait_applied(version)` waits for the subscriber, `server.connected = False`
   simulates a Redis outage. Two sims by hand: `SIM_STATE_REDIS_URL=redis://localhost:6379/15 uv run python -m
   va_sim_server.main --port 19100` and the same with `--port 19500`. `SIM_WORKERS` other than 1 exits 2.
+- 2026-11-01 (P03-T16): live smoke = `tests_live/` (specs/30 §7 Decision P03-T16): `test_vendor_clients.py` (module
+  `pytestmark` = `live` + skipif `LIVE_TESTS != "1"`; fixtures in `tests_live/conftest.py` skip per missing key via
+  `live_env.require`), helpers in `tests_live/support/` (`live_env`, `live_clients` endpoints/model defaults,
+  `live_wer`, `live_fixture` cached TTS-generated STT WAV + sha256 JSON). `make test` collects it (7 skipped);
+  `test_live_gate.py` runs a child pytest with `PYTEST_*`/`COV_CORE_*`/`LIVE_*` stripped from the env. Adding a live
+  test changes `LIVE_TEST_COUNT` there. `tests_live/**` has the same ruff ignores as `**/tests/**`.

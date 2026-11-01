@@ -1314,6 +1314,33 @@ playing pre-synthesized ElevenLabs utterances via `playback_start`), `LIVE_ELEVE
 | `test_sms_live` | send SMS between two test numbers; `message.finalized` delivered |
 | `test_number_search_live` | search returns inventory (no purchase) |
 
+> Decision (2026-11-01): vendor-client live smoke (P03-T16).
+> 1. `tests_live/test_vendor_clients.py` covers the phase-03 clients with seven tests:
+>    `test_telnyx_account_read_live` (balance; `voiceagents` call control apps and outbound voice profiles; the
+>    `voiceagents-{VA_ENV}` messaging profile, `VA_ENV` defaulting to `staging`; `LIVE_FROM_NUMBER` lookup when set),
+>    `test_number_search_live` (US, `limit=5`, E.164, no purchase), `test_elevenlabs_voices_live`,
+>    `test_elevenlabs_tts_ws_live` (ulaw_8000 audio whose alignment characters spell the sent text; a second context
+>    cancelled after its first chunk yields no further audio and still ends with `is_final`),
+>    `test_elevenlabs_stt_ws_live`, `test_elevenlabs_batch_stt_live` (`scribe_v2`), and `test_telnyx_inference_live`
+>    (streaming chat with TTFT and no fallback, a streamed tool call, a forced `record_sentiment` structured call,
+>    embeddings of `EMBEDDINGS_DIMENSIONS` unit vectors). The other rows of the table land with the phase that builds
+>    the flow (calls, AMD, transfer, recording, webhook signature: telephony phases; SMS: messaging; clone: voices).
+> 2. Every test carries `@pytest.mark.live`; the module is skipped unless `LIVE_TESTS=1` exactly, and each test skips
+>    when its key (`LIVE_TELNYX_API_KEY`, `LIVE_ELEVENLABS_API_KEY`, `LIVE_LLM_API_KEY`) is empty, naming the variable.
+>    Keys come from the process environment only (no `.env` loading) and never appear in a repr or assertion message.
+> 3. Endpoints are the specs/02 §6 "real:" values; models are the specs/02 §6 defaults read from `LlmSettings`,
+>    `DEFAULT_TTS_MODEL`, and `SttConnection` (the batch model `scribe_v2` is spelled out until the worker settings
+>    declare `ELEVENLABS_BATCH_STT_MODEL`).
+> 4. The STT fixture is `tests_live/fixtures/stt_phrase.wav` (PCM16 mono 8 kHz, ElevenLabs TTS `pcm_8000` of a fixed
+>    phrase in a premade voice) plus `stt_phrase.json` (`text`, `voice_id`, `model_id`, `sha256` of the WAV). A live
+>    run that finds neither file synthesizes and saves both; the developer commits them. A missing half or a sha256
+>    mismatch fails the test instead of regenerating. The realtime test sends the fixture as μ-law in 20 ms frames
+>    paced in real time, then 0.5 s of silence and a manual commit.
+> 5. WER = word-level Levenshtein distance / reference words after lowercasing, joining apostrophes, and splitting on
+>    other punctuation (`tests_live/support/live_wer.py`, no new dependency); realtime and batch STT must be ≤ 10 %.
+> 6. `tests_live` is in pytest `testpaths`, so `make test` collects the suite and reports the live tests skipped;
+>    `tests_live/test_live_gate.py` (not live) proves that in a child pytest, with and without `LIVE_TESTS=1`.
+
 ## 8. Voice quality evals (`evals/`)
 
 - Input: recordings + transcripts from e2e realistic runs and live smoke runs (`evals/data/*.jsonl` index).
