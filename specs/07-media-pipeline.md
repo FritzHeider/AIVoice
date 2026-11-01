@@ -276,6 +276,42 @@ Concurrency rule: at most one active agent utterance; a new user turn arriving w
 (but before audio started) cancels the generation (same as barge-in steps 3–4 without `clear`) and the new user text
 is concatenated to the previous user turn text (`"{prev} {new}"`) before re-running the engine.
 
+> Decision (2026-11-01) P04-T12b: barge-in, the specs/07 §7 policy and this concurrency rule live in
+> `va_voice.pipeline.CallPipeline` with the pure `va_voice.pipeline.barge_in.BargeInMonitor`. The policy is evaluated
+> after every inbound frame batch and every STT partial while `Speaker.is_playing` (first frame sent, not stopped,
+> not completed) and a VAD speech segment is open: `speech_ms = now − speech_start` of that segment, text = latest
+> partial of the open user turn, level = `effective_level(call interruptibility, node timing.interruptibility
+> (cached after every reply), block_interruptions, the utterance's interruptible)`; at most one decision per
+> segment (only an honored decision ends the segment's evaluation: an attempt closed because playback stopped
+> counts as unhonored, and the same segment is evaluated again against the next utterance). Sequence: (a) `Speaker.interrupt(t_i)` stops the tracker at `t_i` and drops the local queue before its
+> first await (a second trigger in the same tick finds nothing playing), sends `transport.clear` (`t_clear`) and
+> cancels the TTS context unless `is_final` arrived; (b) the reply task is cancelled, which closes the LLM token
+> stream (`Speaker` closes `SpeakText.tokens` explicitly) and the Brain output stream, and records the interrupted
+> assistant turn with the frozen `played_ms`; (c) `Brain.on_interrupted(text_spoken + "—")`; (d)
+> `PipelineObserver.on_interrupt(InterruptRecord)` (§7 step 7 fields, `reaction_ms = t_clear − speech_start`, which
+> includes the level's speech threshold; `clear_delay_ms = t_clear − t_i` is the ≤ 120 ms target),
+> `va_barge_in_total{honored="true"}` + reaction histogram. A segment that overlapped playback and ended (or outlived
+> the utterance) without interrupting counts once as `honored="false"`. False barge-in: after an honored barge-in of
+> a non-resume utterance with an unspoken remainder, a user turn whose committed transcript is blank or missing
+> after `stt_commit_timeout_ms` (no partial fallback), or a discarded turn, is not given to the Brain; the pipeline
+> speaks `"Sorry — " + unspoken` itself as an interruptible static line that is never resumed again;
+> `PipelineStats.false_barge_ins` (no specs/27 metric yet). Any delivered user turn clears the pending resume. Turn
+> routing at end of turn: a turn that overlapped interruptible playback (level ≥ 1) without a barge-in and is only
+> backchannels is dropped (`ignored_backchannels`); while a reply runs and none of its audio went out, its
+> generation is cancelled (TTS context, then the reply task; no `clear`) and the new turn is delivered as
+> `merge_turns(answered turn, new)` with `UserTurn.supersedes` = the answered turn's index (the opener has no turn,
+> so nothing is prepended); while a reply runs whose audio started, the turn is held (level 0, non-interruptible
+> lines, or speech too short to interrupt) and merged with further held turns; the held turn is delivered when the
+> reply ends, or merged in front of the caller's turn still open at that moment. `PipelineObserver.on_user_turn`
+> fires when a turn is handed to the Brain (and for turns arriving while the call is closing); user and agent turns
+> keep sharing one index counter, and false barge-ins consume no index. Telephony actions (§7 step 5, "continue to
+> completion") are never cancelled by a reply cancel: `ActionHandler.handle` runs in its own task awaited through
+> `asyncio.shield`, so a barge-in, the concurrency rule or the watchdog cancels the reply right away (the inbound
+> path never waits for an action) and only the outputs after the action are lost; the reply loop waits for that
+> action before it starts the next reply, and its failure ends the pipeline with `error`. The end of the pipeline
+> cancels an action still in flight (`pipeline_action_abandoned`). A turn cannot cancel `EndCall`: it sets closing
+> first, and turns arriving while closing are never answered.
+
 ## 9. Outbound clock and playback tracking
 
 `OutboundClock` runs every 20 ms (drift-corrected using `loop.time()` targets, not sleep accumulation):

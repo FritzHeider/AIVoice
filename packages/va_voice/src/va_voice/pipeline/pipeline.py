@@ -14,6 +14,17 @@
 - ``watchdog``: ``max_duration_message`` at ``max_duration - warning`` (pre-empting any reply, not
   interruptible), then ends the pipeline at ``max_duration`` (``max_duration``).
 
+Barge-in (§7, §8, Decision P04-T12b): after every inbound frame batch and every STT partial the
+:class:`~va_voice.pipeline.barge_in.BargeInMonitor` evaluates the interruption policy while an utterance
+plays; an honored barge-in clears the far end, cancels the TTS context, cancels the reply task (LLM stream),
+hands the truncated text to ``Brain.on_interrupted`` and arms the false-barge-in resume. A user turn that
+ends while a reply is still generating (no audio yet) cancels it and is merged with the turn it answered; one
+that ends while a reply is audible is held (dropped when only a backchannel) and delivered after playback.
+Telephony actions are never cut short (§7 step 5): an ``ActionHandler.handle`` runs shielded in its own
+task, so cancelling the reply (barge-in, concurrency rule, watchdog) stops only the rest of the generation;
+the reply loop waits for the action before it starts the next reply. Only the end of the pipeline cancels
+an action.
+
 Every task failure ends the pipeline with ``error`` (logged ``pipeline_failed``); the first end reason wins.
 The pipeline never hangs up, persists or publishes: :meth:`run` returns a :class:`PipelineResult`, turn
 records and latency reports go to the :class:`PipelineObserver`, telephony actions to the
@@ -30,14 +41,18 @@ from typing import Any, Final
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_voice.endpointing import EndOfTurn, Endpointer, EndpointerSettings, TurnDiscarded
+from va_voice.interrupt import InterruptDecision, effective_level
 from va_voice.latency import LatencyTracer, TurnMark, TurnTimer
 from va_voice.outbound import FrameMixer
+from va_voice.pipeline.barge_in import BargeInMonitor, merge_turns
 from va_voice.pipeline.config import PipelineConfig
 from va_voice.pipeline.inbound import InboundPath
 from va_voice.pipeline.models import (
     BrainAction,
     BrainOutput,
+    BrainTiming,
     EndCall,
+    InterruptRecord,
     PipelineResult,
     PipelineStats,
     SpeakStatic,
@@ -57,19 +72,21 @@ from va_voice.pipeline.protocols import (
     TtsStream,
     VoiceActivityDetector,
 )
-from va_voice.pipeline.speaker import Speaker
+from va_voice.pipeline.speaker import Interruption, Speaker
 from va_voice.pipeline.waits import wait_until_set, within
 from va_voice.reorder import NULL_OBSERVER as NULL_REORDER_OBSERVER
 from va_voice.reorder import ReorderObserver
 from va_voice.text.pronunciation import PronunciationApplier
 from va_voice.vad import VadEvent
 
-__all__ = ["CallPipeline", "StreamEndedError", "default_context_id"]
+__all__ = ["RESUME_PREFIX", "CallPipeline", "StreamEndedError", "default_context_id"]
 
 _log = get_logger(__name__)
 
 _MS_PER_SECOND: Final = 1000.0
 _WAKE_EPSILON_MS: Final = 0.001
+RESUME_PREFIX: Final = "Sorry — "
+"""Prefix of the false-barge-in resume (§7)."""
 
 
 class StreamEndedError(RuntimeError):
@@ -81,9 +98,17 @@ class _PipelineEnded(Exception):  # noqa: N818 (a control-flow signal, not an er
 
 
 @dataclass(frozen=True, slots=True)
-class _Job:
+class _TurnJob:
     turn: UserTurn
-    timer: TurnTimer
+    timer: TurnTimer | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeJob:
+    text: str
+
+
+type _Job = _TurnJob | _ResumeJob
 
 
 def default_context_id(index: int) -> str:
@@ -145,6 +170,14 @@ class CallPipeline:
         self._start_ms = 0.0
         self._closing = False
         self._reply_task: asyncio.Task[None] | None = None
+        self._reply_turn: UserTurn | None = None
+        self._reply_timer: TurnTimer | None = None
+        self._reply_resume = False
+        self._action: asyncio.Task[None] | None = None
+        self._timing = BrainTiming()
+        self._monitor = BargeInMonitor(on_unhonored=self._on_unhonored)
+        self._held: UserTurn | None = None
+        self._pending_resume: str | None = None
         self._end_reason: str | None = None
         self._error: BaseException | None = None
 
@@ -168,6 +201,10 @@ class CallPipeline:
     def inbound(self) -> InboundPath:
         return self._inbound
 
+    @property
+    def barge_in(self) -> BargeInMonitor:
+        return self._monitor
+
     async def run(self) -> PipelineResult:
         """Run the leg until it ends; cancelling the caller cancels every task and re-raises."""
         if self._started:
@@ -182,6 +219,8 @@ class CallPipeline:
                     group.create_task(self._guarded(name, work), name=f"pipeline-{name}")
         except* _PipelineEnded:
             pass
+        finally:
+            await self._abandon_action()
         reason = self._end_reason if self._end_reason is not None else "error"
         _log.info("pipeline_ended", end_reason=reason, turns=self._turn_index)
         return PipelineResult(reason, self._turn_index, self._stats, self._error)
@@ -219,6 +258,7 @@ class CallPipeline:
         async for event in self._transport.events():
             if isinstance(event, InboundAudio):
                 self._on_vad(await self._inbound.push(event))
+                await self._check_barge_in()
             elif isinstance(event, MarkEcho):
                 self._speaker.on_mark(event.name)
             else:
@@ -232,18 +272,23 @@ class CallPipeline:
             if event.kind == "speech_start" and not self._endpointer.turn_open:
                 self._turn_start_ms = event.at_ms
             self._endpointer.on_vad(event)
+            self._monitor.on_vad(event)
         if edges:
             self._endpoint_wake.set()
 
     async def _read_stt(self) -> None:
         async for event in self._stt.events():
             self._on_stt(event)
+            if event.kind == "partial":
+                await self._check_barge_in()
         message = "the STT event stream ended"
         raise StreamEndedError(message)
 
     def _on_stt(self, event: SttEventLike) -> None:
         if event.kind == "partial":
             self._endpointer.on_partial(event.text, self._now_ms())
+            if self._endpointer.turn_open:
+                self._monitor.on_partial(event.text)
             self._endpoint_wake.set()
         elif event.kind == "committed":
             self._on_committed(event)
@@ -265,6 +310,91 @@ class CallPipeline:
         message = "the TTS audio stream ended"
         raise StreamEndedError(message)
 
+    # barge-in
+
+    async def _check_barge_in(self) -> None:
+        now = self._now_ms()
+        playing = self._speaker.is_playing(now)
+        level = self._level() if playing else 0
+        decision = self._monitor.evaluate(now, playing=playing, level=level)
+        if decision:
+            await self._barge_in(decision, now, level)
+
+    def _level(self) -> int:
+        return effective_level(
+            call_level=self._config.interruptibility,
+            node_level=self._timing.interruptibility,
+            block_interruptions=self._config.block_interruptions,
+            interruptible=self._speaker.current_interruptible,
+        )
+
+    async def _barge_in(self, decision: InterruptDecision, at_ms: float, level: int) -> None:
+        """§7 steps 2-7: clear + TTS cancel (speaker), cancel the reply (LLM stream), truncate history."""
+        speech_start = self._monitor.speech_started_ms
+        timer = self._reply_timer
+        interruption = await self._speaker.interrupt(at_ms)
+        if interruption is None:
+            return
+        truncated = interruption.truncated
+        if interruption.resumable and truncated.unspoken:
+            self._pending_resume = truncated.unspoken
+        if timer is not None:
+            timer.mark_interrupted()
+        await self._cancel_reply()
+        await self._brain.on_interrupted(truncated.history_text)
+        self._report_interrupt(
+            interruption, decision, at_ms, at_ms if speech_start is None else speech_start, level
+        )
+
+    def _report_interrupt(
+        self,
+        interruption: Interruption,
+        decision: InterruptDecision,
+        at_ms: float,
+        speech_start: float,
+        level: int,
+    ) -> None:
+        truncated = interruption.truncated
+        reaction_ms = interruption.clear_ms - speech_start
+        record = InterruptRecord(
+            turn_index=interruption.utterance_index,
+            at_ms=at_ms,
+            speech_start_ms=speech_start,
+            clear_ms=interruption.clear_ms,
+            reaction_ms=reaction_ms,
+            clear_delay_ms=interruption.clear_ms - at_ms,
+            played_ms=interruption.played_ms,
+            played_chars=truncated.played_chars,
+            total_chars=truncated.total_chars,
+            level=level,
+            reason=decision.reason,
+        )
+        self._stats.barge_ins += 1
+        self._latency.barge_in(honored=True, reaction_ms=reaction_ms)
+        self._observer.on_interrupt(record)
+        _log.info(
+            "pipeline_barge_in",
+            turn_index=record.turn_index,
+            reason=record.reason,
+            level=level,
+            reaction_ms=round(reaction_ms, 3),
+            played_chars=record.played_chars,
+            total_chars=record.total_chars,
+        )
+
+    def _on_unhonored(self) -> None:
+        """Caller speech overlapped playback and ended (or outlived it) without interrupting."""
+        self._stats.unhonored_barge_ins += 1
+        self._latency.barge_in(honored=False)
+
+    async def _cancel_reply(self) -> None:
+        """Cancel the running reply task and wait for it (closes the Brain stream and the LLM tokens)."""
+        task = self._reply_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.wait({task})
+
     # turns
 
     async def _endpoint_loop(self) -> None:
@@ -282,24 +412,96 @@ class CallPipeline:
             if isinstance(result, EndOfTurn):
                 await self._end_of_turn(result)
             elif isinstance(result, TurnDiscarded):
-                self._stats.discarded_turns += 1
-                _log.debug("pipeline_turn_discarded", started_ms=result.started_ms)
+                self._on_discarded(result)
 
     async def _end_of_turn(self, eot: EndOfTurn) -> None:
-        index = self._next_index()
         start = self._turn_start_ms if self._turn_start_ms is not None else eot.last_voiced_end_ms
         self._turn_start_ms = None
+        commit_ms = self._now_ms()
+        committed = await self._commit_stt()
+        overlapped = self._monitor.overlapped_playback
+        self._monitor.reset_turn()
+        blank = committed is None or not committed.text.strip()
+        if self._pending_resume is not None and blank:
+            self._false_barge_in()
+            return
+        index = self._next_index()
         timer = self._latency.start_turn(index)
         timer.mark(TurnMark.USER_SPEECH_START, start)
         timer.mark(TurnMark.USER_SPEECH_END, eot.last_voiced_end_ms)
         timer.mark(TurnMark.EOT, eot.at_ms)
-        timer.mark(TurnMark.STT_COMMIT)
-        committed = await self._commit_stt()
+        timer.mark(TurnMark.STT_COMMIT, commit_ms)
         timer.mark(TurnMark.STT_FINAL)
-        turn = _user_turn(index, eot, start, committed)
+        await self._route_turn(_user_turn(index, eot, start, committed), timer, overlapped=overlapped)
+
+    def _on_discarded(self, result: TurnDiscarded) -> None:
+        self._monitor.reset_turn()
+        self._turn_start_ms = None
+        if self._pending_resume is not None:
+            self._false_barge_in()
+            return
+        self._stats.discarded_turns += 1
+        _log.debug("pipeline_turn_discarded", started_ms=result.started_ms)
+        self._flush_held()
+
+    def _false_barge_in(self) -> None:
+        """§7 false-barge-in protection: noise interrupted the agent; re-speak the unspoken remainder once."""
+        remainder = self._pending_resume
+        self._pending_resume = None
+        if remainder is None or self._closing:
+            return
+        self._stats.false_barge_ins += 1
+        _log.info("pipeline_false_barge_in", chars=len(remainder))
+        self._jobs.put_nowait(_ResumeJob(f"{RESUME_PREFIX}{remainder}"))
+
+    async def _route_turn(self, turn: UserTurn, timer: TurnTimer, *, overlapped: bool) -> None:
+        """§7/§8: deliver, merge with a reply still generating, hold behind audible playback, or drop."""
+        if self._closing:
+            # Recorded for the transcript, never answered: the call is ending.
+            self._stats.user_turns += 1
+            self._observer.on_user_turn(turn)
+            _log.debug("pipeline_turn_dropped", turn_index=turn.index)
+            return
+        if overlapped and self._monitor.classifier.is_backchannel(turn.text):
+            self._stats.ignored_backchannels += 1
+            _log.debug("pipeline_backchannel_ignored", turn_index=turn.index)
+            self._flush_held()
+            return
+        running = self._reply_running()
+        if running and self._speaker.reply_audio_started:
+            self._held = merge_turns(self._held, turn)
+            self._stats.held_turns += 1
+            _log.debug("pipeline_turn_held", turn_index=turn.index)
+            return
+        if self._held is not None:
+            turn = merge_turns(self._held, turn)
+            self._held = None
+        if running:
+            previous = self._reply_turn
+            await self._speaker.cancel_generation()
+            await self._cancel_reply()
+            turn = merge_turns(previous, turn, supersede=True)
+            self._stats.merged_turns += 1
+            _log.info("pipeline_turn_merged", turn_index=turn.index, supersedes=turn.supersedes)
+        self._deliver(turn, timer)
+
+    def _deliver(self, turn: UserTurn, timer: TurnTimer | None) -> None:
+        self._pending_resume = None
         self._stats.user_turns += 1
         self._observer.on_user_turn(turn)
-        self._jobs.put_nowait(_Job(turn, timer))
+        self._jobs.put_nowait(_TurnJob(turn, timer))
+
+    def _flush_held(self) -> None:
+        """Deliver the held turn if no reply runs and the caller is not mid-turn (else its EOT merges it)."""
+        held = self._held
+        if held is None or self._closing or self._reply_running() or self._endpointer.turn_open:
+            return
+        self._held = None
+        self._deliver(held, None)
+
+    def _reply_running(self) -> bool:
+        task = self._reply_task
+        return task is not None and not task.done()
 
     async def _commit_stt(self) -> SttEventLike | None:
         """Commit the STT and wait for its committed transcript (``None`` after ``stt_commit_timeout_ms``)."""
@@ -319,16 +521,33 @@ class CallPipeline:
     # replies
 
     async def _reply_loop(self) -> None:
-        await self._run_reply(self._brain.start(), None)
+        await self._run_reply(self._brain.start(), None, None)
+        await self._settle_action()
         while True:
+            self._flush_held()
             job = await self._jobs.get()
             if self._closing:
-                _log.debug("pipeline_turn_dropped", turn_index=job.turn.index)
+                _log.debug("pipeline_job_dropped", job=type(job).__name__)
                 continue
-            await self._run_reply(self._brain.on_user_turn(job.turn), job.timer)
+            if isinstance(job, _ResumeJob):
+                await self._run_reply(_resume_outputs(job.text), None, None, resume=True)
+            else:
+                await self._run_reply(self._brain.on_user_turn(job.turn), job.timer, job.turn)
+            await self._settle_action()
 
-    async def _run_reply(self, outputs: AsyncIterator[BrainOutput], timer: TurnTimer | None) -> None:
+    async def _run_reply(
+        self,
+        outputs: AsyncIterator[BrainOutput],
+        timer: TurnTimer | None,
+        turn: UserTurn | None,
+        *,
+        resume: bool = False,
+    ) -> None:
         """Run one reply in its own task (cancellable on its own); its failure or end signal propagates."""
+        self._speaker.begin_reply()
+        self._reply_turn = turn
+        self._reply_timer = timer
+        self._reply_resume = resume
         task = asyncio.get_running_loop().create_task(
             self._guarded("reply", self._reply(outputs, timer)), name="pipeline-reply"
         )
@@ -337,6 +556,7 @@ class CallPipeline:
             await asyncio.wait({task})
         finally:
             self._reply_task = None
+            self._reply_timer = None
             if not task.done():
                 task.cancel()
                 await asyncio.wait({task})
@@ -355,7 +575,7 @@ class CallPipeline:
 
     async def _handle_output(self, output: BrainOutput, timer: TurnTimer | None) -> None:
         if isinstance(output, SpeakText | SpeakStatic):
-            await self._speaker.speak(output, timer)
+            await self._speaker.speak(output, timer, resume=self._reply_resume)
         elif isinstance(output, EndCall):
             await self._end_call(output)
         else:
@@ -375,7 +595,38 @@ class CallPipeline:
         if self._actions is None:
             _log.info("pipeline_action_unhandled", kind=action.kind)
             return
-        await self._actions.handle(action)
+        task = asyncio.get_running_loop().create_task(self._actions.handle(action), name="pipeline-action")
+        self._action = task
+        try:
+            # Cancelling the reply lands here at once; the action itself runs to completion.
+            await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._action = None
+
+    async def _settle_action(self) -> None:
+        """Wait for an action that outlived its cancelled reply; its failure fails the reply loop."""
+        task = self._action
+        if task is None:
+            return
+        await asyncio.wait({task})
+        self._action = None
+        _log.info("pipeline_action_completed_after_cancel")
+        task.result()
+
+    async def _abandon_action(self) -> None:
+        """The pipeline ended: cancel an action still in flight (the call is over)."""
+        task = self._action
+        self._action = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+            _log.info("pipeline_action_abandoned")
+        await asyncio.wait({task})
+        if not task.cancelled() and task.exception() is not None:
+            exc = task.exception()
+            _log.warning("pipeline_action_failed", error_type=type(exc).__name__, error=str(exc))
 
     async def _stop_reply(self) -> None:
         """Cut off the reply in progress (its audio and its Brain stream)."""
@@ -406,6 +657,7 @@ class CallPipeline:
     def _apply_timing(self) -> None:
         """Endpointing settings of the Brain's current node (re-read after every reply)."""
         timing = self._brain.timing()
+        self._timing = timing
         self._endpointer.configure(
             EndpointerSettings(
                 resumption_speed=timing.resumption_speed,
@@ -435,6 +687,11 @@ def _user_turn(index: int, eot: EndOfTurn, start_ms: float, committed: SttEventL
     return UserTurn(
         index, committed.text.strip(), start_ms, eot.last_voiced_end_ms, words, committed.language_code
     )
+
+
+async def _resume_outputs(text: str) -> AsyncIterator[BrainOutput]:
+    """The false-barge-in resume: one interruptible static line, no Brain involved."""
+    yield SpeakStatic(text, interruptible=True)
 
 
 async def _close(outputs: AsyncIterator[BrainOutput]) -> None:

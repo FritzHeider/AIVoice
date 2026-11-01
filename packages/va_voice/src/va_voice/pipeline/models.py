@@ -20,6 +20,7 @@ __all__ = [
     "BrainTiming",
     "EndCall",
     "EndReason",
+    "InterruptRecord",
     "PipelineResult",
     "PipelineStats",
     "SpeakStatic",
@@ -33,7 +34,11 @@ EndReason = Literal["transport_closed", "agent_hangup", "max_duration", "no_inpu
 
 @dataclass(frozen=True, slots=True)
 class UserTurn:
-    """A finished user turn on the pipeline timeline (ms); ``dtmf`` is set for keypad turns (§13)."""
+    """A finished user turn on the pipeline timeline (ms); ``dtmf`` is set for keypad turns (§13).
+
+    ``supersedes``: index of an earlier turn this one replaces (§8 concurrency rule: the earlier turn's reply
+    was cancelled before any audio and its text is the front of this one).
+    """
 
     index: int
     text: str
@@ -42,6 +47,7 @@ class UserTurn:
     words: tuple[str, ...] = ()
     language_code: str | None = None
     dtmf: str | None = None
+    supersedes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +111,27 @@ class AgentTurn:
     ended_ms: float
 
 
+@dataclass(frozen=True, slots=True)
+class InterruptRecord:
+    """One honored barge-in (``call.interrupt``, §7 step 7), times in pipeline ms.
+
+    ``reaction_ms`` = ``clear_ms - speech_start_ms``; ``clear_delay_ms`` = ``clear_ms - at_ms`` (decision to
+    clear).
+    """
+
+    turn_index: int
+    at_ms: float
+    speech_start_ms: float
+    clear_ms: float
+    reaction_ms: float
+    clear_delay_ms: float
+    played_ms: float
+    played_chars: int
+    total_chars: int
+    level: int
+    reason: str
+
+
 @dataclass(slots=True)
 class PipelineStats:
     """Counters of one pipeline run."""
@@ -114,6 +141,12 @@ class PipelineStats:
     discarded_turns: int = 0
     commit_timeouts: int = 0
     stale_tts_chunks: int = 0
+    barge_ins: int = 0
+    unhonored_barge_ins: int = 0
+    false_barge_ins: int = 0
+    ignored_backchannels: int = 0
+    merged_turns: int = 0
+    held_turns: int = 0
 
 
 @dataclass(frozen=True, slots=True)

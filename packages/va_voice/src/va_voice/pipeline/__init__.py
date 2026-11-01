@@ -1,5 +1,6 @@
 """The transport-agnostic call pipeline (specs/07-media-pipeline.md, Decision P04-T12a)."""
 
+from va_voice.pipeline.barge_in import BargeInMonitor, merge_turns
 from va_voice.pipeline.config import (
     DEFAULT_MAX_DURATION_MESSAGE,
     DEFAULT_NO_INPUT_GOODBYE,
@@ -15,13 +16,14 @@ from va_voice.pipeline.models import (
     BrainTiming,
     EndCall,
     EndReason,
+    InterruptRecord,
     PipelineResult,
     PipelineStats,
     SpeakStatic,
     SpeakText,
     UserTurn,
 )
-from va_voice.pipeline.pipeline import CallPipeline, StreamEndedError, default_context_id
+from va_voice.pipeline.pipeline import RESUME_PREFIX, CallPipeline, StreamEndedError, default_context_id
 from va_voice.pipeline.protocols import (
     NULL_OBSERVER,
     ActionHandler,
@@ -39,7 +41,7 @@ from va_voice.pipeline.protocols import (
     TtsStream,
     VoiceActivityDetector,
 )
-from va_voice.pipeline.speaker import Speaker
+from va_voice.pipeline.speaker import Interruption, Speaker
 from va_voice.pipeline.waits import wait_until_set, within
 
 __all__ = [
@@ -47,9 +49,11 @@ __all__ = [
     "DEFAULT_NO_INPUT_GOODBYE",
     "DEFAULT_NO_INPUT_PROMPT",
     "NULL_OBSERVER",
+    "RESUME_PREFIX",
     "SUPPORTED_FORMATS",
     "ActionHandler",
     "AgentTurn",
+    "BargeInMonitor",
     "Brain",
     "BrainAction",
     "BrainOutput",
@@ -60,6 +64,8 @@ __all__ = [
     "InboundAudio",
     "InboundDtmf",
     "InboundPath",
+    "InterruptRecord",
+    "Interruption",
     "MarkEcho",
     "PipelineConfig",
     "PipelineObserver",
@@ -79,6 +85,7 @@ __all__ = [
     "UserTurn",
     "VoiceActivityDetector",
     "default_context_id",
+    "merge_turns",
     "wait_until_set",
     "within",
 ]

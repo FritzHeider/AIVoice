@@ -41,6 +41,7 @@ from va_voice.pipeline import (
     BrainTiming,
     InboundAudio,
     InboundDtmf,
+    InterruptRecord,
     MarkEcho,
     TransportEvent,
     UserTurn,
@@ -63,6 +64,7 @@ __all__ = [
     "RecordingObserver",
     "Said",
     "ScriptedBrain",
+    "SlowActions",
     "decode_frame",
     "encode_frame",
     "hanging",
@@ -455,12 +457,29 @@ class FakeTts:
         await self._tasks.aclose()
 
 
-async def tokens(text: str, clock: Clock | None = None, *, first_delay_s: float = 0.0) -> AsyncIterator[str]:
-    """``text`` as word deltas (an LLM stream); the first one ``first_delay_s`` after iteration starts."""
-    if clock is not None and first_delay_s:
-        await clock.sleep(first_delay_s)
-    for word in text.split(" "):
-        yield f"{word} "
+async def tokens(
+    text: str,
+    clock: Clock | None = None,
+    *,
+    first_delay_s: float = 0.0,
+    per_token_delay_s: float = 0.0,
+    calls: list[tuple[str, float]] | None = None,
+) -> AsyncIterator[str]:
+    """``text`` as word deltas (an LLM stream); the first one ``first_delay_s`` after iteration starts, the
+    others ``per_token_delay_s`` apart. With ``calls`` (and ``clock``), closing the stream before its end logs
+    ``("llm.cancel", ms)``."""
+    done = False
+    try:
+        if clock is not None and first_delay_s:
+            await clock.sleep(first_delay_s)
+        for i, word in enumerate(text.split(" ")):
+            if clock is not None and per_token_delay_s and i:
+                await clock.sleep(per_token_delay_s)
+            yield f"{word} "
+        done = True
+    finally:
+        if not done and calls is not None and clock is not None:
+            calls.append(("llm.cancel", _now_ms(clock)))
 
 
 async def hanging(text: str) -> AsyncIterator[str]:
@@ -486,6 +505,17 @@ class ScriptedBrain:
         self.no_input_calls = 0
         self.interrupted: list[str] = []
         self.closed = 0
+        self._clock: Clock | None = None
+        self._calls: list[tuple[str, float]] | None = None
+
+    def bind(self, clock: Clock, calls: list[tuple[str, float]]) -> None:
+        """Log ``brain.closed`` / ``brain.interrupted`` with virtual ms into the shared ``calls`` list."""
+        self._clock = clock
+        self._calls = calls
+
+    def _log(self, name: str) -> None:
+        if self._calls is not None and self._clock is not None:
+            self._calls.append((name, _now_ms(self._clock)))
 
     async def start(self) -> AsyncIterator[BrainOutput]:
         try:
@@ -493,6 +523,7 @@ class ScriptedBrain:
                 yield output
         finally:
             self.closed += 1
+            self._log("brain.closed")
 
     async def on_user_turn(self, turn: UserTurn) -> AsyncIterator[BrainOutput]:
         self.user_turns.append(turn)
@@ -502,6 +533,7 @@ class ScriptedBrain:
                 yield output
         finally:
             self.closed += 1
+            self._log("brain.closed")
 
     async def on_no_input(self) -> AsyncIterator[BrainOutput]:
         self.no_input_calls += 1
@@ -510,6 +542,7 @@ class ScriptedBrain:
 
     async def on_interrupted(self, spoken_text: str) -> None:
         self.interrupted.append(spoken_text)
+        self._log("brain.interrupted")
 
     def timing(self) -> BrainTiming:
         return self.timing_value
@@ -520,6 +553,7 @@ class RecordingObserver:
         self.user_turns: list[UserTurn] = []
         self.agent_turns: list[AgentTurn] = []
         self.reports: list[TurnReport] = []
+        self.interrupts: list[InterruptRecord] = []
 
     def on_user_turn(self, turn: UserTurn) -> None:
         self.user_turns.append(turn)
@@ -530,6 +564,9 @@ class RecordingObserver:
     def on_latency(self, report: TurnReport) -> None:
         self.reports.append(report)
 
+    def on_interrupt(self, record: InterruptRecord) -> None:
+        self.interrupts.append(record)
+
 
 class RecordingActions:
     def __init__(self) -> None:
@@ -537,3 +574,41 @@ class RecordingActions:
 
     async def handle(self, action: BrainAction) -> None:
         self.handled.append(action)
+
+
+class SlowActions:
+    """An action handler that takes ``duration_s`` of virtual time and records how each action ended.
+
+    The harness binds it to its clock (:meth:`bind`). ``log`` entries are ``(event, kind, virtual ms)`` with
+    event ``started`` / ``completed`` / ``cancelled`` / ``failed``; ``fail`` makes every action raise
+    ``RuntimeError`` at its end.
+    """
+
+    def __init__(self, duration_s: float, *, fail: bool = False) -> None:
+        self._clock: Clock | None = None
+        self._duration_s = duration_s
+        self._fail = fail
+        self.log: list[tuple[str, str, float]] = []
+
+    def bind(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def events(self, event: str) -> list[float]:
+        return [at for name, _, at in self.log if name == event]
+
+    async def handle(self, action: BrainAction) -> None:
+        clock = self._clock
+        if clock is None:
+            message = "SlowActions.bind(clock) was not called"
+            raise RuntimeError(message)
+        self.log.append(("started", action.kind, _now_ms(clock)))
+        try:
+            await clock.sleep(self._duration_s)
+        except asyncio.CancelledError:
+            self.log.append(("cancelled", action.kind, _now_ms(clock)))
+            raise
+        if self._fail:
+            self.log.append(("failed", action.kind, _now_ms(clock)))
+            message = f"action {action.kind} failed"
+            raise RuntimeError(message)
+        self.log.append(("completed", action.kind, _now_ms(clock)))

@@ -1053,3 +1053,15 @@ Grafana 3001
   `hanging(text)` keeps a TTS context open); drive with `await h.turn(600)` / `await h.until(predicate)`. Once
   `is_final` arrived nothing is cancelled at TTS, so tests that expect `tts.cancelled` must use `hanging(...)`.
   Never run `ruff --fix --unsafe-fixes` blindly: it rewrote `zip(a[3:], a[4:])` into `pairwise(a)`.
+- 2026-11-01 (P04-T12b): barge-in = `CallPipeline._check_barge_in` (after each inbound batch and STT partial) →
+  `BargeInMonitor.evaluate` → `_barge_in` (`Speaker.interrupt` → `_cancel_reply` → `Brain.on_interrupted` →
+  `observer.on_interrupt(InterruptRecord)`); turn routing is `_route_turn` (backchannel drop / held / pre-audio merge
+  with `supersedes`) and `_false_barge_in` (rules: specs/07 §8 Decision P04-T12b). Harness: `ScriptedBrain.bind`
+  (the harness does it) logs `brain.closed`/`brain.interrupted` into `transport.calls` next to `transport.clear`/
+  `tts.*`; `tokens(..., per_token_delay_s=, calls=)` logs `llm.cancel`; `RecordingObserver.interrupts`;
+  `harness(partial_after=)`. A `SpeakStatic` context is final at once (FakeTts), so tests that need a TTS cancel
+  at barge-in must use `SpeakText(hanging(...))`. Opener outputs that need the clock: append to
+  `h.brain.opener` right after entering `harness` (before the first await).
+  `ActionHandler.handle` runs shielded in `CallPipeline._action` (a reply cancel never cancels an action; the
+  reply loop waits for it via `_settle_action`, the pipeline end cancels it). Slow actions in tests:
+  `pipeline_fakes.SlowActions(duration_s, fail=)` passed as `harness(actions=...)` (the harness binds its clock).

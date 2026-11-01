@@ -1626,3 +1626,221 @@ make test 7341 passed / 7 skipped (98.58 %), check_spec_refs 0, jscpd 0 clones. 
 Note for P04-T12b: when an utterance is cancelled mid-SpeakText, `Speaker` does not aclose `SpeakText.tokens`
 (only the Brain output stream is closed); the barge-in "cancel LLM stream" step should close the token iterator
 explicitly.
+
+## Plan P04-T12b (Planner, 2026-11-01)
+Barge-in, interruption policy, concurrency rule and false-barge-in resume in `CallPipeline` (specs/07 §7, §8, §9).
+Record every decision below in specs/07 as `> Decision (2026-11-01) P04-T12b` placed right after the §8 concurrency
+paragraph (one block; reference §7 inside it on the same line as `specs/07`/§ refs as needed).
+
+### Decisions (put in the spec Decision block)
+1. **Evaluation** runs while `Speaker.is_playing(now)` (an utterance whose first frame went out, not stopped, not
+   completed) and user speech is active (current continuous VAD segment open). It is evaluated after every inbound
+   frame batch (`_read_transport`, after `_on_vad`) and after every STT partial. `speech_ms = now − at_ms of the
+   segment's speech_start`; text = latest STT partial of the open user turn (reset at EOT/discard/commit); words=None
+   (tokenize text). Level = `effective_level(call_level=config.interruptibility, node_level=timing.interruptibility,
+   block_interruptions=config.block_interruptions, interruptible=<current utterance's interruptible>)`; timing is
+   the cached `BrainTiming` from `_apply_timing` (store it in `self._timing`; never call `brain.timing()` per frame).
+2. **Reaction.** `call.interrupt` `reaction_ms = t_clear_sent − t_speech_start` (spec §7 step 7; includes the level's
+   speech threshold). The ≤ 120 ms target is decision → clear (`clear_delay_ms`); tests assert `clear_delay_ms ≤ 120`
+   and at level 4 `reaction_ms ≤ 150 + 120`.
+3. **Sequence** (one coroutine `CallPipeline._barge_in(decision, now)`, called inline from the inbound or stt task;
+   re-entry guarded synchronously because `tracker.stop` happens before the first await):
+   (a) `Speaker.interrupt(at_ms)` — sync: `tracker.stop(at)`, `outbound.clear()`, mark the utterance `cancelled`;
+   then `await transport.clear()` (t_clear = now after it), then `await tts.cancel(ctx)` (unless `is_final`
+   arrived); returns `Interruption(utterance_index, truncated: TruncatedMessage, played_ms, clear_ms, resumable)`
+   or `None` when nothing is playing. `_abandon` must not cancel the TTS context a second time (check `cancelled`).
+   (b) cancel the reply task and await it (closes the Brain output stream; Speaker closes `SpeakText.tokens`
+   explicitly — fixes the T12a review note; this is step 4 "cancel the LLM stream"; step 5 tool speech = whatever the
+   reply task was doing). The cancelled utterance is recorded as an interrupted `AgentTurn` by `_abandon` with the
+   frozen `played_ms` (already true).
+   (c) `await brain.on_interrupted(truncated.history_text)` (history = `text_spoken + "—"`).
+   (d) `observer.on_interrupt(InterruptRecord(...))`, `latency.barge_in(honored=True, reaction_ms=...)`,
+   `stats.barge_ins += 1`, log `pipeline_barge_in` (turn_index, reason, level, reaction_ms, played_chars, total_chars).
+   (e) `_pending_resume = truncated.unspoken` if non-blank and the interrupted utterance was not itself a resume.
+   Endpointing simply continues (step 8).
+4. **Unhonored barge-ins**: a VAD speech segment that started or ran while `Speaker.is_playing` and ended (speech_end,
+   or the utterance completed) without an interrupt → `latency.barge_in(honored=False)` once per segment,
+   `stats.unhonored_barge_ins += 1`.
+5. **Turn routing at EndOfTurn** (`_route_turn(turn, timer)` replaces `_jobs.put_nowait`):
+   - `_closing` → drop (existing behaviour).
+   - false barge-in check first: if `_pending_resume` is set and the committed transcript is missing (commit timeout
+     = `stt_commit_timeout_ms`, 1 500 ms) or blank → **false barge-in**: the turn is NOT given to the Brain (no partial
+     fallback for post-interrupt turns), `stats.false_barge_ins += 1`, log `pipeline_false_barge_in`, queue a resume
+     job speaking `SpeakStatic("Sorry — " + unspoken, interruptible=True)` (no Brain stream; flagged `resume=True`
+     so it never arms another resume). A `TurnDiscarded` while `_pending_resume` is set is the same false barge-in.
+     Any delivered user turn or any new reply clears `_pending_resume`. (`false_barge_in_total` has no specs/27 metric
+     yet → PipelineStats counter only; phase 05 maps it.)
+   - no reply running → queue the turn (merged with `_held`, see below).
+   - reply running and **no audio of this reply heard yet** (`Speaker.reply_audio_started` false) → concurrency rule:
+     cancel the generation without `clear` (`Speaker.cancel_generation()` = tts.cancel of the open context, then the
+     reply task cancel), `stats.merged_turns += 1`, new turn = `merge_turns(reply_turn, turn, index)` where text =
+     `f"{prev.text} {new.text}"` (stripped; just the new text when the reply was the opener / had no user turn),
+     `start_ms` = prev start, `end_ms` = new end, words concatenated, `language_code` = new's or prev's,
+     `supersedes=prev.index` (new `UserTurn.supersedes: int | None = None` field; observer receives the merged turn
+     too). Queue it.
+   - reply running and audio already started: if the user's speech overlapped interruptible playback (level ≥ 1)
+     without barge-in and the turn text is all backchannel (`BackchannelClassifier.is_backchannel(text)`) → drop
+     (`stats.ignored_backchannels += 1`, log debug `pipeline_backchannel_ignored`). Otherwise **hold**: `_held` =
+     merge(_held, turn) (level 0 / non-interruptible / insufficient speech: "appended to the next user turn after
+     playback ends").
+   - Held delivery: after each reply finishes, if `_held` and `not endpointer.turn_open` → queue it; if a turn is
+     open, its EOT merges `_held` in front (`merge_turns(held, turn)`); after a `TurnDiscarded` with no reply running
+     → queue `_held`.
+   Track `_reply_turn: UserTurn | None` (turn the running reply answers) in `_run_reply`.
+6. `Speaker` gains: `_Utterance.interruptible`, `cancelled`, `resume`; `is_playing(now_ms) -> bool`,
+   `current_interruptible -> bool | None`, `reply_audio_started` (+ `begin_reply()` called by the pipeline at each
+   reply start; set true when any utterance of the reply sent a frame — check the active tracker's
+   `t_first_frame_sent` live plus a flag set in `_record`/`_abandon`), `interrupt(at_ms) -> Interruption | None`,
+   `cancel_generation()` (tts.cancel, no clear, only valid before audio), `speak(..., resume=False)`. In `speak`,
+   wrap clause iteration with `contextlib.aclosing` and close `output.tokens` (if it has `aclose`) in `finally`.
+
+### Files
+- `src/va_voice/pipeline/barge_in.py` (new, pure/sync, keeps pipeline.py small): `BargeInMonitor(policy:
+  InterruptPolicy | None = None)` with `on_vad(event) -> bool` (returns True when an unhonored attempt just ended),
+  `on_partial(text)`, `reset_turn()`, `evaluate(now_ms, *, playing: bool, level: int) -> InterruptDecision | None`
+  (None when not playing / no speech; marks the segment as an attempt; truthy decision once per segment),
+  properties `speech_started_ms`, `overlapped_playback` (current user turn overlapped interruptible playback),
+  `playback_ended()` (closes an open attempt as unhonored → returns bool). `merge_turns(prev: UserTurn | None, new:
+  UserTurn, index: int) -> UserTurn`.
+- `src/va_voice/pipeline/models.py`: `UserTurn.supersedes`, `InterruptRecord(turn_index, at_ms, speech_start_ms,
+  clear_ms, reaction_ms, clear_delay_ms, played_ms, played_chars, total_chars, level, reason)`, `PipelineStats` +
+  `barge_ins`, `unhonored_barge_ins`, `false_barge_ins`, `ignored_backchannels`, `merged_turns`, `held_turns`.
+- `src/va_voice/pipeline/protocols.py`: `PipelineObserver.on_interrupt(record)`; `_NullObserver` too.
+- `src/va_voice/pipeline/speaker.py`, `pipeline.py` per the decisions (job types `_TurnJob(turn, timer)` /
+  `_ResumeJob(text)`; `_Job` union). Keep radon ≤ B per function; move routing into small methods.
+- `src/va_voice/pipeline/__init__.py`: export `InterruptRecord`, `BargeInMonitor`, `merge_turns`.
+- specs/07 Decision block; AGENTS.md bullet (P04-T12b: barge-in entry points + harness helpers).
+
+### Harness / fakes (`tests/support/pipeline_fakes.py`, `pipeline_harness.py`)
+- `tokens(..., per_token_delay_s=0.0, calls=None)`: logs `("llm.cancel", t)` in `finally` when closed before
+  exhaustion (GeneratorExit/CancelledError).
+- `ScriptedBrain(calls=...)`: `on_user_turn`/`start` finally log `("brain.closed", t)`; `on_interrupted` logs
+  `("brain.interrupted", t)`. Harness passes `transport.calls` to brain (shared log).
+- `RecordingObserver.interrupts: list[InterruptRecord]`.
+- `harness(..., brain_calls=True)` not needed if the brain gets the clock+calls via a harness setter; keep simple:
+  `ScriptedBrain.bind(clock, calls)` called by the harness.
+- `FakeStt` partial cadence: tests that need ≥ 2 words before 500 ms rely on `partial_after` (10 loud frames =
+  200 ms); expose `partial_after` as a harness knob.
+
+### Tests `tests/pipeline/test_pipeline_barge_in.py` (+ `tests/pipeline/test_barge_in_monitor.py` pure unit tests)
+Harness tests (AcceleratedClock, long agent utterances e.g. 400 chars × 5 ms = 2 s audio):
+- `test_barge_in_sequence_order_and_timing`: level 2, SpeakText with per-token delay so LLM still streams; caller
+  speaks 900 ms "please stop talking now" while playing → calls order `transport.clear` < `tts.cancel` <
+  `llm.cancel` < `brain.closed` < `brain.interrupted`; `InterruptRecord.clear_delay_ms ≤ 120`; reaction_ms =
+  clear − speech start; no frames of that utterance sent after clear (`transport.frames` times ≤ clear); interrupted
+  AgentTurn `text_spoken` is a whole-word prefix; `brain.interrupted[0]` ends with "—"; latency metric
+  `va_barge_in_total{honored="true"}` = 1 when the harness uses a real `LatencyTracer` with metrics (latency knob).
+- `test_level4_any_speech_interrupts_quickly`: level 4, backchannel "mm" → interrupt, `reaction_ms ≤ 270`.
+- `test_backchannel_ignored_at_level_2`: caller says "yeah" 300 ms during playback → no clear, utterance completes
+  (not interrupted), Brain gets no user turn for it, `stats.ignored_backchannels == 1`, unhonored count 1.
+- `test_level2_long_speech_without_words_interrupts` (≥ 900 ms, partial is backchannel-only) → interrupt reason
+  `long_speech`.
+- `test_level0_blocks_and_appends_to_next_turn`: config interruptibility 0 (and a variant `block_interruptions=True`),
+  caller speaks "wait a second" during playback → no clear, playback completes, then Brain gets UserTurn "wait a
+  second" (held → delivered after playback); variant where the caller speaks again before... use two utterances: one
+  during playback, one starting right as playback ends while held → single merged turn "a b" with `supersedes` None
+  (held merge) — assert text concatenation.
+- `test_non_interruptible_static_not_interrupted`: SpeakStatic(interruptible=False) at level 4 → no clear.
+- `test_node_level_overrides_call_level` (timing.interruptibility=0 with call level 4 → blocked).
+- `test_pre_audio_turn_cancels_generation_and_concatenates`: reply = SpeakText(hanging/slow first token, e.g.
+  first_delay 5 s) so no audio; caller speaks a second utterance → `tts.cancel` (or no context yet), no
+  `transport.clear`, Brain's next `on_user_turn` text == "first second", `supersedes` == first index,
+  `stats.merged_turns == 1`, latency report of the cancelled turn has no E2E event.
+- `test_false_barge_in_resumes_once`: interrupt by noise (Said("") commit blank, partial "uh what" to cross words
+  threshold or 900 ms speech) → no Brain turn, resume utterance text starts with "Sorry — " + unspoken remainder,
+  `stats.false_barge_ins == 1`; interrupt the resume with noise again → no second resume.
+- `test_false_barge_in_commit_timeout` (commit_latency 2 s → timeout → resume) and `test_real_turn_after_interrupt_
+  clears_resume` (committed text → Brain gets it, no resume).
+- `test_unhonored_speech_counted` / `test_barge_in_during_opener` (opener interruptible, brain.start closed).
+- Speaker unit edges: `interrupt` with nothing playing → None; double trigger (partial + frame same tick) → one
+  interrupt; tts.cancel failure during interrupt logged, sequence continues.
+Monitor unit tests: evaluate None when not playing/no speech; speech_ms from segment start; one decision per segment;
+attempt bookkeeping; `merge_turns` text/fields (opener prev None, blank prev).
+Update existing tests if `_NullObserver`/observer signature or job flow changes; all 60 T12a tests must still pass.
+Coverage: pipeline modules ≥ 95 % (aim 100 %).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q`, `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src/va_voice/pipeline`, pip-audit + `corepack pnpm audit` (no new deps).
+
+### Risks
+- Cancelling the reply task from the inbound task: the reply's `_abandon` awaits only local work after (a); never await
+  something that needs the inbound task (mark echoes) while cancelling. `asyncio.wait({task})` after cancel.
+- CancelledError landing inside `tokens.__anext__` finalizes the generator itself (logs `llm.cancel` at cancel time),
+  which is after tts.cancel because the cancel is issued after (a) — keep that order.
+- AcceleratedClock: barge-in tests must keep the caller streaming (FakeCaller) — never busy-poll.
+- VAD speech_start arrives ≥ START_WINDOWS windows after the speech began, so level-4 decisions happen on the first
+  frame after speech_start; assert bounds, not exact ms.
+- Held/merge state must be cleared on `_closing`; watchdog/EndCall lines are non-interruptible (level 0) → speech
+  during them is held then dropped by `_closing`.
+
+## Build P04-T12b (Builder, 2026-11-01)
+Implemented per plan: `va_voice.pipeline.barge_in` (`BargeInMonitor` with `on_unhonored` callback, `merge_turns(prev,
+new, supersede=)`), Speaker (`interrupt`, `cancel_generation`, `is_playing`, `current_interruptible`,
+`reply_audio_started`/`begin_reply`, `speak(..., resume=)`, `aclosing` clauses + explicit `SpeakText.tokens` close,
+`Interruption`), pipeline (`_check_barge_in`, `_barge_in`, `_route_turn`, `_false_barge_in`, `_flush_held`,
+`_TurnJob`/`_ResumeJob`, `RESUME_PREFIX`), models (`UserTurn.supersedes`, `InterruptRecord`, 6 new stats),
+`PipelineObserver.on_interrupt`. Spec: specs/07 §8 Decision P04-T12b. Deviations from plan:
+- `merge_turns` takes `supersede=` (held merges have no `supersedes`; concurrency merges set it).
+- Turns that end while the call is closing are still reported to the observer (transcript) but not answered.
+- Backchannel drop applies whether or not the reply is still running (the overlap flag decides).
+- False barge-ins consume no turn index (index allocated after the commit result; STT_COMMIT mark uses the
+  pre-commit instant). Held turns delivered on their own carry no latency timer.
+- `preempt()` now also cancels the TTS context (it marks the utterance cancelled, so `_abandon` skips it).
+Tests: tests/pipeline/test_pipeline_barge_in.py (20) + test_barge_in_monitor.py (9) + null observer; 89 pipeline
+tests; pipeline coverage 97-100 %.
+Gates: make fmt/lint/typecheck/placeholders pass (mypy 882 files clean, 0 placeholder findings); make test 7370 passed /
+7 skipped, coverage 98.56 % (pipeline 97-100 %); 3 consecutive xdist runs of tests/pipeline green; check_spec_refs 0;
+jscpd 0 clones; radon avg A (2.12); pip-audit no known vulnerabilities; pnpm audit 3 moderate (high threshold passes).
+
+## Review P04-T12b (Reviewer, 2026-11-01)
+Gates re-run: make lint/typecheck/placeholders pass (mypy 882 files, 0 placeholder findings); make test 7370 passed /
+7 skipped, coverage 99 % total. The barge-in sequence, InterruptRecord, false-barge-in resume, held/merge routing and
+the Decision block all look right. REJECTED, 2 findings:
+1. `packages/va_voice/src/va_voice/pipeline/pipeline.py:450` (`_route_turn`, concurrency branch) and `:573`/`:585`
+   (`_handle_action`): when a turn ends while a reply runs with no audio yet, `_cancel_reply()` cancels the whole reply
+   task, including an `ActionHandler.handle(action)` that is in flight (transfer, SMS, DTMF, hold). specs/07 §8 says
+   the concurrency rule cancels "the generation (same as barge-in steps 3–4 without `clear`)" (TTS context and LLM
+   stream only), and §7 step 5 says tool requests "continue to completion". Cancelling a half-done transfer or SMS
+   leaves telephony state inconsistent, and the Brain may retry and send twice. Fix: never cancel a reply while it
+   is inside `_handle_action` or `_end_call`. Either hold the new turn until the action returns, then cancel the
+   rest of the generation and merge, or shield the action (`asyncio.shield` plus waiting for it) so cancellation
+   lands only between outputs. Add a harness test: a reply yields `BrainAction` with a slow `ActionHandler`, the
+   caller's turn ends meanwhile, and the action must still complete (handler records completion, not
+   CancelledError). Record the rule in the P04-T12b Decision block.
+2. `packages/va_voice/src/va_voice/pipeline/barge_in.py:87-111`: when playback stops mid-segment, `evaluate(playing=
+   False)` calls `_close_attempt()`, which sets `_decided = True`. If the same continuous VAD segment then overlaps
+   the reply's next utterance (e.g. a non-interruptible `SpeakStatic` followed by an interruptible `SpeakText`, or
+   a level-0 line followed by a normal one), that utterance is never evaluated, which contradicts §7 "user speech is
+   evaluated continuously". Fix: closing an attempt because playback ended should report it unhonored and clear
+   `_attempt`, but must not block later evaluation in the same segment. Only an honored decision should set
+   `_decided`. Add a monitor unit test (attempt → playing=False → unhonored once → playing=True with enough speech →
+   decision) and a harness test (non-interruptible line then interruptible line, with the caller speaking across
+   both: the second line is interrupted).
+
+## Build P04-T12b fixes (Builder, 2026-11-01)
+Both review findings are fixed:
+1. Actions are never cancelled. `_handle_action` runs `ActionHandler.handle` in its own task (`self._action`) and
+   awaits it through `asyncio.shield`. A reply cancel (barge-in, concurrency merge, watchdog) therefore ends the reply
+   right away, so the inbound path never blocks on an action, while the action itself runs to completion. The reply
+   loop calls `_settle_action()` after every `_run_reply`: it waits for the orphaned action before the next reply
+   starts, and the action's failure still fails the pipeline. `run()` calls `_abandon_action()` in `finally`, which
+   cancels an action still in flight when the pipeline ends (`pipeline_action_abandoned`). EndCall cannot be cut:
+   it sets `_closing` first, and turns arriving while closing are never answered. The rule is in the Decision block.
+2. `BargeInMonitor._close_attempt` no longer sets `_decided`. Playback ending reports the attempt unhonored once,
+   and the same segment is evaluated again against the next utterance. Only an honored decision ends evaluation.
+Tests: monitor unit test `test_a_segment_outliving_playback_is_evaluated_against_the_next_utterance` (the old
+"not evaluated again" assertion is removed). Harness tests: `test_a_segment_spanning_two_lines_interrupts_the_interruptible_one`,
+`test_a_turn_during_an_action_merges_without_cancelling_it`, `..._action_outliving_its_reply_fails_the_pipeline...`,
+`test_the_pipeline_end_cancels_an_action_in_flight`. Fake: `pipeline_fakes.SlowActions(duration_s, fail=)`, bound
+to the clock by the harness. All 5 new tests fail when the two fixes are reverted.
+Gates: make fmt/lint pass; make typecheck pass (882 files); placeholders 0; make test 7375 passed / 7 skipped,
+coverage 98.55 % (pipeline 97-100 %); pipeline tests 3x xdist green; spec refs 0; jscpd 0; radon avg A (2.15);
+pip-audit clean; pnpm audit 3 moderate (high threshold passes).
+
+## Review P04-T12b fixes (Reviewer, 2026-11-01)
+APPROVED. Gates re-run: make lint/typecheck/placeholders pass (0 findings); make test 7375 passed / 7 skipped, coverage
+98.55 %. Finding 1: `_handle_action` runs the handler in its own task under `asyncio.shield`, `_settle_action` waits for
+orphans before the next reply, `_abandon_action` cancels at pipeline end; Decision block updated. Finding 2:
+`_close_attempt` no longer sets `_decided`; monitor + harness tests cover a segment spanning two lines.

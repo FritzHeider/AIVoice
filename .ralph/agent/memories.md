@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793550714-ba32
+> P04-T12b fix: CallPipeline runs ActionHandler.handle in its own task awaited via asyncio.shield so reply cancels (barge-in/merge/watchdog) never cut actions; reply loop _settle_action waits for orphans; BargeInMonitor only sets _decided on honored decisions (segments re-evaluated after playback gaps); test fake SlowActions
+<!-- tags: voice, pipeline, testing | created: 2026-11-01 -->
+
+### mem-1793550102-2329
+> P04-T12b: barge-in in CallPipeline (_check_barge_in after inbound batch + partial -> BargeInMonitor.evaluate -> Speaker.interrupt sync cut before first await -> clear -> tts.cancel -> cancel reply task -> brain.on_interrupted); FakeTts SpeakStatic context is final immediately so TTS-cancel tests need SpeakText(hanging()); harness ScriptedBrain.bind logs brain.closed/interrupted in transport.calls; parametrizing with module-level ScriptedBrain instances is OK (one use each)
+<!-- tags: voice, pipeline, testing | created: 2026-11-01 -->
+
 ### mem-1793548904-55b3
 > P04-T12a: va_voice.pipeline CallPipeline (TaskGroup of inbound/stt/tts/outbound/endpoint/replies/watchdog; reply tasks are plain tasks owned by the reply loop because creating a TaskGroup child while it aborts raises and leaks the coroutine); harness tests/support/pipeline_harness.harness on sim AcceleratedClock with pipeline_fakes (FakeCaller streams 20 ms frames forever, hanging(text) keeps a TTS context open); deadlines via pipeline.waits.within on the injected clock; ruff --unsafe-fixes rewrote zip(a[3:],a[4:]) to pairwise(a) - never apply blindly
 <!-- tags: voice, pipeline, testing | created: 2026-11-01 -->

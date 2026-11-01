@@ -8,14 +8,21 @@ context are stale and dropped. The utterance is one outbound segment (its mark f
 complete on that mark's echo, or once the playback estimate passes the end plus the mark-loss grace. An
 utterance that is cancelled or fails stops its tracker, drops queued audio locally, cancels its TTS context
 and is recorded as interrupted when the caller heard any of it.
+
+Barge-in (Decision P04-T12b): :meth:`Speaker.interrupt` stops the playing utterance at the decision
+instant (tracker, local queue) before its first await, then clears the far end and cancels the TTS context;
+the pipeline then cancels the reply task, whose :meth:`Speaker.speak` closes the LLM token stream and records
+the interrupted turn. :meth:`Speaker.cancel_generation` is the same cut without ``clear`` for a reply no one
+has heard yet.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+import contextlib
+from collections.abc import AsyncGenerator, AsyncIterable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from va_common.logging import get_logger
 from va_common.time import Clock
@@ -28,12 +35,13 @@ from va_voice.playback import (
     LEAD_MS_ESTIMATE,
     MARK_LOSS_GRACE_MS,
     PlaybackTracker,
+    TruncatedMessage,
     truncate_assistant_message,
 )
 from va_voice.text.chunker import ClauseChunker
 from va_voice.text.pronunciation import PronunciationApplier
 
-__all__ = ["Speaker"]
+__all__ = ["Interruption", "Speaker"]
 
 _log = get_logger(__name__)
 
@@ -49,8 +57,23 @@ class _Utterance:
     tracker: PlaybackTracker
     timer: TurnTimer | None
     started_ms: float
+    interruptible: bool = True
+    resume: bool = False
     final: asyncio.Event = field(default_factory=asyncio.Event)
     chars: int = 0
+    cancelled: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Interruption:
+    """The utterance a barge-in cut off: what the caller heard and when the far end was cleared."""
+
+    utterance_index: int
+    truncated: TruncatedMessage
+    played_ms: float
+    clear_ms: float
+    resumable: bool
+    """False for a false-barge-in resume (it is never resumed again)."""
 
 
 class Speaker:
@@ -64,6 +87,7 @@ class Speaker:
         "_next_index",
         "_observer",
         "_outbound",
+        "_reply_audio",
         "_stats",
         "_transport",
         "_tts",
@@ -96,6 +120,7 @@ class Speaker:
         self._wake = asyncio.Event()
         self._outbound = OutboundAudio(transport, mixer, clock=clock, on_finished=self._on_finished)
         self._active: _Utterance | None = None
+        self._reply_audio = False
 
     @property
     def outbound(self) -> OutboundAudio:
@@ -107,6 +132,27 @@ class Speaker:
         """Playback of the utterance in progress."""
         return None if self._active is None else self._active.tracker
 
+    @property
+    def current_interruptible(self) -> bool | None:
+        """``interruptible`` of the utterance in progress (``None`` when none)."""
+        return None if self._active is None else self._active.interruptible
+
+    @property
+    def reply_audio_started(self) -> bool:
+        """Some audio of the current reply (since :meth:`begin_reply`) went out to the caller."""
+        if self._reply_audio:
+            return True
+        return self._active is not None and self._active.tracker.t_first_frame_sent is not None
+
+    def begin_reply(self) -> None:
+        """A new reply starts: :attr:`reply_audio_started` is false until one of its frames goes out."""
+        self._reply_audio = False
+
+    def is_playing(self, now_ms: float) -> bool:
+        """The caller is hearing an utterance (first frame sent, not stopped, not completed)."""
+        utterance = self._active
+        return utterance is not None and not utterance.cancelled and utterance.tracker.is_playing(now_ms)
+
     def on_mark(self, name: str) -> None:
         """A transport mark echo."""
         if self._active is not None and self._active.tracker.on_mark(name):
@@ -115,7 +161,12 @@ class Speaker:
     def on_tts_chunk(self, chunk: TtsChunkLike) -> None:
         """TTS audio or end of a context; anything but the current open context is stale."""
         utterance = self._active
-        if utterance is None or chunk.context_id != utterance.context_id or utterance.final.is_set():
+        if (
+            utterance is None
+            or chunk.context_id != utterance.context_id
+            or utterance.final.is_set()
+            or utterance.cancelled
+        ):
             self._stats.stale_tts_chunks += 1
             return
         if chunk.audio:
@@ -126,17 +177,23 @@ class Speaker:
         if chunk.is_final:
             utterance.final.set()
 
-    async def speak(self, output: SpeakText | SpeakStatic, timer: TurnTimer | None) -> AgentTurn | None:
-        """Play ``output`` to completion; ``None`` when it had no text to speak."""
+    async def speak(
+        self, output: SpeakText | SpeakStatic, timer: TurnTimer | None, *, resume: bool = False
+    ) -> AgentTurn | None:
+        """Play ``output`` to completion; ``None`` when it had no text to speak.
+
+        ``resume``: a false-barge-in resume (§7), never resumed itself.
+        """
         if self._active is not None:
             message = "an utterance is already playing"
             raise RuntimeError(message)
         utterance: _Utterance | None = None
         try:
-            async for clause in self._clauses(output, timer):
-                if utterance is None:
-                    utterance = await self._open(timer)
-                await self._send_clause(utterance, clause)
+            async with contextlib.aclosing(self._clauses(output, timer)) as clauses:
+                async for clause in clauses:
+                    if utterance is None:
+                        utterance = await self._open(timer, output.interruptible, resume=resume)
+                    await self._send_clause(utterance, clause)
             if utterance is None:
                 return None
             await self._tts.flush(utterance.context_id)
@@ -151,18 +208,44 @@ class Speaker:
         finally:
             if utterance is not None:
                 self._mark_first_audio(utterance)
+                if utterance.tracker.t_first_frame_sent is not None:
+                    self._reply_audio = True
             self._active = None
+
+    async def interrupt(self, at_ms: float) -> Interruption | None:
+        """Barge-in at ``at_ms`` (§7 steps 2-3, 6): ``None`` when nothing is playing.
+
+        Playback stops and the local queue is dropped before the first await, so a second trigger in the same
+        tick finds nothing playing; then the far end is cleared and the TTS context cancelled.
+        """
+        utterance = self._active
+        if utterance is None or not self.is_playing(at_ms):
+            return None
+        played_ms = self._cut(utterance, at_ms)
+        truncated = truncate_assistant_message(utterance.tracker.timeline, played_ms)
+        await self._transport.clear()
+        clear_ms = self._now_ms()
+        await self._cancel_context(utterance)
+        return Interruption(utterance.index, truncated, played_ms, clear_ms, resumable=not utterance.resume)
+
+    async def cancel_generation(self) -> None:
+        """Cut an utterance nobody has heard yet (§8 concurrency rule): TTS cancel, no ``clear``."""
+        utterance = self._active
+        if utterance is None or utterance.cancelled:
+            return
+        self._cut(utterance, self._now_ms())
+        await self._cancel_context(utterance)
 
     async def preempt(self) -> None:
         """Cut the utterance in progress off at once: stop playback, drop queued audio, clear the far end."""
         utterance = self._active
-        if utterance is None or utterance.tracker.stopped:
+        if utterance is None or utterance.cancelled:
             return
-        utterance.tracker.stop(self._now_ms())
-        self._outbound.clear()
+        self._cut(utterance, self._now_ms())
         await self._transport.clear()
+        await self._cancel_context(utterance)
 
-    async def _clauses(self, output: SpeakText | SpeakStatic, timer: TurnTimer | None) -> AsyncIterator[str]:
+    async def _clauses(self, output: SpeakText | SpeakStatic, timer: TurnTimer | None) -> AsyncGenerator[str]:
         if isinstance(output, SpeakStatic):
             text = output.text.strip()
             if text:
@@ -171,24 +254,31 @@ class Speaker:
         if timer is not None:
             timer.mark(TurnMark.LLM_REQUEST, output.llm_request_ms)
         chunker = ClauseChunker()
-        async for delta in output.tokens:
-            if delta and timer is not None:
-                timer.mark(TurnMark.LLM_FIRST_TOKEN)
-            for clause in chunker.feed(delta):
-                yield clause
+        try:
+            async for delta in output.tokens:
+                if delta and timer is not None:
+                    timer.mark(TurnMark.LLM_FIRST_TOKEN)
+                for clause in chunker.feed(delta):
+                    yield clause
+        finally:
+            await _close_tokens(output.tokens)
         for clause in chunker.flush():
             yield clause
 
-    async def _open(self, timer: TurnTimer | None) -> _Utterance:
+    async def _open(self, timer: TurnTimer | None, interruptible: bool, *, resume: bool) -> _Utterance:
         index = self._next_index()
         tracker = PlaybackTracker(index, self._tts_format)
-        utterance = _Utterance(index, self._context_ids(index), tracker, timer, self._now_ms())
+        utterance = _Utterance(
+            index, self._context_ids(index), tracker, timer, self._now_ms(), interruptible, resume
+        )
         self._active = utterance
         self._outbound.start_utterance(tracker)
         await self._tts.start_context(utterance.context_id)
         return utterance
 
     async def _send_clause(self, utterance: _Utterance, clause: str) -> None:
+        if utterance.cancelled:
+            return
         pronounced = self._applier.apply(clause)
         utterance.tracker.timeline.add_clause(pronounced)
         if utterance.timer is not None:
@@ -217,13 +307,27 @@ class Speaker:
         if not tracker.stopped and not tracker.completed(now):
             tracker.stop(now)
             self._outbound.clear()
-        if not utterance.final.is_set():
-            try:
-                await self._tts.cancel(utterance.context_id)
-            except Exception as exc:
-                _log.warning("pipeline_tts_cancel_failed", error_type=type(exc).__name__)
+        if not utterance.cancelled:
+            utterance.cancelled = True
+            await self._cancel_context(utterance)
         if tracker.t_first_frame_sent is not None and not tracker.completed(now):
             self._record(utterance, interrupted=True)
+
+    def _cut(self, utterance: _Utterance, at_ms: float) -> float:
+        """Stop ``utterance`` at ``at_ms`` and drop its queued audio (synchronous); returns ``played_ms``."""
+        utterance.cancelled = True
+        played_ms = utterance.tracker.stop(at_ms)
+        self._outbound.clear()
+        return played_ms
+
+    async def _cancel_context(self, utterance: _Utterance) -> None:
+        """Cancel the utterance's TTS context unless ``is_final`` arrived (nothing open at the vendor)."""
+        if utterance.final.is_set():
+            return
+        try:
+            await self._tts.cancel(utterance.context_id)
+        except Exception as exc:
+            _log.warning("pipeline_tts_cancel_failed", error_type=type(exc).__name__)
 
     def _record(self, utterance: _Utterance, *, interrupted: bool) -> AgentTurn:
         now = self._now_ms()
@@ -251,3 +355,10 @@ class Speaker:
 
     def _now_ms(self) -> float:
         return self._clock.monotonic() * _MS_PER_SECOND
+
+
+async def _close_tokens(tokens: AsyncIterable[str]) -> None:
+    """Close an LLM token stream that is an async generator (§7 step 4: closes the HTTP stream)."""
+    aclose: Callable[[], Coroutine[Any, Any, None]] | None = getattr(tokens, "aclose", None)
+    if aclose is not None:
+        await aclose()

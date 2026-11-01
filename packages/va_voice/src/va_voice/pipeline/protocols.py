@@ -19,7 +19,14 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from va_voice.latency import TurnReport
-    from va_voice.pipeline.models import AgentTurn, BrainAction, BrainOutput, BrainTiming, UserTurn
+    from va_voice.pipeline.models import (
+        AgentTurn,
+        BrainAction,
+        BrainOutput,
+        BrainTiming,
+        InterruptRecord,
+        UserTurn,
+    )
     from va_voice.text.alignment import ChunkAlignmentLike
     from va_voice.vad import VadEvent
 
@@ -179,13 +186,18 @@ class ActionHandler(Protocol):
 
 
 class PipelineObserver(Protocol):
-    """Synchronous callbacks for turn records and latency reports (persistence and events live outside)."""
+    """Synchronous callbacks for turn records, barge-ins and latency reports (persistence and events live
+    outside). ``on_user_turn`` fires when a turn is handed to the Brain (held turns once merged, a superseding
+    turn again).
+    """
 
     def on_user_turn(self, turn: UserTurn) -> None: ...
 
     def on_agent_turn(self, turn: AgentTurn) -> None: ...
 
     def on_latency(self, report: TurnReport) -> None: ...
+
+    def on_interrupt(self, record: InterruptRecord) -> None: ...
 
 
 class _NullObserver:
@@ -197,6 +209,9 @@ class _NullObserver:
 
     def on_latency(self, report: TurnReport) -> None:
         del report
+
+    def on_interrupt(self, record: InterruptRecord) -> None:
+        del record
 
 
 NULL_OBSERVER: Final[PipelineObserver] = _NullObserver()

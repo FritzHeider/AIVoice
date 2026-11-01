@@ -21,6 +21,7 @@ from pipeline_fakes import (
     RecordingObserver,
     Said,
     ScriptedBrain,
+    SlowActions,
 )
 
 from va_sim.clock import AcceleratedClock
@@ -83,16 +84,22 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
     actions: ActionHandler | None = None,
     latency: Callable[[AcceleratedClock], LatencyTracer] | None = None,
     streaming: bool = True,
+    partial_after: int = 10,
 ) -> AsyncIterator[Harness]:
     cfg = config if config is not None else PipelineConfig()
     clock = AcceleratedClock()
     transport = FakeTransport(clock, echo_delay_ms=echo_delay_ms)
     caller = FakeCaller(transport, clock, cfg.fmt, cfg.wire_byte_order)
     caller.streaming = streaming
-    stt = FakeStt(clock, utterances, fmt=cfg.fmt, commit_latency_s=commit_latency_s)
+    stt = FakeStt(
+        clock, utterances, fmt=cfg.fmt, commit_latency_s=commit_latency_s, partial_after=partial_after
+    )
     tts = FakeTts(clock, transport.calls, fmt=cfg.tts_format, ttfa_s=ttfa_s)
     vad = EnergyVad()
     the_brain = brain if brain is not None else ScriptedBrain()
+    the_brain.bind(clock, transport.calls)
+    if isinstance(actions, SlowActions):
+        actions.bind(clock)
     observer = RecordingObserver()
     pipeline = CallPipeline(
         transport=transport,
