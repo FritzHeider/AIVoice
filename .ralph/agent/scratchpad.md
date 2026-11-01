@@ -374,3 +374,179 @@ Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test exit 0 (77
 ## Review P05-T02 round 2 (Reviewer, 2026-11-01)
 Finding 1 fixed (headers signed inside the client block, skew TOLERANCE_S+60). Gates re-run: lint 0, typecheck 0,
 placeholders 0, make test exit 0 (7784 passed, 7 skipped, 98.57 %). Approved and committed.
+
+## Plan P05-T03a — Send Call request/config models, E.164 normalization, shared language table (Planner, 2026-11-01)
+P05-T03 was too large for one Builder activation, so plan/phase-05.md now splits it into P05-T03a (models, pure, no
+I/O), P05-T03b (pure `resolve_call_config`), and P05-T03c (I/O loader in `va_api.services.call_inputs`). P05-T04
+depends on P05-T03c. Tick P05-T03 itself when a–c are ticked. Persona/agent loading and experiments stay in P13-T07
+(the plan says so), but the request model validates persona/agent fields and runner rules now.
+
+### Decisions (write as `> Decision (2026-11-01): Send Call request model (P05-T03a).` under specs/05 §3, after the guard_rails paragraph)
+1. Schemas live in the package `va_domain.calls` (`__init__` re-exports; modules `request.py`, `request_parts.py`,
+   `config.py`, `tools.py`, `errors.py`). The import path `va_domain.calls` matches the spec header. va_domain stays
+   I/O-free and does not depend on va_common, so rule failures are `CallRequestError(code, message, field)` (a
+   plain `Exception` with attributes) that the API maps to `AppError(code, message, field=field)` in P05-T03c/T05.
+2. `CallParameters` has every §3 parameter **except** the runner fields and `phone_number`, all optional with the §3
+   defaults. Lower layers (`orgs.settings.call_defaults`, pathway `global_config.call_defaults`, agent
+   `call_settings`, persona config) are parsed with `CallParameters.model_validate(...)` in P05-T03b.
+   `SendCallRequest(CallParameters)` adds the §3.1 runner fields and `phone_number` (required).
+   `model_config = ConfigDict(extra="ignore", str_strip_whitespace=True, populate_by_name=True)`. Nested objects use
+   `extra="forbid"` (only top-level unknown fields are ignored, per §3). Helper `unknown_fields(raw: Mapping[str,
+   object]) -> list[str]` (top-level keys that are not field names/aliases) for the endpoint's debug log.
+3. `explicit_fields() -> dict[str, Any]`: canonical parameter name → value for parameters present in the body
+   (`model_fields_set`), with legacy aliases folded: `amd` → `ivr_mode` (`ivr_mode` wins when both are sent);
+   `available_tags` → `dispositions` (`dispositions` wins); `local_dialing`/`geospatial_dialing` true →
+   `dialing_strategy={"type":"local"}` unless `dialing_strategy` was sent; `knowledge_base_ids` folded into the KB
+   entries of `tools` (deduplicated, order kept); the `voicemail` object reports only its sent keys plus the implied
+   `action="leave_message"` when `message` is set and `action` is not; `voicemail_detect_timeout_ms` stays a
+   top-level key (P05-T03b maps it into `voicemail.detect_timeout_ms`). Values are model instances/primitives, not
+   JSON (P05-T03b decides the merge).
+4. `check_rules() -> None` raises the first `CallRequestError` in this order (all are schema-adjacent; each maps
+   to its catalogued code): `retry` present without `wait` → `RETRY_NOT_PROVIDED` (field `retry.wait`, message
+   "Retry attempt not provided for retry call."); runner rules (§3.1, step 4): none of
+   task/pathway_id/persona_id/agent_id → `RUNNER_CONFLICT` (field `task`); `agent_id` with `persona_id` or
+   `pathway_id` → `RUNNER_CONFLICT` (field `agent_id`); `agent_id` with `task` → `RUNNER_CONFLICT` (field `task`).
+   `runner_type` property → `"agent" | "persona" | "pathway" | "task"` (that precedence: agent, persona, pathway,
+   task) — `task` alongside another runner is ignored (warning emitted in T05), and persona+pathway is a persona
+   runner with a pathway override. `AGENT_REQUIRES_ORG_KEY`, `GUARD_RAIL_LIMIT`, `FEATURE_NOT_IN_PLAN`,
+   `test_call`/`test_mode` permission and webhook scheme/SSRF policy need the principal/org/plan: P05-T03c.
+5. Destination: the model keeps `phone_number` raw (trimmed, 1–64 chars). Parsing is validation step 8
+   (`INVALID_PHONE_NUMBER`) with region = body `country`, else `orgs.settings.default_country`, else `US`, so it
+   happens in P05-T03c via `va_domain.phone.normalize_e164(value, region) -> str` (raises `InvalidPhoneNumber(
+   ValueError)`): `phonenumbers.parse`, must be `is_possible_number` and `is_valid_number`, format E164; values
+   starting with `+` ignore the region; strips spaces/dashes/parentheses/dots (phonenumbers does). `from`,
+   `transfer_list` values, `voicemail.sms.from` are strict E.164 in the schema (reuse `va_domain.org.E164`);
+   `transfer_phone_number` is E.164 or `sip:` URI (`^sip:[^@\s]+@[^\s]+$`, ≤ 256).
+6. `start_time` parses `YYYY-MM-DD HH:MM:SS ±HH:MM`, `YYYY-MM-DD HH:MM:SS` (naive), and ISO 8601 (`datetime.
+   fromisoformat`, `Z` accepted) into a `datetime` that may be naive. Future/≤ 90 days and localizing a naive value
+   with the resolved timezone need the clock and resolved timezone: P05-T03b.
+7. `language`: validated in the schema against the specs/08 §5 table (case-insensitive; stored as sent, trimmed).
+   The pure table (`DEFAULT_TTS_LANGUAGE`, `TTS_SUPPORTED`, `LanguageMapping`, `_ROWS`, `LANGUAGE_MAP`, plus a new
+   `lookup_language(value) -> LanguageMapping | None`) moves from `va_elevenlabs.languages` to
+   `va_domain.languages`; `va_elevenlabs.languages` imports and re-exports them and keeps `resolve_language`
+   (AppError), `tts_language`, `LanguageLock` (va_elevenlabs already depends on va-domain). Existing va_elevenlabs
+   tests must pass unchanged.
+8. `tools` items: `"TL-<uuid>"`, `"KB-<uuid>"` (regex `^(TL|KB)-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$`),
+   or an `InlineTool` object = specs/13 §2 ToolCreate without id: `name` `^[A-Za-z][A-Za-z0-9_]{0,63}$`,
+   `description` 1–1 000, `speech` ≤ 500 | None, `url` 1–2 048 (may contain `{{vars}}`; scheme check `http(s)://`
+   prefix only), `method` GET/POST/PUT/PATCH/DELETE default POST, `headers`/`query` dict[str, str] (header names
+   RFC 7230 tokens), `body` JsonValue | None (≤ 64 KB serialized), `input_schema` object with `type: "object"`
+   default `{"type":"object","properties":{}}`, `response` dict[str, str] (JSONPath parse is P08), `timeout_ms`
+   100–60 000 default 10 000, `retries` 0–3 default 0. Inline tools do **not** accept `secret_headers` (they would be
+   stored in plaintext in `calls.config`; extra="forbid" rejects them → `INVALID_INPUT`). `DynamicDataSpec` per §7:
+   `url`, `method` (default GET), `headers`, `query`, `body`, `cache` (default false), `cache_ttl_seconds` 0–86 400
+   default 300, `timing` `pre_call|every_turn` default `pre_call`, `response_data: list[ResponseDataItem(name
+   ^[A-Za-z_][A-Za-z0-9_]{0,63}$, data 1–500, context ≤ 1 000 | None)]` ≤ 20. These live in `va_domain.calls.tools`;
+   P08's `va_tools.models` re-exports them instead of redefining.
+9. `campaign_id` (named in §10's alias list) is the `GET /v1/calls` alias of `batch_id` (§6), so it belongs to the
+   list-filter model (P05-T16), not to Send Call.
+
+### Field list (SendCallRequest/CallParameters) — implement every §3 row; constraints per the tables
+- Runner: `task` 1–16 000; `pathway_id` UUID; `pathway_version` `int ≥ 0 | "production" | "staging" | "draft"`
+  (draft only usable with `test_call`; enforced in T03c) default None (= production); `start_node_id` 1–128;
+  `persona_id` UUID; `persona_version` `"production" | "draft" | int ≥ 0`; `persona_settings` dict[str, JsonValue]
+  whose keys must be `CallParameters` field names/aliases (else INVALID_INPUT, field `persona_settings.<key>`);
+  `agent_id` UUID; `agent_version` pattern `^(production|staging|dev|latest|\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?|branch:[A-Za-z0-9._/-]{1,64})$`.
+- Basic: `phone_number`; `voice` 1–100 (name or UUID string); `voice_settings: VoiceSettingsPatch` (all fields optional,
+  same bounds as `va_domain.voices.VoiceSettings`, extra forbid); `first_sentence` ≤ 1 000; `wait_for_greeting` bool;
+  `language` (Decision 7); `model` 1–200; `temperature` 0–1; `max_tokens` 32–1 024; `pronunciation_guide` ≤ 200
+  `PronunciationRule`; `interruption_threshold` 50–5 000 | None; `interruptibility` 0–4; `block_interruptions`;
+  `noise_cancellation`; `background_track` `office|cafe|restaurant|none|None`; `hd_audio`; `record`; `max_duration`
+  float 0.5–240.
+- Dispatch: `from_` alias `from` (E.164); `dialing_strategy` `DialingStrategy` (custom_pooling requires `pool_id`,
+  others forbid it); `timezone` (`va_domain.org.Timezone`); `start_time` (Decision 6); `transfer_phone_number`;
+  `transfer_list` ≤ 20, labels 1–64, values E.164, non-empty must contain `default`; `warm_transfer`
+  `WarmTransferRequest` (briefing ≤ 2 000, hold_audio, timeout_s 10–120 default 45); `country` `CountryCode`.
+- Knowledge: `tools` ≤ 30; `knowledge_base_ids` ≤ 10 `KB-<uuid>`; `memory_id` UUID; `memory_enabled` bool.
+- Voicemail: `ivr_mode` (+ `amd`); `voicemail` `VoicemailRequest` (message ≤ 1 000, action optional, sms
+  `{message ≤ 1 600, from?}` required when action `leave_message_and_sms`, sensitive); `voicemail_detect_timeout_ms`
+  3 000–30 000; `answered_by_enabled`.
+- Analysis: `summary_prompt` ≤ 2 000; `dispositions` ≤ 50 `^[A-Z][A-Z0-9_]{0,63}$`; `available_tags` (same items);
+  `analysis_schema` ≤ 50 keys, key 1–64, value 1–500 string; `analysis_prompt` ≤ 2 000; `citation_schema_ids` ≤ 10
+  UUIDs; `post_call_evals` exactly one of the two ids; `stream_post_transfer_transcript`; `retry` `RetryRequest`
+  (`wait` 60–86 400 optional at schema level, voicemail_action, voicemail_message ≤ 1 000, max_attempts 1–5 default
+  1, on_no_answer).
+- Advanced: `request_data` (keys `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, ≤ 65 536 bytes `json.dumps(separators=(",",":"))`
+  UTF-8); `metadata` ≤ 65 536 bytes; `external_id` `^[\x20-\x7E]{1,256}$` (validate before strip? strip applies; then
+  1–256); `webhook` absolute http(s) URL ≤ 2 048 (scheme policy + SSRF in T03c); `webhook_events` unique subset of
+  the 9 names; `dynamic_data` ≤ 10; `keywords` ≤ 100 `^[^:\s][^:]{0,99}(:(10|[1-9]))?$`; `ignore_button_press`;
+  `precall_dtmf_sequence` `^[0-9*#w]{1,64}$`; `test_call`; `guard_rails` list[`GuardRail`] ≤ 20 (custom requires
+  name 1–64 + description 1–1 000; action `transfer` requires E.164 phone_number; `move_to_node` requires node_id);
+  `local_dialing`, `geospatial_dialing`, `test_mode` bools.
+- Every field gets `Field(description=..., examples=...)` where useful (OpenAPI in T05 relies on it), and the
+  request model one `json_schema_extra` example (§5 style request).
+
+### SendCallConfig (va_domain/calls/config.py)
+Exactly the §4.4 block (field names, types, defaults), `extra="forbid"`, `VoicemailSms.from_` with
+`serialization_alias`/`validation_alias` `"from"` + populate_by_name (AGENTS.md P03-T08a note: use
+`Field(serialization_alias="from", validation_alias="from")`), `InlineTool`/`DynamicDataSpec` from `tools.py`,
+`VoiceSettings` from `va_domain.voices`, JSON round-trip `SendCallConfig.model_validate(cfg.model_dump(mode="json",
+by_alias=True))` == cfg.
+
+### Files
+- create `packages/va_domain/src/va_domain/calls/{__init__,errors,tools,request_parts,request,config}.py`
+  (`request_parts` = nested request models + Annotated field types; keep each module < ~400 lines, radon ≤ B).
+- create `packages/va_domain/src/va_domain/phone.py`, `packages/va_domain/src/va_domain/languages.py`.
+- modify `packages/va_elevenlabs/src/va_elevenlabs/languages.py` (import table from va_domain, same `__all__`).
+- modify `packages/va_domain/pyproject.toml` (+ `phonenumbers>=9`; check the latest with `uv add`), `uv lock`.
+  phonenumbers ships type stubs? If not, add a commented mypy override like soxr.
+- create `apps/api/tests/fixtures/bland_send_call/01_task_basic.json … 12_*.json` (groups: task basic, pathway
+  runner + version, persona + persona_settings, agent runner, voice/audio, dispatch/schedule, transfer, tools/KB/
+  dynamic_data, voicemail/AMD, analysis/retry, advanced/request_data/metadata/guard_rails, legacy aliases) and
+  `apps/api/tests/test_bland_send_call_fixtures.py` (each parses, `check_rules()` passes, `unknown_fields` empty
+  except where a fixture deliberately carries one Bland-only field).
+- specs/05 §3 Decision (items 1–9); AGENTS.md learning line.
+
+### Tests (packages/va_domain/tests)
+- `test_call_request_fields.py`: one parametrized table `(field, valid values, invalid values)` covering every §3
+  parameter boundary (e.g. `max_tokens` 32/1024 ok, 31/1025 bad; `max_duration` 0.5/240 ok, 0.49/240.1 bad; task
+  16 000 ok/16 001 bad; request_data exactly 65 536 bytes ok/65 537 bad; bad request_data key; transfer_list without
+  default; 21 entries; keywords `word:11`; dtmf `12a`; webhook_events unknown; dispositions lower-case; analysis_schema
+  51 keys; post_call_evals both/neither; dialing_strategy custom_pooling without pool_id; guard rail transfer
+  without phone; inline tool with secret_headers rejected; tools 31 items; bad `TL-` id; voice_settings speed 1.3;
+  language `xx` rejected, `EN-us` accepted…). Builds the minimal valid body `{"phone_number": "+14155550100",
+  "task": "Hi"}` and patches one field per case; asserts error `loc`.
+- `test_call_request_rules.py`: aliases (amd, local_dialing, geospatial_dialing, available_tags, knowledge_base_ids,
+  voicemail message → leave_message, both alias+canonical → canonical wins), `explicit_fields` only sent keys,
+  trimming, unknown fields ignored + `unknown_fields`, `check_rules` table (every RUNNER_CONFLICT case, retry
+  missing wait precedes runner conflict, valid combos incl. persona+pathway and task+pathway), `runner_type`,
+  start_time formats (offset, naive, ISO Z, bad format), persona_settings unknown key rejected.
+- `test_call_config.py`: `SendCallConfig` field names and defaults equal the specs/05 §4.4 code block (parse the
+  ```python block: `name: type = default` lines, `;`-separated too; compare names per class and the literal defaults
+  that are plain literals), JSON round trip, `from` alias.
+- `test_phone.py`: national US with/without country, `+44 20 7946 0958`, letters rejected, too short, `+1 555 0100`
+  invalid, region `GB`, whitespace/dashes, `InvalidPhoneNumber` is a ValueError.
+- `test_languages.py` (va_domain): every alias resolvable, case-insensitive lookup, unknown → None; va_elevenlabs
+  `tests/test_languages.py` still green.
+
+### Gates
+`make fmt lint typecheck placeholders test`, spec refs, jscpd 0 clones, radon. No call flow touched → `make e2e` not
+required (tests_e2e absent anyway).
+
+### Risks
+- jscpd: the field table tests and fixture JSONs can look repetitive; keep fixtures distinct, build tests from tables.
+- pydantic `str_strip_whitespace` applies to all str fields incl. JSON values? It does not touch JsonValue dict
+  contents; fine. `extra="ignore"` + `populate_by_name` with alias `from` — mypy without plugin: construct in tests
+  via `model_validate(dict)` only.
+- `VoiceSettingsPatch` must not duplicate `VoiceSettings` field blocks verbatim (jscpd): define with Annotated types
+  shared from `va_domain.voices` (add `Stability`, etc. aliases there) or generate with `create_model`; prefer the
+  shared Annotated types.
+- Moving the language table must keep `va_elevenlabs.languages.__all__` and behaviour identical.
+
+## Build P05-T03a (Builder, 2026-11-01)
+Implemented per plan. Deviations: the nested models shared by request and config live in `va_domain/calls/parts.py`
+(not `request_parts.py`); `WarmTransferConfig`/`DialingStrategy`/`GuardRail(Action)`/`PostCallEvals`/
+`PronunciationRule`/`VoicemailSms` are one model each (constrained), used by both request and config; request-only
+`VoicemailRequest` (`sent()`) and `RetryRequest`; `RetryConfig`/`VoicemailConfig` are plain spec copies in config.py.
+`InvalidPhoneNumber` is named `InvalidPhoneNumberError` (ruff N818). `voices.py` gained `UnitInterval`/`Speed`
+Annotated types plus `VoiceSettingsPatch`. Letters are rejected by `normalize_e164`, not converted as vanity numbers.
+persona_settings key errors land at `persona_settings.<key>` via a dict-key AfterValidator.
+config.py field blocks sit between jscpd ignore markers (they clone the spec block on purpose).
+Gates: fmt ok; lint 0; mypy 937 files clean; placeholders 0; spec refs 0; jscpd 0 clones; radon avg A (2.53, worst
+class C 11); make test exit 0 (8175 passed, 7 skipped, 98.46 %); va_domain coverage 99 %; pip-audit clean; pnpm audit
+3 moderate (no high, unchanged). No call flow touched → no e2e.
+
+## Review P05-T03a (Reviewer, 2026-11-01)
+Approved. Re-ran make lint typecheck placeholders (0 findings) and make test (8175 passed, 7 skipped, 98.58 %), spec refs.
+Checked §3.1–§3.7 rows vs CallParameters/SendCallRequest, §4.4 drift test, specs/13 §2/§7 shapes; probed aliases,
+voicemail implied action, KB dedupe, start_time forms, country upper-casing, persona_settings key errors.

@@ -1,0 +1,9 @@
+{
+  "phone_number": "415 555 0127",
+  "task": "Follow up on the quote we sent last week and answer any questions.",
+  "from": "+14155550190",
+  "timezone": "America/New_York",
+  "start_time": "2026-11-20 09:30:00 -05:00",
+  "dialing_strategy": {"type": "default"},
+  "max_duration": 15
+}

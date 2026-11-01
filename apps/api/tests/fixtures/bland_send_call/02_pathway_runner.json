@@ -1,0 +1,10 @@
+{
+  "phone_number": "(415) 555-0123",
+  "country": "US",
+  "pathway_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b01",
+  "pathway_version": 4,
+  "start_node_id": "verify_identity",
+  "request_data": {"customer_name": "Jordan Lee", "account_tier": "gold", "balance_due": 182.5},
+  "webhook": "https://hooks.acme.test/calls",
+  "webhook_events": ["call", "tool"]
+}

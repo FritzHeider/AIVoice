@@ -1,0 +1,31 @@
+{
+  "phone_number": "+14155550129",
+  "task": "Help the caller book a table. Check availability before confirming.",
+  "tools": [
+    "TL-0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b05",
+    "KB-0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b06",
+    {
+      "name": "check_availability",
+      "description": "Checks table availability for a date, time and party size.",
+      "speech": "Let me check that for you.",
+      "url": "https://api.bellapasta.test/availability",
+      "method": "POST",
+      "headers": {"Content-Type": "application/json"},
+      "body": {"date": "{{input.date}}", "party": "{{input.party_size}}"},
+      "input_schema": {"type": "object", "properties": {"date": {"type": "string"}, "party_size": {"type": "integer"}}, "required": ["date", "party_size"]},
+      "response": {"available": "$.available"},
+      "timeout_ms": 8000,
+      "retries": 1
+    }
+  ],
+  "knowledge_base_ids": ["KB-0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b07"],
+  "dynamic_data": [
+    {
+      "url": "https://crm.bellapasta.test/contacts?phone={{to}}",
+      "method": "GET",
+      "cache": true,
+      "response_data": [{"name": "customer_name", "data": "$.contact.name", "context": "The customer's name is {{customer_name}}."}]
+    }
+  ],
+  "keywords": ["Bella Pasta:5", "tiramisu"]
+}

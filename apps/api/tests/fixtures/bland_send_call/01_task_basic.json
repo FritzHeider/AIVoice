@@ -1,0 +1,9 @@
+{
+  "phone_number": "+14155550100",
+  "task": "You are Maya, a friendly receptionist at Bella Pasta. Confirm the caller's reservation for tonight at 7pm and ask if they need a high chair.",
+  "voice": "Karen",
+  "first_sentence": "Hi, this is Maya from Bella Pasta calling about your reservation tonight.",
+  "wait_for_greeting": true,
+  "record": true,
+  "max_duration": 5
+}

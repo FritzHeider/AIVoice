@@ -12,15 +12,33 @@
   - Deliverables: `va_edge.mapping` (every voice event type), leg/call transitions with guard checks, Redis `call:{id}:carrier` publish + `carrier_state` hash, Temporal signal to `CallWorkflow`, domain events via publisher
   - Acceptance: table-driven tests for every event type and illegal transition handling.
 
-- [ ] P05-T03 Send Call validation and resolved configuration
+- [ ] P05-T03 Send Call validation and resolved configuration (split into P05-T03a–c below; tick when all three are ticked)
   - Spec refs: specs/05-calls-api.md (POST /v1/calls, every parameter, SendCallConfig, runner selection and precedence, validation order)
   - Depends on: P02-T03, P02-T12
   - Deliverables: `SendCallRequest` pydantic model (every parameter, aliases, defaults), `resolve_call_config(...)` implementing precedence incl. request_data/metadata replacement semantics, runner resolution for task and pathway (+ version semantics), language/voice resolution, E.164 normalization
   - Acceptance: exhaustive parameter tests; snapshot of resolved config for representative requests.
 
+- [x] P05-T03a Send Call request and config models, E.164 normalization, shared language table — va_domain.calls (CallParameters/SendCallRequest/SendCallConfig, explicit_fields, check_rules), va_domain.phone, va_domain.languages; 12 Bland fixtures; make lint/typecheck/placeholders/test green (8175 passed, 98.58 %)
+  - Spec refs: specs/05-calls-api.md §3, §4.1 steps 3–4, §4.4, §10 (request model tests); specs/08-stt-elevenlabs.md §5; specs/13-tools-and-dynamic-data.md §2, §7
+  - Depends on: P02-T12
+  - Deliverables: `va_domain.calls` (`CallParameters`, `SendCallRequest`, every §3 parameter with validation/aliases, `explicit_fields()`, `check_rules()` → `CallRequestError` for `RUNNER_CONFLICT`/`RETRY_NOT_PROVIDED`; `SendCallConfig` + sub-models of §4.4; `InlineTool`, `DynamicDataSpec`), `va_domain.phone.normalize_e164`, language table moved to `va_domain.languages` (va_elevenlabs re-uses it), 12 Bland sample requests in `apps/api/tests/fixtures/bland_send_call/`
+  - Acceptance: every parameter valid/invalid boundary parametrized; aliases; unknown fields ignored; §4.4 field-name drift test; all 12 fixtures parse.
+
+- [ ] P05-T03b Pure `resolve_call_config` precedence
+  - Spec refs: specs/05-calls-api.md §4.3, §4.4, §3 (defaults and semantics)
+  - Depends on: P05-T03a
+  - Deliverables: `va_domain.call_resolution.resolve_call_config(org, request, runner, refs, now)` (pure; layers platform → org `call_defaults` → runner defaults (task, pathway `global_config.call_defaults`; persona/agent layer shapes ready for P13-T07) → explicit fields), request_data/metadata replacement, tools union, dispositions + built-ins, guard rails union, record forcing, ivr_mode effects, model mapping, start_time localization/window
+  - Acceptance: ≥ 40-case precedence table; snapshot of resolved configs for the 12 Bland fixtures.
+
+- [ ] P05-T03c Send Call input loading: runner, voice, tools, from number
+  - Spec refs: specs/05-calls-api.md §3.1–§3.4, §4.1 steps 4, 5, 7, 8; specs/16-phone-numbers.md §8 (local selection)
+  - Depends on: P05-T03b
+  - Deliverables: `apps/api/src/va_api/services/call_inputs.py` loading everything `resolve_call_config` needs inside one `tenant_session`: pathway + version semantics (production/staging/integer fallback, draft for test calls, warnings), voice by name/id (org first, then platform; org default voice), tool/KB existence, `encrypted_key` account, destination parse (`INVALID_PHONE_NUMBER`), `from` ownership + `local` dialing strategy (`va_common.nanp`), `AGENT_REQUIRES_ORG_KEY`, `test_call`/`test_mode` permission checks
+  - Acceptance: DB tests per validation step proving order (earlier failures mask later ones) and each error code/body.
+
 - [ ] P05-T04 Dispatch checks: limits, compliance, credit hold
   - Spec refs: specs/24-billing-and-limits.md (limit enforcement algorithms, credit holds); specs/23-guardrails-and-compliance.md (DNC, blacklist, calling hours); specs/31-error-catalog.md
-  - Depends on: P05-T03
+  - Depends on: P05-T03c
   - Deliverables: `va_billing.limits` (daily/hourly/concurrency/same-number/new-account/international), `va_compliance.dnc.check`, calling-hours check when enforced, `va_billing.holds` (create/capture/release), error codes exactly as catalogued
   - Acceptance: Redis algorithm tests with fake clock; hold sizing tests.
 

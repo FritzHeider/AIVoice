@@ -1,0 +1,7 @@
+{
+  "phone_number": "+14155550124",
+  "persona_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b02",
+  "persona_version": "production",
+  "persona_settings": {"voice": "Maya", "first_sentence": "Hello from the Acme team!", "max_duration": 12},
+  "metadata": {"campaign": "spring-renewals", "row": 17}
+}

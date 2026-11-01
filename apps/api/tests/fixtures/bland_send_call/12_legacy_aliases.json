@@ -1,0 +1,10 @@
+{
+  "phone_number": "4155550133",
+  "task": "Navigate the phone tree to reach the billing department and ask for the account balance.",
+  "amd": true,
+  "local_dialing": true,
+  "geospatial_dialing": true,
+  "available_tags": ["BALANCE_OBTAINED", "UNREACHABLE"],
+  "language": "babel",
+  "reduce_latency": true
+}

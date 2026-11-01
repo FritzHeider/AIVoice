@@ -1,0 +1,7 @@
+{
+  "phone_number": "+14155550128",
+  "task": "Qualify the lead. If they want to talk pricing, transfer them to sales; for support issues, transfer to support.",
+  "transfer_phone_number": "+14155550199",
+  "transfer_list": {"default": "+14155550199", "sales": "+14155550198", "support": "+14155550197"},
+  "warm_transfer": {"enabled": true, "briefing_prompt": "Summarize the caller's need in one sentence.", "hold_audio": "music", "timeout_s": 30}
+}

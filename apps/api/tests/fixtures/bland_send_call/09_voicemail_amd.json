@@ -1,0 +1,12 @@
+{
+  "phone_number": "+14155550130",
+  "task": "Let the customer know their order has shipped and offer tracking details.",
+  "voicemail": {
+    "message": "Hi, this is Acme letting you know your order has shipped. We've texted you the tracking link.",
+    "action": "leave_message_and_sms",
+    "sms": {"message": "Your Acme order has shipped: https://acme.test/t/123"},
+    "sensitive": true
+  },
+  "voicemail_detect_timeout_ms": 9000,
+  "answered_by_enabled": true
+}

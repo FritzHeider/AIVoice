@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["VoiceSettings"]
+__all__ = ["Speed", "UnitInterval", "VoiceSettings", "VoiceSettingsPatch"]
+
+UnitInterval = Annotated[float, Field(ge=0, le=1)]
+Speed = Annotated[float, Field(ge=0.7, le=1.2)]
 
 
 class VoiceSettings(BaseModel):
@@ -12,10 +17,22 @@ class VoiceSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    stability: float = Field(default=0.5, ge=0, le=1, description="Lower values give a more varied delivery.")
-    similarity_boost: float = Field(
-        default=0.75, ge=0, le=1, description="How closely the output follows the original voice."
+    stability: UnitInterval = Field(default=0.5, description="Lower values give a more varied delivery.")
+    similarity_boost: UnitInterval = Field(
+        default=0.75, description="How closely the output follows the original voice."
     )
-    style: float = Field(default=0.0, ge=0, le=1, description="Style exaggeration of the speaker.")
+    style: UnitInterval = Field(default=0.0, description="Style exaggeration of the speaker.")
     use_speaker_boost: bool = Field(default=True, description="Boost similarity to the original speaker.")
-    speed: float = Field(default=1.0, ge=0.7, le=1.2, description="Speaking rate multiplier.")
+    speed: Speed = Field(default=1.0, description="Speaking rate multiplier.")
+
+
+class VoiceSettingsPatch(BaseModel):
+    """Per-call overrides of a voice's stored settings (specs/05 §3.2): only the sent keys apply."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stability: UnitInterval | None = None
+    similarity_boost: UnitInterval | None = None
+    style: UnitInterval | None = None
+    use_speaker_boost: bool | None = None
+    speed: Speed | None = None

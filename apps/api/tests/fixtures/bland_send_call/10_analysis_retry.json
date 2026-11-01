@@ -1,0 +1,9 @@
+{
+  "phone_number": "+14155550131",
+  "task": "Ask the customer how satisfied they were with their recent visit on a scale of 1 to 10.",
+  "summary_prompt": "Summarize the customer's feedback in two sentences.",
+  "dispositions": ["PROMOTER", "PASSIVE", "DETRACTOR"],
+  "analysis_schema": {"score": "number", "would_recommend": "boolean", "comments": "string"},
+  "analysis_prompt": "Score is the number the customer said, 1-10.",
+  "retry": {"wait": 3600, "voicemail_action": "leave_message", "voicemail_message": "We'll try you again later.", "max_attempts": 2, "on_no_answer": true}
+}

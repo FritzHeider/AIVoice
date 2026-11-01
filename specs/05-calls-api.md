@@ -164,6 +164,32 @@ Actions: `end_call`, `transfer {phone_number}`, `move_to_node {node_id}` (pathwa
 Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATURE_NOT_IN_PLAN`). Semantics in
 `23-guardrails-and-compliance.md`.
 
+> Decision (2026-11-01): Send Call request model (P05-T03a). The schemas live in `va_domain.calls` (I/O-free):
+> `CallParameters` holds every §3.2–§3.7 parameter (lower config layers parse with it too) and `SendCallRequest`
+> adds the §3.1 runner fields and `phone_number`. Only top-level unknown keys are ignored (`unknown_fields(raw)`
+> lists them for the debug log); nested objects reject unknown keys (`INVALID_INPUT`), so inline tools cannot carry
+> `secret_headers` (they would be stored in plaintext in `calls.config`). `explicit_fields()` reports the parameters
+> present in the body with legacy aliases folded: `amd` → `ivr_mode`, `available_tags` → `dispositions`,
+> `local_dialing`/`geospatial_dialing` true → `dialing_strategy` local (the canonical parameter wins when both are
+> sent), `knowledge_base_ids` appended to the KB entries of `tools` (deduplicated), `voicemail` as its sent keys plus
+> the implied `action: "leave_message"`. `check_rules()` raises, in order, `RETRY_NOT_PROVIDED` (`retry` without
+> `wait`; `wait` is optional in the schema for that reason), then `RUNNER_CONFLICT` (no runner → field `task`;
+> `agent_id` with `persona_id`/`pathway_id` → field `agent_id`; `agent_id` with `task` → field `task`). Runner
+> precedence is agent, persona (a `pathway_id` next to it overrides the persona's pathway), pathway, task (`task`
+> next to another runner is ignored with a warning). `phone_number` is kept raw (1–64 chars) and parsed at step 8
+> with `va_domain.phone.normalize_e164(value, region)` (region = body `country`, else org `default_country`, else
+> `US`; letters are rejected rather than translated as vanity numbers); `from`, `transfer_list` values and
+> `voicemail.sms.from` are strict E.164 in the schema; `country` is upper-cased. `pathway_version` and
+> `persona_version` integers must be JSON integers (booleans and numeric strings are rejected); `pathway_version`
+> also accepts `"draft"` (usable only with `test_call`). `persona_settings` keys must be call parameter names
+> (`from`, not `from_`); their values are validated when the persona layer is resolved. `start_time` accepts
+> `YYYY-MM-DD HH:MM:SS ±HH:MM`, a naive `YYYY-MM-DD HH:MM:SS` (localized later with the resolved timezone), or ISO
+> 8601 (`Z` allowed); the future/90-day check needs the clock and happens during resolution. `language` is checked
+> against the specs/08 §5 table, now shared as `va_domain.languages`. `request_data`/`metadata` sizes count the
+> compact UTF-8 JSON (`separators=(",", ":")`). `campaign_id` is the `GET /v1/calls` alias of `batch_id` (§6), not
+> a Send Call parameter. Checks that need the principal, org or plan (`AGENT_REQUIRES_ORG_KEY`, `GUARD_RAIL_LIMIT`,
+> `FEATURE_NOT_IN_PLAN`, `test_call`/`test_mode` permissions, webhook scheme policy and SSRF) run in the API layer.
+
 ## 4. Resolution and precedence
 
 ### 4.1 Validation order (first failure wins; each step maps to a code)

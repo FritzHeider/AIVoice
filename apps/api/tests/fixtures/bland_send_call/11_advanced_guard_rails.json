@@ -1,0 +1,18 @@
+{
+  "phone_number": "+14155550132",
+  "task": "Collect the caller's insurance details for their upcoming appointment.",
+  "request_data": {"patient": {"name": "Ana", "dob": "1990-02-14"}},
+  "metadata": {"source": "ehr-sync"},
+  "precall_dtmf_sequence": "1w2w#",
+  "ignore_button_press": false,
+  "test_call": true,
+  "guard_rails": [
+    {"type": "tcpa:ai_disclosure"},
+    {"type": "tcpa:recording_disclosure", "config": {"end_seconds": 30}},
+    {"type": "tcpa:opt_out", "action": {"type": "end_call"}},
+    {"type": "custom", "name": "no_medical_advice", "description": "Agent must never give medical advice", "action": {"type": "transfer", "phone_number": "+14155550100"}}
+  ],
+  "memory_enabled": true,
+  "citation_schema_ids": ["0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b08"],
+  "post_call_evals": {"workbench_setup_id": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b09"}
+}

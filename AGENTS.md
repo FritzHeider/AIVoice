@@ -1104,3 +1104,15 @@ Grafana 3001
   `packages/va_telnyx/tests/support/telnyx_spec.spec_voice_event_types`. A `FrozenClock` app clock makes the
   processor's 2 s handler budget fire at once (`HandlerTimeoutError`): give apps that process real handlers a clock
   with real `sleep` (see `SimTimeClock` in `test_sim_contract.py`).
+- 2026-11-01 (P05-T03a): Send Call schemas = `va_domain.calls` (rules: specs/05 §3 Decision P05-T03a): `CallParameters`
+  (every §3.2-§3.7 parameter; lower config layers parse with it), `SendCallRequest` (+ runner fields, `phone_number`;
+  `explicit_fields()` folds legacy aliases, `check_rules()` → `CallRequestError(code, message, field)`,
+  `runner_type`), `unknown_fields(raw)`, `PARAMETER_NAMES` (Bland names: `from`, not `from_`), shared nested models in
+  `calls.parts`, `InlineTool`/`DynamicDataSpec` in `calls.tools` (P08 re-exports them), `SendCallConfig` in
+  `calls.config` (drift-checked against the §4.4 block by `packages/va_domain/tests/test_call_config.py`; its field
+  blocks sit between `jscpd:ignore` markers because they mirror the spec). The specs/08 §5 language table is
+  `va_domain.languages` (`lookup_language`); `va_elevenlabs.languages` re-exports it. Destination parsing:
+  `va_domain.phone.normalize_e164(value, region)` (raises `InvalidPhoneNumberError`, a `ValueError`; phonenumbers
+  ships `py.typed`). Bland sample bodies: `apps/api/tests/fixtures/bland_send_call/*.json`. A dict-key validator
+  (`dict[Annotated[str, AfterValidator(f)], V]`) puts the key into the error `loc`, so `field_path` gives
+  `persona_settings.<key>`.

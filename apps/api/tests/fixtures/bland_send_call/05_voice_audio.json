@@ -1,0 +1,14 @@
+{
+  "phone_number": "+14155550126",
+  "task": "Remind the customer about their dental cleaning appointment tomorrow at 10am.",
+  "voice": "0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6b04",
+  "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "speed": 1.05},
+  "language": "en-US",
+  "background_track": "office",
+  "noise_cancellation": false,
+  "hd_audio": true,
+  "interruption_threshold": 300,
+  "pronunciation_guide": [{"word": "Dr. Nguyen", "pronunciation": "Doctor Win"}],
+  "temperature": 0.4,
+  "model": "enhanced"
+}
