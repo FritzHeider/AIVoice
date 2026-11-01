@@ -1161,3 +1161,10 @@ Grafana 3001
   fakeredis + `FrozenClock(NOW)`; conftest fixture `rig`), `billing_rows.py` (`new_billing_org` defaults to
   `created_at = NOW - 30 days`, else the real insert time makes the org a "new account" for the frozen clock;
   `holds_of`). Adding an error code also bumps the row count in `packages/va_common/tests/test_errors.py`.
+- 2026-11-01 (P05-T05a): outbound URL vetting = `va_common.net.check_destination_url(url, allow_http=, allow_private=,
+  resolver=)` (returns the vetted addresses, raises `UnsafeDestinationError(.reason)`), `blocked_address`, `parse_ip`,
+  `system_resolver`, `HostResolver` (rules: specs/19 §8 Decision P05-T05a). `WEBHOOK_ALLOW_PRIVATE` is the shared
+  `va_common.settings.WebhookSafetySettings` mixin (dispatcher + api). Send Call webhook check:
+  `va_api.services.webhook_policy.check_call_webhook(url, org=, settings=, resolver=)`. Tests always inject a fake
+  `resolver=` (never real DNS; `system_resolver("127.0.0.1")` works offline). Python flags IPv6 `::1` as
+  `is_reserved` (inside `::/8`), so loopback is exempted from the always-blocked reserved rule.

@@ -36,7 +36,7 @@
   - Deliverables: `apps/api/src/va_api/services/call_inputs.py` loading everything `resolve_call_config` needs inside one `tenant_session`: pathway + version semantics (production/staging/integer fallback, draft for test calls, warnings), voice by name/id (org first, then platform; org default voice), tool/KB existence, `encrypted_key` account, destination parse (`INVALID_PHONE_NUMBER`), `from` ownership + `local` dialing strategy (`va_common.nanp`), `AGENT_REQUIRES_ORG_KEY`, `test_call`/`test_mode` permission checks
   - Acceptance: DB tests per validation step proving order (earlier failures mask later ones) and each error code/body.
 
-- [ ] P05-T04 Dispatch checks: limits, compliance, credit hold (split into P05-T04a–b below; tick when both are ticked)
+- [x] P05-T04 Dispatch checks: limits, compliance, credit hold (split into P05-T04a–b below; tick when both are ticked) — P05-T04a/b both ticked (0d28237)
   - Spec refs: specs/24-billing-and-limits.md (limit enforcement algorithms, credit holds); specs/23-guardrails-and-compliance.md (DNC, blacklist, calling hours); specs/31-error-catalog.md
   - Depends on: P05-T03c
   - Deliverables: `va_billing.limits` (daily/hourly/concurrency/same-number/new-account/international), `va_compliance.dnc.check`, calling-hours check when enforced, `va_billing.holds` (create/capture/release), error codes exactly as catalogued
@@ -54,11 +54,23 @@
   - Deliverables: new package `packages/va_billing` (`plans.effective_limits`/`effective_pricing` (org `limits` override > plan), `limits` with Lua `capped_incr.lua`/`concurrency_acquire.lua` (same-number, frequency, new-account, daily, hourly, concurrency, international rate, reverse-order rollback, idempotent release), `holds` (sizing, reserve/capture/release, enterprise skip), `dispatch.admit_call(...)` running compliance → limits → hold with compensation)
   - Acceptance: Redis algorithm tests with fake clock (fakeredis) plus real-Redis testcontainer tests (capped_incr never exceeds cap under 100 concurrent increments; concurrency self-heal/idempotent release); rollback-order tests; hold sizing and available-balance tests.
 
-- [ ] P05-T05 `POST /v1/calls` endpoint and CallWorkflow start
+- [ ] P05-T05 `POST /v1/calls` endpoint and CallWorkflow start (split into P05-T05a–b below; tick when both are ticked)
   - Spec refs: specs/05-calls-api.md (POST /v1/calls response); specs/01-architecture.md §2 (outbound steps 1–3)
   - Depends on: P05-T04, P05-T02
   - Deliverables: endpoint inserting `calls` row + `call.queued`/`call.scheduled` events in one transaction, Temporal start with workflow id `call-{id}`, Bland-compatible response
   - Acceptance: API tests incl. idempotency replay and every 4xx path.
+
+- [x] P05-T05a Shared destination URL guard and Send Call webhook policy — va_common.net check_destination_url/blocked_address, WebhookSafetySettings mixin, check_call_webhook; make test 8653 passed / 7 skipped, 98.65 %; lint/typecheck/placeholders/spec refs 0
+  - Spec refs: specs/19-events-and-webhooks.md §8 (SSRF, scheme rules); specs/28-security.md §6.4 (extra blocked ranges); specs/13-tools-and-dynamic-data.md §9; specs/05-calls-api.md §3.7 `webhook`; specs/02-repo-layout-and-conventions.md §6 `WEBHOOK_ALLOW_PRIVATE`; specs/31-error-catalog.md `WEBHOOK_URL_REJECTED`
+  - Depends on: P05-T03c
+  - Deliverables: `va_common.net` (`blocked_address`, `check_destination_url` with injectable resolver, `UnsafeDestinationError.reason`), shared `WebhookSafetySettings` (dispatcher + api; forced false in staging/production), `va_api.services.webhook_policy.check_call_webhook` raising `WEBHOOK_URL_REJECTED` field `webhook`; OIDC discovery reuses the address rule
+  - Acceptance: every blocked range parametrized (v4, v6, mapped v6); scheme/env/org-setting matrix; DNS failure and mixed public/private answers rejected; settings forcing test.
+
+- [ ] P05-T05b Send Call dispatch service, `POST /v1/calls`, CallWorkflow start
+  - Spec refs: specs/05-calls-api.md §1, §2, §4.1 (steps 1–12), §5; specs/01-architecture.md §2.1 step 1; specs/19-events-and-webhooks.md §1, §2 (`call.queued`, `call.scheduled`, `call.error`); specs/24-billing-and-limits.md §5, §7 (`calls.config.pricing`)
+  - Depends on: P05-T04, P05-T05a, P05-T02
+  - Deliverables: `va_api.services.call_dispatch` (steps 4–12 in one tenant transaction: inputs, resolution, webhook check, admit_call, `calls` row with pricing snapshot, `call.queued`/`call.scheduled` event + `call_events` row in the same transaction; after commit Temporal start `CallWorkflow` id `call-{id}` on the main queue; on start failure row → `failed`, hold released, counters rolled back, `503`), `va_domain.call_workflow` start contract, `routers/calls.py` legacy router with `calls:write` + `calls_send` rate limit + idempotency, container `call_starter`
+  - Acceptance: API tests for success (queued/scheduled bodies), idempotency replay/mismatch, every 4xx path through the endpoint, Temporal failure path, event + row atomicity; cross-tenant/audit/openapi gates green.
 
 - [ ] P05-T06 CallWorkflow and activities
   - Spec refs: specs/01-architecture.md §2, §3; specs/06-telephony-telnyx.md (dial parameters); specs/13-tools-and-dynamic-data.md (pre-call dynamic data, cache flag)

@@ -149,6 +149,14 @@ Unknown top-level fields are ignored (logged at debug) for Bland forward-compati
 | `citations` | — | — | — | (No such parameter; see `citation_schema_ids`.) |
 | `test_mode` | boolean | `false` | | Ours: the call is routed to the simulator caller (`va_sim`) instead of Telnyx; only with `test` environment API keys. Billed at $0. |
 
+> Decision (2026-11-01): webhook check (P05-T05a). The dispatch checks the *resolved* `webhook` (request, runner, or
+> org `default_webhook`) with `va_api.services.webhook_policy.check_call_webhook`: `http` is allowed when `VA_ENV` is
+> `local`/`test` or the org setting `allow_insecure_webhooks` is true; private targets only where
+> `WEBHOOK_ALLOW_PRIVATE` holds (never staging/production); the address rules are the specs/19 §8 Decision P05-T05a.
+> Every refusal is `400 WEBHOOK_URL_REJECTED` with field `webhook` and the message for its reason: scheme
+> "webhook must use https.", host "webhook must be an absolute http(s) URL with a host.", resolution "The webhook host
+> could not be resolved.", address "The webhook URL resolves to a blocked address.".
+
 `guard_rails` items:
 
 ```json

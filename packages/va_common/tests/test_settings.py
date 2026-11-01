@@ -16,6 +16,7 @@ from va_common.settings import (
     KmsProviderName,
     LogFormat,
     TemporalSettings,
+    WebhookSafetySettings,
 )
 
 NO_DOTENV: dict[str, Any] = {"_env_file": None}
@@ -197,3 +198,21 @@ def test_database_and_temporal_mixins_read_environment(monkeypatch: pytest.Monke
 def test_database_pool_size_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         settings_of(DatabaseSettings, database_pool_size=0)
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"), [("local", True), ("test", True), ("staging", False), ("production", False)]
+)
+def test_webhook_private_targets_forced_off_outside_dev(
+    monkeypatch: pytest.MonkeyPatch, env: str, expected: bool
+) -> None:
+    monkeypatch.setenv("VA_ENV", env)
+    monkeypatch.setenv("WEBHOOK_ALLOW_PRIVATE", "true")
+    assert settings_of(WebhookSafetySettings).webhook_allow_private is expected
+
+
+def test_webhook_private_targets_default_and_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEBHOOK_ALLOW_PRIVATE", raising=False)
+    assert settings_of(WebhookSafetySettings).webhook_allow_private is True
+    monkeypatch.setenv("WEBHOOK_ALLOW_PRIVATE", "false")
+    assert settings_of(WebhookSafetySettings).webhook_allow_private is False

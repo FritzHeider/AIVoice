@@ -1278,3 +1278,124 @@ make test 8561 passed / 7 skipped, 98.65 %; va_billing 69 passed.
 ## Review P05-T04b round 2 (Reviewer, 2026-11-01)
 Approved. lint 0, typecheck 0, placeholders 0, make test 8561 passed / 7 skipped, 98.65 %. Finding 1 fixed: `_settle`
 filters `CreditHold.org_id`, `compensate` passes org_id, test `test_capture_and_release_filter_by_org` covers it.
+
+## Plan P05-T05a — Shared destination URL guard and Send Call webhook policy (Planner, 2026-11-01)
+Context: P05-T04 ticked (a+b done). P05-T05 split into T05a (this) and T05b (dispatch service + `POST /v1/calls` +
+CallWorkflow start; planned next iteration). T05b wires `check_call_webhook` into the dispatch right after
+`resolve_inputs` (it checks the *resolved* `config.webhook`, so an org `default_webhook` is checked too).
+
+### Decisions (write as `> Decision (2026-11-01): destination URL guard (P05-T05a).` under specs/19 §8 after the SSRF
+bullet; one-line cross-refs under specs/13 §9 and specs/28 §6.4 and next to the specs/05 §3.7 `webhook` row as a
+Decision paragraph after the §3.7 table)
+1. Module `va_common.net` (not `assert_public_destination` in specs/13 §9 wording: the name is
+   `check_destination_url`; update the specs/13 §9 sentence to the real name). The pinning HTTP client
+   (`safe_client`, specs/28 §6.4) is NOT part of this task; it arrives with tools/webhook delivery. Returning the vetted
+   addresses lets that client pin later.
+2. Blocked address rule `blocked_address(ip) -> bool`: an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is judged by its
+   embedded IPv4; then blocked when `not ip.is_global` OR `ip.is_multicast` OR `ip.is_reserved` OR
+   `ip.is_unspecified`. This is a superset of the specs/19 §8 list plus the specs/28 §6.4 extras (0/8, 192.0.0.0/24,
+   198.18/15, 240/4, ff00::/8, mapped private) — tests parametrize every range named in both specs.
+3. Metadata addresses `169.254.169.254` and `fd00:ec2::254` are ALWAYS blocked, even with `allow_private`
+   (local/test `WEBHOOK_ALLOW_PRIVATE=true` relaxes only the private/loopback rule so the simulators on localhost work).
+4. URL rules: scheme `https`, or `http` only when `allow_http`; a hostname is required; IP-literal hosts (incl.
+   `[v6]`) are checked directly without DNS; otherwise DNS resolves once (`getaddrinfo`, all A/AAAA answers) with a
+   timeout (`timeout_s`, default 2.0) and EVERY answer must pass (a mixed public/private answer is rejected); empty
+   answer / `OSError` / timeout → reason `resolution`.
+5. `UnsafeDestinationError(reason)` with `reason: Literal["scheme", "host", "resolution", "address"]`.
+6. Send Call webhook policy (specs/05 §3.7): `http` allowed when `VA_ENV` is `local`/`test` or org
+   `allow_insecure_webhooks` is true; private targets allowed only with `WEBHOOK_ALLOW_PRIVATE` (forced false in
+   staging/production). Error `WEBHOOK_URL_REJECTED` (400), field `webhook`, messages per reason:
+   scheme → "webhook must use https.", host → "webhook must be an absolute http(s) URL with a host.",
+   resolution → "The webhook host could not be resolved.", address → "The webhook URL resolves to a blocked address.".
+7. `WEBHOOK_ALLOW_PRIVATE` moves into a shared settings mixin `va_common.settings.WebhookSafetySettings` (field
+   `webhook_allow_private: bool = True`, model validator forces False in staging/production — exactly the current
+   dispatcher logic). `DispatcherSettings` and `ApiSettings` both inherit it (specs/02 §6 already lists api). No
+   `.env.example` change (key exists).
+
+### Files
+- NEW `packages/va_common/src/va_common/net.py`:
+  - `type IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address`; `type HostResolver = Callable[[str],
+    Awaitable[list[str]]]`; `METADATA_ADDRESSES: Final = frozenset({ip("169.254.169.254"), ip("fd00:ec2::254")})`;
+    `DNS_TIMEOUT_S: Final = 2.0`; `type UnsafeReason = Literal["scheme","host","resolution","address"]`.
+  - `class UnsafeDestinationError(Exception)` with `.reason` (message `f"destination rejected: {reason}"`).
+  - `async def system_resolver(host: str) -> list[str]` (moved from `va_api.auth.oidc_discovery`: `loop.getaddrinfo(
+    host, None, type=socket.SOCK_STREAM)` → unique `sockaddr[0]` strings; strip IPv6 zone `%`).
+  - `def parse_ip(host: str) -> IpAddress | None` (strips `[...]`).
+  - `def blocked_address(address: IpAddress, *, allow_private: bool = False) -> bool` (Decision 2/3; with
+    allow_private only METADATA_ADDRESSES, multicast, unspecified, reserved stay blocked).
+  - `async def check_destination_url(url: str, *, allow_http: bool, allow_private: bool, resolver: HostResolver =
+    system_resolver, timeout_s: float = DNS_TIMEOUT_S) -> tuple[IpAddress, ...]` (Decision 4; `urlsplit` ValueError
+    → `host`; timeout via `asyncio.timeout(timeout_s)`).
+- `packages/va_common/src/va_common/settings.py`: `WebhookSafetySettings(BaseServiceSettings)` + `_PRIVATE_FORBIDDEN`;
+  export in `__all__`.
+- `apps/webhook_dispatcher/src/va_webhooks/settings.py`: `DispatcherSettings(WebhookSafetySettings, RedisSettings,
+  DatabaseSettings)`, delete its own field/validator (existing dispatcher settings tests must still pass unchanged).
+- `apps/api/src/va_api/settings.py`: add `WebhookSafetySettings` to `ApiSettings` bases.
+- `apps/api/src/va_api/auth/oidc_discovery.py`: import `HostResolver`, `system_resolver`, `parse_ip` from
+  `va_common.net` (delete the local copies / `_is_ip`); `_check_host` keeps its own stricter rule (`is_global` for
+  every address — OIDC never allows private even in production) but uses `parse_ip`. Re-export nothing new; grep
+  tests for `oidc_discovery.system_resolver` and update imports if any.
+- NEW `apps/api/src/va_api/services/webhook_policy.py`: `MESSAGES: Final[dict[UnsafeReason, str]]`,
+  `INSECURE_ENVIRONMENTS = frozenset({Environment.LOCAL, Environment.TEST})`,
+  `async def check_call_webhook(url: str | None, *, org: OrgSettings, settings: ApiSettings, resolver: HostResolver =
+  system_resolver) -> None` (None → return; `allow_http = settings.va_env in INSECURE_ENVIRONMENTS or
+  org.allow_insecure_webhooks`; `allow_private = settings.webhook_allow_private`; maps `UnsafeDestinationError` to
+  `AppError("WEBHOOK_URL_REJECTED", MESSAGES[reason], field="webhook")` chained).
+- Specs: Decisions above (specs/19 §8 main; specs/13 §9 name fix + cross-ref; specs/28 §6.4 cross-ref; specs/05 §3.7).
+- AGENTS.md learning line: `va_common.net.check_destination_url` / `blocked_address` / `WebhookSafetySettings`,
+  `check_call_webhook`, inject `resolver=` in tests (never real DNS).
+
+### Tests
+- NEW `packages/va_common/tests/test_net.py` (no real DNS: a dict-backed fake resolver; `system_resolver` tested only
+  with an IP literal / `localhost`-free path: call it with `"127.0.0.1"` which getaddrinfo resolves without network):
+  - `blocked_address` parametrized blocked: `10.0.0.1, 172.16.0.1, 172.31.255.255, 192.168.1.1, 127.0.0.1,
+    169.254.169.254, 169.254.1.1, ::1, fc00::1, fd12::1, fe80::1, 100.64.0.1, 100.127.255.255, 0.0.0.1, 192.0.0.8,
+    198.18.0.1, 198.19.255.255, 240.0.0.1, 255.255.255.255, 224.0.0.1, ff02::1, ::ffff:10.0.0.1, ::ffff:127.0.0.1, ::,
+    0.0.0.0`; allowed: `8.8.8.8, 1.1.1.1, 172.32.0.1, 100.128.0.1, 2606:4700:4700::1111, ::ffff:8.8.8.8`.
+  - allow_private: `10.0.0.1`, `127.0.0.1`, `::1`, `fd12::1` allowed; `169.254.169.254`, `fd00:ec2::254`,
+    `224.0.0.1`, `0.0.0.0` still blocked.
+  - `check_destination_url`: https public → returns addresses; http with allow_http False → `scheme`; ftp → `scheme`;
+    no host (`https:///x`, `https://`) → `host`; malformed (`https://[::1`) → `host`; IP literal private → `address`
+    without calling the resolver (resolver raises if called); `[::1]` literal; mixed answer `[8.8.8.8, 10.0.0.1]` →
+    `address`; empty answer → `resolution`; resolver `OSError` → `resolution`; hanging resolver with
+    `timeout_s=0.01` → `resolution`; uppercase scheme `HTTPS://` accepted; allow_private lets `http://localhost:9100`
+    (fake resolver → 127.0.0.1) through.
+  - `system_resolver("127.0.0.1") == ["127.0.0.1"]`.
+- `packages/va_common/tests/test_settings.py` (or new `test_settings_webhooks.py`): `WebhookSafetySettings` default True
+  in local/test, forced False in staging/production even when env sets true; env var `WEBHOOK_ALLOW_PRIVATE=false`
+  honored in local.
+- NEW `apps/api/tests/test_webhook_policy.py`: None → no-op; https public ok; http in local/test ok; http in
+  production rejected unless `OrgSettings(allow_insecure_webhooks=True)`; staging http rejected; private target with
+  `webhook_allow_private` True (test env) ok, production (forced False) rejected; each reason → exact error code,
+  status 400, message, field `webhook`. Build settings with `api_helpers.make_settings(...)` (production needs
+  `kms_provider="aws", aws_kms_key_id=...`, see AGENTS.md P02-T04b).
+- Existing: `apps/webhook_dispatcher` settings tests, `apps/api/tests/test_oidc_discovery.py` stay green.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `make openapi` (no drift
+expected), `npx --yes jscpd@4 --silent` (0 clones), `uvx radon cc -s -a` (≤ B), coverage of new modules 100 %,
+`uvx pip-audit` on `uv export`, `corepack pnpm audit`. No call flow → no e2e.
+
+### Risks
+- Python `ipaddress` flag semantics differ across versions (3.12.4+ changed is_private/is_global for some ranges):
+  the explicit multicast/reserved/unspecified checks plus the parametrized table guard behaviour; run on the repo
+  interpreter.
+- `getaddrinfo` for `127.0.0.1` works offline; never resolve real hostnames in tests.
+- Moving `system_resolver` must not break OIDC tests that monkeypatch it — grep `system_resolver` in apps/api/tests.
+
+## Build P05-T05a (Builder, 2026-11-01)
+Implemented per plan: `va_common.net` (check_destination_url, blocked_address, parse_ip, system_resolver,
+UnsafeDestinationError, METADATA_ADDRESSES), `WebhookSafetySettings` mixin (dispatcher + api), oidc_discovery now
+imports resolver/parse_ip from va_common.net (keeps its stricter is_global rule; non-IP resolver answers are refused
+instead of raising ValueError), `va_api.services.webhook_policy.check_call_webhook`. Deviation found in testing:
+Python flags `::1` as `is_reserved` (inside `::/8`), so loopback is exempt from the always-blocked reserved rule
+(recorded in the specs/19 §8 Decision). Resolver answers that are not IP strings → `resolution`.
+Decisions: specs/19 §8 (main), specs/13 §9 (name fixed + cross-ref), specs/28 §6.4, specs/05 §3.7. AGENTS.md line.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0, spec refs 0, make test 8653 passed / 7 skipped, 98.65 %;
+new modules 100 %; jscpd 0 clones; radon net.py avg A, nothing ≥ C; openapi no drift; pip-audit clean;
+pnpm audit 3 moderate (unchanged). No call flow → no e2e.
+
+## Review P05-T05a (Reviewer, 2026-11-01)
+Approved. lint 0, typecheck 0, placeholders 0, spec refs 0, make test 8653 passed / 7 skipped, 98.65 %. net.py rules
+match specs/19 §8 + specs/28 §6.4 (mapped v6, metadata always blocked, every DNS answer checked, timeout → resolution);
+WEBHOOK_URL_REJECTED in catalog; dispatcher settings behaviour unchanged via mixin; OIDC keeps stricter is_global rule.

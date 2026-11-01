@@ -8,7 +8,13 @@ import pytest
 from service_helpers import isolate_env, reset_logging
 
 from va_common.email import EmailSettings
-from va_common.settings import CryptoSettings, DatabaseSettings, RedisSettings, TemporalSettings
+from va_common.settings import (
+    CryptoSettings,
+    DatabaseSettings,
+    RedisSettings,
+    TemporalSettings,
+    WebhookSafetySettings,
+)
 
 __all__ = ["reset_logging"]
 
@@ -24,4 +30,5 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         DatabaseSettings,
         TemporalSettings,
         EmailSettings,
+        WebhookSafetySettings,
     )

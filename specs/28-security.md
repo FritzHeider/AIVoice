@@ -168,6 +168,10 @@ prevent DNS rebinding) with SNI/Host of the original name, max 3 redirects each 
 proxy (Squid in the cluster, `29` §4) that also enforces the blocklist; vendor domains (`api.telnyx.com`,
 `api.elevenlabs.io`, `api.us.elevenlabs.io`, `api.stripe.com`) bypass via NAT directly.
 
+> Decision (2026-11-01): the address check and DNS rule are `va_common.net.check_destination_url` /
+> `blocked_address` (specs/19 §8 Decision P05-T05a), covering every range listed here; `safe_client` builds on them
+> when tools and webhook delivery arrive.
+
 ### 6.5 Custom code sandbox
 
 Deno 2 subprocess per execution: `deno run --no-prompt --no-config --no-npm --no-remote --v8-flags=--max-old-space-size=64

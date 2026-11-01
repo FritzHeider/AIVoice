@@ -11,11 +11,7 @@ whose ``reason`` is shown to the admin (or logged by the login flow).
 
 from __future__ import annotations
 
-import asyncio
-import ipaddress
 import json
-import socket
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlsplit
@@ -23,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from va_api.settings import ApiSettings
+from va_common.net import HostResolver, parse_ip, system_resolver
 from va_common.settings import Environment
 
 __all__ = [
@@ -68,8 +65,6 @@ _SCHEMES: Final = frozenset({"http", "https"})
 _HTTP_OK: Final = 200
 _REDIRECTS: Final = range(300, 400)
 
-type HostResolver = Callable[[str], Awaitable[list[str]]]
-
 
 @dataclass(frozen=True, slots=True)
 class ProviderMetadata:
@@ -87,12 +82,6 @@ class DiscoveryError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-
-
-async def system_resolver(host: str) -> list[str]:
-    """The unique addresses ``host`` resolves to, in resolver order."""
-    infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    return list(dict.fromkeys(str(info[4][0]) for info in infos))
 
 
 def normalise_issuer(raw: str) -> str:
@@ -155,10 +144,13 @@ class OidcDiscovery:
 
     async def _check_host(self, host: str) -> None:
         try:
-            addresses = [host] if _is_ip(host) else await self._resolver(host)
+            literal = parse_ip(host)
+            answers = [str(literal)] if literal is not None else await self._resolver(host)
         except OSError as exc:
             raise DiscoveryError(UNREACHABLE) from exc
-        if not addresses or not all(ipaddress.ip_address(address).is_global for address in addresses):
+        # OIDC providers must be global even where webhooks may target private addresses (local/test).
+        addresses = [parse_ip(answer) for answer in answers]
+        if not addresses or not all(address is not None and address.is_global for address in addresses):
             raise DiscoveryError(ADDRESS_NOT_ALLOWED)
 
     async def _send(
@@ -228,14 +220,6 @@ class OidcDiscovery:
         await self.check_url(url)
         form_headers = {"Content-Type": "application/x-www-form-urlencoded", **headers}
         return _json_object(await self._send("POST", url, body=body, headers=form_headers))
-
-
-def _is_ip(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return True
 
 
 async def _read_capped(response: httpx.Response) -> bytes:

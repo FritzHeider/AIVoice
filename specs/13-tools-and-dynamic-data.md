@@ -201,9 +201,13 @@ export default async function (ctx: {
 `CUSTOM_CODE_ERROR` (31). JavaScript is checked with `deno check` too (syntax only). Timeout 10 s.
 
 ## 9. SSRF guard (shared with webhooks)
-`SafeHttpClient` reuses `va_common.net.assert_public_destination(url)` — the exact rules of
+`SafeHttpClient` reuses `va_common.net.check_destination_url(url, ...)` — the exact rules of
 `19-events-and-webhooks.md` §8 (blocked ranges, scheme rules, `WEBHOOK_ALLOW_PRIVATE` in local/test). DNS is resolved
 once and the connection pinned to the checked IP (custom `httpx` transport) to prevent DNS rebinding.
+
+> Decision (2026-11-01): the guard is `va_common.net.check_destination_url`, which returns the vetted addresses the
+> pinning client connects to; its rules are the specs/19 §8 Decision P05-T05a. The pinning client itself arrives with
+> tool execution.
 
 ## 10. Tests required
 - CRUD, validation errors, secret masking, tenant isolation, reference-check delete.

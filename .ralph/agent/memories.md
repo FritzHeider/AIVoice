@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793567413-771c
+> P05-T05a: va_common.net.check_destination_url/blocked_address (Python marks IPv6 ::1 is_reserved -> loopback exempted from always-blocked reserved rule); WebhookSafetySettings mixin for WEBHOOK_ALLOW_PRIVATE; va_api.services.webhook_policy.check_call_webhook; api production settings in tests need kms_provider=aws + aws_kms_key_id + smtps:// smtp_url
+<!-- tags: api, security, testing | created: 2026-11-01 -->
+
 ### mem-1793564621-892f
 > P05-T04b: va_billing = plans/keys/scripts(Lua capped_incr, counter_release, concurrency_acquire)/limits.CallLimiter(acquire->LimitTicket.rollback)/holds/dispatch.admit_call; tests billing_helpers.limiter_rig (fakeredis+FrozenClock NOW) and billing_rows.new_billing_org (created_at defaults NOW-30d, else org counts as new account); new error code needs test_errors row-count bump; redis_container.flushed_redis shared helper
 <!-- tags: billing, redis, testing | created: 2026-11-01 -->

@@ -255,6 +255,21 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
   (`10/8, 172.16/12, 192.168/16, 127/8, 169.254/16, ::1, fc00::/7, fe80::/10, 100.64/10`), except in `local`/`test`
   env where `WEBHOOK_ALLOW_PRIVATE=true` is honored. Only `http`/`https`; `http` refused in production unless the
   org setting `allow_insecure_webhooks=true`.
+
+> Decision (2026-11-01): destination URL guard (P05-T05a). The rules above live in `va_common.net`:
+> `check_destination_url(url, *, allow_http, allow_private, resolver=, timeout_s=2.0)` returns the vetted addresses
+> (for a later pinning client) or raises `UnsafeDestinationError(reason)` with `reason` one of `scheme`, `host`,
+> `resolution`, `address`. Scheme `https`, or `http` only when the caller allows it; a host is required. IP-literal
+> hosts (also `[v6]`) are checked without DNS; names are resolved once (`getaddrinfo`, every A/AAAA answer) within the
+> timeout and **every** answer must pass, so a mixed public/private answer is refused; an empty answer, a resolver
+> error, or the timeout is `resolution`. `blocked_address(ip, *, allow_private=False)` judges an IPv4-mapped IPv6
+> address by its embedded IPv4 address, then blocks anything that is not `is_global` plus multicast, reserved
+> (`240/4`, IPv6 reserved blocks except loopback `::1`), and unspecified addresses: a superset of the list above and
+> of the specs/28 §6.4 extras. With `allow_private` (`WEBHOOK_ALLOW_PRIVATE`, honored only in local/test) private,
+> loopback, link-local, and CGNAT targets pass, but the metadata addresses `169.254.169.254` and `fd00:ec2::254`,
+> multicast, reserved, and unspecified addresses stay blocked. `WEBHOOK_ALLOW_PRIVATE` is the shared settings mixin
+> `va_common.settings.WebhookSafetySettings` (forced false in staging/production) used by the dispatcher and the api.
+> Send Call (specs/05 §3.7) maps the reasons to `WEBHOOK_URL_REJECTED` on field `webhook`.
 - Replay: `POST /v1/webhooks/deliveries/{id}/replay` re-queues (new attempt series, same event id).
 - Dead-letter view: `GET /v1/webhooks/deliveries?status=dead`.
 

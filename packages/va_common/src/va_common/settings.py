@@ -21,6 +21,7 @@ __all__ = [
     "LogFormat",
     "RedisSettings",
     "TemporalSettings",
+    "WebhookSafetySettings",
 ]
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -112,6 +113,25 @@ class TemporalSettings(BaseServiceSettings):
     temporal_host: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_task_queue: str = "va-main"
+
+
+_PRIVATE_FORBIDDEN = frozenset({Environment.STAGING, Environment.PRODUCTION})
+
+
+class WebhookSafetySettings(BaseServiceSettings):
+    """``WEBHOOK_ALLOW_PRIVATE`` (dispatcher, api, worker): private/loopback webhook and tool targets.
+
+    Allowed by default in local/test so the simulators on localhost work; forced false in staging and
+    production whatever the environment says (specs/19 §8 Decision P05-T05a).
+    """
+
+    webhook_allow_private: bool = True
+
+    @model_validator(mode="after")
+    def _forbid_private_outside_dev(self) -> WebhookSafetySettings:
+        if self.va_env in _PRIVATE_FORBIDDEN and self.webhook_allow_private:
+            object.__setattr__(self, "webhook_allow_private", False)
+        return self
 
 
 class KmsProviderName(StrEnum):
