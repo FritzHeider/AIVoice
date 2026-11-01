@@ -2762,6 +2762,7 @@ version = "0.1.0"
 source = { editable = "packages/va_llm" }
 dependencies = [
     { name = "httpx", extra = ["http2"] },
+    { name = "jsonschema" },
     { name = "openai" },
     { name = "opentelemetry-api" },
     { name = "orjson" },
@@ -2776,6 +2777,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "openai", specifier = ">=2" },
     { name = "opentelemetry-api", specifier = ">=1.45.1" },
     { name = "orjson", specifier = ">=3.13.0" },

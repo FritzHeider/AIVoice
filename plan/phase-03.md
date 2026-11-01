@@ -190,13 +190,28 @@
   - Deliverables: `stream_dialogue(DialogueRequest) -> DialogueStream` (`text()`, `tool_calls()`, `ttft_ms`, `usage`, `finish_reason`, `commit()`, `discard()`) through `LlmGateway`, TTFT 2 500 ms / total 20 s deadlines on the injected clock, fallback before the first token, breaker skip, speculation metric, usage recording (discarded tokens metered)
   - Acceptance: tests for TTFT measurement (reasoning deltas excluded), fallback on 5xx/timeout before the first token, partial text kept after the first token, tool-call delta assembly, cancellation closes the stream, speculative commit/discard; FakeLLM contract tests.
 
-- [ ] P03-T14 `va_llm` structured outputs and embeddings
-  - Spec refs: specs/10-llm-gateway.md (structured outputs via forced tool call, embeddings client)
+- [x] P03-T14a `va_llm` structured outputs (forced tool call, JSON-mode fallback, repair retry) — `va_llm.structured` + `structured_calls`, `LlmGateway.call_structured`, `StructuredOutputError`, `va_llm_structured_total`; specs/10 §3 + specs/27 §3.6 Decisions; 6260 passed, va_llm 100 %, lint/typecheck/placeholders 0
+  - Spec refs: specs/10-llm-gateway.md §3 (structured outputs), §2.1 (classifier/analysis rows), §11 (metering)
   - Depends on: P03-T13b, P03-T06b
-  - Deliverables: `structured(role, prompt_messages, schema: type[BaseModel])` with forced tool call, jsonschema validation, one repair retry; `Embeddings.embed(texts)` batching 64 with `dimensions=1024`
-  - Acceptance: tests for valid, invalid-then-repaired, and unrecoverable outputs.
-    Drift test: `va_llm.structured.TOOL_NAMES` equals `va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES` (the simulator
-    keeps its own copy, specs/30 §3.4 Decision P03-T06b; tests may import both, production code never does).
+  - Deliverables: `va_llm.structured` (`TOOL_NAMES`, `register_structured_function`, `tool_schema` with `$defs`
+    inlined and `additionalProperties: false`, `StructuredOutputError`); `LlmGateway.call_structured(call_type,
+    schema, *, org_id, messages, function_name, description, ...)` through `complete` (policies, fallback, breaker,
+    metering), jsonschema + Pydantic validation, JSON-mode fallback, one repair retry
+  - Acceptance: tests for valid, invalid-then-repaired, and unrecoverable outputs; JSON-mode path (provider without
+    tool choice, reply without a tool call); FakeLLM contract tests (rule args, malformed-args rule, heuristic args
+    for every registered name). Drift test: `va_llm.structured.TOOL_NAMES` equals
+    `va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES` (the simulator keeps its own copy, specs/30 §3.4 Decision
+    P03-T06b; tests may import both, production code never does); call-site test: every literal
+    `function_name=` passed to `call_structured` in apps/ and packages/ is registered.
+
+- [ ] P03-T14b `va_llm` embeddings client
+  - Spec refs: specs/10-llm-gateway.md §10 (embeddings), §11 (metering); specs/24-billing-and-limits.md (`kb_embedding_tokens`)
+  - Depends on: P03-T14a
+  - Deliverables: `Embeddings.embed(texts)` batching 64 with `dimensions=1024`, 4 batches in flight, retries on
+    429/5xx (1 s/4 s/10 s), input truncation, `len == 1024` validation, L2 normalization, `embed_query` Redis cache
+    `emb:q:{sha256(model|dims|text)}` 24 h, `kb_embedding_tokens` usage recording, metrics and spans
+  - Acceptance: tests for batching, truncation, normalization, caching, retries; FakeLLM contract test (1024-d
+    deterministic unit vectors).
 
 - [ ] P03-T15 Telnyx bootstrap script and sim service wiring
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)
@@ -206,7 +221,7 @@
 
 - [ ] P03-T16 Live smoke tests for vendor clients
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)
-  - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13b, P03-T14
+  - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13b, P03-T14b
   - Deliverables: `tests_live/test_vendor_clients.py` (Telnyx: list numbers/profiles; ElevenLabs: list voices, short TTS over WS with alignment, Scribe realtime on a committed WAV fixture, batch STT; Telnyx Inference: streaming chat, forced tool call, embeddings with 1024 dims); skipped unless `LIVE_TESTS=1`
   - Acceptance: suite is collected and skipped in CI; documented run command in AGENTS.md.
 

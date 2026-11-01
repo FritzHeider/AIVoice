@@ -24,7 +24,13 @@ from service_helpers import json_log_stream
 
 from va_common.metrics import new_registry
 from va_llm import CallType, LlmMetrics, LlmUnavailableError
-from va_llm.metrics import BREAKER_METRIC, DURATION_METRIC, REQUESTS_METRIC, SPECULATION_METRIC
+from va_llm.metrics import (
+    BREAKER_METRIC,
+    DURATION_METRIC,
+    REQUESTS_METRIC,
+    SPECULATION_METRIC,
+    STRUCTURED_METRIC,
+)
 
 OK = httpx.Response(200, json=completion_body(usage=(30, 7)))
 KINDS = {Counter: "counter", Histogram: "histogram", Gauge: "gauge"}
@@ -34,7 +40,13 @@ def test_registered_metrics_equal_the_spec_rows() -> None:
     registry = new_registry(process_collectors=False)
     metrics = LlmMetrics(registry)
     registered = set()
-    for collector in (metrics._requests, metrics._duration, metrics._breaker, metrics.speculation):
+    for collector in (
+        metrics._requests,
+        metrics._duration,
+        metrics._breaker,
+        metrics.speculation,
+        metrics.structured_outputs,
+    ):
         name = collector._name
         if isinstance(collector, Counter):
             name = f"{name}_total"
@@ -45,6 +57,7 @@ def test_registered_metrics_equal_the_spec_rows() -> None:
         DURATION_METRIC,
         BREAKER_METRIC,
         SPECULATION_METRIC,
+        STRUCTURED_METRIC,
     }
 
 

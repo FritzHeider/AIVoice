@@ -11,15 +11,21 @@ from llm_client_helpers import GatewayRig, gateway_rig
 from service_helpers import isolate_env, reset_logging
 
 from va_common.settings import DatabaseSettings
-from va_llm import LlmSettings
+from va_llm import LlmSettings, structured
 
-__all__ = ["isolated_env", "llm_api", "reset_logging", "rig"]
+__all__ = ["fresh_structured_registry", "isolated_env", "llm_api", "reset_logging", "rig"]
 
 
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """No ``LLM_*``/database variable or developer ``.env`` leaks into a test."""
     isolate_env(monkeypatch, tmp_path, LlmSettings, DatabaseSettings)
+
+
+@pytest.fixture(autouse=True)
+def fresh_structured_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test starts with an empty structured-function registry (registrations are process-global)."""
+    monkeypatch.setattr(structured, "_registry", {})
 
 
 @pytest.fixture

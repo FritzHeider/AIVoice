@@ -199,6 +199,7 @@ named `LAT_MS`.
 | `va_llm_request_duration_ms` | histogram (LAT_MS) | `call_type` |
 | `va_llm_breaker_state` | gauge | `provider`, `model` (0 closed, 1 half-open, 2 open) |
 | `va_llm_speculation_total` | counter | `outcome` (committed/discarded) |
+| `va_llm_structured_total` | counter | `function`, `outcome` (valid/repaired/invalid) |
 
 > Decision (2026-11-01): vendor clients (`va_telnyx`, later `va_elevenlabs`/`va_llm`) run in several services, so
 > their metrics are not part of the per-service `CATALOG` of §3.1-§3.5: the library registers them in the registry
@@ -238,6 +239,12 @@ named `LAT_MS`.
 > token. Each stream records one `llm.dialogue` CLIENT span (ended by the producer) with the P03-T13a attributes plus
 > `llm.streaming=true`, `llm.speculative`, `llm.outcome` (`completed|failed|truncated|discarded|cancelled`),
 > `llm.ttft_ms` and `llm.turn_index` when set; `failed` and `truncated` end with error status.
+
+> Decision (2026-11-01): structured outputs (`LlmGateway.call_structured`, P03-T14a) add one
+> `va_llm_structured_total{function, outcome}` per call that got an answer: `valid` (first output valid), `repaired`
+> (the repair output was valid), `invalid` (`StructuredOutputError`). A call whose request raises
+> `LlmUnavailableError` adds nothing here (its attempts are in `va_llm_requests_total`). Each request is one
+> `complete` call with its own `llm.<call_type>` span and duration observation.
 
 ## 4. Per-call latency events
 

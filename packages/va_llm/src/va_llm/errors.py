@@ -24,6 +24,7 @@ __all__ = [
     "LlmTimeoutError",
     "LlmUnavailableError",
     "OrgProviderError",
+    "StructuredOutputError",
     "UnavailableReason",
     "map_openai_error",
 ]
@@ -131,6 +132,28 @@ class LlmUnavailableError(LlmError):
     @property
     def error_kind(self) -> ErrorKind:
         return self.last.error_kind if self.last is not None else "http"
+
+
+class StructuredOutputError(LlmError):
+    """A structured output still invalid after the repair request (specs/10 §3 step 6).
+
+    ``errors`` are the rendered validation errors of the last output, ``attempts`` the structured requests
+    made; ``provider_id`` and ``model`` name the last completion's target.
+    """
+
+    kind: ClassVar[ErrorKind] = "parse"
+
+    def __init__(
+        self, function_name: str, errors: tuple[str, ...], *, attempts: int, provider_id: str, model: str
+    ) -> None:
+        super().__init__(
+            f"{function_name}: invalid structured output after {attempts} requests: {'; '.join(errors)}",
+            provider_id=provider_id,
+            model=model,
+        )
+        self.function_name = function_name
+        self.errors = errors
+        self.attempts = attempts
 
 
 def map_openai_error(exc: openai.OpenAIError, *, provider_id: str, model: str, now: datetime) -> LlmError:

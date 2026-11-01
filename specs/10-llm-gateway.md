@@ -199,6 +199,41 @@ async def call_structured(provider, model, messages, schema: type[BaseModel], *,
    `Your previous output was invalid: <validation errors>. Call {function_name} again with corrected arguments.`
 6. Second failure → raise `StructuredOutputError` (callers apply their fallback).
 
+> Decision (2026-11-01): structured outputs (P03-T14a). Modules `structured` (pure) and `structured_calls`.
+> 1. API: `LlmGateway.call_structured(call_type, schema, *, org_id, messages, function_name, description,
+>    call_id=None, temperature=0.0, max_tokens=512) -> schema instance`. The provider, model, and timeout of the
+>    signature above come from the call type: provider via the registry, model via the §2.1 policy role, and each
+>    request (the first and the repair) is one `complete` call with its own policy budget, retries, breaker skip,
+>    fallback, metering, and span. `call_type="dialogue"` raises `ValueError` (dialogue streams).
+> 2. `TOOL_NAMES` is the constant set of the 14 names above. `register_structured_function(name, schema)` raises
+>    `ValueError` for a name outside it or a second registration with another class (the same class is a no-op);
+>    `registered_schema(name)` reads it. `call_structured` raises `ValueError` before any request for a name outside
+>    `TOOL_NAMES` or registered with another class. FakeLLM never imports `va_llm` (specs/30 §3.4): it keeps its
+>    own copy, and `packages/va_llm/tests/test_structured_drift.py` asserts both sets are equal and that every
+>    `call_structured(function_name=...)`/`register_structured_function(...)` call site in `apps/*/src` and
+>    `packages/*/src` uses a string literal from `TOOL_NAMES`.
+> 3. Tool schema (`tool_schema(schema)`): `model_json_schema()` with every `#/$defs/X` reference replaced by a copy
+>    of the definition (sibling keys such as `description` merged over it), `$defs` removed, and
+>    `additionalProperties: false` on every object schema with `properties` that does not set it (only schema
+>    positions are rewritten; `enum`, `default`, ... values are data). A self-referencing model → `ValueError`.
+> 4. Forced mode (provider `supports_tool_choice`): the output is the arguments of the first tool call named
+>    `function_name` (else the first tool call); a reply without tool calls falls back to the first JSON object of
+>    `content` (rule 6), and when there is none the output is invalid.
+> 5. JSON mode (provider `supports_tool_choice=false`; when the org's provider cannot be loaded, the platform
+>    provider's flag decides and `complete` applies the §1 rules): no tools, the system instruction (compact JSON of
+>    the tool schema) is appended after the given messages, and the output is the first JSON object of `content`.
+> 6. First JSON object: from each `{` in order, the first prefix that decodes to a JSON object.
+> 7. Validation: the output text must be a JSON object, then Draft 2020-12 `jsonschema` against the tool schema,
+>    then `schema.model_validate`. Errors render as `<path>: <message>` (`items[0].name`, `$` for the root),
+>    jsonschema errors sorted, at most 5, each message clipped to 200 characters.
+> 8. Repair: original messages (+ the JSON-mode instruction) + an `assistant` message with the raw invalid output
+>    + the user message above, in the same mode as the first request, except that a forced request answered
+>    without a tool call is repaired in JSON mode. A second invalid output raises `StructuredOutputError`
+>    (`kind="parse"`, `function_name`, `errors`, `attempts=2`, target of the last completion).
+>    `LlmUnavailableError` from either request propagates unchanged.
+> 9. Observability: `va_llm_structured_total{function, outcome}` (specs/27 §3.6) and a `llm.structured_invalid`
+>    warning per invalid output (function, call type, attempt, error count; never the output itself).
+
 ## 4. Prompt assembly for voice dialogue
 
 Message list order:

@@ -22,6 +22,7 @@ import httpx
 import openai
 from opentelemetry import trace
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, TracerProvider
+from pydantic import BaseModel
 
 from va_common.logging import get_logger
 from va_common.time import Clock
@@ -47,6 +48,7 @@ from va_llm.models import ChatMessage, Completion, ToolChoice, ToolDef
 from va_llm.policy import POLICIES, CallPolicy, CallType
 from va_llm.pricing import CostTable
 from va_llm.providers import ProviderRegistry
+from va_llm.structured_calls import StructuredCall, run_structured
 from va_llm.targets import RETRYABLE_STATUSES, Target, platform_fallback, record_failure, sdk_backstop
 from va_llm.wire import ChatRequest, ParsedCompletion, parse_completion
 
@@ -161,6 +163,39 @@ class LlmGateway:
     async def stream_dialogue(self, request: DialogueRequest) -> DialogueStream:
         """Start one streaming dialogue turn (specs/10 §2); returns before the first token."""
         return DialogueStream(self._dialogue, request)
+
+    async def call_structured[M: BaseModel](  # noqa: PLR0913 - mirrors specs/10 §3
+        self,
+        call_type: CallType,
+        schema: type[M],
+        *,
+        org_id: uuid.UUID,
+        messages: Sequence[ChatMessage],
+        function_name: str,
+        description: str,
+        call_id: uuid.UUID | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> M:
+        """A validated ``schema`` instance from a forced call of ``function_name`` (specs/10 §3).
+
+        JSON mode when the provider cannot force a tool; one repair request after an invalid output. Raises
+        ``ValueError`` for ``dialogue`` or a name outside ``TOOL_NAMES`` or registered with another schema,
+        :class:`StructuredOutputError` when the repair is invalid too, and :class:`LlmUnavailableError` when a
+        request's policy is exhausted.
+        """
+        call = StructuredCall(
+            call_type,
+            schema,
+            org_id,
+            tuple(messages),
+            function_name,
+            description,
+            call_id,
+            temperature,
+            max_tokens,
+        )
+        return await run_structured(self, self._metrics, call)
 
     async def complete(  # noqa: PLR0913 - mirrors the chat-completions parameters
         self,

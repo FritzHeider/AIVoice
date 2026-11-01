@@ -1943,3 +1943,143 @@ jscpd 0 clones, radon max B (avg A 2.48), spec refs 0, pip-audit no known vulns,
 Re-ran lint 0, typecheck 0, placeholders 0, make test 6197 passed (va_llm 100 %), spec refs 0, jscpd 0 clones. Both
 findings fixed: `discard()` re-queues `_END` when the dropped buffer held it (two new tests); `_ended` records a producer
 crash on the span with ERROR status (crash test asserts it). Approved.
+
+## Plan P03-T14a (Planner, 2026-11-01)
+Split P03-T14 into T14a (structured outputs, this task) and T14b (embeddings client) in plan/phase-03.md (T16 now
+depends on T14b). Rationale: each is a full review unit (T13 was split the same way).
+
+### Spec decision to write: specs/10 §3 `> Decision (2026-11-01): structured outputs (P03-T14a).` Numbered rules:
+1. API: `LlmGateway.call_structured(call_type: CallType, schema: type[M], *, org_id, messages, function_name,
+   description, call_id=None, temperature=0.0, max_tokens=512) -> M` (M bound BaseModel). The §3 signature's
+   `provider, model, timeout_s` come from the call type: provider via the registry, model via the policy role,
+   timeout = §2.1 row (each request — the first and the repair — is one `complete` call with its own policy budget,
+   retries, breaker skip, fallback, metering). `call_type="dialogue"` → `ValueError` (dialogue streams).
+2. Registry: `TOOL_NAMES: frozenset[str]` = the 14 §3 names (constant). `register_structured_function(name, schema)`
+   raises `ValueError` for a name outside `TOOL_NAMES` or a second registration with a different schema class (same
+   class = no-op); `registered_schema(name) -> type[BaseModel] | None`. `call_structured` raises `ValueError` for an
+   unregistered-in-TOOL_NAMES name, or when the name is registered with a different schema class.
+3. Tool schema: `tool_schema(schema) -> dict` = `schema.model_json_schema()` with every `$ref` to `#/$defs/X`
+   replaced by a deep copy of the def (siblings of `$ref` merged), `$defs` removed, and `additionalProperties: false`
+   on every object schema that has `properties` (unless it already sets `additionalProperties`). A recursive model
+   (a def that references itself directly or indirectly) → `ValueError("recursive schema")`. Cached per class
+   (`functools.cache`).
+4. Forced-tool mode (provider `supports_tool_choice`): `tools=[ToolDef(name, description, tool_schema)]`,
+   `tool_choice=ForceTool(name)`. The output is the first tool call whose name is `function_name` (else the first
+   tool call); no tool call → the first JSON object in `content` (rule 6), else invalid ("no tool call").
+5. JSON mode (provider `supports_tool_choice=false`; on `OrgProviderError` during the mode lookup use the platform
+   provider's flag): no tools; append a system message `Respond with only a JSON object that matches this JSON
+   Schema: <compact JSON of tool_schema>` after the given messages; output = first JSON object in `content`.
+6. First JSON object: scan `content` for `{`, `json.JSONDecoder().raw_decode` from each `{` in order; the first that
+   decodes to a dict wins; none → invalid ("no JSON object in the reply").
+7. Validation: arguments text → JSON (orjson; non-JSON or non-object → invalid), then
+   `jsonschema.Draft202012Validator(tool_schema)` errors sorted by path, rendered `"<path>: <message>"`
+   (path in `va_domain`-like dotted form `items[0].name`, `$` for root), at most 5 joined by `; ` (each message
+   truncated at 200 chars); then `schema.model_validate(obj)` (a pydantic error rendered the same way).
+8. Repair: on the first invalid output, one more request = original messages + `assistant` message with the raw
+   previous output (arguments JSON text, or content; no `tool_calls`, so no tool reply is needed) + `user` message
+   `Your previous output was invalid: <errors>. Call {function_name} again with corrected arguments.` In the same
+   mode as the first request; additionally a first-request reply with no tool call in forced mode switches the repair
+   to JSON mode (system instruction appended, no tools). Second invalid output → `StructuredOutputError`.
+9. `StructuredOutputError(LlmError)` (`kind = "parse"`, `.function_name`, `.errors: tuple[str, ...]`, `.attempts`
+   = structured requests made (2), provider_id/model of the last completion). `LlmUnavailableError` from `complete`
+   propagates unchanged (callers catch `LlmError` to apply their §2.1 fallback). Both completions are metered by
+   `complete`.
+10. Observability: `va_llm_structured_total{function, outcome}` counter (outcome `valid|repaired|invalid`) in
+    `LlmMetrics` (new §3.6 row in specs/27 + Decision sentence); log `llm.structured_invalid` (warning) with
+    function, attempt, error count (never the arguments). The `llm.<call_type>` spans come from `complete`.
+
+### Files
+- `packages/va_llm/pyproject.toml`: add `jsonschema>=4.26`; root `pyproject.toml` mypy already has
+  `types-jsonschema` in dev deps (verify mypy is happy; add to package deps only the runtime lib). `uv lock`.
+- `packages/va_llm/src/va_llm/structured.py` (new): `TOOL_NAMES`, `register_structured_function`,
+  `registered_schema`, `tool_schema`, `first_json_object`, `validate_arguments(schema, text) -> M` raising
+  `_InvalidOutput(errors)` (internal), `repair_message(function_name, errors)`, `json_mode_instruction(schema)`,
+  `StructuredOutput`-free; keep pure (no gateway import).
+- `packages/va_llm/src/va_llm/structured_calls.py` (new) OR a method body in gateway.py delegating to a small
+  `_StructuredRun` helper in `structured_calls.py` (keep gateway.py < ~420 lines, radon ≤ B):
+  `async def call_structured(gateway_complete, registry, metrics, call_type, schema, ...)`. Gateway method
+  `LlmGateway.call_structured(...)` is a thin wrapper.
+- `errors.py`: `StructuredOutputError`. `metrics.py`: `STRUCTURED_METRIC = "va_llm_structured_total"`,
+  `LlmMetrics.structured(function, outcome)`; `StructuredOutcome` Literal.
+- `__init__.py`: export `StructuredOutputError`, `TOOL_NAMES`, `register_structured_function`, `tool_schema`.
+- specs/10 §3 Decision; specs/27 §3.6 row `va_llm_structured_total | counter | function, outcome (valid/repaired/invalid)`
+  (+ `test_metrics_spans.py` row parser must still pass: it parses `va_llm_` rows — register the counter).
+- AGENTS.md bullet (P03-T14a).
+
+### Tests (packages/va_llm/tests/)
+- `test_structured_schema.py` (pure): `tool_schema` inlines nested `$defs` (model with nested model + list of
+  nested + Optional nested → no `$ref`/`$defs` anywhere, `additionalProperties: false` on each object), keeps an
+  explicit `additionalProperties` (dict[str, int] field), recursive model → ValueError; cached identity;
+  `first_json_object` (prose around, braces in strings, first non-dict `{` skipped, nested, none → None);
+  validation error rendering (path forms, 5-error cap, truncation); registry rules (unknown name, conflicting
+  re-register, idempotent same class); `TOOL_NAMES` equals the 14 names in the specs/10 §3 paragraph (parse it).
+- `test_structured_drift.py`: `TOOL_NAMES == va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES`; AST scan of every
+  `*.py` under `apps/*/src` and `packages/*/src` for calls named `call_structured` with a literal `function_name`
+  keyword → must be in `TOOL_NAMES` (non-literal → fail with the file:line, so call sites use constants? no: allow
+  `Name`/`Attribute` constants only if they resolve to module-level string constants — simpler: require a string
+  literal; currently zero call sites, assert the scanner finds a planted literal in a tmp file via a unit test of
+  the scanner function).
+- `test_structured_calls.py` (respx + gateway_rig): valid forced tool call → model instance, request has `tools`
+  with the inlined schema, `tool_choice` forcing the name, `temperature 0`, `max_tokens 512`, no `stream`; metric
+  `valid`; invalid (schema violation: missing required) then repaired → second request contains the assistant raw
+  output + exact repair user message, metric `repaired`; invalid JSON args then repaired; pydantic-only violation
+  (validator beyond JSON Schema, e.g. `field_validator`) triggers repair; unrecoverable → StructuredOutputError
+  with errors/attempts=2, metric `invalid`, both completions metered (recorder sees 2 records); no tool call but
+  JSON object in content → accepted without repair; no tool call and no JSON → repair in JSON mode (no `tools`,
+  system instruction last-before-repair? — exact message order: original messages, system instruction,
+  assistant raw, user repair); provider `supports_tool_choice=False` (org provider fixture) → JSON mode first
+  request (no tools, instruction appended); OrgProviderError during lookup → platform flag (forced mode) and
+  `complete` falls to... (non-falling-back call type raises LlmUnavailableError("provider_unavailable")
+  unchanged); LlmUnavailableError on first request propagates (router 503 twice); `call_type="dialogue"` →
+  ValueError; unknown function name → ValueError before any request; conflicting registered schema → ValueError;
+  tool call choice: picks the call named `function_name` when several.
+- `test_structured_contract_fakellm.py` (`sim_gateway(realtime_llm_state())` or accelerated `llm_state`, ASGI ok
+  since non-streaming): rule `tool_name: select_path` with object args → parsed model; rule with string malformed
+  args at `call_index: 0` and valid args at `call_index: 1` → repaired (sim request log shows 2 requests, second has
+  the repair message); malformed both times → StructuredOutputError; heuristic args (no rule) for each of the 14
+  names using `tests/support/llm_schemas.py`-like pydantic models built per name (reuse va_sim test SPEC_CALLS?
+  they live in va_sim tests support — not importable as a package path from va_llm tests unless on pythonpath;
+  instead define small pydantic models in `packages/va_llm/tests/support/structured_models.py` for 3-4 names
+  (select_path, score_condition, classify_answer, evaluate_guard_rails) whose JSON schemas the sim fills validly);
+  JSON-mode contract: rule `system_contains: ["Respond with only a JSON object"]` responding content
+  `Sure: {"...": ...}` → parsed.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a packages/va_llm/src` (no C+), `uvx pip-audit` on `uv export` + `corepack pnpm audit`.
+va_llm coverage ≥ 95 % (currently 100 %).
+
+### Risks
+- `model_json_schema()` puts `$defs` at the root and may emit `$ref` with siblings (description) — merge siblings.
+- Pydantic `Optional[Nested]` renders `anyOf: [{$ref}, {type: null}]` — inliner must recurse into lists/anyOf.
+- `additionalProperties: false` + pydantic defaults: fields with defaults are not `required`; fine. A model with
+  `extra="allow"` would conflict; keep explicit `additionalProperties` if present.
+- The sim's `SchemaFill.conform` must produce valid args for inlined schemas without `$defs` (it handled
+  specs/30 schemas; verify with the contract tests).
+- jsonschema `best_match`/error ordering nondeterminism: sort by `(list(error.absolute_path) as str, message)`.
+- Keep `gateway.py` size and radon in check by putting the run logic in `structured_calls.py`.
+
+## Build P03-T14a (Builder, 2026-11-01)
+Implemented per plan. New `va_llm.structured` (pure: TOOL_NAMES, register_structured_function/registered_schema/
+check_function, tool_schema with keyword-aware $defs inlining + additionalProperties false, first_json_object,
+validate_arguments → InvalidOutputError, repair_message, json_mode_instruction) and `structured_calls`
+(StructuredCall, run_structured(gateway, metrics, call); LlmGateway imported only under TYPE_CHECKING).
+`LlmGateway.call_structured` thin wrapper. `StructuredOutputError` in errors.py; `va_llm_structured_total` in
+LlmMetrics (`structured_outputs` counter). jsonschema added to va_llm deps.
+Deviations: tool_schema returns a deep copy per call (cached internally) instead of the cached object; validation
+uses the cached Draft202012Validator; LlmUnavailableError adds no structured metric (recorded in specs/27 Decision).
+Tests: test_structured_schema (27+), test_structured_calls (22, respx), test_structured_drift (AST scanner + sim set
+equality), test_structured_contract_fakellm (9). Autouse conftest fixture resets the registry.
+Specs: specs/10 §3 Decision P03-T14a (9 rules), specs/27 §3.6 row + Decision. AGENTS.md bullet.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 6260 passed (TOTAL 98 %, va_llm 100 %),
+spec refs 0, jscpd 0 clones, radon max B (structured avg A 2.77), pip-audit no known vulns, pnpm audit high clean
+(3 moderate pre-existing).
+
+## Review P03-T14a (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, make test 6260 passed (TOTAL 98.39 %). Read the diff
+against specs/10 §3 and the new Decision (9 rules) and the specs/27 §3.6 row/Decision: the API, registry rules, keyword-aware
+`$defs` inlining with `additionalProperties: false`, forced/JSON mode choice (platform flag on OrgProviderError), first-JSON
+scan, validation rendering/cap/clip, repair message order and JSON-mode switch, the error fields, the metric outcomes, and the
+log fields (no output content) all match. Tests cover valid/repaired/invalid, JSON-mode paths, org-provider modes,
+unavailability during both requests, the refused names and dialogue, the drift and call-site scanner, and FakeLLM contracts.
+The double provider lookup (mode, then complete) hits the OrgProviderStore TTL cache. Approved.

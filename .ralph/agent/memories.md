@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793529774-bd6f
+> va_llm P03-T14a: LlmGateway.call_structured -> structured_calls.run_structured (each request = one complete call); pure parts in va_llm.structured (TOOL_NAMES, tool_schema inlines $defs keyword-aware, validate_arguments -> InvalidOutputError); registry process-global -> va_llm conftest autouse fresh_structured_registry; drift test AST-scans call sites for literal function_name; pydantic docstrings become schema description sent to the model
+<!-- tags: llm, testing, structured | created: 2026-11-01 -->
+
 ### mem-1793528014-c05e
 > va_llm P03-T13b: streaming dialogue in va_llm.dialogue (DialogueStream producer task; END delivered by task done-callback); httpx ASGITransport buffers whole bodies so FakeLLM streaming contract tests use llm_client_helpers.served_gateway (real uvicorn); respx streams via streamed(*parts)/StreamingBody (bytes|Exception|asyncio.Event hang); wait_for_sleep(TTFT_S) before first token, TOTAL_S after
 <!-- tags: llm, testing, streaming | created: 2026-11-01 -->

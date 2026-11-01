@@ -895,3 +895,11 @@ Grafana 3001
   first token `wait_for_sleep(TTFT_S)`, after it `wait_for_sleep(TOTAL_S - elapsed)`; `await _settle()` (a few
   `sleep(0)`) before cancelling when the body must already be waiting. Always close a `DialogueStream`
   (`async with await gateway.stream_dialogue(...) as stream`).
+- 2026-11-01 (P03-T14a): structured outputs = `LlmGateway.call_structured(call_type, Schema, org_id=, messages=,
+  function_name=, description=)` (rules: specs/10 §3 Decision P03-T14a); pure parts in `va_llm.structured`
+  (`TOOL_NAMES`, `register_structured_function`, `tool_schema`, `validate_arguments`, `first_json_object`), the run in
+  `structured_calls`. `function_name` must be a string literal from `TOOL_NAMES` at every call site
+  (`test_structured_drift.py` AST-scans `apps/*/src` and `packages/*/src`); a new name goes into specs/10 §3,
+  `TOOL_NAMES`, and FakeLLM's `STRUCTURED_TOOL_NAMES` together. The registry is process-global: va_llm tests reset it
+  with the autouse `fresh_structured_registry` fixture. Pydantic puts a model's docstring into the schema
+  `description`, which is sent to the model, so write schema docstrings as instructions (or none).

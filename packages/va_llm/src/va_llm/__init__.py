@@ -12,6 +12,7 @@ from va_llm.errors import (
     LlmTimeoutError,
     LlmUnavailableError,
     OrgProviderError,
+    StructuredOutputError,
 )
 from va_llm.gateway import LlmGateway
 from va_llm.metering import UsageRecord, UsageRecorder
@@ -23,11 +24,13 @@ from va_llm.pricing import MODEL_COSTS, CostTable, ModelCost, load_costs
 from va_llm.probe import ProbeResult, probe_provider
 from va_llm.providers import LlmProvider, ProviderRegistry, platform_provider
 from va_llm.settings import LlmSettings
+from va_llm.structured import TOOL_NAMES, register_structured_function, registered_schema, tool_schema
 
 __all__ = [
     "CALL_ID_HEADER",
     "MODEL_COSTS",
     "POLICIES",
+    "TOOL_NAMES",
     "BreakerBoard",
     "BreakerState",
     "CallPolicy",
@@ -56,6 +59,7 @@ __all__ = [
     "OrgProviderStore",
     "ProbeResult",
     "ProviderRegistry",
+    "StructuredOutputError",
     "TokenUsage",
     "ToolCall",
     "ToolChoice",
@@ -66,4 +70,7 @@ __all__ = [
     "load_costs",
     "platform_provider",
     "probe_provider",
+    "register_structured_function",
+    "registered_schema",
+    "tool_schema",
 ]

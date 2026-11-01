@@ -20,9 +20,11 @@ __all__ = [
     "DURATION_METRIC",
     "REQUESTS_METRIC",
     "SPECULATION_METRIC",
+    "STRUCTURED_METRIC",
     "AttemptOutcome",
     "LlmMetrics",
     "SpeculationOutcome",
+    "StructuredOutcome",
 ]
 
 type AttemptOutcome = Literal[
@@ -38,10 +40,13 @@ type AttemptOutcome = Literal[
 
 type SpeculationOutcome = Literal["committed", "discarded"]
 
+type StructuredOutcome = Literal["valid", "repaired", "invalid"]
+
 REQUESTS_METRIC: Final = "va_llm_requests_total"
 DURATION_METRIC: Final = "va_llm_request_duration_ms"
 BREAKER_METRIC: Final = "va_llm_breaker_state"
 SPECULATION_METRIC: Final = "va_llm_speculation_total"
+STRUCTURED_METRIC: Final = "va_llm_structured_total"
 
 
 class LlmMetrics:
@@ -73,6 +78,12 @@ class LlmMetrics:
             labelnames=("outcome",),
             registry=registry,
         )
+        self.structured_outputs = Counter(
+            STRUCTURED_METRIC,
+            "Structured-output calls by function and outcome",
+            labelnames=("function", "outcome"),
+            registry=registry,
+        )
         self._tokens = catalog.counter("va_llm_tokens_total") if catalog is not None else None
         self._errors = catalog.counter("va_llm_errors_total") if catalog is not None else None
         self._ttft = catalog.histogram("va_llm_ttft_ms") if catalog is not None else None
@@ -101,3 +112,6 @@ class LlmMetrics:
 
     def speculated(self, outcome: SpeculationOutcome) -> None:
         self.speculation.labels(outcome=outcome).inc()
+
+    def structured(self, function: str, outcome: StructuredOutcome) -> None:
+        self.structured_outputs.labels(function=function, outcome=outcome).inc()
