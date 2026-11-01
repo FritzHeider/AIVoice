@@ -11,6 +11,7 @@ members = [
     "va-elevenlabs",
     "va-events",
     "va-events-sink",
+    "va-llm",
     "va-media-worker",
     "va-sim",
     "va-sim-server",
@@ -2756,6 +2757,37 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-llm"
+version = "0.1.0"
+source = { editable = "packages/va_llm" }
+dependencies = [
+    { name = "httpx", extra = ["http2"] },
+    { name = "openai" },
+    { name = "opentelemetry-api" },
+    { name = "orjson" },
+    { name = "prometheus-client" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "va-common" },
+    { name = "va-db" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
+    { name = "openai", specifier = ">=2" },
+    { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.16.1" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
+    { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
+]
+
+[[package]]
 name = "va-media-worker"
 version = "0.1.0"
 source = { editable = "apps/media_worker" }
@@ -2962,6 +2994,7 @@ dev = [
     { name = "va-elevenlabs" },
     { name = "va-events" },
     { name = "va-events-sink" },
+    { name = "va-llm" },
     { name = "va-media-worker" },
     { name = "va-sim" },
     { name = "va-sim-server" },
@@ -3010,6 +3043,7 @@ dev = [
     { name = "va-elevenlabs", editable = "packages/va_elevenlabs" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-events-sink", editable = "apps/events_sink" },
+    { name = "va-llm", editable = "packages/va_llm" },
     { name = "va-media-worker", editable = "apps/media_worker" },
     { name = "va-sim", editable = "packages/va_sim" },
     { name = "va-sim-server", editable = "apps/sim" },

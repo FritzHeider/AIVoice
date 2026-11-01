@@ -101,3 +101,22 @@ Template:
 - **Reasoning:** T02a is self-contained and testable (messages and number orders exercise the emitter end to end).
 - **Reversibility:** yes — the plan ids are the only artefact.
 - **Timestamp:** 2026-10-29T00:00:00Z
+
+## DEC-006 — Split P03-T13 (`va_llm` gateway) and offline token estimation
+
+- **Decision:** P03-T13 bundles providers/org overrides/probe, the §2.1 policy matrix, the breaker, metering, and
+  streaming dialogue with speculation; too large for one activation. specs/10 §11 estimates missing usage with
+  tiktoken, but tiktoken downloads its BPE file at first use (network in tests, not in CI).
+- **Chosen Option:** P03-T13a (core + non-streaming `complete`) then P03-T13b (streaming dialogue). Missing usage
+  is estimated offline as `ceil(utf8_bytes / 4)` per text (+4 per message) and flagged `estimated=True`; tiktoken
+  arrives with `window.py` (phase 05) together with a pinned, checksum-verified encoding asset. Probe uses
+  `max_tokens=16` (a forced tool call cannot fit in 1 token; FakeLLM rule 5 and real providers truncate it).
+  Built-in COGS defaults in `va_llm.pricing.MODEL_COSTS` are provisional values overridable by `LLM_MODEL_COSTS_JSON`.
+- **Confidence:** 70
+- **Alternatives Considered:**
+  - One task — rejected: P03-T12 alone needed a fix cycle.
+  - tiktoken now with a fetched asset — rejected: CI does not run `fetch_models.sh`; estimation is a rare path
+    (Telnyx Inference and FakeLLM both send `include_usage`).
+- **Reasoning:** keeps T13a testable offline; written as a `> Decision` in specs/10 §1/§11 by the Builder.
+- **Reversibility:** yes — estimator is one function; prices are data.
+- **Timestamp:** 2026-11-01T00:00:00Z

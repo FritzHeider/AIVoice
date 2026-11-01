@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793526011-80a2
+> va_llm P03-T13a: LlmGateway.complete raises only LlmUnavailableError(reason,last); openai 3.x typed for httpx2 -> build SDK clients via va_llm.clients.openai_client + sdk_timeout; respx records calls only on completion -> assert Hanging.requests/cancelled and mix via llm_client_helpers.scripted(); tests gateway_rig (ManualClock wait_for_sleep+run_for), sim_gateway(state)->(rig, control)
+<!-- tags: llm, testing, openai | created: 2026-11-01 -->
+
 ### mem-1793523727-35ff
 > va_elevenlabs P03-T12: ElevenLabsRest REST ops go through ElevenLabsTransport.call(op, path, parse) (parse inside span so bad bodies count as failures) or observed(op, work)+Exchange.send for paged ops; per-op RestRetry in rest_retry (add/edit never retried); tests: conftest rig/api fixtures (respx on rest_client_helpers.BASE_URL, RecordingClock), sim_rest() over FakeElevenLabs ASGI, form_parts() decodes multipart via stdlib email; specs/27 §3.6 rows parsed by obs_helpers.vendor_metric_rows(prefix)
 <!-- tags: elevenlabs, testing, rest | created: 2026-11-01 -->

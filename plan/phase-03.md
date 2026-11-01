@@ -178,15 +178,21 @@
   - Deliverables: `ElevenLabsRest` (tts_convert, list_voices v2 with pagination, add_voice multipart, edit_voice, get/update voice settings, delete_voice, batch_transcribe)
   - Acceptance: contract tests against FakeElevenLabs; multipart encoding verified.
 
-- [ ] P03-T13 `va_llm` gateway: providers, streaming, fallback
-  - Spec refs: specs/10-llm-gateway.md (provider registry, model roles, streaming, TTFT, fallback, circuit breaker, retries, token metering)
+- [x] P03-T13a `va_llm` core: providers, registry, call policies, breaker, metering, `complete` — LlmGateway with per-call-type policies, breaker, fallback, org providers (RLS + envelope, failures → OrgProviderError), metering, §3.6 metrics; make test 6118 passed (va_llm 100 %), lint/typecheck/placeholders 0, jscpd 0, radon max B
+  - Spec refs: specs/10-llm-gateway.md §1 (providers, org override, probe, client), §2.1 (timeouts/fallback per call type, HTTP retry policy), §2.2 (circuit breaker), §11 (metering); specs/27-observability.md §3.3, §3.6; specs/03-data-model.md §9a (`org_llm_providers`)
   - Depends on: P03-T06a
-  - Deliverables: `LlmGateway` with `stream_chat(role, messages, tools, temperature)` yielding deltas with timing, `complete(...)`, per-org provider overrides (encrypted API keys), fallback model policy, circuit breaker, usage accounting hooks
-  - Acceptance: tests for TTFT measurement, fallback on 5xx/timeout, breaker open/half-open/close.
+  - Deliverables: package `packages/va_llm`; `LlmProvider`/`LlmSettings`/`ProviderRegistry` (platform + cached per-org providers from `org_llm_providers` with envelope-decrypted keys), cached `AsyncOpenAI` clients on one shared httpx client, `prewarm()`, `probe_provider()`; `CircuitBreaker` per (provider, model) on an injected clock; call policies of §2.1 and `LlmGateway.complete(call_type, ...)` (non-streaming, retries, fallback model, breaker skip, `X-VA-Call-Id`); errors; pricing (`MODEL_COSTS` + `LLM_MODEL_COSTS_JSON`) and `UsageRecorder` hook; metrics and spans
+  - Acceptance: breaker closed → open → half-open → closed with a fake clock; per-call-type retry/fallback matrix (429 Retry-After ≤ 1 s vs > 1 s, 5xx, connect, timeout) with respx; org provider override + key decryption + fallback to the platform fallback model; probe against FakeLLM; contract tests against FakeLLM (rules, faults).
+
+- [ ] P03-T13b `va_llm` streaming dialogue: TTFT, tool-call deltas, speculative commit/discard, fallback
+  - Spec refs: specs/10-llm-gateway.md §2 (streaming), §2.1 (dialogue row), §8 (speculative contract), §11 (usage from the final chunk)
+  - Depends on: P03-T13a
+  - Deliverables: `stream_dialogue(DialogueRequest) -> DialogueStream` (`text()`, `tool_calls()`, `ttft_ms`, `usage`, `finish_reason`, `commit()`, `discard()`) through `LlmGateway`, TTFT 2 500 ms / total 20 s deadlines on the injected clock, fallback before the first token, breaker skip, speculation metric, usage recording (discarded tokens metered)
+  - Acceptance: tests for TTFT measurement (reasoning deltas excluded), fallback on 5xx/timeout before the first token, partial text kept after the first token, tool-call delta assembly, cancellation closes the stream, speculative commit/discard; FakeLLM contract tests.
 
 - [ ] P03-T14 `va_llm` structured outputs and embeddings
   - Spec refs: specs/10-llm-gateway.md (structured outputs via forced tool call, embeddings client)
-  - Depends on: P03-T13, P03-T06b
+  - Depends on: P03-T13b, P03-T06b
   - Deliverables: `structured(role, prompt_messages, schema: type[BaseModel])` with forced tool call, jsonschema validation, one repair retry; `Embeddings.embed(texts)` batching 64 with `dimensions=1024`
   - Acceptance: tests for valid, invalid-then-repaired, and unrecoverable outputs.
     Drift test: `va_llm.structured.TOOL_NAMES` equals `va_sim.llm.heuristics.STRUCTURED_TOOL_NAMES` (the simulator
@@ -200,7 +206,7 @@
 
 - [ ] P03-T16 Live smoke tests for vendor clients
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)
-  - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13, P03-T14
+  - Depends on: P03-T08b, P03-T10, P03-T11, P03-T12, P03-T13b, P03-T14
   - Deliverables: `tests_live/test_vendor_clients.py` (Telnyx: list numbers/profiles; ElevenLabs: list voices, short TTS over WS with alignment, Scribe realtime on a committed WAV fixture, batch STT; Telnyx Inference: streaming chat, forced tool call, embeddings with 1024 dims); skipped unless `LIVE_TESTS=1`
   - Acceptance: suite is collected and skipped in CI; documented run command in AGENTS.md.
 

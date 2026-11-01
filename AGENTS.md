@@ -868,3 +868,20 @@ Grafana 3001
   Tests: `tests/support/rest_client_helpers.py` (`rest_rig()` = client on `BASE_URL` for respx with a
   `RecordingClock`; `sim_rest()` = client over FakeElevenLabs via ASGI; `form_parts(request)` decodes multipart
   with the stdlib `email` parser). The sim batch record list is `GET /sim/elevenlabs/stt/batch` key `requests`.
+- 2026-11-01 (P03-T13a): `packages/va_llm` (dist `va-llm`) = the LLM gateway core (rules: specs/10 §1 Decision
+  P03-T13a, metering §11 Decision, metrics specs/27 §3.6 Decision). `LlmGateway(ProviderRegistry(platform,
+  OrgProviderStore|None), http, clock=, metrics=LlmMetrics(registry, catalog), recorder=, costs=CostTable(...))`;
+  `complete(call_type, org_id=, messages=[ChatMessage], ...)` raises only `LlmUnavailableError` (`.reason`,
+  `.last`). openai ≥ 3 is typed against `httpx2` but accepts our httpx clients at runtime: build SDK clients only
+  with `va_llm.clients.openai_client` and pass timeouts through `sdk_timeout` (mypy rejects httpx objects
+  otherwise; test code constructing openai exceptions passes httpx objects typed `Any`). respx records a call
+  only when it completes: for hanging requests assert the `Hanging` side effect's `requests`/`cancelled`, and mix
+  hangs with responses through `llm_client_helpers.scripted(...)` (a respx list side effect is typed
+  `Response | Exception` only). Tests: `gateway_rig()` (ManualClock: `wait_for_sleep(s)` then `run_for(s)` for
+  deadlines and retry waits), `sim_gateway(state)` → `(rig, control)` over FakeLLM ASGI, the `llm_api` respx
+  fixture; `test_org_providers_db.py` boots its own module Postgres with `open_identity_db`. An `LlmProvider`
+  needs a non-empty key (the SDK refuses an empty one at construction). Org-provider lookup failures surface as
+  `OrgProviderError` (`.cause` = exception type name); `complete` turns them into the platform fallback
+  (dialogue/analysis) or `LlmUnavailableError("provider_unavailable")`. In va_llm tests read logs with
+  `service_helpers.json_log_stream`/`log_events` (structlog `capture_logs` misses events once another test has
+  configured logging).

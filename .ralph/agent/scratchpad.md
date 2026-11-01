@@ -1543,3 +1543,213 @@ rest_transport/stt_batch 100%), jscpd 0 clones, radon no C+.
 ## Review P03-T12 re-review (Reviewer, 2026-11-01)
 Approved. Re-ran lint/typecheck/placeholders 0, make test 5936 passed (98%, REST modules 100%), spec refs 0, jscpd 0.
 Finding 1 fixed: `_entity_text`/`_entity_offset` raise ElevenLabsProtocolError; `transport.call` wraps parser slips.
+
+## Plan P03-T13a (Planner, 2026-11-01)
+P03-T13 split (DEC-006): T13a = core + non-streaming `complete`; T13b = streaming dialogue/speculation. Out of scope
+here: `stream_dialogue`, structured calls/embeddings (T14), prompts/window (phase 05), the `PUT /v1/org/llm-provider`
+route + SSRF check (API phase; the probe function is delivered here), usage_events DB writes (billing phase).
+
+### Spec decision to write: specs/10 §1 `> Decision (2026-11-01): va_llm core (P03-T13a).` Numbered rules:
+1. Package map (`packages/va_llm`, dist `va-llm`, deps: `openai>=2`, `httpx>=0.28`, `pydantic>=2.9`,
+   `opentelemetry-api`, `prometheus-client`, `orjson`, `va-common`, `va-db`): `settings` (`LlmSettings`
+   mixin), `models` (`ChatMessage`, `ToolDef`, `ToolCall`, `TokenUsage`, `Completion`), `providers`
+   (`LlmProvider`, `platform_provider(settings)`, `ProviderRegistry`, `probe_provider`), `org_providers`
+   (`OrgProviderStore`, `encrypt_org_api_key`), `policy` (`CallType`, `CallPolicy`, `POLICIES`), `breaker`,
+   `errors`, `pricing`, `metering`, `metrics`, `deadline`, `gateway` (`LlmGateway`). Never import `va_sim`.
+2. Clients: one `openai.AsyncOpenAI(base_url, api_key, timeout=httpx.Timeout(connect=2, read=30, write=5,
+   pool=2), max_retries=0, http_client=<shared>)` per provider, cached by `(provider.id, base_url,
+   sha256(api_key))` so a rotated org key gets a new client; the caller owns the shared
+   `va_common.http.http_client(settings, timeout=..., http2=True, max_connections=500, max_keepalive=100)`.
+   `prewarm()` sends `GET {base_url}/models` for the platform provider (errors logged `llm.prewarm_failed`, not
+   raised). Every request carries `X-VA-Call-Id` when a call id is given (FakeLLM rule matching, specs/10 §12).
+3. Org providers: `OrgProviderStore(database, envelope, *, clock, ttl_s=60)` reads `org_llm_providers` in
+   `database.tenant_session(org_id)`, decrypts `api_key_enc` with AAD `org_llm_providers.api_key_enc:<row id>`
+   (specs/28 §2 format), builds `LlmProvider(id="org:<uuid>", models=row.models, supports_tool_choice=...)`;
+   cache (hits and misses) for `ttl_s` on `clock.monotonic()`; `invalidate(org_id)`. `ProviderRegistry(platform,
+   org_store | None)`: `resolve(org_id) -> LlmProvider` = org provider when present else platform.
+4. Probe: `probe_provider(provider, http) -> ProbeResult(supports_tool_choice, error)`: one non-streaming
+   `chat.completions.create` with `max_tokens=16` (not 1: a forced tool call's arguments cannot fit in one
+   token, real providers and FakeLLM truncate it), tool `va_probe` (`{"type":"object","properties":{"ok":
+   {"type":"boolean"}}}`) forced by name, `temperature=0`, 10 s timeout. Tool call present → `(True, None)`;
+   2xx without a tool call, or 400/422 → retry once without tools: success → `(False, None)`; any other failure
+   → `(False, "<kind>: <vendor message>")` (key never included).
+5. Call policies (§2.1 as data, `POLICIES: Mapping[CallType, CallPolicy]`): `CallType = Literal["dialogue",
+   "router", "loop_condition", "extraction", "voicemail", "guard_rails", "analysis"]`; role model: dialogue →
+   `dialogue`, analysis → `analysis`, others → `router` (override with `model=`). Timeout is the TOTAL budget of
+   the call on the primary target (retries included): router/loop/voicemail 1.5 s, guard_rails 2 s,
+   extraction 3 s, dialogue 2.5 s (T13a non-streaming uses the TTFT budget; T13b adds the 20 s total), analysis
+   60 s PER attempt. Retries: classifiers/router/extraction → 1 immediate retry on retryable errors; analysis →
+   2 retries after 2 s and 8 s (timeouts retryable too), then the fallback model; dialogue → no retry, straight
+   to the fallback model. Retryable = 500/502/503/504, connect errors, and 429 whose `Retry-After` ≤ 1 s (sleep
+   it first; absent header = 0); 429 with Retry-After > 1 s fails over immediately. 4xx other than 429 never
+   retried. A classifier timeout is final (no retry). Exhausted → `LlmUnavailableError` (callers apply their
+   documented fallback; T13a does not implement heuristics).
+6. Fallback target: platform request → `(platform, platform.models["fallback"])`; org request → the platform
+   provider's fallback model ("if org provider fails, platform provider"). Only dialogue and analysis fall back;
+   one attempt, its own breaker; skipped when it equals the primary target.
+7. Breaker (`CircuitBreaker(clock, failures=5, window_s=30, open_s=20)`, one per `(provider_id, model)` in
+   `BreakerBoard`): failures = timeouts, 5xx, connect errors; any HTTP answer < 500 (2xx, 429, other 4xx)
+   counts as success because the server answered; closed → open on the 5th failure within 30 s (sliding deque of monotonic times); open → half-open
+   after 20 s; half-open admits exactly 1 probe (concurrent callers are rejected); probe success → closed (window
+   cleared), failure → open again for 20 s. `allow() -> bool` and `record(success: bool)`; transitions logged
+   `llm.breaker_transition` (provider, model, from, to) and exported as gauge `va_llm_breaker_state{provider,
+   model}` 0 closed / 1 half_open / 2 open. Open primary → dialogue/analysis go to fallback, others raise
+   `LlmUnavailableError(reason="breaker_open")` without a request.
+8. Errors (`errors.py`): `LlmError(message, *, provider_id, model, kind)` with `kind` ∈ `timeout|http|parse`
+   (the `va_llm_errors_total` label) and `to_app_error()` → `AppError("UPSTREAM_TIMEOUT")`; subclasses
+   `LlmTimeoutError`, `LlmHttpError(status)` (`LlmRateLimitedError` for 429), `LlmConnectionError` (kind http),
+   `LlmProtocolError` (kind parse: malformed body / no choices), `LlmUnavailableError(reason, last: LlmError |
+   None)`. Map openai exceptions in one function (`APITimeoutError` → timeout, `APIConnectionError` → connection,
+   `APIStatusError` → http with `status_code` and `response.headers["retry-after"]`, `APIResponseValidationError`
+   → protocol). Messages never contain the API key.
+9. Usage + metering: `TokenUsage(prompt_tokens, completion_tokens, estimated=False)` from the response `usage`;
+   absent → offline estimate `ceil(len(text.encode())/4)` per message text (+4 per message) and per completion
+   text + tool-call arguments, `estimated=True` (tiktoken comes with `window.py`, DEC-006). `pricing.MODEL_COSTS`
+   built-in `{model: ModelCost(in_per_1k_micros, out_per_1k_micros)}` for the 4 specs/02 §6 models + embeddings
+   model (provisional: GLM-5.3-Flash 50/200, GLM-5.3 600/2200, Kimi-K2.6 600/2500, Qwen3-Embedding-8B 20/0),
+   `load_costs(settings.llm_model_costs_json)` merges the JSON over them (invalid JSON or shape → `ValueError` at
+   startup); unknown model → cost 0 + log `llm.unpriced_model` once per model. `cost_micros = ceil(tokens * per_1k
+   / 1000)` per direction. `UsageRecord(org_id, call_id, call_type, provider_id, model, prompt_tokens,
+   completion_tokens, estimated, cost_in_micros, cost_out_micros)`; `UsageRecorder` Protocol `async
+   record(UsageRecord)`; the gateway records every successful completion (including fallbacks); a recorder
+   exception is logged `llm.usage_record_failed` and swallowed.
+10. Metrics: va_llm takes `LlmMetrics(registry, catalog: ServiceMetrics | None = None)`: registers the new
+   specs/27 §3.6 rows in `registry` — `va_llm_requests_total{call_type, model, outcome}` (outcome
+   ok/timeout/rate_limited/server_error/client_error/transport_error/parse_error/breaker_open, one per attempt),
+   `va_llm_request_duration_ms{call_type}` (LAT_MS, one per `complete`, retries + fallback included),
+   `va_llm_breaker_state{provider, model}` gauge, `va_llm_speculation_total{outcome}` (registered now, used by
+   T13b); when `catalog` (media-worker `ServiceMetrics`) is given it also feeds §3.3 `va_llm_tokens_total{model,
+   direction}` and `va_llm_errors_total{model, kind}` (T13b adds `va_llm_ttft_ms`). Add a specs/27 §3.6 Decision
+   sentence for va_llm like the ElevenLabs one. Span per `complete`: `llm.<call_type>` CLIENT with
+   `llm.call_type`, `llm.provider`, `llm.model` (final), `llm.attempts`, `llm.fallback` (bool),
+   `llm.tokens_in`/`llm.tokens_out`, `http.status_code` (last, when any); error status when raising.
+11. `LlmGateway(registry: ProviderRegistry, http: httpx.AsyncClient, *, clock, metrics, recorder=None,
+   costs=MODEL_COSTS, tracer_provider=None)`; `async complete(call_type, *, org_id, messages, tools=(),
+   tool_choice=None, temperature=0.0, max_tokens=512, model=None, call_id=None, response_format=None) ->
+   Completion(content, tool_calls, finish_reason, usage, provider_id, model, attempts, fell_back)`. Deadlines
+   run on the injected clock (`deadline.within(clock, seconds, coro)` races the request task against
+   `clock.sleep` and cancels the loser) so ManualClock tests are exact; `aclose()` closes nothing it does not own.
+
+### Files
+- `packages/va_llm/pyproject.toml` (+ `src/va_llm/py.typed`, `__init__.py` exports), root `pyproject.toml`:
+  dev group `va-llm` + `[tool.uv.sources] va-llm = { workspace = true }`, mypy `files`
+  (`packages/va_llm/src`, `packages/va_llm/tests`) and `mypy_path` (`packages/va_llm/src`,
+  `packages/va_llm/tests/support`), pytest `pythonpath` += `packages/va_llm/tests/support`; `uv lock`.
+- `src/va_llm/{settings,models,providers,org_providers,policy,breaker,errors,pricing,metering,metrics,deadline,
+  gateway}.py` per the rules. Keep radon ≤ B per function (split `complete` into attempt/retry/fallback helpers).
+- specs/10 §1 Decision (rules 1-11, condensed), §11 one-line pointer; specs/27 §3.6 four rows + Decision sentence.
+- AGENTS.md bullet (P03-T13a); check `.env.example` needs no new keys (none planned).
+
+### Tests (`packages/va_llm/tests/`, support `tests/support/llm_client_helpers.py`: `platform(base_url=...)`
+provider builder, `gateway_rig(transport)` → LlmGateway on `ManualClock` + fresh registry + memory spans + a
+`RecordingUsage` recorder; `sim_gateway(state)` = gateway over `httpx.ASGITransport(Starlette(routes=
+simulator_routes("llm", state)))` with base_url `http://sim/v1`; respx fixture on `http://llm.test/v1`)
+- `test_breaker.py`: 4 failures stay closed; 5th within 30 s opens; failures older than 30 s drop out; open
+  rejects; at +20 s half-open admits 1 and rejects a concurrent 2nd; probe success closes (gauge 0), failure
+  reopens (gauge 2); 429/4xx count as success; transitions logged.
+- `test_policy.py`: table equals the specs/10 §2.1 rows (timeouts per call type), role-model mapping.
+- `test_gateway_retries.py` (respx): per call type — router 503 then 200 → ok, 2 attempts; router 503 ×2 →
+  LlmUnavailableError; 429 Retry-After 1 → slept 1.0 s on the clock then retried; 429 Retry-After 2 → no retry;
+  connect error retried; 400 not retried (LlmHttpError surfaced inside LlmUnavailableError.last or raised —
+  pick: raise `LlmHttpError` directly for non-retryable 4xx, documented); router timeout at 1.5 s
+  (ManualClock `wait_for_sleep(1.5)`/`run_for`) → unavailable, request cancelled; analysis 500,500,500 → sleeps
+  2 s and 8 s then fallback model succeeds (`fell_back`, model = fallback); dialogue 503 → fallback immediately,
+  no retry; breaker open on primary → dialogue goes to fallback without a primary request, router raises
+  `breaker_open` with zero requests; org provider failure → platform fallback model; `X-VA-Call-Id` header sent;
+  request body (model, messages, tools, tool_choice, temperature, max_tokens, no `stream`).
+- `test_usage_metering.py`: usage from response; estimate when absent (`estimated=True`, exact numbers);
+  costs with defaults and JSON overrides; invalid JSON → ValueError; unknown model → 0 + one log; recorder gets
+  one record per completion incl. fallback; recorder exception swallowed + logged.
+- `test_metrics_spans.py`: §3.6 `va_llm_` rows parsed with `obs_helpers.vendor_metric_rows("va_llm_")` equal the
+  registered metrics; outcomes per attempt; duration once; catalog tokens/errors only with a media-worker
+  `ServiceMetrics`; span attributes and error status; key absent from repr/error messages/logs.
+- `test_providers.py`: platform provider from `LlmSettings` defaults (spec dev values) and env; client cache by
+  id + key hash (rotated key → new client, same → same); `prewarm` GET /models, failure logged not raised;
+  probe → True / (2xx no tool call → False) / (400 → retry without tools → False) / auth error → error string.
+- `test_org_providers_db.py` (integration, Postgres via va_db support `running_postgres` + `fresh_database` +
+  `upgrade` module fixture, `tenant_rows.open_database`, Envelope with local KMS fakes from `crypto_fakes`):
+  stored row decrypts to the provider; missing row → platform; cache hit within ttl (no DB read: count via a
+  wrapper), refresh after ttl, `invalidate`; wrong AAD (row id swapped) → error; RLS: org B never sees A's row.
+- `test_contract_fakellm.py` (FakeLLM `realtime_llm_state()` ASGI): complete returns rule content and usage;
+  `X-VA-Call-Id` matched by a `match.call_id` rule; `server_error` fault once → retried ok; `rate_limit` fault
+  retry_after_s=1 → retried after 1 s on the gateway clock; `timeout` fault → router unavailable after 1.5 s
+  (`wait_held(state, 1)` then `clock.run_for(1.5)`); probe → supports_tool_choice True; tool calls parsed.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones; watch metrics/transport similarities with va_elevenlabs — factor into va_common if flagged),
+`uvx radon cc -s -a packages/va_llm/src` (no C+), audit (`uvx pip-audit` on `uv export`, `corepack pnpm audit`).
+Coverage va_llm ≥ 95 %.
+
+### Risks
+- openai SDK's own timeouts vs our clock deadlines: keep SDK timeout as a backstop (≥ policy), deadline via clock.
+- ManualClock: every sleep parks (deadline + Retry-After sleepers coexist) — tests must `wait_for_sleep(s)` for the
+  specific duration before `run_for`.
+- Cancelling an in-flight openai request must not leak sockets (`filterwarnings=error`); close the shared http
+  client and ASGI apps in fixtures.
+- `test_metrics.py` counts 57 catalog rows (§3.1-§3.5): §3.6 additions don't change it; don't add va_llm rows
+  to §3.3.
+- respx + openai: openai sends to `{base_url}/chat/completions`; base_url must end in `/v1`.
+
+## Build P03-T13a (Builder, 2026-11-01)
+New package `packages/va_llm` (dist `va-llm`): settings, models, errors, providers, clients, org_providers, probe,
+policy, breaker, deadline, pricing, metering, metrics, wire, gateway. Root pyproject: dev dep + source, mypy
+files/mypy_path, pytest pythonpath; uv.lock. specs/10 §1 Decision (9 rules) + §11 metering Decision; specs/27 §3.6
+four `va_llm_` rows + Decision. AGENTS.md bullet.
+Deviations from the plan (all written into the specs/10 §1 Decision):
+- Every exhausted call raises `LlmUnavailableError(reason exhausted|breaker_open, last)` (no direct LlmHttpError
+  raise for 4xx); dialogue/analysis also fall back after a non-retryable 4xx or malformed body (other model/provider
+  may accept it).
+- `LlmProvider.api_key` must be non-empty (openai refuses an empty key at client construction).
+- Probe uses the provider's `router` model. Clients enforce `max_concurrency` with a per-provider semaphore.
+- Response bodies are parsed by `wire.parse_completion` from `with_raw_response` (SDK lenient construction lets
+  malformed bodies through); span `http.status_code` is the real status.
+- openai 3.42 is typed against `httpx2`; `clients.openai_client`/`sdk_timeout` are the only typing crossings.
+Gates: make fmt 0, make lint 0, make typecheck 0, make placeholders 0 findings, spec refs 0, make test 6106 passed
+(TOTAL 98%, va_llm 100%), jscpd 0 clones, radon no C+ (avg A 2.33), pip-audit no known vulns, pnpm audit 0.
+Integration: test_org_providers_db.py ran against Docker Postgres (6 passed).
+
+## Review P03-T13a (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0, make test 6106 passed (va_llm 100 %), spec refs 0,
+jscpd 0 clones, radon no C+. Code otherwise matches the specs/10 §1/§2.1/§2.2/§11 Decisions closely. One finding:
+
+1. `packages/va_llm/src/va_llm/gateway.py` `LlmGateway.complete` (the `provider = await self.registry.resolve(org_id)`
+   line, before the span/try): a failure of the org-provider lookup escapes `complete` raw. Examples:
+   `OrgProviderStore.get` raises `va_common.crypto.DecryptionError` (tested in `test_org_providers_db.py`),
+   SQLAlchemy/asyncpg errors when Postgres is unavailable, or a pydantic `ValidationError` when a stored `models`
+   JSON lacks a role (`org_providers.py` passes it with `type: ignore`). That breaks the documented contract (specs/10
+   §1 Decision rule 6 "Every exhausted call raises `LlmUnavailableError`", AGENTS.md "raises only
+   `LlmUnavailableError`") that the media worker will rely on for its §2.1 fallbacks. It also skips the §2.1 dialogue
+   rule "if org provider fails, platform provider". Failures are not cached, so a DB blip makes every turn raise.
+   Required: catch lookup failures in `complete` (inside the span so duration/span still record). Log
+   `llm.org_provider_unavailable` (org_id, error type, never the key). Then for falls_back policies
+   (dialogue/analysis) go straight to the platform fallback target (`fell_back=True`; count it like any fallback).
+   For the other call types raise `LlmUnavailableError` with a new reason `"provider_unavailable"` (add it to
+   `UnavailableReason` and the rule 6 text) and `last=None`. Wrap the store's errors at the `OrgProviderStore`/registry
+   boundary (e.g. `OrgProviderError(LlmError)` raised from `_load` for DB/decrypt/validation failures) so the gateway
+   doesn't catch bare `Exception`. Also validate `row.models` explicitly instead of the `type: ignore`.
+   Tests: gateway with an org source that raises → dialogue answers from the platform fallback model, router raises
+   `LlmUnavailableError(reason="provider_unavailable")` with zero requests, span error status + duration observed;
+   DB test: a row with a `models` dict missing a role → `OrgProviderError`, a decrypt failure → `OrgProviderError`.
+
+## Build P03-T13a fix (Builder, 2026-11-01)
+Finding 1 fixed: `errors.OrgProviderError(provider_id, cause)` (cause = exception type name only) and reason
+`provider_unavailable`. `OrgProviderStore.get` wraps `_load` failures (SQLAlchemyError, OSError, CryptoError,
+ValidationError, botocore ClientError/BotoCoreError) — not cached; `models` validated with a
+`TypeAdapter(dict[ModelRole, str])` (no type: ignore). `LlmGateway.complete` resolves the provider inside the span
+(`_open`): logs `llm.org_provider_unavailable` (org_id, call_type, error); dialogue/analysis run one attempt on the
+platform fallback (`fell_back=True`, metered); other call types raise `LlmUnavailableError("provider_unavailable",
+last=None)` with zero requests; duration + span error status recorded either way. specs/10 §1 rule 6 updated;
+AGENTS.md bullet extended. Tests: new `test_org_provider_failure.py` (fallback per falls-back type, fallback failure,
+5 classifier types unavailable/no request/no attempt samples/span, unreachable DB → OrgProviderError not cached);
+DB tests: decrypt failure → OrgProviderError(cause DecryptionError) not cached, missing role / unknown role →
+ValidationError cause.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 6118 passed (TOTAL 98%, va_llm 100% after
+final branch tidy; va_llm suite re-run 182 passed), spec refs 0, jscpd 0 clones, radon max B (avg A 2.35),
+pip-audit no known vulns, pnpm audit --audit-level high clean (3 moderate pre-existing).
+
+## Review P03-T13a re-review (Reviewer, 2026-11-01)
+Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6118 passed (va_llm 100 %), spec refs 0, jscpd 0 clones.
+Finding 1 resolved: OrgProviderStore wraps lookup failures in OrgProviderError (not cached, models validated via
+TypeAdapter); complete resolves inside the span, falls back (dialogue/analysis) or raises provider_unavailable.
+Approved, ticked, committed.

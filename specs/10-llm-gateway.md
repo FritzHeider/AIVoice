@@ -30,6 +30,57 @@ class LlmProvider(BaseModel):
 - Model override per call: `SendCallConfig.dialogue_model` / `router_model` (from `model` param or agent/persona
   settings) selects the model string within the chosen provider.
 
+> Decision (2026-11-01): va_llm core (P03-T13a). Streaming dialogue (`dialogue.py`) follows in P03-T13b,
+> structured calls and embeddings in P03-T14; the module list above gains `settings`, `models`, `clients`,
+> `org_providers`, `probe`, `policy`, `errors`, `pricing`, `metrics`, `deadline`, `wire`, and `gateway`.
+> 1. `va_llm.LlmSettings` holds the specs/02 §6 `LLM_*` rows; `platform_provider(settings)` builds the provider
+>    `platform`. `LlmProvider` requires a non-empty `api_key` and a model for each of the four roles.
+> 2. `LlmClients` caches one `AsyncOpenAI` per provider id (rebuilt when the base URL or the key's sha256 changes,
+>    so a rotated org key gets a new client) on the caller's shared httpx client (`max_retries=0`, the timeout
+>    above), bounds concurrent requests per provider with `max_concurrency`, and `prewarm` lists `/models`
+>    (failure logged `llm.prewarm_failed`). Every request with a call id sends `X-VA-Call-Id`.
+> 3. `OrgProviderStore(database, envelope, clock=, ttl_s=60)` reads `org_llm_providers` in the org's
+>    `tenant_session`, decrypts `api_key_enc` with AAD `org_llm_providers.api_key_enc:<row id>`
+>    (`encrypt_org_api_key` seals it for writers), and caches hits and misses for `ttl_s` (`invalidate(org_id)`
+>    after a change). `ProviderRegistry.resolve(org_id)` returns the org provider, else the platform provider.
+> 4. `probe_provider(provider, http)` sends one non-streaming completion on the provider's `router` model with a
+>    forced `va_probe` call, `temperature=0`, and `max_tokens=16` (a forced call's arguments cannot fit in one
+>    token), 10 s timeout. A tool call → `supports_tool_choice=true`; a 2xx without one, or a 400/422, is retried
+>    once without tools (success → `false` with no error); any other failure → `false` with
+>    `"<kind>: <message>"` (the key is masked).
+> 5. `va_llm.policy.POLICIES` is the §2.1 table: call types `dialogue`, `router`, `loop_condition`,
+>    `extraction`, `voicemail`, `guard_rails`, `analysis`; role model `dialogue`/`analysis`/`router` (others),
+>    overridable per call with `model=`. The timeout is the total budget of the attempts on a target (waits
+>    included), except analysis: 60 s per attempt. Retries: the classifiers and extraction 1 immediate retry,
+>    analysis 2 retries after 2 s and 8 s (timeouts retried too), dialogue none. Retryable: 500/502/503/504,
+>    connect errors, and 429 with `Retry-After` ≤ 1 s (absent = 0; the wait is `max(policy delay, Retry-After)`
+>    and must fit in the remaining budget). A 429 above 1 s, other 4xx, and malformed bodies are never retried;
+>    a classifier timeout is final (its budget is spent).
+> 6. Dialogue and analysis fall back once, with a fresh timeout, to the platform provider's `fallback` model
+>    (also for an org provider) after any failure of the primary target, including a skipped open breaker and a
+>    non-retryable 4xx (another model or provider may accept the request); no fallback when it is the primary
+>    target. When the org's provider cannot be loaded (`OrgProviderStore` wraps database, KMS/decryption, and
+>    invalid-row failures in `OrgProviderError`; they are logged `llm.org_provider_unavailable` and not cached),
+>    dialogue and analysis go straight to that fallback (`fell_back=True`) and the other call types raise
+>    `LlmUnavailableError(reason="provider_unavailable", last=None)` without a request. Every exhausted call
+>    raises `LlmUnavailableError(reason="exhausted"|"breaker_open"|"provider_unavailable", last=...)`, whose
+>    `last` is the final request error; callers apply their §2.1 fallback.
+> 7. Breakers per `(provider_id, model)` follow §2.2 on the injected clock; failures are timeouts, 5xx, and
+>    connect errors, while any other HTTP answer (2xx, 429, 4xx, malformed 2xx) is a success. A cancelled
+>    half-open probe frees the probe slot. An open primary breaker skips to the fallback (dialogue/analysis) or
+>    raises `LlmUnavailableError("breaker_open")` without a request.
+> 8. Errors: `LlmTimeoutError` (kind `timeout`), `LlmConnectionError`, `LlmHttpError(status)` and
+>    `LlmRateLimitedError(retry_after_s)` (kind `http`), `LlmProtocolError` (kind `parse`); `to_app_error()` is
+>    `UPSTREAM_TIMEOUT`. The gateway parses the raw body itself (the SDK constructs malformed bodies leniently).
+>    openai ≥ 3 is typed against `httpx2` but accepts the platform's httpx clients at runtime; `va_llm.clients`
+>    is the only place that crosses that boundary.
+> 9. `LlmGateway(registry, http, clock=, metrics=, recorder=, costs=, tracer_provider=)`.
+>    `complete(call_type, *, org_id, messages, tools, tool_choice, temperature=0.0, max_tokens=512, model,
+>    call_id, response_format) -> Completion(content, tool_calls, finish_reason, usage, provider_id, model,
+>    attempts, fell_back)` (non-streaming). Deadlines race the request against `clock.sleep` (tests with a manual
+>    clock are exact); the SDK timeout stays as a backstop that is never shorter. Metrics and spans: specs/27 §3.6
+>    Decision (P03-T13a). Metering: §11 Decision.
+
 ## 2. Streaming dialogue (`dialogue.py`)
 
 ```python
@@ -320,6 +371,17 @@ per-minute; priced for `/analyze` and Norm-style builders per plan), cost from e
 `LLM_COST_MICROS_PER_1K_IN`/`LLM_COST_MICROS_PER_1K_OUT` per model map in `va_llm.pricing.MODEL_COSTS` (configurable
 JSON env `LLM_MODEL_COSTS_JSON`). Usage comes from the final stream chunk (`include_usage`); if absent, estimated
 with tiktoken.
+
+> Decision (2026-11-01): metering in P03-T13a. A missing `usage` is estimated offline as `ceil(utf8_bytes / 4)` per
+> text (message contents, tool-call names and arguments) plus 4 per prompt message and flagged
+> `TokenUsage.estimated` (tiktoken arrives with `window.py`, DEC-006). `va_llm.pricing.MODEL_COSTS` holds
+> provisional built-in prices in micro-dollars per 1 000 tokens (`zai-org/GLM-5.3-Flash` 50/200, `zai-org/GLM-5.3`
+> 600/2200, `moonshotai/Kimi-K2.6` 600/2500, `Qwen/Qwen3-Embedding-8B` 20/0); `load_costs(LLM_MODEL_COSTS_JSON)`
+> merges overrides over them and raises `ValueError` at startup for invalid JSON or entries; an unknown model costs
+> 0 and is logged `llm.unpriced_model` once. Costs round up per direction. Every successful completion (fallbacks
+> included) goes to the injected `UsageRecorder` as a `UsageRecord(org_id, call_id, call_type, provider_id, model,
+> prompt_tokens, completion_tokens, estimated, cost_in_micros, cost_out_micros)`; a recorder failure is logged
+> `llm.usage_record_failed` and never fails the completion (the billing phase writes `usage_events`).
 
 ## 12. Simulator (`va_sim.llm`)
 

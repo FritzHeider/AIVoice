@@ -195,6 +195,10 @@ named `LAT_MS`.
 | `va_telnyx_request_duration_ms` | histogram (LAT_MS) | `operation` |
 | `va_elevenlabs_requests_total` | counter | `operation`, `outcome` (ok/client_error/auth_error/rate_limited/server_error/transport_error) |
 | `va_elevenlabs_request_duration_ms` | histogram (LAT_MS) | `operation` |
+| `va_llm_requests_total` | counter | `call_type`, `model`, `outcome` (ok/timeout/rate_limited/server_error/client_error/transport_error/parse_error/breaker_open) |
+| `va_llm_request_duration_ms` | histogram (LAT_MS) | `call_type` |
+| `va_llm_breaker_state` | gauge | `provider`, `model` (0 closed, 1 half-open, 2 open) |
+| `va_llm_speculation_total` | counter | `outcome` (committed/discarded) |
 
 > Decision (2026-11-01): vendor clients (`va_telnyx`, later `va_elevenlabs`/`va_llm`) run in several services, so
 > their metrics are not part of the per-service `CATALOG` of §3.1-§3.5: the library registers them in the registry
@@ -213,6 +217,18 @@ named `LAT_MS`.
 > `elevenlabs.voice_id` (when present), `http.status_code` (last response), and `elevenlabs.attempts` (every request
 > of the operation, pages included). The WebSocket clients keep the media-worker catalog metrics of §3.3.
 > `packages/va_elevenlabs/tests/test_rest_transport.py` parses the `va_elevenlabs_` rows.
+
+> Decision (2026-11-01): the LLM gateway (`va_llm.LlmGateway`, P03-T13a) registers the `va_llm_` rows above with
+> `va_llm.LlmMetrics(registry, catalog)`. Unlike the other vendor clients, `va_llm_requests_total` counts every
+> attempt (retries and the fallback each add one; a target skipped because its breaker is open counts as
+> `breaker_open`), while `va_llm_request_duration_ms` is one observation per `complete` call (retries, waits, and
+> the fallback included). When the process passes its media-worker catalog (`catalog=ServiceMetrics`), every
+> completion also adds its tokens to §3.3 `va_llm_tokens_total{model, direction}` and every failed attempt adds one
+> to §3.3 `va_llm_errors_total{model, kind}`. Each call records one `llm.<call_type>` CLIENT span with
+> `llm.call_type`, `llm.provider`, `llm.model` (the target that answered or failed last), `llm.attempts`,
+> `llm.fallback`, `http.status_code` (last response, absent when nothing answered), and `llm.tokens_in`/
+> `llm.tokens_out` on success; it ends with error status when the call raises.
+> `packages/va_llm/tests/test_metrics_spans.py` parses the `va_llm_` rows.
 
 ## 4. Per-call latency events
 
