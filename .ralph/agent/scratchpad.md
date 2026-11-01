@@ -1140,3 +1140,117 @@ reset after clear, mark after a segment's last frame, 100005 pause 100 ms + lead
 Hann, p20 profile over 1.5 s non-speech, floor 0.25, α 0.6; Rayleigh scale recorded as a Decision for §22 ≥ 10 dB),
 §10.2 (asset per rate, unit gain, clip, no ducking, outbound only), §15 (L16 wire byte order). Tests run on
 ManualClock with events (no sleeps); clear-in-flight and stopped-tracker paths covered; real-Silero recall test.
+
+## Plan P04-T10 (Planner, 2026-11-01)
+Latency tracer + turn metrics. Specs: specs/07 §8 step 7, §20 (metric table, span tree, histograms); specs/27 §2.1
+(`turn`, `turn.eot`, `turn.stt_final`, `turn.route`, `turn.tool <name>`), §3.3 catalog, §4 (latency events);
+specs/19 §2 `call.latency`; specs/03 `call_turns.latency` jsonb keys. va_voice deps unchanged (va_common already brings
+opentelemetry-api/sdk + prometheus_client). va_voice must NOT import va_events/va_llm/va_elevenlabs.
+
+### Key decisions (record in specs/07 §20 as `> Decision (2026-11-01) P04-T10`)
+1. Histogram names follow the specs/27 §3.3 catalog: `va_turn_eot_ms` (07 §20 says `va_eot_ms`; catalog wins, fix the
+   07 text in the decision).
+2. No double counting: `va_stt_final_ms`, `va_tts_ttfa_ms`, `va_llm_ttft_ms` are already observed by the vendor clients
+   (va_elevenlabs CatalogSttMetrics/CatalogTtsMetrics, va_llm LlmMetrics — they own the `model`/`purpose` labels).
+   `TurnMetrics` observes only `va_turn_e2e_ms{org_tier}`, `va_turn_eot_ms`, `va_barge_in_total{honored}`,
+   `va_barge_in_reaction_ms`.
+3. `stt_final_ms` starts at the commit (sent at the EOT decision, so 27 §4's "EOT decision →" is the same instant
+   when the commit is immediate); mark `stt_commit`.
+4. Spans are emitted retroactively when the turn finishes, with explicit start/end timestamps: monotonic ms →
+   epoch ns through an anchor `(clock.now(), clock.monotonic())` taken when the tracer is built. Child names
+   `turn.eot`, `turn.stt_final`, `turn.route`, `turn.llm`, `turn.tts_first_audio`, `turn.tool <name>`; add the two
+   missing rows (`turn.llm` attrs `va.llm_ttft_ms`; `turn.tts_first_audio` attrs `va.tts_ttfa_ms`) to specs/27 §2.1.
+5. Marks are first-wins except `user_speech_end` (last voiced window end; resumed speech moves it: last-wins) and
+   `user_speech_start` (first-wins). A metric is `None` when a mark is missing or end < start (misordered input logs
+   `turn_latency_misordered` with the metric name, debug-free warning once per metric). Values rounded half-up to int ms.
+6. Summary event `"E2E: {e2e}ms"` only when `e2e_ms` is measured (interrupted-before-audio turns have no summary);
+   stage events `"STT: {n}ms"`, `"LLM: {n}ms"`, `"TTS: {n}ms"` each only when measured. Order: summary, STT, LLM, TTS.
+
+### Files
+1. `packages/va_voice/src/va_voice/latency.py`
+   - `class TurnMark(StrEnum)`: `USER_SPEECH_START="user_speech_start"`, `USER_SPEECH_END`, `EOT`, `STT_COMMIT`,
+     `STT_FINAL`, `ROUTE_START`, `ROUTE_END`, `LLM_REQUEST`, `LLM_FIRST_TOKEN`, `TTS_FIRST_TEXT`, `TTS_FIRST_AUDIO`,
+     `FIRST_AUDIO_OUT`.
+   - `METRIC_SPANS: Final` table: metric name → (start mark, end mark, child span name, attribute key):
+     eot_ms (USER_SPEECH_END→EOT, `turn.eot`, `va.eot_ms`), stt_final_ms (STT_COMMIT→STT_FINAL, `turn.stt_final`,
+     `va.stt_final_ms`), route_ms (ROUTE_START→ROUTE_END, `turn.route`, `va.route_ms`), llm_ttft_ms
+     (LLM_REQUEST→LLM_FIRST_TOKEN, `turn.llm`, `va.llm_ttft_ms`), tts_ttfa_ms (TTS_FIRST_TEXT→TTS_FIRST_AUDIO,
+     `turn.tts_first_audio`, `va.tts_ttfa_ms`), e2e_ms (USER_SPEECH_END→FIRST_AUDIO_OUT, no child; on `turn` as
+     `va.e2e_ms`).
+   - `@dataclass(frozen=True) ToolTiming(name, start_ms, end_ms, status_code: int | None)`; `duration_ms`.
+   - `@dataclass(frozen=True) TurnLatency`: `eot_ms, stt_final_ms, route_ms, tool_ms, llm_ttft_ms, tts_ttfa_ms,
+     e2e_ms: int | None`; `as_dict() -> dict[str, int]` (measured keys only, spec key order — this is the
+     `call_turns.latency` jsonb); tool_ms = sum of tool durations (None when no tools).
+   - `class TurnTimer(turn_index: int, clock: Clock, *, node_id: str | None = None)`: `mark(m, at_ms: float | None =
+     None)` (default `clock.monotonic()*1000`; same ms timeline as the endpointer/pacer callers), `at(m) -> float |
+     None`, `add_tool(name, start_ms, end_ms, status_code=None)`, `set_node(node_id)`, `interrupted` (settable via
+     `mark_interrupted()`), `latency() -> TurnLatency`, `started_ms` (first mark seen; span start = min of all marks),
+     `ended_ms` (max), properties `turn_index`, `node_id`, `tools`.
+   - `@dataclass(frozen=True) LatencyEvent(message: str, data: dict[str, int])`; `latency_events(latency, turn_index)
+     -> list[LatencyEvent]` (summary data = `as_dict()` + `turn_index`; stage events data `{"<metric>": n,
+     "turn_index": i}`).
+   - `class TurnMetrics(metrics: ServiceMetrics, *, org_tier: str)`: `observe(latency)` (e2e with label, eot),
+     `barge_in(*, honored: bool, reaction_ms: float | None)` (counter label `"true"/"false"`, histogram only when
+     honored and reaction given).
+   - `class TurnTracer(clock: Clock, *, call_id: str, org_id: str, tracer_provider: TracerProvider | None = None,
+     parent: Context | None = None)`: `emit(timer)`: no marks → nothing; `turn` span from min to max mark with
+     `va.turn_index`, `va.node_id` (when set), `va.interrupted`, `va.e2e_ms` (when measured), `va.call_id`,
+     `va.org_id`; children per measured metric with its attribute (+ `va.chars`? no — keep metric attrs only, plus
+     `turn.tool <name>` with `va.tool.duration_ms`, `http.status_code` when given). Uses
+     `trace.get_tracer("va_voice", tracer_provider=...)`, `start_span(name, context=..., start_time=ns)` +
+     `span.end(end_time=ns)`; children parented with `trace.set_span_in_context(turn_span)`.
+   - `class LatencyTracer(clock, *, metrics: TurnMetrics | None = None, tracer: TurnTracer | None = None)`:
+     `start_turn(turn_index, node_id=None) -> TurnTimer`; `finish(timer) -> TurnReport(latency, events)` (observes
+     metrics, emits spans, builds events; idempotent: second finish of the same timer raises RuntimeError);
+     `barge_in(...)` delegates.
+2. specs/07 §20 Decision; specs/27 §2.1 two rows (`turn.llm`, `turn.tts_first_audio`), keep table format.
+3. AGENTS.md bullet (P04-T10).
+
+### Tests `packages/va_voice/tests/test_latency.py` (FrozenClock / ManualClock from clock_helpers; no sleeps)
+- metric arithmetic table: full mark set → exact ints for every metric; rounding half-up (e.g. 12.5 → 13);
+  missing marks → None; misordered → None + warning logged (json_log_stream/log_events or structlog capture).
+- `user_speech_end` last-wins, other marks first-wins; default timestamp from clock.monotonic (advance clock).
+- tool_ms sum of two tools, None without tools; `as_dict` key order and omission.
+- `latency_events`: messages exactly `"E2E: 742ms"`, `"STT: 63ms"`, `"LLM: 266ms"`, `"TTS: 218ms"`; summary data
+  keys; no summary without e2e; stage events omitted when unmeasured.
+- TurnMetrics with `build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))`: sample counts/sums
+  via `registry.get_sample_value(...)` for e2e (org_tier label), eot; stage histograms untouched (stt/llm/tts
+  `_count` stay 0 — proves no double count); barge_in honored/not.
+- TurnTracer with `obs_helpers.memory_provider()` (or local InMemorySpanExporter + SimpleSpanProcessor
+  TracerProvider): one `turn` span + children names, parent ids, attributes, start/end ns equal anchor + offsets
+  exactly; parent context respected (children of a `media.session` span); no marks → no spans; tool span attrs.
+- LatencyTracer.finish: report equals parts, double finish RuntimeError, works with metrics/tracer None.
+- Coverage 100 % for latency.py.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q`, `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src/va_voice/latency.py`, pip-audit/pnpm audit (no new deps).
+
+### Risks
+- OTel timestamps are int ns: compute `anchor_ns + round((ms - anchor_mono_ms) * 1e6)` to avoid float noise; tests
+  assert exact ints.
+- `test_metrics` catalog parity unaffected (no new metrics). If the specs/27 §2.1 table is parsed anywhere, keep
+  row format.
+- va_voice tests may need `obs_helpers`/`clock_helpers` on pythonpath — already shared via packages/va_common/tests
+  (check pytest pythonpath; existing va_voice outbound tests already import clock_helpers).
+
+## Build P04-T10 (Builder, 2026-11-01)
+Implemented per plan. Deviations/additions (recorded in specs/07 §20 Decision P04-T10):
+- `TurnTimer.intervals()` computes the measured (start, end) once per finish; `latency(intervals)` and
+  `TurnTracer.emit(timer, intervals)` reuse it, so a misordered metric logs `turn_latency_misordered` exactly once.
+- `TurnTimer.annotate(span, {...})` adds caller-known catalog attributes (`va.chars`, `va.silence_threshold_ms`,
+  `va.route.to`, ...) to `turn` or a child; ignored when that span is not emitted.
+- Child spans carry their metric attribute (`va.route_ms` on `turn.route` too); specs/27 §2.1 gained `turn.llm`
+  and `turn.tts_first_audio` rows.
+- New `packages/va_voice/tests/conftest.py` re-exports `reset_logging` (json_log_stream in tests).
+Files: va_voice/latency.py; tests/test_latency.py, tests/conftest.py; specs/07 §20, specs/27 §2.1; AGENTS bullet.
+Gates: fmt ok; lint pass; typecheck pass (862 files); placeholders 0; spec refs 0; test_latency 25 passed,
+latency.py 100 %; make test 7224 passed / 7 skipped (98.55 %); jscpd 0 clones; radon A (2.26); pip-audit no known
+vulns; pnpm audit 3 moderate, no high.
+
+## Review P04-T10 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 7224 passed / 7 skipped (98.55 %),
+jscpd 0 clones, radon A (2.26). Checked against specs/07 §20 metric table (marks match start/end columns),
+specs/27 §2.1/§3.3/§4, specs/03 call_turns.latency key order, specs/19 call.latency messages. No sleeps; spans
+asserted with exact ns timestamps; misordered path logged once and covered.

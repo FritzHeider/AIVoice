@@ -1023,3 +1023,12 @@ Grafana 3001
   VAD-path noise gate: `va_voice.noise.SpectralGate` (`process` returns whole 256-sample hops, output = input
   delayed 256 samples; `set_speech` from VAD events). Tests drive `OutboundAudio` on `ManualClock`
   (`wait_for_sleep(0.02)` before `run_for`); sink timestamps need rounding (float ms noise ~1e-14).
+- 2026-11-01 (P04-T10): turn latency = `va_voice.latency` (rules: specs/07 §20 Decision P04-T10). The pipeline gets a
+  `TurnTimer` from `LatencyTracer(clock, metrics=TurnMetrics(build_metrics(Service.MEDIA_WORKER, ...), org_tier=),
+  tracer=TurnTracer(clock, call_id=, org_id=, tracer_provider=, parent=))`. It calls `.start_turn(i, node_id)`,
+  then `timer.mark(TurnMark.X[, at_ms])`, `add_tool`, and `annotate(span, {...})`, and finally `finish(timer)`,
+  which returns a `TurnReport(latency, events)`. Barge-ins are counted with `LatencyTracer.barge_in(honored=,
+  reaction_ms=)`. Never observe `va_stt_final_ms`/`va_tts_ttfa_ms`/`va_llm_ttft_ms` from the pipeline: the vendor
+  clients already do. `packages/va_voice/tests/conftest.py` re-exports `reset_logging`, so va_voice tests can use
+  `service_helpers.json_log_stream`/`log_events`. Retroactive OTel spans:
+  `tracer.start_span(name, context=, start_time=ns)` + `span.end(end_time=ns)`.

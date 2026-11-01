@@ -513,6 +513,27 @@ OpenTelemetry: one span per turn `turn` with child spans `eot`, `stt_final`, `ro
 `tool:{name}`; attributes `call_id`, `org_id`, `turn_index`, `node_id`. Prometheus histograms
 `va_turn_e2e_ms`, `va_llm_ttft_ms`, `va_tts_ttfa_ms`, `va_stt_final_ms`, `va_eot_ms` (buckets 50…3 000 ms).
 
+> Decision (2026-11-01) P04-T10: the tracer is `va_voice.latency`. The pipeline records `TurnMark`s on the
+> monotonic ms timeline into a `TurnTimer` (first value wins, except `user_speech_end`, where the last voiced
+> window wins because resumed speech moves it). `LatencyTracer.finish` computes `TurnLatency` (whole ms, rounded
+> half up; a metric is unmeasured when a mark is missing, or when its end precedes its start, which is logged as
+> `turn_latency_misordered`; `tool_ms` = sum of the turn's tool durations), observes metrics, emits spans, and
+> returns the `call.latency` events. (1) Histogram names follow the specs/27-observability.md §3.3 catalog:
+> `va_turn_eot_ms`, not `va_eot_ms`. (2) `TurnMetrics` observes only `va_turn_e2e_ms{org_tier}`, `va_turn_eot_ms`,
+> `va_barge_in_total{honored}`, and `va_barge_in_reaction_ms` (honored barge-ins only). The vendor clients already
+> observe `va_stt_final_ms`, `va_tts_ttfa_ms`, and `va_llm_ttft_ms` with their own labels, so the tracer does not
+> observe them a second time. (3) `stt_final_ms` starts at the `stt_commit` mark. The commit is sent at the EOT
+> decision, so this is the same instant as specs/27 §4's "EOT decision". (4) Spans are emitted when the turn
+> finishes, with explicit timestamps (monotonic ms mapped to epoch ns through an anchor taken when the
+> `TurnTracer` is built). The span names are those of the specs/27 §2.1 catalog: `turn`, `turn.eot`,
+> `turn.stt_final`, `turn.route`, `turn.llm`, `turn.tts_first_audio`, `turn.tool <name>`. `turn` spans from the
+> earliest to the latest recorded instant, and a child span exists only for a measured metric. Each span carries
+> its metric attribute (`va.eot_ms`, ...). Attributes that only the caller knows (`va.chars`,
+> `va.silence_threshold_ms`, `va.route.to`, ...) are attached with `TurnTimer.annotate(span, {...})`. (5) The summary
+> event `"E2E: {n}ms"` (data = the measured `call_turns.latency` keys + `turn_index`) exists only when `e2e_ms` was
+> measured, so a turn interrupted before its first audio has none. It is followed by `"STT: {n}ms"`, `"LLM: {n}ms"`,
+> and `"TTS: {n}ms"`, each only when that stage was measured.
+
 ## 21. Performance requirements and CPU budget
 
 Per call at 2 vCPU pod: VAD ≈ 0.3 ms / 32 ms window (≈ 1 % core), codec + mixing ≈ 0.2 %, JSON/base64 for 50 msgs/s

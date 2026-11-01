@@ -54,7 +54,7 @@
   - Deliverables: `OutboundAudio` (20 ms pacing with lead buffer, clear(), background loop mixing at configured level, pure passthrough when background is `none`), noise handling module as specified
   - Acceptance: timing tests with fake clock; mixed output level within ±1 dB of target.
 
-- [ ] P04-T10 Latency tracer and turn metrics
+- [x] P04-T10 Latency tracer and turn metrics — va_voice.latency (TurnTimer marks, TurnLatency, TurnMetrics e2e/eot/barge-in without double counting vendor histograms, retroactive turn span tree, call.latency events); test_latency 25 tests, latency.py 100 %; make test 7224 passed / 7 skipped (98.55 %), lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, radon A (2.26)
   - Spec refs: specs/07-media-pipeline.md (latency tracing spans, metric definitions); specs/27-observability.md (per-turn spans)
   - Depends on: P00-T08
   - Deliverables: `TurnTimer` marks (user_speech_end, eot, stt_final, llm_first_token, tts_first_audio, first_audio_out), computed metrics dict, OTel span emission, Prometheus histograms

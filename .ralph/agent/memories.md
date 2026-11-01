@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793546380-d277
+> P04-T10: va_voice.latency TurnTimer.intervals() computed once and shared by latency()/TurnTracer.emit so misordered warnings log once; retroactive OTel spans via start_span(start_time=ns)+end(end_time=ns), anchor ns from (clock.now()-epoch)//timedelta(microseconds=1)*1000; va_voice tests/conftest.py re-exports reset_logging; use exactly-representable floats in tests (mypy rejects pytest.approx in tuple equality: comparison-overlap)
+<!-- tags: voice, latency, testing | created: 2026-11-01 -->
+
 ### mem-1793545684-8d30
 > P04-T09: va_voice.outbound FramePacer anchors targets at max(0,n-lead)*20 after the anchor, re-anchors when drained (now >= anchor+sent*20), mark_gap so the wait after idle is not lateness; OutboundAudio clear() uses a generation counter for frames in flight; SpectralGate returns whole 256-sample hops (input delayed 256), Rayleigh p20->mean scale 1.876 gives -11.6 dB; ManualClock float ms noise ~1e-14, so round sink timestamps
 <!-- tags: voice, outbound, testing | created: 2026-11-01 -->

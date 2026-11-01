@@ -83,6 +83,8 @@ Package: `va_common.logging`, `va_common.tracing`, `va_common.metrics`. Every se
 | `turn.route` | media | `va.route.to`, `va.route.alternatives` |
 | `turn.kb_retrieve` | media | `va.kb_id`, `va.top_k`, `va.hits` |
 | `turn.tool <name>` | media | `http.status_code`, `va.tool.duration_ms` |
+| `turn.llm` | media | `va.llm_ttft_ms` (dialogue request → first content delta) |
+| `turn.tts_first_audio` | media | `va.tts_ttfa_ms` (first text → first audio chunk) |
 | `llm.chat` | media, worker | `gen_ai.system="telnyx"`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `va.llm.ttft_ms`, `va.llm.purpose` (dialogue/router/extraction/analysis) |
 | `tts.segment` | media | `va.tts.chars`, `va.tts.ttfa_ms`, `va.tts.context_id` |
 | `tts.playback` | media | `va.played_ms` |
