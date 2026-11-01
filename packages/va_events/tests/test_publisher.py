@@ -164,3 +164,45 @@ async def test_a_redis_outage_raises_and_persists_nothing(
     assert caught.value.__cause__ is not None
     assert rig.writer.rows == []
     assert rig.router.routed == []
+
+
+async def test_sequence_assigns_the_seq_without_broadcasting_or_persisting(rig: PublisherRig) -> None:
+    call_id = uuid.uuid4()
+    first = await rig.publisher.sequence(event(EventType.CALL_QUEUED, call_id=call_id))
+    second = await rig.publisher.sequence(event(EventType.CALL_TURN, call_id=call_id))
+    assert (first.seq, second.seq) == (1, 2)
+    assert await rig.redis.xlen(stream_key("calls")) == 0
+    assert rig.writer.rows == []
+    assert rig.router.routed == []
+
+
+async def test_sequence_leaves_non_call_events_unchanged(rig: PublisherRig) -> None:
+    original = event(EventType.KB_READY)
+    assert await rig.publisher.sequence(original) is original
+    assert [key async for key in rig.redis.scan_iter("call:*")] == []
+
+
+async def test_broadcast_sends_the_exact_payload_to_the_stream_and_live_channel(rig: PublisherRig) -> None:
+    call_id = uuid.uuid4()
+    sequenced = await rig.publisher.sequence(event(EventType.CALL_QUEUED, call_id=call_id))
+    pubsub = rig.redis.pubsub()
+    try:
+        await pubsub.subscribe(call_live_channel(call_id))
+        assert (await pubsub.get_message(timeout=1.0))["type"] == "subscribe"
+        await rig.publisher.broadcast(sequenced)
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+    finally:
+        await pubsub.aclose()  # type: ignore[no-untyped-call]
+    assert message is not None
+    assert decode(message["data"]) == sequenced
+    assert await stream_payloads(rig.redis, stream_key("calls")) == [message["data"]]
+    assert rig.writer.rows == []
+    assert rig.router.routed == []
+
+
+async def test_broadcast_failure_raises_at_the_stream_step(rig: PublisherRig) -> None:
+    sequenced = await rig.publisher.sequence(event(EventType.CALL_QUEUED, call_id=uuid.uuid4()))
+    rig.server.connected = False
+    with pytest.raises(EventPublishError) as caught:
+        await rig.publisher.broadcast(sequenced)
+    assert caught.value.step == "stream"

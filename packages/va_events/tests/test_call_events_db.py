@@ -25,6 +25,7 @@ from va_events import (
     DbCallEventWriter,
     EventType,
     event_uuid,
+    insert_rows,
     new_event,
 )
 
@@ -140,3 +141,27 @@ async def test_one_failing_org_leaves_the_others_written_once(migrated_url: str,
     assert await buffer.flush() == 2
     assert [r.id for r in await _rows(database, org_b)] == [r.id for r in rows_b]
     assert [r.id for r in await _rows(database, org_a)] == [r.id for r in rows_a]
+
+
+async def test_insert_rows_writes_in_the_callers_transaction_idempotently(database: Database) -> None:
+    org = await OrgFactory(database).create()
+    call_id = uuid.uuid4()
+    rows = _rows_of(org, call_id, 2)
+    async with database.tenant_session(org) as session:
+        await insert_rows(session, rows)
+        await insert_rows(session, rows)
+        await insert_rows(session, [])
+    assert sorted(r.seq for r in await _rows(database, org)) == [1, 2]
+
+
+async def test_insert_rows_rolls_back_with_the_callers_transaction(database: Database) -> None:
+    org = await OrgFactory(database).create()
+
+    class AbortError(Exception):
+        """Raised inside the transaction to roll it back."""
+
+    with pytest.raises(AbortError):
+        async with database.tenant_session(org) as session:
+            await insert_rows(session, _rows_of(org, uuid.uuid4(), 1))
+            raise AbortError
+    assert await _rows(database, org) == []

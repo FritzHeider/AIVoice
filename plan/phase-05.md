@@ -54,7 +54,7 @@
   - Deliverables: new package `packages/va_billing` (`plans.effective_limits`/`effective_pricing` (org `limits` override > plan), `limits` with Lua `capped_incr.lua`/`concurrency_acquire.lua` (same-number, frequency, new-account, daily, hourly, concurrency, international rate, reverse-order rollback, idempotent release), `holds` (sizing, reserve/capture/release, enterprise skip), `dispatch.admit_call(...)` running compliance → limits → hold with compensation)
   - Acceptance: Redis algorithm tests with fake clock (fakeredis) plus real-Redis testcontainer tests (capped_incr never exceeds cap under 100 concurrent increments; concurrency self-heal/idempotent release); rollback-order tests; hold sizing and available-balance tests.
 
-- [ ] P05-T05 `POST /v1/calls` endpoint and CallWorkflow start (split into P05-T05a–b below; tick when both are ticked)
+- [x] P05-T05 `POST /v1/calls` endpoint and CallWorkflow start (split into P05-T05a–b below; tick when both are ticked) — P05-T05a + P05-T05b
   - Spec refs: specs/05-calls-api.md (POST /v1/calls response); specs/01-architecture.md §2 (outbound steps 1–3)
   - Depends on: P05-T04, P05-T02
   - Deliverables: endpoint inserting `calls` row + `call.queued`/`call.scheduled` events in one transaction, Temporal start with workflow id `call-{id}`, Bland-compatible response
@@ -66,7 +66,7 @@
   - Deliverables: `va_common.net` (`blocked_address`, `check_destination_url` with injectable resolver, `UnsafeDestinationError.reason`), shared `WebhookSafetySettings` (dispatcher + api; forced false in staging/production), `va_api.services.webhook_policy.check_call_webhook` raising `WEBHOOK_URL_REJECTED` field `webhook`; OIDC discovery reuses the address rule
   - Acceptance: every blocked range parametrized (v4, v6, mapped v6); scheme/env/org-setting matrix; DNS failure and mixed public/private answers rejected; settings forcing test.
 
-- [ ] P05-T05b Send Call dispatch service, `POST /v1/calls`, CallWorkflow start
+- [x] P05-T05b Send Call dispatch service, `POST /v1/calls`, CallWorkflow start — va_api.services.call_dispatch + call_starter, routers/calls, EventPublisher.sequence/broadcast + insert_rows, CallWorkflowInput; start-failure compensation (moved-on rows left to owner), guarded counter release; make test 8699 passed / 7 skipped, 99.10 %; lint/typecheck/placeholders 0; openapi + schema.d.ts regenerated
   - Spec refs: specs/05-calls-api.md §1, §2, §4.1 (steps 1–12), §5; specs/01-architecture.md §2.1 step 1; specs/19-events-and-webhooks.md §1, §2 (`call.queued`, `call.scheduled`, `call.error`); specs/24-billing-and-limits.md §5, §7 (`calls.config.pricing`)
   - Depends on: P05-T04, P05-T05a, P05-T02
   - Deliverables: `va_api.services.call_dispatch` (steps 4–12 in one tenant transaction: inputs, resolution, webhook check, admit_call, `calls` row with pricing snapshot, `call.queued`/`call.scheduled` event + `call_events` row in the same transaction; after commit Temporal start `CallWorkflow` id `call-{id}` on the main queue; on start failure row → `failed`, hold released, counters rolled back, `503`), `va_domain.call_workflow` start contract, `routers/calls.py` legacy router with `calls:write` + `calls_send` rate limit + idempotency, container `call_starter`

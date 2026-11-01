@@ -1168,3 +1168,16 @@ Grafana 3001
   `va_api.services.webhook_policy.check_call_webhook(url, org=, settings=, resolver=)`. Tests always inject a fake
   `resolver=` (never real DNS; `system_resolver("127.0.0.1")` works offline). Python flags IPv6 `::1` as
   `is_reserved` (inside `::/8`), so loopback is exempted from the always-blocked reserved rule.
+- 2026-11-01 (P05-T05b): Send Call = `va_api.services.call_dispatch.dispatch_call(deps_of(request), ctx, body,
+  encrypted_key=)` behind `POST /v1/calls` (`routers/calls.py`; rules: specs/05 §5 Decision P05-T05b). Callers that
+  write a `call_events` row in their own transaction use `EventPublisher.sequence(event)` → `va_events.insert_rows(
+  session, [row_for(e)])` → commit → `EventPublisher.broadcast(e)`. `CallWorkflow` start contract:
+  `va_domain.call_workflow` (`CALL_WORKFLOW_NAME`, `CallWorkflowInput`); the api starter is
+  `va_api.services.call_starter.TemporalCallStarter` (`CallStartError`). Container gained `call_limiter`,
+  `event_publisher` (no sink), `call_starter`, `host_resolver`. Tests: `SessionContainer` has `call_starter:
+  FakeCallStarter` (`.started`, `.fail`) and `host_resolver: FakeResolver` (`.answers`, `.lookups`; default public
+  `8.8.8.8`) from `tests/support/call_fakes.py`; `call_helpers.callable_org(identity, container)` (plan build, created
+  30 days before the clock, $50, org voice `Karen`, owned number, live `*` key), `task_body(org, **over)`,
+  `send_call(client, key, body, **headers)`. Any test that dispatches needs a container clock inside the migration's
+  `call_events` partitions: `SessionContainer(identity=..., clock=FrozenClock(call_helpers.business_hours_today()))`
+  (the default `FrozenClock` 2026-01-01 has no partition).

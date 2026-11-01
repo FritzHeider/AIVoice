@@ -23,6 +23,7 @@ from typing import Protocol
 
 from pydantic import JsonValue
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.logging import get_logger
 from va_db.models import CallEvent, CallEventCategory, CallEventLevel
@@ -37,6 +38,7 @@ __all__ = [
     "CallEventWriter",
     "DbCallEventWriter",
     "DirectCallEventWriter",
+    "insert_rows",
     "row_for",
 ]
 
@@ -77,6 +79,14 @@ def row_for(event: DomainEvent) -> CallEventRow | None:
         data=dict(event.data),
         created_at=event.occurred_at,
     )
+
+
+async def insert_rows(session: AsyncSession, rows: Sequence[CallEventRow]) -> None:
+    """Insert ``rows`` in the caller's transaction; rows already stored are skipped (idempotent)."""
+    if not rows:
+        return
+    statement = insert(CallEvent).on_conflict_do_nothing(index_elements=["created_at", "id"])
+    await session.execute(statement, [asdict(row) for row in rows])
 
 
 class CallEventSink(Protocol):
@@ -141,9 +151,8 @@ class DbCallEventWriter:
             raise CallEventWriteError(unwritten, failed_orgs=len(failed)) from first_error
 
     async def _insert(self, org_id: uuid.UUID, rows: Sequence[CallEventRow]) -> None:
-        statement = insert(CallEvent).on_conflict_do_nothing(index_elements=["created_at", "id"])
         async with self._database.tenant_session(org_id) as session:
-            await session.execute(statement, [asdict(row) for row in rows])
+            await insert_rows(session, rows)
 
 
 class DirectCallEventWriter:

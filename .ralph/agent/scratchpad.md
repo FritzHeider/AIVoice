@@ -1399,3 +1399,248 @@ pnpm audit 3 moderate (unchanged). No call flow → no e2e.
 Approved. lint 0, typecheck 0, placeholders 0, spec refs 0, make test 8653 passed / 7 skipped, 98.65 %. net.py rules
 match specs/19 §8 + specs/28 §6.4 (mapped v6, metadata always blocked, every DNS answer checked, timeout → resolution);
 WEBHOOK_URL_REJECTED in catalog; dispatcher settings behaviour unchanged via mixin; OIDC keeps stricter is_global rule.
+
+## Plan P05-T05b — Send Call dispatch service, `POST /v1/calls`, CallWorkflow start (Planner, 2026-11-01)
+Context: P05-T05a approved (f1c5de6). This task wires T03c (inputs) + T03b (resolution) + T05a (webhook) + T04a/b
+(`admit_call`) into one dispatch, inserts the `calls` row + `call.queued`/`call.scheduled` event row atomically,
+starts `CallWorkflow` (defined in P05-T06; here only the start contract), and exposes `POST /v1/calls`. After it is
+approved, tick P05-T05 too (a+b done).
+
+### Decisions (write as `> Decision (2026-11-01): Send Call dispatch (P05-T05b).` under specs/05 §5, cross-refs: one
+line under specs/01 §2.1 step 1, specs/19 §2.1 (new code), specs/05 §4.1 step 12)
+1. Order inside one `tenant_session(ctx.org_id)`: steps 4-8 `load_call_inputs` → `resolve_inputs` →
+   **webhook check** `check_call_webhook(config.webhook, ...)` (validation of the resolved config; runs before step 9 so a
+   bad URL never consumes limits) → `load_billing_org` → `admit_call` (9-11) → insert `calls` row → event row. Org
+   settings are read with `OrgSettingsReader.get(ctx.org_id)` BEFORE the session opens (reader opens its own session).
+2. `call_id = va_common.ids.new_id()` (UUIDv7) is generated before admission (limits/hold reference it).
+3. `calls` row: `id`, `org_id`, `direction='outbound'`, `to_number=config.phone_number`, `from_number=config.from_number`,
+   `status` `queued` | `scheduled` (scheduled ⇔ `config.start_time` is not None), `queue_status` `queued` | `new`
+   (Bland values, specs/19 §4), `runner_type`, `pathway_id/pathway_version/persona_id/persona_version/agent_id/
+   agent_version_id/experiment_id/experiment_arm_id/voice_id/phone_number_id/memory_id/external_id/start_time` from the
+   config, `test_call=request.test_call`, `request_data=config.request_data`, `metadata_=config.metadata`,
+   `config = {**config.model_dump(mode="json"), "pricing": admitted.pricing.snapshot()}` (specs/24 §4 item 1),
+   `credit_hold_id = admitted.hold.id if hold else None`, `workflow_id = call_workflow_id(call_id)`.
+4. Event: `call.queued` (message "Call successfully queued.") or `call.scheduled` (message "Call successfully
+   scheduled.", data `scheduled_for` ISO). Both carry `data.warnings = [{code, message, field?}]` from
+   `CallResolution.warnings` (the `ResolutionWarning` docstring already says the queued event carries them) and
+   `data.status`. The seq is assigned (Redis `INCR`) BEFORE commit and the `call_events` row is inserted in the SAME
+   tenant transaction (`insert(CallEvent)` of `row_for(event)` via the session); the Redis XADD/PUBLISH broadcast runs
+   AFTER commit, best effort: `EventPublishError` there is logged `calls.event_broadcast_failed` (event type, call_id)
+   and not raised (row is durable; phase 06 outbox delivers webhooks from rows/transaction). A Redis failure while
+   assigning the seq (before commit) → rollback, admission compensated, `SERVICE_UNAVAILABLE` "Call events are
+   temporarily unavailable.".
+5. va_events gains public split methods on `EventPublisher` (publish keeps its behaviour, now composed of them):
+   `async def sequence(event) -> DomainEvent` (seq for call events, unchanged for others; the old `_next_seq`) and
+   `async def broadcast(event) -> None` (the old `_broadcast`), plus `va_events.call_events.insert_rows(session, rows)`
+   (same `ON CONFLICT (created_at, id) DO NOTHING` statement `DbCallEventWriter._insert` uses — refactor it to call
+   `insert_rows`, no duplication). Update the specs/19 §1 Decision P03-T17 with an item 10 describing these.
+6. Commit failure (any exception leaving the `tenant_session`): `admitted.compensate`-equivalent for Redis only
+   (`ticket.rollback()` + `limiter.release_call`); the hold row disappears with the rollback. Implement as a
+   `try/except BaseException` around the session block that calls a helper `_undo_counters(admitted, limiter)` and
+   re-raises.
+7. Workflow start after commit: `CallStarter.start(CallWorkflowInput)` →
+   `client.start_workflow(CALL_WORKFLOW_NAME, input.model_dump(mode="json"), id=call_workflow_id(id),
+   task_queue=settings.temporal_task_queue, id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+   rpc_timeout=timedelta(seconds=START_RPC_TIMEOUT_S=5))`, the whole connect+start inside
+   `asyncio.timeout(start_timeout_s)` (default 10 s, constructor arg). `WorkflowAlreadyStartedError` = success (a
+   retried start). Any of `RPCError`, `TimeoutError`, `OSError`, `RuntimeError` (temporalio's failed connect) →
+   `CallStartError` (cause chained).
+8. On `CallStartError`: new `tenant_session`: `CallRepo(session, org_id, ...).transition(call_id, "failed",
+   from_={"queued","scheduled"}, error_message="Call workflow could not be started.", end_reason="error",
+   ended_by="error", ended_at=now, queue_status="call_error")` (if `CallTransitionError`, log
+   `calls.start_failure_unrecorded` and continue), `holds.release(session, org_id, hold.id)` when a hold exists,
+   event `call.error` level `error` data `{"code": "dispatch_failed", "detail": "workflow_start"}` sequenced + row in
+   the same transaction; after commit counters rolled back (`ticket.rollback()` + `release_call`), broadcast best
+   effort; raise `AppError("SERVICE_UNAVAILABLE", "The call could not be started. Please retry.")` (503; idempotency
+   middleware releases 5xx claims, so a retry with the same key runs again). Add `dispatch_failed` to the specs/19 §2.1
+   closed set (level `error`). The P05-T06 workflow must exit without dialing when the row is not `queued`/`scheduled`
+   (an ambiguous start timeout may have started it) — write that sentence into the Decision.
+9. `va_domain.call_workflow` (new module) = the start contract shared by api and worker: `CALL_WORKFLOW_NAME:
+   Final = "CallWorkflow"`, `class CallWorkflowInput(BaseModel)` (frozen, extra forbid: `call_id: UUID`, `org_id: UUID`,
+   `scheduled_for: datetime | None = None`), re-exports `call_workflow_id` from `va_domain.carrier`.
+10. Response 200 (legacy body, specs/05 §5): `SendCallResponse(status: Literal["success"], message: str, call_id: UUID,
+    batch_id: UUID | None = None, scheduled_for: datetime | None)`; `scheduled_for` is omitted when None (a
+    `model_serializer(mode="wrap")` dropping it), `batch_id` always present (null). Scheduled `scheduled_for` =
+    `config.start_time` in UTC (pydantic dumps `...Z`).
+11. Route: `POST /v1/calls` on new `calls_router = legacy_router(prefix="/v1/calls", tags=["Calls"])` in
+    `va_api/routers/calls.py` (schemas `routers/calls_schemas.py`), added to `main.ROUTERS`;
+    `operation_id="calls_send"`, `dependencies=[Depends(require_scope("calls:write")), Depends(rate_limit("calls_send"))]`,
+    body `SendCallRequest` (its examples feed OpenAPI), header `encrypted_key: Annotated[str | None,
+    Header(alias="encrypted_key", convert_underscores=False)] = None`, `openapi_extra={"x-scope": "calls:write",
+    **audit_exempt("call creation is recorded in calls and call_events")}`. No audit row.
+
+### Files
+- NEW `packages/va_domain/src/va_domain/call_workflow.py` (Decision 9) + export in `va_domain/__init__` only if that
+  module re-exports others (check; otherwise import by module path).
+- `packages/va_events/src/va_events/publisher.py`: public `sequence`, `broadcast`; `publish` composed of them.
+- `packages/va_events/src/va_events/call_events.py`: `async def insert_rows(session: AsyncSession, rows:
+  Sequence[CallEventRow]) -> None`; `DbCallEventWriter._insert` uses it. Export in `__all__` (+ package `__init__` if
+  it re-exports).
+- NEW `apps/api/src/va_api/services/call_starter.py`: `CallStartError(Exception)`; `class CallStarter(Protocol):
+  async def start(self, call: CallWorkflowInput) -> None`; `class TemporalCallStarter` (`__init__(connector:
+  TemporalConnector, task_queue: str, *, start_timeout_s: float = START_TIMEOUT_S)`); constants `START_TIMEOUT_S =
+  10.0`, `START_RPC_TIMEOUT_S = 5.0`.
+- NEW `apps/api/src/va_api/services/call_dispatch.py`:
+  - `@dataclass(frozen=True, slots=True) class DispatchDeps`: `database: Database`, `limiter: CallLimiter`,
+    `publisher: EventPublisher`, `starter: CallStarter`, `org_settings: OrgSettingsReader`, `settings: ApiSettings`,
+    `clock: Clock`, `resolver: HostResolver`.
+  - `@dataclass(frozen=True, slots=True) class DispatchedCall`: `call_id: UUID`, `scheduled_for: datetime | None`.
+  - `async def dispatch_call(deps, ctx: RequestContext, request: SendCallRequest, *, encrypted_key: str | None) ->
+    DispatchedCall` — orchestrates Decisions 1-8, split into small private helpers to stay ≤ radon B:
+    `_admission(...)` (CallAdmission from config/inputs: `destination=config.phone_number`, `region=inputs.country`,
+    `max_duration_min=math.ceil(config.max_duration_min)` (check `CallAdmission.max_duration_min: int`),
+    `at=config.start_time or now`, `scheduled=start_time is not None`,
+    `allowed_countries=settings.allowed_destination_countries()`), `_call_row(...) -> Call`, `_queued_event(...)`,
+    `_persist_event(session, publisher, event) -> DomainEvent` (sequence + insert_rows), `_record_start_failure(...)`,
+    `_undo_counters(admitted, limiter)`. Models: `PlatformModels(settings.llm_dialogue_model, settings.llm_router_model)`.
+  - `deps_of(request: Request) -> DispatchDeps` building from the container.
+- `apps/api/src/va_api/container.py`: new fields `call_limiter: CallLimiter` (`CallLimiter(redis, clock=clock)`),
+  `event_publisher: EventPublisher` (`EventPublisher(redis, call_events=None)`; rows are written by the caller's
+  transaction), `call_starter: CallStarter` (`TemporalCallStarter(temporal, settings.temporal_task_queue)`),
+  `host_resolver: HostResolver = system_resolver`; docstring updated.
+- NEW `apps/api/src/va_api/routers/calls.py`, `routers/calls_schemas.py` (Decisions 10-11); `main.ROUTERS` += calls_router.
+- `apps/api/pyproject.toml`: add `va-events` dependency if not already present (va_billing/va_compliance are).
+- `apps/api/tests/support/session_helpers.py` `SessionContainer`: add `call_limiter`, `event_publisher`,
+  `call_starter: FakeCallStarter` (records inputs; `fail: Exception | None`), `host_resolver` (fake dict resolver;
+  default resolves everything to `93.184.216.34`-style public IP — use a TEST-NET-free public literal such as
+  `8.8.8.8`). Put `FakeCallStarter`/`fake_resolver` in NEW `apps/api/tests/support/call_helpers.py` with
+  `send_call(client, key, body, **headers)`, `seed_callable_org(...)` (org with plan, funded via `fund`, a platform
+  voice "Karen" or org voice via `call_input_rows.Seed`, an owned from number, API key with `calls:write` via
+  `store_api_key(..., environment="test")`).
+- `openapi/openapi.json` regenerated (`make openapi`); then dashboard + sdk `gen:api` (schema.d.ts drift tests).
+- Cross-tenant suite: route has no path params, only the foreign-org-header probe applies (refused before the
+  handler). If the suite needs a request, `REGISTRY.register_request("calls_send", json={...})`.
+- `apps/api/tests/test_openapi.py` lists if it enumerates public paths/operations (check `PUBLIC_PATHS`-like sets).
+- Specs: Decisions above; AGENTS.md learning line (dispatch module, publisher split, FakeCallStarter, partition note).
+
+### Tests
+- `packages/va_domain/tests/test_call_workflow.py`: input JSON round trip (`model_dump(mode="json")` →
+  `model_validate`), extra field rejected, workflow id format, name constant.
+- `packages/va_events/tests/test_publisher.py` (extend): `sequence` assigns gap-free seq and leaves non-call events
+  untouched; `broadcast` XADDs + PUBLISHes the exact bytes; `publish` unchanged behaviour (existing tests stay green);
+  `insert_rows` idempotent on a DB (reuse an existing va_events DB fixture; real time clock — partitions).
+- NEW `apps/api/tests/test_call_starter.py` (fake client like `apps/telephony_edge/tests/test_signals.py`): start args
+  (name, JSON input, id `call-<id>`, task queue, REJECT_DUPLICATE, rpc_timeout); `WorkflowAlreadyStartedError` →
+  success; `RPCError` / connect `RuntimeError` / `OSError` → `CallStartError` with cause; hanging start with
+  `start_timeout_s=0.01` → `CallStartError` (TimeoutError cause).
+- NEW `apps/api/tests/test_calls_send.py` (module Postgres via `migrated_postgres()` + `SessionContainer`; endpoint
+  through `session_app(container)` + `make_client`):
+  - success immediate: 200 body exactly `{"status":"success","message":"Call successfully queued.","call_id":…,
+    "batch_id":null}`; DB row (status queued, queue_status queued, config.pricing equals plan snapshot, workflow_id,
+    credit_hold_id = held hold row, to/from numbers); one `call_events` row (category queue, seq 1, message);
+    stream `events:calls` holds the `call.queued` payload; starter got `CallWorkflowInput(call_id, org_id, None)`;
+    concurrency member present.
+  - scheduled (`start_time` 1 day ahead of the container clock): message "Call successfully scheduled.",
+    `scheduled_for` `…Z`; row `scheduled`/`new`; no hold, no limit keys; starter input `scheduled_for` set; event
+    `call.scheduled`.
+  - warnings: pathway runner with `task` also set → `call.queued` data.warnings contains `TASK_IGNORED`.
+  - idempotency: same key + body → identical body + `Idempotent-Replayed: true`, ONE calls row, starter called once;
+    same key different body → 422 `IDEMPOTENCY_KEY_REUSED`.
+  - 4xx through the endpoint, one test each (exact code/status/field): missing `phone_number` → 400 `INVALID_INPUT`
+    field `phone_number`; `RUNNER_CONFLICT`; unknown `pathway_id` → 404 family code; unknown `encrypted_key` header →
+    400 `INVALID_ENCRYPTED_KEY`; invalid phone → `INVALID_PHONE_NUMBER`; webhook `http://10.0.0.1/x` with
+    `webhook_allow_private=False` settings or a resolver answer `10.0.0.1` → `WEBHOOK_URL_REJECTED`; DNC row →
+    `NUMBER_BLOCKED`; second call to the same number within 10 s → `SAME_NUMBER_TOO_SOON`; unfunded org →
+    `INSUFFICIENT_CREDITS` (and assert counters rolled back: daily key back to 0); scope `calls:read` only → 403
+    `FORBIDDEN`. After every failure: no `calls` row, no `call_events` row, starter not called.
+  - Temporal failure: `call_starter.fail = CallStartError(...)` → 503 `SERVICE_UNAVAILABLE`; row `failed`,
+    `queue_status` `call_error`, `end_reason` `error`, error_message set; hold `released`; counters rolled back
+    (daily/hourly back, concurrency member removed); events seq 1 `call.queued` + seq 2 `call.error`
+    (`data.code=dispatch_failed`); retry with the same `Idempotency-Key` runs again (claim released).
+  - atomicity: seq Redis failure (monkeypatch `container.event_publisher.sequence` to raise `EventPublishError`) → 503
+    "Call events are temporarily unavailable.", no row, no hold, counters rolled back; broadcast failure after commit
+    (monkeypatch `broadcast`) → still 200, row + event row present, log `calls.event_broadcast_failed`.
+  - sub-account acting (`X-VA-Org-Id` child) places the call in the child org (row org_id = child).
+- `apps/api/tests/test_call_dispatch_unit.py` only if helpers need direct coverage (e.g. `_admission` ceil of
+  fractional `max_duration_min`, `SendCallResponse` serializer drops `scheduled_for`).
+- Existing gates: `test_operations_contract`, `test_audit_markers`, `test_cross_tenant_routes`, `test_openapi`,
+  dashboard/sdk `schema.test.ts`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `make test-ts` (schema drift after gen:api), `uv run python
+scripts/check_spec_refs.py`, `make openapi` (commit), `npx --yes jscpd@4 --silent` (0 clones), `uvx radon cc -s -a`
+(≤ B), new modules 100 % line+branch, `uvx pip-audit` on `uv export`, `corepack pnpm audit`. No media/carrier flow
+yet (the workflow arrives in T06) → `make e2e` not required; say so in evidence.
+
+### Risks
+- `call_events` partitions exist only around the migration month; the test container clock (`FrozenClock`, default
+  2026-01-01) would make the event insert fail ("no partition of relation"). In the module fixture create the
+  partitions for the frozen clock's month with `va_db.partitions.ensure_call_event_partitions(conn, clock.now())` on a
+  login-role connection, or give the `SessionContainer` a `FrozenClock` at the real current time (preferred if the
+  field allows it). Orgs created at real time are "in the future" for a 2026-01-01 clock → new-account rules (US/CA
+  only, caps 100/10) apply; use a real-time clock or `NEW_ACCOUNT`-safe US numbers.
+- `start_time` validation is relative to `now` (clock) — build scheduled times from `container.clock.now()`.
+- Pool size 1 per role: never open the org-settings reader session or the failure-recording session while the
+  dispatch session is open (sequential only).
+- Header names with underscores: `convert_underscores=False` or FastAPI looks for `encrypted-key`.
+- DNS: the webhook check uses `container.host_resolver`; tests must never hit real DNS.
+- `admitted.compensate` releases the hold via the session — after a rollback the hold row does not exist, so only the
+  Redis part is undone in Decision 6 (do not call `compensate` with a dead session).
+- The idempotency middleware stores 4xx bodies: a 4xx replay must return the same error (assert one case).
+
+## Build P05-T05b (Builder, 2026-11-01)
+- va_events: public `EventPublisher.sequence`/`broadcast` (publish composed of them), `call_events.insert_rows`
+  (DbCallEventWriter reuses it); specs/19 §1 Decision item 10; `dispatch_failed` added to §2.1 (+ Decision).
+- va_domain.call_workflow (`CALL_WORKFLOW_NAME`, `CallWorkflowInput` with `workflow_id()`).
+- va_db.call_states: new edge `scheduled → failed` (plan's from_={"queued","scheduled"} would otherwise raise
+  ValueError); test DISPATCH_EDGES; specs/05 §8 Decision.
+- api: services/call_starter.py (TemporalCallStarter, CallStartError), services/call_dispatch.py, routers/calls.py +
+  calls_schemas.py (`scheduled_for` omitted via `Field(exclude_if=...)`: a wrap model_serializer erased the OpenAPI
+  schema/examples), container fields, va-events dependency, openapi + both schema.d.ts regenerated.
+- Deviation: tests use LIVE keys (plan said environment="test"; both work under VA_ENV=test). The start-failure
+  path still commits the failed status when Redis refuses the `call.error` seq (event dropped, logged by caller).
+- Tests: test_calls_send.py (21), test_call_starter.py (6), va_events publisher/DB additions, test_call_workflow.py.
+- Coverage config: `[tool.coverage.run] concurrency = ["greenlet", "thread"]` — without it, lines after awaited
+  SQLAlchemy async calls read as missed (call_dispatch showed 89% with phantom misses; 100% with it). Total 99.10%.
+- Gates: make fmt/lint/typecheck/placeholders pass; make test 8696 passed, 7 skipped (99.10%); dashboard 52 + sdk 48
+  vitest pass (schema drift ok after gen:api); jscpd 0 clones; spec refs 0; pip-audit no vulns (workspace pkgs
+  unauditable as usual); pnpm audit 3 moderate (no high). e2e not run: no media/carrier flow until P05-T06.
+
+## Review P05-T05b (Reviewer, 2026-11-01)
+Gates re-run: make lint / typecheck / placeholders pass (0 findings). make test was still running when I rejected,
+so this rejection rests only on the findings below. Spec/contract checks (route, scopes, x-scope, audit marker,
+events, Decision text, call_states edge, publisher split, insert_rows reuse) are OK. Two correctness findings:
+
+1. `apps/api/src/va_api/services/call_dispatch.py` `_record_start_failure` (the `except CallTransitionError` branch):
+   when the transition to `failed` is refused because the row has already moved on, the code still releases the hold,
+   gives the Redis counters and concurrency slot back (`finally: _undo_counters`), records `call.error dispatch_failed`,
+   and `dispatch_call` returns 503. The Decision itself says a timed-out start may still have reached Temporal. In that
+   case the workflow has moved the row to `dialing`/`ringing`/..., so the live call runs with no hold and no
+   concurrency slot, the event log shows a false `dispatch_failed`, and the 503 releases the idempotency claim, so the
+   client's retry with the same key places a SECOND real call. Required: if the row is no longer `queued`/`scheduled`,
+   treat the workflow as started. Do not release the hold, undo the counters, or emit `call.error`. Log
+   `calls.start_failure_unrecorded` (status) and return the normal success response (`QUEUED`/`SCHEDULED` body, the
+   call exists and runs). Have `_record_start_failure` return a bool. Update the Decision P05-T05b item 5 sentence
+   accordingly and rewrite `test_a_start_failure_on_a_call_that_moved_on_keeps_its_status`: it currently asserts the
+   wrong behaviour (hold `released`, 503). Use a starter that moves the row to `dialing` and then raises. Assert 200,
+   hold still `held`, concurrency member present, no `call.error` row. A `canceled` row (stopped meanwhile) may keep
+   today's 503 only if you can justify it. Simplest is the same rule: not ours to fail, so no compensation by the
+   dispatcher (the stop path owns the release).
+2. Redis outage masks the real error. `_undo_counters` calls `limiter.release_call(...)`, a bare `zrem` that is not
+   guarded (unlike `LimitTicket.rollback`, which logs and continues). It runs in `_create`'s `except BaseException`
+   and in `_record_start_failure`'s `finally`. When Redis is down (exactly the case behind `calls.event_sequence_failed`
+   → 503 "Call events are temporarily unavailable."), `zrem` raises `RedisError`/`OSError`, which replaces the
+   `AppError`, so the client gets 500 INTERNAL instead of 503 (on the start-failure path: 500 instead of 503 after the
+   row was already failed). Required: guard `release_call` in `_undo_counters` (catch `RedisError`/`OSError`, log
+   `calls.counter_release_failed`; the slot expires by its score anyway). Add a test where the limiter's Redis fails
+   during the undo (for example, monkeypatch `container.call_limiter.release_call` to raise `RedisError` together with
+   a `sequence` failure) and assert 503 `SERVICE_UNAVAILABLE` plus the log event.
+
+## Fix P05-T05b review (Builder, 2026-11-01)
+1. `_record_start_failure` returns bool: a refused `failed` transition (row moved on: workflow started, or a stop
+   canceled it) logs `calls.start_failure_unrecorded` and returns False with NO compensation (hold stays held,
+   counters/slot kept, no `call.error`); `dispatch_call` then returns the normal success body. Counter undo now via
+   `finally` guarded by `moved_on` (`# pragma: no branch`: the flag is set only right before the return).
+   Test rewritten as parametrized `test_a_start_failure_on_a_call_that_moved_on_is_left_to_its_owner[dialing|canceled]`
+   (200, hold held, daily=1, active=1, only call.queued). Spec §5 Decision item 5 extended.
+2. `_undo_counters` guards `release_call` (RedisError/OSError → `calls.counter_release_failed`). Tests: seq failure +
+   release failure → 503 "Call events are temporarily unavailable." + log; start failure + release OSError → 503,
+   row failed + log.
+Gates: fmt/lint/typecheck/placeholders pass; make test 8699 passed, 7 skipped, 99.10%, call_dispatch 100%;
+jscpd 0 clones; radon avg A; spec refs 0; pip-audit clean; pnpm audit 3 moderate (no high). No TS change.
+
+## Review P05-T05b round 2 (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (0 findings) and make test (8699 passed, 7 skipped, 99.10 %).
+Both findings fixed: moved-on start failure returns success with no compensation (parametrized dialing|canceled
+test asserts hold held, slot kept, no call.error); `_undo_counters` guards release_call (two tests, 503 kept).
+Ticked P05-T05b and parent P05-T05.

@@ -56,6 +56,9 @@ REORDER_EDGES: frozenset[tuple[CallStatus, CallStatus]] = frozenset(
 )
 """The carrier-reorder tolerance added by the §8 Decision P05-T02."""
 
+DISPATCH_EDGES: frozenset[tuple[CallStatus, CallStatus]] = frozenset({("scheduled", "failed")})
+"""A scheduled call whose workflow could not be started (specs/05 §5 Decision P05-T05b)."""
+
 
 def _spec_end_reasons() -> list[tuple[str, str]]:
     text = SPEC_05.read_text(encoding="utf-8")
@@ -72,7 +75,7 @@ def test_end_reasons_equal_the_spec_table_in_order() -> None:
 
 @pytest.mark.parametrize(("source", "target"), list(itertools.product(get_args(CallStatus), repeat=2)))
 def test_call_transition_matrix(source: CallStatus, target: CallStatus) -> None:
-    allowed = (source, target) in DIAGRAM_EDGES | REORDER_EDGES
+    allowed = (source, target) in DIAGRAM_EDGES | REORDER_EDGES | DISPATCH_EDGES
     assert (source in allowed_from(target)) is allowed
 
 

@@ -205,6 +205,8 @@ filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
+# SQLAlchemy's asyncio layer switches greenlets; without this, lines after an awaited DB call read as missed.
+concurrency = ["greenlet", "thread"]
 source = ["scripts", "packages", "apps", "sdks"]
 omit = ["*/tests/*", "scripts/ralph/*", "*/node_modules/*"]
 

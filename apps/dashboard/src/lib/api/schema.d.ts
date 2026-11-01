@@ -151,6 +151,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Calls Send
+         * @description Place an outbound call now, or schedule it with ``start_time``.
+         */
+        post: operations["calls_send"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -1347,6 +1367,58 @@ export interface components {
             /** Errors */
             errors?: null;
         };
+        /** DialingStrategy */
+        DialingStrategy: {
+            /** Pool Id */
+            pool_id?: string | null;
+            /**
+             * Type
+             * @default default
+             * @enum {string}
+             */
+            type: "default" | "local" | "custom_pooling";
+        };
+        /**
+         * DynamicDataSpec
+         * @description A pre-call (or per-turn) HTTP fetch whose extracted values become variables (specs/13 §7).
+         */
+        DynamicDataSpec: {
+            body?: components["schemas"]["JsonValue"];
+            /**
+             * Cache
+             * @default false
+             */
+            cache: boolean;
+            /**
+             * Cache Ttl Seconds
+             * @default 300
+             */
+            cache_ttl_seconds: number;
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
+            /**
+             * Method
+             * @default GET
+             * @enum {string}
+             */
+            method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /** Query */
+            query?: {
+                [key: string]: string;
+            };
+            /** Response Data */
+            response_data?: components["schemas"]["ResponseDataItem"][];
+            /**
+             * Timing
+             * @default pre_call
+             * @enum {string}
+             */
+            timing: "pre_call" | "every_turn";
+            /** Url */
+            url: string;
+        };
         /**
          * EngineSettings
          * @description Dialogue engine behaviour.
@@ -1468,6 +1540,35 @@ export interface components {
              */
             sticky_by_contact: boolean;
         };
+        /** GuardRail */
+        GuardRail: {
+            action?: components["schemas"]["GuardRailAction"] | null;
+            /** Config */
+            config?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** Description */
+            description?: string | null;
+            /** Name */
+            name?: string | null;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "tcpa:ai_disclosure" | "tcpa:self_introduction" | "tcpa:recording_disclosure" | "tcpa:opt_out" | "custom";
+        };
+        /** GuardRailAction */
+        GuardRailAction: {
+            /** Node Id */
+            node_id?: string | null;
+            /** Phone Number */
+            phone_number?: string | null;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "end_call" | "transfer" | "move_to_node" | "none";
+        };
         /**
          * GuardRailConfig
          * @description A default guard rail (specs/23-guardrails-and-compliance.md §1.1); other keys are kept as sent.
@@ -1495,6 +1596,72 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /**
+         * InlineTool
+         * @description A tool defined inside the request (ToolCreate without `id` and without `secret_headers`, which would
+         *     be stored in plaintext in `calls.config`).
+         */
+        InlineTool: {
+            body?: components["schemas"]["JsonValue"];
+            /**
+             * Description
+             * @description When the LLM should call the tool.
+             */
+            description: string;
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
+            /**
+             * Input Schema
+             * @description JSON Schema (draft 2020-12) of the tool input.
+             */
+            input_schema?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Method
+             * @default POST
+             * @enum {string}
+             */
+            method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /**
+             * Name
+             * @description Function name shown to the LLM.
+             */
+            name: string;
+            /** Query */
+            query?: {
+                [key: string]: string;
+            };
+            /**
+             * Response
+             * @description Variable name -> JSONPath.
+             */
+            response?: {
+                [key: string]: string;
+            };
+            /**
+             * Retries
+             * @default 0
+             */
+            retries: number;
+            /**
+             * Speech
+             * @description Said while the tool runs.
+             */
+            speech?: string | null;
+            /**
+             * Timeout Ms
+             * @default 10000
+             */
+            timeout_ms: number;
+            /**
+             * Url
+             * @description Request URL; `{{vars}}` are rendered at call time.
+             */
+            url: string;
         };
         /**
          * InvitationCreate
@@ -2384,6 +2551,13 @@ export interface components {
         };
         /** @enum {string} */
         PollStatus: "pending_verification" | "approved" | "delivered" | "denied" | "expired";
+        /** PostCallEvals */
+        PostCallEvals: {
+            /** Workbench Setup Id */
+            workbench_setup_id?: string | null;
+            /** Workbench Setup Version Id */
+            workbench_setup_version_id?: string | null;
+        };
         /** @enum {string} */
         PrincipalType: "api_key" | "user" | "widget" | "platform_admin";
         /**
@@ -2404,6 +2578,23 @@ export interface components {
              */
             zero_retention: boolean;
         };
+        /** PronunciationRule */
+        PronunciationRule: {
+            /**
+             * Case Sensitive
+             * @default false
+             */
+            case_sensitive: boolean;
+            /** Pronunciation */
+            pronunciation: string;
+            /**
+             * Spaced
+             * @default false
+             */
+            spaced: boolean;
+            /** Word */
+            word: string;
+        };
         /**
          * RedactionSettings
          * @description Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).
@@ -2421,6 +2612,357 @@ export interface components {
              * @default false
              */
             redact_llm_context: boolean;
+        };
+        /**
+         * ResponseDataItem
+         * @description One variable extracted from a dynamic data response.
+         */
+        ResponseDataItem: {
+            /**
+             * Context
+             * @description Appended to the prompt context.
+             */
+            context?: string | null;
+            /**
+             * Data
+             * @description JSONPath into the response.
+             */
+            data: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * RetryRequest
+         * @description `wait` is optional here so its absence maps to `RETRY_NOT_PROVIDED` instead of `INVALID_INPUT`.
+         */
+        RetryRequest: {
+            /**
+             * Max Attempts
+             * @default 1
+             */
+            max_attempts: number;
+            /**
+             * On No Answer
+             * @default false
+             */
+            on_no_answer: boolean;
+            /**
+             * Voicemail Action
+             * @default hangup
+             * @enum {string}
+             */
+            voicemail_action: "hangup" | "leave_message" | "ignore";
+            /** Voicemail Message */
+            voicemail_message?: string | null;
+            /**
+             * Wait
+             * @description Seconds before the retry call.
+             */
+            wait?: number | null;
+        };
+        /**
+         * SendCallRequest
+         * @description The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.
+         * @example {
+         *       "first_sentence": "Hi {{name}}, this is Maya from Bella Pasta.",
+         *       "max_duration": 5,
+         *       "phone_number": "+14155550100",
+         *       "record": true,
+         *       "request_data": {
+         *         "name": "Jordan"
+         *       },
+         *       "task": "You are Maya from Bella Pasta. Confirm tonight's reservation for {{name}}.",
+         *       "voice": "Karen",
+         *       "webhook": "https://hooks.bellapasta.test/calls"
+         *     }
+         */
+        SendCallRequest: {
+            /** Agent Id */
+            agent_id?: string | null;
+            /** Agent Version */
+            agent_version?: string | null;
+            /**
+             * Amd
+             * @description Legacy alias of ivr_mode.
+             * @default false
+             */
+            amd: boolean;
+            /** Analysis Prompt */
+            analysis_prompt?: string | null;
+            /** Analysis Schema */
+            analysis_schema?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * Answered By Enabled
+             * @default true
+             */
+            answered_by_enabled: boolean;
+            /**
+             * Available Tags
+             * @description Legacy alias of dispositions.
+             */
+            available_tags?: string[] | null;
+            /** Background Track */
+            background_track?: ("office" | "cafe" | "restaurant" | "none") | null;
+            /**
+             * Block Interruptions
+             * @default false
+             */
+            block_interruptions: boolean;
+            /** Citation Schema Ids */
+            citation_schema_ids?: string[];
+            /**
+             * Country
+             * @description Region for numbers without a + prefix.
+             * @default US
+             */
+            country: string;
+            dialing_strategy?: components["schemas"]["DialingStrategy"] | null;
+            /** Dispositions */
+            dispositions?: string[] | null;
+            /** Dynamic Data */
+            dynamic_data?: components["schemas"]["DynamicDataSpec"][];
+            /** External Id */
+            external_id?: string | null;
+            /**
+             * First Sentence
+             * @description First utterance, verbatim.
+             */
+            first_sentence?: string | null;
+            /** From */
+            from?: string | null;
+            /**
+             * Geospatial Dialing
+             * @description Legacy alias of local_dialing.
+             * @default false
+             */
+            geospatial_dialing: boolean;
+            /** Guard Rails */
+            guard_rails?: components["schemas"]["GuardRail"][];
+            /**
+             * Hd Audio
+             * @default false
+             */
+            hd_audio: boolean;
+            /**
+             * Ignore Button Press
+             * @default false
+             */
+            ignore_button_press: boolean;
+            /**
+             * Interruptibility
+             * @description 0 block … 4 always.
+             * @default 2
+             */
+            interruptibility: number;
+            /**
+             * Interruption Threshold
+             * @description Fixed EOT silence (ms).
+             */
+            interruption_threshold?: number | null;
+            /**
+             * Ivr Mode
+             * @default false
+             */
+            ivr_mode: boolean;
+            /** Keywords */
+            keywords?: string[];
+            /** Knowledge Base Ids */
+            knowledge_base_ids?: string[];
+            /**
+             * Language
+             * @description STT/TTS language (specs/08 §5).
+             * @default babel-en
+             */
+            language: string;
+            /**
+             * Local Dialing
+             * @description Legacy alias of dialing_strategy local.
+             * @default false
+             */
+            local_dialing: boolean;
+            /**
+             * Max Duration
+             * @description Hard limit in minutes.
+             * @default 30
+             */
+            max_duration: number;
+            /**
+             * Max Tokens
+             * @description Max tokens per agent reply.
+             * @default 250
+             */
+            max_tokens: number;
+            /** Memory Enabled */
+            memory_enabled?: boolean | null;
+            /** Memory Id */
+            memory_id?: string | null;
+            /**
+             * Metadata
+             * @description Echoed in webhooks; never shown to the LLM.
+             */
+            metadata?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Model
+             * @description base, turbo, enhanced or an id.
+             * @default base
+             */
+            model: string;
+            /**
+             * Noise Cancellation
+             * @default true
+             */
+            noise_cancellation: boolean;
+            /** Pathway Id */
+            pathway_id?: string | null;
+            /**
+             * Pathway Version
+             * @description Integer, production (default), staging, or draft (test calls only).
+             */
+            pathway_version?: number | ("production" | "staging" | "draft") | null;
+            /** Persona Id */
+            persona_id?: string | null;
+            /**
+             * Persona Settings
+             * @description Per-call overrides applied after the persona config.
+             */
+            persona_settings?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** Persona Version */
+            persona_version?: number | ("production" | "draft") | null;
+            /**
+             * Phone Number
+             * @description Destination; normalized to E.164.
+             */
+            phone_number: string;
+            post_call_evals?: components["schemas"]["PostCallEvals"] | null;
+            /** Precall Dtmf Sequence */
+            precall_dtmf_sequence?: string | null;
+            /** Pronunciation Guide */
+            pronunciation_guide?: components["schemas"]["PronunciationRule"][];
+            /**
+             * Record
+             * @default false
+             */
+            record: boolean;
+            /**
+             * Request Data
+             * @description Variables available as {{key}}.
+             */
+            request_data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            retry?: components["schemas"]["RetryRequest"] | null;
+            /** Start Node Id */
+            start_node_id?: string | null;
+            /**
+             * Start Time
+             * @example 2026-11-20 09:30:00 -08:00
+             */
+            start_time?: string | null;
+            /**
+             * Stream Post Transfer Transcript
+             * @default false
+             */
+            stream_post_transfer_transcript: boolean;
+            /** Summary Prompt */
+            summary_prompt?: string | null;
+            /**
+             * Task
+             * @description Free-form prompt runner.
+             */
+            task?: string | null;
+            /**
+             * Temperature
+             * @default 0.7
+             */
+            temperature: number;
+            /**
+             * Test Call
+             * @default false
+             */
+            test_call: boolean;
+            /**
+             * Test Mode
+             * @description Route the call to the simulator caller.
+             * @default false
+             */
+            test_mode: boolean;
+            /**
+             * Timezone
+             * @default America/Los_Angeles
+             */
+            timezone: string;
+            /** Tools */
+            tools?: (string | components["schemas"]["InlineTool"])[];
+            /** Transfer List */
+            transfer_list?: {
+                [key: string]: string;
+            };
+            /** Transfer Phone Number */
+            transfer_phone_number?: string | null;
+            /**
+             * Voice
+             * @description Voice name or voice UUID.
+             */
+            voice?: string | null;
+            /** @description Per-call TTS overrides. */
+            voice_settings?: components["schemas"]["VoiceSettingsPatch"] | null;
+            voicemail?: components["schemas"]["VoicemailRequest"] | null;
+            /**
+             * Voicemail Detect Timeout Ms
+             * @default 12000
+             */
+            voicemail_detect_timeout_ms: number;
+            /**
+             * Wait For Greeting
+             * @description Stay silent until the callee speaks.
+             * @default false
+             */
+            wait_for_greeting: boolean;
+            warm_transfer?: components["schemas"]["WarmTransferConfig"] | null;
+            /** Webhook */
+            webhook?: string | null;
+            /** Webhook Events */
+            webhook_events?: ("queue" | "call" | "latency" | "webhook" | "tool" | "dynamic_data" | "citations" | "evals" | "post_transfer_transcript")[];
+        };
+        /**
+         * SendCallResponse
+         * @description The created call; ``scheduled_for`` (UTC) appears only for scheduled calls.
+         * @example {
+         *       "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "message": "Call successfully queued.",
+         *       "status": "success"
+         *     }
+         * @example {
+         *       "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "message": "Call successfully scheduled.",
+         *       "scheduled_for": "2026-10-25T16:00:00Z",
+         *       "status": "success"
+         *     }
+         */
+        SendCallResponse: {
+            /** Batch Id */
+            batch_id?: string | null;
+            /**
+             * Call Id
+             * Format: uuid
+             */
+            call_id: string;
+            /** Message */
+            message: string;
+            /** Scheduled For */
+            scheduled_for?: string | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
         };
         /**
          * SmsSettings
@@ -2778,6 +3320,48 @@ export interface components {
             use_speaker_boost: boolean;
         };
         /**
+         * VoiceSettingsPatch
+         * @description Per-call overrides of a voice's stored settings (specs/05 §3.2): only the sent keys apply.
+         */
+        VoiceSettingsPatch: {
+            /** Similarity Boost */
+            similarity_boost?: number | null;
+            /** Speed */
+            speed?: number | null;
+            /** Stability */
+            stability?: number | null;
+            /** Style */
+            style?: number | null;
+            /** Use Speaker Boost */
+            use_speaker_boost?: boolean | null;
+        };
+        /**
+         * VoicemailRequest
+         * @description The request `voicemail` object: only the sent keys override lower layers (see `explicit_fields`).
+         */
+        VoicemailRequest: {
+            /** Action */
+            action?: ("hangup" | "leave_message" | "leave_message_and_sms" | "ignore") | null;
+            /**
+             * Message
+             * @description Message to leave; supports {{vars}}.
+             */
+            message?: string | null;
+            /**
+             * Sensitive
+             * @default false
+             */
+            sensitive: boolean;
+            sms?: components["schemas"]["VoicemailSms"] | null;
+        };
+        /** VoicemailSms */
+        VoicemailSms: {
+            /** From */
+            from?: string | null;
+            /** Message */
+            message: string;
+        };
+        /**
          * VoicesSettings
          * @description Voice resolution rules.
          */
@@ -2788,6 +3372,27 @@ export interface components {
              * @default false
              */
             allow_raw_provider_ids: boolean;
+        };
+        /** WarmTransferConfig */
+        WarmTransferConfig: {
+            /** Briefing Prompt */
+            briefing_prompt?: string | null;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Hold Audio
+             * @default music
+             * @enum {string}
+             */
+            hold_audio: "music" | "silence" | "agent";
+            /**
+             * Timeout S
+             * @default 45
+             */
+            timeout_s: number;
         };
         /** @enum {string} */
         Weekday: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -3134,6 +3739,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    calls_send: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description Selects the org's BYO Telnyx account (specs/05 §2). */
+                encrypted_key?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendCallRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendCallResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
                 };
             };
         };

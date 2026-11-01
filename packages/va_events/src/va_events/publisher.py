@@ -68,9 +68,8 @@ class EventPublisher:
         session: AsyncSession | None = None,
     ) -> DomainEvent:
         """Publish ``event``; returns it with ``seq`` set for call events."""
-        if event.call_id is not None:
-            event = event.model_copy(update={"seq": await self._next_seq(event, event.call_id)})
-        await self._broadcast(event)
+        event = await self.sequence(event)
+        await self.broadcast(event)
         if persist_call_event and self._call_events is not None:
             row = row_for(event)
             if row is not None:
@@ -78,6 +77,16 @@ class EventPublisher:
         if deliver_webhooks and self._router is not None:
             await self._router.route(event, session=session)
         return event
+
+    async def sequence(self, event: DomainEvent) -> DomainEvent:
+        """``event`` with its per-call ``seq`` assigned (non-call events are returned unchanged).
+
+        Callers that write the ``call_events`` row in their own transaction sequence first, insert the row,
+        and :meth:`broadcast` after the commit. Raises :class:`EventPublishError` (step ``seq``).
+        """
+        if event.call_id is None:
+            return event
+        return event.model_copy(update={"seq": await self._next_seq(event, event.call_id)})
 
     async def _next_seq(self, event: DomainEvent, call_id: uuid.UUID) -> int:
         key = call_seq_key(call_id)
@@ -90,7 +99,11 @@ class EventPublisher:
             raise EventPublishError(event, "seq") from exc
         return int(seq)
 
-    async def _broadcast(self, event: DomainEvent) -> None:
+    async def broadcast(self, event: DomainEvent) -> None:
+        """``XADD`` the event to its stream and, for call events, ``PUBLISH`` it on the live channel.
+
+        Raises :class:`EventPublishError` (step ``stream``).
+        """
         payload = encode(event)
         try:
             async with self._redis.pipeline(transaction=False) as pipe:

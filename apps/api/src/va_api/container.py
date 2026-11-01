@@ -21,12 +21,15 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
+from va_api.services.call_starter import CallStarter, TemporalCallStarter
 from va_api.settings import ApiSettings
+from va_billing.limits import CallLimiter
 from va_common.auth import ApiKeyHasher, PasswordHasher
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import Envelope, open_kms_provider
 from va_common.email import EmailSender, InMemoryEmailSender, SmtpEmailSender
 from va_common.health import CheckFn
+from va_common.net import HostResolver, system_resolver
 from va_common.service import ReadinessSource
 from va_common.settings import Environment
 from va_common.time import Clock, SystemClock
@@ -34,6 +37,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
+from va_events import EventPublisher
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
 
@@ -66,6 +70,10 @@ class Container:
     org_settings: OrgSettingsReader
     agent_requests: AgentRequestStore
     onboarding_limiter: OnboardingLimiter
+    call_limiter: CallLimiter
+    event_publisher: EventPublisher
+    call_starter: CallStarter
+    host_resolver: HostResolver
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -86,7 +94,10 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     envelope (KMS provider plus ``org_data_keys`` store), the org provisioner, the password hasher, the
     session manager, the login throttle, the MFA guard, the email sender, the verification resend limiter, and
     the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
-    state store, the cached org settings reader, and the agent onboarding request store and limiter.
+    state store, the cached org settings reader, the agent onboarding request store and limiter, and the
+    Send Call pieces: the dispatch limiter, the event publisher (``call_events`` rows are written by the
+    caller's transaction, so it has no sink), the ``CallWorkflow`` starter, and the system DNS resolver for
+    webhook checks.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -141,4 +152,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             org_settings=org_settings,
             agent_requests=AgentRequestStore(redis, clock),
             onboarding_limiter=OnboardingLimiter(redis),
+            call_limiter=CallLimiter(redis, clock=clock),
+            event_publisher=EventPublisher(redis, call_events=None),
+            call_starter=TemporalCallStarter(temporal, settings.temporal_task_queue),
+            host_resolver=system_resolver,
         )

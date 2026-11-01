@@ -72,6 +72,8 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    `status='queued'`, writes `call.queued` event, and starts Temporal workflow `CallWorkflow(call_id)` with
    workflow id `call-{call_id}`. If `start_time` is set, the workflow sleeps until then (durable timer) and the
    row has `status='scheduled'`. Response: `{"status":"success","call_id":"…","batch_id":null,"message":"Call successfully queued."}`.
+   > Decision (2026-11-01): the exact transaction boundaries, event persistence, and start-failure handling of this
+   > step are specs/05 §5 Decision P05-T05b (`va_api.services.call_dispatch`).
 2. `CallWorkflow` activity `prefetch_call_context`: runs pre-call `dynamic_data` fetches with `cache: true`
    entries, loads memory context for the contact, resolves the voice, pre-computes the start-node prompt, and
    stores a `call_context` JSON in Redis key `call:{id}:ctx` (TTL = max_duration + 1 h).

@@ -18,6 +18,7 @@ import httpx
 import pytest
 from api_helpers import make_settings
 from auth_helpers import AuthContainer
+from call_fakes import FakeCallStarter, FakeResolver
 from docker_probe import docker_available
 from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
@@ -39,6 +40,7 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
 from va_api.settings import ApiSettings
+from va_billing.limits import CallLimiter
 from va_common.auth import (
     Argon2Params,
     KeyEnvironment,
@@ -66,6 +68,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
+from va_events import EventPublisher
 
 __all__ = [
     "ACCEPT_INVITATION",
@@ -132,8 +135,10 @@ def migrated_postgres() -> Iterator[str]:
 class SessionContainer(AuthContainer):
     """The fake api container plus a real database, envelope, and provisioner, cheap password hasher,
     sessions, login throttle, MFA guard, an in-memory email sender, the verification resend limiter, the OIDC
-    login state store, the cached org settings reader, the agent onboarding request store and limiter, and the
-    OIDC discovery client built from the app settings when the app opens it (intercept it with respx)."""
+    login state store, the cached org settings reader, the agent onboarding request store and limiter, the
+    OIDC discovery client built from the app settings when the app opens it (intercept it with respx), and
+    the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
+    ``FakeResolver``)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -150,6 +155,10 @@ class SessionContainer(AuthContainer):
     org_settings: OrgSettingsReader = field(init=False)
     agent_requests: AgentRequestStore = field(init=False)
     onboarding_limiter: OnboardingLimiter = field(init=False)
+    call_limiter: CallLimiter = field(init=False)
+    event_publisher: EventPublisher = field(init=False)
+    call_starter: FakeCallStarter = field(default_factory=FakeCallStarter)
+    host_resolver: FakeResolver = field(default_factory=FakeResolver)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -166,6 +175,8 @@ class SessionContainer(AuthContainer):
         self.sso_states = SsoStateStore(self.redis)
         self.agent_requests = AgentRequestStore(self.redis, self.clock)
         self.onboarding_limiter = OnboardingLimiter(self.redis)
+        self.call_limiter = CallLimiter(self.redis, clock=self.clock)
+        self.event_publisher = EventPublisher(self.redis, call_events=None)
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:

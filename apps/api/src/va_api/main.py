@@ -38,6 +38,7 @@ from va_api.routers.agent_onboarding import agent_onboarding_router
 from va_api.routers.api_keys import api_keys_router
 from va_api.routers.audit_logs import audit_logs_router
 from va_api.routers.auth import internal_auth_router
+from va_api.routers.calls import calls_router
 from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
 from va_api.routers.org_sso import org_router
@@ -72,6 +73,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     me_router,
     org_router,
     orgs_router,
+    calls_router,
     api_keys_router,
     agent_onboarding_router,
     audit_logs_router,

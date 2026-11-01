@@ -1383,6 +1383,110 @@
         "title": "DataResponse[list[MemberView]]",
         "type": "object"
       },
+      "DialingStrategy": {
+        "additionalProperties": false,
+        "properties": {
+          "pool_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pool Id"
+          },
+          "type": {
+            "default": "default",
+            "enum": [
+              "default",
+              "local",
+              "custom_pooling"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "DialingStrategy",
+        "type": "object"
+      },
+      "DynamicDataSpec": {
+        "additionalProperties": false,
+        "description": "A pre-call (or per-turn) HTTP fetch whose extracted values become variables (specs/13 §7).",
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "cache": {
+            "default": false,
+            "title": "Cache",
+            "type": "boolean"
+          },
+          "cache_ttl_seconds": {
+            "default": 300,
+            "maximum": 86400.0,
+            "minimum": 0.0,
+            "title": "Cache Ttl Seconds",
+            "type": "integer"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "method": {
+            "default": "GET",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "query": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Query",
+            "type": "object"
+          },
+          "response_data": {
+            "items": {
+              "$ref": "#/components/schemas/ResponseDataItem"
+            },
+            "maxItems": 20,
+            "title": "Response Data",
+            "type": "array"
+          },
+          "timing": {
+            "default": "pre_call",
+            "enum": [
+              "pre_call",
+              "every_turn"
+            ],
+            "title": "Timing",
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "DynamicDataSpec",
+        "type": "object"
+      },
       "EngineSettings": {
         "additionalProperties": false,
         "description": "Dialogue engine behaviour.",
@@ -1563,6 +1667,115 @@
         "title": "ExperimentsSettings",
         "type": "object"
       },
+      "GuardRail": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GuardRailAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "config": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Config",
+            "type": "object"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "type": {
+            "enum": [
+              "tcpa:ai_disclosure",
+              "tcpa:self_introduction",
+              "tcpa:recording_disclosure",
+              "tcpa:opt_out",
+              "custom"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "GuardRail",
+        "type": "object"
+      },
+      "GuardRailAction": {
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "phone_number": {
+            "anyOf": [
+              {
+                "pattern": "^\\+[1-9][0-9]{1,14}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Number"
+          },
+          "type": {
+            "enum": [
+              "end_call",
+              "transfer",
+              "move_to_node",
+              "none"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "title": "GuardRailAction",
+        "type": "object"
+      },
       "GuardRailConfig": {
         "additionalProperties": true,
         "description": "A default guard rail (specs/23-guardrails-and-compliance.md §1.1); other keys are kept as sent.",
@@ -1604,6 +1817,111 @@
           "status"
         ],
         "title": "HealthStatus",
+        "type": "object"
+      },
+      "InlineTool": {
+        "additionalProperties": false,
+        "description": "A tool defined inside the request (ToolCreate without `id` and without `secret_headers`, which would\nbe stored in plaintext in `calls.config`).",
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "description": {
+            "description": "When the LLM should call the tool.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "input_schema": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "JSON Schema (draft 2020-12) of the tool input.",
+            "title": "Input Schema",
+            "type": "object"
+          },
+          "method": {
+            "default": "POST",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "name": {
+            "description": "Function name shown to the LLM.",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Query",
+            "type": "object"
+          },
+          "response": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variable name -> JSONPath.",
+            "title": "Response",
+            "type": "object"
+          },
+          "retries": {
+            "default": 0,
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "Retries",
+            "type": "integer"
+          },
+          "speech": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Said while the tool runs.",
+            "title": "Speech"
+          },
+          "timeout_ms": {
+            "default": 10000,
+            "maximum": 60000.0,
+            "minimum": 100.0,
+            "title": "Timeout Ms",
+            "type": "integer"
+          },
+          "url": {
+            "description": "Request URL; `{{vars}}` are rendered at call time.",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "url"
+        ],
+        "title": "InlineTool",
         "type": "object"
       },
       "InvitationCreate": {
@@ -3199,6 +3517,37 @@
         ],
         "type": "string"
       },
+      "PostCallEvals": {
+        "additionalProperties": false,
+        "properties": {
+          "workbench_setup_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workbench Setup Id"
+          },
+          "workbench_setup_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workbench Setup Version Id"
+          }
+        },
+        "title": "PostCallEvals",
+        "type": "object"
+      },
       "PrincipalType": {
         "enum": [
           "api_key",
@@ -3228,6 +3577,39 @@
         "title": "PrivacySettings",
         "type": "object"
       },
+      "PronunciationRule": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "default": false,
+            "title": "Case Sensitive",
+            "type": "boolean"
+          },
+          "pronunciation": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Pronunciation",
+            "type": "string"
+          },
+          "spaced": {
+            "default": false,
+            "title": "Spaced",
+            "type": "boolean"
+          },
+          "word": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Word",
+            "type": "string"
+          }
+        },
+        "required": [
+          "word",
+          "pronunciation"
+        ],
+        "title": "PronunciationRule",
+        "type": "object"
+      },
       "RedactionSettings": {
         "additionalProperties": false,
         "description": "Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).",
@@ -3246,6 +3628,869 @@
           }
         },
         "title": "RedactionSettings",
+        "type": "object"
+      },
+      "ResponseDataItem": {
+        "additionalProperties": false,
+        "description": "One variable extracted from a dynamic data response.",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Appended to the prompt context.",
+            "title": "Context"
+          },
+          "data": {
+            "description": "JSONPath into the response.",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Data",
+            "type": "string"
+          },
+          "name": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "data"
+        ],
+        "title": "ResponseDataItem",
+        "type": "object"
+      },
+      "RetryRequest": {
+        "additionalProperties": false,
+        "description": "`wait` is optional here so its absence maps to `RETRY_NOT_PROVIDED` instead of `INVALID_INPUT`.",
+        "properties": {
+          "max_attempts": {
+            "default": 1,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "on_no_answer": {
+            "default": false,
+            "title": "On No Answer",
+            "type": "boolean"
+          },
+          "voicemail_action": {
+            "default": "hangup",
+            "enum": [
+              "hangup",
+              "leave_message",
+              "ignore"
+            ],
+            "title": "Voicemail Action",
+            "type": "string"
+          },
+          "voicemail_message": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Voicemail Message"
+          },
+          "wait": {
+            "anyOf": [
+              {
+                "maximum": 86400.0,
+                "minimum": 60.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds before the retry call.",
+            "title": "Wait"
+          }
+        },
+        "title": "RetryRequest",
+        "type": "object"
+      },
+      "SendCallRequest": {
+        "description": "The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.",
+        "examples": [
+          {
+            "first_sentence": "Hi {{name}}, this is Maya from Bella Pasta.",
+            "max_duration": 5,
+            "phone_number": "+14155550100",
+            "record": true,
+            "request_data": {
+              "name": "Jordan"
+            },
+            "task": "You are Maya from Bella Pasta. Confirm tonight's reservation for {{name}}.",
+            "voice": "Karen",
+            "webhook": "https://hooks.bellapasta.test/calls"
+          }
+        ],
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "agent_version": {
+            "anyOf": [
+              {
+                "pattern": "^(production|staging|dev|latest|\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?|branch:[A-Za-z0-9._/-]{1,64})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Version"
+          },
+          "amd": {
+            "default": false,
+            "description": "Legacy alias of ivr_mode.",
+            "title": "Amd",
+            "type": "boolean"
+          },
+          "analysis_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Prompt"
+          },
+          "analysis_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxProperties": 50,
+                "propertyNames": {
+                  "maxLength": 64,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Schema"
+          },
+          "answered_by_enabled": {
+            "default": true,
+            "title": "Answered By Enabled",
+            "type": "boolean"
+          },
+          "available_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "pattern": "^[A-Z][A-Z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Legacy alias of dispositions.",
+            "title": "Available Tags"
+          },
+          "background_track": {
+            "anyOf": [
+              {
+                "enum": [
+                  "office",
+                  "cafe",
+                  "restaurant",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Background Track"
+          },
+          "block_interruptions": {
+            "default": false,
+            "title": "Block Interruptions",
+            "type": "boolean"
+          },
+          "citation_schema_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Citation Schema Ids",
+            "type": "array"
+          },
+          "country": {
+            "default": "US",
+            "description": "Region for numbers without a + prefix.",
+            "title": "Country",
+            "type": "string"
+          },
+          "dialing_strategy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DialingStrategy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dispositions": {
+            "anyOf": [
+              {
+                "items": {
+                  "pattern": "^[A-Z][A-Z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispositions"
+          },
+          "dynamic_data": {
+            "items": {
+              "$ref": "#/components/schemas/DynamicDataSpec"
+            },
+            "maxItems": 10,
+            "title": "Dynamic Data",
+            "type": "array"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "pattern": "^[\\x20-\\x7E]{1,256}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Id"
+          },
+          "first_sentence": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "First utterance, verbatim.",
+            "title": "First Sentence"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "pattern": "^\\+[1-9][0-9]{1,14}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "geospatial_dialing": {
+            "default": false,
+            "description": "Legacy alias of local_dialing.",
+            "title": "Geospatial Dialing",
+            "type": "boolean"
+          },
+          "guard_rails": {
+            "items": {
+              "$ref": "#/components/schemas/GuardRail"
+            },
+            "maxItems": 20,
+            "title": "Guard Rails",
+            "type": "array"
+          },
+          "hd_audio": {
+            "default": false,
+            "title": "Hd Audio",
+            "type": "boolean"
+          },
+          "ignore_button_press": {
+            "default": false,
+            "title": "Ignore Button Press",
+            "type": "boolean"
+          },
+          "interruptibility": {
+            "default": 2,
+            "description": "0 block … 4 always.",
+            "maximum": 4.0,
+            "minimum": 0.0,
+            "title": "Interruptibility",
+            "type": "integer"
+          },
+          "interruption_threshold": {
+            "anyOf": [
+              {
+                "maximum": 5000.0,
+                "minimum": 50.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fixed EOT silence (ms).",
+            "title": "Interruption Threshold"
+          },
+          "ivr_mode": {
+            "default": false,
+            "title": "Ivr Mode",
+            "type": "boolean"
+          },
+          "keywords": {
+            "items": {
+              "pattern": "^[^:\\s][^:]{0,99}(:(10|[1-9]))?$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Keywords",
+            "type": "array"
+          },
+          "knowledge_base_ids": {
+            "items": {
+              "pattern": "^KB-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Knowledge Base Ids",
+            "type": "array"
+          },
+          "language": {
+            "default": "babel-en",
+            "description": "STT/TTS language (specs/08 §5).",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Language",
+            "type": "string"
+          },
+          "local_dialing": {
+            "default": false,
+            "description": "Legacy alias of dialing_strategy local.",
+            "title": "Local Dialing",
+            "type": "boolean"
+          },
+          "max_duration": {
+            "default": 30,
+            "description": "Hard limit in minutes.",
+            "maximum": 240.0,
+            "minimum": 0.5,
+            "title": "Max Duration",
+            "type": "number"
+          },
+          "max_tokens": {
+            "default": 250,
+            "description": "Max tokens per agent reply.",
+            "maximum": 1024.0,
+            "minimum": 32.0,
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "memory_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Enabled"
+          },
+          "memory_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Id"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Echoed in webhooks; never shown to the LLM.",
+            "title": "Metadata",
+            "type": "object"
+          },
+          "model": {
+            "default": "base",
+            "description": "base, turbo, enhanced or an id.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "noise_cancellation": {
+            "default": true,
+            "title": "Noise Cancellation",
+            "type": "boolean"
+          },
+          "pathway_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pathway Id"
+          },
+          "pathway_version": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "production",
+                  "staging",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Integer, production (default), staging, or draft (test calls only).",
+            "title": "Pathway Version"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Id"
+          },
+          "persona_settings": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Per-call overrides applied after the persona config.",
+            "title": "Persona Settings",
+            "type": "object"
+          },
+          "persona_version": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "production",
+                  "draft"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Version"
+          },
+          "phone_number": {
+            "description": "Destination; normalized to E.164.",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Phone Number",
+            "type": "string"
+          },
+          "post_call_evals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PostCallEvals"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "precall_dtmf_sequence": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9*#w]{1,64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Precall Dtmf Sequence"
+          },
+          "pronunciation_guide": {
+            "items": {
+              "$ref": "#/components/schemas/PronunciationRule"
+            },
+            "maxItems": 200,
+            "title": "Pronunciation Guide",
+            "type": "array"
+          },
+          "record": {
+            "default": false,
+            "title": "Record",
+            "type": "boolean"
+          },
+          "request_data": {
+            "description": "Variables available as {{key}}.",
+            "patternProperties": {
+              "^[A-Za-z_][A-Za-z0-9_]{0,63}$": {
+                "$ref": "#/components/schemas/JsonValue"
+              }
+            },
+            "title": "Request Data",
+            "type": "object"
+          },
+          "retry": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetryRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_node_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Node Id"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "examples": [
+              "2026-11-20 09:30:00 -08:00"
+            ],
+            "title": "Start Time"
+          },
+          "stream_post_transfer_transcript": {
+            "default": false,
+            "title": "Stream Post Transfer Transcript",
+            "type": "boolean"
+          },
+          "summary_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Prompt"
+          },
+          "task": {
+            "anyOf": [
+              {
+                "maxLength": 16000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-form prompt runner.",
+            "title": "Task"
+          },
+          "temperature": {
+            "default": 0.7,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "test_call": {
+            "default": false,
+            "title": "Test Call",
+            "type": "boolean"
+          },
+          "test_mode": {
+            "default": false,
+            "description": "Route the call to the simulator caller.",
+            "title": "Test Mode",
+            "type": "boolean"
+          },
+          "timezone": {
+            "default": "America/Los_Angeles",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Timezone",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "anyOf": [
+                {
+                  "pattern": "^(TL|KB)-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$",
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/components/schemas/InlineTool"
+                }
+              ]
+            },
+            "maxItems": 30,
+            "title": "Tools",
+            "type": "array"
+          },
+          "transfer_list": {
+            "additionalProperties": {
+              "pattern": "^\\+[1-9][0-9]{1,14}$",
+              "type": "string"
+            },
+            "maxProperties": 20,
+            "propertyNames": {
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "title": "Transfer List",
+            "type": "object"
+          },
+          "transfer_phone_number": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transfer Phone Number"
+          },
+          "voice": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Voice name or voice UUID.",
+            "title": "Voice"
+          },
+          "voice_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoiceSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-call TTS overrides."
+          },
+          "voicemail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoicemailRequest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "voicemail_detect_timeout_ms": {
+            "default": 12000,
+            "maximum": 30000.0,
+            "minimum": 3000.0,
+            "title": "Voicemail Detect Timeout Ms",
+            "type": "integer"
+          },
+          "wait_for_greeting": {
+            "default": false,
+            "description": "Stay silent until the callee speaks.",
+            "title": "Wait For Greeting",
+            "type": "boolean"
+          },
+          "warm_transfer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WarmTransferConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "webhook": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook"
+          },
+          "webhook_events": {
+            "items": {
+              "enum": [
+                "queue",
+                "call",
+                "latency",
+                "webhook",
+                "tool",
+                "dynamic_data",
+                "citations",
+                "evals",
+                "post_transfer_transcript"
+              ],
+              "type": "string"
+            },
+            "title": "Webhook Events",
+            "type": "array"
+          }
+        },
+        "required": [
+          "phone_number"
+        ],
+        "title": "SendCallRequest",
+        "type": "object"
+      },
+      "SendCallResponse": {
+        "description": "The created call; ``scheduled_for`` (UTC) appears only for scheduled calls.",
+        "examples": [
+          {
+            "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "message": "Call successfully queued.",
+            "status": "success"
+          },
+          {
+            "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "message": "Call successfully scheduled.",
+            "scheduled_for": "2026-10-25T16:00:00Z",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "call_id": {
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "scheduled_for": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scheduled For"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "call_id"
+        ],
+        "title": "SendCallResponse",
         "type": "object"
       },
       "SmsSettings": {
@@ -3791,6 +5036,158 @@
         "title": "VoiceSettings",
         "type": "object"
       },
+      "VoiceSettingsPatch": {
+        "additionalProperties": false,
+        "description": "Per-call overrides of a voice's stored settings (specs/05 §3.2): only the sent keys apply.",
+        "properties": {
+          "similarity_boost": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity Boost"
+          },
+          "speed": {
+            "anyOf": [
+              {
+                "maximum": 1.2,
+                "minimum": 0.7,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speed"
+          },
+          "stability": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stability"
+          },
+          "style": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Style"
+          },
+          "use_speaker_boost": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Speaker Boost"
+          }
+        },
+        "title": "VoiceSettingsPatch",
+        "type": "object"
+      },
+      "VoicemailRequest": {
+        "additionalProperties": false,
+        "description": "The request `voicemail` object: only the sent keys override lower layers (see `explicit_fields`).",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "hangup",
+                  "leave_message",
+                  "leave_message_and_sms",
+                  "ignore"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Message to leave; supports {{vars}}.",
+            "title": "Message"
+          },
+          "sensitive": {
+            "default": false,
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "sms": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoicemailSms"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "VoicemailRequest",
+        "type": "object"
+      },
+      "VoicemailSms": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "anyOf": [
+              {
+                "pattern": "^\\+[1-9][0-9]{1,14}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "message": {
+            "maxLength": 1600,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "VoicemailSms",
+        "type": "object"
+      },
       "VoicesSettings": {
         "additionalProperties": false,
         "description": "Voice resolution rules.",
@@ -3803,6 +5200,47 @@
           }
         },
         "title": "VoicesSettings",
+        "type": "object"
+      },
+      "WarmTransferConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "briefing_prompt": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Briefing Prompt"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hold_audio": {
+            "default": "music",
+            "enum": [
+              "music",
+              "silence",
+              "agent"
+            ],
+            "title": "Hold Audio",
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 45,
+            "maximum": 120.0,
+            "minimum": 10.0,
+            "title": "Timeout S",
+            "type": "integer"
+          }
+        },
+        "title": "WarmTransferConfig",
         "type": "object"
       },
       "Weekday": {
@@ -4439,6 +5877,81 @@
         "x-envelope": "envelope",
         "x-permission": "audit.read",
         "x-scope": "org:read"
+      }
+    },
+    "/v1/calls": {
+      "post": {
+        "description": "Place an outbound call now, or schedule it with ``start_time``.",
+        "operationId": "calls_send",
+        "parameters": [
+          {
+            "description": "Selects the org's BYO Telnyx account (specs/05 §2).",
+            "in": "header",
+            "name": "encrypted_key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Selects the org's BYO Telnyx account (specs/05 §2).",
+              "title": "Encrypted Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendCallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendCallResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Send",
+        "tags": [
+          "Calls"
+        ],
+        "x-audit-exempt": "call creation is recorded in calls and call_events",
+        "x-envelope": "legacy",
+        "x-scope": "calls:write"
       }
     },
     "/v1/health": {

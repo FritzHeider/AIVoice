@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793569614-ee33
+> P05-T05b: SQLAlchemy async (greenlet) made coverage report phantom misses after awaited DB calls; fixed with [tool.coverage.run] concurrency=[greenlet,thread]. Send Call dispatch = va_api.services.call_dispatch; EventPublisher.sequence/broadcast + va_events.insert_rows for in-transaction call_events rows; api tests that dispatch need SessionContainer(clock=FrozenClock(call_helpers.business_hours_today())) for call_events partitions; pydantic Field(exclude_if=) to omit optional response fields (wrap model_serializer kills OpenAPI examples)
+<!-- tags: api, calls, testing | created: 2026-11-01 -->
+
 ### mem-1793567413-771c
 > P05-T05a: va_common.net.check_destination_url/blocked_address (Python marks IPv6 ::1 is_reserved -> loopback exempted from always-blocked reserved rule); WebhookSafetySettings mixin for WEBHOOK_ALLOW_PRIVATE; va_api.services.webhook_policy.check_call_webhook; api production settings in tests need kms_provider=aws + aws_kms_key_id + smtps:// smtp_url
 <!-- tags: api, security, testing | created: 2026-11-01 -->

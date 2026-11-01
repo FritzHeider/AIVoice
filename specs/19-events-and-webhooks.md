@@ -66,6 +66,12 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 >    `XREADGROUP ... >`; `ack(ids)`. The `payload` field is looked up as bytes or str (clients built with
 >    `decode_responses=True`). Entries deleted while pending are acknowledged away; a payload that is not a
 >    `DomainEvent` is acknowledged, logged `events.stream_poison` (entry id and stream only), and not returned.
+> 10. (P05-T05b) `publish` is composed of two public steps for callers that write the `call_events` row in their own
+>     transaction: `sequence(event)` (assigns the seq of a call event, returns non-call events unchanged; step `seq`) and
+>     `broadcast(event)` (XADD + live PUBLISH; step `stream`). `va_events.call_events.insert_rows(session, rows)` is the
+>     same idempotent `ON CONFLICT (created_at, id) DO NOTHING` insert `DbCallEventWriter` uses, in the caller's session.
+>     The Send Call dispatch sequences before its commit, inserts the row in the same transaction, and broadcasts after
+>     the commit (best effort).
 
 ## 2. Event type catalog (complete)
 
@@ -120,8 +126,13 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 `call.error` events carry `data.code` from this closed set: `stt_reconnect`, `stt_warning`, `tts_error`, `stream_failed`,
 `recording_failed`, `listen_leg_misrouted`, `TEMPLATE_VAR_MISSING`, `TOOL_FAILED`, `CUSTOM_CODE_FAILED`, `KB_TIMEOUT`,
 `PATHWAY_UNPUBLISHED`, `PATHWAY_VERSION_FALLBACK`, `VOICE_NOT_FOUND`, `CONTACT_IDENTIFIER_CONFLICT`, `RECORDING_MISSING`,
-`llm_fallback`, `llm_failed`, `pipeline_fatal`.
-Level is `warning` for recoverable codes and `error` for `pipeline_fatal`, `llm_failed`, `stream_failed`.
+`llm_fallback`, `llm_failed`, `pipeline_fatal`, `dispatch_failed`.
+Level is `warning` for recoverable codes and `error` for `pipeline_fatal`, `llm_failed`, `stream_failed`,
+`dispatch_failed`.
+
+> Decision (2026-11-01): `dispatch_failed` (P05-T05b) is recorded by the api when `CallWorkflow` could not be started
+> after the `calls` row was committed (`data = {"code": "dispatch_failed", "detail": "workflow_start"}`, message "Call
+> workflow could not be started."); see specs/05 §5 Decision P05-T05b.
 
 ## 3. Webhook routing rules
 

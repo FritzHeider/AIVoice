@@ -218,7 +218,7 @@ Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATU
     `INTERNATIONAL_RATE_LIMITED`, `DAILY_CAP_REACHED`, `HOURLY_CAP_REACHED`, `CONCURRENCY_CAP_REACHED`.
 11. Credits hold (`INSUFFICIENT_CREDITS`) — hold amount = `min(max_duration, 10) × connected_rate` + `min_attempt`.
 12. Insert + workflow start (on Temporal failure the row is marked `failed` with `error_message` and
-    `503 SERVICE_UNAVAILABLE` is returned; hold released).
+    `503 SERVICE_UNAVAILABLE` is returned; hold released). Details: §5 Decision P05-T05b.
 
 > Decision (2026-11-01): dispatch compliance (P05-T04a). Step 9 is
 > `va_compliance.check_call_compliance(session, OrgFacts(org_id, plan_id, kyc_level, limits, settings), destination=,
@@ -492,6 +492,44 @@ Error example `400`:
 {"status": "error", "message": "Invalid phone number.", "errors": [{"error": "INVALID_PHONE_NUMBER", "message": "Invalid phone number.", "field": "phone_number"}], "request_id": "req_0193c5d2…"}
 ```
 
+> Decision (2026-11-01): Send Call dispatch (P05-T05b). `va_api.services.call_dispatch.dispatch_call`; route
+> `POST /v1/calls` (`operation_id` `calls_send`, `calls:write`, `calls_send` rate bucket, `Idempotency-Key`, header
+> `encrypted_key`; unknown body keys are ignored and logged at debug; no audit row).
+> 1. Org settings are read through `OrgSettingsReader` before the tenant session opens. Then, in ONE
+>    `tenant_session(org_id)`: steps 4-8 (`load_call_inputs`), resolution, the check of the **resolved** `webhook`
+>    (`WEBHOOK_URL_REJECTED`, before step 9 so a bad URL never consumes limits), steps 9-11 (`admit_call`), the `calls`
+>    row, and the created event. The call id (UUIDv7) is generated before admission.
+> 2. Row: `direction='outbound'`, `status`/`queue_status` = `queued`/`queued`, or `scheduled`/`new` when `start_time`
+>    is set; runner, voice, number, memory, `external_id`, `start_time`, `request_data`, `metadata` from the resolved
+>    config; `test_call` from the request; `config` = the resolved `SendCallConfig` JSON plus `pricing` (the
+>    specs/24 §4 rate snapshot); `credit_hold_id`; `workflow_id = call-<id>`.
+> 3. Event `call.queued` ("Call successfully queued.") or `call.scheduled` ("Call successfully scheduled.", data
+>    `scheduled_for` UTC `…Z`), data `status` and `warnings` (`[{code, message, field?}]`, the resolution warnings such
+>    as `TASK_IGNORED`). Its seq is assigned in Redis before the commit and its `call_events` row is inserted in the
+>    same transaction; the stream/live broadcast runs after the commit, best effort (a failure is logged
+>    `calls.event_broadcast_failed`). A Redis failure while assigning the seq rolls everything back:
+>    `503 SERVICE_UNAVAILABLE` "Call events are temporarily unavailable.".
+> 4. Any failure before the commit rolls back the row, the event row, and the hold; the Redis counters and the
+>    concurrency slot taken by step 10 are given back.
+> 5. After the commit `CallWorkflow` is started (`va_domain.call_workflow`: name `CallWorkflow`, input
+>    `CallWorkflowInput{call_id, org_id, scheduled_for}` as JSON, id `call-<id>`, task queue `TEMPORAL_TASK_QUEUE`,
+>    `REJECT_DUPLICATE`, start RPC timeout 5 s, connect + start within 10 s). An already started workflow counts as
+>    started. Any other failure: the call moves to `failed` (from `queued` or `scheduled`; the §8 table gains the
+>    edge `scheduled → failed` for this case) with `error_message` "Call workflow could not be started.",
+>    `end_reason`/`ended_by` `error`, `queue_status` `call_error`; the hold is released; a `call.error` event
+>    (`dispatch_failed`, specs/19 §2.1) is recorded; the counters are given back; the response is
+>    `503 SERVICE_UNAVAILABLE` "The call could not be started. Please retry." (5xx releases the idempotency claim,
+>    so a retry with the same key runs again). A timed-out start may still have reached Temporal, so `CallWorkflow`
+>    (P05-T06) must exit without dialing when the row is no longer `queued`/`scheduled`. Conversely, when the
+>    `failed` transition is refused because the row is no longer `queued`/`scheduled` (the workflow already moved
+>    it on, or a stop canceled it), the call is not the dispatcher's to fail: the hold, counters, and concurrency
+>    slot are left to the workflow / stop path, no `call.error` is recorded, `calls.start_failure_unrecorded` is
+>    logged, and the normal success response is returned (a 503 would release the idempotency claim and a retry
+>    would place a second call). Redis failures while giving counters back are logged
+>    (`calls.counter_release_failed`, `limits.rollback_failed`) and never replace the error being returned.
+> 6. Scheduled calls take no limits and no hold at creation (specs/24 §6 Decision P05-T04b); the workflow takes them
+>    when it dispatches the call.
+
 ## 6. `GET /v1/calls` — list
 
 Query parameters (all optional):
@@ -654,6 +692,9 @@ retries are therefore no-ops). Bland status mapping in the Call Object: `no_answ
 > (a hangup before the bridge). `completed`, `failed`, `canceled`, `no_answer`, `busy` are terminal. Legs:
 > `ringing`/`answered` from `initiated`/`ringing`, `bridged` from `initiated`/`ringing`/`answered`, `hangup` from any
 > non-hangup state; `initiated` is only inserted.
+
+> Decision (2026-11-01): `scheduled` → `failed` (P05-T05b) is allowed too, for a scheduled call whose `CallWorkflow`
+> could not be started at creation (§5 Decision P05-T05b item 5).
 
 ## 9. `end_reason` enumeration (normative; referenced by other specs)
 

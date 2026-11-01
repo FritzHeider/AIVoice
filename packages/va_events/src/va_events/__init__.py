@@ -11,6 +11,7 @@ from va_events.call_events import (
     CallEventWriter,
     DbCallEventWriter,
     DirectCallEventWriter,
+    insert_rows,
     row_for,
 )
 from va_events.catalog import DEFAULT_CATEGORY, STREAMS, EventType, Stream, stream_for
@@ -41,6 +42,7 @@ __all__ = [
     "decode",
     "encode",
     "event_uuid",
+    "insert_rows",
     "is_call_event",
     "new_event",
     "row_for",

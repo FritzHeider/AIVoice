@@ -2628,6 +2628,7 @@ dependencies = [
     { name = "va-compliance" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-events" },
 ]
 
 [package.metadata]
@@ -2648,6 +2649,7 @@ requires-dist = [
     { name = "va-compliance", editable = "packages/va_compliance" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-events", editable = "packages/va_events" },
 ]
 
 [[package]]

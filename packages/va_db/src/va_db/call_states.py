@@ -99,7 +99,8 @@ CALL_TRANSITIONS: Final[Mapping[CallStatus, frozenset[CallStatus]]] = MappingPro
         "transferring": frozenset({"in_progress"}),
         "transferred": frozenset({"transferring"}),
         "completed": frozenset({"in_progress", "transferring", "transferred"}),
-        "failed": frozenset({"queued", "dialing", "ringing"}),
+        # ``scheduled`` too: its workflow could not be started (specs/05 §5 Decision P05-T05b).
+        "failed": frozenset({"scheduled", "queued", "dialing", "ringing"}),
         "no_answer": _RINGING_PHASE,
         "busy": _RINGING_PHASE,
         "canceled": frozenset({"scheduled", "queued", "dialing", "ringing"}),
