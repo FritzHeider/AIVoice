@@ -1140,3 +1140,13 @@ Grafana 3001
   `row(Model, **values)` via `RowFactory`, `load(body, org=, ctx=, encrypted_key=)`; `make_ctx(org_id, scopes=,
   environment=, plan_id=)`; `random_e164(npa)` because `phone_numbers.e164` is unique among active rows across
   orgs). Agent versions need explicit increasing `created_at` (rows inserted in one transaction share `now()`).
+- 2026-11-01 (P05-T04a): `packages/va_compliance` (dist `va-compliance`; the api depends on it) = Send Call step 9:
+  `check_call_compliance(session, OrgFacts(org_id, plan_id, kyc_level, limits, settings), destination=, region=, at=,
+  now=, scheduled=, allowed_countries=)` in the caller's tenant session (rules: specs/05 §4.1 Decision P05-T04a).
+  Pieces: `fraud.blocked_prefix`, `dnc.find_block` (platform/own/parent via `use_org`), `international`
+  (`international_allowed`, `parse_allowed_countries`; `ApiSettings.allowed_destination_countries()`),
+  `calling_windows` (`callee_timezones` returns every candidate zone, `in_window`, `local_minute`), `state_rules`
+  (data `va_compliance/data/state_rules.json`, every entry cites statute + https source + `last_verified`; changing
+  an entry needs the statute re-checked and the specs/17 §7 Decision updated), `calling_hours.calling_hours_open`.
+  DB tests: session fixture `compliance_db_url` + `tests/support/compliance_rows.py` (`new_org(parent=, settings=)`,
+  `add_dnc(org_id | None, e164)` through `system_session` because va_app cannot write platform rows, `random_e164`).

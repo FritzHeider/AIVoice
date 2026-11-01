@@ -12,7 +12,7 @@
   - Deliverables: `va_edge.mapping` (every voice event type), leg/call transitions with guard checks, Redis `call:{id}:carrier` publish + `carrier_state` hash, Temporal signal to `CallWorkflow`, domain events via publisher
   - Acceptance: table-driven tests for every event type and illegal transition handling.
 
-- [ ] P05-T03 Send Call validation and resolved configuration (split into P05-T03a–c below; tick when all three are ticked)
+- [x] P05-T03 Send Call validation and resolved configuration (split into P05-T03a–c below; tick when all three are ticked) — P05-T03a/b/c all ticked (3178218)
   - Spec refs: specs/05-calls-api.md (POST /v1/calls, every parameter, SendCallConfig, runner selection and precedence, validation order)
   - Depends on: P02-T03, P02-T12
   - Deliverables: `SendCallRequest` pydantic model (every parameter, aliases, defaults), `resolve_call_config(...)` implementing precedence incl. request_data/metadata replacement semantics, runner resolution for task and pathway (+ version semantics), language/voice resolution, E.164 normalization
@@ -36,11 +36,23 @@
   - Deliverables: `apps/api/src/va_api/services/call_inputs.py` loading everything `resolve_call_config` needs inside one `tenant_session`: pathway + version semantics (production/staging/integer fallback, draft for test calls, warnings), voice by name/id (org first, then platform; org default voice), tool/KB existence, `encrypted_key` account, destination parse (`INVALID_PHONE_NUMBER`), `from` ownership + `local` dialing strategy (`va_common.nanp`), `AGENT_REQUIRES_ORG_KEY`, `test_call`/`test_mode` permission checks
   - Acceptance: DB tests per validation step proving order (earlier failures mask later ones) and each error code/body.
 
-- [ ] P05-T04 Dispatch checks: limits, compliance, credit hold
+- [ ] P05-T04 Dispatch checks: limits, compliance, credit hold (split into P05-T04a–b below; tick when both are ticked)
   - Spec refs: specs/24-billing-and-limits.md (limit enforcement algorithms, credit holds); specs/23-guardrails-and-compliance.md (DNC, blacklist, calling hours); specs/31-error-catalog.md
   - Depends on: P05-T03c
   - Deliverables: `va_billing.limits` (daily/hourly/concurrency/same-number/new-account/international), `va_compliance.dnc.check`, calling-hours check when enforced, `va_billing.holds` (create/capture/release), error codes exactly as catalogued
   - Acceptance: Redis algorithm tests with fake clock; hold sizing tests.
+
+- [x] P05-T04a Dispatch compliance checks: DNC, international policy, calling hours — va_compliance (fraud/dnc/international/calling_windows/state_rules/calling_hours/check_call_compliance); make test 8491 passed, va_compliance 100 %, jscpd 0, radon ≤ B
+  - Spec refs: specs/23-guardrails-and-compliance.md §2.1, §3; specs/17-batches-and-scheduling.md §3.1, §3.2, §7; specs/24-billing-and-limits.md §6 item 7 (policy half); specs/05-calls-api.md §4.1 step 9; specs/31-error-catalog.md
+  - Depends on: P05-T03c
+  - Deliverables: new package `packages/va_compliance` (`dnc.find_block` org + platform + parent inheritance via `use_org`, `international.check_destination` (allowed list, home country, US/CA, `international_enabled`/kyc ≥ 2), `calling_windows.callee_timezones` + `in_window`, `state_rules` + `data/state_rules.json` with statute/source_url/last_verified, `calling_hours.check_calling_hours`), `compliance.check_call_compliance(...)` raising `NUMBER_BLOCKED`/`INTERNATIONAL_NOT_ENABLED`/`OUTSIDE_CALLING_HOURS` in §4.1 order; `INTERNATIONAL_ALLOWED_COUNTRIES` in api settings
+  - Acceptance: DB tests for DNC scopes/expiry/inheritance/cross-tenant; international matrix; calling-window table tests across DST and multi-zone NPAs; state rule data test; order test.
+
+- [ ] P05-T04b Dispatch limits and credit holds
+  - Spec refs: specs/24-billing-and-limits.md §2 (effective limits/prices), §5, §6 items 2–6 and 7 (rate half), §13; specs/17-batches-and-scheduling.md §7 (frequency caps); specs/05-calls-api.md §4.1 steps 10–11; specs/31-error-catalog.md
+  - Depends on: P05-T04a
+  - Deliverables: new package `packages/va_billing` (`plans.effective_limits`/`effective_pricing` (org `limits` override > plan), `limits` with Lua `capped_incr.lua`/`concurrency_acquire.lua` (same-number, frequency, new-account, daily, hourly, concurrency, international rate, reverse-order rollback, idempotent release), `holds` (sizing, reserve/capture/release, enterprise skip), `dispatch.admit_call(...)` running compliance → limits → hold with compensation)
+  - Acceptance: Redis algorithm tests with fake clock (fakeredis) plus real-Redis testcontainer tests (capped_incr never exceeds cap under 100 concurrent increments; concurrency self-heal/idempotent release); rollback-order tests; hold sizing and available-balance tests.
 
 - [ ] P05-T05 `POST /v1/calls` endpoint and CallWorkflow start
   - Spec refs: specs/05-calls-api.md (POST /v1/calls response); specs/01-architecture.md §2 (outbound steps 1–3)

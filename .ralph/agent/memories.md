@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793563013-9d78
+> P05-T04a: va_compliance.check_call_compliance(session, OrgFacts, destination=, region=, at=, now=, scheduled=, allowed_countries=) is Send Call step 9; DB tests use session fixture compliance_db_url + tests/support/compliance_rows (add_dnc via system_session for platform rows); callee_timezones falls back when phonenumbers returns >8 zones (NANP non-geographic); state_rules.json entries verified against statutes (MD/UT/AL/LA stricter than original spec table)
+<!-- tags: compliance, calls, testing | created: 2026-11-01 -->
+
 ### mem-1793561163-497e
 > P05-T03c: Send Call loader va_api.services.call_inputs.load_call_inputs(session, ctx, request, org=, encrypted_key=, models=, va_env=) + resolve_inputs; parts call_runners/call_pathways(PathwayFields)/call_refs/caller_id; va_common.nanp reads generated data/npa_states.json (scripts/generate_npa_states.py --check); tests use apps/api/tests/support/call_input_rows.Seed (row() via RowFactory, random_e164 since phone_numbers.e164 unique across orgs, agent versions need explicit created_at); never pkill -f pytest from the Bash tool (kills its own shell)
 <!-- tags: calls, api, testing | created: 2026-11-01 -->
@@ -311,6 +315,10 @@
 <!-- tags: database, testing | created: 2026-10-27 -->
 
 ## Decisions
+
+### mem-1793562105-042f
+> P05-T04 split: T04a va_compliance (fraud prefixes, DNC with parent inheritance via use_org, international policy reconciling specs/24§6.7+28§9.1, callee_timezones/in_window, state_rules.json, check_call_compliance order prefix>DNC>intl>hours); T04b va_billing limits/holds/dispatch.admit_call + move org_schemas.effective_limits to va_billing.plans
+<!-- tags: calls, compliance, billing | created: 2026-11-01 -->
 
 ### mem-1793128976-28d0
 > Every new migration must GRANT SELECT, INSERT, UPDATE, DELETE on new tables to va_app, va_system and add §10 trigger/RLS; RLS = NOT NULL org_id + voices/dnc_entries; call_events partitions call_events_pYYYYMM (UTC months)

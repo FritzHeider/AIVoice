@@ -212,6 +212,24 @@ Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATU
 12. Insert + workflow start (on Temporal failure the row is marked `failed` with `error_message` and
     `503 SERVICE_UNAVAILABLE` is returned; hold released).
 
+> Decision (2026-11-01): dispatch compliance (P05-T04a). Step 9 is
+> `va_compliance.check_call_compliance(session, OrgFacts(org_id, plan_id, kyc_level, limits, settings), destination=,
+> region=, at=, now=, scheduled=, allowed_countries=)`, run in the caller's tenant session, in this order (first
+> failure wins): (a) the specs/28 §9.2 high-cost prefix blocklist plus the org's `blocked_prefixes`, then (b) DNC
+> (platform row, own row, and the direct parent's row when the **parent's** `compliance.dnc_inherit_from_parent` is
+> true; specs/23 §2.1), both `NUMBER_BLOCKED` "This number is blocked." field `phone_number` with the same text for
+> every list; (c) international policy `INTERNATIONAL_NOT_ENABLED` "International calls to <REGION> are not enabled
+> for this organization." (`this destination` when the region is unknown) field `phone_number`; (d) calling hours
+> when `compliance.enforce_calling_hours`, `OUTSIDE_CALLING_HOURS` "The destination's local time is outside the
+> allowed calling hours." field `start_time` for scheduled calls, else `phone_number`. Reconciliation with specs/17
+> §7: a scheduled call is checked against its scheduled instant (`at`) at creation, and the dispatcher re-runs the
+> whole step with `at = now` at dispatch; DNC expiry always uses `now`. International rules (reconciles specs/24 §6
+> item 7 and specs/28 §9.1): a region outside `INTERNATIONAL_ALLOWED_COUNTRIES` (or a non-geographic/unknown region)
+> is always blocked; US, CA, and the org's `default_country` are domestic; anything else needs
+> `settings.international_enabled`, the region in `settings.allowed_countries`, and the plan/KYC gate
+> (`orgs.limits.international_enabled` exactly `true`, or `kyc_level >= 2`, or `kyc_level >= 1` on a plan other
+> than `start`). The hourly international counter and the new-account US/CA-only rule are step 10 (`va_billing`).
+
 ### 4.2 Agent version resolution and experiments
 
 1. `agent_version` omitted → look for `experiments` row with `agent_id` and `status='running'`. If found, choose an

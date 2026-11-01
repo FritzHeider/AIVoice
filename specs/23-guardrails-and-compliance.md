@@ -113,6 +113,11 @@ to `19` §4).
 - Inbound calls/SMS from DNC numbers are **not** blocked (they initiated contact); SMS opt-outs suppress automated replies only.
 - Sub-accounts: parent org setting `compliance.dnc_inherit_from_parent` (default true) makes child orgs also honor the parent's list.
 
+> Decision (2026-11-01): the flag is read from the parent's own settings (the child's value is ignored), only the
+> direct parent is consulted (no grandparents), and the parent's rows are read inside the child's tenant session
+> with `va_db.session.use_org` (RLS stays on). Expired entries (`expires_at <= now`) never block. Implemented by
+> `va_compliance.dnc.find_block` (specs/05 §4.1 Decision P05-T04a).
+
 ### 2.2 API (`/v1/dnc`)
 
 | Method | Path | Body / query | Notes |

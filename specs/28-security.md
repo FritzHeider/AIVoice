@@ -244,6 +244,12 @@ rate), `+808` (shared cost), `+247` (Ascension), `+290` (St Helena), `+500` (Fal
 (São Tomé), `+245` (Guinea-Bissau), `+252` (Somalia), `+371 90` (Latvia premium). Org `blocked_prefixes` add to it.
 Matching = longest-prefix on E.164 digits. Result `NUMBER_BLOCKED`.
 
+> Decision (2026-11-01): `BLOCKED_PREFIXES = ALWAYS_BLOCKED_PREFIXES + HIGH_RISK_PREFIXES` (`+371 90` is stored as
+> `+37190`). An enterprise org's `orgs.limits.allowed_high_risk_prefixes` (a list of strings; anything else is
+> ignored) unblocks exact high-risk prefixes only; it never unblocks `+1900`/`+1976` or the org's own
+> `blocked_prefixes`. The §9.1 gating is evaluated as specified in specs/05 §4.1 Decision P05-T04a (domestic also
+> includes the org's `default_country`; the platform `INTERNATIONAL_ALLOWED_COUNTRIES` list always applies).
+
 ### 9.3 Velocity checks
 
 - New accounts (< 24 h): ≤ 100 calls/day, ≤ 10 concurrent, US/CA only (`NEW_ACCOUNT_LIMIT`).

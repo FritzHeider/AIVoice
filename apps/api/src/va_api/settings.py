@@ -9,6 +9,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from va_common.auth import ApiKeyHasher, Pepper
 from va_common.email import EmailSettings
 from va_common.settings import CryptoSettings, DatabaseSettings, RedisSettings, TemporalSettings
+from va_compliance.international import parse_allowed_countries
 
 __all__ = ["ApiSettings"]
 
@@ -40,6 +41,8 @@ class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettin
     # Platform model ids recorded in every resolved call config (specs/05 §4.4).
     llm_dialogue_model: str = "zai-org/GLM-5.3-Flash"
     llm_router_model: str = "zai-org/GLM-5.3-Flash"
+    # Destinations ever dialable; everything else is INTERNATIONAL_NOT_ENABLED (specs/24 §6 item 7).
+    international_allowed_countries: str = "US,CA,GB,AU,IE,NZ,DE,FR,ES,IT,NL,BE,SE,NO,DK,FI,MX,BR,IN,PH,SG"
 
     @field_validator("api_key_pepper", "api_key_pepper_previous")
     @classmethod
@@ -70,3 +73,7 @@ class ApiSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettin
         previous_hex = self.api_key_pepper_previous.get_secret_value()
         previous = Pepper.from_hex(previous_hex, version - 1) if previous_hex else None
         return ApiKeyHasher(Pepper.from_hex(current, version), previous)
+
+    def allowed_destination_countries(self) -> frozenset[str]:
+        """``INTERNATIONAL_ALLOWED_COUNTRIES`` as a set of ISO regions."""
+        return parse_allowed_countries(self.international_allowed_countries)

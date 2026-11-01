@@ -248,6 +248,18 @@ call (`parent_call_id` = original) after `wait` seconds (10–86 400) with `voic
   fields. Per-day call frequency caps use Redis `freq:{org_id}:{e164}:{yyyymmdd}`.
 - Inbound calls are never blocked by calling hours.
 
+> Decision (2026-11-01): state rules verified against their sources (P05-T04a). Verifying the cited law changed
+> four entries to the stricter rule it states: MD also limits hours to 08:00–20:00 (Com. Law §14-4503), UT also
+> forbids Sundays (Utah Code §13-25a-103), and AL (PSC rule 770-X-5-.17) and LA (R.S. 45:811) limit Mon–Sat calls
+> to 08:00–20:00 besides forbidding Sundays; FL's cite is Fla. Stat. §501.616(6). Legal holidays named by several of
+> these statutes are not modelled yet (they arrive with the holiday calendar of P11-T04). `state_rules.json` entries
+> are `{windows, no_call_days, max_calls_per_24h, statute, source_url, last_verified}`; an empty `windows` list
+> leaves the hours unrestricted. The state is the destination area code's state (`va_common.nanp`). For a single
+> call the destination is open only when, in **every** candidate zone, the org window and the state rule both
+> allow it. `va_compliance.calling_windows.callee_timezones(e164, explicit=, fallback=)` returns all candidate zones
+> (`callee_timezone` returns the first); a number for which phonenumbers knows only the calling code (more than
+> `MAX_CANDIDATE_ZONES` = 8 zones, e.g. NANP `+1 500`) or no zone uses the fallback.
+
 ## 8. Interplay with org caps
 
 Batch dispatch respects exactly the same caps as API calls (daily, hourly, concurrency, international, same-number

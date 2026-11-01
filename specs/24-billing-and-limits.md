@@ -123,6 +123,11 @@ returns its error (`31-error-catalog.md`). Scripts are loaded with `SCRIPT LOAD`
    `US,CA,GB,AU,IE,NZ,DE,FR,ES,IT,NL,BE,SE,NO,DK,FI,MX,BR,IN,PH,SG`) are always blocked (`INTERNATIONAL_NOT_ENABLED`).
 8. **Credits**: hold (§5).
 
+> Decision (2026-11-01): the international **policy** of item 7 (allowed regions, domestic set, plan/KYC gate) is
+> evaluated in Send Call step 9 by `va_compliance.international.international_allowed`, before any counter is
+> touched; `va_billing.limits` keeps only the hourly international counter. Exact rules: specs/05 §4.1 Decision
+> P05-T04a.
+
 If any later step fails, previously incremented counters (daily, hourly, concurrency, intl) are rolled back in reverse order
 (compensation in Python `finally`).
 

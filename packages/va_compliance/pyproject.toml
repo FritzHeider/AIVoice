@@ -1,0 +1,23 @@
+[project]
+name = "va-compliance"
+version = "0.1.0"
+description = "VoiceAgents dispatch compliance: high-cost prefixes, do-not-call lists, international policy, calling hours"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "phonenumbers>=9",
+    "pydantic>=2.9",
+    "sqlalchemy[asyncio]>=2.0.35",
+    "tzdata>=2025.2",
+    "va-common",
+    "va-db",
+    "va-domain",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }
+va-db = { workspace = true }
+va-domain = { workspace = true }

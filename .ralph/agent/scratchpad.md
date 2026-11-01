@@ -918,3 +918,165 @@ new modules 100 % line+branch; jscpd 0 clones; radon nothing ≥ C; generate_npa
 statuses match specs/31; step order matches specs/05 §4.1 steps 4-8; Decisions recorded in specs/05 §4.2 and specs/16
 §6.2. Note: specs/05 §3.1 says `dev` → newest on main while §4.2 step 3 says env_pins[dev]; the Decision picks the pin
 (missing pin → newest main), which is consistent with §4.2.
+
+## Plan P05-T04a — Dispatch compliance checks: DNC, international policy, calling hours (Planner, 2026-11-01)
+P05-T03 ticked (a/b/c done). P05-T04 split into T04a (this: `va_compliance`, Send Call §4.1 step 9) and T04b
+(`va_billing`: effective limits/prices, Lua limits incl. frequency caps, holds, `dispatch.admit_call` orchestration
+compliance → limits → hold with compensation). T04b moves `va_api.routers.org_schemas.effective_limits` into
+`va_billing.plans` and adds the frequency-cap error code; NOT in T04a.
+
+### Decisions (write as `> Decision (2026-11-01): dispatch compliance (P05-T04a).` under specs/05 §4.1, and a short
+cross-reference Decision under specs/24 §6 item 7 and specs/28 §9.1)
+1. Step 9 order: (a) high-cost prefix blocklist (specs/28 §9.2) → `NUMBER_BLOCKED`; (b) DNC (platform row, own org
+   row, parent row when inherited) → `NUMBER_BLOCKED`; (c) international policy → `INTERNATIONAL_NOT_ENABLED`;
+   (d) calling hours when `compliance.enforce_calling_hours` → `OUTSIDE_CALLING_HOURS`. Messages/fields:
+   `NUMBER_BLOCKED` "This number is blocked." field `phone_number` (same text for every scope — never reveal which
+   list); `INTERNATIONAL_NOT_ENABLED` "International calls to <REGION> are not enabled for this organization."
+   field `phone_number`; `OUTSIDE_CALLING_HOURS` "The destination's local time is outside the allowed calling
+   hours." field `start_time` when the call is scheduled, else `phone_number`.
+2. Scheduled calls (specs/05 §4.1 says hours are skipped for scheduled calls, specs/17 §7 says they apply to the
+   scheduled instant): the check takes `at` = scheduled instant (or now) and runs at creation for scheduled calls
+   too; dispatch (P05-T06) re-runs the whole step with `at = now`. Recorded as the reconciliation.
+3. International (reconciles specs/24 §6.7, specs/28 §9.1, specs/04 §7 settings): region = destination ISO region
+   (`CallInputs.country`; non-geographic `001`/None counts as a region not in the list). Rules, first failing wins:
+   region ∉ `INTERNATIONAL_ALLOWED_COUNTRIES` → blocked (always, even US orgs calling a domestic region removed from
+   the env list); domestic iff region ∈ {US, CA} or region == `settings.default_country` → allowed; otherwise
+   allowed iff `settings.international_enabled` AND region ∈ `settings.allowed_countries` AND (plan/KYC gate:
+   `orgs.limits.international_enabled is True` (bool override only) OR `kyc_level ≥ 2` OR (`kyc_level ≥ 1` AND
+   `plan_id != "start"`)). The hourly counter and new-account US/CA-only rule are T04b (`NEW_ACCOUNT_LIMIT`).
+4. DNC inheritance: the flag is read from the **parent's** settings (`load_settings(parent.settings).compliance.
+   dnc_inherit_from_parent`, specs/23 §2.1 "parent org setting"); direct parent only; parent rows read inside the
+   caller's tenant session via `va_db.session.use_org(session, parent_id)` (RLS stays on; no `va_system`). Expired
+   = `expires_at <= now`. Entries match exact `phone_e164`.
+5. Calling hours: zones = `callee_timezones(e164, explicit=None, fallback=settings.timezone)`; open iff, in **every**
+   zone, local time is inside an org `compliance.calling_hours` window AND (when `compliance.state_quiet_hours` and
+   the destination NPA maps to a state with a rule) the state rule allows it. Windows are `[start, end)` local
+   minutes. State from `va_common.nanp.state_for_npa(npa(e164))` (the specs/16 §6.3 neighbour table remains P10).
+   State frequency caps (`max_calls_per_24h`) are data only here; T04b enforces them with `freq:` counters.
+   Non-NANP destinations skip state rules.
+6. `callee_timezones` returns a tuple (specs/17 §3.1 step 3 evaluates every candidate zone); `callee_timezone`
+   (single str per §3.1 signature) = first sorted zone, kept for P11-T04 which adds `next_window_start`, holidays
+   and Hypothesis DST properties. Zones from `phonenumbers.timezone.time_zones_for_number`; `("Etc/Unknown",)` or
+   empty → `(fallback,)`; explicit → `(explicit,)`.
+7. High-cost blocklist (specs/28 §9.2) lives in `va_compliance.fraud`: `ALWAYS_BLOCKED_PREFIXES = ("+1900",
+   "+1976")`, `HIGH_RISK_PREFIXES` = the listed ones (`+371 90` → `+37190`); org `blocked_prefixes` add to them;
+   enterprise orgs (`plan_id == "enterprise"`) may unblock a high-risk prefix via `orgs.limits.
+   allowed_high_risk_prefixes` (list of strings, exact prefix match; ignored when not a list of str). Longest
+   prefix wins; always-blocked ones are never unblocked.
+
+### Files
+- create package `packages/va_compliance` (dist `va-compliance`, uv_build, `py.typed`, deps `va-common`, `va-db`,
+  `va-domain`, `phonenumbers>=9`, `tzdata`): root `pyproject.toml` dev group + `[tool.uv.sources]` workspace entry,
+  mypy `mypy_path` (`packages/va_compliance/src`) and `files` (src + tests), `uv lock`.
+  - `src/va_compliance/__init__.py` (docstring + re-exports of the public names below).
+  - `fraud.py`: `ALWAYS_BLOCKED_PREFIXES`, `HIGH_RISK_PREFIXES: tuple[str, ...]`,
+    `blocked_prefix(e164: str, *, org_blocked: Sequence[str], allowed_high_risk: Sequence[str], enterprise: bool)
+    -> str | None`.
+  - `dnc.py`: `@dataclass(frozen=True) DncBlock(scope: Literal["platform","org","parent"], source: str)`;
+    `async def find_block(session: AsyncSession, org_id: UUID, e164: str, *, now: datetime) -> DncBlock | None`
+    (one query for own+platform rows — platform wins the scope label; then parent lookup: `select(Org.parent_org_id)`
+    for org, parent `Org.settings`, inherit flag, `use_org`).
+  - `international.py`: `DOMESTIC_NANP = frozenset({"US","CA"})`, `parse_allowed_countries(raw: str) ->
+    frozenset[str]` (comma list, strip, upper, drop empties), `international_allowed(region: str | None, *, settings:
+    OrgSettings, limits: Mapping[str, object], kyc_level: int, plan_id: str, allowed_countries: frozenset[str]) ->
+    bool`.
+  - `calling_windows.py`: `callee_timezones(e164, *, explicit: str | None, fallback: str) -> tuple[str, ...]`,
+    `callee_timezone(...) -> str`, `local_minute(now_utc, tz) -> tuple[Weekday, int]` (raises `ValueError` on naive
+    datetimes), `in_window(now_utc: datetime, tz: str, windows: Sequence[CallingWindow]) -> bool`.
+  - `state_rules.py` + `data/state_rules.json`: pydantic `StateRule(windows: list[CallingWindow] = [],
+    no_call_days: list[Weekday] = [], max_calls_per_24h: int | None (ge 1), statute: str (min 1), source_url:
+    HttpUrl (https), last_verified: date)`, extra forbid; `state_rules() -> Mapping[str, StateRule]` (cached,
+    importlib.resources); `STATE_CALLING_HOURS` name exported as that mapping accessor alias per spec
+    (`STATE_CALLING_HOURS = state_rules()` at import is fine, it is tiny); `state_allows(rule, weekday, minute)
+    -> bool`. Entries exactly specs/17 §7: FL (08–20 all days, 3/24h), OK (08–20, 3/24h), MD (3/24h, no window),
+    WA (08–20), TX (mon–sat 09–21, sun 12–21), AL/LA/MS (`no_call_days: ["sun"]`), UT (08–21). Citations to verify
+    (WebFetch if available; otherwise use these well-known cites and the official statute site URL):
+    FL Fla. Stat. §501.059(8)(a) / (8)(b) (leg.state.fl.us); OK 15 O.S. §775C.4 (oscn.net); MD Md. Code Com. Law
+    §14-4501 et seq. Stop the Spam Calls Act (mgaleg.maryland.gov); WA RCW 80.36.390 (app.leg.wa.gov); TX Tex. Bus. &
+    Com. Code §301.051 (statutes.capitol.texas.gov); AL Ala. Code §8-19C-3 (alison / law.justia acceptable only if
+    no official); LA La. R.S. 45:844.14 (legis.la.gov); MS Miss. Code §77-3-725 (law.justia / official);
+    UT Utah Code §13-25a-103 (le.utah.gov). `last_verified` = the date actually checked.
+  - `calling_hours.py`: `calling_hours_open(at_utc: datetime, e164: str, *, settings: OrgSettings) -> bool`.
+  - `compliance.py`: `@dataclass(frozen=True) OrgFacts(org_id: UUID, plan_id: str, kyc_level: int, limits:
+    Mapping[str, object], settings: OrgSettings)`; `async def check_call_compliance(session, facts: OrgFacts, *,
+    destination: str, region: str | None, at: datetime, now: datetime, scheduled: bool, allowed_countries:
+    frozenset[str]) -> None` raising `AppError` per Decision 1 order.
+- modify `apps/api/src/va_api/settings.py`: `international_allowed_countries: str` (default = spec default string)
+  + property/method `allowed_destination_countries() -> frozenset[str]` via `parse_allowed_countries`; add
+  `va-compliance` to `apps/api/pyproject.toml` deps (the endpoint in P05-T05 calls it; adding the dep now keeps T05
+  small). Do NOT wire into a route yet (no route exists).
+- specs: Decisions above (specs/05 §4.1, specs/24 §6 item 7 cross-ref, specs/28 §9.1/§9.2 cross-ref, specs/17 §7
+  cross-ref for scheduled instant + `callee_timezones`). AGENTS.md learning line (package, OrgFacts, data file).
+
+### Tests (`packages/va_compliance/tests`, conftest re-exporting nothing special; DB tests via a module fixture using
+`migration_helpers.migrated_postgres()` / `tenant_rows.open_database(url)` from va_db test support — add
+`packages/va_db/tests/support` is already on pythonpath)
+- `test_fraud.py`: `+19005551234` blocked always (also for enterprise with it in allowed list); `+88212345678`
+  blocked; enterprise + `allowed_high_risk=["+882"]` → allowed; non-enterprise with same list → blocked; `+37190…`
+  blocked, `+3712…` not; org `blocked_prefixes=["+4420"]` blocks `+44207…`; longest prefix returned; `+1809…` not
+  blocked; every `HIGH_RISK_PREFIXES` entry matches `^\+[0-9]+$` and spec list parity (hard-coded expected tuple).
+- `test_international.py`: matrix — US org → CA allowed; US org → GB with defaults blocked; GB home org → GB allowed
+  (domestic) only if GB in env list; env list without GB → GB blocked even for GB home; enabled + allowed_countries
+  incl GB + kyc 2 start → allowed; kyc 1 start → blocked; kyc 1 build → allowed; kyc 0 build + limits override True
+  → allowed; override `"true"` string ignored; region None / "001" → blocked; `parse_allowed_countries(" us, ca ,,")`.
+- `test_calling_windows.py`: single-zone NPA (`+1212…` → America/New_York), multi-zone NANP number (pick an NPA
+  phonenumbers maps to 2 zones, e.g. find one in the test via the library — assert len > 1 rather than hard-code if
+  unstable), unknown → fallback, explicit wins; `in_window` table: NY 08:00 open/07:59 closed/20:59 open/21:00 closed;
+  DST spring-forward 2026-03-08 and fall-back 2026-11-01 in America/New_York (same UTC instant, local hour differs),
+  Europe/London 2026-03-29, Australia/Lord_Howe half-hour DST (2026-10-04); weekday-limited window; naive datetime →
+  ValueError.
+- `test_state_rules.py`: JSON parses; exactly keys {FL, OK, MD, WA, TX, AL, LA, MS, UT}; every entry has statute,
+  https source_url, last_verified ≤ today; FL max 3; TX Sunday 11:59 closed / 12:00 open; AL Sunday closed, Monday
+  open; MD has no window (always allows hours).
+- `test_calling_hours.py`: org default 08–21: FL number (`+1305…`) at 20:30 local closed with state_quiet_hours, open
+  without; TX Sunday 10:00 closed; custom org windows; multi-zone number open only when open in all zones; non-NANP
+  (`+4420…`) uses only org windows in Europe/London.
+- `test_dnc_db.py` (Postgres): own entry blocks (scope org); platform entry (inserted via `system_session`) blocks
+  (scope platform) for any org; expired entry ignored, future expiry blocks; other org's entry does not block
+  (cross-tenant); parent entry blocks child when parent setting default true; parent with
+  `dnc_inherit_from_parent=false` → child not blocked; child's own setting false but parent true → still blocked
+  (flag is parent's); grandparent ignored; org without parent fine; RLS context restored after parent lookup (a
+  following query in the same session still sees only the child's rows).
+- `test_compliance_db.py`: order — blocked prefix + DNC → NUMBER_BLOCKED; DNC + international → NUMBER_BLOCKED;
+  international + outside hours → INTERNATIONAL_NOT_ENABLED; outside hours only with enforce true →
+  OUTSIDE_CALLING_HOURS (field `phone_number`), scheduled → field `start_time` and evaluated at `at` (open `at`
+  passes even if `now` closed); enforce false → passes at 03:00 local; exact error bodies (code/status/message/field).
+- `apps/api/tests`: settings test for `allowed_destination_countries()` default and env override.
+
+### Gates
+`make fmt lint typecheck placeholders test`, spec refs, `npx --yes jscpd@4 --silent` (0 clones), `uvx radon cc -s -a`
+(≤ B), coverage va_compliance ≥ 85 % (target 100 % of new modules), `uvx pip-audit`, `corepack pnpm audit`. No call
+flow yet → no e2e.
+
+### Risks
+- phonenumbers timezone data for NANP: some NPAs map to several zones; tests must derive a multi-zone sample from the
+  library (search NPAs 200–999 for one with >1 zone) instead of hard-coding.
+- Platform DNC rows: va_app cannot insert `org_id IS NULL` rows (RLS); seed via `system_session` / login role.
+- `use_org` must restore `app.org_id`; assert with a follow-up query.
+- New package wiring (root pyproject, mypy paths, uv.lock, Dockerfile unaffected) — follow the P00-T05 AGENTS line.
+- Statute citations: do not invent URLs that 404; prefer official legislature domains; `last_verified` truthfully.
+
+## Build P05-T04a (Builder, 2026-11-01)
+Implemented per plan: new `packages/va_compliance` (fraud, dnc, international, calling_windows, state_rules + data
+JSON, calling_hours, compliance.check_call_compliance + OrgFacts), wired into root pyproject (dev dep, uv source,
+mypy paths/files, pytest pythonpath for tests/support), uv.lock; api depends on it; `ApiSettings.
+international_allowed_countries` + `allowed_destination_countries()`. Specs: Decisions in 05 §4.1, 17 §7, 23 §2.1,
+24 §6, 28 §9.2. AGENTS.md line.
+Deviations / choices (all recorded in specs):
+- Statute verification (web search) changed 4 state entries to the stricter law: MD 08–20 window, UT no Sunday,
+  AL/LA Mon–Sat 08–20 + no Sunday; FL cite is §501.616(6) (not 501.059). AL cite is the PSC rule 770-X-5-.17,
+  LA R.S. 45:811; MS §77-3-723(1) via law.justia (official text not reachable; Sunday ban kept as in spec).
+  Holidays not modelled (P11-T04).
+- `callee_timezones` falls back when phonenumbers returns > 8 zones (NANP non-geographic like +1 500 maps to 42
+  zones; intersecting would close the window forever).
+- `BLOCKED_PREFIXES` (spec name) exported = ALWAYS + HIGH_RISK.
+- No route wired (P05-T05); no call flow touched → e2e not run.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 8491 passed / 7 skipped; va_compliance
+100 % line+branch; spec refs 0 problems; jscpd 0 clones; radon max B (8); pip-audit clean; pnpm audit 3 moderate
+(unchanged); openapi current.
+
+## Review P05-T04a (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (pass, 0 findings), make test (8491 passed, 7 skipped, 98.64 %),
+jscpd 0 clones, radon nothing ≥ C, spec refs 0 problems. Error codes/statuses match specs/31; blocklist matches
+specs/28 §9.2; INTERNATIONAL_ALLOWED_COUNTRIES default matches specs/02 §6 and .env.example. State table deviations
+from specs/17 §7 (stricter MD/UT/AL/LA after statute verification) are recorded as a Decision. Next: P05-T04b.
