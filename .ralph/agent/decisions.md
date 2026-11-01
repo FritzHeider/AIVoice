@@ -120,3 +120,12 @@ Template:
 - **Reasoning:** keeps T13a testable offline; written as a `> Decision` in specs/10 §1/§11 by the Builder.
 - **Reversibility:** yes — estimator is one function; prices are data.
 - **Timestamp:** 2026-11-01T00:00:00Z
+
+## DEC-007
+- Decision: media stream token expiry when specs/06 §4.2 (+1 h) and specs/28 §6.2 (+10 min) disagree
+- Chosen Option: exp = mint time + ceil(max_duration) + 600 s (specs/28)
+- Confidence: 75
+- Alternatives Considered: + 1 h (specs/06)
+- Reasoning: security spec owns the token; 10 min still covers ring time and a Telnyx WS reconnect at the end of the call; shorter replay window
+- Reversibility: high (one constant)
+- Timestamp (UTC ISO 8601): 2026-11-01T00:00:00Z

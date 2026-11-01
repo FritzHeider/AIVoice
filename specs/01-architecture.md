@@ -77,6 +77,19 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
 2. `CallWorkflow` activity `prefetch_call_context`: runs pre-call `dynamic_data` fetches with `cache: true`
    entries, loads memory context for the contact, resolves the voice, pre-computes the start-node prompt, and
    stores a `call_context` JSON in Redis key `call:{id}:ctx` (TTL = max_duration + 1 h).
+   > Decision (2026-11-01): call context (P05-T06a). The JSON is `va_domain.call_context.CallContext` (version 1)
+   > under `call:{<id>}:ctx` (hash-tag form) with TTL `ceil(max_duration_min * 60) + 3600` s, built only by
+   > `va_db.call_context.build_call_context` from the `calls` row; the media worker (rebuilding a missing context,
+   > specs/07 §3) and the edge (inbound, P05-T12) use the same builder. `config` is `calls.config` restricted to the
+   > `SendCallConfig` fields (the dispatch `pricing` snapshot and other non-config keys are dropped) and is stored
+   > with spec field names (`by_alias`, e.g. `voicemail.sms.from`). The row's `to_number`/`from_number` win; the
+   > configuration fills NULL columns. `trace_context` carries the W3C trace headers injected in the activity.
+   > `variables`/`context_sections` (pre-call dynamic data, phase 08), `memory` (specs/20 §2.3, P13-T01) and the
+   > first-sentence pre-render (P05-T10) stay empty until their producers exist. The activity
+   > (`va_workflows.activities.call_context`, timeout 10 s, 3 attempts, 1 s → 5 s backoff) stores nothing for a
+   > call already in a terminal status, and an unknown call (or another org's, RLS) fails non-retryably with
+   > `ApplicationError(type="CallNotFound")`. Activities take and return pydantic models; the worker's Temporal
+   > client uses `temporalio.contrib.pydantic.pydantic_data_converter`.
 3. Activity `dial` calls Telnyx `POST /v2/calls` with `connection_id` = org's Call Control App connection,
    `to`, `from` (resolved via dialing strategy), `stream_url = wss://{MEDIA_PUBLIC_HOST}/ws/telnyx?call_id={id}&token={stream_token}`,
    `stream_track="inbound_track"`, `stream_bidirectional_mode="rtp"`, `stream_bidirectional_codec="PCMU"`

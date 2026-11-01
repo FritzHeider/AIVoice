@@ -7,6 +7,7 @@ dependencies = [
     "starlette>=1.0",
     "temporalio>=1.8",
     "va-common",
+    "va-workflows",
 ]
 
 [build-system]
@@ -18,3 +19,4 @@ module-name = "va_worker"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-workflows = { workspace = true }

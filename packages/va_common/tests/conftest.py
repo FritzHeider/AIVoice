@@ -12,6 +12,7 @@ from va_common.settings import (
     CryptoSettings,
     DatabaseSettings,
     RedisSettings,
+    StreamTokenSettings,
     TemporalSettings,
     WebhookSafetySettings,
 )
@@ -27,6 +28,7 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         tmp_path,
         CryptoSettings,
         RedisSettings,
+        StreamTokenSettings,
         DatabaseSettings,
         TemporalSettings,
         EmailSettings,

@@ -150,6 +150,14 @@ free-text field (task 20 000 chars hard cap, prompts 20 000, node prompt 10 000,
 - On upgrade the media worker verifies: token HMAC (constant time, accepting `STREAM_TOKEN_SECRET_PREVIOUS`), exp,
   `call_id` param equals token call id, call status in (`dialing`,`ringing`,`in_progress`), and the Telnyx Ed25519
   signature headers over `{timestamp}|{full stream_url}` (`06`). Failure → close 4401 without reading media.
+> Decision (2026-11-01): stream token expiry (P05-T06a). specs/06 §4.2 said exp = dial time + max_duration + 1 h;
+> this section wins: `exp = mint time + ceil(max_duration_min * 60) + 600` s, truncated to whole unix seconds (it
+> still covers ring time ≤ 120 s and a Telnyx WS reconnect near the end of the call). Raw layout: `call_id` UUID
+> bytes (16) ‖ `exp` (8, big-endian unsigned) ‖ `HMAC_SHA256(secret, call_id ‖ exp)[:16]`, base64url without
+> padding (40 bytes → 54 characters); secret = `bytes.fromhex(STREAM_TOKEN_SECRET)` (64 hex, validated at settings
+> load without echoing the value). Verification (`va_common.stream_tokens.verify_stream_token`) rejects, in order:
+> `malformed` (not 54 base64url characters decoding to 40 bytes), `signature` (no current/previous secret matches,
+> `hmac.compare_digest`; checked before the expiry), `expired` (`exp <= now`), `call_mismatch` (`call_id` param).
 - Widget audio WS uses a conversation token (`22`).
 
 ### 6.3 Database access

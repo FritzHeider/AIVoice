@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any, ClassVar
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "KmsProviderName",
     "LogFormat",
     "RedisSettings",
+    "StreamTokenSettings",
     "TemporalSettings",
     "WebhookSafetySettings",
 ]
@@ -132,6 +133,29 @@ class WebhookSafetySettings(BaseServiceSettings):
         if self.va_env in _PRIVATE_FORBIDDEN and self.webhook_allow_private:
             object.__setattr__(self, "webhook_allow_private", False)
         return self
+
+
+class StreamTokenSettings(BaseServiceSettings):
+    """``STREAM_TOKEN_SECRET`` / ``_PREVIOUS`` (worker, edge, media): HMAC keys of the media WS stream tokens.
+
+    Both may be empty at construction so a service module imports without environment; services that mint
+    or verify tokens refuse to start without a current secret. A non-empty value must be 64 hex characters
+    (32 bytes). Validation errors never echo the input (``hide_input_in_errors``).
+    """
+
+    model_config = SettingsConfigDict(hide_input_in_errors=True)
+
+    stream_token_secret: SecretStr = SecretStr("")
+    stream_token_secret_previous: SecretStr = SecretStr("")
+
+    @field_validator("stream_token_secret", "stream_token_secret_previous")
+    @classmethod
+    def _check_hex(cls, value: SecretStr, info: ValidationInfo) -> SecretStr:
+        raw = value.get_secret_value()
+        if raw and not _is_master_key_hex(raw):
+            msg = f"{str(info.field_name).upper()} must be 64 hex characters (32 bytes) when set"
+            raise ValueError(msg)
+        return value
 
 
 class KmsProviderName(StrEnum):

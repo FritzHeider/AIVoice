@@ -1644,3 +1644,162 @@ Approved. Re-ran make lint/typecheck/placeholders (0 findings) and make test (86
 Both findings fixed: moved-on start failure returns success with no compensation (parametrized dialing|canceled
 test asserts hold held, slot kept, no call.error); `_undo_counters` guards release_call (two tests, 503 kept).
 Ticked P05-T05b and parent P05-T05.
+
+## Plan P05-T06a — CallContext, stream tokens, va_workflows package, prefetch_call_context (Planner, 2026-11-01)
+P05-T06 was too large for one Builder run (context + tokens + 3 telephony activities + the workflow + worker wiring),
+so it is split in plan/phase-05.md into T06a (this), T06b (dial/hangup/end-state activities), T06c (CallWorkflow +
+registration). Facts checked: no stream token code exists; no `packages/va_workflows`; `va_worker.task_queues.
+REGISTRATIONS` is `()`; temporalio 1.34, `WorkflowEnvironment.start_time_skipping()` works here (test server cached
+in /var/tmp). Dynamic data fetch is P08 (plan/phase-08.md), memory P13-T01, first-sentence pre-render P05-T10, so the
+prefetch here builds the context from the row and leaves typed, empty slots for them.
+
+### Decisions
+1. under specs/01 §2.1 step 2: `> Decision (2026-11-01): call context (P05-T06a).` — `va_domain.call_context.
+   CallContext` is the JSON in `call:{<id>}:ctx` (TTL `ceil(max_duration_min*60) + 3600`); built by
+   `va_db.call_context.build_call_context` from the `calls` row (config = `calls.config` restricted to the
+   `SendCallConfig` fields, so `pricing`/`postcall_steps` are dropped) — the same function the media worker uses to
+   rebuild a missing context (specs/07 §3 step 3) and the edge uses for inbound (P05-T12). `variables` /
+   `context_sections` are filled by pre-call dynamic data (phase 08), `memory` by P13-T01, the first-sentence
+   pre-render by P05-T10; until then they are empty/None. The activity does not store a context for a terminal call.
+2. under specs/28 §6.2 (and a one-line pointer under specs/06 §4.2): `> Decision (2026-11-01): stream token expiry
+   (P05-T06a).` specs/06 says exp = dial + max_duration + 1 h, specs/28 says + 10 min. Chosen: specs/28's
+   `exp = mint time + ceil(max_duration_min*60) + 600 s` (security spec, tighter; still covers ring time ≤ 120 s and a
+   Telnyx WS reconnect at the end of the call). Token layout exactly as specs: raw bytes `call_id.bytes (16) ||
+   exp (8, big-endian unsigned) || HMAC_SHA256(secret, call_id.bytes || exp_bytes)[:16]`, base64url without padding
+   (40 bytes → 54 chars). Secret = `bytes.fromhex(STREAM_TOKEN_SECRET)`. Verification accepts the current or the
+   previous secret, compares with `hmac.compare_digest`, rejects exp < now. Record DEC-007 in decisions.md.
+
+### Files
+- NEW `packages/va_common/src/va_common/stream_tokens.py`:
+  - `STREAM_TOKEN_GRACE_S: Final = 600`
+  - `class StreamTokenError(ValueError)` with `reason: Literal["malformed","signature","expired","call_mismatch"]`.
+  - `@dataclass(frozen=True, slots=True) class StreamTokenClaims: call_id: uuid.UUID; expires_at: datetime`.
+  - `def stream_token_expiry(now: datetime, max_duration_min: float) -> datetime` (now + ceil(min*60) + grace,
+    truncated to whole seconds).
+  - `def mint_stream_token(call_id: uuid.UUID, expires_at: datetime, secret: bytes) -> str`.
+  - `def verify_stream_token(token: str, *, secrets: Sequence[bytes], now: datetime, call_id: uuid.UUID | None =
+    None) -> StreamTokenClaims` (wrong length / bad base64 → malformed; no secret matches → signature; exp ≤ now →
+    expired (signature checked FIRST so an attacker learns nothing); call_id given and different → call_mismatch).
+  - `StreamTokenSecrets` helper: `def stream_token_secrets(settings: StreamTokenSettings) -> tuple[bytes, ...]`
+    (current first, previous when non-empty).
+- `packages/va_common/src/va_common/settings.py`: `class StreamTokenSettings(BaseServiceSettings)`:
+  `stream_token_secret: str = ""`, `stream_token_secret_previous: str = ""`; validator: each non-empty value must be
+  64 hex chars (`ValueError` naming the variable, never echoing the value). Services require a non-empty current
+  secret where they mint/verify (T06b/T07 raise at container build, like `API_KEY_PEPPER`). Check
+  `scripts/tests/test_env_example.py`/spec table need no change (variables already listed).
+- NEW `packages/va_domain/src/va_domain/call_context.py`:
+  - `CALL_CONTEXT_VERSION: Final = 1`, `CALL_CONTEXT_EXTRA_TTL_S: Final = 3600`.
+  - `class MemoryFact(BaseModel)`: `key: str; value: JsonValue`. `class MemoryOpenItem`: `text: str; opened_at:
+    AwareDatetime`. `class MemoryMessage`: `role: Literal["user","assistant"]; channel: Literal["voice","sms",
+    "widget"]; text: str; at: AwareDatetime`. `class CallMemory`: `memory_id: UUID; summary: str | None = None;
+    facts: list[MemoryFact] = []; open_items: list[MemoryOpenItem] = []; recent_messages: list[MemoryMessage] =
+    Field(default_factory=list, max_length=10)` (specs/20 §2.3/§2.4 shape; frozen, extra forbid on all).
+  - `class CallContext(BaseModel)` (frozen, extra forbid): `version: Literal[1] = 1`, `call_id`, `org_id`,
+    `direction: Literal["outbound","inbound"]`, `to_number: str`, `from_number: str`, `batch_id: UUID | None`,
+    `contact_id: UUID | None`, `test_call: bool` (check the Call column name; use whatever `calls` has),
+    `config: SendCallConfig`, `variables: dict[str, JsonValue] = {}`, `context_sections: list[str] = []`,
+    `memory: CallMemory | None = None`, `trace_context: dict[str, str] = {}`, `created_at: AwareDatetime`.
+    Method `ttl_s() -> int` = `call_context_ttl_s(self.config.max_duration_min)`.
+  - `def call_context_key(call_id) -> str` → `call:{<id>}:ctx` (same hash-tag form as `va_domain.carrier`).
+  - `def call_context_ttl_s(max_duration_min: float) -> int` = `math.ceil(max_duration_min * 60) + 3600`.
+- NEW `packages/va_db/src/va_db/call_context.py`:
+  - `def config_of(call: Call) -> SendCallConfig` (validate `{k: v for k, v in call.config.items() if k in
+    SendCallConfig.model_fields}`).
+  - `def build_call_context(call: Call, *, now: datetime, trace_context: Mapping[str, str] | None = None) ->
+    CallContext` (pure; `to_number`/`from_number` from the row, falling back to config `phone_number`/`from_number`
+    when the row columns are NULL).
+  - `class CallContextStore`: `__init__(self, redis: Redis)`; `async def save(self, ctx: CallContext) -> None`
+    (`SET key json EX ctx.ttl_s()`, `ctx.model_dump_json()`); `async def load(self, call_id) -> CallContext | None`
+    (missing → None; invalid JSON / schema → log `call_context.invalid` and return None so the caller rebuilds);
+    `async def delete(self, call_id) -> None`.
+- NEW package `packages/va_workflows` (dist `va-workflows`; follow AGENTS.md P00-T05 line: uv_build, `py.typed`,
+  root dev group + `[tool.uv.sources]`, mypy `mypy_path`/`files`, pytest paths; deps `temporalio`, `va-common`,
+  `va-db`, `va-domain`, `redis`, `opentelemetry-api`). `apps/worker/pyproject.toml` depends on it (no registration
+  yet — T06c).
+  - `src/va_workflows/__init__.py` (docstring only), `activities/__init__.py` (import-free).
+  - `src/va_workflows/activities/inputs.py`: `class CallActivityInput(BaseModel)` frozen/extra forbid `call_id`,
+    `org_id` (Temporal default converter: pydantic → pass `model_dump(mode="json")` dicts as T05b did, OR use
+    `temporalio.contrib.pydantic.pydantic_data_converter` — DECIDE: use `pydantic_data_converter` for the worker
+    client in T06c; for T06a activities take/return pydantic models and tests run them through `ActivityEnvironment`
+    directly. Verify `temporalio.contrib.pydantic` exists in 1.34 — it does since 1.10). Record in the Decision.
+  - `src/va_workflows/activities/call_context.py`:
+    `PREFETCH_TIMEOUT: Final = timedelta(seconds=10)`, `PREFETCH_RETRY: Final = RetryPolicy(initial_interval=1 s,
+    backoff_coefficient=2, maximum_interval=5 s, maximum_attempts=3, non_retryable_error_types=["CallNotFound"])`.
+    `class PrefetchResult(BaseModel)`: `stored: bool; status: str; ttl_s: int | None`.
+    `class CallContextActivities`: `__init__(self, database: Database, store: CallContextStore, clock: Clock)`;
+    `@activity.defn(name="prefetch_call_context") async def prefetch_call_context(self, request: CallActivityInput)
+    -> PrefetchResult`: `tenant_session(org_id)` → `TenantRepository(Call...)`/`CallRepo` get (absent → raise
+    `ApplicationError("call not found", type="CallNotFound", non_retryable=True)`); terminal status
+    (`va_db.call_states.TERMINAL_STATUSES`) → `PrefetchResult(stored=False, status=…, ttl_s=None)`, log
+    `call_context.skipped`; else close the session, inject the current OTel context into a dict
+    (`opentelemetry.propagate.inject(carrier)`), `build_call_context`, `store.save`, log `call_context.stored` with
+    `call_id`/`org_id`, return stored result. Bind `bind_call_context` logging fields if convenient.
+- Specs: Decisions 1-2; AGENTS.md learning line (new package, CallContext location, token module).
+
+### Tests
+- `packages/va_common/tests/test_stream_tokens.py`: round trip (claims equal; token is 54 url-safe chars, no `=`);
+  known vector (fixed call id + exp + secret bytes generated at test time is fine, but pin layout by decoding and
+  checking the 16/8/16 split and recomputing the HMAC independently); every byte flipped → `signature` (parametrize
+  positions 0..39 — sizes, not random values); truncated/extra bytes/bad base64 → `malformed`; expired (now = exp and
+  now > exp) → `expired`; expired + bad signature → `signature`; previous secret accepted, unknown secret rejected;
+  `call_id=` mismatch → `call_mismatch`; `stream_token_expiry` math for fractional minutes (0.5 → +630 s);
+  settings: non-hex / wrong length rejected with the variable name and without the value in the message; empty ok;
+  `stream_token_secrets` order.
+- `packages/va_domain/tests/test_call_context.py`: key format; ttl (30 min → 5400; 0.5 → 3630); JSON round trip;
+  extra key rejected; `recent_messages` > 10 rejected; version literal.
+- `packages/va_db/tests/test_call_context.py` (unit): build from a `Call` instance constructed in memory with a config
+  from every `apps/api/tests/fixtures/bland_send_call_resolved/*.json` snapshot (parametrize on file names; the
+  snapshot JSON may need the `pricing` key added to prove it is dropped); NULL row numbers fall back to config;
+  `trace_context` copied. Store tests on fakeredis: save sets TTL = ttl_s; load round trip; missing → None; garbage
+  and schema-invalid JSON → None + log event; delete.
+- `packages/va_workflows/tests/test_prefetch_activity.py` (module Postgres via `migration_helpers.migrated_postgres()`
+  + `call_rows.seed_call` from va_db test support; add `packages/va_db/tests/support` to the new package's pytest
+  `pythonpath` only if not already global): run through `temporalio.testing.ActivityEnvironment().run(acts.
+  prefetch_call_context, CallActivityInput(...))`: stored context equals `build_call_context` of the row, TTL right,
+  `trace_context` contains `traceparent` when run inside a span of an in-memory tracer provider (use
+  `obs_helpers.memory_provider()` and `otel_traces_sampler_arg=1.0`; if global propagation needs a global provider,
+  use `opentelemetry.trace.use_span`/context with a non-recording `SpanContext` you build — keep it deterministic);
+  terminal call (`completed`) → `stored=False`, nothing in Redis; unknown call id → `ApplicationError` non-retryable
+  with type `CallNotFound`; other org's call id → also `CallNotFound` (RLS); seed_call must give a valid config
+  (reuse a resolved snapshot JSON as `config`).
+- Coverage: new modules 100 % line + branch.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a` (≤ B), `uvx pip-audit` on `uv export`, `corepack pnpm audit`. No route change (no
+openapi), no call flow yet → `make e2e` not required (state it in evidence).
+
+### Risks
+- `uv.lock` changes when adding the package (`uv lock`); commit it. Docker image `.dockerignore` already includes
+  `packages/`.
+- Root mypy `files`/`mypy_path` and pytest `testpaths`/`pythonpath` must list the new package (AGENTS.md P00-T05).
+- `call_rows.seed_call` may build a minimal config that is not a valid `SendCallConfig`: pass an explicit config
+  (snapshot JSON) for prefetch tests.
+- Do not store contexts with secrets: `config` contains no keys (BYO key is only referenced by `telnyx_account_id`);
+  `request_data` is customer data and already in `calls.config` — acceptable (same trust zone).
+- `ActivityEnvironment` runs the activity in the test loop; `activity.info()` is available there.
+
+## Build P05-T06a (Builder, 2026-11-01)
+Implemented per plan, with these deviations/notes:
+- `StreamTokenSettings` secrets are `SecretStr` (not `str`) and the class sets `hide_input_in_errors=True`: pydantic
+  otherwise prints `input_value=<secret>` in ValidationErrors (both field and model validators). Message names the
+  variable (`STREAM_TOKEN_SECRET must be 64 hex characters (32 bytes) when set`).
+- `CallContext.direction` also allows `web` (`calls.direction` CHECK has it). `MemoryOpenItem` carries `id`
+  (open items are closed by id, specs/20 §2.5).
+- `PrefetchResult.status` is the call's status (stored or terminal). Log events bound with call_id/org_id.
+- Found: dispatch stores `calls.config` via `model_dump(mode="json")` without `by_alias`, so `voicemail.sms` is stored
+  as `from_` (snapshots use `from`). Both validate (populate_by_name). The context store writes `by_alias=True`.
+  Possibly worth aligning dispatch later (not in scope).
+- Test support: `packages/va_domain/tests/support/resolved_configs.py` (`resolved_config(name)`, `RESOLVED_NAMES`);
+  `call_rows.seed_call` now lets `values` override defaults (`config=` etc.).
+- Specs: Decisions under specs/01 §2.1 step 2, specs/28 §6.2, pointer under specs/06 §4.2. DEC-007 already present.
+Gates: make fmt ok; make lint pass; make typecheck pass; make placeholders 0 findings; make test 8811 passed,
+7 skipped, 99.11 % (new modules 100 % line+branch); jscpd 0 clones; radon avg A (2.04); spec refs 0; pip-audit clean;
+pnpm audit 3 moderate (no high). No TS/route change; no call flow yet, so make e2e not run.
+
+## Review P05-T06a (Reviewer, 2026-11-01)
+Approved. Re-ran make lint/typecheck/placeholders (0 findings), check_spec_refs (0), make test (8811 passed,
+7 skipped, 99.11 %; stream_tokens, va_db/va_domain call_context, va_workflows activities all 100 %). Token layout,
+check order (signature before expiry), rotation, settings redaction match specs/28 §6.2 Decision; context builder
+drops non-config keys, stores by_alias; prefetch skips terminal calls, CallNotFound non-retryable incl. RLS case.
+Ticked P05-T06a. Next: P05-T06b.

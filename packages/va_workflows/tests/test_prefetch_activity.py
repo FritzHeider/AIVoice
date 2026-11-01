@@ -1,0 +1,138 @@
+"""``prefetch_call_context`` (specs/01 §2.1 step 2 Decision P05-T06a)."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from call_rows import SeededCall, load_call, seed_call
+from fakeredis import FakeAsyncRedis
+from obs_helpers import memory_provider
+from resolved_configs import resolved_config
+from service_helpers import json_log_stream, log_events
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
+
+from va_common.ids import new_id
+from va_common.time import FrozenClock
+from va_db.call_context import CallContextStore, build_call_context
+from va_db.call_states import TERMINAL_STATUSES
+from va_db.models import CallStatus
+from va_db.session import Database
+from va_domain.call_context import call_context_key
+from va_workflows.activities.call_context import (
+    CALL_NOT_FOUND,
+    PREFETCH_RETRY,
+    PREFETCH_TIMEOUT,
+    CallContextActivities,
+    PrefetchResult,
+)
+from va_workflows.activities.inputs import CallActivityInput
+
+NOW = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+
+@pytest.fixture
+async def redis() -> AsyncIterator[FakeAsyncRedis]:
+    client = FakeAsyncRedis()
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+def activities(database: Database, redis: FakeAsyncRedis) -> CallContextActivities:
+    return CallContextActivities(database, CallContextStore(redis), FrozenClock(NOW))
+
+
+async def _seed(database: Database, status: CallStatus = "queued") -> SeededCall:
+    return await seed_call(database, status=status, config=resolved_config("09_voicemail_amd.json"))
+
+
+async def _run(activities: CallContextActivities, call: SeededCall) -> PrefetchResult:
+    request = CallActivityInput(call_id=call.call_id, org_id=call.org_id)
+    return await ActivityEnvironment().run(activities.prefetch_call_context, request)
+
+
+async def test_the_context_of_a_queued_call_is_stored_with_its_ttl(
+    database: Database, redis: FakeAsyncRedis, activities: CallContextActivities
+) -> None:
+    stream = json_log_stream()
+    call = await _seed(database)
+
+    result = await _run(activities, call)
+
+    assert result == PrefetchResult(stored=True, status="queued", ttl_s=5400)
+    stored = await CallContextStore(redis).load(call.call_id)
+    assert stored == build_call_context(await load_call(database, call), now=NOW)
+    assert await redis.ttl(call_context_key(call.call_id)) == 5400
+    [event] = [line for line in log_events(stream) if line["event"] == "call_context.stored"]
+    assert (event["call_id"], event["org_id"], event["ttl_s"]) == (str(call.call_id), str(call.org_id), 5400)
+
+
+async def test_the_current_trace_context_travels_with_the_context(
+    database: Database, redis: FakeAsyncRedis, activities: CallContextActivities
+) -> None:
+    provider, _ = memory_provider()
+    call = await _seed(database, status="scheduled")
+
+    with provider.get_tracer("test").start_as_current_span("CallWorkflow") as span:
+        await _run(activities, call)
+        trace_id = format(span.get_span_context().trace_id, "032x")
+
+    stored = await CallContextStore(redis).load(call.call_id)
+    assert stored is not None
+    assert stored.trace_context["traceparent"].split("-")[1] == trace_id
+
+
+async def test_outside_a_trace_the_trace_context_is_empty(
+    database: Database, redis: FakeAsyncRedis, activities: CallContextActivities
+) -> None:
+    call = await _seed(database)
+
+    await _run(activities, call)
+
+    stored = await CallContextStore(redis).load(call.call_id)
+    assert stored is not None
+    assert stored.trace_context == {}
+
+
+@pytest.mark.parametrize("status", sorted(TERMINAL_STATUSES))
+async def test_a_terminal_call_gets_no_context(
+    database: Database, redis: FakeAsyncRedis, activities: CallContextActivities, status: CallStatus
+) -> None:
+    stream = json_log_stream()
+    call = await _seed(database, status=status)
+
+    assert await _run(activities, call) == PrefetchResult(stored=False, status=status)
+    assert await redis.exists(call_context_key(call.call_id)) == 0
+    assert [line["status"] for line in log_events(stream) if line["event"] == "call_context.skipped"] == [
+        status
+    ]
+
+
+async def test_an_unknown_call_fails_without_retries(activities: CallContextActivities) -> None:
+    with pytest.raises(ApplicationError) as caught:
+        await _run(activities, SeededCall(org_id=new_id(), call_id=new_id()))
+
+    assert (caught.value.type, caught.value.non_retryable) == (CALL_NOT_FOUND, True)
+
+
+async def test_another_orgs_call_is_not_found(
+    database: Database, redis: FakeAsyncRedis, activities: CallContextActivities
+) -> None:
+    call = await _seed(database)
+    other = await _seed(database)
+
+    with pytest.raises(ApplicationError) as caught:
+        await _run(activities, SeededCall(org_id=other.org_id, call_id=call.call_id))
+
+    assert caught.value.type == CALL_NOT_FOUND
+    assert await redis.exists(call_context_key(call.call_id)) == 0
+
+
+def test_the_retry_policy_is_bounded_and_skips_missing_calls() -> None:
+    assert timedelta(seconds=10) == PREFETCH_TIMEOUT
+    assert PREFETCH_RETRY.maximum_attempts == 3
+    assert PREFETCH_RETRY.maximum_interval == timedelta(seconds=5)
+    assert list(PREFETCH_RETRY.non_retryable_error_types or []) == [CALL_NOT_FOUND]

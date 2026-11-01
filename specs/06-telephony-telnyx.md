@@ -238,6 +238,8 @@ reconstructs it from `wss://{MEDIA_PUBLIC_HOST}{path}?{raw_query}`. Additionally
 `exp` = dial time + max_duration + 1 h. Both checks must pass; failure → close code 4401. `stream_auth_token`
 carries the same token (Telnyx forwards it as `Authorization: Bearer <token>`); if present it must equal the query
 token. Live smoke test `test_media_ws_headers` records the headers Telnyx actually sends and asserts this scheme.
+> Decision (2026-11-01): the token expiry is specs/28 §6.2 Decision P05-T06a (mint time + max duration + 10 min),
+> not + 1 h.
 
 ## 5. Voice webhook → domain mapping (complete)
 

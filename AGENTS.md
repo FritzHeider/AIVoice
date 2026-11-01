@@ -1181,3 +1181,14 @@ Grafana 3001
   `send_call(client, key, body, **headers)`. Any test that dispatches needs a container clock inside the migration's
   `call_events` partitions: `SessionContainer(identity=..., clock=FrozenClock(call_helpers.business_hours_today()))`
   (the default `FrozenClock` 2026-01-01 has no partition).
+- 2026-11-01 (P05-T06a): `packages/va_workflows` (dist `va-workflows`; the worker depends on it) holds Temporal
+  activities (and, from P05-T06c, workflows); `va_workflows.activities/__init__.py` stays import-free and activity
+  inputs (`activities.inputs.CallActivityInput`) are plain pydantic models (worker client: `pydantic_data_converter`).
+  Call context = `va_domain.call_context.CallContext` (`call:{<id>}:ctx`), built only by
+  `va_db.call_context.build_call_context(call, now=, trace_context=)` and stored by `CallContextStore` (JSON
+  `by_alias`: `calls.config` written by dispatch holds `voicemail.sms.from_`, both forms validate). Media WS tokens =
+  `va_common.stream_tokens` (`mint_stream_token`, `verify_stream_token(..., secrets=stream_token_secrets(settings))`,
+  `stream_token_expiry`); `StreamTokenSettings` hides inputs in validation errors. Activity tests run through
+  `temporalio.testing.ActivityEnvironment().run(...)`; resolved configs for test rows come from
+  `resolved_configs.resolved_config(name)` (va_domain tests/support); `call_rows.seed_call(..., config=...)`
+  overrides any default column.

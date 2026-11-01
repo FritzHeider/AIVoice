@@ -72,11 +72,29 @@
   - Deliverables: `va_api.services.call_dispatch` (steps 4–12 in one tenant transaction: inputs, resolution, webhook check, admit_call, `calls` row with pricing snapshot, `call.queued`/`call.scheduled` event + `call_events` row in the same transaction; after commit Temporal start `CallWorkflow` id `call-{id}` on the main queue; on start failure row → `failed`, hold released, counters rolled back, `503`), `va_domain.call_workflow` start contract, `routers/calls.py` legacy router with `calls:write` + `calls_send` rate limit + idempotency, container `call_starter`
   - Acceptance: API tests for success (queued/scheduled bodies), idempotency replay/mismatch, every 4xx path through the endpoint, Temporal failure path, event + row atomicity; cross-tenant/audit/openapi gates green.
 
-- [ ] P05-T06 CallWorkflow and activities
+- [ ] P05-T06 CallWorkflow and activities (split into P05-T06a–c below; tick when all three are ticked)
   - Spec refs: specs/01-architecture.md §2, §3; specs/06-telephony-telnyx.md (dial parameters); specs/13-tools-and-dynamic-data.md (pre-call dynamic data, cache flag)
   - Depends on: P05-T05
   - Deliverables: `CallWorkflow` (scheduled wait, `prefetch_call_context`, `dial`, carrier/pipeline signals, backstop timer, heartbeat watch, hangup on failure, child `PostCallWorkflow` start), activities with retry policies, `CallContext` model stored at `call:{id}:ctx`; Telnyx hangups decided from carrier signals (`fax_detected` premium AMD; `streaming.failed` while in progress with no owner after 5 s), per specs/06 §5 Decision P05-T02 item 4
   - Acceptance: Temporal time-skipping tests for scheduled start, no-answer, worker crash backstop, normal completion.
+
+- [x] P05-T06a CallContext, media stream tokens, `va_workflows` package, `prefetch_call_context` activity — va_common.stream_tokens + StreamTokenSettings, va_domain/va_db call_context, va_workflows prefetch activity; make test 8811 passed, 7 skipped, 99.11 % (new modules 100 %), lint/typecheck/placeholders/spec refs pass
+  - Spec refs: specs/01-architecture.md §2.1 step 2; specs/03-data-model.md §11 (`call:{id}:ctx`); specs/06-telephony-telnyx.md §4.2 (stream token); specs/28-security.md §6.2; specs/07-media-pipeline.md §3 step 3 (rebuild from `calls.config`); specs/20-memory-personas-agents.md §2.3 (memory slot); specs/13-tools-and-dynamic-data.md §7 (pre-call variables slot); specs/27-observability.md §2 (`trace_context`); specs/02-repo-layout-and-conventions.md §6 (`STREAM_TOKEN_SECRET[_PREVIOUS]`)
+  - Depends on: P05-T05
+  - Deliverables: `va_common.stream_tokens` (mint/verify with rotation, constant time) + `StreamTokenSettings`; `va_domain.call_context` (`CallContext`, `CallMemory`, key/TTL builders); `va_db.call_context` (`build_call_context` from a `calls` row, `CallContextStore` save/load); new package `packages/va_workflows` with `CallActivityInput` and `CallContextActivities.prefetch_call_context`; dynamic data (phase 08), memory (P13-T01), and first-sentence pre-render (P05-T10) fill their slots later
+  - Acceptance: token round trip, tamper/expiry/wrong-call/previous-secret tests; context built from every resolved Bland snapshot config; prefetch activity tests (ActivityEnvironment) for stored context + TTL, terminal call not stored, unknown call non-retryable.
+
+- [ ] P05-T06b Telephony call activities: dial, hangup, end-state recording
+  - Spec refs: specs/06-telephony-telnyx.md §3, §5 Decision P05-T02 item 4, §5.1, §6; specs/05-calls-api.md §5 Decision P05-T05b items 5-6, §7.2, §8, §9; specs/24-billing-and-limits.md §6 Decision P05-T04b; specs/19-events-and-webhooks.md §2 (`call.dialing`, `call.dispatch_blocked`, `call.error`, `call.ended`)
+  - Depends on: P05-T06a
+  - Deliverables: `va_workflows.activities.telephony` — `dial` (status guard, scheduled-call dispatch admission with limits + hold, concurrency requeue signal, `DialRequest` per §6 step 5, leg insert, `dialing` + `call.dialing`, carrier error path), `hangup_call` (idempotent `command_id`), `fail_call` / `end_call` end-state recording (`fax_detected`, `stream_failed` → `error`, `worker_crash`, `canceled`, `dispatch_blocked`) with hold release, slot release, and events; activity retry policies as constants
+  - Acceptance: activity tests against FakeTelnyx (dial body asserted field by field incl. AMD/record/hd_audio/time limit), Postgres for row/leg/hold/event effects, every failure branch.
+
+- [ ] P05-T06c `CallWorkflow` orchestration and worker registration
+  - Spec refs: specs/01-architecture.md §2.1 steps 2-9, §3; specs/05-calls-api.md §7.2 (`signal_cancel`), §5 Decision P05-T05b item 5; specs/06-telephony-telnyx.md §5 Decision P05-T02 items 3-4; specs/07-media-pipeline.md §18 step 5, §19; specs/18-post-call-analysis.md §1 (child start contract)
+  - Depends on: P05-T06b
+  - Deliverables: `va_workflows.calls.CallWorkflow` (scheduled durable wait + `signal_cancel`, prefetch, dial, `signal_carrier_event` handling incl. fax and `streaming.failed` hangups, `signal_pipeline_finished`, heartbeat watch → `worker_crash`, `max_duration + 120 s` backstop, hangup on failure, child `PostCallWorkflow` start with `ABANDON`), `REGISTRATIONS` entry for the main queue, worker settings/container for activity dependencies
+  - Acceptance: Temporal time-skipping tests for scheduled start, cancel while scheduled, no-answer, worker crash backstop, fax hangup, stream failure hangup, normal completion (child started with id `postcall-{id}`).
 
 - [ ] P05-T07 Media worker server, ownership, control channel, drain
   - Spec refs: specs/07-media-pipeline.md (worker WebSocket endpoints and auth, ownership lock, control channel schemas, graceful drain, admission control)

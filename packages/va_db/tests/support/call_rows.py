@@ -25,19 +25,17 @@ class SeededCall:
 async def seed_call(
     database: Database, *, status: CallStatus = "dialing", org_id: uuid.UUID | None = None, **values: Any
 ) -> SeededCall:
-    """An outbound task call in ``status`` (a fresh org unless ``org_id`` is given)."""
+    """An outbound task call in ``status`` (a fresh org unless ``org_id`` is given); ``values`` override the
+    defaults (``config``, numbers, ...)."""
     org = org_id if org_id is not None else await OrgFactory(database).create()
-    call = Call(
-        id=new_id(),
-        org_id=org,
-        direction="outbound",
-        status=status,
-        runner_type="task",
-        config={},
-        to_number="+14155550100",
-        from_number="+14155550199",
-        **values,
-    )
+    defaults: dict[str, Any] = {
+        "direction": "outbound",
+        "runner_type": "task",
+        "config": {},
+        "to_number": "+14155550100",
+        "from_number": "+14155550199",
+    }
+    call = Call(id=new_id(), org_id=org, status=status, **{**defaults, **values})
     async with database.tenant_session(org) as session:
         session.add(call)
     return SeededCall(org_id=org, call_id=call.id)
