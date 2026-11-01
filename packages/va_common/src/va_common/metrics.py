@@ -145,6 +145,7 @@ CATALOG: Final[Mapping[Service, tuple[MetricSpec, ...]]] = {
         _c("va_tts_characters_total", "Characters sent to text-to-speech", "model"),
         _c("va_tts_cache_hits_total", "Text-to-speech cache hits"),
         _c("va_tts_cache_misses_total", "Text-to-speech cache misses"),
+        _c("va_tts_late_audio_dropped_total", "Text-to-speech audio dropped after its context was cancelled"),
         _c("va_vendor_ws_reconnects_total", "Vendor WebSocket reconnects", "vendor"),
         _c("va_vendor_errors_total", "Vendor errors", "vendor", "code"),
         _c("va_barge_in_total", "Caller barge-ins", "honored"),

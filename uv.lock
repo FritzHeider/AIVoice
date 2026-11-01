@@ -8,6 +8,7 @@ members = [
     "va-common",
     "va-db",
     "va-domain",
+    "va-elevenlabs",
     "va-events",
     "va-events-sink",
     "va-media-worker",
@@ -2694,6 +2695,31 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-elevenlabs"
+version = "0.1.0"
+source = { editable = "packages/va_elevenlabs" }
+dependencies = [
+    { name = "opentelemetry-api" },
+    { name = "orjson" },
+    { name = "prometheus-client" },
+    { name = "pydantic" },
+    { name = "va-common" },
+    { name = "va-domain" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "prometheus-client", specifier = ">=0.26.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
+    { name = "websockets", specifier = ">=17.0" },
+]
+
+[[package]]
 name = "va-events"
 version = "0.1.0"
 source = { editable = "packages/va_events" }
@@ -2929,6 +2955,7 @@ dev = [
     { name = "va-common" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-elevenlabs" },
     { name = "va-events" },
     { name = "va-events-sink" },
     { name = "va-media-worker" },
@@ -2976,6 +3003,7 @@ dev = [
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-elevenlabs", editable = "packages/va_elevenlabs" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-media-worker", editable = "apps/media_worker" },

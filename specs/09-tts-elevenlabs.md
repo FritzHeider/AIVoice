@@ -208,6 +208,55 @@ bill TTS characters separately (included in per-minute), but cost (`cost_micros`
 - No audio for a flushed context within 3 000 ms → treat as failure → reconnect path.
 - After 3 failed reconnects → error path (`07` §19).
 
+> Decision (2026-11-01): TTS WebSocket client (P03-T10). `va_elevenlabs.tts_ws.TtsSocket` implements the §1
+> protocol (wire format in `tts_wire`, per-context state in `tts_context`, errors in `tts_errors`, metrics in
+> `tts_metrics`; configuration `tts_models.TtsConfig`).
+> 1. `open()` connects (header `xi-api-key`, `proxy=None`, open timeout 5 s, close timeout 2 s), retrying
+>    connect errors after 50/100/200 ms (4 attempts, then `TtsUnavailableError`; HTTP 401/403 on the handshake →
+>    `TtsAuthError`), and initialises `ka`. `async with TtsSocket(...)` only guarantees `close()` on exit.
+>    `start_context(id, voice)` may change only the voice settings: a different voice, model, or language (bound
+>    in the URL) is a `ValueError` (the caller opens another socket, §2). Reusing an open id or `ka` is a
+>    `ValueError`, and so is sending to an unknown, ended, or closed context.
+> 2. Callers only see logical context ids. A context is re-initialised after reconnect number n under the wire id
+>    `{id}-r{n}`; frames for the current wire id are reported under the logical id.
+> 3. Confirmation (§11 "first audio received"): a clause is confirmed once the visible (non-whitespace) alignment
+>    characters received for its context exceed the visible length of every earlier clause; any chunk confirms the
+>    first clause sent on the current socket (its alignment may be `null`). After a reconnect the count restarts
+>    at the first unconfirmed clause, and exactly the unconfirmed clauses are resent, each with its own `flush`
+>    flag (the clause a bare flush followed is resent with `flush: true`).
+> 4. End of utterance: the §5 chunker flushes every clause, so `send(..., flush=True)` only forces generation and
+>    `flush(id)` marks the end of the utterance (it sends the §3 bare flush only when the last clause had no
+>    flush). Once the utterance ended and every clause is confirmed, the client sends `close_context` after
+>    `tail_grace_s` (0.3 s) without audio, or after `no_audio_timeout_s` (3 s) when alignment did not cover every
+>    visible character; the server's `isFinal` then yields `TtsAudio(id, b"", None, is_final=True)`, exactly once
+>    per context. Audio of a context that was not cancelled is always forwarded.
+> 5. `cancel(id)` sends `close_context`, drops later audio of the context (`va_tts_late_audio_dropped_total`),
+>    and still yields its `is_final`. At most two utterance contexts are open (not yet closed by us) besides `ka`:
+>    `start_context` cancels the oldest first.
+> 6. Keepalive: `{"text": "", "context_id": "ka"}` once `keepalive_s` (15 s) passed since the last message carrying
+>    text, while no utterance context awaits its `isFinal`.
+> 7. Failures: error frames `voice_not_found` → `TtsVoiceNotFoundError`; `invalid_api_key`/`needs_authorization`
+>    → `TtsAuthError`; `context_closed`/`invalid_message`/`max_active_conversations` → `TtsProtocolError`; any
+>    other code → `TtsServerError`, counted (`va_vendor_errors_total{vendor="elevenlabs_tts", code}`) and handled
+>    by the reconnect path when the socket closes. Closes: reason `voice_not_found` → `TtsVoiceNotFoundError`;
+>    1008 `Invalid API key` → `TtsAuthError`; 1008 `invalid …` → `TtsProtocolError`; everything else (inactivity,
+>    1011, 1012, abnormal) reconnects. Malformed frames (not JSON, not an object, bad base64, bad alignment arrays)
+>    are `TtsProtocolError`; objects with none of `audio`/`isFinal`/`error` are ignored. A fatal error stops the
+>    socket and is raised from `audio()` and from later `start_context`/`send`/`flush`.
+> 8. Reconnect: delays 50/100/200 ms on the injected clock, each attempt counted in
+>    `va_vendor_ws_reconnects_total{vendor="elevenlabs_tts"}`. A reconnect attempt fails when it cannot connect,
+>    or when its socket closes before delivering audio or sending a keepalive; three consecutive failed attempts →
+>    `TtsUnavailableError`. A healthy socket resets the count. Unexpected closes reconnect even with no context
+>    open (warm socket). The no-audio watchdog (§11, 3 s after a flush or the last audio while a flushed clause is
+>    unconfirmed) and a send timeout (5 s) drop the socket into the same path. Contexts already closed by us or
+>    complete when their socket died yield `is_final` locally instead of being replayed.
+> 9. Metrics (media-worker catalog): `va_tts_ttfa_ms{model}` from a context's first text sent to its first audio
+>    (a reconnect before the first audio is included), `va_tts_characters_total{model}` counts clause characters
+>    written (resends included), plus the counters above. Spans: `elevenlabs.tts.connect` per attempt
+>    (`elevenlabs.voice_id`, `elevenlabs.model_id`, `elevenlabs.attempt`) and `elevenlabs.tts.context` per context
+>    (`elevenlabs.context_id`, `elevenlabs.characters`, `elevenlabs.ttfa_ms`, `elevenlabs.reconnects`), ended at
+>    `is_final` or `close()`, with error status on a fatal error.
+
 ## 12. Metrics
 
 `tts_ttfa_ms` (first text sent → first audio chunk per context), `tts_chars_total`, `tts_reconnects_total`,

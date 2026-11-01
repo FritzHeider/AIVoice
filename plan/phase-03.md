@@ -160,7 +160,7 @@
   - Deliverables: `verify_webhook(raw_body, headers, public_key, now)`, `verify_media_ws(stream_url, headers, public_key, now)`, event payload models for every voice and messaging event type, media message models (inbound and outbound) with parsing that tolerates unknown fields
   - Acceptance: fixed test vectors; 5-minute tolerance; tampered body rejected.
 
-- [ ] P03-T10 `va_elevenlabs` TTS WebSocket client
+- [x] P03-T10 `va_elevenlabs` TTS WebSocket client — TtsSocket (keepalive, tail-grace close_context, cancel/late-drop, alignment clause confirmation, -r{n} reconnect replay, no-audio watchdog, error classification, metrics/spans); 100 package tests incl. FakeElevenLabs mid-utterance reconnect resending only clause 2; make test 5665 passed 98.28 %, lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, radon avg A
   - Spec refs: specs/09-tts-elevenlabs.md (WS client, contexts, keepalive, reconnection, alignment)
   - Depends on: P03-T04
   - Deliverables: `TtsSocket` (connect once per call, `open_context`, `send_text`, `flush`, `close_context`, keepalive task, async iterator of `AudioChunk(context_id, audio, alignment)`), reconnection policy

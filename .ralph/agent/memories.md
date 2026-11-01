@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793520581-4eea
+> va_elevenlabs P03-T10: TtsSocket (tts_ws) state-first-then-write under one lock so reconnect replay repairs failed writes; flush(id) = end of utterance (close_context after tail grace), send(flush=True) only forces generation; tests use tts_client_helpers RecordingTtsServer + rig(url) on ManualClock; ManualClock.wait_for_sleep(s) before run_for(s) when the sleeper starts after real socket I/O
+<!-- tags: elevenlabs, testing, clock | created: 2026-11-01 -->
+
 ### mem-1793518547-0b04
 > va_telnyx P03-T09: inbound Telnyx verification in va_telnyx.signatures (verify_webhook/verify_media_ws, WebhookVerificationError.reason), webhooks.parse_envelope/parse_payload (UnknownEventPayload for unmodelled types e.g. number_order.complete), voice_events one model per specs/06 §5 row (test parses the §5 table), media.parse_media_message fast path; contract tests verify FakeTelnyx webhooks with state.signing_key.public_key_b64 + state.clock.now(); helpers telnyx_client_helpers.provisioned/sms_number
 <!-- tags: telnyx, testing | created: 2026-11-01 -->

@@ -834,3 +834,16 @@ Grafana 3001
   modelled event (clear `transport.received` after ordering numbers). The fixed signature vector in
   `test_signatures.py` uses the seed `bytes(range(32))`. Provision app + messaging profile in va_telnyx tests with
   `telnyx_client_helpers.provisioned(client, voice_url, sms_url)`.
+- 2026-11-01 (P03-T10): `packages/va_elevenlabs` (dist `va-elevenlabs`) holds the TTS socket
+  `va_elevenlabs.tts_ws.TtsSocket(TtsConfig(ws_base, api_key, ...), clock=, metrics=CatalogTtsMetrics(...),
+  tracer_provider=)` (rules: specs/09 §11 Decision P03-T10). `flush(id)` ends an utterance (`close_context` follows
+  after the tail grace); `send(..., flush=True)` only forces generation. Client state changes before every write,
+  so a write to a dead socket is repaired by the reconnect replay. `va_tts_late_audio_dropped_total` is in the
+  media-worker catalog (`test_metrics` counts 57 spec rows). Never import `va_sim` from `va_elevenlabs` src.
+  Tests: `tests/support/tts_client_helpers.py` (`RecordingTtsServer` with `reject_status`, `auto_final`,
+  `auto_close`; `Connection.next/take/send/close`; `audio_frame`, `final_frame`, `opened`, `collect`, `rig(url)`
+  = socket on a `ManualClock` + media-worker registry + memory spans). `ManualClock`
+  (`packages/va_common/tests/clock_helpers.py`) parks sleepers until `run_for(s)`; before advancing past a delay
+  that a task starts after real socket I/O, `await clock.wait_for_sleep(s)` (event-driven, no polling). Prove
+  "nothing was sent before X" by issuing a marker message and asserting it is the next one received. Contract
+  tests run the socket on the wall clock against `tts_helpers.served(realtime_state())`.

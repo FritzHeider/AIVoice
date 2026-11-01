@@ -990,3 +990,184 @@ pass, make test 5565 passed (98.30 %), spec refs 0, radon avg A, jscpd 0.
 ## Review P03-T09 re-review (Reviewer, 2026-11-01)
 Approved. Finding 1 fixed (12-digit cap → malformed_timestamp, Decision rule 1 updated, tests for 13/400/5000 digits on
 both verifiers). Re-ran: lint/typecheck/placeholders pass, make test 5565 passed (98.30 %), spec refs 0.
+
+## Plan P03-T10 (Planner, 2026-11-01)
+`va_elevenlabs` TTS multi-context WebSocket client (specs/09 §1-§3, §8, §11, §12; sim contract specs/30 §3.3
+Decision P03-T04 + P03-T05c rule 9). New workspace package `packages/va_elevenlabs` (dist `va-elevenlabs`, module
+`va_elevenlabs`). Client builds every wire message itself from specs/09 §3 — never import `va_sim` from src (tests may).
+
+### Spec decision to write: specs/09 §11 `> Decision (2026-11-01): TTS WebSocket client (P03-T10).`
+1. Class `va_elevenlabs.tts_ws.TtsSocket` implements the §1 `StreamingTts` protocol with the §1 method names
+   (`open/start_context/send/flush/cancel/audio/close`; the plan's `open_context/send_text/close_context` names map to
+   these). Also an async context manager (`async with TtsSocket(...) as tts` → `open` on enter is NOT implied: enter
+   only guarantees `close()` on exit). Socket voice = the `open()` voice; `start_context(id, voice)` with a different
+   `provider_voice_id` → `ValueError` (caller opens a second socket, §2); a different `settings` is sent in that
+   context's init only.
+2. Logical vs wire ids: callers only ever see the logical `context_id`; after reconnect n the wire id is
+   `{id}-r{n}` (§11) and audio for it is reported under the logical id.
+3. Clause confirmation: a clause is confirmed when the cumulative count of non-whitespace alignment `chars` received
+   for the context exceeds the non-whitespace length of all earlier clauses (alignment `null` confirms nothing,
+   except that the context's first audio chunk always confirms clause 0). Reconnect resends exactly the unconfirmed
+   clauses (each with its original `flush` flag, then a bare flush if the context had been flushed).
+4. End of utterance: when every clause of a flushed context is confirmed and no audio for it has arrived for
+   `tail_grace_s` (0.3 s, injected clock), the client sends `close_context`; the server `isFinal` yields
+   `TtsAudio(context_id, b"", None, is_final=True)`. Audio arriving for a non-cancelled context before `isFinal` is
+   forwarded. Only cancelled contexts drop audio (`va_tts_late_audio_dropped_total`). After `cancel` the `isFinal`
+   still yields `is_final=True` (callers know the server freed the slot). A context's `is_final` is emitted once.
+5. Max 3 contexts (`ka` + 2): `start_context` with 2 non-`ka` contexts open cancels the oldest first.
+6. Keepalive: `ka` initialised at open with `{"text": " ", "context_id": "ka"}` (no voice settings); every
+   `keepalive_s` (15) of injected-clock time with no non-`ka` context open, send `{"text": "", "context_id": "ka"}`.
+7. Failure classification (`tts_errors.classify_close(code, reason)`, `classify_error(error)`):
+   close 1008 reason `Invalid API key` → `TtsAuthError` (fatal); error frame or close reason `voice_not_found` →
+   `TtsVoiceNotFoundError` (fatal, caller switches voice); other 1008 closes starting `invalid ` → `TtsProtocolError`
+   (fatal); error frames `context_closed|invalid_message|max_active_conversations` → `TtsProtocolError` (fatal, our
+   bug); `quota_exceeded`/`insufficient_credits`... unknown error codes → `TtsServerError` recorded
+   (`va_vendor_errors_total{vendor="elevenlabs_tts", code=<error>}`) and handled by the reconnect path when the socket
+   closes; inactivity close (reason starts `Have not received`), 1011, 1012, 1006/abnormal, connect errors → retry.
+   A fatal error is raised from the `audio()` iterator (and from later `send`/`flush`) and stops the socket.
+8. Reconnect: delays 50/100/200 ms (injected clock); a failed attempt = connect error or a new socket that closes
+   before delivering any audio; 3 consecutive failed attempts → `TtsUnavailableError` (raised from `audio()`). A
+   reconnect is attempted on every unexpected close (keep warm), also with no active context. Each reconnect
+   increments `va_vendor_ws_reconnects_total{vendor="elevenlabs_tts"}`. No audio for a context within
+   `no_audio_timeout_s` (3.0) after its first flush → reconnect path (same accounting).
+9. Metrics via the media-worker catalog (`va_tts_ttfa_ms{model}` first text sent → first audio per context,
+   reset on reconnect only if no audio yet; `va_tts_characters_total{model}` characters of every text frame;
+   `va_vendor_ws_reconnects_total`; `va_vendor_errors_total`; new `va_tts_late_audio_dropped_total` counter, added to
+   specs/27 §3.3 and `va_common.metrics` CATALOG). Spans: `elevenlabs.tts.connect` per attempt (attrs
+   `elevenlabs.voice_id`, `elevenlabs.model_id`, `elevenlabs.attempt`) and `elevenlabs.tts.context` per context
+   (`elevenlabs.context_id`, `elevenlabs.characters`, `elevenlabs.ttfa_ms`, `elevenlabs.reconnects`, ends at is_final
+   / cancel / close; error status on fatal).
+10. Timeouts: connect `open_timeout_s` 5, each send `send_timeout_s` 5 (a send timeout = socket failure → reconnect
+    path), close handshake 2 s. `websockets` client with `proxy=None`, `additional_headers={"xi-api-key": key}`.
+
+### Files
+- `packages/va_elevenlabs/pyproject.toml` (deps: `websockets>=17.0`, `orjson`, `pydantic>=2.9`,
+  `opentelemetry-api`, `prometheus-client`, `va-common`, `va-domain`; uv_build; `[tool.uv.sources]` workspace).
+  `src/va_elevenlabs/py.typed`. Root `pyproject.toml`: dev group `"va-elevenlabs"`, sources entry, mypy_path
+  `packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support`, mypy files src+tests, pytest pythonpath
+  `packages/va_elevenlabs/tests/support`. `uv lock`. Mirror whatever else va_telnyx registered (grep the repo for
+  `va_telnyx` in Makefile/CI/coverage config).
+- `src/va_elevenlabs/tts_models.py`: `type OutputFormat = Literal["ulaw_8000", "pcm_16000"]`; `TtsVoice`
+  (`provider_voice_id`, `model_id = "eleven_flash_v2_5"`, `settings: va_domain.voices.VoiceSettings = VoiceSettings()`,
+  `language_code: str | None = None`, frozen); `ChunkAlignment(chars: tuple[str, ...], char_start_ms: tuple[int, ...],
+  char_duration_ms: tuple[int, ...])` frozen; `TtsAudio(context_id, audio: bytes, alignment: ChunkAlignment | None,
+  is_final: bool = False)` frozen; `StreamingTts` Protocol (§1 verbatim); `@dataclass(frozen=True) TtsConfig(ws_base,
+  api_key, zero_retention=False, inactivity_timeout=180, chunk_length_schedule=(50, 90, 120, 150), keepalive_s=15.0,
+  no_audio_timeout_s=3.0, tail_grace_s=0.3, reconnect_delays_s=(0.05, 0.1, 0.2), open_timeout_s=5.0,
+  send_timeout_s=5.0)` (`repr=False` on api_key).
+- `src/va_elevenlabs/tts_wire.py` (pure): `socket_url(config, voice, fmt) -> str` (path `/v1/text-to-speech/{voice}/
+  multi-stream-input`, query in §2 table order: model_id, output_format, sync_alignment=true, auto_mode=false,
+  inactivity_timeout, apply_text_normalization=auto, language_code only when set, enable_ssml_parsing=false,
+  enable_logging=false only when zero_retention; voice id URL-quoted; ws_base trailing slash tolerated);
+  `init_context(wire_id, settings, schedule) -> bytes`, `keepalive_init() -> bytes`, `keepalive() -> bytes`,
+  `text_message(wire_id, text, *, flush) -> bytes` (`normalize_clause(text)`: strip trailing whitespace + exactly one
+  space; `flush` key only when true; empty/whitespace text → ValueError), `flush_message`, `close_context_message`,
+  `close_socket_message` (orjson bytes, key order as §3); `parse_frame(raw: str | bytes) -> AudioFrame | FinalFrame |
+  ErrorFrame` (slots dataclasses; `AudioFrame(wire_id, audio bytes (b64 decoded, validate=True), alignment
+  ChunkAlignment|None)` from `audio`/`contextId`/`alignment{chars,charStartTimesMs,charDurationsMs}`; `FinalFrame(
+  wire_id)`; `ErrorFrame(error, message, code)`; anything else / bad base64 / mismatched alignment lengths →
+  `TtsProtocolError`). Audio frames with empty `audio` string are ignored by the socket (not an error).
+- `src/va_elevenlabs/tts_errors.py`: `TtsError(Exception)` (`code: str`), subclasses `TtsAuthError`,
+  `TtsVoiceNotFoundError`, `TtsProtocolError`, `TtsServerError`, `TtsUnavailableError`; `type Disposition =
+  Literal["retry", "fatal"]`; `classify_close(code: int | None, reason: str) -> TtsError | None` (None = retry),
+  `classify_error(frame: ErrorFrame) -> TtsError` + `is_fatal(err)`. Messages never contain the API key.
+- `src/va_elevenlabs/tts_context.py` (pure): `Clause(text, flush, confirmed=False)`; `ContextState(logical_id,
+  settings, schedule)` with `wire_id`, `rewire(n)`, `add(text, flush)`, `mark_flushed()`, `confirm(alignment|None) ->
+  int` (newly confirmed), `unconfirmed() -> list[Clause]`, `complete() -> bool` (flushed and all confirmed),
+  `cancelled`, `final_emitted`, `first_text_at`, `first_audio_at`, `last_audio_at`, `characters`.
+- `src/va_elevenlabs/tts_metrics.py`: `TtsMetrics` Protocol (`ttfa(model, ms)`, `characters(model, n)`,
+  `reconnect()`, `vendor_error(code)`, `late_dropped()`), `CatalogTtsMetrics(ServiceMetrics)` using the catalog
+  names, `NullTtsMetrics`.
+- `src/va_elevenlabs/tts_ws.py`: `TtsSocket(config, *, clock: Clock = SystemClock(), metrics: TtsMetrics =
+  NullTtsMetrics(), tracer_provider=None, connect=websockets.asyncio.client.connect)`. Internals: one reader task +
+  one timer task (keepalive / tail grace / no-audio watchdog; wakes every `min(pending deadlines)` via
+  `clock.sleep`), both created in `open()`, cancelled in `close()`; a done-callback turns an unexpected task crash into
+  the terminal error. Output `asyncio.Queue[TtsAudio | TtsError]`; `audio()` is an async generator that raises the
+  terminal error and ends after `close()`. Send lock around every socket write. Reconnect logic in a private method
+  used by both reader (on close) and watchdog. `close()` sends `close_socket`, waits ≤ 2 s for the server close,
+  then closes; idempotent. Keep each method radon ≤ B (split helpers).
+- `src/va_elevenlabs/__init__.py`: export public names.
+- `packages/va_common/src/va_common/metrics.py`: add `_c("va_tts_late_audio_dropped_total", ...)` to the
+  media-worker list; specs/27 §3.3 row `va_tts_late_audio_dropped_total | counter | —`.
+- `packages/va_common/tests/clock_helpers.py`: `ManualClock(FrozenClock)` — `sleep(s)` parks a future until
+  `advance()` passes its deadline (`sleep(0)` yields once); `async def run_for(seconds)` advances and yields a few
+  loop turns; `sleepers` count for asserting a timer is parked (never poll with real sleeps).
+- specs/09 §11 Decision (above); AGENTS.md bullet (package, modules, test helpers, gotchas found).
+
+### Tests (packages/va_elevenlabs/tests/; support `tests/support/tts_client_helpers.py`)
+Support: `RecordingTtsServer` (websockets `serve` on 127.0.0.1:0; records every connection's path/query/headers and
+JSON messages into `asyncio.Queue`s; `next_message(timeout)` with a wall-clock bound; test can `send_frame`,
+`close(code, reason)` the current connection, refuse further connections); `sim_tts(state)` = `tts_helpers.served`
++ a `TtsConfig(ws_base=url.replace("http","ws"), api_key=...)`; `collect(tts, until=...)` reads `audio()` with a
+wall timeout. conftest re-exports `isolated_env`/`reset_logging` like va_telnyx.
+- `test_tts_wire.py`: exact bytes/JSON for every §3 message (compare with the spec's literal JSON examples parsed
+  from specs/09 §3 code blocks so the spec stays the oracle), clause normalization (`"Hi"`→`"Hi "`, `"Hi  \n"`→
+  `"Hi "`, empty → ValueError), URL query (order, language_code present/absent, enable_logging only under zero
+  retention, quoted voice id), `parse_frame` audio/alignment/null alignment/isFinal/error/garbage/bad base64/length
+  mismatch/non-object.
+- `test_tts_context.py`: confirmation by non-whitespace alignment counts across chunk boundaries, null alignment,
+  first chunk confirms clause 0, `unconfirmed`, `rewire` ids `t7-0-r1`, `t7-0-r2`, `complete`.
+- `test_tts_errors.py`: classification table (every row of Decision rule 7).
+- `test_tts_protocol.py` (RecordingTtsServer + ManualClock): message sequence snapshot (ka init, context init with
+  voice_settings + `generation_config.chunk_length_schedule [50,90,120,150]`, text frames, bare flush,
+  close_context on cancel, close_socket on close) + `xi-api-key` header + URL query; keepalive cadence (no message
+  before 15 s, one at 15 s, two at 30 s, none while a context is open, resumes after its isFinal); max contexts
+  (third start sends close_context for the oldest); voice mismatch → ValueError; tail grace → close_context only
+  after `tail_grace_s` of silence once all clauses confirmed; is_final emitted once; cancel then late audio frame →
+  dropped (metric) and not yielded; no-audio watchdog: flushed, no audio, advance 3 s → second connection with
+  `t1-0-r1` init and the resent clause; error frame `quota_exceeded` → vendor error metric then reconnect on close;
+  `context_closed` error → TtsProtocolError from `audio()`; send after fatal raises; malformed frame → TtsProtocolError;
+  3 failed reconnects (server refuses) → TtsUnavailableError; metrics (ttfa observed once per context, characters,
+  reconnects) read from a `build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))` registry;
+  spans with `memory_provider()`.
+- `test_tts_contract.py` (FakeElevenLabs `realtime_state()` + `served`): open + two flushed clauses → μ-law audio
+  under the logical id, alignment chars reconstruct the text, `is_final` after completion; sim
+  `/sim/elevenlabs/tts/requests` shows contexts `ka` and `t1-0` with the expected text/model/output_format;
+  `pcm_16000`; cancel during a `delay` fault → no audio after cancel, is_final, record `interrupted`;
+  **reconnection mid-utterance**: arm `disconnect` with `after_chunks` = first chunk of clause 2 (clause 1 = 13 chars
+  × 60 ms → 4 chunks, so `after_chunks=4`) → client reconnects, sim records a `t1-0-r1` context whose text is only
+  clause 2, audio covers both clauses, reconnect metric 1; `error` fault → reconnect; `disconnect` fault with
+  `after_chunks=0, times=4` → TtsUnavailableError; unknown voice → TtsVoiceNotFoundError; allow-list without the key
+  → TtsAuthError; close() → record end_reason `close_socket`.
+- Coverage va_elevenlabs ≥ 95 % (aim 100 %).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(the client's wire builders vs sim tts code must stay structurally distinct), `uvx radon cc -s -a
+packages/va_elevenlabs/src` (no C+), audit (`uvx pip-audit` on `uv export`, `corepack pnpm audit`).
+
+### Risks
+- Sim `close_context` drops the in-flight tail (rule 6), so close_context only after tail grace; do not shorten.
+- Accelerated sim clock + real sockets race: contract tests use `realtime_state()`; client timers use their own
+  injected clock (SystemClock in contract tests, ManualClock in protocol tests).
+- websockets 17 honours proxy env vars — pass `proxy=None`. `filterwarnings=error`: close every connection/server
+  in tests (unclosed sockets raise ResourceWarning).
+- Reconnect + cancellation races: all socket writes under one lock; a reconnect in progress must queue `send`s
+  (await an `_connected` event) rather than writing to the dead socket.
+- `va_tts_late_audio_dropped_total` catalog addition may be asserted by an existing metrics test parsing specs/27
+  §3.3 — update both together.
+
+## Build P03-T10 (Builder, 2026-11-01)
+New package `packages/va_elevenlabs` (tts_models, tts_wire, tts_context, tts_errors, tts_metrics, tts_ws) +
+tests (wire vs specs/09 §3 JSON examples, context, errors, metrics, 31 protocol tests on RecordingTtsServer +
+ManualClock, 8 FakeElevenLabs contract tests incl. mid-utterance reconnect resending only clause 2 as `t1-0-r1`).
+Deviations from the plan, written into specs/09 §11 Decision P03-T10:
+- `flush(id)` marks end of utterance (chunker flushes every clause, so flush flags cannot); close_context follows
+  after 0.3 s quiet (3 s if alignment did not cover every visible char).
+- Reconnect attempt failure = cannot connect OR socket closes before audio/keepalive (bounds a close-on-connect
+  loop); initial socket loss does not count; 3 consecutive failures → TtsUnavailableError.
+- Frames that are objects with none of audio/isFinal/error are ignored (not fatal); ttfa not reset on reconnect.
+- Contexts closed by us or complete when their socket died emit is_final locally instead of replay.
+Also: `va_tts_late_audio_dropped_total` in catalog + specs/27 §3.3 (test_metrics count 56→57); ManualClock +
+settle in va_common/tests/clock_helpers.py; StreamingTts Protocol wrapped in jscpd ignore (verbatim spec).
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 5665 passed 98.28 %, va_elevenlabs 97 %,
+spec refs 0, jscpd 0 clones, radon avg A (no C), pip-audit no known vulns, pnpm audit 3 moderate (pre-existing).
+
+## Review P03-T10 (Reviewer, 2026-11-01)
+Approved. Re-ran: make lint/typecheck/placeholders exit 0 (0 findings), make test 5665 passed 98.28 %
+(va_elevenlabs tts_ws 96 %, others 99-100 %), spec refs 0, jscpd 0 clones, radon avg A (no C), package suite 3x
+stable (100 passed, ~4.4 s). Checked against specs/09 §1-§3, §8, §11: URL query order, exact message shapes,
+ka init/keepalive, max 2 utterance contexts + ka, cancel drops late audio (new metric in specs/27 §3.3 +
+catalog), -r{n} replay of unconfirmed clauses only, 50/100/200 ms reconnect with 3-failure limit, 3 s
+watchdog. API key only in header (TtsConfig repr=False). Looked at a close()-during-reconnect leak race:
+not reachable (the reader cannot be parked inside _attach with _ws unset).

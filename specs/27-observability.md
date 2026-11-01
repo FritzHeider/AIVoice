@@ -147,6 +147,7 @@ named `LAT_MS`.
 | `va_tts_ttfa_ms` | histogram | `model` |
 | `va_tts_characters_total` | counter | `model` |
 | `va_tts_cache_hits_total` / `va_tts_cache_misses_total` | counter | — |
+| `va_tts_late_audio_dropped_total` | counter | — |
 | `va_vendor_ws_reconnects_total` | counter | `vendor` (elevenlabs_stt/elevenlabs_tts) |
 | `va_vendor_errors_total` | counter | `vendor`, `code` |
 | `va_barge_in_total` | counter | `honored` (true/false) |
