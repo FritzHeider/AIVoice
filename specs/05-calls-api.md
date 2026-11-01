@@ -696,6 +696,11 @@ retries are therefore no-ops). Bland status mapping in the Call Object: `no_answ
 > Decision (2026-11-01): `scheduled` → `failed` (P05-T05b) is allowed too, for a scheduled call whose `CallWorkflow`
 > could not be started at creation (§5 Decision P05-T05b item 5).
 
+> Decision (2026-11-01): `CallWorkflow` moves calls through `va_workflows.activities` (P05-T06b): `dial` takes
+> `scheduled → queued → dialing` (admission of scheduled calls) and `dialing → failed` (carrier rejection), `end_call`
+> records workflow-decided ends (`canceled`, `dispatch_blocked`, `carrier_error`, `error`, `worker_crash`,
+> `fax_detected`, `max_duration`). Rules: specs/06 §6 Decision P05-T06b.
+
 ## 9. `end_reason` enumeration (normative; referenced by other specs)
 
 | `end_reason` | `ended_by` | Bland `call_ended_by` | Meaning |

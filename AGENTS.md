@@ -1192,3 +1192,16 @@ Grafana 3001
   `temporalio.testing.ActivityEnvironment().run(...)`; resolved configs for test rows come from
   `resolved_configs.resolved_config(name)` (va_domain tests/support); `call_rows.seed_call(..., config=...)`
   overrides any default column.
+- 2026-11-01 (P05-T06b): call activities are classes with keyword-only collaborators: `TelephonyActivities(database=,
+  telnyx=TelnyxClientFactory, limiter=, publisher=, settings=DialSettings.for_env(va_env, ...), clock=)` (`dial`,
+  `hangup_call`) and `CallEndActivities(database=, limiter=, publisher=, redis=, clock=)` (`end_call`); inputs, results,
+  timeouts and retry policies in `va_workflows.activities.telephony_inputs`, error type names in `activities.errors`
+  (both workflow-safe). Workflows must call `end_call` before `hangup_call`. Event rows go through
+  `activities.events.persist_events` (in the change's transaction) + `broadcast_events` after the commit. Connected/
+  transfer seconds: `va_db.call_states.call_durations` (the edge uses it too); `CallLegRepo.primary(call_id)` finds the
+  primary leg. Tests: `packages/va_workflows/tests/support/telephony_rig.py` (`rig(database, answer=, realtime=)`:
+  FakeTelnyx via ASGI with every request recorded in `Rig.sent`/`dials()`, fakeredis, `SystemClock` for the
+  `call_events` partitions, `seed`, `byo_account`, `failing_factory(r, handler)` without client retries,
+  `broken_redis()`). FakeTelnyx's accelerated clock jumps to the next carrier timer (time limit!) whenever the loop
+  waits on Postgres: tests that need a live carrier call use `realtime=True`. FakeTelnyx answers a repeated
+  `command_id` as a duplicate (`ok`), even after the call ended.

@@ -123,6 +123,16 @@ class CallLegRepo:
         )
         return await self.session.scalar(statement.execution_options(populate_existing=True))
 
+    async def primary(self, call_id: uuid.UUID) -> CallLeg | None:
+        """The call's ``primary`` leg (the first recorded when several exist); ``None`` before the dial."""
+        statement = (
+            select(CallLeg)
+            .where(CallLeg.org_id == self.org_id, CallLeg.call_id == call_id, CallLeg.role == "primary")
+            .order_by(CallLeg.created_at, CallLeg.id)
+            .limit(1)
+        )
+        return await self.session.scalar(statement.execution_options(populate_existing=True))
+
     async def record_initiated(  # noqa: PLR0913 - keyword-only leg attributes
         self,
         call_id: uuid.UUID,

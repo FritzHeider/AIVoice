@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import itertools
 import re
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import get_args
 
 import pytest
@@ -16,6 +18,7 @@ from va_db.call_states import (
     TERMINAL_STATUSES,
     EndReason,
     allowed_from,
+    call_durations,
     is_terminal,
     leg_allowed_from,
 )
@@ -113,3 +116,37 @@ def test_leg_hangup_is_final_and_initiated_is_never_entered() -> None:
     assert set(LEG_TRANSITIONS) == set(get_args(CallLegState))
     assert not leg_allowed_from("initiated")
     assert "hangup" not in set().union(*LEG_TRANSITIONS.values())
+
+
+_ANSWERED = datetime(2026, 11, 1, 12, tzinfo=UTC)
+
+
+def test_connected_seconds_run_from_answer_to_end_without_a_transfer() -> None:
+    ended = _ANSWERED + timedelta(seconds=61, microseconds=234_567)
+
+    assert call_durations(_ANSWERED, ended) == {"connected_seconds": Decimal("61.235")}
+
+
+def test_a_transfer_splits_connected_and_transfer_seconds() -> None:
+    transfer = _ANSWERED + timedelta(seconds=30)
+    ended = _ANSWERED + timedelta(seconds=95, milliseconds=500)
+
+    assert call_durations(_ANSWERED, ended, transfer) == {
+        "transfer_seconds": Decimal("65.500"),
+        "connected_seconds": Decimal("30.000"),
+    }
+
+
+def test_a_transfer_started_after_the_end_counts_connected_time_to_the_end() -> None:
+    ended = _ANSWERED + timedelta(seconds=10)
+
+    assert call_durations(_ANSWERED, ended, ended + timedelta(seconds=2)) == {
+        "transfer_seconds": Decimal("0.000"),
+        "connected_seconds": Decimal("10.000"),
+    }
+
+
+def test_an_end_before_the_answer_clamps_to_zero() -> None:
+    assert call_durations(_ANSWERED, _ANSWERED - timedelta(seconds=3)) == {
+        "connected_seconds": Decimal("0.000")
+    }

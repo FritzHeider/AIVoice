@@ -126,13 +126,17 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 `call.error` events carry `data.code` from this closed set: `stt_reconnect`, `stt_warning`, `tts_error`, `stream_failed`,
 `recording_failed`, `listen_leg_misrouted`, `TEMPLATE_VAR_MISSING`, `TOOL_FAILED`, `CUSTOM_CODE_FAILED`, `KB_TIMEOUT`,
 `PATHWAY_UNPUBLISHED`, `PATHWAY_VERSION_FALLBACK`, `VOICE_NOT_FOUND`, `CONTACT_IDENTIFIER_CONFLICT`, `RECORDING_MISSING`,
-`llm_fallback`, `llm_failed`, `pipeline_fatal`, `dispatch_failed`.
+`llm_fallback`, `llm_failed`, `pipeline_fatal`, `dispatch_failed`, `dial_failed`.
 Level is `warning` for recoverable codes and `error` for `pipeline_fatal`, `llm_failed`, `stream_failed`,
-`dispatch_failed`.
+`dispatch_failed`, `dial_failed`.
 
 > Decision (2026-11-01): `dispatch_failed` (P05-T05b) is recorded by the api when `CallWorkflow` could not be started
 > after the `calls` row was committed (`data = {"code": "dispatch_failed", "detail": "workflow_start"}`, message "Call
 > workflow could not be started."); see specs/05 §5 Decision P05-T05b.
+
+> Decision (2026-11-01): `dial_failed` (P05-T06b) is recorded by the `dial` activity when Telnyx rejects the dial
+> (`data = {"code": "dial_failed", "detail": <first Telnyx error code, or "unknown", or "account_unavailable">}`,
+> message = `calls.error_message`); see specs/06 §6 Decision P05-T06b.
 
 ## 3. Webhook routing rules
 

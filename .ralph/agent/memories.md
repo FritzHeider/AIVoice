@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793575125-f13d
+> P05-T06b: va_workflows activities TelephonyActivities(dial,hangup_call)/CallEndActivities(end_call) keyword-only ctor; test rig packages/va_workflows/tests/support/telephony_rig.py (FakeTelnyx ASGI + recorded requests, fakeredis, SystemClock); FakeTelnyx AcceleratedClock jumps to time-limit while awaiting Postgres -> realtime=True for live-call tests; FakeTelnyx answers repeated command_id as duplicate ok even after hangup; DialSettings.allowed_countries must include US or admission blocks INTERNATIONAL_NOT_ENABLED
+<!-- tags: workflows, telnyx, testing | created: 2026-11-01 -->
+
 ### mem-1793569614-ee33
 > P05-T05b: SQLAlchemy async (greenlet) made coverage report phantom misses after awaited DB calls; fixed with [tool.coverage.run] concurrency=[greenlet,thread]. Send Call dispatch = va_api.services.call_dispatch; EventPublisher.sequence/broadcast + va_events.insert_rows for in-transaction call_events rows; api tests that dispatch need SessionContainer(clock=FrozenClock(call_helpers.business_hours_today())) for call_events partitions; pydantic Field(exclude_if=) to omit optional response fields (wrap model_serializer kills OpenAPI examples)
 <!-- tags: api, calls, testing | created: 2026-11-01 -->

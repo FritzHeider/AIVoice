@@ -12,12 +12,11 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
 from typing import Any, Final
 
 from pydantic import JsonValue
 
-from va_db.call_states import END_REASONS, EndReason
+from va_db.call_states import END_REASONS, EndReason, call_durations
 from va_db.models import AnsweredBy, CallEventLevel, CallLegState, CallStatus
 from va_domain.carrier import CarrierLeg
 from va_events.catalog import EventType
@@ -82,7 +81,6 @@ SIGNALLED_TYPES: Final = frozenset(
 )
 """Types signalled to ``CallWorkflow`` (specs/06 §5 Decision P05-T02 item 3)."""
 
-_CONNECTED_PRECISION: Final = Decimal("0.001")
 _INVALID_SIP_CAUSES: Final = frozenset({"404", "484", "604"})
 _STANDARD_AMD: Final[Mapping[str, str]] = {
     "human": "human_residence",
@@ -176,10 +174,6 @@ def _iso(value: datetime) -> str:
     return value.isoformat()
 
 
-def _seconds(start: datetime, end: datetime) -> Decimal:
-    return max(Decimal(0), Decimal(str((end - start).total_seconds()))).quantize(_CONNECTED_PRECISION)
-
-
 def _ended(reason: EndReason, ended_at: datetime, **values: Any) -> dict[str, Any]:
     return {"end_reason": reason, "ended_by": END_REASONS[reason], "ended_at": ended_at, **values}
 
@@ -216,12 +210,7 @@ def hangup_outcome(payload: CallHangup, snapshot: CallSnapshot, occurred_at: dat
         reason = "max_duration"
     elif snapshot.status == "transferred":
         reason = "transferred"
-    values: dict[str, Any] = {}
-    connected_end = ended_at
-    if snapshot.transfer_started_at is not None:
-        connected_end = min(ended_at, snapshot.transfer_started_at)
-        values["transfer_seconds"] = _seconds(snapshot.transfer_started_at, ended_at)
-    values["connected_seconds"] = _seconds(snapshot.answered_at, connected_end)
+    values = call_durations(snapshot.answered_at, ended_at, snapshot.transfer_started_at)
     return HangupOutcome(CallChange("completed", _ended(reason, ended_at, **values)), reason)
 
 

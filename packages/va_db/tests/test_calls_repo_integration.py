@@ -119,6 +119,22 @@ async def test_record_initiated_is_idempotent_and_fills_missing_ids(database: Da
     assert (leg.call_leg_id, leg.call_session_id, leg.state) == ("leg-1", "sess-1", "initiated")
 
 
+async def test_primary_is_the_first_primary_leg_of_the_call(database: Database) -> None:
+    call = await seed_call(database)
+    other = await seed_call(database, org_id=call.org_id)
+    first, second = _ccid(), _ccid()
+    await seed_leg(database, call, _ccid(), role="transfer_target")
+    await seed_leg(database, other, _ccid())
+    async with database.tenant_session(call.org_id) as session:
+        assert await CallLegRepo(session, call.org_id).primary(call.call_id) is None
+    await seed_leg(database, call, first)
+    await seed_leg(database, call, second)
+    async with database.tenant_session(call.org_id) as session:
+        leg = await CallLegRepo(session, call.org_id).primary(call.call_id)
+    assert leg is not None
+    assert leg.call_control_id == first
+
+
 async def test_advance_is_guarded(database: Database) -> None:
     call = await seed_call(database)
     ccid = _ccid()

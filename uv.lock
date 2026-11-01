@@ -3116,23 +3116,31 @@ version = "0.1.0"
 source = { editable = "packages/va_workflows" }
 dependencies = [
     { name = "opentelemetry-api" },
+    { name = "phonenumbers" },
     { name = "pydantic" },
     { name = "redis" },
     { name = "temporalio" },
+    { name = "va-billing" },
     { name = "va-common" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-events" },
+    { name = "va-telnyx" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "phonenumbers", specifier = ">=9.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "redis", specifier = ">=5.1" },
     { name = "temporalio", specifier = ">=1.34" },
+    { name = "va-billing", editable = "packages/va_billing" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-events", editable = "packages/va_events" },
+    { name = "va-telnyx", editable = "packages/va_telnyx" },
 ]
 
 [[package]]

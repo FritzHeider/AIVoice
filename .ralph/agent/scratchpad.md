@@ -1803,3 +1803,236 @@ Approved. Re-ran make lint/typecheck/placeholders (0 findings), check_spec_refs 
 check order (signature before expiry), rotation, settings redaction match specs/28 §6.2 Decision; context builder
 drops non-config keys, stores by_alias; prefetch skips terminal calls, CallNotFound non-retryable incl. RLS case.
 Ticked P05-T06a. Next: P05-T06b.
+
+## Plan P05-T06b — Telephony call activities: dial, hangup, end-state recording (Planner, 2026-11-01)
+Facts checked: dispatch (P05-T05b) already took limits + concurrency slot + hold for `queued` calls; `scheduled`
+calls took nothing (specs/24 §6 Decision P05-T04b). `calls.from_number` is already selected at Send Call (read-only,
+specs/16 §6.2 Decision P05-T03c) → §6 step 4 "select from / mark pool usage" = use `calls.from_number`; pool usage
+marking arrives with P10 (say so in the Decision). Edge maps `call.initiated` only `dialing → ringing`, and treats an
+answered hangup as "unchanged" when `calls.end_reason` is already set (specs/06 §5 Decision item 7). `transfer_started_at`
+lives in `call:{<id>}:carrier_state`. Durations helper `_seconds` is private to `va_edge.mapping`. `DialResult` has
+`call_control_id`, `call_leg_id`, `call_session_id`. BYO connection id = `telnyx_accounts.call_control_app_id`.
+`WorkerSettings` has no telephony fields yet (T06c wires the container); here activities take an injected
+`DialSettings` dataclass.
+
+### Decisions (one block `> Decision (2026-11-01): dial and end-state activities (P05-T06b).` under specs/06 §6,
+### plus a one-line `dial_failed` addition under specs/19 §2.1 and a pointer line under specs/05 §8)
+1. Status guard / idempotency of `dial` (activity retries reuse `command_id=dial-<call_id>`):
+   terminal → `skipped`; `scheduled` → dispatch admission (item 2) then `scheduled → queued` with `credit_hold_id`
+   (commit); `queued` → `queued → dialing` with `dial_started_at=now` **committed before** the Telnyx request (so a
+   `call.initiated` webhook racing the response finds `dialing`, never `queued`); `dialing` without a primary leg →
+   send the dial again (same command_id, a retry after a crash/timeout); `dialing` with a primary leg, or `ringing` /
+   `in_progress` / `transferring` / `transferred` → `already_dialed` (returns the leg's call_control_id). After a
+   successful dial: `CallLegRepo.record_initiated(role='primary', …, telnyx_account_id)` (upsert tolerates the edge
+   inserting first) + `call.dialing` event (data `{call_control_id}`) in one tenant session.
+2. Scheduled admission: `va_billing.dispatch.admit_call` with `CallAdmission(destination=calls.to_number,
+   region=phonenumbers.region_code_for_number(parse(to_number)), max_duration_min=ceil(config.max_duration_min),
+   at=now, scheduled=False, allowed_countries=DialSettings.allowed_countries)` → `credit_hold_id`. `AppError` codes:
+   `CONCURRENCY_CAP_REACHED` → outcome `requeue` (row stays `scheduled`, nothing held) unless `DialInput.final_attempt`
+   (the workflow's 30-min requeue budget is spent; T06c decides) → blocked; `SERVICE_UNAVAILABLE` → raise retryable
+   `ApplicationError(type="DispatchUnavailable")`; every other code → blocked: `scheduled → failed`,
+   `end_reason='dispatch_blocked'`, `ended_by='system'`, `error_message` = the AppError message, `queue_status=
+   'call_error'`, `ended_at=now`; events `call.dispatch_blocked` (level `warning`, message = AppError message, data
+   `{reason: <code>, message}` — `reason` is the specs/31 code) then `call.ended` (data `{end_reason, ended_by}`).
+   Admission success but a later failure before commit → `Admitted.compensate`. Only `scheduled` rows are re-checked
+   (batch items arrive in phase 17 and will be `scheduled`-like; note it).
+3. `DialRequest` per specs/06 §6 step 5: `connection_id` = platform `DialSettings.call_control_app_id`, or the BYO
+   account's `call_control_app_id` (read in the tenant session; missing/`None` or `UnknownTelnyxAccount` → carrier
+   error path, message "Telnyx account is not available for dialing."); `to`/`from_` from the row; `timeout_secs` =
+   org `dial_timeout_s` (`load_settings(org.settings)`); `time_limit_secs = min(14400, ceil(max_min*60)+30)`;
+   AMD `premium` with the exact §6 config unless `ivr_mode` or `not answered_by_enabled` or (`voicemail.action ==
+   "ignore"` and `not voicemail.sensitive`) → `disabled` and no config; record fields when `config.record`;
+   `custom_headers=[X-VA-Call-Id]`; `client_state=encode(ClientState(call_id, "primary", org_id))`;
+   `webhook_url=None` (the app's URL, platform and BYO); stream `StreamParams(stream_url=…, stream_codec /
+   bidirectional codec "L16" + rate 16000 when hd_audio else "PCMU"/8000)`. Stream URL:
+   `f"{scheme}://{MEDIA_PUBLIC_HOST}/ws/telnyx?call_id={id}&token={token}"`, token = `mint_stream_token(call_id,
+   stream_token_expiry(now, config.max_duration_min), secret)`; scheme `wss`, except `ws` when `VA_ENV` is
+   `local`/`test` (the dev media worker has no TLS; same rule as the OIDC `allow_insecure` decision).
+4. Telnyx failures in `dial`: `TelnyxApiError` (incl. 4xx/5xx after the client's own retries) → carrier-error path:
+   `dialing → failed` (`from_={"dialing"}`), `end_reason='carrier_error'`, `ended_by='error'`, `error_message =
+   "Carrier rejected the dial: <first error title or detail>"` (truncate 500), `queue_status='call_error'`,
+   `ended_at=now`; hold released (`holds.release`), slot released (`CallLimiter.release_call`, Redis errors logged
+   `calls.counter_release_failed`), events `call.error` (level `error`, data `{code:"dial_failed", detail:<telnyx
+   code or "unknown">}`) and `call.ended`; outcome `failed`. A `CallTransitionError` there (stopped meanwhile) →
+   log `calls.dial_failure_unrecorded`, outcome `skipped`. `TelnyxRateLimited` / `TelnyxTransportError` → raise
+   retryable `ApplicationError(type="TelnyxUnavailable")` (the retry resends the same command_id). Add `dial_failed`
+   to the specs/19 §2.1 closed set (level `error`).
+5. `end_call(EndCallInput)` records a workflow-decided end. Allowed reasons (Literal): `canceled`, `dispatch_blocked`,
+   `carrier_error`, `error`, `worker_crash`, `fax_detected`, `max_duration`. Current status:
+   - terminal → no change (`changed=False`).
+   - `scheduled`/`queued`/`dialing`/`ringing` → `canceled` (reason canceled; `disposition_tag='CANCELED'`) or
+     `failed` (`queue_status='call_error'`), `end_reason`, `ended_by=END_REASONS[reason]`, `ended_at=now`,
+     `error_message` from input. Hold released only when the call never reached Telnyx (was `scheduled`/`queued`, or
+     `dialing` without a primary leg); otherwise PostCallWorkflow settles it (attempt minimum, P05-T18). Slot always
+     released (idempotent ZREM).
+   - `in_progress`/`transferring`/`transferred` with an answered-phase reason (`error`, `worker_crash`,
+     `fax_detected`, `max_duration`): `→ completed` with the input's reason unless `calls.end_reason` is already set
+     (kept: the worker decided before dying), `ended_at=now`, `connected_seconds`/`transfer_seconds` via the shared
+     helper (item 6) with `transfer_started_at` from carrier state. Hold untouched (PostCall captures). Slot released.
+     The workflow calls `end_call` BEFORE `hangup_call`, so the carrier's hangup webhook finds `end_reason` set and
+     leaves the call alone. A pre-answer-only reason (`canceled`, `dispatch_blocked`, `carrier_error`) on an answered
+     call → non-retryable `ApplicationError(type="InvalidEndReason")`.
+   - Events of an applied change: `call.dispatch_blocked` (reason dispatch_blocked; data `{reason: input.code or
+     "dispatch_blocked", message}`) then `call.ended {end_reason, ended_by}`. No `call.error` (the edge already
+     emitted `stream_failed`; worker_crash has no §2.1 code).
+   - A `CallTransitionError` from a concurrent edge/worker update → `changed=False` with the new status.
+6. Shared durations: move the rule to `va_db.call_states.call_durations(answered_at, ended_at, transfer_started_at)
+   -> dict[str, Decimal]` (`connected_seconds` = answered → min(end, transfer start), `transfer_seconds` when a
+   transfer started; 3 dp like the edge's `_CONNECTED_PRECISION`); `va_edge.mapping.hangup_outcome` uses it (no
+   behaviour change; edge tests stay green).
+7. `hangup_call(HangupInput{call_id, org_id, reason})`: primary leg's `call_control_id` (tenant session; none →
+   `sent=False`, `reason="no_leg"`); `client.hangup(ccid, command_id=f"hangup-{call_id}", client_state=…)`;
+   `False` from the client (already ended) → `sent=False`, reason `already_ended`. Rate-limited/transport →
+   retryable `TelnyxUnavailable`; other `TelnyxApiError` → non-retryable `ApplicationError(type="HangupRejected")`.
+   Log `calls.hangup_sent` with the reason (`fax_detected`, `stream_failed`, `worker_crash`, `max_duration`, ...).
+8. Retry policies (constants): `DIAL_TIMEOUT=30 s`, `DIAL_RETRY(1 s, ×2, max 10 s, 5 attempts, non-retryable
+   [CallNotFound, InvalidEndReason])`; `HANGUP_TIMEOUT=15 s`, `HANGUP_RETRY(1 s, ×2, max 10 s, 6 attempts,
+   non-retryable [HangupRejected])`; `END_CALL_TIMEOUT=15 s`, `END_CALL_RETRY(1 s, ×2, max 10 s, 6 attempts,
+   non-retryable [CallNotFound, InvalidEndReason])`.
+9. Event persistence helper shared by the activities: sequence → `insert_rows` in the open session → commit →
+   `broadcast` (best effort, `calls.event_broadcast_failed`); a sequence failure raises retryable
+   `ApplicationError(type="EventsUnavailable")` and rolls the transaction back.
+
+### Files
+- `packages/va_db/src/va_db/call_states.py`: `call_durations` (item 6); export it. Edit
+  `apps/telephony_edge/src/va_edge/mapping.py` to use it (drop `_seconds`/`_CONNECTED_PRECISION` if unused).
+- NEW `packages/va_workflows/src/va_workflows/activities/telephony_inputs.py` (import-free like `inputs.py`;
+  workflows import it): `DialInput(call_id, org_id, final_attempt: bool = False)`; `DialOutcome(result:
+  Literal["dialing","already_dialed","skipped","requeue","blocked","failed"], status: str, call_control_id: str |
+  None = None, code: str | None = None)`; `HangupInput(call_id, org_id, reason: str)`; `HangupResult(sent: bool,
+  reason: Literal["sent","no_leg","already_ended"])`; `WorkflowEndReason` Literal (item 5); `EndCallInput(call_id,
+  org_id, end_reason: WorkflowEndReason, error_message: str | None = None, code: str | None = None)`;
+  `EndCallResult(changed: bool, status: str)`; retry/timeout constants (item 8) — `RetryPolicy`/`timedelta` are
+  workflow-safe imports. All frozen, extra forbid.
+- NEW `packages/va_workflows/src/va_workflows/activities/events.py`: `persist_events(session, publisher, events) ->
+  list[DomainEvent]`, `broadcast_events(publisher, events)` (item 9).
+- NEW `packages/va_workflows/src/va_workflows/activities/dial_request.py` (pure): `@dataclass(frozen=True)
+  DialSettings(call_control_app_id: str, media_public_host: str, media_ws_scheme: Literal["ws","wss"],
+  stream_secret: bytes, allowed_countries: frozenset[str])` + `classmethod from_env(va_env, …)` helper choosing the
+  scheme; `PREMIUM_AMD_CONFIG: Final[AmdConfig]`; `amd_mode(config) -> AmdMode`; `stream_params(config, url)`;
+  `time_limit_secs(max_min)`; `stream_url(settings, call_id, token)`; `build_dial_request(call: Call, config:
+  SendCallConfig, *, connection_id: str, timeout_secs: int, stream_token: str, settings: DialSettings) ->
+  DialRequest`.
+- NEW `packages/va_workflows/src/va_workflows/activities/telephony.py`: `class TelephonyActivities.__init__(self,
+  database: Database, telnyx: TelnyxClientFactory, limiter: CallLimiter, publisher: EventPublisher, redis: Redis,
+  settings: DialSettings, clock: Clock)`; `@activity.defn(name="dial") async def dial(self, request: DialInput) ->
+  DialOutcome`; `@activity.defn(name="hangup_call") async def hangup_call(self, request: HangupInput) ->
+  HangupResult`; private helpers `_guard`, `_admit_scheduled`, `_block`, `_mark_dialing`, `_send_dial`,
+  `_record_dialed`, `_carrier_failure`, `_release_slot`. Keep each function ≤ radon B (split per item).
+- NEW `packages/va_workflows/src/va_workflows/activities/call_end.py`: `class CallEndActivities.__init__(self,
+  database, limiter, publisher, redis, clock)`; `@activity.defn(name="end_call") async def end_call(self, request:
+  EndCallInput) -> EndCallResult` (item 5); reads `transfer_started_at` with `HGET carrier_state_key(call_id)`
+  (Redis error → raise retryable). Reuse `_call_not_found` from `call_context.py` (move it to a small
+  `activities/errors.py` with the type constants `CALL_NOT_FOUND`, `TELNYX_UNAVAILABLE`, `EVENTS_UNAVAILABLE`,
+  `DISPATCH_UNAVAILABLE`, `INVALID_END_REASON`, `HANGUP_REJECTED`; keep `call_context.CALL_NOT_FOUND` re-export).
+- `packages/va_workflows/pyproject.toml`: add deps `va-telnyx`, `va-billing`, `va-compliance`, `va-events`,
+  `phonenumbers` (+ workspace sources); `uv lock`. If va_workflows tests need va_telnyx / va_sim / va_billing test
+  support dirs, they are already on the root pytest `pythonpath` (check; add if not).
+- Specs: Decisions (above); AGENTS.md learning line (activity classes, DialSettings, end_call-before-hangup rule,
+  call_durations location).
+
+### Tests (packages/va_workflows/tests; DB via the existing `database` fixture, Redis via fakeredis[lua] shared
+### between limiter/publisher/carrier state; FakeTelnyx via `telnyx_client_helpers.sim_http(state)` + a
+### `TelnyxClientFactory` over that http client; provision connection + number with `provisioned(...)`; seed rows
+### with `call_rows.seed_call(..., config=resolved_config(name), status=…)` and `billing_rows`/`fund` style helpers
+### — reuse va_billing tests/support `billing_rows.new_billing_org` if importable, else seed org/plan via RowFactory)
+- `test_dial_request.py` (pure): full body `== {...}` for a default config (every field incl. `stream_*`,
+  `stream_bidirectional_target_legs`, AMD premium + exact config dict, `time_limit_secs`, `timeout_secs`,
+  `custom_headers`, `client_state` decodes to primary leg, `send_silence_when_idle`); hd_audio → L16/16000;
+  record → the four record fields; AMD disabled for ivr_mode / answered_by_enabled false / ignore+not sensitive, but
+  premium for ignore+sensitive; time limit cap (240 min → 14400; 0.5 → 60); stream URL scheme ws/wss and the token
+  verifies with `verify_stream_token(call_id=)` and expires at `now + ceil(min*60) + 600`.
+- `test_dial_activity.py` (ActivityEnvironment, FakeTelnyx): queued → outcome `dialing`, row `dialing` +
+  `dial_started_at`, primary leg with the sim's ids, `call.dialing` row in `call_events` + stream entry, FakeTelnyx
+  received exactly one dial whose body equals `build_dial_request(...).body()` (field-by-field assert on AMD,
+  record, hd_audio, time limit via the sim's call record); BYO account → that account's connection id and client;
+  retry after a dial already recorded → `already_dialed`, no second Telnyx dial; `dialing` without leg → dial resent
+  with the same `command_id`; terminal → `skipped`, nothing sent; scheduled + admission ok → `queued` then
+  `dialing`, `credit_hold_id` set, hold `held`, concurrency slot present; scheduled + concurrency cap → `requeue`,
+  row `scheduled`, no hold, daily counter rolled back; same with `final_attempt=True` → `blocked`; scheduled + DNC
+  → `blocked`, row failed/dispatch_blocked/error_message, events dispatch_blocked + ended; insufficient credits →
+  blocked with `INSUFFICIENT_CREDITS` reason; Redis down during admission → `ApplicationError` type
+  `DispatchUnavailable` retryable; Telnyx 422 (FakeTelnyx `fail`/scenario or respx) → `failed`, row
+  failed/carrier_error, hold released, slot gone, events error(dial_failed)+ended; Telnyx transport error / 429 →
+  `TelnyxUnavailable` retryable and row stays `dialing`; carrier error after a concurrent cancel → `skipped`;
+  unknown call → `CallNotFound` non-retryable; event sequence failure → `EventsUnavailable` and row unchanged.
+- `test_hangup_activity.py`: answered sim call → `sent=True`, sim call ends, command_id `hangup-<id>`; repeated →
+  `already_ended`; no leg → `no_leg`; 429/transport → `TelnyxUnavailable`; other API error → `HangupRejected`.
+- `test_end_call_activity.py`: parametrize pre-answer statuses × reasons (canceled → `canceled` + CANCELED
+  disposition; others → `failed` + call_error) with hold released iff never dialed; answered → `completed` with
+  durations (incl. transfer_started_at from carrier state), hold still `held`, slot released, `call.ended` data;
+  existing `end_reason` kept; dispatch_blocked emits both events in order; terminal → `changed=False`;
+  pre-answer-only reason on answered call → `InvalidEndReason`; concurrent transition → `changed=False`.
+- `packages/va_db/tests/test_call_states.py` (or a new test file): `call_durations` cases (no transfer, transfer,
+  end before answer clamps to 0, precision).
+- Coverage: new modules 100 % line + branch.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a`, `uvx pip-audit` on `uv export`, `corepack pnpm audit`. No route change. `make e2e`:
+no runnable call flow until T06c/P05-T17 — state that in the evidence.
+
+### Risks
+- FakeTelnyx dial needs a known connection id and an owned `from` number for the sim account: use the va_telnyx
+  test helper `provisioned(client, voice_url, sms_url)` + number order flow (see va_telnyx contract tests).
+- `call_events` partitions exist only around the migration month: activities use a real-time clock in DB tests
+  (`SystemClock`), not `FrozenClock(2026-01-01)`.
+- Scheduled admission reads compliance calling windows at `now`: seed orgs/settings so the test runs at any wall
+  time (disable calling hours / state quiet hours in org settings) or inject a clock inside business hours that is
+  still within the partitions (`call_helpers.business_hours_today()` pattern).
+- Session pool size 1 in tests: never open a second session while one is open (Redis reads before the session).
+- Do not import `va_edge` from va_workflows (shared code goes to va_db/va_domain).
+
+## Build P05-T06b (Builder, 2026-11-01)
+Implemented per plan, with these deviations (all recorded in the specs/06 §6 Decision P05-T06b):
+- `command_id`s: dial = `dial-{call_id}` (spec §6 step 6 verbatim); hangup = `command_id("hangup", call_id, "primary")`
+  (`hangup-{id}-primary`, the specs/06 §2 example), not `hangup-{id}`.
+- `hangup_call`: Telnyx 429 / 5xx after the client retries are retryable `TelnyxUnavailable` (not `HangupRejected`);
+  other API rejections and an unusable BYO account are `HangupRejected`.
+- `DialSettings.allowed_countries` is required (an empty default blocked US: INTERNATIONAL_NOT_ENABLED); T06c passes
+  `parse_allowed_countries(INTERNATIONAL_ALLOWED_COUNTRIES)`. Constructor `DialSettings.for_env(va_env, ...)`.
+- Activity classes take keyword-only collaborators. `TelephonyActivities` has no `redis` param (not needed).
+- New `CallLegRepo.primary(call_id)` (va_db, tested); shared `activities/lookup.load_call` (prefetch uses it too),
+  `activities/events` (`persist_events`, `broadcast_events`, `call_event`, `ended_event`), `activities/errors`
+  (type names + `call_not_found`/`retryable`; `call_context.CALL_NOT_FOUND` still exported).
+- Event sequence failure on `_record_dialed`: the call stays `dialing` (committed before the request), the leg and
+  event roll back, the retry resends the same command (deduplicated) — tested.
+- Scheduled admission success then a lost transition race → counters given back, outcome `skipped` (tested).
+- `call_durations` in `va_db.call_states` (+ `DURATION_PRECISION`); edge `hangup_outcome` uses it.
+Gates (this iteration): make fmt 0, make lint 0, make typecheck 0 (mypy 1036 files), placeholders 0 findings,
+check_spec_refs 0, make test 8913 passed / 7 skipped, coverage 99.12% (va_workflows activities 100% line+branch),
+jscpd 0 clones, radon avg A (2.89; all new functions A/B), pip-audit (uv export --no-emit-workspace) no known
+vulnerabilities, pnpm audit 3 moderate (no high, pre-existing). make e2e: exit 4 "collected 0 items" — `tests_e2e/`
+does not exist yet (flows arrive with T06c/P05-T17); no TS change.
+
+## Review P05-T06b (Reviewer, 2026-11-01)
+Gates re-run: make lint 0, make typecheck 0, make placeholders 0, check_spec_refs 0, make test (see below).
+Findings:
+1. `packages/va_workflows/src/va_workflows/activities/call_end.py` `end_call`: the concurrency slot is released only
+   when this activity applies the end. If the call is already terminal (the `is_terminal` early return), or a
+   concurrent update made it terminal (the `CallTransitionError` branch), the slot stays taken. That contradicts the
+   module docstring ("The concurrency slot is always released"), the specs/06 §6 Decision P05-T06b item 5 ("The slot
+   is always released") and specs/24 §6 ("Released by ZREM when the call ends (pipeline end, no-answer, failure)").
+   The edge (`va_edge.carrier`) never calls `release_call`. So every carrier-ended call (no-answer, busy, normal
+   hangup) keeps its slot until the score expires (max_duration + 5 min) unless `end_call` releases it, and
+   CallWorkflow (T06c) has no idempotent cleanup activity to call. Fix: whenever the call's status after the activity
+   is terminal (the early return and a `CallTransitionError` whose `.current` is terminal), call `release_slot` too
+   (ZREM is idempotent). Keep the slot when the race left the call live (e.g. `ringing → in_progress`). Update
+   `test_a_terminal_call_is_left_alone` (line 228 currently asserts the slot is still taken) and
+   `test_a_concurrent_status_change_wins` (line 219: raced to `no_answer`, which is terminal → slot must be gone).
+   Add a race-to-non-terminal case that keeps the slot.
+
+## Fix P05-T06b review (Builder, 2026-11-01)
+1. `end_call` now releases the concurrency slot whenever the call is terminal after the activity: already terminal
+   (early path) or a `CallTransitionError` whose `.current` is terminal (`CallEndActivities._unchanged`). A race to a
+   live status (e.g. `in_progress`) keeps the slot. Tests: `test_a_terminal_call_is_left_alone_but_frees_its_slot`
+   (every terminal status, slot gone, row unchanged, no events), `test_a_concurrent_status_change_wins[terminal|live]`
+   (slot gone / kept). Module docstring and specs/06 §6 Decision P05-T06b item 5 reworded (end_call = CallWorkflow's
+   idempotent cleanup).
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0, check_spec_refs 0, make test 8914 passed / 7 skipped,
+coverage 99.12% (call_end.py 100%), jscpd 0 clones, radon end_call B(6), others A. make e2e: tests_e2e/ not present
+yet (flows arrive with T06c/P05-T17).
+
+## Review P05-T06b round 2 (Reviewer, 2026-11-01)
+Finding 1 fixed: `_unchanged` releases the slot for terminal statuses; tests cover terminal/live races. Gates re-run:
+lint 0, typecheck 0, placeholders 0, make test 8914 passed / 7 skipped, coverage 99.12%. Approved.

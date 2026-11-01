@@ -369,6 +369,53 @@ Unknown `hangup_cause` values are stored verbatim and treated as "any other caus
    `dial_started_at`, emit `call.dialing`.
 7. On `CARRIER_ERROR` → `failed`/`carrier_error`, release slot and hold, emit `call.error`.
 
+> Decision (2026-11-01): dial and end-state activities (P05-T06b). `va_workflows.activities.telephony`
+> (`TelephonyActivities.dial`, `.hangup_call`) and `va_workflows.activities.call_end` (`CallEndActivities.end_call`);
+> inputs, results, timeouts and retry policies in `activities.telephony_inputs`, error types in `activities.errors`,
+> the request in `activities.dial_request` (`DialSettings`: platform app id, `MEDIA_PUBLIC_HOST`, `ws` scheme only
+> for `VA_ENV` `local`/`test`, stream secret, `INTERNATIONAL_ALLOWED_COUNTRIES`).
+> 1. Status guard: terminal → `skipped`; `scheduled` → admission (item 2), then `scheduled → queued` (with
+>    `credit_hold_id`) and `queued → dialing` (`dial_started_at`) in one transaction committed **before** the
+>    request, so a `call.initiated` that overtakes the response finds `dialing`; `dialing` without a primary leg →
+>    the dial is sent again (Telnyx deduplicates `dial-{call_id}`); a primary leg recorded, or `ringing` and later →
+>    `already_dialed`. After the response: `call_legs(role='primary')` upsert + `call.dialing`
+>    (`data.call_control_id`) in one transaction. A stop that wins a transition race → `skipped`, the admission
+>    rolled back.
+> 2. Steps 2-3 for `scheduled` calls are `va_billing.dispatch.admit_call` at dispatch time (`at = now`, region of
+>    `calls.to_number`). `CONCURRENCY_CAP_REACHED` → outcome `requeue` (nothing taken; the workflow waits 15 s, up
+>    to 30 min) unless `final_attempt`; `SERVICE_UNAVAILABLE` → retryable `DispatchUnavailable`; any other code →
+>    `failed`/`dispatch_blocked` (`ended_by='system'`, `error_message` = the error message, `queue_status=
+>    'call_error'`) with `call.dispatch_blocked` (`warning`, `data = {reason: <specs/31 code>, message}`) then
+>    `call.ended`. No hold or slot exists then, so nothing is released. Calls already `queued` were admitted by Send
+>    Call and are not re-checked.
+> 3. Step 4: `from` is `calls.from_number` (selected read-only at Send Call, specs/16 §6.2 Decision P05-T03c); pool
+>    usage marking arrives with phase 10. `connection_id` is the BYO account's `call_control_app_id` when
+>    `config.telnyx_account_id` is set; a missing app or key fails the call like a carrier rejection (message
+>    "Telnyx account is not available for dialing.", detail `account_unavailable`). `webhook_url` is omitted (the
+>    app's URL). The stream token is `mint_stream_token(call_id, stream_token_expiry(now, max_duration_min))`.
+> 4. Step 7: a `TelnyxApiError` left after the client's own retries (4xx, or 5xx) → `dialing → failed`,
+>    `end_reason='carrier_error'`, `ended_by='error'`, `error_message = "Carrier rejected the dial: <first error title,
+>    detail or code>"` (≤ 500 chars), `queue_status='call_error'`; hold released, slot released after the commit;
+>    `call.error` (`dial_failed`, specs/19 §2.1) then `call.ended`. The client rate limit or a transport failure →
+>    retryable `TelnyxUnavailable` (the call stays `dialing`; the retry resends the same `command_id`).
+> 5. `end_call(reason)`: terminal → unchanged. `scheduled`/`queued`/`dialing`/`ringing` → `canceled` (reason
+>    `canceled`, `disposition_tag='CANCELED'`) or `failed` (`queue_status='call_error'`); the hold is released only
+>    when the call never reached Telnyx (`scheduled`/`queued`, or `dialing` without a primary leg), otherwise
+>    post-call billing settles it. `in_progress`/`transferring`/`transferred` → `completed` with `connected_seconds`/
+>    `transfer_seconds` (`va_db.call_states.call_durations`, `transfer_started_at` from the carrier state); an
+>    `end_reason` already stored by the media worker wins; `canceled`/`dispatch_blocked`/`carrier_error` there is a
+>    non-retryable `InvalidEndReason`. The slot is released whenever the call is terminal afterwards, also when it
+>    already was (a carrier-ended call) or a concurrent update ended it (ZREM is idempotent), so `end_call` is
+>    CallWorkflow's idempotent cleanup. Events: `call.dispatch_blocked` (reason `dispatch_blocked`) then `call.ended {end_reason, ended_by}`. The workflow calls `end_call` **before**
+>    `hangup_call`, so the hangup webhook finds `end_reason` set and leaves the call alone (§5 Decision P05-T02).
+> 6. `hangup_call` sends `hangup` with `command_id("hangup", call_id, "primary")` to the primary leg (none →
+>    `no_leg`; "already ended" → `already_ended`); rate limit, transport, 429 and 5xx → retryable
+>    `TelnyxUnavailable`, any other rejection → non-retryable `HangupRejected`.
+> 7. Every event row is written in the transaction of the change it describes (`seq` from Redis first; a Redis
+>    failure is a retryable `EventsUnavailable` that rolls the change back) and broadcast after the commit (best
+>    effort). Retry policies: `dial` 30 s timeout, 5 attempts; `hangup_call` and `end_call` 15 s, 6 attempts; all 1 s
+>    doubling to 10 s.
+
 ## 7. Inbound routing algorithm (`va_edge.routing.route_inbound`)
 
 1. Extract `to` (E.164) and `from` from payload; `call_control_id`.

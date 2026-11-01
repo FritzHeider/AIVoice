@@ -9,6 +9,8 @@ regression.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Final, Literal
 
@@ -16,11 +18,13 @@ from va_db.models import CallLegState, CallStatus, EndedBy
 
 __all__ = [
     "CALL_TRANSITIONS",
+    "DURATION_PRECISION",
     "END_REASONS",
     "LEG_TRANSITIONS",
     "TERMINAL_STATUSES",
     "EndReason",
     "allowed_from",
+    "call_durations",
     "is_terminal",
     "leg_allowed_from",
 ]
@@ -138,3 +142,26 @@ def leg_allowed_from(to: CallLegState) -> frozenset[CallLegState]:
 def is_terminal(status: CallStatus) -> bool:
     """Whether ``status`` ends the call's status machine (no outgoing transition)."""
     return status in TERMINAL_STATUSES
+
+
+DURATION_PRECISION: Final = Decimal("0.001")
+"""``calls.connected_seconds`` / ``transfer_seconds`` are stored with millisecond precision."""
+
+
+def _seconds(start: datetime, end: datetime) -> Decimal:
+    return max(Decimal(0), Decimal(str((end - start).total_seconds()))).quantize(DURATION_PRECISION)
+
+
+def call_durations(
+    answered_at: datetime, ended_at: datetime, transfer_started_at: datetime | None = None
+) -> dict[str, Decimal]:
+    """``connected_seconds`` (answer → end, or → the transfer start when one began first) and, after a
+    transfer started, ``transfer_seconds`` (transfer start → end); negative spans clamp to 0 (specs/06 §5.1).
+    """
+    connected_end = ended_at
+    values: dict[str, Decimal] = {}
+    if transfer_started_at is not None:
+        connected_end = min(ended_at, transfer_started_at)
+        values["transfer_seconds"] = _seconds(transfer_started_at, ended_at)
+    values["connected_seconds"] = _seconds(answered_at, connected_end)
+    return values
