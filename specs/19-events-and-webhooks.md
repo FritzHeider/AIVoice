@@ -35,6 +35,38 @@ class DomainEvent(BaseModel):
 Consumers use Redis consumer groups (`XREADGROUP GROUP <service> <pod>`), acknowledge after processing, and
 claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 
+> Decision (2026-11-01): publisher core (P03-T17).
+> 1. A "call event" is any event with `call_id` set (`call.*`, `citations.ready`, `evals.completed`, ...). Only call
+>    events get a `seq`, a `PUBLISH call:{<id>}:live`, and a `call_events` row.
+> 2. Keys use the specs/03 §11 hash-tag form `call:{<uuid>}:seq` / `call:{<uuid>}:live`; the streams are
+>    `events:calls|sms|widget|billing|system` (one key each). `va_events.keys` builds them (`va_common.redis.keys`
+>    does not exist; bus keys live with the bus, as `apikey:` and `emb:q:` live with their owners).
+> 3. Seq = `MULTI INCR + EXPIRE 172800` (TTL refreshed on every event): strictly increasing and gap-free per call under
+>    concurrency. XADD order across concurrent publishers may differ from seq order; consumers order by `seq`.
+> 4. A stream entry has one field `payload` = orjson of `model_dump(mode="json")` (seq included); the live PUBLISH
+>    sends the same bytes. XADD and PUBLISH go in one non-transactional pipeline after the seq is assigned.
+> 5. A Redis failure in steps 1-3 raises `EventPublishError` (cause chained, `.step` = `seq` or `stream`) and steps 4-5
+>    do not run. Callers decide (the media worker logs and continues).
+> 6. The row's category is `event.category` or the §2 default of the type; a call event with neither (e.g. `batch.*`
+>    with a call id) has no row. Row `id` = the uuid inside `evt_<hex>`, `created_at` = `occurred_at`.
+> 7. `publish(..., session=)` passes the caller's open `AsyncSession` (or `None`) to `WebhookRouter.route(event,
+>    session=)`. Until phase 06 provides a router, publishers are built without one and step 5 is a no-op. Router
+>    exceptions propagate.
+> 8. `CallEventBuffer` (media worker) flushes at 200 pending rows, every 1 s on the injected `Clock`, on
+>    `flush_call(call_id)` (writes everything pending), and on `aclose()`; flushes are serialised, one
+>    `tenant_session(org_id)` per org, bulk insert with `ON CONFLICT (created_at, id) DO NOTHING` (re-writing a row is
+>    harmless, e.g. after a COMMIT whose reply was lost). The writer attempts every org; when some fail it raises
+>    `CallEventWriteError(unwritten=...)` with exactly those orgs' rows, and the buffer re-queues only them at the
+>    front (order kept) for the next trigger, so one org's failure never holds back the others. Any other writer
+>    exception re-queues the whole batch. At most 10 000 rows are pending; the oldest are dropped with an `events.call_events_dropped` warning
+>    (count only). Rows added after `aclose()` are dropped the same way. Other services use `DirectCallEventWriter`
+>    (each row written at once).
+> 9. `StreamConsumer(redis, stream, group, consumer)`: `ensure_group()` (`XGROUP CREATE ... $ MKSTREAM`, BUSYGROUP
+>    ignored); `read()` returns entries claimed with `XAUTOCLAIM` (idle ≥ 60 s, up to `count`) first, otherwise
+>    `XREADGROUP ... >`; `ack(ids)`. The `payload` field is looked up as bytes or str (clients built with
+>    `decode_responses=True`). Entries deleted while pending are acknowledged away; a payload that is not a
+>    `DomainEvent` is acknowledged, logged `events.stream_poison` (entry id and stream only), and not returned.
+
 ## 2. Event type catalog (complete)
 
 | Type | Category | Emitted by | When | Webhook `webhook_events` key |

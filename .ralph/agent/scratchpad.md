@@ -2738,3 +2738,169 @@ Diff vs plan/specs/30 §7 Decision P03-T16: gate (exactly "1"), per-key skips, k
 endpoints from specs/02 §6, model defaults read from LlmSettings/DEFAULT_TTS_MODEL, fixture sha256 check without silent
 regeneration, WER helper, TTS cancel relies on documented TtsSocket.cancel (late audio dropped, is_final follows).
 STT WAV fixture is generated on the first live run (no keys here) as the Decision documents. Approved.
+
+## Plan P03-T17 (Planner, 2026-11-01)
+Event publisher core in `packages/va_events` (specs/19 §1–§2, specs/03 §11 keys `call:{id}:seq` 48 h,
+`call:{id}:live`, `events:*` streams MAXLEN ~ 1 000 000). WebhookRouter itself is phase 06: only its Protocol lands.
+
+### Spec decision to write: specs/19 §1 `> Decision (2026-11-01): publisher core (P03-T17).` Numbered rules:
+1. "Call event" = event with `call_id` set (covers `call.*`, `citations.ready`, `evals.completed`). Only call events get
+   `seq`, `PUBLISH call:{<id>}:live`, and a `call_events` row.
+2. Keys use the specs/03 §11 hash-tag form: `call:{<uuid>}:seq`, `call:{<uuid>}:live`; streams `events:calls|sms|widget|
+   billing|system` (no tag; one key each). Built by `va_events.keys` (precedent: `apikey`, `emb:q` build keys in their
+   own package; `va_common.redis.keys` does not exist yet — note it in the decision).
+3. Seq: `MULTI INCR + EXPIRE 172800` (TTL refreshed on every event) → seq strictly increasing per call, gap-free under
+   concurrency. XADD order across concurrent publishers may differ from seq order; consumers order by `seq`.
+4. Stream entry: one field `payload` = orjson of `event.model_dump(mode="json")` (seq included); live PUBLISH sends the
+   same bytes. XADD + PUBLISH go in one non-transactional pipeline after the seq is assigned.
+5. Redis failure (RedisError/OSError/timeout) in steps 1–3 raises `EventPublishError` (cause chained) and steps 4–5 do
+   not run (a `call_events` row needs the seq). Callers decide (media worker logs + continues).
+6. Row category = `event.category` or the catalog default for the type; a call event with neither (e.g. `batch.*` with a
+   call id) is not persisted (logged at debug). `created_at` of the row = `occurred_at`; row `id` = the uuid inside
+   `evt_<hex>`.
+7. `deliver_webhooks=True` calls `router.route(event, session=session)` (session = caller's open `AsyncSession` for
+   the transactional outbox, or None) when the publisher was built with a router; without one (until phase 06) it is a
+   no-op. Router exceptions propagate.
+8. `CallEventBuffer` (write-behind, media worker): flush when 200 rows are pending, every 1 s (on the injected Clock),
+   on `flush_call(call_id)` (call end, flushes everything pending), and on `aclose()`. One `tenant_session(org_id)` per
+   org in a flush, bulk insert. A failed flush keeps the rows (re-queued at the front, order preserved) and retries on
+   the next trigger; pending is capped at 10 000 rows, the oldest are dropped with a `call_events_dropped` warning
+   (count, no payloads). `DirectCallEventWriter` (other services) writes each row immediately in its own tenant session.
+9. Consumers: `StreamConsumer(redis, stream, group, consumer)`: `ensure_group()` (`XGROUP CREATE ... $ MKSTREAM`,
+   BUSYGROUP ignored), `claim_stale(min_idle_ms=60_000, count=100)` (XAUTOCLAIM loop until cursor `0-0` or count
+   reached; deleted entries reported by XAUTOCLAIM are acked away), `read(count=100, block_ms=1000)` = claimed stale
+   entries first, then `XREADGROUP ... >`; `ack(ids)`. A payload that does not parse as `DomainEvent` is acked, logged
+   (`event_stream_poison`, entry id + stream), and not returned.
+
+### Files
+- `packages/va_events/pyproject.toml`: deps add `pydantic>=2`, `redis>=5.1`, `va-db` (+ `[tool.uv.sources] va-db`).
+  Update description. Check va_db does not import va_events (cycle).
+- `src/va_events/catalog.py`: `class EventType(StrEnum)` — every type of specs/19 §2 (expand comma rows; member names
+  upper snake: `CALL_QUEUED = "call.queued"`, `BATCH_IN_PROGRESS`, `TENDLC_BRAND_STATUS`, ...); `CallEventCategory` =
+  re-export `va_db.models.CallEventCategory`; `DEFAULT_CATEGORY: Mapping[EventType, CallEventCategory | None]` from the
+  table's Category column (`—` → None); `Stream = Literal["calls","sms","widget","billing","system"]`;
+  `stream_for(type: EventType) -> Stream` (prefix rules §1 step 2).
+- `src/va_events/keys.py`: `call_seq_key(call_id) -> str`, `call_live_channel(call_id) -> str`, `stream_key(stream) -> str`,
+  `CALL_SEQ_TTL_S = 172_800`, `STREAM_MAXLEN = 1_000_000`.
+- `src/va_events/model.py`: `DomainEvent(BaseModel)` exactly per §1 (`model_config = ConfigDict(frozen=True,
+  extra="forbid")`, `occurred_at` validated aware → UTC via `ensure_utc`, `id` pattern `^evt_[0-9a-f]{32}$`,
+  `data: dict[str, JsonValue] = Field(default_factory=dict)`); `new_event(type, *, org_id, clock, **fields) -> DomainEvent`
+  (id `evt_` + `new_id().hex`, `occurred_at=clock.now()`); `event_uuid(event) -> UUID`; `encode(event) -> bytes`,
+  `decode(payload: bytes|str) -> DomainEvent`; `is_call_event(event)`.
+- `src/va_events/call_events.py`: `CallEventRow` (frozen dataclass: id, org_id, call_id, seq, category, level, message,
+  data, created_at), `row_for(event) -> CallEventRow | None` (rule 6), `CallEventSink` Protocol (`async add(row)`),
+  `CallEventWriter` Protocol (`async write(rows: Sequence[CallEventRow])`), `DbCallEventWriter(database: Database)`
+  (groups by org, `tenant_session(org)` + `session.execute(insert(CallEvent), [dicts])`), `DirectCallEventWriter(writer)`
+  (sink that writes immediately).
+- `src/va_events/buffer.py`: `CallEventBuffer(writer, *, clock, max_rows=200, interval_s=1.0, max_pending=10_000)`:
+  `async add(row)` (sync append; sets the wake event at ≥ max_rows), `async flush() -> int` (serialised by a lock;
+  returns rows written), `async flush_call(call_id)`, `async run()` (loop: wait first of wake event / `clock.sleep(interval)`
+  then flush; exceptions from writer are logged `call_events_flush_failed` and swallowed), `async aclose()` (stop run,
+  final flush), `pending` property. Run under the caller's Supervisor/TaskGroup (documented).
+- `src/va_events/publisher.py`: `WebhookRouter` Protocol (`async route(event, *, session: AsyncSession | None) -> None`);
+  `EventPublishError(Exception)`; `EventPublisher(redis, *, call_events: CallEventSink | None, router: WebhookRouter |
+  None = None)`; `async publish(event, *, persist_call_event=True, deliver_webhooks=True, session=None) -> DomainEvent`
+  (returns the event with seq set; `model_copy(update={"seq": n})`).
+- `src/va_events/consumer.py`: `StreamEntry(entry_id: str, event: DomainEvent)`, `StreamConsumer` per rule 9.
+- `src/va_events/__init__.py`: re-export the public names (keep ClickHouse exports untouched).
+- specs/19 §1 Decision; AGENTS.md Learned bullet.
+
+### Tests (packages/va_events/tests/; helpers `tests/support/event_helpers.py`: `event(type, call_id=..., **kw)`,
+`RecordingWriter` (records batches, `fail_next(n)`), `RecordingRouter`, `publisher_rig()` = fakeredis[lua] +
+RecordingWriter-backed sink)
+- `test_catalog.py`: parse the specs/19 §2 table (expand `a`, `b` rows) → set equals `{t.value for t in EventType}`;
+  categories equal `DEFAULT_CATEGORY`; every non-None category ∈ CallEventCategory; parametrized `stream_for` per prefix
+  (call/batch/citations/evals→calls, sms/conversation→sms, widget→widget, billing→billing, number/tendlc/voice/kb/
+  system→system).
+- `test_model.py`: id format, naive datetime rejected / offset converted to UTC, extra field rejected, encode/decode
+  round trip, `new_event` uses clock, frozen.
+- `test_publisher.py`: stream routing per type (XRANGE on the expected stream, other streams empty); seq 1,2,3 per call,
+  independent per call, key TTL 172800 refreshed; 200 concurrent `asyncio.gather` publishes on one call → seqs exactly
+  1..200; non-call event: no seq, no INCR key, no PUBLISH, no row; live channel receives the payload (pubsub subscribe
+  before publish); MAXLEN approx passed (spy or stream trims when patched small — assert via `xadd` call args with a
+  wrapper); persist flag false → no row; category default/explicit/None-skip; router called with session, not called
+  when flag false, no router → fine; Redis outage (fakeredis `server.connected=False`) → EventPublishError, no row,
+  no router call.
+- `test_buffer.py` (ManualClock): 199 rows no flush, 200th triggers one batch of 200; interval flush after 1 s
+  (`wait_for_sleep(1.0)` + `run_for(1.0)`); `flush_call` flushes immediately; writer failure keeps rows in order and the
+  next trigger writes them; overflow drops oldest + warning log (json_log_stream); `aclose` final flush and run task
+  ends; concurrent flushes don't duplicate rows (lock).
+- `test_consumer.py` (fakeredis; if fakeredis lacks XAUTOCLAIM, these move to the integration module): ensure_group
+  idempotent; read returns events, ack removes from PEL (XPENDING); unacked entry older than 60 s is claimed by a
+  second consumer (`min_idle_ms` controlled — use real Redis for idle time, see integration); poison payload acked +
+  logged, not returned.
+- `test_events_integration.py` (`@pytest.mark.integration`, `redis_container.running_redis_url` + docker probe):
+  seq monotonic with 200 concurrent publishes over real Redis; XAUTOCLAIM of a stale entry (consumer A reads, no ack,
+  `claim_stale(min_idle_ms=50)` from B after a real short idle — use `XCLAIM`-free wait: poll `XPENDING` idle ≥ 50 ms
+  bounded loop, no fixed sleeps... acceptable: `min_idle_ms=0`); MAXLEN trimming approximate (publish 2 000 with
+  patched maxlen 100 → XLEN < 2 000).
+- `test_call_events_db.py` (integration, module Postgres via va_db support `running_postgres` + `fresh_database` +
+  `upgrade`; see apps/api tests/test_idempotency_db.py): DbCallEventWriter writes rows for two orgs, each visible only
+  in its own tenant_session, seq/category/data/created_at stored; publisher + buffer end to end → rows ordered by seq.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a`, pip-audit + pnpm audit.
+
+### Risks
+- va_events → va_db dependency: events_sink image gets va_db too (fine); ensure no import cycle and mypy paths ok.
+- fakeredis XAUTOCLAIM/approximate MAXLEN support — verify; fall back to the real-Redis integration module.
+- Partition for `created_at` must exist: migration 0001 creates current month + 3; tests use `clock.now()` ≈ today.
+- `filterwarnings=error`: pubsub cleanup must `aclose()` the PubSub.
+
+## Build P03-T17 (Builder, 2026-11-01)
+Implemented per plan in `packages/va_events/src/va_events/`: `catalog.py` (EventType = all 62 §2 types, DEFAULT_CATEGORY,
+stream_for), `keys.py`, `model.py` (DomainEvent frozen/extra=forbid, `new_event(type, org_id=, clock=, **EventFields)`,
+encode/decode, event_uuid), `call_events.py` (CallEventRow, row_for, DbCallEventWriter per-org tenant_session bulk
+insert, DirectCallEventWriter), `buffer.py` (CallEventBuffer 200 rows / 1 s / flush_call / aclose, re-queue on failure,
+10 000 cap drops oldest), `publisher.py` (MULTI INCR+EXPIRE seq, pipelined XADD MAXLEN~ + PUBLISH, EventPublishError
+.step seq|stream, WebhookRouter Protocol), `consumer.py` (StreamConsumer ensure_group/claim_stale XAUTOCLAIM/read/ack,
+poison acked+logged). va_events now depends on va_db/redis/pydantic/sqlalchemy. specs/19 §1 Decision P03-T17 (9 rules);
+AGENTS.md Learned bullet. Tests: test_catalog (parses §2 table), test_model, test_publisher, test_buffer (ManualClock),
+test_consumer (fakeredis), test_events_redis_integration (real Redis: 200 concurrent seqs, XAUTOCLAIM idle, trimming),
+test_call_events_db (real Postgres via new shared `migration_helpers.migrated_postgres()`). Deviations: rows added after
+aclose are dropped with `events.call_events_dropped` reason=closed (plan silent); log events prefixed `events.`.
+Gates: lint 0, typecheck 0, placeholders 0, make test 6514 passed / 7 skipped / 98.43 %, va_events cov 99 %, spec refs 0,
+jscpd 0 clones, radon A (2.17), pip-audit clean, pnpm audit high clean (3 moderate pre-existing).
+
+## Review P03-T17 (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0, make test 6514 passed / 7 skipped / 98 %. Catalog, keys, model, publisher
+steps 1-3/5, consumer and spec Decision match specs/19 §1-§2 and specs/03 §11. Rejected for buffer/writer failure
+handling (specs/19 §1 step 4 write-behind must not lose or wedge rows):
+1. `call_events.py` `DbCallEventWriter.write` commits one tenant transaction per org in sequence, and `buffer.py`
+   `CallEventBuffer.flush` re-queues the WHOLE batch on any exception. If org A's transaction commits and org B's
+   fails (or a COMMIT succeeds but its reply is lost when the connection drops), the retry inserts org A's rows again.
+   That hits the `call_events` PK `(created_at, id)`, so every later flush raises IntegrityError. The buffer then never
+   writes another row: every org's rows pile up until the 10 000 cap drops them. Fix both sides: (a) make the insert
+   idempotent with `sqlalchemy.dialects.postgresql.insert(CallEvent).on_conflict_do_nothing()`, which works on the
+   partitioned PK because it includes `created_at`; (b) have the writer report which rows were not written, e.g.
+   `CallEventWriteError(unwritten=[...])` raised after it has tried every org. The buffer re-queues only those rows,
+   so one org's failure (missing partition, RLS rejection) does not block the other orgs.
+2. Missing tests for these error paths: a DB test where the same rows are written twice and stay single (no error);
+   a buffer/writer test where org B fails, org A's rows are written once, and only B's rows are retried. A retry
+   after B recovers must not re-insert A.
+3. Minor: `consumer._parse` only looks up `b"payload"`. A consumer built on a `redis_client(...,
+   decode_responses=True)` client (an option `va_common.redis` exposes) sees str keys, so it treats every entry as
+   poison and acks it away. That is silent data loss. Look up both `PAYLOAD_FIELD` and its bytes form, and add a test
+   with a decode_responses fakeredis.
+
+## Build P03-T17 fix (Builder, 2026-11-01)
+Fixed all 3 review findings:
+1. `DbCallEventWriter` inserts with `postgresql.insert(...).on_conflict_do_nothing(index_elements=["created_at","id"])`,
+   tries every org, logs `events.call_events_org_write_failed` per failing org, then raises
+   `CallEventWriteError(unwritten, failed_orgs=)` (rows of failed orgs, batch order; first error chained). Buffer re-queues
+   only `exc.unwritten` on CallEventWriteError, whole batch on any other exception (safe: writer idempotent).
+2. Tests: test_buffer `test_a_failing_org_does_not_hold_back_the_others_and_only_its_rows_are_retried` (RecordingWriter
+   `failing_orgs`); test_call_events_db `test_writing_the_same_rows_twice_stores_them_once` and
+   `test_one_failing_org_leaves_the_others_written_once` (org B rows dated 2000-01 → no partition; after creating
+   `call_events_p200001` the retry writes B only, A stays single).
+3. consumer `_parse` looks up bytes then str `payload`; test with `FakeAsyncRedis(decode_responses=True)`.
+specs/19 §1 Decision rules 8/9 updated; AGENTS.md bullet extended.
+Gates: lint 0, typecheck 0, placeholders 0, make test 6518 passed / 7 skipped / 98.44 %, va_events 99 %, spec refs 0,
+jscpd 0 clones, radon A (2.25), pip-audit clean, pnpm audit high clean (3 moderate pre-existing).
+
+## Review P03-T17 re-review (Reviewer, 2026-11-01)
+Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6518 passed / 7 skipped / 98 %. All 3 findings fixed:
+idempotent ON CONFLICT (created_at, id) insert, every org attempted and CallEventWriteError.unwritten re-queued only;
+DB tests for double write + partial org failure/recovery; consumer reads str or bytes payload field (decode_responses
+test). Approved, committed.

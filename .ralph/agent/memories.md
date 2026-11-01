@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793538351-5d78
+> P03-T17 fix: CallEventWriter must be idempotent (ON CONFLICT (created_at,id) DO NOTHING) and report partial failure via CallEventWriteError.unwritten; buffer re-queues only those. Partial-failure DB test trick: rows dated outside all call_events partitions fail one org's insert
+<!-- tags: events, database, testing | created: 2026-11-01 -->
+
+### mem-1793537886-dfee
+> P03-T17: va_events bus = catalog/keys/model/publisher/call_events/buffer/consumer; tests via event_helpers.publisher_rig (fakeredis max_connections=256 for 200 concurrent publishes; fakeredis supports XAUTOCLAIM+pubsub); call_events DB tests need real time (partitions only around migration month); shared migration_helpers.migrated_postgres() for module DB fixtures
+<!-- tags: events, redis, testing | created: 2026-11-01 -->
+
 ### mem-1793536549-931f
 > P03-T16: live smoke suite in tests_live/ (support modules live_env/live_clients/live_wer/live_fixture on pytest pythonpath + mypy_path); module pytestmark live+skipif LIVE_TESTS!=1, per-key skip in conftest fixtures; test_live_gate runs child pytest with PYTEST_/COV_CORE_/LIVE_ env stripped and asserts '7 skipped' (update LIVE_TEST_COUNT when adding live tests)
 <!-- tags: testing, live | created: 2026-11-01 -->

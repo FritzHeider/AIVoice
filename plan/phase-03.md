@@ -249,7 +249,7 @@
   - Deliverables: `tests_live/test_vendor_clients.py` (Telnyx: list numbers/profiles; ElevenLabs: list voices, short TTS over WS with alignment, Scribe realtime on a committed WAV fixture, batch STT; Telnyx Inference: streaming chat, forced tool call, embeddings with 1024 dims); skipped unless `LIVE_TESTS=1`
   - Acceptance: suite is collected and skipped in CI; documented run command in AGENTS.md.
 
-- [ ] P03-T17 Event publisher
+- [x] P03-T17 Event publisher — va_events catalog/keys/model/publisher (MULTI INCR+EXPIRE seq, XADD MAXLEN~, live PUBLISH), idempotent DbCallEventWriter with per-org partial-failure reporting, CallEventBuffer write-behind, StreamConsumer with XAUTOCLAIM; specs/19 §1 Decision; make test 6518 passed / 7 skipped, 98 %, lint/typecheck/placeholders 0
   - Spec refs: specs/19-events-and-webhooks.md (internal event model, publisher steps)
   - Depends on: P01-T10, P00-T08
   - Deliverables: `DomainEvent`, `EventType` enum (every type in the catalog), `EventPublisher` (seq via INCR, XADD with MAXLEN, PUBLISH live, write-behind `CallEventBuffer` with flush policy), consumer-group helper with XAUTOCLAIM

@@ -949,3 +949,16 @@ Grafana 3001
   `live_wer`, `live_fixture` cached TTS-generated STT WAV + sha256 JSON). `make test` collects it (7 skipped);
   `test_live_gate.py` runs a child pytest with `PYTEST_*`/`COV_CORE_*`/`LIVE_*` stripped from the env. Adding a live
   test changes `LIVE_TEST_COUNT` there. `tests_live/**` has the same ruff ignores as `**/tests/**`.
+- 2026-11-01 (P03-T17): event bus core = `va_events` (rules: specs/19 §1 Decision P03-T17): `catalog.EventType` (every §2
+  type; `test_catalog.py` parses the §2 table, so a new row needs a member and a `_CATEGORIES` entry), `stream_for`,
+  `keys` (`call:{<id>}:seq|live`, `events:<stream>`), `model.DomainEvent`/`new_event(type, org_id=, clock=, **fields)`/
+  `encode`/`decode`, `publisher.EventPublisher(redis, call_events=sink|None, router=None).publish(...)` (raises
+  `EventPublishError`), `call_events` (`row_for`, `DbCallEventWriter`, `DirectCallEventWriter`), `buffer.CallEventBuffer`
+  (run `run()` under a supervisor, `flush_call` at call end, `aclose` on shutdown), `consumer.StreamConsumer`.
+  va_events depends on va_db now. Tests: `packages/va_events/tests/support/event_helpers.py` (`event`, `row`,
+  `RecordingWriter.fail_next`, `RecordingRouter`, `publisher_rig(buffer=)` on fakeredis with `max_connections=256` for
+  200 concurrent publishes; fakeredis supports XAUTOCLAIM/pubsub). DB tests must use real time (`SystemClock`):
+  `call_events` partitions exist only around the migration month, and `FrozenClock` starts at 2026-01-01.
+  `CallEventWriter`s must be idempotent (`DbCallEventWriter` inserts `ON CONFLICT DO NOTHING`) and report a partial
+  failure as `CallEventWriteError(unwritten, failed_orgs=)`; the buffer re-queues only `unwritten`. Rows dated
+  outside every partition make an org's insert fail (handy for partial-failure DB tests).

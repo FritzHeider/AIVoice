@@ -2730,13 +2730,21 @@ version = "0.1.0"
 source = { editable = "packages/va_events" }
 dependencies = [
     { name = "clickhouse-connect", extra = ["async"] },
+    { name = "pydantic" },
+    { name = "redis" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "va-common" },
+    { name = "va-db" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "clickhouse-connect", extras = ["async"], specifier = ">=1.11" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "redis", specifier = ">=5.1" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
 ]
 
 [[package]]

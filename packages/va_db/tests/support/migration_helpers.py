@@ -15,6 +15,8 @@ from typing import Any, Final
 import pytest
 from alembic import command
 from alembic.config import Config
+from docker_probe import docker_available
+from pg_container import running_postgres
 from service_helpers import settings_of
 from sqlalchemy import make_url, text
 
@@ -28,6 +30,7 @@ __all__ = [
     "downgrade",
     "fresh_database",
     "load_revision",
+    "migrated_postgres",
     "offline_sql",
     "query",
     "query_many",
@@ -113,3 +116,13 @@ def fresh_database(server_url: str) -> Iterator[str]:
         yield make_url(server_url).set(database=name).render_as_string(hide_password=False)
     finally:
         query(server_url, f'DROP DATABASE "{name}" WITH (FORCE)')
+
+
+@contextmanager
+def migrated_postgres() -> Iterator[str]:
+    """A fresh database migrated to head on its own test Postgres container (skips without Docker)."""
+    if not docker_available():
+        pytest.skip("docker unavailable")
+    with running_postgres() as server_url, fresh_database(server_url) as url:
+        upgrade(url)
+        yield url
