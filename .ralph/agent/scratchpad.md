@@ -362,3 +362,127 @@ state/context, hysteresis 0.5/0.35, 3-window start at first window start, end ca
 -55 dBFS floor, reset per leg, thread-pool inference; MEDIA_VAD_THREADS in specs/02 §6 + .env.example + settings; CI
 fetches models. Reviewer tidy-up: rewrapped the vad_model.py module docstring (broken line breaks).
 §5.3 local noise gate (§10) is not part of this task (SpectralGate comes later).
+
+## Plan P04-T04 (Planner, 2026-11-01)
+Adaptive endpointer — specs/07 §6 (+ §20 `eot_ms`, specs/05 `interruption_threshold` 50–5000 / `ivr_mode`, specs/11
+node `resumption_speed` 1–3 + variables). Pure, sync, deterministic: every input carries an explicit ms timestamp on
+ONE caller-chosen timeline (the pipeline in P04-T12 maps VAD stream time + partial arrival times onto it); no wall
+clock inside. Tests drive time with explicit `now_ms` (the "fake clock"); no sleeps.
+
+### Files
+1. `packages/va_voice/src/va_voice/text_norm.py` (shared with P04-T05 backchannels):
+   - `tokens(text: str) -> tuple[str, ...]` — lowercase, `re.findall(r"[a-z0-9']+")` after mapping `-` to space?
+     NO: keep hyphen handling for T05; here split on anything not `[a-z0-9']` (so "uh-huh" → ("uh","huh")).
+   - `normalized(text) -> str` = `" ".join(tokens(text))`.
+   - `ends_sentence(raw: str) -> bool` — `raw.rstrip()` ends with `.`, `?`, `!` (also `…`? no; exactly the 3).
+   - `ends_with_digit(raw) -> bool` — last char of `raw` with trailing punctuation/whitespace stripped is 0-9.
+2. `packages/va_voice/src/va_voice/endpointing.py`:
+   - Constants (exported): `BASE_SILENCE_MS = {1: 300, 2: 500, 3: 800}`, `PAUSE_MIN_MS = 120`, `PAUSE_MAX_MS = 1500`,
+     `PAUSE_HISTORY = 20`, `MIN_PAUSE_SAMPLES = 4`, `ADAPTIVE_MIN_MS = 250`, `ADAPTIVE_MAX_MS = 1500`,
+     `TIMEOUT_MIN_MS = 250`, `TIMEOUT_MAX_MS = 2000`, `IVR_FLOOR_MS = 900`, multipliers `COMPLETE = 0.7`,
+     `CONTINUATION = 1.6`, `NUMBER = 1.8`, `SHORT_ANSWERS` / `CONTINUATION_WORDS` frozensets (verbatim §6),
+     `NUMBER_NAME_HINTS = ("phone","zip","number","code")`.
+   - `@dataclass(frozen=True, slots=True) EndpointerSettings(resumption_speed: Literal[1,2,3] = 2,
+     interruption_threshold_ms: int | None = None, ivr_mode: bool = False, collecting_number: bool = False)`;
+     `__post_init__` raises `ValueError` for speed ∉ {1,2,3} or threshold outside 50–5000.
+   - `collects_number(variables: Iterable[tuple[str, str]]) -> bool` — any (name, type) with type `integer` or
+     lowercase name containing a hint (helper for the engine/turn manager to fill `collecting_number`).
+   - `percentile(samples: Sequence[float], q: float) -> float` — linear interpolation between closest ranks
+     (numpy default method, rank = q/100·(n−1)); pure Python; ValueError on empty.
+   - `completeness_multiplier(raw_partial: str, *, collecting_number: bool) -> float` — order (Decision): number rule
+     (ends_with_digit and collecting_number → 1.8) first, then complete (ends_sentence or normalized whole text in
+     SHORT_ANSWERS → 0.7), then continuation (last token in CONTINUATION_WORDS → 1.6), else 1.0. Empty → 1.0.
+   - `@dataclass(frozen=True, slots=True) EndOfTurn(at_ms: float, reason: Literal["silence","late_transcript"],
+     last_voiced_end_ms: float, timeout_ms: float)` with property `eot_ms = at_ms − last_voiced_end_ms`.
+     `TurnDiscarded(at_ms: float, started_ms: float, last_voiced_end_ms: float)` (noise burst, rule 6).
+   - `class Endpointer(settings: EndpointerSettings = EndpointerSettings())`:
+     - `configure(settings)` — node change; keeps pause samples (per-caller adaptation persists for the call).
+     - `on_vad(event: VadEvent) -> None` — `speech_start`: if no turn open → open turn (`started_ms`, clear text);
+       if a silence was pending → pause = `at_ms − last_voiced_end`; append to deque(maxlen 20) iff 120 ≤ pause ≤ 1500;
+       clear pending silence; mark speaking. `speech_end`: if speaking → `last_voiced_end = at_ms`, not speaking.
+       `probability` events ignored. Duplicate start while speaking / end while silent ignored.
+     - `on_partial(text: str, at_ms: float) -> None` — only while a turn is open: store as latest raw partial;
+       non-empty (after strip) sets `has_text` and `text_at_ms`. While idle: ignored (trailing update of an ended
+       turn; Decision).
+     - `adaptive_ms() -> float` (base if < 4 samples else clamp(max(base, 1.25·p90 + 80), 250, 1500)).
+     - `timeout_ms() -> float` — fixed threshold → `max(threshold, 900 if ivr else 0)` with NO multiplier/clamp
+       (Decision: §6 "timeout = interruption_threshold_ms", range 50–5000 per specs/05); else
+       `clamp(adaptive × multiplier(latest partial), 250, 2000)`, then ivr floor `max(·, 900)`. Recomputed on every
+       call (a later partial changes the deadline).
+     - `text_wait_cap_ms() -> float` = `max(timeout_ms(), TIMEOUT_MAX_MS)` — the max-wait cap: when silence reaches
+       the timeout but no partial text yet (STT lags), keep waiting for text until silence reaches this cap, then
+       discard (Decision).
+     - `deadline_ms() -> float | None` — next time `poll` can return something: None when idle or speaking;
+       `last_voiced_end + timeout` if has_text else `last_voiced_end + text_wait_cap` … but must also return the
+       timeout instant when no text so the caller re-polls? No: without text nothing happens before text or cap;
+       `on_partial` changes the deadline and the caller re-reads it after every input.
+     - `poll(now_ms: float) -> EndOfTurn | TurnDiscarded | None` — idle/speaking → None. silence = now − last_voiced_end.
+       has_text and silence ≥ timeout → `EndOfTurn(now, "silence" if text_at_ms ≤ last_voiced_end + timeout else
+       "late_transcript", …)`; no text and silence ≥ cap → `TurnDiscarded`. Either closes the turn (idle, text
+       cleared; pause samples kept).
+     - Properties `turn_open`, `speaking`; `reset()` (leg change: everything incl. pause samples).
+   - Keep every function radon ≤ B (split `_on_start`, `_on_end`, `_fixed_timeout`).
+3. specs/07 §6 `> Decision (2026-11-01)`: pure ms-timeline API (on_vad/on_partial/deadline/poll); partials attributed
+   only to an open turn; multiplier order (number first); fixed `interruption_threshold_ms` bypasses multiplier and
+   clamps but keeps the ivr floor; percentile = linear interpolation; text-wait cap = max(timeout, 2000) then discard;
+   reasons `silence`/`late_transcript`; pause samples persist across nodes, cleared by `reset()`; ivr_mode keeps
+   adaptation (floor only).
+4. AGENTS.md bullet (P04-T04): module names, time-base rule, `text_norm` shared with T05.
+
+### Tests
+`packages/va_voice/tests/test_text_norm.py`: tokens/normalized (punctuation, case, hyphen, apostrophe), ends_sentence,
+ends_with_digit ("zip is 9021." True, "five" False).
+`packages/va_voice/tests/test_endpointing.py` (helpers `start(ms)`/`end(ms)` building VadEvent; table-driven):
+- base per speed: 1/2/3 → EOT exactly at last_end+300/500/800 with neutral partial ("hello there friend" → wait,
+  "hello" is a short answer; use "i would like to book"? "to" is continuation — use "i want a table tonight"), and
+  `poll(deadline − 0.001)` is None.
+- multipliers table: "Yes." / "thank you" / "Is it?" → ×0.7 ; "and" / "I went to the" / "um" → ×1.6 ; "my zip is 90210"
+  collecting → ×1.8, not collecting → 1.0 ; "90210." collecting → 1.8 (number first); "" → 1.0; normal → 1.0.
+- clamp: speed 1 × 0.7 = 210 → 250; speed 3 adaptive 1500 × 1.6 = 2400 → 2000.
+- adaptation: < 4 pauses → base; feed pauses [200,300,400,600] via start/end cycles → p90 by linear interp
+  (= 540) → adaptive = max(500, 1.25·540+80=755) = 755; samples outside 120–1500 (100, 1600 not possible before
+  timeout? use fixed threshold 5000 to allow a 1600 ms pause) ignored; history keeps last 20 (feed 25, assert p90 of
+  last 20); adaptive clamp at 1500 upper; percentile unit tests vs `numpy.percentile` on hypothesis lists.
+- fixed `interruption_threshold_ms=1200`: timeout 1200 regardless of partial/adaptation; 50 with ivr → 900; 5000
+  allowed; 49/5001 → ValueError; speed 4 → ValueError.
+- ivr floor: speed 1 ivr → 900; adaptive 1500×1.6 ivr → 2000.
+- partial rules: no partial → no EOT at timeout, `TurnDiscarded` at last_end+2000; partial arriving after timeout but
+  before cap → EOT at the arrival poll with reason `late_transcript`; whitespace-only partial does not count; partial
+  while idle ignored; a later partial changes deadline (Yes. → then "and" extends).
+- resumption: speech resumes before timeout → no EOT, pause recorded; EOT measured from the NEW last_voiced_end;
+  `eot_ms` = at − last_end; after EOT state idle and next turn needs new text; `configure` keeps samples, `reset`
+  clears them; `probability` events ignored; duplicate start/end ignored; `collects_number` table (integer type,
+  "phone_number", "ZIP", "Postcode" false).
+- `deadline_ms` values in each state (idle None, speaking None, silence with/without text).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (100 % coverage on new modules),
+`make test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src`, pip-audit + pnpm audit (no new deps).
+
+### Risks
+- Hypothesis vs numpy percentile float equality: compare with `pytest.approx`.
+- Keep `text_norm` minimal but correct for T05 phrase matching (multi-word backchannels match on token tuples).
+
+## Build P04-T04 (Builder, 2026-11-01)
+Implemented per plan:
+- `va_voice/text_norm.py`: `tokens` (letters/digits any script + inner apostrophes, lowercased), `normalized`,
+  `ends_sentence` (ignores trailing spaces + closing quotes/brackets), `ends_with_digit` (ASCII digits only).
+- `va_voice/endpointing.py`: constants, `percentile` (linear interp, validates q), `collects_number`,
+  `completeness_multiplier` (number → complete → continuation), `EndpointerSettings` (validated),
+  `EndOfTurn(at_ms, reason, last_voiced_end_ms, timeout_ms, text)` + `eot_ms`, `TurnDiscarded`, `Endpointer`
+  (on_vad/on_partial/adaptive_ms/timeout_ms/text_wait_cap_ms/deadline_ms/poll/configure/reset, pause_samples).
+- Deviations from plan: blank partials do not replace the stored partial; `EndOfTurn` also carries `text` (latest
+  partial); `collects_number` is a plain substring match, so "Postcode" → True (plan said False; spec says "name
+  contains code") — recorded in the Decision.
+- specs/07 §6 Decision P04-T04; AGENTS bullet.
+Gates: fmt ok; lint pass; typecheck pass (837 files); placeholders 0; spec refs 0; va_voice 239 passed; make test
+6759 passed / 7 skipped (98.47 %; endpointing.py + text_norm.py 100 %) — first full run had 1 failure in
+apps/sim/tests/test_sim_shared_redis.py (subprocess exit -15 under load; passes alone and on rerun, unrelated);
+jscpd 0 clones; radon A (2.35); pip-audit clean; pnpm audit 3 moderate (no high).
+
+## Review P04-T04 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint pass, typecheck pass (837 files), placeholders 0, make test 6759 passed / 7 skipped (98.47 %;
+endpointing.py + text_norm.py 100 %). Checked against specs/07 §6 rules 1-7: base table, pause range 120-1500 / last 20,
+p90 at ≥4 samples, adaptive clamp 250-1500, short-answer / continuation sets verbatim, number rule, timeout clamp
+250-2000, non-empty partial requirement + silent discard, ivr floor 900, eot_ms. Decision documents the ambiguities.

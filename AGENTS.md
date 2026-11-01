@@ -984,3 +984,8 @@ Grafana 3001
   (truth `SPEECH_SEGMENTS_MS` lives there; the support dir is on pytest `pythonpath` and mypy `mypy_path`). Unit
   tests drive `SileroVad` with any object that has `infer(samples, state) -> (p, state)` (`ScriptedModel` in
   `tests/test_vad.py`). The media worker's `vad_model` delegates to va_voice (va-media-worker depends on va-voice).
+- 2026-11-01 (P04-T04): endpointing = `va_voice.endpointing.Endpointer` (pure, sync; spec: specs/07 §6 Decision
+  P04-T04): feed `on_vad(VadEvent)` / `on_partial(text, at_ms)` on one ms timeline, re-read `deadline_ms()` after every
+  input, `poll(now_ms)` → `EndOfTurn | TurnDiscarded | None`. No clock inside: tests drive time with explicit ms
+  values. `va_voice.text_norm` (`tokens`, `normalized`, `ends_sentence`, `ends_with_digit`) is the shared transcript
+  normalizer (P04-T05 backchannels reuse it).

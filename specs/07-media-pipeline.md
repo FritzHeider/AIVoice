@@ -188,6 +188,22 @@ Adaptive per-caller adjustment (disabled when `interruption_threshold_ms` set �
 On `EndOfTurn`, the turn manager sends `commit: true` to Scribe (`08` §4) and starts the turn (§8).
 `eot_ms = t_eot_decision − t_last_voiced_end`.
 
+> Decision (2026-11-01): P04-T04. `va_voice.endpointing.Endpointer` is pure and synchronous: every input carries an
+> explicit ms timestamp on one caller-chosen timeline (`on_vad(VadEvent)`, `on_partial(text, at_ms)`); the caller
+> re-reads `deadline_ms()` after each input and calls `poll(now_ms)` at that instant, which returns
+> `EndOfTurn(at_ms, reason, last_voiced_end_ms, timeout_ms, text)` or `TurnDiscarded`. Rules fixed here:
+> (a) a turn opens at its first `speech_start`; partials outside an open turn (trailing updates of an ended turn) and
+> blank partials are ignored; (b) multiplier order is number → complete → continuation → 1.0, so `"90210."` while
+> collecting a number is ×1.8; the number-name rule is a plain substring match (`postcode` contains `code`);
+> (c) a set `interruption_threshold_ms` (50–5000, specs/05) is the timeout as is: no multiplier and no 250–2 000 clamp,
+> but the `ivr_mode` 900 ms floor still applies; (d) percentile = linear interpolation between closest ranks (numpy's
+> default); (e) when the timeout is reached without text, the endpointer keeps waiting for a late partial until the
+> silence reaches `max(timeout, 2000)` ms and then discards the segment; a partial arriving in that window ends the
+> turn immediately with `reason = "late_transcript"` (otherwise `"silence"`); (f) pause samples (120–1 500 ms gaps
+> between a `speech_end` and the next `speech_start` inside one open turn) persist across nodes (`configure`) and are
+> cleared only by `reset()` (new leg); `ivr_mode` keeps adaptation and only adds the floor. Token normalization is
+> `va_voice.text_norm` (shared with the §7 backchannel matcher).
+
 ## 7. Interruptibility and barge-in
 
 Effective level: `0` if `block_interruptions`; else node `interruptibility` (0–3) if set; else call `interruptibility` (0–4).

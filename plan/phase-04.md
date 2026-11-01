@@ -18,7 +18,7 @@
   - Deliverables: `SileroVad` (onnxruntime session from `models/silero_vad.onnx`, state tensors, 512-sample windows at 16 kHz, thresholds, thread-pool execution), `VadEvent` stream (speech_start, speech_end, probability)
   - Acceptance: fixture WAVs (speech/silence generated via TTS fixture files committed under tests/fixtures) produce expected segments; manifest verification on load; `test_synth_detected_by_silero` (specs/30 §3.1): the production `SileroVad` with production thresholds classifies ≥ 90 % of 32 ms windows of the voiced body of 20 random `va_sim.audio.synthesize_utterance` utterances as speech (deferred here from P03-T03a).
 
-- [ ] P04-T04 Adaptive endpointer
+- [x] P04-T04 Adaptive endpointer — va_voice.endpointing.Endpointer (pure ms timeline, adaptive p90, completeness multipliers, ivr floor, fixed threshold, late-transcript/discard cap) + va_voice.text_norm; specs/07 §6 Decision; make test 6759 passed / 7 skipped (98.47 %, new modules 100 %); lint, typecheck, placeholders pass
   - Spec refs: specs/07-media-pipeline.md (endpointing algorithm, resumption_speed)
   - Depends on: P04-T03
   - Deliverables: `Endpointer` combining VAD silence, partial-transcript completeness heuristic, adaptive per-caller timeout, per-node resumption speed, max-wait cap; emits `EndOfTurn(at, reason)`
