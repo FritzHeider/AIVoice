@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793544526-4d65
+> P04-T08: va_voice.playback.PlaybackTracker owns text.alignment.AlignmentTimeline (played_text); timeline uses prefix-max end bisect + lazy trailing-gap interpolation; test Alignment dataclass shared in tests/support/text_helpers.py (jscpd flagged duplicate)
+<!-- tags: voice, playback, testing | created: 2026-11-01 -->
+
 ### mem-1793543716-f7d6
 > P04-T07: va_voice.text.pronunciation.PronunciationApplier compiles one alternation regex (stable longest-first, (?i:) scoped per rule); OffsetMap.to_original floor (inside replaced span -> span start), to_original_ceil; tests compare with naive reference scan; C++C is not a C++ match because of the (?!\w) lookahead
 <!-- tags: voice, pronunciation, testing | created: 2026-11-01 -->

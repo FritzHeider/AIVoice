@@ -293,6 +293,20 @@ is concatenated to the previous user turn text (`"{prev} {new}"`) before re-runn
 `LEAD_MS_ESTIMATE = 60`. Mark echoes correct the estimate: on mark `seg:k:i`, `played_ms ≥ segments[i].end_ms`.
 `is_playing` true from first frame until the last mark echo (or `played_ms` reaches total + 200 ms if marks are lost).
 
+> Decision (2026-11-01): P04-T08. `va_voice.playback.PlaybackTracker(turn, fmt, lead_ms=60)` is pure and synchronous;
+> callers pass ms timestamps from their monotonic clock. The outbound clock calls `frame_sent(now_ms)` per 20 ms frame
+> and `end_segment(chars)` after a segment's last frame; it returns the mark name `seg:{turn}:{idx}` to send. A segment
+> needs at least one frame; `finish()` declares that no more audio follows and requires every frame to belong to a
+> segment. `played_ms(t) = max(confirmed, clamp((t − t_first_frame_sent) − 60, 0, frames_sent × 20))` where
+> `confirmed` is the end of the latest echoed segment; marks of another turn, unknown indices and malformed names are
+> ignored. `is_playing` is false before the first frame and after `stop`; it stays true until `finish()` (an
+> underrun is still "speaking"), then ends on the echo of the last segment's mark or once the unclamped estimate
+> reaches total + 200 ms. `stop(at_ms)` (barge-in) freezes `played_ms` at `at_ms` and returns it; later frames and
+> marks are ignored. The tracker owns the utterance's `AlignmentTimeline` (`played_text(at)`).
+> `truncate_assistant_message(timeline, played_ms)` returns `text` (full planned original, stripped), `text_spoken`,
+> `history_text = text_spoken + "—"` (just `"—"` when nothing was heard), `played_chars = len(text_spoken)`,
+> `total_chars = len(text)` and `unspoken` (the remainder, for the false-barge-in resume).
+
 Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms and reduces lead to 1 frame for 5 s.
 
 ## 10. Audio conditioning

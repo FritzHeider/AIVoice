@@ -196,6 +196,18 @@ Per utterance:
 - If alignment is missing for a chunk, chars of the corresponding clause are linearly interpolated across the
   chunk duration.
 
+> Decision (2026-11-01): P04-T08. The alignment is accepted structurally (`chars`, `char_start_ms`,
+> `char_duration_ms`; `va_voice` does not import `va_elevenlabs`); arrays of unequal length are `ValueError`.
+> Whitespace alignment chars are skipped and the rest are assigned positionally to the non-whitespace sent characters;
+> alignment chars beyond the sent text are ignored. Missing alignment: consecutive chunks without alignment form one
+> gap. When an aligned chunk follows, its first ≤ 8 non-whitespace chars are searched in the untimed sent text up to
+> the end of the clause after the current one; the characters skipped up to the match are spread evenly across the
+> gap (not found ⇒ nothing skipped, the gap is dropped). A trailing gap is spread at query time over the rest of the
+> current clause, so a later aligned chunk can still resync. `text_until(played_ms)` takes the longest sent prefix
+> whose non-whitespace chars all ended by `played_ms`, maps its end through the clause's `OffsetMap.to_original`
+> (a partly heard replacement counts as unheard), cuts back to the start of the word it falls in (word boundaries are
+> whitespace in the original text) and strips trailing whitespace; it is monotone in `played_ms`.
+
 ## 8. Cancellation
 
 `cancel(context_id)`: send `close_context`; mark context `cancelled` locally; any subsequent `audio` with that

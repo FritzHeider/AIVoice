@@ -42,7 +42,7 @@
   - Deliverables: `PronunciationApplier` (case_sensitive, spaced, word-boundary regex, precompiled per call)
   - Acceptance: tests for each flag and overlapping rules ordering.
 
-- [ ] P04-T08 Playback tracker and truncation
+- [x] P04-T08 Playback tracker and truncation — va_voice.playback (PlaybackTracker, marks, truncate_assistant_message) + text.alignment (AlignmentTimeline, gap resync); make test 7121 passed / 7 skipped, 98.51 %, new modules 100 %; lint/typecheck/placeholders pass
   - Spec refs: specs/07-media-pipeline.md (playback tracker, barge-in truncation); specs/09-tts-elevenlabs.md (alignment handling)
   - Depends on: P04-T01
   - Deliverables: `PlaybackTracker` (absolute alignment timeline per context, frames-sent clock, Telnyx mark correlation, `played_text(at)`), `truncate_assistant_message`

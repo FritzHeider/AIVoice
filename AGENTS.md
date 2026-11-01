@@ -1009,3 +1009,9 @@ Grafana 3001
   the original text for the alignment timeline and barge-in truncation; `replace(text)` for static phrases. Tests
   compare against a naive reference scan in `tests/text/test_pronunciation.py`; note `C++C` is not a `C++` match
   (`(?!\w)` sees the `C`).
+- 2026-11-01 (P04-T08): playback = `va_voice.playback.PlaybackTracker(turn, fmt)` (pure ms API: `frame_sent(now)`,
+  `end_segment(chars) -> mark name`, `finish()`, `on_mark(name)`, `played_ms`, `is_playing`, `stop(at)`,
+  `played_text(at)`) owning a `va_voice.text.alignment.AlignmentTimeline` (`add_clause(PronouncedText | str)`,
+  `add_chunk(audio, alignment | None)`, `text_until(ms)`); barge-in text via `truncate_assistant_message(timeline,
+  played_ms)`. Rules: specs/07 §9 and specs/09 §7 Decisions P04-T08. Alignments are structural (tests use a local
+  frozen dataclass with `chars`/`char_start_ms`/`char_duration_ms`).

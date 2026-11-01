@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 def split_at(text: str, cuts: list[int]) -> list[str]:
     """``text`` cut into consecutive deltas at the given offsets (bad offsets ignored)."""
@@ -13,3 +15,12 @@ def split_at(text: str, cuts: list[int]) -> list[str]:
         start = point
     parts.append(text[start:])
     return parts
+
+
+@dataclass(frozen=True, slots=True)
+class Alignment:
+    """A chunk alignment shaped like ``va_elevenlabs.ChunkAlignment`` (times relative to the chunk)."""
+
+    chars: tuple[str, ...]
+    char_start_ms: tuple[int, ...]
+    char_duration_ms: tuple[int, ...]

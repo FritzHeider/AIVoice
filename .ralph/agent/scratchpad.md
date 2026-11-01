@@ -839,3 +839,142 @@ Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 70
 pronunciation.py 100 %). Checked against specs/09 §6: pattern `(?<!\w)` + escape + `(?!\w)` per rule, IGNORECASE
 scoped per rule, longest-first, single combined pass (no re-match), spaced spelling incl. empty pronunciation →
 matched word; OffsetMap.to_original as the spec requires. Decision note covers ignored rules / tie order / overlaps.
+
+## Plan P04-T08 (Planner, 2026-11-01)
+Playback tracker + alignment timeline + truncation. Specs: specs/07 §7 step 6 (barge-in truncation), §9 (PlaybackTracker,
+marks, LEAD_MS_ESTIMATE), specs/09 §7 (AlignmentTimeline). Pure, sync, explicit ms timestamps (like `Endpointer`: no
+clock inside; callers pass `now_ms` from their injected monotonic source). No new deps. va_voice must NOT import
+va_elevenlabs: alignments accepted structurally.
+
+### Files
+1. `packages/va_voice/src/va_voice/text/alignment.py` (specs/09 §7 names it `va_voice.text.alignment.AlignmentTimeline`):
+   - `class ChunkAlignmentLike(Protocol)`: `@property chars: Sequence[str]`, `char_start_ms: Sequence[int]`,
+     `char_duration_ms: Sequence[int]` (va_elevenlabs `ChunkAlignment` satisfies it structurally).
+   - `@dataclass(frozen=True, slots=True) class CharTiming(start_ms: float, end_ms: float)`.
+   - `@dataclass(frozen=True, slots=True) class SpokenPrefix(text: str, chars: int)` — `text` = original prefix with
+     trailing whitespace stripped; `chars` = length of the original prefix (before rstrip? NO: after rstrip, so
+     `played_chars` counts spoken chars).
+   - `class AlignmentTimeline(fmt: AudioFormat)`:
+     - `add_clause(clause: PronouncedText | str) -> None` — appends one clause as sent to TTS (str ⇒ identity
+       offsets). Keeps per clause: sent base, original base, OffsetMap; the global sent text / original text are the
+       concatenations. Visible (non-whitespace, `str.isspace`) sent chars are queued for matching.
+     - `add_chunk(audio: bytes | int, alignment: ChunkAlignmentLike | None) -> None` — `chunk_ms = fmt.duration_ms(n)`.
+       With alignment: for each alignment char k whose char is not whitespace: `abs_start = offset_ms + start[k]`,
+       `abs_end = abs_start + duration[k]`, assigned to the next unmatched visible sent char (positional, whitespace-
+       insensitive; extra alignment chars beyond the sent text are ignored). Unequal array lengths ⇒ `ValueError`.
+       Without alignment: record a pending gap `[offset_ms, offset_ms + chunk_ms]` (consecutive gaps merge).
+       `offset_ms += chunk_ms` always. Empty audio with no alignment is a no-op.
+     - Gap resync (Decision): when an aligned chunk follows a pending gap, find the chunk's visible alignment string
+       (first ≤ 8 visible chars) in the unmatched visible sent text starting at the cursor (`str.find`, limited to
+       the end of the clause after the current one); the skipped chars are linearly interpolated across the gap
+       (`start = gap_start + i*gap/n`, `end = start + gap/n`); if not found, the skipped count is 0 and the gap is
+       dropped (positional fallback). A trailing gap (no aligned chunk after it yet) is interpolated lazily at query
+       time over the remaining unmatched visible chars of the clause containing the cursor (not materialized, so a
+       later aligned chunk still resyncs).
+     - `offset_ms` property (total audio ms received), `sent_text`, `original_text`, `total_chars` (= len original),
+       `char_end_ms(sent_index) -> float | None`.
+     - `text_until(played_ms: float) -> SpokenPrefix`: s = length of the longest sent prefix whose every visible char
+       has a known timing with `end_ms ≤ played_ms` (whitespace never blocks); map s to the original via the owning
+       clause's `offsets.to_original` (floor: partial replacement = unspoken) + clause original base; then cut back
+       to a word boundary: keep `original[:o]` if `o == len(original)` or `original[o].isspace()`, else cut to the
+       last whitespace index < o (0 if none); rstrip. Monotone in played_ms. `played_ms ≤ 0` ⇒ `SpokenPrefix("", 0)`.
+     - Clause boundary handling: s exactly at a clause end maps through the next clause base (prefix includes the
+       whole first clause's original including its trailing space, then rstrip).
+2. `packages/va_voice/src/va_voice/playback.py`:
+   - `LEAD_MS_ESTIMATE: Final = 60`, `MARK_LOSS_GRACE_MS: Final = 200`, uses `audio.FRAME_MS`.
+   - `mark_name(turn: int, idx: int) -> str` = `f"seg:{turn}:{idx}"`; `parse_mark(name) -> tuple[int, int] | None`
+     (strict `^seg:(\d+):(\d+)$`, else None).
+   - `@dataclass(frozen=True, slots=True) class Segment(idx, start_ms, end_ms, chars)`.
+   - `class PlaybackTracker(turn: int, *, lead_ms: int = LEAD_MS_ESTIMATE)` per utterance:
+     - `frame_sent(now_ms: float) -> None` (first call sets `t_first_frame_sent`; ignored after `stop`/`finish`
+       ValueError? → after `stop`: ignored; frames after `finish`: `RuntimeError`).
+     - `end_segment(chars: int) -> str` after the last frame of a segment: appends `Segment(idx=len, start=prev end,
+       end=frames_sent*20, chars)`, returns the mark name to send. A segment with 0 new frames ⇒ `ValueError`.
+     - `finish() -> None` — no more audio for this utterance (needed for `is_playing` end detection).
+     - `on_mark(name: str) -> bool`: parse; foreign turn / unknown idx / malformed ⇒ False; else
+       `confirmed_ms = max(confirmed_ms, segments[idx].end_ms)` and record the highest idx echoed; True.
+     - `played_ms(now_ms) -> float` = `max(confirmed_ms, clamp((now − t_first) − lead, 0, frames_sent*20))`; 0 before
+       the first frame; after `stop(at)` frozen at the value at `at`.
+     - `is_playing(now_ms) -> bool`: False before first frame and after `stop`; True until `finish()` was called AND
+       (last segment's mark echoed OR `(now − t_first) − lead ≥ total_ms + 200`). Without `finish()` it stays True
+       (stream still producing/underrun).
+     - `stop(at_ms) -> float` (barge-in): freezes and returns `played_ms(at_ms)`; idempotent (second call returns the
+       first value).
+     - properties: `turn`, `t_first_frame_sent: float | None`, `frames_sent`, `total_ms`, `segments` (tuple),
+       `confirmed_ms`, `finished`, `stopped`, `completed(now_ms)` = finished and not playing and not stopped.
+   - `@dataclass(frozen=True, slots=True) class TruncatedMessage(text: str, text_spoken: str, history_text: str,
+     played_chars: int, total_chars: int, unspoken: str)`.
+   - `truncate_assistant_message(timeline: AlignmentTimeline, played_ms: float) -> TruncatedMessage`: `text` = full
+     planned original (stripped), `text_spoken` = `timeline.text_until(played_ms).text`, `history_text` =
+     `f"{text_spoken}—"` (specs/07 §7 step 6; `"—"` alone when nothing was spoken), `played_chars`/`total_chars`
+     (total = len of stripped original), `unspoken` = `original[played_chars:].strip()` (for the false-barge-in
+     resume, T12).
+3. `text/__init__.py` docstring: add `alignment` (§7). `va_voice/__init__.py` unchanged unless it lists modules.
+4. specs/07 §9 `> Decision (2026-11-01): P04-T08 ...`: pure ms API; `end_segment` returns the mark; frames after
+   `stop` ignored; mark of other turns ignored; `is_playing` requires `finish()`; `played_ms` floor of confirmed
+   marks; one Framer per utterance so frames_sent×20 equals TTS audio ms except the final padded frame (timeline
+   offsets come from raw chunk bytes, so they never drift). specs/09 §7 Decision: structural alignment, positional
+   whitespace-insensitive matching, gap resync/interpolation rule, word boundary = whitespace in the original text,
+   `SpokenPrefix.chars` excludes trailing whitespace, history `"{spoken}—"`.
+5. AGENTS.md bullet (P04-T08).
+
+### Tests
+`packages/va_voice/tests/text/test_alignment.py`:
+- helper building synthetic alignments: `aligned(text, ms_per_char, start_ms=0)` → (chunk bytes for its duration in
+  ULAW_8000, alignment object = small local frozen dataclass), plus whitespace chars with timings (vendor sends them).
+- single chunk: `text_until` at every char boundary returns whole words only ("Hello there friend": at end of "there"
+  ⇒ "Hello there"; mid "friend" ⇒ "Hello there"; at total ⇒ full; 0 ⇒ "").
+- chunk-relative → absolute: two chunks, second chunk's times relative ⇒ offsets added (the AGENTS gotcha).
+- punctuation attached to words ("Hi, Bob." – "Hi," spoken only when ',' ended).
+- multi-clause (`"Thanks for calling. "`, `"How can I help? "`) with pronunciation: clause "Call SQL now " with rule
+  SQL→sequel; interrupt inside "sequel" ⇒ "Call"; after ⇒ "Call SQL".
+- missing alignment: a gap chunk then aligned chunk ⇒ skipped chars interpolated linearly (assert exact interpolated
+  end times via `char_end_ms`); trailing gap ⇒ remaining clause chars interpolated across it; resync not found ⇒
+  positional.
+- unequal array lengths ⇒ ValueError; pcm_16000 duration (32 bytes/ms) offsets.
+- hypothesis: random words (letters/punct) split into random clauses and random chunking with monotone timings:
+  for any played_ms, result is a whole-word prefix of the original (original.startswith(text) and next char is
+  whitespace/end), monotone non-decreasing in played_ms, and equals a naive reference (scan words, keep while the
+  word's last char end ≤ played_ms).
+`packages/va_voice/tests/test_playback.py`:
+- mark_name/parse_mark round trip + malformed names (`seg:1`, `seg:a:1`, `x:1:2`, `seg:1:2:3`).
+- played_ms formula: lead 60 subtraction, clamp to 0 and to frames_sent×20, before first frame = 0.
+- mark echo raises played_ms floor; foreign turn / unknown idx ignored (False).
+- is_playing: false before frames; true while streaming even when estimate passes total; ends on last mark after
+  finish; ends at total+200 when marks lost (and not at total+199); false after stop.
+- stop freezes and is idempotent; frames after stop ignored; frame after finish ⇒ RuntimeError; empty segment ⇒
+  ValueError.
+- truncation at arbitrary interrupt times (acceptance): table + hypothesis over interrupt time using tracker +
+  timeline built from synthetic alignments (20 ms frames fed per audio chunk): `text_spoken` always word boundary,
+  `history_text` endswith "—", `played_chars ≤ total_chars`, `text_spoken + " " + unspoken` reconstructs (modulo
+  whitespace) the original; full playback (mark echo) ⇒ text_spoken == text.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (new modules 100 %), `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a packages/va_voice/src`,
+pip-audit + pnpm audit (no new deps).
+
+### Risks
+- Gap resync heuristics: keep bounded and deterministic; unit-test each branch for 100 % coverage.
+- Floating ms: chunk_ms may be fractional (odd byte counts); use float throughout, compare with ≤.
+- Keep complexity low (radon): split text_until into prefix scan / map / boundary helpers.
+- mypy narrows properties across asserts: compare tuples from helper functions in tests.
+
+## Build P04-T08 (Builder, 2026-11-01)
+Implemented per plan with one addition from the plan-file deliverable (`played_text(at)`): `PlaybackTracker(turn, fmt,
+lead_ms)` owns its `AlignmentTimeline` (`tracker.timeline`) and exposes `played_text(at_ms)`. Files:
+`va_voice/text/alignment.py` (ChunkAlignmentLike protocol, CharTiming, SpokenPrefix, AlignmentTimeline with positional
+whitespace-insensitive matching, prefix-max end bisect, gap resync via ≤8-char probe, lazy trailing-gap
+interpolation, word-boundary cut), `va_voice/playback.py` (LEAD_MS_ESTIMATE, MARK_LOSS_GRACE_MS, INTERRUPTED_SUFFIX,
+mark_name/parse_mark, Segment, PlaybackTracker, TruncatedMessage, truncate_assistant_message), shared test
+`text_helpers.Alignment`, specs/07 §9 + specs/09 §7 Decisions P04-T08, AGENTS bullet.
+Gates: fmt ok; lint pass; typecheck pass (851 files); placeholders 0; spec refs 0; make test 7121 passed / 7 skipped
+(98.51 %; playback.py + alignment.py 100 %), va_voice re-run after test-helper dedupe 601 passed; jscpd 0 clones;
+radon A (2.27); pip-audit no known vulns; pnpm audit no high.
+
+## Review P04-T08 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 7121 passed / 7 skipped (98.51 %;
+playback.py + alignment.py 100 %). Checked against specs/07 §7 step 6 / §9 (played_ms formula, LEAD 60, mark floor,
+is_playing until last echo or total+200, history `text_spoken—`) and specs/09 §7 (chunk-relative → absolute, sequential
+whitespace-insensitive matching, OffsetMap mapping, word-boundary text_until, missing-alignment interpolation per
+Decision). Pure ms API, no sleeps; hypothesis reference tests for word-boundary truncation.
