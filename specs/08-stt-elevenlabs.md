@@ -272,6 +272,10 @@ produce a higher-accuracy transcript aligned to the recording for citations, eva
 > (and `combined` with `timestamps_granularity=none`), and the simulator answers 422 to match; when redaction needs
 > entities, the client requests `separate` and merges the channels' words itself by start time.
 
+> Decision (2026-11-01): the request options, response normalisation, and utterance grouping of this section are
+> `va_elevenlabs.BatchOptions.for_recording`, `BatchTranscript`, and `group_utterances` (specs/15 §7 Decision
+> "ElevenLabs REST client (P03-T12)" rules 5-6).
+
 ## 9. Metering
 
 - `stt_seconds` usage event (cost only; price 0 in plans) per call = session audio duration sent (frames × 20 ms),

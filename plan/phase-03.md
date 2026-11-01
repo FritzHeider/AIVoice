@@ -172,7 +172,7 @@
   - Deliverables: `SttSession` (connect with query params, `send_audio(frame, commit=False)`, `commit()`, async iterator of `Partial/Committed` events), error classification, buffered reconnect
   - Acceptance: contract tests for every server message type and error type.
 
-- [ ] P03-T12 `va_elevenlabs` REST client
+- [x] P03-T12 `va_elevenlabs` REST client — ElevenLabsRest (TTS convert/with-timestamps, voices list/get/add/edit/settings/delete, batch STT) with per-op retries, error mapping, metrics, spans; specs/15 §7 Decision; 5936 tests pass, va_elevenlabs REST modules 100% coverage, lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
   - Spec refs: specs/09-tts-elevenlabs.md (REST convert for phrase cache); specs/08-stt-elevenlabs.md (batch re-transcription); specs/15-voices.md (voices, cloning)
   - Depends on: P03-T05b, P03-T05c
   - Deliverables: `ElevenLabsRest` (tts_convert, list_voices v2 with pagination, add_voice multipart, edit_voice, get/update voice settings, delete_voice, batch_transcribe)

@@ -8,6 +8,8 @@ redirects are never followed implicitly, connection limits are explicit, and req
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Final
 
 import httpx
@@ -16,7 +18,7 @@ from opentelemetry.trace import TracerProvider
 
 from va_common.settings import BaseServiceSettings
 
-__all__ = ["DEFAULT_CONNECT_TIMEOUT_S", "build_timeout", "http_client", "user_agent"]
+__all__ = ["DEFAULT_CONNECT_TIMEOUT_S", "build_timeout", "http_client", "retry_after_seconds", "user_agent"]
 
 DEFAULT_CONNECT_TIMEOUT_S: Final = 5.0
 
@@ -29,6 +31,22 @@ def build_timeout(timeout: float | httpx.Timeout) -> httpx.Timeout:
         msg = f"timeout must be positive, got {timeout}"
         raise ValueError(msg)
     return httpx.Timeout(timeout, connect=min(timeout, DEFAULT_CONNECT_TIMEOUT_S))
+
+
+def retry_after_seconds(value: str | None, now: datetime) -> float | None:
+    """Seconds a ``Retry-After`` header asks for (``None`` when absent or unparsable; never negative)."""
+    if value is None or not value.strip():
+        return None
+    text = value.strip()
+    if text.isdigit():
+        return float(int(text))
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0.0, (when - now).total_seconds())
 
 
 def user_agent(settings: BaseServiceSettings, version: str) -> str:

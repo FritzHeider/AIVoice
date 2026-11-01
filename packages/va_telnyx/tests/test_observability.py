@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import fakeredis
 import httpx
 import pytest
 import respx
-from obs_helpers import memory_provider
+from obs_helpers import memory_provider, vendor_metric_rows
 from opentelemetry.trace import SpanKind, StatusCode
 from prometheus_client import CollectorRegistry
 from telnyx_client_helpers import API_KEY, BASE_URL, CCID, RecordingClock, rig
@@ -28,24 +25,12 @@ from va_telnyx import (
 )
 from va_telnyx.metrics import DURATION_METRIC, REQUESTS_METRIC
 
-SPEC = Path(__file__).resolve().parents[3] / "specs" / "27-observability.md"
 OK = {"data": {"result": "ok"}}
 HANGUP = f"/calls/{CCID}/actions/hangup"
 
 
-def _spec_rows() -> set[tuple[str, str, tuple[str, ...]]]:
-    text = SPEC.read_text(encoding="utf-8")
-    section = text.split("### 3.6 ", 1)[1].split("\n## ", 1)[0]
-    rows = set()
-    for line in section.splitlines():
-        if line.startswith("| `va_"):
-            metric, kind, labels = (cell.strip() for cell in line.strip("|").split("|"))
-            rows.add((metric.strip("`"), kind.split()[0], tuple(re.findall(r"`([^`]+)`", labels))))
-    return rows
-
-
 def test_metrics_match_spec_section_3_6() -> None:
-    assert _spec_rows() == {
+    assert vendor_metric_rows("va_telnyx_") == {
         (REQUESTS_METRIC, "counter", ("operation", "outcome")),
         (DURATION_METRIC, "histogram", ("operation",)),
     }

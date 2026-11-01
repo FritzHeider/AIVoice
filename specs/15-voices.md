@@ -150,6 +150,52 @@ Sent to ElevenLabs in the multi-stream `voice_settings` of context initializatio
 | 429 | retried; final → `UPSTREAM_TIMEOUT` | 504 |
 | 5xx / timeout | retried; final → `UPSTREAM_TIMEOUT` | 504 |
 
+> Decision (2026-11-01): ElevenLabs REST client (P03-T12). `va_elevenlabs.ElevenLabsRest` makes every vendor
+> REST call of this spec, specs/09 §9, and specs/08 §8:
+> 1. Modules: `rest_transport` (auth header `xi-api-key`, per-operation timeout and retries, error mapping,
+>    metrics, spans), `tts_rest`, `voices_rest`, `stt_batch` (mixins), `rest` (`ElevenLabsRest(api_key, base_url,
+>    http, *, clock, rng, metrics, tracer_provider)`). The caller owns the `httpx.AsyncClient`
+>    (`va_common.http.http_client`); `repr` never shows the key.
+> 2. Operations: `tts_convert` (`POST /v1/text-to-speech/{voice_id}?output_format=`, returns audio, content type,
+>    `x-character-count`, `request-id`), `tts_with_timestamps` (decodes `audio_base64`; alignment arrays of unequal
+>    length are a protocol error), `list_voices` (`GET /v2/voices`, `include_total_count=false`, follows
+>    `next_page_token` until `has_more` is false, at most 100 pages), `get_voice`, `add_voice` (`POST
+>    /v1/voices/add`), `edit_voice` (`POST /v1/voices/{voice_id}/edit`; ElevenLabs clears a description that is not
+>    sent, so callers pass the current one), `get_voice_settings`, `update_voice_settings` (`POST
+>    .../settings/edit` with all five §5 fields), `delete_voice(voice_id, missing_ok=True)` (404 returns `False`,
+>    §3.4), `batch_transcribe(AudioUpload | SourceUrl, BatchOptions)`.
+> 3. Timeouts and retries (waits plus 0-100 ms jitter, on 429/500/502/503/504 and transport failures; a longer
+>    `Retry-After` replaces the wait, one over 30 s ends the retries): reads, settings write, delete 10 s with
+>    0.5/1/2 s; TTS 10 s with one retry after 0.2 s (callers then fall back to the socket, specs/09 §9);
+>    `add_voice`/`edit_voice` 60 s and never retried by the client (not idempotent; `VoiceCloneWorkflow` retries
+>    2/4/8/16/32 s, §3.2); batch 300 s with 5 s/20 s (specs/08 §8).
+> 4. Errors: `ElevenLabsError` (`to_app_error()`); `ElevenLabsApiError(status, code, provider_message, detail)`
+>    parses `{"detail": {"status", "message"}}` (code = `status`), 422 `{"detail": [{"loc", "msg", "type"}]}`
+>    (code `validation_error`, first `msg`), anything else (code `http_<status>`, first 200 characters);
+>    subclasses `ElevenLabsAuthError` (401/403), `ElevenLabsNotFoundError` (404), `ElevenLabsRateLimitedError`
+>    (429 after retries); `ElevenLabsTransportError` and `ElevenLabsProtocolError` (malformed success body).
+>    Mapping per the table above: 401/403 and any unlisted 4xx `INTERNAL_ERROR`; 400/422 `VOICE_CLONE_FAILED` with
+>    `details.provider_code` and `details.provider_message`; 404 `VOICE_NOT_FOUND`; 429/5xx/transport
+>    `UPSTREAM_TIMEOUT`; protocol `INTERNAL_ERROR`. A parser that raises a plain `TypeError`/`ValueError`/`KeyError`/`IndexError`
+>    on a success body is reported as `ElevenLabsProtocolError` too (counted `client_error`, span in error).
+> 5. Multipart (always multipart, a URL source too): add/edit send `name`, `description` (when given), `labels`
+>    (compact JSON object, when given), `remove_background_noise` (`true`/`false`), then one `files` part per
+>    `VoiceFile(filename, data, content_type)`. Batch sends `model_id`, `use_multi_channel`,
+>    `timestamps_granularity`, `tag_audio_events`, `diarize`, `multichannel_output_style` (multi-channel only),
+>    `num_speakers`, `detect_speaker_roles`, `language_code` (when set), repeated `keyterms` (at most 1 000,
+>    `ValueError` beyond) and `entity_detection`, then `file` or `cloud_storage_url`; query `enable_logging=false`
+>    only under zero retention. `BatchOptions.for_recording(model_id, *, stereo, language_code, keyterms, redact,
+>    zero_retention)` applies specs/08 §8: stereo = multi-channel `combined`, or `separate` with `entity_detection`
+>    `pii`, `pci` when `redact`; mono = `diarize`, `num_speakers=2`, `detect_speaker_roles=true`.
+> 6. `BatchTranscript(language_code, text, words, entities, transcription_id, audio_duration_secs)` normalises the
+>    single-channel, `separate` (merged by start, channel, original order; text = the merged words; entities keep
+>    their `channel_index`), and `combined` shapes. `group_utterances(words, gap_s=0.7)` keeps `word` entries
+>    sorted by start, maps channel 0 / `speaker_0` to `user` and anything else to `assistant`, and starts a new
+>    utterance on a role change or a silence longer than 0.7 s (exactly 0.7 s stays together).
+> 7. Metrics and spans: specs/27 §3.6 (`va_elevenlabs_requests_total`, `va_elevenlabs_request_duration_ms`, span
+>    `elevenlabs.<operation>`). Response models ignore unknown vendor fields; voice settings keep the five §5
+>    fields and drop `null` values.
+
 ## 8. Permissions
 List/get/preview: all roles except billing. Clone/rename/settings/samples/delete/import: owner, admin, developer.
 Rate: any member. API key scopes `voices:read`, `voices:write`.

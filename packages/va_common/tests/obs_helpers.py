@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any, ClassVar
 
 from opentelemetry.sdk.trace import TracerProvider
@@ -31,3 +33,15 @@ def memory_provider(ratio: float = 1.0, **kwargs: Any) -> tuple[TracerProvider, 
         **kwargs,
     )
     return provider, exporter
+
+
+def vendor_metric_rows(prefix: str) -> set[tuple[str, str, tuple[str, ...]]]:
+    """``(metric, type, labels)`` of the specs/27 §3.6 table rows whose metric name starts with ``prefix``."""
+    spec = Path(__file__).resolve().parents[3] / "specs" / "27-observability.md"
+    section = spec.read_text(encoding="utf-8").split("### 3.6 ", 1)[1].split("\n## ", 1)[0]
+    rows = set()
+    for line in section.splitlines():
+        if line.startswith(f"| `{prefix}"):
+            metric, kind, labels = (cell.strip() for cell in line.strip("|").split("|"))
+            rows.add((metric.strip("`"), kind.split()[0], tuple(re.findall(r"`([^`]+)`", labels))))
+    return rows

@@ -193,6 +193,8 @@ named `LAT_MS`.
 |---|---|---|
 | `va_telnyx_requests_total` | counter | `operation`, `outcome` (ok/already_ended/carrier_error/rate_limited/transport_error) |
 | `va_telnyx_request_duration_ms` | histogram (LAT_MS) | `operation` |
+| `va_elevenlabs_requests_total` | counter | `operation`, `outcome` (ok/client_error/auth_error/rate_limited/server_error/transport_error) |
+| `va_elevenlabs_request_duration_ms` | histogram (LAT_MS) | `operation` |
 
 > Decision (2026-11-01): vendor clients (`va_telnyx`, later `va_elevenlabs`/`va_llm`) run in several services, so
 > their metrics are not part of the per-service `CATALOG` of §3.1-§3.5: the library registers them in the registry
@@ -203,6 +205,14 @@ named `LAT_MS`.
 > records one `telnyx.<operation>` CLIENT span with `telnyx.operation`, `telnyx.call_control_id` and
 > `telnyx.command_id` (when present), `telnyx.status_code` (last response), and `telnyx.attempts`; it ends with
 > error status when the operation raises. `packages/va_telnyx/tests/test_observability.py` parses this table.
+
+> Decision (2026-11-01): the ElevenLabs REST client (`va_elevenlabs.ElevenLabsRest`, P03-T12) follows the same
+> rules with `va_elevenlabs.ElevenLabsRestMetrics(registry)`: `operation` is the client method name (`tts_convert`,
+> `list_voices`, `batch_transcribe`, ...), a paginated `list_voices` is one observation, and a malformed success
+> body counts as `client_error`. Its span is `elevenlabs.<operation>` (CLIENT) with `elevenlabs.operation`,
+> `elevenlabs.voice_id` (when present), `http.status_code` (last response), and `elevenlabs.attempts` (every request
+> of the operation, pages included). The WebSocket clients keep the media-worker catalog metrics of §3.3.
+> `packages/va_elevenlabs/tests/test_rest_transport.py` parses the `va_elevenlabs_` rows.
 
 ## 4. Per-call latency events
 

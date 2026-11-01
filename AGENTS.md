@@ -858,3 +858,13 @@ Grafana 3001
   mypy narrows properties across asserts (`assert x.p is None` makes a later `assert x.p == "a"` unreachable):
   compare tuples returned by a helper function instead. Contract tests that need "no audio lost" must keep the
   whole utterance within the 2 s replay cap (the client sends unpaced audio before it sees the fault).
+- 2026-11-01 (P03-T12): ElevenLabs REST = `va_elevenlabs.ElevenLabsRest(api_key, base_url, http, *, clock, ...)`
+  (rules: specs/15 §7 Decision P03-T12). Mixins `tts_rest`/`voices_rest`/`stt_batch` call
+  `ElevenLabsTransport.call(op, path, parse, ...)`: parse the body INSIDE the call so a malformed body counts as
+  the operation's failure; multi-request operations (paged `list_voices`) use `transport.observed(op, work)` with
+  `Exchange.send` (one metric/span, attempts summed). Retry schedules are per `RestOperation` (`rest_retry`);
+  add/edit are never retried. Multipart parts are httpx `files=` tuples (`(None, text)` fields) so URL-only batch
+  requests stay multipart. `retry_after_seconds` now lives in `va_common.http` (`va_telnyx.retry` re-exports).
+  Tests: `tests/support/rest_client_helpers.py` (`rest_rig()` = client on `BASE_URL` for respx with a
+  `RecordingClock`; `sim_rest()` = client over FakeElevenLabs via ASGI; `form_parts(request)` decodes multipart
+  with the stdlib `email` parser). The sim batch record list is `GET /sim/elevenlabs/stt/batch` key `requests`.

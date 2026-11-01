@@ -1368,3 +1368,178 @@ previous_text first-chunk-only, 100 ms batching/silence commit, 250 ms throttle 
 every §4 row (ACTIONS + IGNORED_TYPES), §5 table, §6 keyterms, §7 replay cap/attempts/rotation all match.
 Not blocking (for P04 engine work): an answer for a commit sent on a rotated-out session that never arrives
 within the 0.5 s drain stays in the outstanding FIFO. The engine only rotates during silence, which keeps that unlikely.
+
+## Plan P03-T12 (Planner, 2026-11-01)
+`va_elevenlabs` REST client `ElevenLabsRest` (specs/15 header names `va_elevenlabs.rest.ElevenLabsRest`; specs/09
+names `tts_rest.py`, specs/08 names `stt_batch.py`). Layout like va_telnyx: transport + mixins.
+Phrase cache (Redis, P04-T11), catalog sync / clone workflow (P09), S3 artifact + call_events (P12-T01) are OUT of
+scope; this task delivers only the vendor calls and pure response helpers they need.
+
+### Spec decision to write: specs/15 §7 `> Decision (2026-11-01): ElevenLabs REST client (P03-T12).` Numbered rules:
+1. Module map: `rest_transport.ElevenLabsTransport` (auth/retry/errors/metrics/spans), `tts_rest.TtsRestCommands`,
+   `voices_rest.VoiceCommands`, `stt_batch.BatchSttCommands`; `rest.ElevenLabsRest` combines the three mixins.
+   `ElevenLabsRest(api_key, base_url, http, *, clock, rng, metrics, tracer_provider, retry)`; the caller owns the
+   `httpx.AsyncClient` built with `va_common.http.http_client` (timeouts are per operation, rule 3). `repr` hides
+   the key. Header `xi-api-key`; `Accept: application/json` except audio routes.
+2. Operations (method name = metric/span `operation`): `tts_convert(voice_id, text, *, model_id, output_format,
+   voice_settings=None, language_code=None, apply_text_normalization="auto") -> TtsRestAudio(audio, content_type,
+   character_count, request_id)` (`POST /v1/text-to-speech/{id}?output_format=`); `tts_with_timestamps(...same) ->
+   TtsTimestamped(audio: bytes, alignment: RestAlignment|None, normalized_alignment|None)` (`.../with-timestamps`,
+   decodes `audio_base64`, alignment arrays equal length else `ElevenLabsProtocolError`); `list_voices(*,
+   category=None, search=None, voice_type=None, page_size=100) -> list[VendorVoice]` follows `next_page_token`
+   until `has_more=false` (cap 100 pages → `ElevenLabsProtocolError` if exceeded; always
+   `include_total_count=false`); `get_voice(id)`; `add_voice(name, files: Sequence[VoiceFile], *, description=None,
+   labels=None, remove_background_noise=False) -> AddedVoice(voice_id, requires_verification)`
+   (`POST /v1/voices/add`); `edit_voice(id, name, files=None, *, description=None, labels=None,
+   remove_background_noise=False)` (`POST /v1/voices/{id}/edit`; description is always sent when given — vendor
+   clears an absent description, documented); `get_voice_settings(id) -> VoiceSettings` (va_domain.voices);
+   `update_voice_settings(id, settings: VoiceSettings)` (`POST /v1/voices/{id}/settings/edit`, full JSON);
+   `delete_voice(id, *, missing_ok=True)` (404 tolerated per specs/15 §3.4 → returns False); `batch_transcribe(
+   source: AudioUpload | SourceUrl, BatchOptions) -> BatchTranscript`.
+3. Timeouts and retries (per operation, `RestRetry(delays_s)` + uniform 0-100 ms jitter, `Retry-After` replaces a
+   shorter delay, > cap stops): reads (`list_voices`, `get_voice`, `get_voice_settings`) timeout 10 s, retry
+   0.5/1/2 s on 429/5xx/transport; `tts_*` 10 s, one retry after 0.2 s (callers fall back to the socket, specs/09
+   §9); `update_voice_settings` 10 s, 0.5/1/2 s (idempotent full write); `delete_voice` 10 s, 0.5/1/2 s;
+   `add_voice`/`edit_voice` 60 s, NO client retry (non-idempotent; VoiceCloneWorkflow retries 2/4/8/16/32 s,
+   specs/15 §3.2); `batch_transcribe` 300 s, retries 5 s/20 s on 429/5xx/transport (specs/08 §8).
+4. Errors (`rest_errors.py`): `ElevenLabsError(message, operation)` base with `to_app_error()`;
+   `ElevenLabsApiError(status, code, message, detail)` parses both vendor shapes — `{"detail": {"status",
+   "message"}}` (code = status) and 422 `{"detail": [{"loc","msg","type"}]}` (code `validation_error`, message =
+   first `msg`) — plus non-JSON bodies (code `http_<status>`). Subclasses: `ElevenLabsAuthError` (401/403),
+   `ElevenLabsNotFound` (404 / `voice_not_found`), `ElevenLabsRateLimited` (429 after retries),
+   `ElevenLabsTransportError` (timeout/network after retries), `ElevenLabsProtocolError` (malformed success body).
+   `to_app_error` per specs/15 §7: auth → `INTERNAL_ERROR`; 422 and 400 (`voice_limit_reached`, `invalid_sample`,
+   …) → `VOICE_CLONE_FAILED` with `details.provider_message`; 404 → `VOICE_NOT_FOUND`; 429/5xx/transport →
+   `UPSTREAM_TIMEOUT`. Messages never contain the key.
+5. Multipart: built by httpx `files=`/`data=`; fields in this order: `name`, `description`, `labels` (compact
+   JSON object), `remove_background_noise` (`true|false`), then one `files` part per sample (`VoiceFile(filename,
+   data: bytes, content_type)`; `VoiceFile.from_path(path)` reads with anyio). Batch: `model_id`, `file` (or
+   `cloud_storage_url` for `SourceUrl`), `use_multi_channel`, `multichannel_output_style`,
+   `timestamps_granularity`, `tag_audio_events`, `diarize`, `num_speakers` (when set), `language_code` (when set),
+   repeated `keyterms` (≤ 1 000, `ValueError` beyond), repeated `entity_detection`; query `enable_logging=false`
+   only when `zero_retention`. `BatchOptions.for_recording(model_id, *, stereo=True, language_code, keyterms,
+   entity_detection, zero_retention)` applies specs/08 §8 (stereo: multichannel `combined`, or `separate` when
+   entity_detection is non-empty per the specs/08 §8 Decision; mono: diarize, num_speakers=2) — note
+   `detect_speaker_roles` is NOT sent (the sim ignores unknown fields; record in the Decision that it is sent
+   only for mono and test it via respx).
+6. `BatchTranscript(language_code, text, words: tuple[BatchWord,...], entities, transcription_id,
+   audio_duration_secs)` normalises all three response shapes; `separate` is merged by (start, channel_index,
+   original order) — same as the sim's `combined`. `BatchWord(text, start, end, type, speaker_id, channel_index,
+   logprob)`; spacing entries kept in `words`, dropped by `utterances()`. Pure `group_utterances(words, gap_s=0.7)
+   -> tuple[Utterance(role, text, start, end, words)]`: words only (type `word`), sorted by start, role
+   `user` for channel 0 / `assistant` for channel 1 (mono: `speaker_0` user, `speaker_1` assistant), new
+   utterance on role change or gap > 0.7 s; text joined with single spaces.
+7. Metrics (specs/27 §3.6 table rows added): `va_elevenlabs_requests_total{operation, outcome}` (outcome
+   ok/client_error/auth_error/rate_limited/server_error/transport_error) and `va_elevenlabs_request_duration_ms
+   {operation}` (LAT_MS, retries included), `ElevenLabsRestMetrics(registry)` one per registry. Span
+   `elevenlabs.<operation>` CLIENT with `elevenlabs.operation`, `elevenlabs.voice_id` (when present),
+   `http.status_code` (last), `elevenlabs.attempts`; error status when raising.
+
+### Files
+- `packages/va_common/src/va_common/http.py`: move `retry_after_seconds(value, now)` here (public); `va_telnyx.retry`
+  re-exports it (keep `from va_telnyx.retry import retry_after_seconds` working; tests unchanged). Avoids a jscpd clone.
+- `packages/va_elevenlabs/pyproject.toml`: add `httpx>=0.28`, `anyio>=4`; description mentions REST.
+- New in `packages/va_elevenlabs/src/va_elevenlabs/`: `rest_errors.py`, `rest_metrics.py`, `rest_retry.py`
+  (`RestRetry`, per-op constants), `rest_transport.py` (`RestOperation(name, method, timeout_s, retry)`,
+  `ElevenLabsTransport.request_json/request_bytes/…` with one `_observed` wrapper), `rest_models.py` (pydantic:
+  `VendorVoice` (voice_id, name, category, labels, description, preview_url, settings: VoiceSettings|None,
+  verified_languages: list[VerifiedLanguage], samples: list[VendorSample]|None, created_at_unix) with
+  `extra="ignore"`; `AddedVoice`, `VoiceFile`, `TtsRestAudio`, `RestAlignment`, `TtsTimestamped`),
+  `tts_rest.py`, `voices_rest.py`, `stt_batch.py` (models `BatchOptions`, `AudioUpload`, `SourceUrl`,
+  `BatchWord`, `BatchTranscript`, `Utterance`, `group_utterances`), `rest.py` (`ElevenLabsRest`).
+  `__init__.py` exports. Keep radon ≤ B per function.
+- specs/15 §7 Decision; specs/27 §3.6 two rows + one sentence in its Decision naming `va_elevenlabs`;
+  specs/08 §8 one-line pointer to the Decision for `BatchOptions.for_recording`.
+- `packages/va_telnyx/tests/test_observability.py::_spec_rows`: filter rows starting with `va_telnyx_`.
+- AGENTS.md bullet (P03-T12).
+
+### Tests (packages/va_elevenlabs/tests/, support `tests/support/rest_client_helpers.py`: `rest_rig(transport)`
+→ ElevenLabsRest on ManualClock/RecordingClock + fresh registry + memory spans; `sim_rest()` async cm = ElevenLabsRest
+over `httpx.ASGITransport` on the FakeElevenLabs Starlette app of `realtime_state()` (reuse
+`contract_helpers.SimClient`/`sim_served` patterns), plus the raw sim client for `/sim/*`)
+- `test_rest_errors.py`: both detail shapes, non-JSON, status→subclass, `to_app_error` table of specs/15 §7.
+- `test_rest_transport.py` (respx): header `xi-api-key`, key not in repr/errors; retry 429/5xx/transport per op
+  with delays recorded on the clock incl. jitter bound and Retry-After; add/edit never retried; batch 5/20 s;
+  final error mapping; metrics outcomes + duration; spans attributes/error status; spec §3.6 rows parsed.
+- `test_rest_multipart.py` (respx capture): decode the request body with `multipart` (python-multipart, already a
+  dev dep via va-sim) or `email.parser.BytesParser`: field order/values for add/edit (labels JSON, booleans,
+  N file parts with filename + content type), batch fields (repeated keyterms/entity_detection, cloud_storage_url
+  vs file, enable_logging query only under zero retention, mono vs stereo `for_recording`, separate when entities),
+  keyterms > 1000 → ValueError.
+- `test_stt_batch_models.py`: parsing single / separate / combined fixtures; separate merge order; group_utterances
+  (role change, 700 ms gap boundary: exactly 0.7 s stays, 0.701 splits, spacing dropped, mono speaker mapping).
+- `test_rest_contract.py` (FakeElevenLabs): tts_convert ulaw_8000 length = 60 ms/char × 8 bytes, x-character-count;
+  with_timestamps alignment chars equal the text; unknown voice → ElevenLabsNotFound / VOICE_NOT_FOUND;
+  list_voices page_size=3 walks all 11 premade via tokens (category=premade) and search filter; add_voice with 2
+  WAV samples (use `voice_helpers.wav_sample` if importable via pythonpath, else build WAV with stdlib `wave`) →
+  get_voice shows 2 samples with sim-detected mime; edit_voice with new files replaces samples; settings get/update
+  round trip; delete clone ok, delete again → False (404 tolerated), delete premade → ElevenLabsApiError
+  `voice_not_editable`; add with invalid (short) sample → `invalid_sample` → VOICE_CLONE_FAILED; voice limit
+  → voice_limit_reached; tts fault `error` once → retried and succeeds; batch: dual-channel WAV built from
+  `stt_helpers.caller_audio` (caller ch0) + a REST TTS rendering (agent ch1) → `combined` transcript words with
+  channel 0/1, group_utterances gives user then assistant; batch fault `rate_limited` once → retried after 5 s
+  (ManualClock or RecordingClock-backed sleeps; contract can use a clock whose sleep records and returns);
+  sim `/sim/elevenlabs/stt/batch` record shows keyterms/entity_detection/enable_logging.
+- Coverage va_elevenlabs ≥ 95 %; new modules ~100 %.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones — watch ElevenLabsRestMetrics vs TelnyxMetrics and `_observed` vs va_telnyx transport; factor into
+va_common if flagged), `uvx radon cc -s -a packages/va_elevenlabs/src` (no C+), audit (`uvx pip-audit` on
+`uv export`, `corepack pnpm audit`).
+
+### Risks
+- httpx `files=` with `data=` puts data fields before files — matches rule 5 order; test it.
+- httpx `data=` alone is urlencoded: batch with `SourceUrl` must still be multipart (send fields as
+  `files=[(name,(None,value))]`, AGENTS.md P03-T05b).
+- REST TTS costs `tts_ttfa_ms` of sim time; contract tests on `realtime_state()` (ttfa 0).
+- Retry sleeps must go through the injected clock (no wall sleeps in tests).
+- `filterwarnings=error`: close every httpx client/ASGI app.
+
+## Build P03-T12 (Builder, 2026-11-01)
+Implemented per plan; deviations (all written into specs/15 §7 Decision P03-T12 rules 1-7 + specs/27 §3.6 Decision):
+- Transport API is `call(op, path, parse, ...)` (parse runs inside the span/metric so malformed bodies count as
+  `client_error`) and `observed(op, work)` + `Exchange.send` for multi-request ops (paged `list_voices` = one
+  observation; `elevenlabs.attempts` sums every request incl. pages). No `request_json`; `no_body` parser for
+  edit/settings/delete.
+- No `retry` ctor parameter: schedules are fixed per `RestOperation` (`rest_retry` READ/TTS/BATCH/NO_RETRY);
+  Retry-After cap 30 s.
+- Errors renamed `ElevenLabsNotFoundError` / `ElevenLabsRateLimitedError` (ruff N818). Unlisted 4xx →
+  INTERNAL_ERROR; VOICE_CLONE_FAILED details carry provider_code + provider_message.
+- `BatchOptions.for_recording(..., redact=bool)` (instead of an entity list): redact → entity_detection pii,pci +
+  `separate`. `detect_speaker_roles` sent only for mono. BatchEntity keeps channel_index for separate.
+- jscpd: shared `obs_helpers.vendor_metric_rows(prefix)` (telnyx test refactored onto it),
+  `contract_helpers.control_records`, `rig`/`api` fixtures in va_elevenlabs tests/conftest.py.
+Gates: make fmt/lint/typecheck 0; placeholders 0 findings; spec refs 0; make test 5924 passed (TOTAL 98%, all
+new va_elevenlabs modules 100%); jscpd 0 clones; radon avg A (2.48), no C+; pip-audit no known vulns;
+pnpm audit 3 moderate (no high; no TS touched).
+
+## Review P03-T12 (Reviewer, 2026-11-01)
+Rejected. Re-ran: make lint/typecheck/placeholders 0; make test 5924 passed (new REST modules 100%). Diff checked
+against specs/15 §2-§7, specs/08 §8, specs/09 §9, specs/27 §3.6: endpoints, multipart order, retry schedules,
+error mapping, metrics rows all match. One finding:
+1. packages/va_elevenlabs/src/va_elevenlabs/stt_batch.py `_entities` (the `int(item.get("start_char", 0))` /
+   `int(item.get("end_char", 0))` lines): a malformed entity offset escapes as a raw `TypeError` (`"start_char": null`)
+   or `ValueError` (`"start_char": "x"`), verified with `parse_transcript({"text":"a","words":[],"entities":[{"start_char":None}]})`.
+   That breaks the specs/15 §7 Decision P03-T12 rule 4 contract (a malformed success body is
+   `ElevenLabsProtocolError` → `INTERNAL_ERROR`). The specs/27 §3.6 Decision (a malformed body counts as
+   `client_error`) breaks too: `ElevenLabsTransport.observed` only catches `ElevenLabsError`, so the metric records
+   outcome `ok` and the span has no error status for an operation that raised. Fix: validate offsets like
+   `_number` does (int, not bool; reject otherwise with `ElevenLabsProtocolError(_OPERATION, "entities[].start_char
+   is not an integer")`), and add bad-offset rows to the `test_stt_batch_models` malformed parametrize. Also make
+   `entity_type`/`text` strict (don't `str()` None into "None"). Optionally harden `observed` so any non-ElevenLabs
+   `Exception` from `parse` gets wrapped as a protocol error, so a future parser slip can't record `ok`.
+
+## Build P03-T12 fix (Builder, 2026-11-01)
+Finding 1 fixed: `stt_batch._entities` now validates via `_entity_text` (str required for `text`/`entity_type`) and
+`_entity_offset` (int, not bool, for `start_char`/`end_char`) → `ElevenLabsProtocolError`. Hardened
+`ElevenLabsTransport.call`: TypeError/ValueError/KeyError/IndexError from `parse` → `ElevenLabsProtocolError(op,
+<exc name>)` (so metrics `client_error` + span error). specs/15 §7 Decision rule 4 sentence added. Tests: 7 new
+malformed-entity rows in test_stt_batch_models; test_rest_transport: malformed batch entity counts client_error +
+error span, parametrized parser-slip test.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, spec refs 0, make test 5936 passed (TOTAL 98%,
+rest_transport/stt_batch 100%), jscpd 0 clones, radon no C+.
+
+## Review P03-T12 re-review (Reviewer, 2026-11-01)
+Approved. Re-ran lint/typecheck/placeholders 0, make test 5936 passed (98%, REST modules 100%), spec refs 0, jscpd 0.
+Finding 1 fixed: `_entity_text`/`_entity_offset` raise ElevenLabsProtocolError; `transport.call` wraps parser slips.

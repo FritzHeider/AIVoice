@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793523727-35ff
+> va_elevenlabs P03-T12: ElevenLabsRest REST ops go through ElevenLabsTransport.call(op, path, parse) (parse inside span so bad bodies count as failures) or observed(op, work)+Exchange.send for paged ops; per-op RestRetry in rest_retry (add/edit never retried); tests: conftest rig/api fixtures (respx on rest_client_helpers.BASE_URL, RecordingClock), sim_rest() over FakeElevenLabs ASGI, form_parts() decodes multipart via stdlib email; specs/27 §3.6 rows parsed by obs_helpers.vendor_metric_rows(prefix)
+<!-- tags: elevenlabs, testing, rest | created: 2026-11-01 -->
+
 ### mem-1793522341-0949
 > va_elevenlabs P03-T11: ElevenLabsRealtimeStt (stt_realtime) keeps all sent audio in ReplayBuffer until a later commit is answered, re-sends the collapsed outstanding commit at its mark after reconnect; tests use stt_client_helpers RecordingSttServer (greetings deque) + stt_rig on ManualClock (wait_for_sleep before run_for for reconnect delays), contract tests via contract_helpers.sim_served; mypy narrows properties across asserts -> compare tuples from a helper fn
 <!-- tags: elevenlabs, testing, stt | created: 2026-11-01 -->

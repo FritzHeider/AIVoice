@@ -9,29 +9,13 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Final
+
+from va_common.http import retry_after_seconds
 
 __all__ = ["RETRY_STATUSES", "RetryPolicy", "retry_after_seconds"]
 
 RETRY_STATUSES: Final = frozenset({429, 500, 502, 503, 504})
-
-
-def retry_after_seconds(value: str | None, now: datetime) -> float | None:
-    """Seconds a ``Retry-After`` header asks for (``None`` when absent or unparsable; never negative)."""
-    if value is None or not value.strip():
-        return None
-    text = value.strip()
-    if text.isdigit():
-        return float(int(text))
-    try:
-        when = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return max(0.0, (when - now).total_seconds())
 
 
 @dataclass(frozen=True, slots=True)
