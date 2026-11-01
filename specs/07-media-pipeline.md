@@ -77,6 +77,16 @@ Codec helpers (numpy, precomputed at import):
 `Framer` collects arbitrary byte chunks and yields exact 20 ms frames; `flush()` pads the remainder with codec
 silence (`0xFF` for μ-law, zeros for L16).
 
+> Decision (2026-11-01): P04-T01 module layout is `va_voice.audio.codec` (tables, `ulaw_*`, `l16be_*`, plus
+> `l16_to_pcm`/`pcm_to_l16(x, byte_order)` for `TELNYX_L16_BYTE_ORDER` and `pcm16le_to_pcm`/`pcm_to_pcm16le` for
+> ElevenLabs `pcm_16000` and the widget; VAD float32 is `x / 32768`), `formats` (`AudioFormat`, `ULAW_8000`,
+> `L16_16000`, `PCM16LE_16000`, `FRAME_MS`), `framing` (`Framer` with `feed`/`flush`/`reset`/`pending`,
+> `split_frames`, `join_frames`), `resample` (`Resampler.process`/`flush`, one-shot `resample`; both 8 k↔16 k
+> directions are supported) and `levels`; everything is re-exported from `va_voice.audio`. A `Framer` keeps a
+> dangling odd byte of a 16-bit format until the next chunk (frames are always whole samples). dBFS is RMS relative
+> to full scale 32 767 (the background-asset convention of `scripts/generate_audio_assets.py`); silence and empty
+> signals are `-inf`. The tables are tested to be bit-identical with the simulator's independent codec.
+
 ## 5. Inbound path
 
 ### 5.1 Reorder buffer

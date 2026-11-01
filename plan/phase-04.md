@@ -1,6 +1,6 @@
 # Phase 04 — Real-Time Media Pipeline Core
 
-- [ ] P04-T01 Audio codecs, framing, resampling
+- [x] P04-T01 Audio codecs, framing, resampling — va_voice.audio codec/formats/framing/resample/levels; 71 tests, 100 % coverage, bit-identical with sim codec; make test 6589 passed / 7 skipped, lint/typecheck/placeholders pass, jscpd 0 clones
   - Spec refs: specs/07-media-pipeline.md (audio framing, codecs, hd_audio L16 mode)
   - Depends on: P00-T05
   - Deliverables: `va_voice.audio` (μ-law encode/decode via numpy lookup tables, PCM16 helpers, L16 big-endian conversions, soxr resample 8k↔16k, frame splitter/joiner, RMS/dBFS)

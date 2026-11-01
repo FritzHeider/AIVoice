@@ -692,7 +692,7 @@ Grafana 3001
 - 2026-10-29 (P03-T03a): `va_sim.audio` is the synthetic caller audio (specs/30 §3.1 Decision): `synthesize_utterance`
   (μ-law 8 kHz), `synthesize_pcm16`/`synthesize_wire(..., sample_rate=8000|16000)` (16 kHz synthesized natively,
   wire = L16 BE), `decode_marker(pcm16, sample_rate)`, `goertzel_power`, `synthesize_dtmf`, plus the sim's own G.711
-  codec (`va_sim.audio.codec`, must stay bit-identical with `va_voice.codec`; never import `va_voice` from the sim).
+  codec (`va_sim.audio.codec`, must stay bit-identical with `va_voice.audio.codec`; never import `va_voice` from the sim).
   Seed synthesis with `SimState.utterance_seed(id)`; utterance ids are 16-bit (registry caps at 65 535). Randomness
   only via `va_sim.audio.AudioRng` (raw PCG64). Synthesis is CPU-bound: call it through `asyncio.to_thread` from
   async code. `va_sim.audio` must not import `va_sim.state` (the state imports `MAX_UTTERANCE_ID`). The Silero
@@ -962,3 +962,8 @@ Grafana 3001
   `CallEventWriter`s must be idempotent (`DbCallEventWriter` inserts `ON CONFLICT DO NOTHING`) and report a partial
   failure as `CallEventWriteError(unwritten, failed_orgs=)`; the buffer re-queues only `unwritten`. Rows dated
   outside every partition make an org's insert fail (handy for partial-failure DB tests).
+- 2026-11-01 (P04-T01): `packages/va_voice` (dist `va-voice`) exists; audio primitives are `va_voice.audio` (codec,
+  formats, framing, resample, levels; see the specs/07 §4 Decision). soxr has no `py.typed`: a commented mypy override
+  ignores it and only `va_voice.audio.resample` calls it. soxr LQ streaming emits nothing for the first few 20 ms
+  chunks (filter delay) and outputs in blocks: assert totals after `Resampler.flush()`, never per-chunk sizes; chunked
+  vs one-shot output differs by ≤ 2 LSB. dBFS everywhere = RMS / 32 767 (`va_voice.audio.rms_dbfs`).

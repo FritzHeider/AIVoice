@@ -42,6 +42,7 @@ dev = [
   "va-telnyx",
   "va-elevenlabs",
   "va-llm",
+  "va-voice",
   "actionlint-py>=1.7.12.25",
   "pre-commit>=4.7.0",
   "aiosmtpd>=1.4.6",
@@ -71,6 +72,7 @@ va-domain = { workspace = true }
 va-telnyx = { workspace = true }
 va-elevenlabs = { workspace = true }
 va-llm = { workspace = true }
+va-voice = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -104,7 +106,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:tests_live/support"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:packages/va_voice/src:tests_live/support"
 files = [
   "scripts",
   "packages/va_common/src",
@@ -138,6 +140,8 @@ files = [
   "packages/va_elevenlabs/tests",
   "packages/va_llm/src",
   "packages/va_llm/tests",
+  "packages/va_voice/src",
+  "packages/va_voice/tests",
   "tests_live",
 ]
 exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
@@ -145,6 +149,11 @@ exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 # authlib ships no type information (no py.typed); va_api.auth.oidc_client wraps the few calls it makes.
 [[tool.mypy.overrides]]
 module = ["authlib", "authlib.*"]
+ignore_missing_imports = true
+
+# soxr ships no type information (no py.typed); va_voice.audio.resample wraps the two calls it makes.
+[[tool.mypy.overrides]]
+module = ["soxr", "soxr.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793539212-a7f4
+> P04-T01: va_voice.audio (codec/formats/framing/resample/levels); soxr has no py.typed (mypy override, only resample.py calls it); soxr LQ ResampleStream emits nothing for first chunks - assert totals after Resampler.flush(); dBFS = RMS/32767; jscpd flags known-vector parametrize tables identical to va_sim tests - use a combined (sample, code, decoded) table
+<!-- tags: audio, voice, testing | created: 2026-11-01 -->
+
 ### mem-1793538351-5d78
 > P03-T17 fix: CallEventWriter must be idempotent (ON CONFLICT (created_at,id) DO NOTHING) and report partial failure via CallEventWriteError.unwritten; buffer re-queues only those. Partial-failure DB test trick: rows dated outside all call_events partitions fail one org's insert
 <!-- tags: events, database, testing | created: 2026-11-01 -->
