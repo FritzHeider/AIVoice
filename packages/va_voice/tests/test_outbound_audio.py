@@ -136,6 +136,41 @@ async def test_chunks_are_reframed_and_the_tail_is_padded(rig: Rig) -> None:
     assert tracker.finished
 
 
+async def test_finish_utterance_adds_characters_to_the_trailing_segment(rig: Rig) -> None:
+    tracker = PlaybackTracker(5)
+    rig.out.start_utterance(tracker)
+    rig.out.push_audio(bytes([0x20]) * 250)
+    rig.out.finish_utterance(17)
+    await rig.clock.run_for(0.1)
+    assert [(s.end_ms, s.chars) for s in tracker.segments] == [(40, 17)]
+    assert rig.sink.kinds() == ["audio", "audio", "mark"]
+
+
+async def test_on_finished_reports_each_finished_tracker() -> None:
+    clock = ManualClock()
+    finished: list[PlaybackTracker] = []
+    out = OutboundAudio(RecordingSink(clock), FrameMixer(ULAW_8000), clock=clock, on_finished=finished.append)
+    task = asyncio.create_task(out.run())
+    try:
+        spoken, empty, stopped = PlaybackTracker(1), PlaybackTracker(2), PlaybackTracker(3)
+        out.start_utterance(spoken)
+        out.push_audio(_speech(2))
+        out.finish_utterance(4)
+        out.start_utterance(empty)
+        out.finish_utterance()
+        out.start_utterance(stopped)
+        out.push_audio(_speech(8))
+        out.finish_utterance()
+        stopped.stop(0.0)
+        await settle()
+        await clock.run_for(0.4)
+        assert finished == [spoken, empty]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 async def test_characters_of_an_empty_segment_carry_forward(rig: Rig) -> None:
     tracker = PlaybackTracker(3)
     rig.out.start_utterance(tracker)

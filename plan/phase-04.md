@@ -66,15 +66,27 @@
   - Deliverables: `PhraseCache.get_or_render(voice, text, settings, format)` using REST convert, Redis storage, size limits
   - Acceptance: cache hit/miss tests against FakeElevenLabs; key includes voice settings hash.
 
-- [ ] P04-T12 Pipeline orchestrator and protocols
-  - Spec refs: specs/07-media-pipeline.md (CallSession task group, protocols, barge-in sequence, silence/no-input handling, DTMF input, max_duration)
-  - Depends on: P04-T02, P04-T04, P04-T05, P04-T06, P04-T07, P04-T08, P04-T09, P04-T10
-  - Deliverables: `Transport`, `SttStream`, `TtsStream`, `Brain` protocols; `CallPipeline.run()` (inbound audio fan-out to VAD/STT, endpointing → Brain turn → chunker → TTS → outbound; barge-in; reprompt/hangup on silence; DTMF routing; max-duration timer; cancellation and cleanup)
-  - Acceptance: in-memory harness tests: normal turn, barge-in ordering and ≤ 120 ms reaction, backchannel ignored at level 2, interrupt blocked at level 0, silence reprompt then hangup, DTMF delivered to Brain.
+- [x] P04-T12a Pipeline core: protocols, harness, normal turn — va_voice.pipeline (protocols, models, config, inbound, speaker, pipeline, waits) + AcceleratedClock harness; 60 pipeline tests; make test 7341 passed / 7 skipped (98.58 %, pipeline 99-100 %), lint/typecheck/placeholders/spec refs 0, jscpd 0, radon avg A
+  - Spec refs: specs/07-media-pipeline.md §1, §5.2, §6, §8, §9, §11 (opener), §16, §18 (`duration_watchdog`, end routine), §20
+  - Depends on: P04-T02, P04-T04, P04-T06, P04-T07, P04-T08, P04-T09, P04-T10
+  - Deliverables: `va_voice.pipeline` subpackage: `Transport`, `SttStream`, `TtsStream`, `Brain`, `VoiceActivityDetector` protocols; Brain outputs (`SpeakText`, `SpeakStatic`, `EndCall`, passthrough actions); `CallPipeline.run()` (inbound reorder + fan-out to VAD/STT, endpointing → STT commit → Brain turn → chunker → pronunciation → TTS → outbound with marks and playback completion; opener; max-duration warning and end; latency tracer per turn; cancellation and cleanup returning a `PipelineResult`); deterministic in-memory harness (`tests/support/pipeline_harness.py`) with fake transport/STT/TTS/VAD/Brain on the sim `AcceleratedClock`
+  - Acceptance: harness tests: opener spoken, normal turn (user speech → EOT → committed text to Brain → reply audio paced out with marks, turn record + `call.latency` events with measured e2e), max-duration warning then end, `EndCall` final line then end, transport close ends the pipeline and cancels every task, a crashing component ends with `error`.
+
+- [ ] P04-T12b Pipeline barge-in and interruption policy
+  - Spec refs: specs/07-media-pipeline.md §7 (levels, barge-in sequence, false barge-in), §8 (concurrency rule), §9 (truncation)
+  - Depends on: P04-T05, P04-T12a
+  - Deliverables: barge-in in `CallPipeline` (InterruptPolicy on live VAD/partials while playing; transport.clear → outbound clear → TTS cancel → Brain stream cancel → truncate history; `Brain.on_interrupted`; interrupt events with reaction_ms; pre-audio new user turn cancels generation and concatenates text; false barge-in resume "Sorry — " once per turn)
+  - Acceptance: in-memory harness tests: barge-in ordering recorded with timestamps and ≤ 120 ms reaction, backchannel ignored at level 2, interrupt blocked at level 0 (speech appended to next turn), level 4 any speech, non-interruptible SpeakStatic, truncated history ends with "—", pre-audio concat, false barge-in resume.
+
+- [ ] P04-T12c Pipeline silence policy and DTMF input
+  - Spec refs: specs/07-media-pipeline.md §12, §13
+  - Depends on: P04-T12b
+  - Deliverables: no-input timer after playback completes (reprompts via `Brain.on_no_input`, goodbye + `no_input_timeout` end, reset on speech); DTMF buffering (2 000 ms / `#`), `ignore_button_press`, DTMF user turn `"[DTMF: 1 2 3 4]"` with `dtmf`, DTMF barge-in at levels ≥ 1
+  - Acceptance: in-memory harness tests: silence reprompt then hangup, speech resets the reprompt count, DTMF delivered to Brain (timeout and `#` terminator), ignored DTMF, DTMF interrupts playback at level 1 but not 0.
 
 - [ ] P04-T13 Pipeline benchmark
   - Spec refs: specs/07-media-pipeline.md (performance requirements, CPU budget)
-  - Depends on: P04-T12
+  - Depends on: P04-T12c
   - Deliverables: `packages/va_voice/tests/bench/test_pipeline_bench.py` (marker `bench`), `packages/va_voice/BENCHMARKS.md` generated from results
   - Acceptance: p50 platform overhead ≤ 30 ms per turn with zero-latency fakes; 50 concurrent harness pipelines on one event loop without frame deadline misses.
 

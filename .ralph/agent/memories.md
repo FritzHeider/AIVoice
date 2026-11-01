@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793548904-55b3
+> P04-T12a: va_voice.pipeline CallPipeline (TaskGroup of inbound/stt/tts/outbound/endpoint/replies/watchdog; reply tasks are plain tasks owned by the reply loop because creating a TaskGroup child while it aborts raises and leaks the coroutine); harness tests/support/pipeline_harness.harness on sim AcceleratedClock with pipeline_fakes (FakeCaller streams 20 ms frames forever, hanging(text) keeps a TTS context open); deadlines via pipeline.waits.within on the injected clock; ruff --unsafe-fixes rewrote zip(a[3:],a[4:]) to pairwise(a) - never apply blindly
+<!-- tags: voice, pipeline, testing | created: 2026-11-01 -->
+
 ### mem-1793547327-d126
 > P04-T11: va_voice.phrase_cache PhraseCache single-flight via cache-owned tasks + asyncio.shield (done callback retrieves exception); log redactor masks any field containing 'key' -> log cache entries as entry=; va_voice tests can import va_elevenlabs test support (rest_client_helpers.sim_rest)
 <!-- tags: voice, tts, testing | created: 2026-11-01 -->

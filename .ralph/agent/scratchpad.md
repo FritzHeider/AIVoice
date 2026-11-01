@@ -1379,3 +1379,250 @@ Approved. Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 72
 100 %), jscpd 0 clones, radon A (2.41). Checked key material/value JSON/TTLs/2 MB cap against specs/09 §9 and the
 specs/03 §11 row; single-flight race (re-check after the await read), shielded waiters, aclose, fail-open Redis paths
 all tested; no sleeps beyond sleep(0) yields.
+
+## Plan P04-T12a (Planner, 2026-11-01)
+P04-T12 was too large for one Builder activation, so I split it in plan/phase-04.md: T12a (core + harness + normal
+turn + opener + max duration + EndCall + cleanup), T12b (barge-in/interrupt policy), T12c (silence + DTMF). T13 now
+depends on T12c. Design all of T12a so T12b/T12c only add behaviour, not new plumbing.
+
+### Placement / decisions (record in specs/07 as `> Decision (2026-11-01) P04-T12a` after §16)
+- `va_voice.pipeline` is the transport-agnostic orchestrator. va_media's `CallSession` (phase 05) owns the sockets
+  (open/close STT/TTS, Telnyx WS, Redis control, ownership/heartbeat, persistence) and adapts `ConversationEngine` (§16)
+  to the narrower `Brain`. The pipeline never imports va_elevenlabs/va_telnyx. Its protocols are structural so that
+  `va_elevenlabs` objects (`TtsAudio`, `SttEvent`) satisfy the chunk/event protocols as-is (read-only `@property`
+  protocol members).
+- One timeline: pipeline ms = `clock.monotonic() * 1000`. VAD stream time → pipeline time via `origin_ms` = arrival time
+  (pipeline ms) of the first in-order inbound frame minus 20 ms (frame k ends at stream time 20·k). STT partial times =
+  arrival time. The Endpointer is fed on this timeline.
+- DTMF (T12c) goes to the Brain as a `UserTurn` with `dtmf` set (§13), so `Brain` has no `on_dtmf`.
+- The pipeline does not hang up, persist, or publish. `run()` returns `PipelineResult`; turn records and events go to an
+  injected `PipelineObserver` (sync callbacks, default no-op) that phase 05 maps to write-behind persistence and
+  `call.turn`/`call.latency`.
+- Telephony outputs (Transfer, SendSms, SendDtmf, Hold, ...) are opaque `BrainAction` objects handed to the injected
+  `ActionHandler.handle(action)` (default: log `pipeline_action_unhandled` and ignore). Only speech and EndCall are
+  interpreted.
+
+### Files
+1. `packages/va_voice/src/va_voice/pipeline/__init__.py` — re-exports public names (`__all__`).
+2. `pipeline/protocols.py`
+   - Inbound transport events (frozen slots dataclasses): `InboundAudio(chunk: int, payload: bytes)`,
+     `InboundDtmf(digit: str)`, `MarkEcho(name: str)`; `type TransportEvent = InboundAudio | InboundDtmf | MarkEcho`.
+   - `class Transport(OutboundSink, Protocol)`: `def events(self) -> AsyncIterator[TransportEvent]` (iterator end =
+     far end closed), `async def clear(self) -> None` (used by T12b; declare now).
+   - `class SttWordLike(Protocol)`: `text` property. `class SttEventLike(Protocol)`: properties `kind: str`
+     (`"partial" | "committed" | "error" | "warning"`, other kinds ignored), `text: str`, `words: Sequence[SttWordLike]`,
+     `language_code: str | None`. `class SttStream(Protocol)`: `async send_audio(audio: bytes)`, `async commit()`,
+     `def events(self) -> AsyncIterator[SttEventLike]`.
+   - `class TtsChunkLike(Protocol)`: properties `context_id: str`, `audio: bytes`, `alignment: ChunkAlignmentLike | None`,
+     `is_final: bool`. `class TtsStream(Protocol)`: `async start_context(context_id)`, `async send(context_id, text, *,
+     flush: bool = False)`, `async flush(context_id)`, `async cancel(context_id)`, `def audio(self) ->
+     AsyncIterator[TtsChunkLike]`. (Signatures must be compatible with `va_elevenlabs.TtsSocket` — start_context has an
+     extra optional `voice` param there; a protocol with fewer params is satisfied. Add a typing-only test that assigns
+     a `TtsSocket` / `ElevenLabsRealtimeStt` to the protocols — if the STT client's `send_audio(audio, *, commit=False)`
+     and `events()` match, good; else adapt the protocol, not the client.)
+   - `class VoiceActivityDetector(Protocol)`: `async feed(pcm16k: NDArray[np.int16]) -> list[VadEvent]` (SileroVad fits).
+   - `class Brain(Protocol)`: `def start(self) -> AsyncIterator[BrainOutput]`, `def on_user_turn(self, turn: UserTurn)
+     -> AsyncIterator[BrainOutput]`, `def on_no_input(self) -> AsyncIterator[BrainOutput]` (T12c),
+     `async def on_interrupted(self, spoken_text: str) -> None` (T12b), `def timing(self) -> BrainTiming`.
+   - `class ActionHandler(Protocol)`: `async handle(self, action: BrainAction) -> None`.
+   - `class PipelineObserver(Protocol)` with `on_user_turn(UserTurn)`, `on_agent_turn(AgentTurn)`,
+     `on_latency(TurnReport)`; `NULL_OBSERVER`.
+3. `pipeline/models.py`
+   - `UserTurn(index: int, text: str, start_ms: float, end_ms: float, words: tuple[str, ...] = (), language_code: str |
+     None = None, dtmf: str | None = None)`.
+   - Brain outputs: `SpeakText(tokens: AsyncIterable[str], interruptible: bool = True, llm_request_ms: float | None =
+     None)` (the Brain may give the instant it sent the LLM request; else the pipeline marks LLM_REQUEST when it starts
+     iterating; LLM_FIRST_TOKEN = first non-empty delta), `SpeakStatic(text: str, interruptible: bool = True)`,
+     `EndCall(final_text: str | None = None, reason: str = "agent_hangup")`, `BrainAction` (base class, frozen
+     dataclass with `kind: str`; subclass-able by phase 05). `type BrainOutput = SpeakText | SpeakStatic | EndCall |
+     BrainAction`.
+   - `BrainTiming(interruptibility: int | None = None, resumption_speed: ResumptionSpeed = 2, collecting_number: bool =
+     False, no_input_prompt: str | None = None)`.
+   - `AgentTurn(index, text, text_spoken, interrupted: bool, started_ms, ended_ms)` (T12a: interrupted always False,
+     text_spoken = text).
+   - `EndReason = Literal["transport_closed", "agent_hangup", "max_duration", "no_input_timeout", "error"]` (EndCall may
+     carry another reason string; keep `PipelineResult.end_reason: str`). `PipelineResult(end_reason: str, turns: int,
+     error: BaseException | None = None)`.
+4. `pipeline/config.py` — `PipelineConfig` frozen dataclass: `fmt: AudioFormat = ULAW_8000`, `interruptibility: int =
+   2`, `block_interruptions: bool = False`, `interruption_threshold_ms: int | None = None`, `ivr_mode: bool = False`,
+   `max_duration_s: float = 1800.0` (Bland `max_duration` minutes × 60 by the caller), `max_duration_message: str =
+   "We have reached the maximum call duration. Goodbye."` (check specs/05 or 24 for the actual default text and use it;
+   document the source), `max_duration_warning_s: float = 10.0`, `stt_commit_timeout_ms: int = 1500`,
+   `final_line_timeout_s: float = 8.0`, `no_input_timeout_ms: int = 8000`, `max_reprompts: int = 2`,
+   `no_input_goodbye: str = "It seems we got disconnected. Goodbye."`, `ignore_button_press: bool = False`,
+   `pronunciation: tuple[PronunciationRuleLike, ...] = ()`, `reorder_window: int = 5`. Validate ranges in
+   `__post_init__` (ValueError). T12c fields are declared now but used later.
+5. `pipeline/pipeline.py` — `class CallPipeline`:
+   `__init__(self, *, transport, stt, tts, vad, brain, config, clock, mixer: FrameMixer | None = None, latency:
+   LatencyTracer | None = None, observer=NULL_OBSERVER, actions: ActionHandler | None = None, context_ids:
+   Callable[[int], str] = lambda turn: f"turn-{turn}")`; `async run(self) -> PipelineResult` (call once; second call
+   RuntimeError).
+   Task group (asyncio.TaskGroup) inside `run`:
+   - `inbound_reader`: iterate `transport.events()`; InboundAudio → `ReorderBuffer.push` → for each OrderedFrame:
+     `stt.send_audio(payload)` (raw codec bytes), decode to PCM (ulaw_decode or L16 per fmt) + resample to 16 kHz
+     (`va_voice.audio` Resampler; 16 kHz L16 passes through) → `vad.feed` (await inline; VAD ordering) → VadEvents to
+     the endpointer on the pipeline timeline; MarkEcho → current tracker `on_mark`, re-check playback completion;
+     InboundDtmf → stored for T12c (T12a: ignore with debug log). Iterator end → `reorder.drain()` frames processed,
+     then end with `transport_closed`.
+   - `stt_receiver`: partials → endpointer.on_partial(text, now) + keep `latest_partial`; committed → resolve the
+     pending commit future (one outstanding commit at a time); error/warning → log.
+   - `endpoint_timer`: wake event + `clock.sleep` until `endpointer.deadline_ms()`; `poll(now)` → EndOfTurn → start a
+     turn: timer marks USER_SPEECH_START (from the turn's first speech_start), USER_SPEECH_END (last voiced end, last
+     wins), EOT, STT_COMMIT; `stt.commit()`; await committed with `stt_commit_timeout_ms` (timeout → latest partial /
+     EndOfTurn.text, log `stt_commit_timeout`); STT_FINAL; build `UserTurn`, observer.on_user_turn, then run the Brain
+     reply in the `turn_runner`. TurnDiscarded → debug log only. Never hold CPU: the sleep loop wakes on every VAD
+     edge/partial (event set).
+   - `outbound`: `OutboundAudio(transport, mixer or FrameMixer(fmt), clock=clock).run()`.
+   - `tts_receiver`: `tts.audio()` → chunks for the current context: first audio → TTS_FIRST_AUDIO; `tracker.timeline.
+     add_chunk(audio, alignment)`; `outbound.push_audio`; `is_final` → resolve the context's done future. Chunks of
+     other (stale) context ids are dropped (counted in `PipelineStats.stale_tts_chunks`).
+   - `watchdog`: sleep until `max_duration_s - warning_s` → speak `max_duration_message` non-interruptible (cancels
+     any running reply first — it pre-empts the Brain; T12b handles interruptibility), at `max_duration_s` end
+     `max_duration` (wait for the warning's playback only up to max_duration).
+   - Speaking (`_speak` coroutine, one utterance at a time, a lock): new turn number, `PlaybackTracker(turn, fmt)`,
+     `outbound.start_utterance(tracker)`, `tts.start_context(ctx)`; SpeakText: tokens → ClauseChunker.feed → each clause
+     → `applier.apply(clause)` → `tracker.timeline.add_clause(pronounced)` → `tts.send(ctx, pronounced.text,
+     flush=True)` (first send → TTS_FIRST_TEXT) and `outbound.end_segment(len(clause))`? — NO: segment boundaries must
+     follow audio. Rule: call `outbound.end_segment(chars)` when the TTS audio of that clause is complete; since
+     per-clause audio boundaries are not signalled, use one segment per utterance in T12a?? Decision: segment
+     boundaries are placed at alignment boundaries — simplest correct approach: segment = audio between successive
+     `is_final`? ElevenLabs gives one is_final per context. So: **one segment per utterance** (end_segment(total chars)
+     at is_final, then finish_utterance()). Marks therefore confirm the whole utterance; played_ms between marks comes
+     from the estimate. Record this in the Decision (multi-segment marks need per-clause contexts; revisit only if
+     barge-in accuracy demands it). After the stream ends: `chunker.flush()` clauses, `tts.flush(ctx)`, await the
+     context's is_final (no timeout in T12a beyond cancellation; the TTS client has its own no-audio timeout), then
+     `outbound.end_segment(total_chars)` + `finish_utterance()`, then wait for playback completion: completion =
+     `tracker.completed(now)` checked on every MarkEcho and on a timer at `t_first + total_ms + lead + 200 ms`
+     (MARK_LOSS_GRACE_MS). Then `observer.on_agent_turn(AgentTurn(...))`.
+     SpeakStatic: same path with one clause (`applier.apply(text)`; send with flush=True; no chunker; no LLM marks).
+     EndCall: speak `final_text` if any (interruptible False), wait completion bounded by `final_line_timeout_s`, end
+     with its reason.
+     First audio frame → FIRST_AUDIO_OUT: detect when `tracker.t_first_frame_sent` becomes set — expose it via a tiny
+     wrapper sink: the pipeline passes `OutboundAudio` a sink that forwards to the transport and records the first
+     frame time per utterance (`_FirstFrameSink`), or read `tracker.t_first_frame_sent` (it is set by OutboundAudio on
+     the same timeline? OutboundAudio uses clock ms → check `_now_ms` uses `clock.monotonic()*1000`; if yes, use the
+     tracker value after completion: mark FIRST_AUDIO_OUT at `tracker.t_first_frame_sent`).
+     Latency: user turn → `latency.start_turn(index, node_id=None)`; finish after the reply's first audio is out (or
+     when the reply ends without audio) → `observer.on_latency(report)`. Opener turn has no user marks (no report
+     unless measured stages; still finish it so TTS ttfa is reported — fine either way; test asserts no E2E event for
+     the opener).
+   - Turn runner: one active reply task (`asyncio.Task`), consuming `brain.on_user_turn(turn)` outputs sequentially in
+     order. In T12a a new EndOfTurn while a reply is still generating waits (queues) — T12b replaces this with the
+     concurrency rule. Keep the reply task handle so T12b can cancel it.
+   - Ending: a single `_end(reason, error=None)` sets the result once and cancels the task group (raise a private
+     `_PipelineEnded` exception caught around the TaskGroup, or cancel tasks via a stop event + `TaskGroup` cancel
+     scope). Any task exception → result `error` with the exception (log `pipeline_failed` with error type);
+     `CancelledError` of `run()` itself propagates after cleanup. Cleanup: every task cancelled and awaited (TaskGroup
+     guarantees), current TTS context cancelled best-effort (`tts.cancel(ctx)` in a `finally`, exceptions logged),
+     brain async generators closed (`aclose()` when they have it).
+   - `PipelineStats` (dataclass): turns, user_turns, stale_tts_chunks, commit_timeouts, discarded_turns.
+   - Opener: at start (before any user turn) run `brain.start()` outputs through the same reply runner (§11 step 5/6;
+     greeting waits/AMD are va_media's concern — document).
+   - Apply `brain.timing()` at the start of each user turn: `endpointer.configure(EndpointerSettings(resumption_speed,
+     config.interruption_threshold_ms, config.ivr_mode, collecting_number))`.
+   Keep each method small (radon ≤ B); split into helpers/modules if pipeline.py grows past ~450 lines
+   (e.g. `pipeline/speaker.py` for the utterance logic, `pipeline/inbound.py` for decode/resample/VAD fan-out).
+6. specs/07: Decision P04-T12a (after §16 code block): the items above (pipeline vs CallSession split, Brain subset,
+   DTMF as UserTurn, timeline, one segment per utterance, observer/actions, end reasons, opener scope).
+7. AGENTS.md bullet (P04-T12a): module map + harness usage.
+
+### Harness `packages/va_voice/tests/support/pipeline_harness.py` (support dir is already on pythonpath/mypy_path)
+- Clock: `va_sim.clock.AcceleratedClock()` (virtual time advances only when the loop is idle; no wall delay). Verify
+  it is importable from va_voice tests (root dev deps) and `OutboundAudio` works with it.
+- `FakeTransport`: `asyncio.Queue` events; `send_audio` records `(t_ms, frame)`, `send_mark` records and schedules an
+  echo `MarkEcho(name)` after `echo_delay_ms` (default 60) via a task on the clock; `clear` records `t_ms`; `close()`
+  ends `events()`. Shared `calls: list[tuple[str, float]]` call log (T12b ordering asserts).
+- `FakeCaller(transport, clock)`: `say(ms, loud=True)` / `silence(ms)` push 20 ms μ-law frames with increasing chunk
+  numbers paced by `clock.sleep(0.02)`; loud = `b"\x10\x90" * 80`, silence = `b"\xff" * 160`.
+- `EnergyVad`: implements VoiceActivityDetector with the real `VadDecider` over 512-sample windows (probability 1.0
+  when window RMS > −40 dBFS else 0.0; level = rms_dbfs). This keeps hysteresis real without ONNX.
+- `FakeStt`: `utterances: deque[str]`; once it has received ≥ 5 loud frames (decode μ-law, energy check) it emits a
+  `partial` with the head utterance text; on `commit()` emits `committed` with it after `commit_latency_s` (default 0)
+  and pops it; records commits; `events()` from a queue. Event objects = small frozen dataclasses satisfying
+  `SttEventLike`.
+- `FakeTts`: on `send(ctx, text)` emits audio chunks after `ttfa_s` (default 0): μ-law tone bytes, 8 bytes/ms with
+  `ms_per_char` (default 5) per character, alignment chars = text chars evenly spaced (chunk-relative); on `flush(ctx)`
+  emits `is_final` after the last audio; `cancel` records and stops that context; records every call in the shared log.
+- `ScriptedBrain`: `opener: list[BrainOutput]`, `replies: deque[list[BrainOutput]]` (each SpeakText built from a
+  string via `tokens("Hello there, how can I help?")` async generator yielding word deltas, optional per-token delay on
+  the clock); records `user_turns`, `no_input_calls`, `interrupted`; `timing()` returns a settable `BrainTiming`.
+- `RecordingObserver`: lists of user turns, agent turns, latency reports.
+- `harness(config=..., brain=...)` async context manager: builds everything, starts `pipeline.run()` as a task, yields
+  a `Harness` (fields: clock, transport, caller, stt, tts, brain, observer, pipeline, `result()` awaits the run task,
+  `until(predicate, timeout_s)` sleeps on the virtual clock in 20 ms steps until true — bounded, no wall sleeps), and on
+  exit closes the transport and awaits the run.
+
+### Tests `packages/va_voice/tests/pipeline/` (add `__init__`-less dir like other test dirs; check conftest pattern)
+- `test_pipeline_turn.py`
+  - opener: `ScriptedBrain(opener=[SpeakStatic("Hi, this is Ava.")])` → frames sent, a mark sent and echoed, agent
+    turn recorded with the text; `tts.start_context`/`send(..., flush=True)`/`flush` in order.
+  - normal turn: caller says 600 ms + silence → Brain gets one UserTurn with the committed text (not the partial when
+    they differ), STT commit happened after EOT, reply audio frames paced 20 ms apart after the first burst (lead 3),
+    observer gets agent turn after the mark echo, latency report with e2e/eot/stt_final/tts_ttfa measured and the
+    `"E2E: {n}ms"` event; with zero-latency fakes e2e ≈ eot + small overhead (assert e2e − eot ≤ 30 ms of virtual time).
+  - committed text missing (FakeStt with `commit_latency_s=2`) → commit timeout after 1.5 s, latest partial used,
+    `stats.commit_timeouts == 1`.
+  - pronunciation rule applied to TTS text while the timeline/agent turn keeps the original text.
+  - LLM marks: SpeakText with token delay 0.2 s → `llm_ttft_ms` = 200.
+  - stale TTS chunk (FakeTts emits a chunk for an old context id) is dropped and counted.
+  - noise burst without STT text → TurnDiscarded, Brain not called.
+  - reorder: out-of-order inbound chunks still reach STT in order (FakeStt records audio order).
+  - L16 16 kHz config (`PCM16_16000`/L16 format — use the va_voice format constant for hd_audio) path: VAD fed without
+    resampling (EnergyVad sees 512-sample windows of the same samples).
+- `test_pipeline_lifecycle.py`
+  - transport close → `PipelineResult("transport_closed")`, all pipeline tasks done (no pending tasks created by the
+    pipeline: compare `asyncio.all_tasks()` before/after), current TTS context cancelled.
+  - `EndCall("Goodbye.")` → final line played (mark echoed) then `agent_hangup`; `EndCall()` without text ends at once.
+  - EndCall when marks are never echoed (`echo_delay_ms=None`) → ends after the mark-loss grace, before
+    `final_line_timeout_s`.
+  - max duration (config max 30 s, warning 10 s): warning spoken at 20 s (non-interruptible SpeakStatic path), result
+    `max_duration` at 30 s virtual.
+  - a failing component (FakeStt.events raises RuntimeError) → result `error` with that exception, log
+    `pipeline_failed`.
+  - BrainAction is passed to the ActionHandler; without one it is logged and ignored.
+  - `run()` twice → RuntimeError; cancelling the run task cancels everything and re-raises CancelledError.
+  - config validation errors.
+- `test_pipeline_protocols.py`: typing-level checks (functions annotated to accept the protocols, called with
+  `va_elevenlabs` `TtsSocket`/`ElevenLabsRealtimeStt` instances constructed without opening, `SileroVad` type) so mypy
+  enforces compatibility; runtime asserts trivial.
+Coverage: `va_voice/pipeline/*` ≥ 95 % (aim 100 %); va_voice package stays ≥ 85 %.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q`, `make test`,
+`uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src/va_voice/pipeline`, pip-audit/pnpm audit (no new third-party deps; va_sim only in tests via the
+root dev group — if va_voice tests importing va_sim breaks the acyclic/layering checks, put an equivalent idle-advancing
+clock in `packages/va_common/tests/clock_helpers.py` instead).
+
+### Risks
+- Accelerated clock + OutboundAudio parks on an event without background: fine. Mark echo tasks must use the clock.
+- Endpointer timeline: VAD speech_end at_ms in stream time must be mapped before `on_vad`; build a new `VadEvent` via
+  `dataclasses.replace(event, at_ms=origin + event.at_ms)`.
+- Ending from inside a task group: use one stop path; avoid swallowing CancelledError of the outer task (check
+  `asyncio.current_task().cancelling()`).
+- Commit future races: a committed event arriving with no pending commit (late) is ignored with a debug log.
+- Keep radon complexity low; jscpd: harness fakes must not duplicate va_elevenlabs test helpers.
+
+## Build P04-T12a (Builder, 2026-11-01)
+Implemented `va_voice.pipeline` (protocols, models, config, inbound, speaker, pipeline, waits) per the plan, plus the
+harness (`tests/support/pipeline_fakes.py`, `pipeline_harness.py`) and 60 tests in `tests/pipeline/` (turn, lifecycle,
+edges, protocols). Deviations/decisions (all in the specs/07 §16 Decision P04-T12a):
+- `OutboundAudio.finish_utterance(chars=0)` + `on_finished=` callback (needed so one-segment utterances carry their
+  chars and the speaker learns about `tracker.finish()` without polling); tests added in test_outbound_audio.py.
+- Reply tasks are plain tasks owned by the reply loop (not TaskGroup children): creating a child while the group is
+  aborting raised and leaked the coroutine. The loop cancels/awaits its reply on exit and re-raises its result.
+- Spoken defaults follow the specs/04 org settings (va_domain OrgSettings), not specs/05's max_duration wording;
+  `no_input_prompt` default "Are you still there?" (§12). `PipelineStats` is part of `PipelineResult`.
+- STT `is_update` committed events are ignored (protocol member `is_update`).
+- Once TTS `is_final` arrived the context is not cancelled on abandon (nothing open at the vendor).
+Gates: make fmt/lint/typecheck/placeholders pass; make test 7341 passed / 7 skipped (coverage 98.58 %, pipeline
+99-100 %); spec refs 0; jscpd 0 clones; radon avg A (1.99), worst B (existing OutboundAudio._send_controls);
+pip-audit clean; pnpm audit 3 moderate (pre-existing, high threshold passes).
+
+## Review P04-T12a (Reviewer, 2026-11-01)
+Approved. Re-ran: make lint/typecheck/placeholders (pass), pytest packages/va_voice 821 passed (pipeline.py 99 %),
+make test 7341 passed / 7 skipped (98.58 %), check_spec_refs 0, jscpd 0 clones. Diff checked against specs/07
+§1/§5/§6/§8/§9/§11/§16/§18/§20 and the Decision; spoken defaults match specs/04 §7 (tested against OrgSettings).
+Note for P04-T12b: when an utterance is cancelled mid-SpeakText, `Speaker` does not aclose `SpeakText.tokens`
+(only the Brain output stream is closed); the barge-in "cancel LLM stream" step should close the token iterator
+explicitly.

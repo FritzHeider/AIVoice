@@ -281,6 +281,7 @@ class OutboundAudio:
         "_framer",
         "_generation",
         "_mixer",
+        "_on_finished",
         "_open",
         "_pacer",
         "_pending_chars",
@@ -293,9 +294,16 @@ class OutboundAudio:
     )
 
     def __init__(
-        self, sink: OutboundSink, mixer: FrameMixer, *, clock: Clock, pacer: FramePacer | None = None
+        self,
+        sink: OutboundSink,
+        mixer: FrameMixer,
+        *,
+        clock: Clock,
+        pacer: FramePacer | None = None,
+        on_finished: Callable[[PlaybackTracker], None] | None = None,
     ) -> None:
         self._sink = sink
+        self._on_finished = on_finished
         self._mixer = mixer
         self._clock = clock
         self._pacer = pacer if pacer is not None else FramePacer()
@@ -364,9 +372,13 @@ class OutboundAudio:
         self._pending_chars = 0
         self._wake.set()
 
-    def finish_utterance(self) -> None:
-        """No more audio: pad the last partial frame, close the trailing segment, then finish the tracker."""
+    def finish_utterance(self, chars: int = 0) -> None:
+        """No more audio: pad the last partial frame, close the trailing segment, then finish the tracker.
+
+        ``chars`` are added to the trailing segment (dropped when no frame is left to carry them).
+        """
         tracker = self._require_open()
+        self._pending_chars += chars
         tail = self._framer.flush()
         if tail is not None:
             self._queue.append(_Frame(tracker, tail))
@@ -445,6 +457,8 @@ class OutboundAudio:
                 self._stats.marks_sent += 1
             else:
                 item.tracker.finish()
+                if self._on_finished is not None:
+                    self._on_finished(item.tracker)
 
     def _count(self, lateness: float, *, speech: bool) -> None:
         stats = self._stats

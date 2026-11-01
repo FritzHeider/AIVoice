@@ -452,6 +452,39 @@ class ConversationEngine(Protocol):
     def snapshot(self) -> EngineState: ...
 ```
 
+> Decision (2026-11-01): P04-T12a. `va_voice.pipeline.CallPipeline` is the transport-agnostic turn loop of one leg;
+> va_media's `CallSession` (phase 05) owns the sockets (Telnyx WS, STT/TTS open/close), the Redis control channel,
+> ownership/heartbeat and persistence, and adapts `ConversationEngine` to the narrower `Brain` protocol (`start`,
+> `on_user_turn`, `on_no_input`, `on_interrupted`, `timing`). DTMF reaches the Brain as a `UserTurn` with `dtmf` set
+> (§13), so the Brain has no `on_dtmf`. The pipeline never imports va_elevenlabs/va_telnyx: `Transport`,
+> `SttStream`, `TtsStream`, `VoiceActivityDetector` are structural protocols with read-only members that the
+> vendor clients and `SileroVad` satisfy unchanged. Brain outputs are `SpeakText(tokens, interruptible,
+> llm_request_ms)`, `SpeakStatic(text, interruptible)`, `EndCall(final_text, reason)` and opaque `BrainAction`
+> objects handed to an injected `ActionHandler` (transfer, SMS, DTMF, hold, ...; without a handler they are logged
+> `pipeline_action_unhandled`). `run()` returns `PipelineResult(end_reason, turns, stats, error)` and never hangs
+> up, persists or publishes; user/agent turn records and latency reports go to a synchronous `PipelineObserver`
+> that phase 05 maps to write-behind persistence, `call.turn` and `call.latency`. One timeline: pipeline ms =
+> `clock.monotonic() × 1000`; VAD stream time maps onto it with `origin = arrival of the first in-order frame − 20 ms`,
+> STT partials take their arrival time. The tasks of §1 that belong to the pipeline run in one `TaskGroup`
+> (`inbound`, `stt`, `tts`, `outbound`, `endpoint`, `replies`, `watchdog`); the first end reason wins, any task
+> failure ends with `error` (`pipeline_failed`), and the end of a vendor stream while running is an error. 16 kHz
+> legs (L16 in `TELNYX_L16_BYTE_ORDER`, or little-endian `pcm_16000` for the widget) send little-endian PCM to the
+> STT, feed the VAD without resampling and take `pcm_16000` TTS audio. Each utterance is one TTS context
+> (`turn-{index}`; user and agent turns share one index counter, which is also the mark's turn number), one
+> `send(..., flush=True)` per clause and `flush` at the end, and **one outbound segment**: ElevenLabs reports no
+> per-clause audio boundary, so the utterance's mark follows its last frame (`OutboundAudio.finish_utterance(chars)`)
+> and `played_ms` between start and that mark comes from the estimate. Playback completes on the mark echo or at
+> `t_first + 60 + total + 200 ms` without it. A cancelled or failed utterance stops its tracker, clears the outbound
+> queue locally, cancels its TTS context (unless `is_final` already arrived) and is recorded as interrupted when any
+> audio went out. Brain timing (`resumption_speed`, `collecting_number`) is re-applied to the endpointer at start and
+> after every reply. The opener is `brain.start()` at once; greeting waits (§11 steps 1–4, AMD) are `CallSession`'s
+> concern. `EndCall` stops accepting outputs, plays `final_text` to completion bounded by 8 s, then ends with its
+> reason. The watchdog speaks `max_duration_message` at `max_duration − 10 s` (cutting off any running reply with
+> `transport.clear`; skipped once an `EndCall` is ending the call) and ends with `max_duration` at `max_duration`.
+> Spoken defaults equal the specs/04 §7 org settings defaults (`max_duration_message` = "I'm sorry, we've reached the
+> time limit for this call. Goodbye.", `no_input_goodbye`); the specs/05 `max_duration` row's wording is superseded
+> by that org setting.
+
 ## 17. Control channel messages (`call:{id}:control`)
 
 ```json

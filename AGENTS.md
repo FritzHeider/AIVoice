@@ -1039,3 +1039,17 @@ Grafana 3001
   `ElevenLabsRest.tts_with_timestamps`'s signature (va_voice depends on va-domain, never va-elevenlabs). The log
   redactor replaces any field whose name contains `key` (`cache_key` too): log cache entries as `entry=`.
   va_voice tests can use the va_elevenlabs test support (`rest_client_helpers.sim_rest`, `tts_helpers.VOICE_ID`).
+- 2026-11-01 (P04-T12a): call pipeline = `va_voice.pipeline` (rules: specs/07 §16 Decision P04-T12a): `protocols`
+  (`Transport`, `SttStream`, `TtsStream`, `VoiceActivityDetector`, `Brain`, `ActionHandler`, `PipelineObserver`,
+  inbound events `InboundAudio`/`InboundDtmf`/`MarkEcho`), `models` (Brain outputs, `UserTurn`, `AgentTurn`,
+  `PipelineResult`), `config.PipelineConfig`, `inbound.InboundPath` (reorder → STT + VAD on the pipeline timeline),
+  `speaker.Speaker` (TTS contexts, `OutboundAudio`, playback completion, `preempt()`), `pipeline.CallPipeline` (task
+  group, endpoint loop, reply tasks, watchdog), `waits.within`/`wait_until_set` (deadlines on the injected clock,
+  never `asyncio.wait_for`). `OutboundAudio` gained `finish_utterance(chars)` and `on_finished=`. Harness:
+  `packages/va_voice/tests/support/pipeline_harness.harness(...)` on the sim `AcceleratedClock` with fakes from
+  `pipeline_fakes` (`FakeTransport` echoes marks after `echo_delay_ms`, `FakeCaller` streams a 20 ms frame forever —
+  `await h.caller.say(ms)`, `streaming=False` + `send(payload, chunk)` for hand-made order, `FakeStt` partial every 10
+  loud frames, `FakeTts` 5 ms/char with exact alignment, `ScriptedBrain`, `tokens(text, clock, first_delay_s=)`,
+  `hanging(text)` keeps a TTS context open); drive with `await h.turn(600)` / `await h.until(predicate)`. Once
+  `is_final` arrived nothing is cancelled at TTS, so tests that expect `tts.cancelled` must use `hanging(...)`.
+  Never run `ruff --fix --unsafe-fixes` blindly: it rewrote `zip(a[3:], a[4:])` into `pairwise(a)`.
