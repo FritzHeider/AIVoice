@@ -25,6 +25,7 @@ from tenant_rows import OrgFactory
 from va_db.models import TelnyxAccount, TelnyxEvent
 from va_db.session import Database
 from va_edge.processor import StoredEvent
+from va_telnyx.signatures import TOLERANCE_S
 from va_telnyx.webhooks import EventPayload
 
 pytestmark = pytest.mark.integration
@@ -117,6 +118,28 @@ async def test_valid_webhook_is_stored_processed_and_attributed(edge_db_url: str
     )
 
 
+_SKEW_S = TOLERANCE_S + 60  # a minute of slack beyond the verification window
+
+
+def _tampered(body: bytes, tamper: str, now: int) -> tuple[bytes, dict[str, str]]:
+    headers = signed_headers(body, PLATFORM, timestamp=now)
+    sent = body
+    if tamper == "wrong_key":
+        headers = signed_headers(body, Keypair.generate(), timestamp=now)
+    elif tamper == "tampered_body":
+        sent = body.replace(b"call.answered", b"call.hangup")
+    elif tamper in {"stale", "future"}:
+        skewed = now - _SKEW_S if tamper == "stale" else now + _SKEW_S
+        headers = signed_headers(body, PLATFORM, timestamp=skewed)
+    elif tamper == "missing_signature":
+        del headers["telnyx-signature-ed25519"]
+    elif tamper == "missing_timestamp":
+        del headers["telnyx-timestamp"]
+    else:
+        headers["telnyx-signature-ed25519"] = "not base64!"
+    return sent, headers
+
+
 @pytest.mark.parametrize(
     "tamper",
     ["wrong_key", "tampered_body", "stale", "future", "missing_signature", "missing_timestamp", "garbage"],
@@ -126,23 +149,11 @@ async def test_unverified_webhooks_are_rejected_and_not_stored(
 ) -> None:
     body = envelope("call.answered")
     event_id = event_id_of(body)
-    now = int(time.time())
-    headers = signed_headers(body, PLATFORM, timestamp=now)
-    sent = body
-    if tamper == "wrong_key":
-        headers = signed_headers(body, Keypair.generate(), timestamp=now)
-    elif tamper == "tampered_body":
-        sent = body.replace(b"call.answered", b"call.hangup")
-    elif tamper in {"stale", "future"}:
-        skewed = now - 301 if tamper == "stale" else now + 301
-        headers = signed_headers(body, PLATFORM, timestamp=skewed)
-    elif tamper == "missing_signature":
-        del headers["telnyx-signature-ed25519"]
-    elif tamper == "missing_timestamp":
-        del headers["telnyx-timestamp"]
-    else:
-        headers["telnyx-signature-ed25519"] = "not base64!"
     async with edge_client(edge_db_url, PLATFORM) as (client, app):
+        # Sign after startup, right before the request: the verifier reads the wall clock, so a timestamp
+        # taken before the app started drifts towards the tolerance window. _SKEW_S keeps a minute of slack
+        # beyond TOLERANCE_S, so elapsed time can never make a stale/future timestamp valid.
+        sent, headers = _tampered(body, tamper, int(time.time()))
         response = await client.post("/telnyx/voice", content=sent, headers=headers)
         assert (response.status_code, response.json()) == (401, {"error": "invalid_signature"})
         assert metric(app, "unverified", "invalid_signature") == 1

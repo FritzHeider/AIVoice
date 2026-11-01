@@ -1091,3 +1091,16 @@ Grafana 3001
   reclaim tests pass a `FrozenClock(now + 60 s)` instead of editing timestamps. Never parametrize with random
   uuids (xdist collection mismatch); FakeTelnyx ids are seeded, so contract tests on a shared DB use
   `telnyx_state(transport, seed=secrets.randbits(32))`.
+- 2026-11-01 (P05-T02): carrier events = `va_edge.mapping.plan_effects` (pure, every specs/06 §5 type; spec
+  Decision under specs/06 §5.1) applied by `va_edge.carrier.CarrierEventHandler` (default edge registry via
+  `va_edge.main.carrier_handlers(container, ...)`; the edge container now exposes `redis` and `temporal`). Call/leg
+  state machines: `va_db.call_states` + `va_db.repositories.CallRepo.transition` (guarded UPDATE, raises
+  `CallTransitionError` with `.current`), `CallLegRepo` (`record_initiated` upsert, guarded `advance`), system
+  `CallLegLookupRepo` (12 system repos). Carrier keys/contract: `va_domain.carrier` (`CarrierEvent`,
+  `carrier_state_key`, `carrier_channel`, `owner_key`, `call_workflow_id`, `CARRIER_SIGNAL`). Tests: seed calls with
+  `packages/va_db/tests/support/call_rows.py` (`seed_call`, `seed_leg`, `load_call`, `load_leg`); edge
+  `DbContainer`/`ProbeContainer` carry fakeredis + `never_temporal()` (default handlers never reach Temporal unless
+  a call resolves); `edge_helpers.RecordingSignaller`; the specs/06 §5 event-type parser is
+  `packages/va_telnyx/tests/support/telnyx_spec.spec_voice_event_types`. A `FrozenClock` app clock makes the
+  processor's 2 s handler budget fire at once (`HandlerTimeoutError`): give apps that process real handlers a clock
+  with real `sleep` (see `SimTimeClock` in `test_sim_contract.py`).

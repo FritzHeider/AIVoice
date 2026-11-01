@@ -56,7 +56,7 @@ Roles (created by the migration when absent; passwords come from the deployment,
 
 - `va_app` — used by `api`, `media-worker`, request-scoped code. RLS enforced.
 - `va_system` — `BYPASSRLS`; used only by repositories explicitly marked `system_scope=True`
-  (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`,
+  (`PhoneNumberRoutingRepo`, `OutboxRepo`, `SchedulerRepo`, `RetentionRepo`, `BillingReconcileRepo`, `CallLegLookupRepo`,
   `TelnyxEventRepo`, `TelnyxAccountLookupRepo`, `ApiKeyLookupRepo`, `MembershipLookupRepo`, `SsoConnectionLookupRepo`, `InvitationLookupRepo`, admin endpoints). Code review rule: any new use requires a comment citing this spec section.
 
 > Decision (2026-10-27): deployments provide one `DATABASE_URL` (specs/02 §6), so `va_db.engine.create_engine(settings,
@@ -102,6 +102,11 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > `updated_at < now - stale_after` plus the failed events (`process_error` set) with `process_attempts <
 > max_attempts` and `updated_at < now - retry_after`; claiming sets `updated_at`, which is the lease that keeps
 > other edge processes off the row (specs/06 §4.1 Decision P05-T01).
+
+> Decision (2026-11-01): `CallLegLookupRepo` joins the `va_system` list because a carrier event whose `client_state`
+> is missing or unusable must be attributed to its call before any org context exists (specs/06 §5 Decision P05-T02):
+> `by_call_control_id(ccid)` returns `LegRef(org_id, call_id, role)` or `None`. The tenant `CallRepo` and
+> `CallLegRepo` (`va_db.repositories.calls`) do every other call/leg read and write.
 
 > Decision (2026-10-29): the **global identity tables** (`orgs`, `users`, `sessions`, `email_tokens`) have no `org_id`
 > and no RLS; code reaches them through `Database.global_session()` (a `va_app` transaction with `app.org_id` unset,

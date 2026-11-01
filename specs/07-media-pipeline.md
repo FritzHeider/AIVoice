@@ -562,6 +562,9 @@ class ConversationEngine(Protocol):
 (`24` §6). The owner writes `SET call:{id}:control_ack:{id} 1 EX 30` after handling. Carrier channel
 (`call:{id}:carrier`) carries `{"type": "<telnyx event_type>", "leg": "...", "payload": {...}}`.
 
+> Decision (2026-11-01): the carrier channel message is `va_domain.carrier.CarrierEvent` (P05-T02): the three fields
+> above plus `call_id`, `org_id`, `telnyx_event_id` (dedupe key), and `occurred_at` (specs/06 §5 Decision P05-T02).
+
 ## 18. End of call routine
 
 1. Stop accepting engine outputs; if the end was agent-initiated, finish the final line (wait mark echo, max 8 s).

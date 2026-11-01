@@ -284,11 +284,62 @@ state goes to the inbound router (§7).
 | Answered, `hangup_source` = `callee` (outbound) or `caller` (inbound), pipeline running | worker ends: `user_hangup` |
 | Answered, `hangup_cause` = `time_limit` | `max_duration` |
 | Answered, `hangup_source` = `unknown` | `user_hangup` |
-| Answered, hangup initiated by us (`command_id` prefix `hangup-`) | end_reason already set by initiator; no change |
+| Answered, hangup initiated by us (`calls.end_reason` already set; Decision P05-T02 item 7) | end_reason already set by initiator; no change |
 
 Unknown `hangup_cause` values are stored verbatim and treated as "any other cause". Live smoke test
 `test_hangup_cause_values` places calls to a busy test number and an unanswered test number and asserts the causes
 (`user_busy`, `timeout`) so the table is validated against production behaviour.
+
+> Decision (2026-11-01): carrier event mapping (P05-T02).
+> 1. Contract: `va_domain.carrier.CarrierEvent(type, leg, call_id, org_id, telnyx_event_id, occurred_at, payload)` is
+>    both the `call:{<id>}:carrier` message (JSON) and the argument of the Temporal signal `signal_carrier_event` on
+>    workflow `call-<id>` (sent as `model_dump(mode="json")` so the default data converter carries it). Key builders
+>    `carrier_state_key`, `carrier_channel`, `owner_key` (hash-tag form) and `CARRIER_STATE_TTL_S = 7200` live there.
+> 2. Resolution: the intake's `client_state` attribution (org and call id) when the payload's `client_state` decodes to
+>    the same ids, else the system-scope `CallLegLookupRepo.by_call_control_id` (a BYO route's org must match). The
+>    leg role comes from `client_state`, else the `call_legs` row. An unresolvable incoming `call.initiated` goes to
+>    the `InboundRouter` hook (P05-T12; without one: log `telnyx.inbound_unrouted`); any other unresolvable event, or
+>    a `client_state` naming a call that does not exist, is logged `telnyx.event_unattributed` and marked processed.
+> 3. `va_edge.mapping.plan_effects(event_type, payload, snapshot, occurred_at=)` is pure and covers every row of the
+>    table above. Signalled to the workflow: `call.answered`, `call.bridged`, `call.hangup`, every `call.machine.*`
+>    type, `streaming.failed`, `call.recording.saved`, `call.recording.error`. Published on the carrier channel: every
+>    resolved event except the "stored only" rows (`call.hold`/`call.unhold`, `call.deepfake_detection.*`,
+>    `call.conversation.*`). Playback events are logged at debug and forwarded only.
+> 4. The edge issues no Telnyx commands: the `fax_detected` hangup and the `streaming.failed` hangup (in progress, no
+>    worker after 5 s) are performed by `CallWorkflow` from the signal (P05-T06). The edge records
+>    `answered_by='fax'` and emits `call.amd` / `call.error` (`stream_failed`, level `error`; `recording_failed` is
+>    level `warning`); `data.detail` carries Telnyx's `failure_reason` / `reason`.
+> 5. `call.dtmf.received` is forwarded on the carrier channel only; the media worker (which also receives the WS `dtmf`
+>    and dedupes) emits the `call.turn` `"[DTMF 5]"` with `ignore_button_press` applied, so turns are never doubled.
+> 6. Legs: every leg-changing event first upserts the leg (`CallLegRepo.record_initiated`, which only fills missing
+>    `call_leg_id`/`call_session_id` on conflict), then moves it with a guarded update; an out-of-order or repeated
+>    event leaves the leg as is. Only the `primary` leg drives the call; `transfer_target` events change their own
+>    leg and carrier state (`transfer_target_answered`, `transfer_target_hangup`), except that `call.bridged` or
+>    `conference.participant.joined` of the `transfer_target` leg moves the call `transferring` → `transferred`
+>    (`transferred_to` = payload `to`) and stores `transfer_started_at`.
+> 7. Hangup of the primary leg: never answered (`answered_at` null) → the §5.1 rows in table order (`answered_by =
+>    'no_answer'` for `no_answer`; `disposition_tag` `NO_ANSWER`/`BUSY`/`FAILED` for no_answer/busy/rejected;
+>    `error_message = "Carrier hangup: <cause> (<sip>)"` with `unknown` for a missing value). Answered: when
+>    `calls.end_reason` is already set (we ended it; Telnyx hangup webhooks carry no `command_id`, so this replaces
+>    the "`hangup-` prefix" row) or `call:{<id>}:owner` exists (the pipeline ends the call), the call is unchanged;
+>    otherwise `completed` with `max_duration` (cause `time_limit`), `transferred` (status `transferred`), else
+>    `user_hangup`, `connected_seconds` = answered → min(end, transfer start) and `transfer_seconds` = transfer start
+>    → end (milliseconds). `ended_at` = payload `end_time`, else the event's `occurred_at`; `call.ended` carries
+>    `end_reason` and `ended_by`.
+> 8. Ordering and retries: leg and call changes commit in one `tenant_session`; then carrier state (`HSET` +
+>    `EXPIRE`), domain events, channel `PUBLISH`, signal. Domain events of a status change are published only when this
+>    processing applied it, or on a retry (`process_attempts > 0`) that finds the call already in the target status;
+>    events without a status change are published on every successful run (at least once). Any Redis or Temporal
+>    failure raises, so the processor records `process_error` and the reprocessor retries.
+> 9. AMD: `call.machine.detection.ended` stores the raw result on the leg and emits `call.amd {result}` normalized
+>    (`human`→`human_residence`, `not_sure`→`unknown`, missing → `unknown`, others verbatim), without `answered_by`.
+>    Premium detection stores the raw result on the leg and sets `calls.answered_by` (`human_residence`/
+>    `human_business`→`human`, `machine`→`voicemail`, `fax_detected`→`fax`, anything else → `unknown`); `call.amd`
+>    carries `result` (raw) and `answered_by`. Greeting ended → `data.greeting_ended=true`, premium greeting ended →
+>    `data.beep_detected=true`, screening → `data.screening=true`; carrier-state fields `amd_result`, `answered_by`,
+>    `greeting_ended`, `beep_detected`, `screening`. `va_amd_results_total{result=<raw>}` counts detection results.
+> 10. `TemporalCarrierSignaller`: an `RPCError` `NOT_FOUND` (no workflow yet, or already finished) is logged at debug
+>    (`telnyx.workflow_missing`) and tolerated; other errors propagate.
 
 ## 6. Outbound dial algorithm (activity `dial`)
 

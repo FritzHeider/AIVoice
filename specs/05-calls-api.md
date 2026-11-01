@@ -507,6 +507,16 @@ which uses `UPDATE … WHERE status = ANY(:allowed_from)` and raises `CONFLICT` 
 retries are therefore no-ops). Bland status mapping in the Call Object: `no_answer` → `no-answer`, `in_progress` →
 `in-progress`, `transferring`/`transferred` → `in-progress`/`completed`.
 
+> Decision (2026-11-01): status machine enforcement (P05-T02). The tables live in `va_db.call_states`
+> (`CALL_TRANSITIONS`, target → allowed sources; `LEG_TRANSITIONS`; `END_REASONS` = the §9 table) and the transition is
+> `va_db.repositories.CallRepo.transition(call_id, to, from_=None, **values)` (`from_` must be a subset of the allowed
+> sources; a mismatch raises `CallTransitionError`, code `CONFLICT`, with the current status). Besides the diagram
+> edges, carrier reordering is tolerated: `dialing` → `in_progress` / `no_answer` / `busy` / `canceled` (an answer or
+> hangup overtaking `call.initiated`), `ringing` → `canceled` (`originator_cancel`), and `transferring` → `completed`
+> (a hangup before the bridge). `completed`, `failed`, `canceled`, `no_answer`, `busy` are terminal. Legs:
+> `ringing`/`answered` from `initiated`/`ringing`, `bridged` from `initiated`/`ringing`/`answered`, `hangup` from any
+> non-hangup state; `initiated` is only inserted.
+
 ## 9. `end_reason` enumeration (normative; referenced by other specs)
 
 | `end_reason` | `ended_by` | Bland `call_ended_by` | Meaning |

@@ -9,6 +9,10 @@ dependencies = [
     "pynacl>=1.5",
     "va-common",
     "va-db",
+    "va-domain",
+    "va-events",
+    "redis>=5.2",
+    "temporalio>=1.9",
     "va-telnyx",
 ]
 
@@ -22,4 +26,6 @@ module-name = "va_edge"
 [tool.uv.sources]
 va-common = { workspace = true }
 va-db = { workspace = true }
+va-domain = { workspace = true }
+va-events = { workspace = true }
 va-telnyx = { workspace = true }

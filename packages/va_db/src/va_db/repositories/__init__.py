@@ -27,6 +27,13 @@ from va_db.repositories.base import (
     require_positive,
 )
 from va_db.repositories.billing_reconcile import BalanceDrift, BillingReconcileRepo
+from va_db.repositories.calls import (
+    CallLegLookupRepo,
+    CallLegRepo,
+    CallRepo,
+    CallTransitionError,
+    LegRef,
+)
 from va_db.repositories.credits import (
     DUPLICATE_TRANSFER_MESSAGE,
     INSUFFICIENT_TRANSFER_MESSAGE,
@@ -111,6 +118,10 @@ __all__ = [
     "AuditLogRepo",
     "BalanceDrift",
     "BillingReconcileRepo",
+    "CallLegLookupRepo",
+    "CallLegRepo",
+    "CallRepo",
+    "CallTransitionError",
     "ClaimOutcome",
     "CreditTransfer",
     "CreditTransferRepo",
@@ -123,6 +134,7 @@ __all__ = [
     "InvitationLookupRepo",
     "InvitationRepo",
     "IssuedSession",
+    "LegRef",
     "MemberRecord",
     "MembershipLookupRepo",
     "MembershipRecord",

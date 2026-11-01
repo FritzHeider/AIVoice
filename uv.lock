@@ -2927,8 +2927,12 @@ dependencies = [
     { name = "fastapi" },
     { name = "orjson" },
     { name = "pynacl" },
+    { name = "redis" },
+    { name = "temporalio" },
     { name = "va-common" },
     { name = "va-db" },
+    { name = "va-domain" },
+    { name = "va-events" },
     { name = "va-telnyx" },
 ]
 
@@ -2937,8 +2941,12 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.162.0" },
     { name = "orjson", specifier = ">=3.13.0" },
     { name = "pynacl", specifier = ">=1.5" },
+    { name = "redis", specifier = ">=5.2" },
+    { name = "temporalio", specifier = ">=1.9" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-events", editable = "packages/va_events" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
 ]
 

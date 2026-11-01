@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793556662-6cbd
+> P05-T02: edge carrier handler = va_edge.mapping.plan_effects (pure) + va_edge.carrier.CarrierEventHandler (default registry main.carrier_handlers); CallRepo.transition guarded UPDATE raises CallTransitionError(.current); seed calls via va_db tests support call_rows.py; FrozenClock app clock makes EventProcessor 2s budget fire instantly (HandlerTimeoutError) -> use clock with real sleep; Temporal signal args sent as model_dump(mode=json) (default converter)
+<!-- tags: telnyx, edge, testing | created: 2026-11-01 -->
+
 ### mem-1793554070-998d
 > P05-T01: edge intake = va_edge.intake/keys/processor/reprocessor; edge tests share session fixture edge_db_url (filter by own ids; reclaims pick up other tests' failed rows); telnyx_events.updated_at is DB-clock (trigger) so reclaim tests use FrozenClock(now+60s); FakeTelnyx ids seeded -> seed=secrets.randbits(32) on shared DB; never parametrize random uuids (xdist)
 <!-- tags: telnyx, edge, testing | created: 2026-11-01 -->

@@ -2,9 +2,10 @@
 
 The app serves the Telnyx webhook routes (specs/06-telephony-telnyx.md §4, :mod:`va_edge.intake`), the probes
 of specs/27-observability.md §9 (readiness: Postgres, Redis, Temporal), and the telephony-edge metrics catalog
-(§3.2). The lifespan refuses to start without a valid ``TELNYX_PUBLIC_KEY`` (in ``local`` the simulator's key
-file is the fallback) and runs the event processor and the reprocessor as supervised tasks; a crash of either
-stops the process. Importing this module performs no I/O.
+(§3.2). Stored voice events are applied by :class:`va_edge.carrier.CarrierEventHandler` (specs/06 §5) unless
+a test passes its own ``handlers``. The lifespan refuses to start without a valid ``TELNYX_PUBLIC_KEY`` (in
+``local`` the simulator's key file is the fallback) and runs the event processor and the reprocessor as
+supervised tasks; a crash of either stops the process. Importing this module performs no I/O.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Final
 from fastapi import FastAPI
 from nacl.signing import VerifyKey
 
-from va_common.metrics import Service, build_metrics
+from va_common.metrics import Service, ServiceMetrics, build_metrics
 from va_common.service import (
     ProbeState,
     StopController,
@@ -27,15 +28,19 @@ from va_common.service import (
 )
 from va_common.time import Clock, SystemClock
 from va_edge import __version__
+from va_edge.carrier import CarrierEventHandler
 from va_edge.container import EdgeContainerFactory, EdgeDependencies, build_container
 from va_edge.intake import WebhookIntake, db_key_lookup, telnyx_routes
 from va_edge.keys import WebhookKeys
 from va_edge.processor import EventHandler, EventProcessor
 from va_edge.reprocessor import TelnyxEventReprocessor
 from va_edge.settings import EdgeSettings
+from va_edge.signals import TemporalCarrierSignaller
+from va_events.call_events import DbCallEventWriter, DirectCallEventWriter
+from va_events.publisher import EventPublisher
 from va_telnyx.signatures import load_public_key
 
-__all__ = ["TITLE", "app", "build_container", "create_app", "platform_key"]
+__all__ = ["TITLE", "app", "build_container", "carrier_handlers", "create_app", "platform_key"]
 
 TITLE: Final = "VoiceAgents Telephony Edge"
 
@@ -47,6 +52,26 @@ def platform_key(settings: EdgeSettings) -> VerifyKey:
         msg = "TELNYX_PUBLIC_KEY is not configured"
         raise RuntimeError(msg)
     return load_public_key(key)
+
+
+def carrier_handlers(
+    container: EdgeDependencies, *, clock: Clock, metrics: ServiceMetrics
+) -> Mapping[str, EventHandler]:
+    """The production registry: :class:`CarrierEventHandler` for every voice event type, publishing domain
+    events with direct ``call_events`` writes and signalling ``CallWorkflow`` through Temporal."""
+    database = container.database
+    publisher = EventPublisher(
+        container.redis, call_events=DirectCallEventWriter(DbCallEventWriter(database))
+    )
+    handler = CarrierEventHandler(
+        database,
+        container.redis,
+        publisher,
+        TemporalCarrierSignaller(container.temporal),
+        clock=clock,
+        metrics=metrics,
+    )
+    return handler.handlers()
 
 
 def create_app(  # noqa: PLR0913 - keyword-only test seams
@@ -64,7 +89,6 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     edge_clock = clock if clock is not None else SystemClock()
     controller = stop if stop is not None else StopController()
     metrics = build_metrics(Service.TELEPHONY_EDGE)
-    registry: Mapping[str, EventHandler] = handlers if handlers is not None else {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -83,6 +107,11 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
         app: FastAPI, container: EdgeDependencies, key: VerifyKey
     ) -> tuple[EventProcessor, Supervisor]:
         database = container.database
+        registry = (
+            handlers
+            if handlers is not None
+            else carrier_handlers(container, clock=edge_clock, metrics=metrics)
+        )
         processor = EventProcessor(database, clock=edge_clock, metrics=metrics, handlers=registry)
         reprocessor = TelnyxEventReprocessor(database, processor, clock=edge_clock)
         keys = WebhookKeys(key, db_key_lookup(database), clock=edge_clock)

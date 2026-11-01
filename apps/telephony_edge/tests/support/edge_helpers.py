@@ -1,4 +1,5 @@
-"""Telephony edge test helpers: signing keys, signed envelopes, apps over a real or unreachable database."""
+"""Telephony edge test helpers: signing keys, signed envelopes, apps over a real or unreachable database, and
+a recording carrier signaller."""
 
 from __future__ import annotations
 
@@ -14,9 +15,12 @@ from typing import Any
 
 import httpx
 import orjson
+from fakeredis import FakeAsyncRedis
 from nacl.signing import SigningKey
 from service_helpers import UNREACHABLE, FakeContainer, make_client, settings_of
+from temporalio.client import Client
 
+from va_common.checks import TemporalConnector
 from va_common.health import CheckFn
 from va_common.ids import new_id
 from va_common.metrics import Service, build_metrics
@@ -26,6 +30,7 @@ from va_common.time import Clock, SystemClock
 from va_db.models import TelnyxEvent
 from va_db.repositories import NewTelnyxEvent, TelnyxEventRepo
 from va_db.session import Database
+from va_domain.carrier import CarrierEvent
 from va_edge.container import EdgeDependencies
 from va_edge.main import create_app
 from va_edge.processor import EventHandler, EventProcessor, StoredEvent
@@ -37,6 +42,7 @@ __all__ = [
     "DbContainer",
     "Keypair",
     "ProbeContainer",
+    "RecordingSignaller",
     "client_state",
     "edge_client",
     "edge_settings",
@@ -45,6 +51,7 @@ __all__ = [
     "event_row",
     "make_processor",
     "metric",
+    "never_temporal",
     "post",
     "running",
     "signed_headers",
@@ -112,12 +119,37 @@ def edge_settings(public_key: str, **values: Any) -> EdgeSettings:
     return settings_of(EdgeSettings, telnyx_public_key=public_key, **values)
 
 
+async def _no_temporal(host: str, _namespace: str) -> Client:
+    msg = f"tests never connect to Temporal ({host})"
+    raise ConnectionError(msg)
+
+
+def never_temporal() -> TemporalConnector:
+    """A connector whose first use raises ``ConnectionError`` (no test talks to Temporal)."""
+    return TemporalConnector("temporal.test:7233", "default", connect=_no_temporal)
+
+
+@dataclass
+class RecordingSignaller:
+    """A ``CarrierSignaller`` that records every signal; ``error`` is raised (after recording) when set."""
+
+    signals: list[CarrierEvent] = field(default_factory=list)
+    error: Exception | None = None
+
+    async def signal(self, event: CarrierEvent) -> None:
+        self.signals.append(event)
+        if self.error is not None:
+            raise self.error
+
+
 @dataclass
 class DbContainer:
-    """An edge container over a real database (no readiness dependencies)."""
+    """An edge container over a real database (no readiness dependencies), fakeredis, and no Temporal."""
 
     url: str
     database: Database = field(init=False)
+    redis: FakeAsyncRedis = field(default_factory=FakeAsyncRedis)
+    temporal: TemporalConnector = field(default_factory=never_temporal)
 
     def readiness_checks(self) -> dict[str, CheckFn]:
         return {}
@@ -141,6 +173,8 @@ class ProbeContainer(FakeContainer):
     """A probe-test container whose database is never reachable (no connection is opened unless used)."""
 
     database: Database = field(default_factory=unreachable_database)
+    redis: FakeAsyncRedis = field(default_factory=FakeAsyncRedis)
+    temporal: TemporalConnector = field(default_factory=never_temporal)
 
 
 @asynccontextmanager

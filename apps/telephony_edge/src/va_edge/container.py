@@ -1,4 +1,5 @@
-"""Edge dependency container: readiness dependencies plus the application database (specs/03 §2)."""
+"""Edge dependency container: readiness dependencies, the application database (specs/03 §2), the Redis client
+(carrier state, carrier channel, event bus), and the Temporal connector (``CallWorkflow`` signals)."""
 
 from __future__ import annotations
 
@@ -7,7 +8,9 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from dataclasses import dataclass
 from typing import Protocol
 
-from va_common.checks import Dependencies, open_dependencies
+from redis.asyncio import Redis
+
+from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.health import CheckFn
 from va_db.session import Database
 from va_edge.settings import EdgeSettings
@@ -21,6 +24,12 @@ class EdgeDependencies(Protocol):
     @property
     def database(self) -> Database: ...
 
+    @property
+    def redis(self) -> Redis: ...
+
+    @property
+    def temporal(self) -> TemporalConnector: ...
+
     def readiness_checks(self) -> Mapping[str, CheckFn]: ...
 
 
@@ -31,6 +40,8 @@ type EdgeContainerFactory = Callable[[EdgeSettings], AbstractAsyncContextManager
 class EdgeContainer:
     dependencies: Dependencies
     database: Database
+    redis: Redis
+    temporal: TemporalConnector
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         return self.dependencies.readiness_checks()
@@ -38,12 +49,13 @@ class EdgeContainer:
 
 @asynccontextmanager
 async def build_container(settings: EdgeSettings) -> AsyncIterator[EdgeDependencies]:
-    """Postgres engine, Redis client, and Temporal connector for readiness (in that check order), and the
-    ``va_app``/``va_system`` database; no network I/O until used. Everything is disposed on exit."""
+    """Postgres engine, Redis client, and Temporal connector (readiness checks in that order; the client and
+    the connector also serve the carrier handler), and the ``va_app``/``va_system`` database; no network I/O
+    until used. Everything is disposed on exit."""
     async with open_dependencies() as deps, AsyncExitStack() as stack:
         deps.postgres(settings)
-        deps.redis(settings)
-        deps.temporal(settings)
+        redis = deps.redis(settings)
+        temporal = deps.temporal(settings)
         database = Database.from_settings(settings)
         stack.push_async_callback(database.dispose)
-        yield EdgeContainer(dependencies=deps, database=database)
+        yield EdgeContainer(dependencies=deps, database=database, redis=redis, temporal=temporal)

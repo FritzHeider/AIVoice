@@ -5,14 +5,13 @@ Specs: specs/06 §4.1 step 5, specs/06 §5, specs/21 §5.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Final
 
 import orjson
 import pytest
+from telnyx_spec import spec_voice_event_types
 
 from va_telnyx import (
     MessageEventPayload,
@@ -39,7 +38,6 @@ from va_telnyx.webhooks import (
     WebhookEvent,
 )
 
-SPEC: Final = Path(__file__).resolve().parents[3] / "specs" / "06-telephony-telnyx.md"
 CCID: Final = "v3:abc"
 LEG: Final = {
     "call_control_id": CCID,
@@ -53,24 +51,6 @@ LEG: Final = {
     "state": "answered",
     "start_time": "2026-11-01T12:00:00.000000Z",
 }
-
-
-def spec_voice_event_types() -> set[str]:
-    """Every ``event_type`` in the first column of the specs/06 §5 table (``/ `.suffix``` abbreviations
-    expanded)."""
-    text = SPEC.read_text(encoding="utf-8")
-    section = text.split("## 5. Voice webhook", 1)[1].split("### 5.1", 1)[0]
-    found: set[str] = set()
-    for line in section.splitlines():
-        if not line.startswith("| `"):
-            continue
-        first_cell = line.split("|")[1]
-        previous = ""
-        for name in re.findall(r"`([^`]+)`", first_cell):
-            full = previous.rsplit(".", 1)[0] + name if name.startswith(".") else name
-            found.add(full)
-            previous = full
-    return found
 
 
 def _event(event_type: str, payload: dict[str, Any]) -> WebhookEvent:

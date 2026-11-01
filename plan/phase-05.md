@@ -6,7 +6,7 @@
   - Deliverables: `POST /telnyx/voice`, `POST /telnyx/messaging` (stores raw events for later phase handling), signature verification on raw body (platform key and BYO account keys resolved via `connection_id`/`client_state`), dedupe on `telnyx_event_id`, fast 200 ACK then async processing task with backpressure
   - Acceptance: tests for valid/invalid/stale signatures, duplicates, and unknown event types (stored, ignored).
 
-- [ ] P05-T02 Carrier event mapping and call/leg state machine
+- [x] P05-T02 Carrier event mapping and call/leg state machine — plan_effects for every specs/06 §5 type + §5.1 hangup table, CallRepo.transition guarded state machine, CarrierEventHandler (DB → carrier_state → events → channel → signal), TemporalCarrierSignaller; make test 7784 passed/7 skipped (98.57 %), lint/typecheck/placeholders 0, jscpd 0 clones, radon avg A
   - Spec refs: specs/06-telephony-telnyx.md (event → domain mapping, hangup causes, AMD results); specs/05-calls-api.md (status state machine); specs/19-events-and-webhooks.md (event catalog)
   - Depends on: P05-T01
   - Deliverables: `va_edge.mapping` (every voice event type), leg/call transitions with guard checks, Redis `call:{id}:carrier` publish + `carrier_state` hash, Temporal signal to `CallWorkflow`, domain events via publisher
@@ -33,7 +33,7 @@
 - [ ] P05-T06 CallWorkflow and activities
   - Spec refs: specs/01-architecture.md §2, §3; specs/06-telephony-telnyx.md (dial parameters); specs/13-tools-and-dynamic-data.md (pre-call dynamic data, cache flag)
   - Depends on: P05-T05
-  - Deliverables: `CallWorkflow` (scheduled wait, `prefetch_call_context`, `dial`, carrier/pipeline signals, backstop timer, heartbeat watch, hangup on failure, child `PostCallWorkflow` start), activities with retry policies, `CallContext` model stored at `call:{id}:ctx`
+  - Deliverables: `CallWorkflow` (scheduled wait, `prefetch_call_context`, `dial`, carrier/pipeline signals, backstop timer, heartbeat watch, hangup on failure, child `PostCallWorkflow` start), activities with retry policies, `CallContext` model stored at `call:{id}:ctx`; Telnyx hangups decided from carrier signals (`fax_detected` premium AMD; `streaming.failed` while in progress with no owner after 5 s), per specs/06 §5 Decision P05-T02 item 4
   - Acceptance: Temporal time-skipping tests for scheduled start, no-answer, worker crash backstop, normal completion.
 
 - [ ] P05-T07 Media worker server, ownership, control channel, drain
