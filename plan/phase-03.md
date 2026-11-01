@@ -213,7 +213,7 @@
   - Acceptance: tests for batching, truncation, normalization, caching, retries; FakeLLM contract test (1024-d
     deterministic unit vectors).
 
-- [ ] P03-T15 Telnyx bootstrap script and sim service wiring (split into P03-T15a–c below; ticked when all three are)
+- [x] P03-T15 Telnyx bootstrap script and sim service wiring (split into P03-T15a–c below; ticked when all three are) — T15a, T15b, T15c all approved
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)
   - Depends on: P03-T08b
   - Deliverables: `scripts/telnyx_bootstrap.py` (idempotent find-or-create by name, prints env lines), compose `sim` service with healthcheck, `.env` integration for sim public key, Redis-backed SimState sharing when `SIM_STATE_REDIS_URL` is set
@@ -236,7 +236,7 @@
     `TELNYX_PUBLIC_KEY` into `.env`; `scripts/tests/test_compose.py` lockstep updated
   - Acceptance: `make up` runs `sim` healthy; bootstrap script succeeds against the compose sim and prints ids.
 
-- [ ] P03-T15c Redis-backed SimState sharing
+- [x] P03-T15c Redis-backed SimState sharing — `va_sim.shared.SharedState` (Lua writes + version/generation, MULTI reads, pub/sub subscriber with 1-10 s backoff), async SimState API with sync-before-read entry points, 503 `state_unavailable`, cross-process utterance ids/resolution, `SIM_WORKERS != 1` exits 2; specs/30 §3 Decision; make test 6410 passed (98.42 %) incl. two-process redis:7.2 integration test, lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, radon A (2.30)
   - Spec refs: specs/30-testing-and-evals.md §3 (`SIM_STATE_REDIS_URL`, `SIM_WORKERS`)
   - Depends on: P03-T15b
   - Deliverables: shared registry of scenarios (and other control-plane records named in the Decision) in Redis when

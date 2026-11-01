@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Iterator
 
 import pytest
-from docker_probe import docker_available
 from obs_helpers import make_settings
+from redis_container import running_redis_url
 
 from va_common.redis import redis_client, redis_ping
 from va_common.token_bucket import BucketLimit, TokenBucket
@@ -15,14 +15,8 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(scope="module")
 def redis_url() -> Iterator[str]:
-    if not docker_available():
-        pytest.skip("docker unavailable")
-    from testcontainers.community.redis import RedisContainer  # noqa: PLC0415 - imported only when Docker exists
-
-    with RedisContainer("redis:7.2-alpine") as container:
-        host = container.get_container_host_ip()
-        port = container.get_exposed_port(6379)
-        yield f"redis://{host}:{port}/0"
+    with running_redis_url() as url:
+        yield url
 
 
 async def test_round_trip_against_real_redis(redis_url: str) -> None:

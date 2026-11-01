@@ -22,6 +22,7 @@ from starlette.routing import BaseRoute, Route
 from va_sim.clock import iso_z
 from va_sim.scenario import Scenario, ScenarioError, ScenarioIssue, issues_from_validation, load_scenario
 from va_sim.settings import ProfileName, SimName
+from va_sim.shared import SharedStateUnavailable
 from va_sim.state import SimState
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "invalid_request",
     "json_body",
     "sim_error",
+    "state_unavailable",
     "yaml_or_json_body",
 ]
 
@@ -71,6 +73,11 @@ def sim_error(status: int, code: str, message: str, issues: Sequence[ScenarioIss
     return JSONResponse({"error": error}, status_code=status)
 
 
+def state_unavailable(exc: SharedStateUnavailable) -> JSONResponse:
+    """503 when the shared state Redis (``SIM_STATE_REDIS_URL``) failed a write."""
+    return sim_error(503, "state_unavailable", f"the shared simulator state is unavailable: {exc}")
+
+
 def invalid_request(message: str, issues: Sequence[ScenarioIssue]) -> JSONResponse:
     return sim_error(422, "invalid_request", message, issues)
 
@@ -98,7 +105,10 @@ def _common_routes(state: SimState) -> list[BaseRoute]:
         body = await json_body(request, ResetBody, allow_empty=True)
         if isinstance(body, JSONResponse):
             return body
-        state.reset(body.seed)
+        try:
+            await state.reset_all(body.seed)
+        except SharedStateUnavailable as exc:
+            return state_unavailable(exc)
         return Response(status_code=204)
 
     async def clock(_request: Request) -> Response:
@@ -111,6 +121,7 @@ def _common_routes(state: SimState) -> list[BaseRoute]:
         )
 
     async def snapshot(_request: Request) -> Response:
+        await state.sync()
         return JSONResponse(state.snapshot())
 
     return [
@@ -131,20 +142,28 @@ def _config_routes(sim: SimName, state: SimState) -> list[BaseRoute]:
         return JSONResponse({name: latencies[name] for name in fields})
 
     async def read(_request: Request) -> Response:
+        await state.sync()
         return current()
 
     async def patch(request: Request) -> Response:
         body = await json_body(request, model, allow_empty=False)
         if isinstance(body, JSONResponse):
             return body
-        state.update_latencies(**body.model_dump(exclude_none=True))
+        await state.sync()
+        try:
+            await state.set_latencies(**body.model_dump(exclude_none=True))
+        except SharedStateUnavailable as exc:
+            return state_unavailable(exc)
         return current()
 
     async def profile(request: Request) -> Response:
         body = await json_body(request, ProfileBody, allow_empty=False)
         if isinstance(body, JSONResponse):
             return body
-        state.apply_profile(body.profile)
+        try:
+            await state.set_profile(body.profile)
+        except SharedStateUnavailable as exc:
+            return state_unavailable(exc)
         return current()
 
     return [
@@ -210,17 +229,22 @@ def _telnyx_routes(state: SimState) -> list[BaseRoute]:
         scenario = await yaml_or_json_body(request, Scenario, _load_request_scenario, what="scenario")
         if isinstance(scenario, JSONResponse):
             return scenario
-        state.register_scenario(scenario)
+        try:
+            await state.add_scenario(scenario)
+        except SharedStateUnavailable as exc:
+            return state_unavailable(exc)
         return JSONResponse(
             {"id": scenario.id, "match": scenario.match.model_dump(mode="json")}, status_code=201
         )
 
     async def listing(_request: Request) -> Response:
+        await state.sync()
         scenarios = [state.scenarios[key].model_dump(mode="json") for key in sorted(state.scenarios)]
         return JSONResponse({"scenarios": scenarios})
 
     async def detail(request: Request) -> Response:
         scenario_id = request.path_params["scenario_id"]
+        await state.sync()
         scenario = state.scenarios.get(scenario_id)
         if scenario is None:
             return sim_error(404, "not_found", f"no scenario with id {scenario_id!r}")

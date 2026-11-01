@@ -932,3 +932,13 @@ Grafana 3001
   `docker-compose.e2e.yml` (`SIM_CLOCK: accelerated`). A host-run sim on 9100-9400 now collides with the container:
   stop it (`docker compose stop sim`) or run the host sim with `--port 19100`. `env_file.update_env_file` is the
   shared dotenv updater for scripts.
+- 2026-11-01 (P03-T15c): with `SIM_STATE_REDIS_URL` the sims share scenarios, latencies, reset + seed, and utterance
+  ids through `va_sim.shared.SharedState` (keys `sim:state:*`, Lua writes, channel `sim:state:events`; rules: specs/30
+  §3 Decision P03-T15c). Control routes and other shared writers use the async `SimState` methods (`reset_all`,
+  `add_scenario`, `set_latencies`, `set_profile`, `allocate_utterance`; `SharedStateUnavailable` → 503
+  `state_unavailable`) and readers call `await state.sync()` first; the sync `register_scenario`/`register_utterance`
+  stay process-local. STT resolves markers with `state.resolve_utterance(id)` (worker thread only for the Redis
+  fallback). Tests: two `SimState`s on `FakeAsyncRedis(server=FakeServer())` = two processes
+  (`tests/test_shared_state.py`), `state.wait_applied(version)` waits for the subscriber, `server.connected = False`
+  simulates a Redis outage. Two sims by hand: `SIM_STATE_REDIS_URL=redis://localhost:6379/15 uv run python -m
+  va_sim_server.main --port 19100` and the same with `--port 19500`. `SIM_WORKERS` other than 1 exits 2.

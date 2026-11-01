@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793535767-6ed1
+> P03-T15c: SIM_STATE_REDIS_URL shares scenarios/latencies/reset+seed/utterance ids via va_sim.shared.SharedState (Lua writes, sim:state:* keys, pubsub sim:state:events); shared writers use async SimState methods (reset_all/add_scenario/set_latencies/set_profile/allocate_utterance, SharedStateUnavailable->503 state_unavailable), readers await state.sync(); tests = two SimStates on FakeAsyncRedis(server=FakeServer()), server.connected=False for outage, wait_applied(version) for subscriber; redis_container.running_redis_url + sim_helpers.control_client shared helpers
+<!-- tags: sim, redis, testing | created: 2026-11-01 -->
+
 ### mem-1793534492-10f7
 > P03-T15b: infra/docker/python.Dockerfile builds app images (SERVICE=app dir, dist name sed from apps/$SERVICE/pyproject.toml, uv 0.13.6); test_dockerfile.py compares it line-for-line with specs/29 §1.1 + deviations; compose sim in infra profile, dev_up runs up --build then scripts/sim_public_key.py (TELNYX_PUBLIC_KEY in .env); shared dotenv updater scripts/env_file.py
 <!-- tags: docker, sim, scripts | created: 2026-11-01 -->

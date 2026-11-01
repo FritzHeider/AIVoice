@@ -6,14 +6,16 @@ two states built with the same seed and driven by the same requests behave ident
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Final
 
 import httpx
 from pydantic import JsonValue
 
+from va_common.logging import get_logger
 from va_sim.audio.marker import MAX_UTTERANCE_ID
 from va_sim.clock import SimClock
 from va_sim.elevenlabs.store import ElevenLabsStore
@@ -28,6 +30,12 @@ from va_sim.settings import (
     StripeDefaults,
     WebhookDefaults,
 )
+from va_sim.shared import (
+    SharedSnapshot,
+    SharedState,
+    SharedStateUnavailable,
+    UtteranceLimitError,
+)
 from va_sim.stripe.store import StripeStore
 from va_sim.stripe.webhooks import StripeWebhookEmitter
 from va_sim.tasks import Supervisor
@@ -35,20 +43,15 @@ from va_sim.telnyx.call_engine import CallEngine
 from va_sim.telnyx.keys import SigningKey
 from va_sim.telnyx.store import TelnyxStore
 from va_sim.telnyx.webhooks import WebhookEmitter
+from va_sim.utterances import Utterance
 
 __all__ = ["DEFAULT_SEED", "SimState", "Utterance"]
 
 DEFAULT_SEED: Final = 0
 _UTTERANCE_SEED_STRIDE: Final = MAX_UTTERANCE_ID + 1
+_FETCH_TIMEOUT_S: Final = 1.0
 
-
-@dataclass(frozen=True, slots=True)
-class Utterance:
-    """A synthetic caller utterance (specs/30 §3.1 registry entry)."""
-
-    text: str
-    language: str
-    words: tuple[str, ...]
+_log: Final = get_logger(__name__)
 
 
 class SimState:
@@ -103,6 +106,13 @@ class SimState:
         self._by_destination: dict[str, str] = {}
         self._by_inbound: dict[str, str] = {}
         self.call_engine = CallEngine(self)
+        self._shared: SharedState | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._sync_lock = asyncio.Lock()
+        self._applied = asyncio.Condition()
+        self.applied_version: int | None = None
+        self._applied_generation: int | None = None
+        self._shared_utterances = 0
 
     def reset(self, seed: int | None = None) -> None:
         """Forget everything but the signing key; restore latencies; reseed (same seed when None).
@@ -168,8 +178,7 @@ class SimState:
     def register_utterance(self, text: str, language: str, words: tuple[str, ...]) -> int:
         """Allocate the next utterance id (sequential from 1 per sim run, up to the 16-bit marker limit)."""
         if len(self.utterances) >= MAX_UTTERANCE_ID:
-            msg = f"all {MAX_UTTERANCE_ID} utterance ids (16-bit marker) are in use; reset the sim"
-            raise ValueError(msg)
+            raise UtteranceLimitError
         utterance_id = len(self.utterances) + 1
         self.utterances[utterance_id] = Utterance(text=text, language=language, words=words)
         return utterance_id
@@ -190,13 +199,190 @@ class SimState:
         tokens_per_s: float | None = None,
     ) -> None:
         """Override latencies (control API ``PATCH /sim/{sim}/config``); None keeps the current value."""
+        self.latencies = self._merged_latencies(
+            stt_final_ms=stt_final_ms, tts_ttfa_ms=tts_ttfa_ms, ttft_ms=ttft_ms, tokens_per_s=tokens_per_s
+        )
+
+    def _merged_latencies(
+        self,
+        *,
+        stt_final_ms: int | None,
+        tts_ttfa_ms: int | None,
+        ttft_ms: int | None,
+        tokens_per_s: float | None,
+    ) -> Latencies:
         current = self.latencies
-        self.latencies = Latencies(
+        return Latencies(
             stt_final_ms=current.stt_final_ms if stt_final_ms is None else stt_final_ms,
             tts_ttfa_ms=current.tts_ttfa_ms if tts_ttfa_ms is None else tts_ttfa_ms,
             ttft_ms=current.ttft_ms if ttft_ms is None else ttft_ms,
             tokens_per_s=current.tokens_per_s if tokens_per_s is None else tokens_per_s,
         )
+
+    # Shared control plane (specs/30 §3 Decision P03-T15c). Without a SharedState every method below acts on
+    # this process only, exactly like the synchronous methods above.
+
+    @property
+    def shared(self) -> bool:
+        return self._shared is not None
+
+    async def attach_shared(self, shared: SharedState) -> None:
+        """Share scenarios, latencies, reset + seed, and utterances through ``shared``; adopt what it holds
+        already (attaching never wipes the shared records)."""
+        self._shared = shared
+        self._loop = asyncio.get_running_loop()
+        await self.sync()
+
+    async def sync(self) -> None:
+        """Reload the shared records when another process changed them (no-op when unshared).
+
+        A Redis failure is logged (``sim.shared_state.sync_failed``) and the local copy stays in use.
+        """
+        shared = self._shared
+        if shared is None:
+            return
+        try:
+            async with self._sync_lock:
+                head = await shared.head()
+                self._shared_utterances = head.utterances
+                if head.version != self.applied_version:
+                    self._apply(await shared.load())
+        except SharedStateUnavailable as exc:
+            _log.warning("sim.shared_state.sync_failed", error=str(exc))
+            return
+        await self._notify()
+
+    def _apply(self, snapshot: SharedSnapshot) -> None:
+        if snapshot.generation != self._applied_generation:
+            self.reset(snapshot.seed)
+            self._applied_generation = snapshot.generation
+        self.scenarios.clear()
+        self._by_destination.clear()
+        self._by_inbound.clear()
+        for scenario in snapshot.scenarios:
+            self.register_scenario(scenario)
+        self.latencies = snapshot.latencies if snapshot.latencies is not None else self._base_latencies
+        self.applied_version = snapshot.version
+
+    def _adopt(self, version: int) -> None:
+        """After a local write: skip the reload when no other write happened since the last applied one."""
+        if self.applied_version is not None and version == self.applied_version + 1:
+            self.applied_version = version
+
+    async def _notify(self) -> None:
+        async with self._applied:
+            self._applied.notify_all()
+
+    async def wait_applied(self, version: int) -> None:
+        """Wait until the local copy reflects shared ``version`` (or a later one)."""
+        async with self._applied:
+            await self._applied.wait_for(lambda: (self.applied_version or 0) >= version)
+
+    async def run_subscriber(self) -> None:
+        """Follow the shared change channel until cancelled (returns at once when unshared)."""
+        if self._shared is not None:
+            await self._shared.subscribe(self.sync)
+
+    async def reset_all(self, seed: int | None = None) -> None:
+        """:meth:`reset` here and, when shared, in every process (raises :class:`SharedStateUnavailable`)."""
+        shared = self._shared
+        if shared is None:
+            self.reset(seed)
+            return
+        async with self._sync_lock:
+            result = await shared.reset(seed)
+            self.reset(result.seed)
+            self._applied_generation = result.generation
+            self.applied_version = result.version
+            self._shared_utterances = 0
+        await self._notify()
+
+    async def add_scenario(self, scenario: Scenario) -> None:
+        """:meth:`register_scenario`, shared with every process when shared."""
+        shared = self._shared
+        if shared is None:
+            self.register_scenario(scenario)
+            return
+        async with self._sync_lock:
+            version = await shared.put_scenario(scenario)
+            self.register_scenario(scenario)
+            self._adopt(version)
+        await self._notify()
+
+    async def set_latencies(
+        self,
+        *,
+        stt_final_ms: int | None = None,
+        tts_ttfa_ms: int | None = None,
+        ttft_ms: int | None = None,
+        tokens_per_s: float | None = None,
+    ) -> None:
+        """:meth:`update_latencies`, shared with every process when shared."""
+        await self._store_latencies(
+            self._merged_latencies(
+                stt_final_ms=stt_final_ms, tts_ttfa_ms=tts_ttfa_ms, ttft_ms=ttft_ms, tokens_per_s=tokens_per_s
+            )
+        )
+
+    async def set_profile(self, profile: ProfileName) -> None:
+        """:meth:`apply_profile`, shared with every process when shared."""
+        await self._store_latencies(PROFILES[profile])
+
+    async def _store_latencies(self, latencies: Latencies) -> None:
+        shared = self._shared
+        if shared is None:
+            self.latencies = latencies
+            return
+        async with self._sync_lock:
+            version = await shared.put_latencies(latencies)
+            self.latencies = latencies
+            self._adopt(version)
+        await self._notify()
+
+    async def allocate_utterance(self, text: str, language: str, words: tuple[str, ...]) -> int:
+        """:meth:`register_utterance`; when shared the id is unique across every process.
+
+        Raises :class:`UtteranceLimitError` (a ``ValueError``) when the ids are exhausted and
+        :class:`SharedStateUnavailable` when the shared Redis fails.
+        """
+        shared = self._shared
+        if shared is None:
+            return self.register_utterance(text, language, words)
+        utterance = Utterance(text=text, language=language, words=words)
+        utterance_id = await shared.allocate_utterance(utterance)
+        self.utterances[utterance_id] = utterance
+        self._shared_utterances = max(self._shared_utterances, utterance_id)
+        return utterance_id
+
+    def resolve_utterance(self, utterance_id: int) -> Utterance | None:
+        """The utterance with ``utterance_id``: the local registry first, then (shared, called from a worker
+        thread) the shared registry with a 1 s bound; None when unknown or the lookup fails."""
+        utterance = self.utterances.get(utterance_id)
+        shared, loop = self._shared, self._loop
+        if utterance is not None or shared is None or loop is None or _on_loop_thread(loop):
+            return utterance
+        future = asyncio.run_coroutine_threadsafe(shared.fetch_utterance(utterance_id), loop)
+        try:
+            fetched = future.result(timeout=_FETCH_TIMEOUT_S)
+        except (SharedStateUnavailable, TimeoutError) as exc:
+            future.cancel()
+            _log.warning(
+                "sim.shared_state.utterance_lookup_failed", utterance_id=utterance_id, error=repr(exc)
+            )
+            return None
+        if fetched is not None:
+            self.utterances[utterance_id] = fetched
+        return fetched
+
+    async def known_utterances(self) -> dict[int, Utterance]:
+        """Every utterance this process can resolve (when shared: the whole shared registry)."""
+        shared = self._shared
+        if shared is not None:
+            try:
+                self.utterances.update(await shared.utterances())
+            except SharedStateUnavailable as exc:
+                _log.warning("sim.shared_state.sync_failed", error=str(exc))
+        return dict(self.utterances)
 
     def snapshot(self) -> dict[str, JsonValue]:
         """Summary served at ``GET /sim/state``."""
@@ -208,7 +394,7 @@ class SimState:
             "latencies": latencies,
             "scenarios": scenarios,
             "recordings": len(self.recordings),
-            "utterances": len(self.utterances),
+            "utterances": self._shared_utterances if self._shared is not None else len(self.utterances),
             "telnyx": {
                 "accounts": len(self.telnyx.accounts),
                 "messages": sum(len(account.messages) for account in self.telnyx.accounts.values()),
@@ -254,3 +440,10 @@ class SimState:
         await self.tasks.aclose()
         await self.webhooks.aclose()
         await self.stripe_webhooks.aclose()
+
+
+def _on_loop_thread(loop: asyncio.AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() is loop
+    except RuntimeError:
+        return False

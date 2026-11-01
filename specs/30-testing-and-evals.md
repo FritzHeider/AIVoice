@@ -79,10 +79,50 @@ config (`/sim/*/config`) overrides env values at runtime; values named elsewhere
 > (422, `issues: [{path, line, column, message}]`), `not_found` (404), `unsupported_media_type` (415).
 > `SimState` is seeded (`seed` 0 unless reset with another seed) and there is no `SIM_SEED` variable. The webhook
 > URL defaults above are the specs/02 §6 values (the shared contract); the compose `sim` service sets the
-> `edge:`/`api:` hosts (specs/29 §2). The Redis-backed `SimState` (`SIM_STATE_REDIS_URL`) arrives with the compose
-> `sim` wiring (P03-T15); until then the state is in-process and shared by the four apps of one process. The
+> `edge:`/`api:` hosts (specs/29 §2). The state is in-process and shared by the four apps of one process; what
+> `SIM_STATE_REDIS_URL` shares across processes is the P03-T15c Decision below. The
 > library is the `va-sim` distribution (`packages/va_sim`); the runner `apps/sim` is distribution `va-sim-server`
 > (module `va_sim_server`).
+
+> Decision (2026-11-01): shared SimState (P03-T15c).
+> 1. With `SIM_STATE_REDIS_URL` set, every sim process using that Redis shares exactly these control-plane records:
+>    (a) registered scenarios, (b) latencies (`PATCH /sim/{elevenlabs|llm}/config` and `/config/profile`),
+>    (c) reset + seed (`POST /sim/reset` on any process resets every process), (d) the utterance registry (ids
+>    allocated once across processes, so a marker synthesized by process A's caller resolves in process B's
+>    FakeElevenLabs STT, realtime or batch).
+> 2. Everything else stays per process: FakeTelnyx accounts, applications, profiles, numbers, calls, conferences,
+>    messages, webhook delivery logs, recordings, the FakeElevenLabs/FakeLLM/FakeStripe stores, faults, and the
+>    clock. `GET /sim/state` reports the shared seed, scenarios, latencies and utterance count and the local counts
+>    for the rest.
+> 3. Keys (namespace `sim:state:`; the sim Redis is its own URL, so they never meet the specs/03 platform keys):
+>    `sim:state:version` (INCR on every scenario, latency, or reset write), `sim:state:seed`, `sim:state:generation`
+>    (INCR per reset), `sim:state:scenarios` (hash id → scenario JSON, paths already absolute),
+>    `sim:state:scenario_order` (sorted set id → version of its last registration, so number bindings follow
+>    registration order after a reload), `sim:state:latencies` (JSON), `sim:state:utterances` (hash id →
+>    `{"text","language","words"}`), `sim:state:utterance_next` (counter). Channel `sim:state:events` (payload = the
+>    new version; receivers just sync). No TTLs; a reset deletes them.
+> 4. Consistency: every write is one Lua script (mutate + INCR version + PUBLISH), and reads use one `MULTI`, so
+>    nobody sees half a write. Each process keeps a local copy (synchronous reads stay lock-free). `sync()` reads the
+>    version and reloads everything when it differs from the applied one (a changed generation first resets the
+>    process locally with the shared seed, without re-publishing). It runs at startup (a joining process adopts the
+>    existing records and never wipes them), on every pub/sub message, and at the start of the entry points that read
+>    shared records (scenario register/list/detail, `/sim/state`, `/sim/*/config`, Telnyx dial,
+>    `POST /sim/telnyx/inbound`), which gives read-your-writes across processes without waiting for pub/sub. A process's own write
+>    that directly follows the version it had applied does not trigger a reload.
+> 5. Utterance allocation is a Lua `INCR sim:state:utterance_next` + `HSET`; past 65 535 it fails with the
+>    unshared error message (409 `utterance_limit` on `say`). Allocations do not bump the version (dozens per call
+>    would force every process to reload): resolution is the local registry first, then, on a miss inside the STT
+>    worker thread, an `HGET` run on the event loop through `asyncio.run_coroutine_threadsafe` bounded to 1 s
+>    (never from the loop thread); batch STT reads the whole hash. A failed or missing lookup is the existing
+>    "unintelligible" path.
+> 6. Redis failure: writes answer 503 `{"error": {"code": "state_unavailable", ...}}` (a caller-script utterance
+>    fails its clip); a failed `sync()` logs `sim.shared_state.sync_failed` and keeps the local copy; the subscriber
+>    resubscribes after 1 s, 2 s, 4 s, ... (capped at 10 s) and does a full sync once subscribed. Readiness checks
+>    the Redis (`redis`).
+> 7. `SIM_WORKERS` > 1 (several processes behind one port set) is deferred to the load-test task (plan/phase-20
+>    P20-T06), because per-process FakeTelnyx calls make round-robin REST unusable; until then the runner exits 2
+>    with `SIM_WORKERS > 1 is not supported yet (specs/30 §3 Decision P03-T15c)` on stderr. Several sim processes on
+>    their own ports sharing one Redis are supported.
 
 ### 3.1 Synthetic caller speech and utterance markers (`va_sim.audio`)
 

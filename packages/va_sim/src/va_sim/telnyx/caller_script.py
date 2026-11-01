@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from va_sim.scenario import DtmfStep, SayStep, Step, is_wav_path
+from va_sim.shared import SharedStateUnavailable
 from va_sim.tasks import hold_clock
 from va_sim.telnyx.caller_audio import render_dtmf_tones, render_text, render_wav
 from va_sim.telnyx.caller_steps import GREETING, ClipKey, Interrupted, ScriptSteps
@@ -110,7 +111,7 @@ class CallerScript(ScriptSteps):
     async def _prepare(self) -> None:
         """Register every utterance in document order and render all audio in one worker-thread call."""
         fmt = self._media().fmt
-        jobs = [*self._greeting_jobs(fmt), *self._step_jobs(fmt)]
+        jobs = [*await self._greeting_jobs(fmt), *await self._step_jobs(fmt)]
         if not jobs:
             return
         name = f"telnyx-script-hold-{self._call.call_control_id}"
@@ -122,19 +123,19 @@ class CallerScript(ScriptSteps):
             else:
                 self._errors[key] = result
 
-    def _greeting_jobs(self, fmt: MediaFormat) -> list[Job]:
+    async def _greeting_jobs(self, fmt: MediaFormat) -> list[Job]:
         greeting = self._greeting
         if greeting is None:
             return []
         if is_wav_path(greeting):
             return [((GREETING, 0), functools.partial(render_wav, Path(greeting), fmt))]
-        return self._text_job((GREETING, 0), greeting, "en", fmt)
+        return await self._text_job((GREETING, 0), greeting, "en", fmt)
 
-    def _step_jobs(self, fmt: MediaFormat) -> list[Job]:
+    async def _step_jobs(self, fmt: MediaFormat) -> list[Job]:
         jobs: list[Job] = []
         for index, step in enumerate(self._steps):
             if isinstance(step, SayStep):
-                jobs.extend(self._text_job((index, 0), step.say.text, step.say.language, fmt))
+                jobs.extend(await self._text_job((index, 0), step.say.text, step.say.language, fmt))
             elif isinstance(step, DtmfStep) and step.dtmf.inband:
                 runs = enumerate(step.dtmf.digits.split("w"))
                 jobs.extend(
@@ -142,11 +143,12 @@ class CallerScript(ScriptSteps):
                 )
         return jobs
 
-    def _text_job(self, key: ClipKey, text: str, language: str, fmt: MediaFormat) -> list[Job]:
-        """Register the utterance now (no job when the id space is exhausted: the clip fails)."""
+    async def _text_job(self, key: ClipKey, text: str, language: str, fmt: MediaFormat) -> list[Job]:
+        """Register the utterance now, in document order (no job when the id space is exhausted or the
+        shared state is unavailable: the clip fails)."""
         try:
-            utterance_id = self._state.register_utterance(text, language, tuple(text.split()))
-        except ValueError as exc:
+            utterance_id = await self._state.allocate_utterance(text, language, tuple(text.split()))
+        except (ValueError, SharedStateUnavailable) as exc:
             self._errors[key] = str(exc)
             return []
         self._utterance_ids[key] = utterance_id

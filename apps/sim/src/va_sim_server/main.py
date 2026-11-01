@@ -6,21 +6,27 @@ fake ElevenLabs 9200, fake Telnyx Inference 9300, fake Stripe 9400), each with `
 routes (control API under ``/sim/*`` and the vendor APIs) come from ``packages/va_sim``
 (specs/30-testing-and-evals.md §3); all four apps share one ``SimState``. Before serving, the FakeTelnyx
 public key is written to ``.sim/telnyx_public_key`` (MASTER_PROMPT §9) so local services can verify its
-webhooks.
+webhooks. With ``SIM_STATE_REDIS_URL`` set the state's control plane (scenarios, latencies, reset + seed,
+utterances) is shared with every other sim process on that Redis and a subscriber task follows its changes
+(specs/30 §3 Decision P03-T15c). ``SIM_WORKERS`` other than 1 is refused (exit 2) until the load-test phase.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
+from va_common.health import CheckFn
 from va_common.logging import get_logger
 from va_common.metrics import new_registry
 from va_common.service import (
@@ -37,22 +43,48 @@ from va_common.service import (
 )
 from va_sim.server import BASE_PORT, SIMULATORS, SimName, build_state, ports_from, simulator_routes
 from va_sim.settings import SimSettings
+from va_sim.shared import SharedState
 from va_sim.state import SimState
 from va_sim.telnyx.keys import PUBLIC_KEY_FILE
 from va_sim_server import __version__
 
-__all__ = ["BASE_PORT", "SIMULATORS", "build_container", "create_app", "main", "ports_from", "run"]
+__all__ = [
+    "BASE_PORT",
+    "EXIT_UNSUPPORTED",
+    "SIMULATORS",
+    "SimContainer",
+    "build_container",
+    "create_app",
+    "main",
+    "ports_from",
+    "run",
+]
+
+EXIT_UNSUPPORTED: Final = 2
+_WORKERS_UNSUPPORTED: Final = "SIM_WORKERS > 1 is not supported yet (specs/30 §3 Decision P03-T15c)"
 
 _log: Final = get_logger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class SimContainer:
+    """The opened dependencies and the shared state Redis client (None without ``SIM_STATE_REDIS_URL``)."""
+
+    deps: Dependencies
+    state_redis: Redis | None
+
+    def readiness_checks(self) -> Mapping[str, CheckFn]:
+        return self.deps.readiness_checks()
+
+
 @asynccontextmanager
-async def build_container(settings: SimSettings) -> AsyncIterator[Dependencies]:
+async def build_container(settings: SimSettings) -> AsyncIterator[SimContainer]:
     """The shared state Redis client when ``SIM_STATE_REDIS_URL`` is set, else no dependency."""
     async with open_dependencies() as deps:
+        state_redis = None
         if settings.sim_state_redis_url.strip():
-            deps.redis(settings, url=settings.sim_state_redis_url)
-        yield deps
+            state_redis = deps.redis(settings, url=settings.sim_state_redis_url)
+        yield SimContainer(deps, state_redis)
 
 
 def create_app(
@@ -81,21 +113,31 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
     install_signals: bool = True,
     public_key_file: Path = PUBLIC_KEY_FILE,
 ) -> None:
-    """Serve every simulator until ``stop`` is requested; signals are routed once for all servers."""
+    """Serve every simulator until ``stop`` is requested; signals are routed once for all servers.
+
+    A :class:`SimContainer` with a state Redis attaches the shared control plane before serving; its
+    subscriber runs next to the servers and is cancelled once they have all returned.
+    """
     state = build_state(settings)
     try:
         with observed(settings.service_name, settings, version=__version__, enabled=init_observability):
             await asyncio.to_thread(state.signing_key.write_public_key, public_key_file)
             _log.info("sim.public_key_written", path=str(public_key_file))
             async with container_factory(settings) as source:
+                if isinstance(source, SimContainer) and source.state_redis is not None:
+                    await state.attach_shared(SharedState(source.state_redis))
+                    _log.info("sim.shared_state_attached")
                 signals = shutdown_signals(stop) if install_signals else contextlib.nullcontext()
                 with signals:
                     async with asyncio.TaskGroup() as group:
-                        for sim, port in ports.items():
-                            app = create_app(source, sim, state)
-                            group.create_task(
-                                run_server(app, host=host, port=port, stop=stop, install_signals=False)
-                            )
+                        subscriber = group.create_task(state.run_subscriber(), name="sim-shared-state")
+                        async with asyncio.TaskGroup() as servers:
+                            for sim, port in ports.items():
+                                app = create_app(source, sim, state)
+                                servers.create_task(
+                                    run_server(app, host=host, port=port, stop=stop, install_signals=False)
+                                )
+                        subscriber.cancel()
     finally:
         await state.aclose()
 
@@ -105,6 +147,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv, default_port=BASE_PORT, description="VoiceAgents simulators (--port is the first)"
     )
     settings = SimSettings()
+    if settings.sim_workers != 1:
+        _log.error("sim.workers_unsupported", sim_workers=settings.sim_workers)
+        sys.stderr.write(f"{_WORKERS_UNSUPPORTED}\n")
+        return EXIT_UNSUPPORTED
 
     async def serve_all() -> None:
         await run(settings, stop=StopController(), host=bind.host, ports=ports_from(bind.port))

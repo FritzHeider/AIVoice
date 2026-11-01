@@ -4,33 +4,20 @@ from __future__ import annotations
 
 import io
 import wave
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-import httpx
-from sim_helpers import new_state, scenario_yaml
-from starlette.applications import Starlette
+from sim_helpers import control_client, new_state, scenario_yaml
 
 from va_sim.clock import AcceleratedClock
-from va_sim.server import simulator_routes
-from va_sim.settings import PROFILES, SimName
-from va_sim.state import SimState
+from va_sim.settings import PROFILES
 from va_sim.wav import pcm16_wav
 
 YAML = {"content-type": "application/yaml"}
 
 
-@asynccontextmanager
-async def client_for(sim: SimName, state: SimState) -> AsyncIterator[httpx.AsyncClient]:
-    app = Starlette(routes=simulator_routes(sim, state))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://sim") as client:
-        yield client
-
-
 async def test_reset_clears_state_and_optionally_reseeds() -> None:
     state = new_state(seed=1)
     state.store_recording("r", b"RIFF")
-    async with client_for("llm", state) as client:
+    async with control_client("llm", state) as client:
         plain = await client.post("/sim/reset")
         assert plain.status_code == 204
         assert (state.recordings, state.seed) == ({}, 1)
@@ -51,7 +38,7 @@ async def test_reset_clears_state_and_optionally_reseeds() -> None:
 async def test_clock_reflects_accelerated_time() -> None:
     state = new_state()
     assert isinstance(state.clock, AcceleratedClock)
-    async with client_for("stripe", state) as client:
+    async with control_client("stripe", state) as client:
         before = (await client.get("/sim/clock")).json()
         state.clock.advance(2.5)
         after = (await client.get("/sim/clock")).json()
@@ -61,14 +48,14 @@ async def test_clock_reflects_accelerated_time() -> None:
 
 async def test_state_snapshot() -> None:
     state = new_state(seed=5)
-    async with client_for("elevenlabs", state) as client:
+    async with control_client("elevenlabs", state) as client:
         response = await client.get("/sim/state")
     assert response.json() == state.snapshot()
 
 
 async def test_register_yaml_scenario_then_read_it_back() -> None:
     state = new_state()
-    async with client_for("telnyx", state) as client:
+    async with control_client("telnyx", state) as client:
         created = await client.post("/sim/telnyx/scenarios", content=scenario_yaml("demo"), headers=YAML)
         inbound = await client.post(
             "/sim/telnyx/scenarios",
@@ -88,7 +75,7 @@ async def test_register_yaml_scenario_then_read_it_back() -> None:
 
 async def test_invalid_yaml_scenario_reports_issue_lines() -> None:
     body = scenario_yaml("demo") + "colour: red\nprofile: slow\n"
-    async with client_for("telnyx", new_state()) as client:
+    async with control_client("telnyx", new_state()) as client:
         response = await client.post("/sim/telnyx/scenarios", content=body, headers=YAML)
         undecodable = await client.post("/sim/telnyx/scenarios", content=b"\xff\xfe", headers=YAML)
     assert response.status_code == 422
@@ -106,7 +93,7 @@ async def test_json_scenario_body() -> None:
     state = new_state()
     good = {"id": "json-one", "match": {"to": "+14155550101"}, "answer": {"after_ms": 0}}
     bad = {"id": "json-two", "match": {"to": "+14155550101"}, "steps": [{"silence": {"ms": -1}}]}
-    async with client_for("telnyx", state) as client:
+    async with control_client("telnyx", state) as client:
         created = await client.post("/sim/telnyx/scenarios", json=good)
         rejected = await client.post("/sim/telnyx/scenarios", json=bad)
         unsupported = await client.post(
@@ -128,7 +115,7 @@ async def test_json_scenario_body() -> None:
 
 
 async def test_unknown_scenario_is_404() -> None:
-    async with client_for("telnyx", new_state()) as client:
+    async with control_client("telnyx", new_state()) as client:
         response = await client.get("/sim/telnyx/scenarios/missing")
     assert response.status_code == 404
     assert response.json() == {"error": {"code": "not_found", "message": "no scenario with id 'missing'"}}
@@ -136,7 +123,7 @@ async def test_unknown_scenario_is_404() -> None:
 
 async def test_recordings_are_served_as_wav() -> None:
     state = new_state()
-    async with client_for("telnyx", state) as client:
+    async with control_client("telnyx", state) as client:
         missing = await client.get("/sim/recordings/rec-1.wav")
         state.store_recording("rec-1", pcm16_wav([b"\x01\x00", b"\x02\x00"], 8000))
         found = await client.get("/sim/recordings/rec-1.wav")
@@ -150,7 +137,7 @@ async def test_recordings_are_served_as_wav() -> None:
 
 async def test_llm_config_patch_and_profile() -> None:
     state = new_state()
-    async with client_for("llm", state) as client:
+    async with control_client("llm", state) as client:
         initial = await client.get("/sim/llm/config")
         patched = await client.patch("/sim/llm/config", json={"ttft_ms": 5, "tokens_per_s": 400})
         unknown = await client.patch("/sim/llm/config", json={"tts_ttfa_ms": 1})
@@ -169,7 +156,7 @@ async def test_llm_config_patch_and_profile() -> None:
 
 async def test_elevenlabs_config_patch_keeps_other_values() -> None:
     state = new_state()
-    async with client_for("elevenlabs", state) as client:
+    async with control_client("elevenlabs", state) as client:
         patched = await client.patch("/sim/elevenlabs/config", json={"tts_ttfa_ms": 250})
         empty = await client.patch(
             "/sim/elevenlabs/config", content=b"", headers={"content-type": "application/json"}
@@ -181,12 +168,12 @@ async def test_elevenlabs_config_patch_keeps_other_values() -> None:
 
 async def test_routes_are_scoped_to_their_simulator() -> None:
     state = new_state()
-    async with client_for("llm", state) as client:
+    async with control_client("llm", state) as client:
         scenarios = await client.get("/sim/telnyx/scenarios")
         recording = await client.get("/sim/recordings/x.wav")
         other_config = await client.get("/sim/elevenlabs/config")
         stripe_on_llm = await client.get("/sim/stripe/config")
-    async with client_for("stripe", state) as client:
+    async with control_client("stripe", state) as client:
         llm_on_stripe = await client.get("/sim/llm/config")
         stripe_config = await client.get("/sim/stripe/config")
     responses = (scenarios, recording, other_config, stripe_on_llm, llm_on_stripe, stripe_config)

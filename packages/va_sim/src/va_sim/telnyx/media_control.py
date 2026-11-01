@@ -17,7 +17,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from va_sim.control import json_body, sim_error
+from va_sim.control import json_body, sim_error, state_unavailable
+from va_sim.shared import SharedStateUnavailable
 from va_sim.telnyx.call_control import find_call
 from va_sim.telnyx.call_media import RECORDING_SAMPLE_RATE
 from va_sim.telnyx.call_models import CallerDtmf, CallerSay, InjectFrame
@@ -54,9 +55,11 @@ def media_control_routes(state: SimState) -> list[BaseRoute]:
         if isinstance(body, JSONResponse):
             return body
         try:
-            utterance_id = state.register_utterance(body.text, body.language, tuple(body.text.split()))
+            utterance_id = await state.allocate_utterance(body.text, body.language, tuple(body.text.split()))
         except ValueError as exc:
             return sim_error(409, "utterance_limit", str(exc))
+        except SharedStateUnavailable as exc:
+            return state_unavailable(exc)
         wire = await asyncio.to_thread(
             render_text, utterance_id, body.text, session.fmt, state.utterance_seed(utterance_id)
         )

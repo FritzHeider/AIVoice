@@ -274,9 +274,10 @@ class SttSocket:
             self._finish(INTERNAL_ERROR, error, "fault")
 
     def _resolve(self, marker: int | None) -> Heard:
-        """What a segment with ``marker`` said (runs in the stream's worker thread; reads are GIL-atomic)."""
+        """What a segment with ``marker`` said (runs in the stream's worker thread; reads are GIL-atomic and a
+        shared-registry lookup waits on the event loop from this thread)."""
         if marker is not None:
-            utterance = self._state.utterances.get(marker)
+            utterance = self._state.resolve_utterance(marker)
             if utterance is None:
                 return Heard(UNINTELLIGIBLE, self._language, None, has_marker=True)
             return Heard(utterance.text, utterance.language or self._language, marker, has_marker=True)

@@ -2442,3 +2442,158 @@ jscpd 0 clones. Dockerfile vs specs/29 §1.1: only the 3 documented deviations. 
 documented restart/timeout/OTEL endpoint. Live check: sim-1 healthy, /sim/telnyx/public-key == .env TELNYX_PUBLIC_KEY
 == .sim/telnyx_public_key (comment kept). sim_public_key.py: retries transport errors only, validates 32-byte base64,
 tested with injected sleeps + real-socket e2e. Approved.
+
+## Plan P03-T15c (Planner, 2026-11-01)
+Redis-backed shared control plane for the simulators (specs/30 §3 `SIM_STATE_REDIS_URL`). Only P03-T15c is open
+before T16/T17; when it is approved also tick the umbrella P03-T15 line (T15a–c all done).
+
+### Scope decision (write as specs/30 §3 `> Decision (2026-11-01): shared SimState (P03-T15c).`, after the
+2026-10-29 Decision; edit that older Decision's sentence "The Redis-backed `SimState` ... arrives with the compose
+`sim` wiring (P03-T15); until then ..." to point at the new Decision instead of leaving it false)
+1. With `SIM_STATE_REDIS_URL` set, these control-plane records are shared by every sim process using that Redis:
+   (a) registered scenarios, (b) latencies (`/sim/*/config` PATCH and `/config/profile`), (c) reset + seed
+   (`POST /sim/reset` on any process resets all), (d) the utterance registry (ids allocated once across processes,
+   so a marker synthesized by process A's caller resolves in process B's FakeElevenLabs STT).
+2. Everything else stays per process: Telnyx accounts/apps/profiles/numbers/calls/conferences/messages, webhook
+   delivery logs, recordings, ElevenLabs/LLM/Stripe stores, faults, clock. `GET /sim/state` reports the shared
+   counts for (a)/(d) and the local counts for the rest.
+3. Keys (namespace `sim:state:`; never collides with platform keys in specs/03 because the sim Redis is its own
+   URL — say so): `sim:state:version` (INCR on every shared write), `sim:state:seed`, `sim:state:generation`
+   (INCR per reset), `sim:state:scenarios` (hash id → scenario JSON `model_dump(mode="json")`, paths already
+   absolute), `sim:state:latencies` (JSON string of `Latencies`), `sim:state:utterances` (hash id → `{"text",
+   "language","words"}` JSON), `sim:state:utterance_next` (counter). Channel `sim:state:events` (payload = the new
+   version; receivers ignore it and just `sync()`). No TTLs (reset clears them).
+4. Consistency: every write is one Lua script (mutate + INCR version + PUBLISH) so readers never see a half write.
+   Each process keeps its local in-memory copy (sync reads stay sync and lock-free); `sync()` = GET version, and
+   when it differs from the applied version reload everything (generation changed → local `reset(seed)` first,
+   without re-publishing; then replace scenarios + destination/inbound indexes, latencies, utterances). `sync()`
+   runs (i) at startup (a joining process adopts existing state, never wipes it), (ii) on every pub/sub message
+   (subscriber task), (iii) at the start of async entry points that read shared records: scenario register/list/
+   detail, `/sim/state`, `/sim/*/config` GET, Telnyx dial (`call_routes`) and inbound (`call_control.inbound`)
+   — this gives read-your-writes across processes without waiting for pub/sub.
+5. Utterance allocation with sharing = Lua `INCR utterance_next`; when > 65 535 → error (same ValueError message
+   as today); else HSET. Resolution: local dict first; on a miss in the STT resolver (runs in a worker thread),
+   fetch from Redis via `asyncio.run_coroutine_threadsafe(shared.fetch_utterance(id), loop).result(timeout=1.0)`
+   (blocks the worker thread only, never the loop); a failed/missing lookup → the existing "unintelligible" path.
+6. Redis failure: writes raise → control routes answer 503 `{"error":{"code":"state_unavailable",...}}`; `sync()`
+   failures on entry points log `sim.shared_state.sync_failed` and continue with the local copy; the subscriber
+   reconnects with backoff (1 s, 2 s, ... capped 10 s) and does a full `sync()` after reconnecting. Readiness
+   already checks the Redis (`build_container`).
+7. `SIM_WORKERS` > 1 (several processes behind one port set) is deferred to the load-test task (plan/phase-20 load
+   task — append to its Deliverables: "sim multi-worker mode `SIM_WORKERS` (shared Telnyx resources/calls or
+   call-affine routing)"), because per-process Telnyx calls make round-robin REST unusable. Until then
+   `main` exits 2 with `SIM_WORKERS > 1 is not supported yet (specs/30 §3 Decision P03-T15c)` on stderr/log when
+   `sim_workers != 1`. Several sim processes on their own ports sharing one Redis are supported (acceptance).
+
+### Files
+- `packages/va_sim/src/va_sim/shared.py` (new): `SHARED_NAMESPACE = "sim:state"`, `SharedSnapshot` (frozen
+  dataclass: version, generation, seed, scenarios: dict[str, Scenario], latencies: Latencies | None, utterances:
+  dict[int, Utterance]), `SharedStateUnavailable(RuntimeError)`, `class SharedState(redis: Redis)` with
+  `async version() -> int`, `async load() -> SharedSnapshot` (one pipeline/MULTI read), `async put_scenario(s)`,
+  `async put_latencies(l)`, `async reset(seed: int | None) -> int` (returns the seed now in force; None keeps the
+  stored seed, default 0), `async allocate_utterance(text, language, words) -> int`, `async fetch_utterance(id) ->
+  Utterance | None`, `async subscribe(on_change: Callable[[], Awaitable[None]], stop)` (runs until cancelled; the
+  reconnect loop of rule 6, sleeping via an injectable `sleep` for tests). Lua scripts via `register_script`. JSON
+  via `va_common.json` (orjson). Must not import `va_sim.state` at runtime (state imports shared) — move
+  `Utterance` into `va_sim/utterances.py` (or shared.py) and re-export from `va_sim.state` to keep imports working.
+- `packages/va_sim/src/va_sim/state.py`: `SimState(..., shared: SharedState | None = None)`; new
+  `async sync()`, `async reset_shared(seed)`, `async register_scenario_shared(s)` (or make the control routes call
+  `state.shared...` then apply locally — keep one place: SimState methods `async def apply_*`), `async
+  allocate_utterance(text, language, words) -> int` (local `register_utterance` when unshared), `async
+  set_latencies(...)`/`async set_profile(...)`, `resolve_utterance(id) -> Utterance | None` (thread-safe, rule 5;
+  SimState remembers its loop when shared is attached: `attach_shared(shared)` is async and captures
+  `asyncio.get_running_loop()`, then runs the first `sync()`), `async run_subscriber()`. Snapshot unchanged keys.
+  Unshared behaviour must stay byte-for-byte identical (all existing tests pass untouched except call-site
+  renames).
+- `va_sim/control.py`: reset/config/profile/scenario routes use the async SimState methods, call `await
+  state.sync()` first on reads; map `SharedStateUnavailable` → 503 `state_unavailable`.
+- `va_sim/telnyx/call_routes.py` (dial) and `telnyx/call_control.py` (inbound): `await state.sync()` before scenario
+  lookup. `telnyx/caller_script.py`: `_greeting_jobs`/`_step_jobs`/`_text_job` become async and use
+  `allocate_utterance`. `telnyx/media_control.py` say: `allocate_utterance`. `elevenlabs/stt_ws.py` `_resolve`:
+  `state.resolve_utterance(marker)`; `elevenlabs/stt_batch.py` line ~110 builds its map — when shared, `await
+  state.sync()` before building it.
+- `apps/sim/src/va_sim_server/main.py`: `build_container` yields a small `SimContainer` (readiness_checks +
+  `state_redis: Redis | None`); `run()` attaches `SharedState(container.state_redis)` to the state before serving
+  and runs `state.run_subscriber()` in the TaskGroup (stopped with the servers: cancel it when all servers return —
+  e.g. a `stop.wait()` sibling or run the servers in an inner group and cancel the subscriber after). `main`:
+  `SIM_WORKERS` rule 7. Update the module docstring.
+- specs/30 §3 Decision (above); plan/phase-20 load-task deliverable line; AGENTS.md Learned bullet (keys, sync
+  points, how to run two sims sharing Redis: `SIM_STATE_REDIS_URL=redis://localhost:6379/15 uv run python -m
+  va_sim_server.main --port 19100` twice with different ports).
+
+### Tests
+- `packages/va_sim/tests/test_shared_state.py` (fakeredis `FakeAsyncRedis(server=FakeServer())`, two SimStates =
+  two processes, each `attach_shared`):
+  - scenario registered via A's control API (ASGI client over `simulator_routes("telnyx", a)`) is listed/detailed by
+    B's control API without any pub/sub delivery (read-your-writes through `sync()`), and B's dial to `match.to`
+    uses it (call summary `scenario` id).
+  - replacing a scenario with the same id in B rebinds the destination index in A.
+  - joining process C (attached later) sees existing scenarios and latencies; attaching does not wipe Redis.
+  - reset on A with seed 7 → B's `/sim/state` seed 7 and scenarios empty, B's local Telnyx store reset too; reset
+    without seed keeps the stored seed.
+  - latencies PATCH on A's elevenlabs config → B's `/sim/llm/config` & elevenlabs config reflect; profile applies.
+  - utterance ids: A allocates 1, B allocates 2, A allocates 3 (interleaved) — unique; B resolves A's id via
+    `resolve_utterance` from a worker thread (`asyncio.to_thread`); unknown id → None; 65 536th allocation raises
+    ValueError with the existing message (set `utterance_next` to 65 535 directly).
+  - subscriber: running `run_subscriber()` in B, a write in A makes B's local copy update (await an event set by a
+    test hook / poll `state.scenarios` via an `asyncio.Event` callback — no sleeps); subscriber reconnect: inject a
+    failing pubsub once, assert backoff sleeps recorded (1 s) and a full sync afterwards.
+  - Redis down (closed client / `UNREACHABLE` url): register → 503 `state_unavailable`; reads fall back to local
+    and log `sim.shared_state.sync_failed`.
+  - unshared state: existing behaviour (allocate_utterance == register_utterance numbering; sync() no-op).
+- STT cross-process: an STT socket on B (realtime state, `stt_helpers`) decodes caller audio synthesized with an id
+  allocated on A and returns A's text in `committed_transcript`.
+- `apps/sim/tests/test_sim.py`: `run()` with `SIM_STATE_REDIS_URL` attaches shared state (fake container yielding a
+  fakeredis client) and the subscriber stops with the servers; `main` with `SIM_WORKERS=2` exits 2.
+- Acceptance integration (`@pytest.mark.integration`, docker probe skip): `apps/sim/tests/test_sim_shared_redis.py`
+  boots `testcontainers.community.redis` (check the import path used elsewhere), starts TWO real sim processes
+  (`subprocess` / `asyncio.create_subprocess_exec(sys.executable, "-m", "va_sim_server.main", "--port", p)` with
+  env `SIM_STATE_REDIS_URL`, free ports, `.sim` key file into tmp cwd), waits for `/readyz` on each (bounded loop on
+  the HTTP response, no fixed sleeps — use httpx retries with a deadline), registers a scenario on process 1, asserts
+  `GET /sim/telnyx/scenarios/{id}` on process 2 returns it, resets on 2 → 1 lists none; terminates both (SIGTERM,
+  wait) in `finally`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), radon on va_sim/shared.py + state.py, pip-audit + pnpm audit. va_sim coverage ≥ 95 % stays.
+
+### Risks
+- Making `_text_job` async changes CallerScript ordering: keep document-order allocation (sequential awaits, not
+  gather) so unshared ids stay identical to today (existing caller-script tests pin ids).
+- `run_coroutine_threadsafe(...).result()` from a thread while the loop is blocked would deadlock: only called from
+  `asyncio.to_thread` workers (stt feed/commit), never from the loop thread — assert `loop is not running in this
+  thread` path (if called on the loop thread, skip Redis and return local miss).
+- Accelerated clock: Redis awaits are real I/O; the clock advances when the loop idles, so shared-mode tests use
+  realtime states or don't assert virtual ms.
+- fakeredis pubsub + Lua (`fakeredis[lua]` is a root dev dep) both work; real Redis only in the integration test.
+- Local reset triggered by a remote generation change must not cancel the very task running `sync()` (reset calls
+  `tasks.cancel_all()`; the subscriber is NOT in `state.tasks` — keep it in the app TaskGroup).
+
+## Build P03-T15c (Builder, 2026-11-01)
+Implemented per plan with two documented refinements (specs/30 §3 Decision P03-T15c, 7 rules):
+(1) utterance allocations do NOT bump `sim:state:version` (would force every process to reload per say); resolution =
+local registry → Redis HGET from the STT worker thread via run_coroutine_threadsafe (1 s bound, never on the loop
+thread), batch STT reads the whole hash (`known_utterances`); (2) extra key `sim:state:scenario_order` (zset, score =
+version) so number bindings keep registration order after a reload; reset with no stored seed → each process keeps its
+own seed. Files: new `va_sim/shared.py` (SharedState: head/load MULTI reads, 4 Lua writes, subscribe with 1-2-4..10 s
+backoff, SharedStateUnavailable, UtteranceLimitError), `va_sim/utterances.py` (Utterance moved, re-exported by state);
+`state.py` async API (attach_shared, sync, reset_all, add_scenario, set_latencies, set_profile, allocate_utterance,
+resolve_utterance, known_utterances, run_subscriber, wait_applied; own write right after applied version is adopted
+without reload); control routes sync-before-read + 503 `state_unavailable`; dial/inbound sync; caller_script jobs async
+(document order kept); media say + stt_ws/stt_batch; apps/sim `SimContainer(deps, state_redis)`, run attaches shared
+state + subscriber task cancelled after the servers' inner TaskGroup, `SIM_WORKERS != 1` → exit 2. redis dep added to
+va-sim and va-sim-server. plan/phase-20 P20-T06 deliverable line; AGENTS.md bullet. Dedup: `sim_helpers.control_client`
+(test_control uses it), `packages/va_common/tests/redis_container.running_redis_url` (test_redis_integration uses it).
+Tests: test_shared_state.py (16), elevenlabs/test_stt_shared.py (cross-process marker), apps/sim test_sim.py (+3: run
+shares via redis, build_container exposes redis, SIM_WORKERS=2 exit 2), test_sim_shared_redis.py (integration: two real
+sim processes + redis:7.2 container; register on 1 → detail on 2, reset seed 11 on 2 → 1 empty + seed 11; both exit 0).
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0, make test 6410 passed / 98.42 %, shared.py 99 %, state.py 100 %,
+main.py 100 %, spec refs 0, jscpd 0 clones, radon A (2.29), pip-audit clean, pnpm audit high clean (3 moderate pre-existing).
+
+## Review P03-T15c (Reviewer, 2026-11-01)
+Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6410 passed / 98.42 % (integration test with two real sim
+processes + redis ran, not skipped), check_spec_refs 0, jscpd 0 clones, radon A (2.30). Diff vs specs/30 §3 Decision
+P03-T15c: keys, Lua atomicity, sync points (register/list/detail, /sim/state, config, dial, inbound), own-write adopt,
+generation-change local reset, utterance HGET from worker thread only (loop-thread guard), 503 state_unavailable,
+subscriber backoff, SIM_WORKERS exit 2, phase-20 deliverable. Tests cover cross-process read-your-writes, reset, latencies,
+utterance uniqueness/limit, subscriber push + reconnect, outage paths, unshared parity. Approved; P03-T15 umbrella ticked.

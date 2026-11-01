@@ -33,7 +33,7 @@
 - [ ] P20-T06 Load test
   - Spec refs: specs/30-testing-and-evals.md (load test harness and pass criteria); specs/00-overview.md §5
   - Depends on: P20-T02
-  - Deliverables: `scripts/load/` (k6 API scenarios; asyncio simulator swarm driving 1 000 concurrent calls through FakeTelnyx/FakeElevenLabs/FakeLLM in real-time mode across multiple media-worker containers), `LOADTEST_REPORT.md` generated with latency distributions and resource usage
+  - Deliverables: `scripts/load/` (k6 API scenarios; asyncio simulator swarm driving 1 000 concurrent calls through FakeTelnyx/FakeElevenLabs/FakeLLM in real-time mode across multiple media-worker containers), `LOADTEST_REPORT.md` generated with latency distributions and resource usage; sim multi-worker mode `SIM_WORKERS` (shared Telnyx resources/calls or call-affine routing; deferred from P03-T15c, specs/30 §3 Decision P03-T15c)
   - Acceptance: thresholds in specs/00 §5 met.
 
 - [ ] P20-T07 Live validation with real vendors

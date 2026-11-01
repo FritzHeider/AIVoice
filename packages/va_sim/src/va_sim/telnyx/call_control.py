@@ -56,6 +56,7 @@ def call_control_routes(state: SimState) -> list[BaseRoute]:
         body = await json_body(request, InboundCall, allow_empty=False)
         if isinstance(body, JSONResponse):
             return body
+        await state.sync()
         owner = store.owner_of(body.to)
         connection_id: str | None = owner[1]["connection_id"] if owner is not None else None
         if owner is None or connection_id is None:

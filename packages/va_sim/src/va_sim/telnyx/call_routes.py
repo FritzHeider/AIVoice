@@ -67,6 +67,7 @@ def call_routes(state: SimState) -> list[BaseRoute]:
         body = await parse_body(request, DialRequest)
         if isinstance(body, JSONResponse):
             return body
+        await state.sync()
         known = account.calls.get(account.dial_commands.get(body.command_id or "", ""))
         if known is not None:
             log_command(state, known, "dial", body.command_id, duplicate=True)

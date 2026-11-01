@@ -107,7 +107,8 @@ class _BatchRequest:
         return stored if stored is not None else await _fetch(url)
 
     async def transcribe(self, params: BatchParams, data: bytes) -> Response:
-        utterances = {key: (value.text, value.language) for key, value in self.state.utterances.items()}
+        known = await self.state.known_utterances()
+        utterances = {key: (value.text, value.language) for key, value in known.items()}
         generated = tuple(record.generated_text for record in self.state.elevenlabs.tts_requests)
         form = params.form
 

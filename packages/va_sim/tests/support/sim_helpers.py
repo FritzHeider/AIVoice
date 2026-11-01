@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 from service_helpers import isolate_env
+from starlette.applications import Starlette
 
 from va_sim.clock import AcceleratedClock
 from va_sim.scenario import Scenario, load_scenario
-from va_sim.settings import Latencies, SimSettings
+from va_sim.server import simulator_routes
+from va_sim.settings import Latencies, SimName, SimSettings
 from va_sim.state import SimState
 
 
@@ -36,3 +41,11 @@ def scenario_yaml(
 
 def scenario(scenario_id: str, **binding: str | None) -> Scenario:
     return load_scenario(scenario_yaml(scenario_id, **binding))
+
+
+@asynccontextmanager
+async def control_client(sim: SimName, state: SimState) -> AsyncIterator[httpx.AsyncClient]:
+    """An in-process client of simulator ``sim``'s routes (control API and vendor API) over ``state``."""
+    app = Starlette(routes=simulator_routes(sim, state))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://sim") as client:
+        yield client
