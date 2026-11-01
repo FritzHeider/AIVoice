@@ -84,7 +84,7 @@
   - Deliverables: no-input timer after playback completes (reprompts via `Brain.on_no_input`, goodbye + `no_input_timeout` end, reset on speech); DTMF buffering (2 000 ms / `#`), `ignore_button_press`, DTMF user turn `"[DTMF: 1 2 3 4]"` with `dtmf`, DTMF barge-in at levels ≥ 1
   - Acceptance: in-memory harness tests: silence reprompt then hangup, speech resets the reprompt count, DTMF delivered to Brain (timeout and `#` terminator), ignored DTMF, DTMF interrupts playback at level 1 but not 0.
 
-- [ ] P04-T13 Pipeline benchmark
+- [x] P04-T13 Pipeline benchmark — tests/bench (deselected unless -m bench) + generated BENCHMARKS.md; overhead p50 harness 0.0 ms / wall 1.0 ms, 50 concurrent pipelines 0 late frames (max 2.0 ms); 7430 passed, cov 98.55 %, lint/typecheck/placeholders pass
   - Spec refs: specs/07-media-pipeline.md (performance requirements, CPU budget)
   - Depends on: P04-T12c
   - Deliverables: `packages/va_voice/tests/bench/test_pipeline_bench.py` (marker `bench`), `packages/va_voice/BENCHMARKS.md` generated from results

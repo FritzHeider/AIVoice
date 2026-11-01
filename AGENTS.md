@@ -18,6 +18,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Format | `make fmt` |
 | All gates | `make check` |
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
+| Pipeline benchmark | `uv run pytest -m bench packages/va_voice` (rewrites `packages/va_voice/BENCHMARKS.md`; commit it) |
 | Simulator end-to-end | `make e2e` (single flow: `uv run pytest tests_e2e -m e2e -k barge_in`) |
 | Dashboard e2e | `make e2e-ui` |
 | Live vendor smoke | `LIVE_TESTS=1 LIVE_TELNYX_API_KEY=… LIVE_ELEVENLABS_API_KEY=… LIVE_LLM_API_KEY=… uv run pytest tests_live -m live -rs` (optional `LIVE_FROM_NUMBER`, `VA_ENV`; commit the generated `tests_live/fixtures/stt_phrase.*` after the first run) |
@@ -1072,3 +1073,8 @@ Grafana 3001
   the last utterance: give such tests `PipelineConfig(no_input_timeout_ms=30_000)` instead of weakening asserts.
   Harness: `ScriptedBrain(no_input=[[...]])` scripts `on_no_input` (empty = the pipeline's reprompt; logs
   `brain.no_input` into `transport.calls`), `h.caller.press(digit)`. Never log DTMF digit values.
+- 2026-11-01 (P04-T13): `pytest.mark.bench` tests (`packages/va_voice/tests/bench/`) are deselected by that dir's
+  conftest unless `-m` mentions `bench`; a full non-xdist bench run rewrites `packages/va_voice/BENCHMARKS.md`
+  (`VA_BENCH_REPORT` overrides the path). `harness(clock=RealtimeClock())` runs the pipeline harness on the wall
+  clock; `pipeline_bench.run_conversation(clock=, turns=)` is the scripted zero-latency call. The outbound clock
+  sends frames only while speech/background plays (no idle frames without a background track).

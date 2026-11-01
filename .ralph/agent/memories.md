@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793552401-ab71
+> P04-T13: bench tests (pytest.mark.bench) in packages/va_voice/tests/bench are deselected by that conftest unless -m mentions bench; full non-xdist run rewrites packages/va_voice/BENCHMARKS.md; harness(clock=RealtimeClock()) runs on wall clock; outbound sends no idle frames without background
+<!-- tags: voice, pipeline, testing | created: 2026-11-01 -->
+
 ### mem-1793550714-ba32
 > P04-T12b fix: CallPipeline runs ActionHandler.handle in its own task awaited via asyncio.shield so reply cancels (barge-in/merge/watchdog) never cut actions; reply loop _settle_action waits for orphans; BargeInMonitor only sets _decided on honored decisions (segments re-evaluated after playback gaps); test fake SlowActions
 <!-- tags: voice, pipeline, testing | created: 2026-11-01 -->

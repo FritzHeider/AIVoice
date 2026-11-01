@@ -635,6 +635,19 @@ in + 50 out ≈ 0.6 %, STT/TTS WS ≈ 0.5 %. Budget ≤ 3 % of one core per call
 Load test asserts: no outbound frame scheduled later than 30 ms past its target (p99) at 50 concurrent simulated
 calls; event loop lag p99 ≤ 10 ms (`va_event_loop_lag_ms`).
 
+> Decision (2026-11-01) P04-T13: the phase 04 pipeline benchmark is `packages/va_voice/tests/bench/`
+> (`uv run pytest -m bench packages/va_voice`; bench tests are deselected unless the `-m` expression mentions
+> `bench`, so `make test` never runs timing asserts). Platform overhead per turn =
+> `e2e_ms − eot_ms − (stt_final_ms + llm_ttft_ms + tts_ttfa_ms)` from the turn's `TurnLatency` (endpointing
+> silence is policy, not overhead; unmeasured vendor terms count as 0). With zero-latency fakes the vendor terms
+> are the fakes' in-process time, so the gross `e2e_ms − eot_ms` is gated too. Runs: (a) 200 turns of one harness
+> call on the accelerated clock (scheduling cost in virtual ms), (b) 30 turns on the wall clock
+> (`va_sim.clock.RealtimeClock`, real CPU and event-loop cost), both p50 ≤ 30 ms; (c) 50 harness pipelines × 3
+> turns on one event loop on the wall clock: every turn delivered and zero outbound frames more than 30 ms past
+> their target (`OutboundStats.late_frames`); event-loop lag (10 ms sleep overshoot) is reported, not asserted
+> (the p99 assert belongs to the phase 05 load test). Percentiles are nearest-rank. A complete, non-xdist run
+> rewrites `packages/va_voice/BENCHMARKS.md` (committed; never edited by hand).
+
 ## 22. Tests required
 
 - Codec round trips and vectors; Framer padding; L16 byte order conversion.

@@ -187,6 +187,7 @@ markers = [
   "integration: needs docker/testcontainers",
   "e2e: simulator end-to-end",
   "live: real vendors, LIVE_TESTS=1",
+  "bench: performance benchmarks, run with -m bench",
 ]
 filterwarnings = ["error"]
 

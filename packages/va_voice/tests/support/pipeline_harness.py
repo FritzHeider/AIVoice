@@ -1,8 +1,9 @@
 """Deterministic in-memory harness for :class:`va_voice.pipeline.CallPipeline` (Decision P04-T12a).
 
-``async with harness(...) as h:`` builds the fakes of :mod:`pipeline_fakes` on one
-:class:`va_sim.clock.AcceleratedClock`, starts ``pipeline.run()`` and the caller's 20 ms inbound stream, and
-on exit closes the transport, awaits the run and cancels every fake's background task.
+``async with harness(...) as h:`` builds the fakes of :mod:`pipeline_fakes` on one clock (by default a
+:class:`va_sim.clock.AcceleratedClock`; the benchmark passes a :class:`va_sim.clock.RealtimeClock`), starts
+``pipeline.run()`` and the caller's 20 ms inbound stream, and on exit closes the transport, awaits the run
+and cancels every fake's background task.
 """
 
 from __future__ import annotations
@@ -24,18 +25,20 @@ from pipeline_fakes import (
     SlowActions,
 )
 
-from va_sim.clock import AcceleratedClock
+from va_sim.clock import AcceleratedClock, RealtimeClock
 from va_voice.latency import LatencyTracer
 from va_voice.pipeline import ActionHandler, CallPipeline, PipelineConfig, PipelineResult
 
-__all__ = ["Harness", "harness"]
+__all__ = ["Harness", "HarnessClock", "harness"]
+
+HarnessClock = AcceleratedClock | RealtimeClock
 
 _STEP_S = 0.02
 
 
 @dataclass(slots=True)
 class Harness:
-    clock: AcceleratedClock
+    clock: HarnessClock
     transport: FakeTransport
     caller: FakeCaller
     stt: FakeStt
@@ -82,12 +85,13 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
     ttfa_s: float = 0.0,
     commit_latency_s: float = 0.0,
     actions: ActionHandler | None = None,
-    latency: Callable[[AcceleratedClock], LatencyTracer] | None = None,
+    latency: Callable[[HarnessClock], LatencyTracer] | None = None,
     streaming: bool = True,
     partial_after: int = 10,
+    clock: HarnessClock | None = None,
 ) -> AsyncIterator[Harness]:
     cfg = config if config is not None else PipelineConfig()
-    clock = AcceleratedClock()
+    clock = clock if clock is not None else AcceleratedClock()
     transport = FakeTransport(clock, echo_delay_ms=echo_delay_ms)
     caller = FakeCaller(transport, clock, cfg.fmt, cfg.wire_byte_order)
     caller.streaming = streaming
