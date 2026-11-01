@@ -1,8 +1,7 @@
 """Bodies of ``/v1/me`` and ``/v1/org`` (specs/04-auth-tenancy-rbac.md §8.1) and the effective org limits.
 
-:func:`effective_limits` merges the plan's rates and caps with the ``orgs.limits`` overrides of
-specs/24-billing-and-limits.md §2; an override replaces the plan value, unknown or wrongly typed override
-values are ignored.
+:func:`effective_limits` projects ``va_billing.plans.effective_limits`` (the plan's rates and caps with the
+``orgs.limits`` overrides of specs/24-billing-and-limits.md §2) onto the public ``OrgLimits`` fields.
 """
 
 from __future__ import annotations
@@ -10,17 +9,16 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, Final
+from typing import Annotated, Final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from va_api.auth.context import PrincipalType
+from va_billing import plans as billing_plans
 from va_db.models import MemberRole, Plan
 from va_domain.org import OrgSettings
 
 __all__ = [
-    "BOOL_OVERRIDE_KEYS",
-    "INT_OVERRIDE_KEYS",
     "MeApiKey",
     "MeUser",
     "MeView",
@@ -30,20 +28,6 @@ __all__ = [
     "OrgView",
     "effective_limits",
 ]
-
-INT_OVERRIDE_KEYS: Final = (
-    "connected_rate_micros_per_min",
-    "transfer_rate_micros_per_min",
-    "sms_rate_micros",
-    "widget_message_micros",
-    "daily_calls",
-    "hourly_calls",
-    "concurrency",
-    "voice_clones",
-    "numbers",
-    "sms_per_day",
-)
-BOOL_OVERRIDE_KEYS: Final = ("international_enabled",)
 
 _ORG_ID: Final = "0192f1d2-7b3c-7a10-9c4e-5d6f7a8b9c0d"
 _SUMMARY_EXAMPLE: Final[dict[str, JsonValue]] = {
@@ -212,30 +196,7 @@ class OrgPatch(BaseModel):
     )
 
 
-def _int_override(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def effective_limits(plan: Plan | None, overrides: Mapping[str, object]) -> OrgLimits:
     """The plan's values (all null without a plan) with every well-typed override of ``overrides`` applied."""
-    values: dict[str, Any] = dict.fromkeys((*INT_OVERRIDE_KEYS, *BOOL_OVERRIDE_KEYS))
-    if plan is not None:
-        values |= {
-            "connected_rate_micros_per_min": plan.connected_rate_micros_per_min,
-            "transfer_rate_micros_per_min": plan.transfer_rate_micros_per_min,
-            "sms_rate_micros": plan.sms_rate_micros,
-            "widget_message_micros": plan.widget_message_micros,
-            "daily_calls": plan.daily_call_cap,
-            "hourly_calls": plan.hourly_call_cap,
-            "concurrency": plan.concurrency_cap,
-            "voice_clones": plan.voice_clone_cap,
-        }
-    for key in INT_OVERRIDE_KEYS:
-        number = _int_override(overrides.get(key))
-        if number is not None:
-            values[key] = number
-    for key in BOOL_OVERRIDE_KEYS:
-        flag = overrides.get(key)
-        if isinstance(flag, bool):
-            values[key] = flag
-    return OrgLimits(**values)
+    limits = billing_plans.effective_limits(plan, overrides)
+    return OrgLimits(**{name: getattr(limits, name) for name in OrgLimits.model_fields})

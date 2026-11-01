@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793564621-892f
+> P05-T04b: va_billing = plans/keys/scripts(Lua capped_incr, counter_release, concurrency_acquire)/limits.CallLimiter(acquire->LimitTicket.rollback)/holds/dispatch.admit_call; tests billing_helpers.limiter_rig (fakeredis+FrozenClock NOW) and billing_rows.new_billing_org (created_at defaults NOW-30d, else org counts as new account); new error code needs test_errors row-count bump; redis_container.flushed_redis shared helper
+<!-- tags: billing, redis, testing | created: 2026-11-01 -->
+
 ### mem-1793563013-9d78
 > P05-T04a: va_compliance.check_call_compliance(session, OrgFacts, destination=, region=, at=, now=, scheduled=, allowed_countries=) is Send Call step 9; DB tests use session fixture compliance_db_url + tests/support/compliance_rows (add_dnc via system_session for platform rows); callee_timezones falls back when phonenumbers returns >8 zones (NANP non-geographic); state_rules.json entries verified against statutes (MD/UT/AL/LA stricter than original spec table)
 <!-- tags: compliance, calls, testing | created: 2026-11-01 -->

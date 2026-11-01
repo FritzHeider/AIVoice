@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 
 import pytest
 from docker_probe import docker_available
+from redis.asyncio import Redis
+from service_helpers import settings_of
 
-__all__ = ["running_redis_url"]
+from va_common.redis import redis_client
+from va_common.settings import RedisSettings
+
+__all__ = ["flushed_redis", "running_redis_url"]
 
 
 @contextmanager
@@ -22,3 +27,14 @@ def running_redis_url() -> Iterator[str]:
         host = container.get_container_host_ip()
         port = container.get_exposed_port(6379)
         yield f"redis://{host}:{port}/0"
+
+
+@asynccontextmanager
+async def flushed_redis(url: str, *, max_connections: int) -> AsyncIterator[Redis]:
+    """A ``redis_client`` for ``url`` on an emptied database, closed on exit."""
+    client = redis_client(settings_of(RedisSettings, redis_url=url), max_connections=max_connections)
+    await client.flushdb()
+    try:
+        yield client
+    finally:
+        await client.aclose()

@@ -29,7 +29,7 @@ TABLE = _catalog_table()
 
 
 def test_catalog_table_parsed_completely() -> None:
-    assert len(TABLE) == 62
+    assert len(TABLE) == 63
 
 
 def test_codes_match_catalog_exactly() -> None:

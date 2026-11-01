@@ -16,6 +16,7 @@ dependencies = [
     "temporalio>=1.8",
     "uvicorn[standard]>=0.54.0",
     "va-common",
+    "va-billing",
     "va-compliance",
     "va-db",
     "va-domain",
@@ -27,6 +28,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-billing = { workspace = true }
 va-compliance = { workspace = true }
 va-db = { workspace = true }
 va-domain = { workspace = true }

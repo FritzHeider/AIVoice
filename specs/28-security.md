@@ -259,6 +259,10 @@ Matching = longest-prefix on E.164 digits. Result `NUMBER_BLOCKED`.
   platform admins alerted (`billing.payment_failed`-style system event `system.fraud_suspected` logged and paged).
 - Same-number 10 s rule and per-destination daily cap (5 calls/day/number/org, enterprise configurable).
 
+> Decision (2026-11-01): the per-destination cap is the `freq:` counter of `va_billing.limits`
+> (`DESTINATION_FREQUENCY_CAP`); the enterprise setting is `orgs.limits.per_destination_daily_calls`. Rules: specs/24
+> §6 Decision P05-T04b.
+
 ### 9.4 Key anomaly detection
 
 API key usage from a new country (GeoLite2 ASN/country DB bundled, refreshed monthly by CI artifact) than seen in the

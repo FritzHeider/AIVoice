@@ -1080,3 +1080,201 @@ Approved. Re-ran make lint/typecheck/placeholders (pass, 0 findings), make test 
 jscpd 0 clones, radon nothing ≥ C, spec refs 0 problems. Error codes/statuses match specs/31; blocklist matches
 specs/28 §9.2; INTERNATIONAL_ALLOWED_COUNTRIES default matches specs/02 §6 and .env.example. State table deviations
 from specs/17 §7 (stricter MD/UT/AL/LA after statute verification) are recorded as a Decision. Next: P05-T04b.
+
+## Plan P05-T04b — Dispatch limits and credit holds (Planner, 2026-11-01)
+New package `packages/va_billing` (spec owner specs/24). Send Call §4.1 steps 10–11 plus the orchestration
+`dispatch.admit_call` (step 9 → 10 → 11 with compensation). No route yet (P05-T05 wires it).
+
+### Decisions (write as `> Decision (2026-11-01): dispatch limits and holds (P05-T04b).` under specs/24 §6 (after
+the P05-T04a block), short cross-refs under specs/05 §4.1 (after the P05-T04a Decision), specs/24 §5, specs/17 §7,
+specs/28 §9.3; add the new code row to specs/31 §3)
+1. Order of step 10 follows specs/24 §6 (the owning spec), reconciling specs/05 §4.1's listing:
+   (a) same-number `SET cap:dest:{org}:{e164} 1 NX PX 10000` → `SAME_NUMBER_TOO_SOON` (message exactly the catalog
+   text "Please wait at least 10 seconds between calls to the same number.", field `phone_number`); never rolled
+   back (a failed later step still blocks a rapid retry); (b) per-destination frequency `freq:{org}:{e164}:{yyyymmdd}`
+   (TTL 172 800) → new code `DESTINATION_FREQUENCY_CAP` 429 "This number has reached its daily call limit." field
+   `phone_number`; cap = min(5 (specs/28 §9.3) or `orgs.limits.per_destination_daily_calls` int override for
+   enterprise only, state rule `max_calls_per_24h` when `compliance.state_quiet_hours` and
+   `va_compliance.calling_hours.destination_state_rule(e164)` has one). The 24 h of the state statutes is
+   approximated by the UTC calendar day of the spec key (documented). (c) new account (org `created_at` > now−24 h):
+   destination region ∉ {US, CA} → `NEW_ACCOUNT_LIMIT` "New accounts can call only US and Canadian numbers during
+   their first 24 hours." (specs/28 §9.3); the daily cap becomes min(cap,100) and concurrency min(cap,10) (None →
+   100/10); (d) daily `cap:org:{org}:daily:{yyyymmdd}` TTL 172 800; (e) hourly `cap:org:{org}:hourly:{yyyymmddhh}`
+   TTL 7 200; (f) concurrency zset `cap:org:{org}:concurrency` score `now_ms + (max_duration_min+5)·60 000`;
+   (g) international hourly `cap:org:{org}:intl:{yyyymmddhh}` TTL 7 200, only when region ∉ {US, CA,
+   settings.default_country} (same "domestic" as va_compliance), caps start 10 / build 100 / scale 300 /
+   enterprise unlimited, `orgs.limits.international_hourly_calls` int override wins → `INTERNATIONAL_RATE_LIMITED`.
+   When (d)/(f) fail only because of the new-account tightening (the plan cap alone would allow it) the code is
+   `NEW_ACCOUNT_LIMIT` "New accounts are limited to 100 calls per day and 10 concurrent calls during their first
+   24 hours." else `DAILY_CAP_REACHED` "Daily call limit reached for this organization." / `HOURLY_CAP_REACHED`
+   "Hourly call limit reached for this organization." / `CONCURRENCY_CAP_REACHED` "Concurrent call limit reached for
+   this organization." / `INTERNATIONAL_RATE_LIMITED` "International call limit per hour reached for this
+   organization.". All 429 limit errors carry no `field`, except (a)/(b).
+2. Unlimited caps (NULL) still count (capped_incr with cap −1 = no cap) so `GET /v1/billing/limits` can report
+   `used`; concurrency with no cap still records the member (cap −1).
+3. Rollback: (b),(d),(e),(f),(g) are undone in reverse acquisition order by `LimitTicket.rollback()`; counters via
+   `counter_release.lua` (DECR only when the key exists and is > 0, so a rollback never creates a TTL-less key),
+   concurrency via ZREM (idempotent). `rollback()` is idempotent (second call no-op) and swallows/logs Redis errors
+   per key (`limits.rollback_failed`, keeps going) — counters expire anyway.
+4. Redis unavailable during acquire → `AppError("SERVICE_UNAVAILABLE", "Call limits are temporarily
+   unavailable.")` after rolling back what was acquired (fail closed: limits protect spend; unlike the request-rate
+   bucket which fails open).
+5. `batch_concurrency_share` (specs/17 §8): `acquire(..., concurrency_share=1.0)`; batch callers pass the setting;
+   effective cap = max(1, floor(cap × share)).
+6. Scheduled calls: `admit_call(..., scheduled=True)` runs step 9 only (at = scheduled instant); limits AND hold
+   happen at dispatch (holds expire `max_duration + 2 h` after reserve, so a hold taken days ahead would lapse).
+7. Holds (specs/24 §5): amount = `min(max_duration_min, 10) × connected_rate_micros_per_min + min_attempt_micros`;
+   skipped (returns None) when `orgs.credit_limit_micros >= 1_000_000_000` — that is the meaning of
+   `settings.billing.skip_holds` (no such settings key is added). `reserve` locks the org row FOR UPDATE, available
+   = balance − Σ held + credit_limit, `INSUFFICIENT_CREDITS` "Insufficient credits to place this call." when
+   available < amount; inserts `credit_holds(status='held', reference_type='call', reference_id=str(call_id),
+   expires_at=now + max_duration + 2 h)`; no ledger row, balance unchanged. `capture`/`release` are conditional
+   UPDATEs from `held` returning bool (idempotent).
+8. Override keys: specs/24 §2 list gains `international_hourly_calls`, `per_destination_daily_calls` (ints;
+   `per_destination_daily_calls` honoured only on the enterprise plan). The api `OrgLimits` view keeps its current
+   fields (no OpenAPI change).
+
+### Files
+- `packages/va_billing/` (dist `va-billing`, uv_build, `py.typed`; deps `va-common`, `va-db`, `va-domain`,
+  `va-compliance`, `redis>=5`, `sqlalchemy[asyncio]`, `pydantic`) — root `pyproject.toml`: dev group entry,
+  `[tool.uv.sources]`, mypy `mypy_path` (`packages/va_billing/src`, `packages/va_billing/tests/support`) and `files`
+  (src+tests), pytest `pythonpath` (`packages/va_billing/tests/support`); `uv lock`. `apps/api/pyproject.toml` adds
+  `va-billing`.
+  - `src/va_billing/__init__.py` docstring + re-exports.
+  - `plans.py`: `INT_OVERRIDE_KEYS` (moved from api + the two new keys), `BOOL_OVERRIDE_KEYS`,
+    `ENTERPRISE_PLAN = "enterprise"`, `INTERNATIONAL_HOURLY_CAPS = {"start":10,"build":100,"scale":300}`,
+    `DEFAULT_PER_DESTINATION_DAILY = 5`, `int_override(value) -> int | None` (bool excluded),
+    `@dataclass(frozen=True, slots=True) EffectiveLimits` (every int key + `international_enabled: bool | None` +
+    `international_hourly_calls`, `per_destination_daily_calls`), `effective_limits(plan: Plan | None, overrides)
+    -> EffectiveLimits`; `@dataclass(frozen) EffectivePricing(connected_rate_micros_per_min,
+    transfer_rate_micros_per_min, min_attempt_micros, sms_rate_micros, widget_message_micros,
+    tts_rate_micros_per_1k_chars)` with `snapshot() -> dict[str,int]` (for `calls.config.pricing`, P05-T05);
+    `effective_pricing(plan: Plan, overrides) -> EffectivePricing` (override keys of §2 for the four rate keys;
+    min_attempt and tts from plan); `PriceMeter = Literal[...]` + `effective_price(pricing, meter) -> int`.
+  - `apps/api/src/va_api/routers/org_schemas.py`: delete its key tuples/`_int_override`; `effective_limits(plan,
+    overrides) -> OrgLimits` becomes `OrgLimits(**{f: getattr(base, f) for f in OrgLimits.model_fields})` over
+    `va_billing.plans.effective_limits` (keep the api name; existing `test_org_limits.py` must still pass; keep
+    `INT_OVERRIDE_KEYS`/`BOOL_OVERRIDE_KEYS` importable from org_schemas as re-exports only if something imports
+    them — grep first).
+  - `redis_scripts/capped_incr.lua` (KEYS[1]; ARGV cap, ttl_s → `{ok, value}`: INCR; if value==1 EXPIRE; if cap>=0
+    and value>cap then DECR, return {0, value-1}; else {1, value}), `redis_scripts/counter_release.lua` (if
+    tonumber(GET)>0 then DECR), `redis_scripts/concurrency_acquire.lua` (KEYS[1]; ARGV member, cap, now_ms,
+    expiry_ms: ZREMRANGEBYSCORE -inf now_ms; if ZSCORE member exists → ZADD XX new expiry, return 1 (re-acquire of
+    the same call is idempotent); if cap>=0 and ZCARD>=cap → 0; ZADD; PEXPIRE key to max(existing pttl, expiry−now)
+    so an abandoned set disappears; return 1). Loaded via `importlib.resources` + `redis.register_script` (EVALSHA
+    with NOSCRIPT fallback) — `scripts.py`: `LimitScripts(redis)` with typed async wrappers.
+  - `keys.py`: `same_number_key`, `frequency_key(org, e164, day)`, `daily_key(org, now)`, `hourly_key`,
+    `concurrency_key`, `international_key` — exact specs/03 Redis-table strings; UTC formatting.
+  - `limits.py`: `@dataclass(frozen) LimitInputs(org_id, plan_id, org_created_at, limits: EffectiveLimits,
+    settings: OrgSettings, destination, region, call_id: UUID, max_duration_min, concurrency_share=1.0)`;
+    `class CallLimiter(redis, *, clock: Clock)`: `async acquire(inputs) -> LimitTicket` (Decision 1–5);
+    `async release_call(org_id, call_id) -> None` (ZREM, idempotent; used at call end by P05-T06/T11);
+    `async active_calls(org_id) -> int` (ZREMRANGEBYSCORE + ZCARD) and `async usage(org_id) -> LimitUsage(daily,
+    hourly, international, concurrency)` for the later limits endpoint. `LimitTicket.rollback()` per Decision 3.
+    Message constants exported.
+  - `holds.py`: `CALL_HOLD_CAP_MINUTES = 10`, `SKIP_HOLDS_CREDIT_LIMIT_MICROS = 1_000_000_000`, `HOLD_GRACE =
+    timedelta(hours=2)`, `call_hold_amount(max_duration_min, pricing) -> int`, `holds_skipped(credit_limit) -> bool`,
+    `available_balance(session, org_id) -> int` (balance − held + credit_limit), `async reserve(session, org_id,
+    amount_micros, *, reference_type, reference_id, now, expires_at) -> CreditHold`, `reserve_call_hold(session,
+    org_id, call_id, *, max_duration_min, pricing, now) -> CreditHold | None`, `capture(session, hold_id) -> bool`,
+    `release(session, hold_id) -> bool`. Move `CreditTransferRepo._held` into a public
+    `va_db.repositories.credits.held_micros(session, org_id)` used by both (no duplicate query; jscpd).
+  - `dispatch.py`: `@dataclass(frozen) BillingOrg(org_id, plan_id, kyc_level, created_at, credit_limit_micros,
+    limits_raw, settings: OrgSettings, limits: EffectiveLimits, pricing: EffectivePricing)`;
+    `async load_billing_org(session, org_id) -> BillingOrg` (Org + Plan in the caller's tenant session; missing org
+    → `NOT_FOUND`); `@dataclass(frozen) CallAdmission(call_id, destination, region, max_duration_min, at, scheduled,
+    allowed_countries, concurrency_share=1.0)`; `@dataclass Admitted(pricing, hold: CreditHold | None, ticket:
+    LimitTicket | None)` with `async compensate(session, limiter)` (ticket rollback + `holds.release` + limiter
+    `release_call`); `async admit_call(session, limiter, org: BillingOrg, call: CallAdmission, *, now) -> Admitted`:
+    `check_call_compliance(OrgFacts(...))` → if scheduled return Admitted(pricing, None, None) → `limiter.acquire`
+    → `reserve_call_hold` inside `try`; on any exception roll the ticket back (and release the concurrency member) and
+    re-raise.
+- `packages/va_common/src/va_common/errors.py`: `"DESTINATION_FREQUENCY_CAP": 429` after `SAME_NUMBER_TOO_SOON`;
+  specs/31 §3 row at the same position ("Per-destination daily call cap (5/day/number, stricter state rules)").
+- Specs: Decisions above; AGENTS.md learning line (va_billing modules, Lua files, test helpers).
+
+### Tests (`packages/va_billing/tests`, conftest with `isolated` nothing special; fakeredis[lua] runs the Lua)
+- `test_plans.py`: seed-like Plan objects (build/start/enterprise) → effective_limits values; override precedence
+  (int, bool, bool-as-int ignored, string ignored); intl hourly caps per plan + override; per-destination override
+  ignored off enterprise; effective_pricing override > plan; `snapshot()` keys; `effective_price` for each meter.
+- `test_keys.py`: exact key strings incl. UTC conversion of a non-UTC aware datetime (and naive → ValueError).
+- `test_scripts.py` (fakeredis): capped_incr boundary (cap 2: ok,ok,fail with value 2), TTL set on first incr only,
+  cap −1 unlimited; counter_release never below 0 and does not create the key; concurrency acquire self-heal of
+  expired member, cap reached → 0, same member re-acquire idempotent, PEXPIRE set.
+- `test_limits.py` (fakeredis + `FrozenClock`/`ManualClock` advance): each error code with exact message/status/field;
+  order: same-number before frequency before new-account before daily…; same-number expires after 10 s (advance
+  clock + fakeredis time? → use real PX: set key and assert PTTL ≤ 10 000 instead of waiting); daily key rolls at
+  UTC midnight; hourly rolls; new-account tightening gives NEW_ACCOUNT_LIMIT at 101st/11th, plan cap below 100 gives
+  DAILY_CAP_REACHED; new account non-US/CA → NEW_ACCOUNT_LIMIT; intl counter only for non-domestic; FL number with
+  state_quiet_hours → frequency cap 3, without → 5; enterprise override; rollback when hourly fails restores daily
+  and frequency (exact counter values) and not the same-number key; rollback when concurrency fails; ticket rollback
+  idempotent; concurrency share 0.5; release_call idempotent; Redis down (closed fakeredis server
+  `server.connected = False`) → SERVICE_UNAVAILABLE and nothing left incremented after reconnect.
+- `test_limits_redis.py` (`@pytest.mark.integration`, `redis_container.running_redis_url`, one module): 100
+  concurrent `capped_incr` on cap 50 → exactly 50 ok and the key value 50; 100 concurrent concurrency acquires cap 10
+  → 10 members; self-heal with past expiry; release idempotent. Pool `max_connections=100`.
+- `test_holds_db.py` (Postgres via the va_db support `migrated_postgres()` / `open_database`, module fixture;
+  orgs via `make_org`-style helper with balance/credit_limit): amount math (max_duration 3 → 3×rate+min; 30 → 10×);
+  reserve success inserts held row, balance unchanged; available math with existing holds and credit_limit;
+  INSUFFICIENT_CREDITS exact; skip when credit_limit ≥ 1e9 → None and no row; capture/release idempotent (second
+  call False; capture after release False); expires_at; two concurrent reserves for the last credit → exactly one
+  succeeds (FOR UPDATE).
+- `test_dispatch_db.py`: compliance failure → no counters touched, no hold; limit failure → no hold; hold failure →
+  counters rolled back (daily/hourly/intl/freq back to 0, concurrency member removed); scheduled → only compliance
+  (no Redis keys, no hold); success → ticket + hold + pricing; `compensate` undoes all; `load_billing_org` reads
+  plan + overrides, missing org NOT_FOUND.
+- `packages/va_common/tests/test_errors.py` keeps passing (catalog parity) with the new row; api `test_org_limits.py`
+  unchanged and green.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `make openapi` (expect no
+drift), `npx --yes jscpd@4 --silent` (0 clones), `uvx radon cc -s -a` (≤ B), va_billing coverage 100 % new modules
+(≥ 85 % gate), `uvx pip-audit` on `uv export`, `corepack pnpm audit`. No call flow → no e2e.
+
+### Risks
+- fakeredis Lua + `register_script`: works (`fakeredis[lua]`); real-Redis tests must skip without Docker
+  (`docker_probe.docker_available()`).
+- Redis Lua numbers: return integers only (no floats) from scripts.
+- Holds and the org-row lock: `orgs` has no RLS; select `Org ... FOR UPDATE` inside the tenant session (as
+  `CreditTransferRepo._lock`); `credit_holds` insert relies on `app.org_id` == org.
+- Moving `effective_limits` must not change `/v1/org` output (OpenAPI drift gate + existing tests).
+- Keep `limits.acquire` ≤ radon B: one small method per step, a list of undo callables in the ticket.
+
+## Build P05-T04b (Builder, 2026-11-01)
+Implemented per plan. New `packages/va_billing` (plans, keys, scripts + 3 Lua files, limits, holds, dispatch);
+`held_micros` moved into `va_db.repositories.credits` (CreditTransferRepo uses it); api `org_schemas.effective_limits`
+delegates to va_billing; error code `DESTINATION_FREQUENCY_CAP` (errors.py + specs/31; test_errors count 63).
+Additions vs plan: the frequency cap also honours `compliance.max_attempts_per_number_per_day` (>0); load_billing_org
+raises SERVICE_UNAVAILABLE "Billing is not configured for this organization." when orgs.plan_id names no plan (no FK);
+shared test helper `redis_container.flushed_redis`. Decisions: specs/24 §6 (main) + cross-refs specs/24 §2/§5,
+specs/05 §4.1, specs/17 §8, specs/28 §9.3.
+Gates: make lint/typecheck/placeholders pass; make test 8560 passed, 7 skipped, 98.65 %; va_billing 100 % line+branch
+(68 tests incl. real-Redis + Postgres); jscpd 0 clones; radon avg A, nothing ≥ C; spec refs 0; openapi no drift;
+pip-audit clean; pnpm audit 3 moderate (unchanged). No call flow → no e2e.
+
+## Review P05-T04b (Reviewer, 2026-11-01)
+Gates re-run: make lint 0, make typecheck 0, make placeholders 0, make test 8560 passed / 7 skipped, 98.65 %.
+Spec check: keys match the specs/03 Redis table; order/messages match the specs/24 §6 Decision; error catalog row + count
+OK; Lua scripts are atomic and covered by the real-Redis test; dispatch compensation looks right. One finding:
+1. `packages/va_billing/src/va_billing/holds.py` `_settle` (used by `capture`/`release`): the conditional
+   `UPDATE credit_holds ... WHERE id = :hold_id AND status = 'held'` does not filter by `org_id`. It relies only on RLS.
+   That breaks guardrail 1003 / master prompt rule 5 ("every tenant query ... filters by org_id") and the repository
+   convention (`CallRepo.transition`, `CallLegRepo.advance` all add `Model.org_id == self.org_id`). Fix: make it
+   `capture(session, org_id, hold_id)` / `release(session, org_id, hold_id)`, add `CreditHold.org_id == org_id` to the
+   WHERE, update `Admitted.compensate` (it has `self.org_id`), the specs/24 §6 Decision wording if needed, and add a test
+   that capture/release with another org's id (inside the hold's own org session) returns False and leaves the row `held`.
+
+## Fix P05-T04b review (Builder, 2026-11-01)
+Finding 1 fixed: `holds.capture/release(session, org_id, hold_id)`; `_settle` filters `CreditHold.org_id == org_id`;
+`Admitted.compensate` passes `self.org_id`; specs/24 §6 Decision wording updated; new test
+`test_capture_and_release_filter_by_org` (fails without the filter). Gates: fmt 0, lint 0, typecheck 0, placeholders 0,
+make test 8561 passed / 7 skipped, 98.65 %; va_billing 69 passed; jscpd 0; spec refs 0; radon A.
+
+## Re-verify P05-T04b fix (Builder, 2026-11-01)
+review.rejected re-delivered; finding 1 already fixed (holds `_settle` filters `CreditHold.org_id`, test
+`test_capture_and_release_filter_by_org`). Gates re-run: fmt 0, lint 0, typecheck 0, placeholders 0, spec refs 0,
+make test 8561 passed / 7 skipped, 98.65 %; va_billing 69 passed.
+
+## Review P05-T04b round 2 (Reviewer, 2026-11-01)
+Approved. lint 0, typecheck 0, placeholders 0, make test 8561 passed / 7 skipped, 98.65 %. Finding 1 fixed: `_settle`
+filters `CreditHold.org_id`, `compensate` passes org_id, test `test_capture_and_release_filter_by_org` covers it.

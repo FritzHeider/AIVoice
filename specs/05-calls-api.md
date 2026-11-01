@@ -230,6 +230,11 @@ Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATU
 > (`orgs.limits.international_enabled` exactly `true`, or `kyc_level >= 2`, or `kyc_level >= 1` on a plan other
 > than `start`). The hourly international counter and the new-account US/CA-only rule are step 10 (`va_billing`).
 
+> Decision (2026-11-01): steps 10-11 (P05-T04b) are `va_billing.dispatch.admit_call` (step 9 → `CallLimiter.acquire`
+> → credit hold, counters rolled back when the hold fails). Step 10 also enforces the per-destination daily cap
+> (`DESTINATION_FREQUENCY_CAP`, after `SAME_NUMBER_TOO_SOON`); the exact order and messages are in specs/24 §6
+> Decision P05-T04b.
+
 ### 4.2 Agent version resolution and experiments
 
 1. `agent_version` omitted → look for `experiments` row with `agent_id` and `status='running'`. If found, choose an

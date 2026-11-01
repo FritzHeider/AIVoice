@@ -50,6 +50,7 @@ and return `{"total_count": n, "count": m, "calls":[…]}`.
 | `HOURLY_CAP_REACHED` | 429 | Org hourly call cap |
 | `CONCURRENCY_CAP_REACHED` | 429 | Org concurrency cap |
 | `SAME_NUMBER_TOO_SOON` | 429 | Message: "Please wait at least 10 seconds between calls to the same number." |
+| `DESTINATION_FREQUENCY_CAP` | 429 | Per-destination daily call cap (5/day/number, stricter state rules); message "This number has reached its daily call limit." |
 | `NEW_ACCOUNT_LIMIT` | 429 | Org younger than 24 h and > 100 calls/day or > 10 concurrent (tightened limits) |
 | `INTERNATIONAL_NOT_ENABLED` | 403 | Destination country not allowed for the org's plan/kyc_level |
 | `INTERNATIONAL_RATE_LIMITED` | 429 | International calls per hour exceeded (start: 10/h, build: 100/h, scale: 300/h) |

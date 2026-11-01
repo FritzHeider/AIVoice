@@ -5,6 +5,7 @@ requires-python = "==3.12.*"
 [manifest]
 members = [
     "va-api",
+    "va-billing",
     "va-common",
     "va-compliance",
     "va-db",
@@ -2622,6 +2623,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "temporalio" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "va-billing" },
     { name = "va-common" },
     { name = "va-compliance" },
     { name = "va-db" },
@@ -2641,6 +2643,32 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "temporalio", specifier = ">=1.8" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+    { name = "va-billing", editable = "packages/va_billing" },
+    { name = "va-common", editable = "packages/va_common" },
+    { name = "va-compliance", editable = "packages/va_compliance" },
+    { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
+]
+
+[[package]]
+name = "va-billing"
+version = "0.1.0"
+source = { editable = "packages/va_billing" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "redis" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "va-common" },
+    { name = "va-compliance" },
+    { name = "va-db" },
+    { name = "va-domain" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "redis", specifier = ">=5.1" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-compliance", editable = "packages/va_compliance" },
     { name = "va-db", editable = "packages/va_db" },
@@ -3129,6 +3157,7 @@ dev = [
     { name = "types-python-dateutil" },
     { name = "types-pyyaml" },
     { name = "va-api" },
+    { name = "va-billing" },
     { name = "va-common" },
     { name = "va-compliance" },
     { name = "va-db" },
@@ -3180,6 +3209,7 @@ dev = [
     { name = "types-python-dateutil", specifier = ">=2.9.0.20261021" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },
     { name = "va-api", editable = "apps/api" },
+    { name = "va-billing", editable = "packages/va_billing" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-compliance", editable = "packages/va_compliance" },
     { name = "va-db", editable = "packages/va_db" },

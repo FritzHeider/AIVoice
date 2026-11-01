@@ -42,6 +42,7 @@ from va_db.repositories.credits import (
     CreditTransfer,
     CreditTransferRepo,
     grant_credits,
+    held_micros,
 )
 from va_db.repositories.data_keys import OrgDataKeyRepo, OrgDataKeyStore
 from va_db.repositories.idempotency import (
@@ -165,6 +166,7 @@ __all__ = [
     "TenantRepository",
     "conflict_savepoint",
     "grant_credits",
+    "held_micros",
     "is_unique_violation",
     "require_positive",
     "resolve_existing",

@@ -1150,3 +1150,14 @@ Grafana 3001
   an entry needs the statute re-checked and the specs/17 §7 Decision updated), `calling_hours.calling_hours_open`.
   DB tests: session fixture `compliance_db_url` + `tests/support/compliance_rows.py` (`new_org(parent=, settings=)`,
   `add_dnc(org_id | None, e164)` through `system_session` because va_app cannot write platform rows, `random_e164`).
+- 2026-11-01 (P05-T04b): `packages/va_billing` (dist `va-billing`; the api depends on it) = Send Call steps 10-11
+  (rules: specs/24 §6 Decision P05-T04b): `plans` (`effective_limits`/`effective_pricing`/`effective_price`; the api
+  `org_schemas.effective_limits` projects it onto `OrgLimits`), `keys` (specs/03 Redis key strings, UTC), `scripts`
+  (`LimitScripts` over `redis_scripts/*.lua`, cap `None` → -1), `limits.CallLimiter(redis, clock=)` (`acquire` →
+  `LimitTicket.rollback()`, `release_call`, `active_calls`, `usage`), `holds` (`reserve`/`reserve_call_hold`/
+  `capture`/`release`, `held_micros` lives in `va_db.repositories.credits`), `dispatch.admit_call(session, limiter,
+  load_billing_org(session, org_id), CallAdmission(...), now=)` → `Admitted.compensate`. Tests:
+  `tests/support/billing_helpers.py` (`make_plan` with seed values, `inputs(...)`, `another_call`, `limiter_rig()` on
+  fakeredis + `FrozenClock(NOW)`; conftest fixture `rig`), `billing_rows.py` (`new_billing_org` defaults to
+  `created_at = NOW - 30 days`, else the real insert time makes the org a "new account" for the frozen clock;
+  `holds_of`). Adding an error code also bumps the row count in `packages/va_common/tests/test_errors.py`.

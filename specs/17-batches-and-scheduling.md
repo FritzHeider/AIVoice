@@ -267,6 +267,10 @@ Batch dispatch respects exactly the same caps as API calls (daily, hourly, concu
 batches compete for the same concurrency pool; org setting `batch_concurrency_share` (0.1–1.0, default 1.0) limits
 batches to that fraction of the org concurrency cap so API traffic keeps headroom.
 
+> Decision (2026-11-01): `va_billing.limits.LimitInputs.concurrency_share` carries the setting; the effective batch
+> cap is max(1, floor(cap × share)). The state `max_calls_per_24h` rules of §7 are enforced per UTC day by the
+> `freq:` counter (specs/24 §6 Decision P05-T04b).
+
 ## 9. Tests required
 
 - Request validation: merge semantics (deep, request_data per-key), field error paths with indexes, size limits,

@@ -30,7 +30,8 @@ Micro-dollar seed values: connected 120 000 / 100 000 / 90 000 / enterprise defa
 30 000 / 25 000; min attempt 15 000; SMS 20 000; widget 10 000; fees 0 / 249 000 000 / 449 000 000 / 0.
 Caps NULL = unlimited. Enterprise per-org overrides live in `orgs.limits` (keys `connected_rate_micros_per_min`,
 `transfer_rate_micros_per_min`, `sms_rate_micros`, `widget_message_micros`, `daily_calls`, `hourly_calls`, `concurrency`,
-`voice_clones`, `numbers`, `international_enabled`, `sms_per_day`) and take precedence over `plans`.
+`voice_clones`, `numbers`, `international_enabled`, `sms_per_day`, `international_hourly_calls`,
+`per_destination_daily_calls`) and take precedence over `plans` (the last two: Decision P05-T04b under §6).
 `PLAN_NUMBER_CAPS` and `NUMBER_MONTHLY_PRICES_MICROS` constants live in `va_billing.plans`/`va_billing.prices`
 (`16-phone-numbers.md` §3, §8). Other prices (`va_billing.prices`): TTS standalone characters $0.00012/char (`tts_characters`,
 used only by the standalone TTS API if exposed), KB embedding tokens $0.0000001/token, voice clone creation $0 (cap-limited),
@@ -92,6 +93,9 @@ Rounding: amount = `round_half_up(quantity × unit_price_per_unit)` computed in 
   before connect, `status='released'`. Expired holds are released by `BillingReconcileWorkflow`.
 - Enterprise orgs with `credit_limit_micros ≥ 1 000 000 000` skip holds (`settings.billing.skip_holds=true`).
 
+> Decision (2026-11-01): holds are `va_billing.holds` and `skip_holds` is derived from the credit limit, not a setting;
+> details in the §6 Decision P05-T04b.
+
 ## 6. Limits enforcement (`va_billing.limits`, Redis Lua scripts)
 
 All checks run in `POST /v1/calls` (and batch dispatch, inbound has only concurrency) in this order; the first failure
@@ -127,6 +131,42 @@ returns its error (`31-error-catalog.md`). Scripts are loaded with `SCRIPT LOAD`
 > evaluated in Send Call step 9 by `va_compliance.international.international_allowed`, before any counter is
 > touched; `va_billing.limits` keeps only the hourly international counter. Exact rules: specs/05 §4.1 Decision
 > P05-T04a.
+
+> Decision (2026-11-01): dispatch limits and holds (P05-T04b). `va_billing.limits.CallLimiter.acquire` runs Send
+> Call step 10 in this order (first failure wins; it reconciles specs/05 §4.1, whose list is not ordered): (a)
+> same-number `SET cap:dest:{org_id}:{e164} 1 NX PX 10000` → `SAME_NUMBER_TOO_SOON` field `phone_number`, never
+> rolled back (a rapid retry stays blocked even when the attempt failed later); (b) per-destination frequency
+> `freq:{org_id}:{e164}:{yyyymmdd}` (TTL 172 800) → `DESTINATION_FREQUENCY_CAP` 429 "This number has reached its daily
+> call limit." field `phone_number`; the cap is the minimum of 5 (specs/28 §9.3; the integer override
+> `orgs.limits.per_destination_daily_calls`, honoured on the enterprise plan only), the org's
+> `compliance.max_attempts_per_number_per_day` when > 0, and the destination state's `max_calls_per_24h` when
+> `compliance.state_quiet_hours` (the statutes' 24 h are approximated by the spec key's UTC calendar day); (c)
+> new account (org `created_at` within 24 h): a destination region outside US/CA → `NEW_ACCOUNT_LIMIT` "New accounts
+> can call only US and Canadian numbers during their first 24 hours." field `phone_number`; (d) daily, (e) hourly,
+> (f) concurrency (score `now_ms + (max_duration + 5 min)`; the Lua script also refreshes the expiry of a member that
+> already holds a slot and keeps the key's `PEXPIRE` at least as long as its newest member), (g) international hourly
+> counter only when the region is not US, CA, or `settings.default_country`; caps start 10 / build 100 / scale 300 /
+> enterprise unlimited, the integer override `orgs.limits.international_hourly_calls` wins. A new account's daily and
+> concurrency caps become min(cap, 100) and min(cap, 10); when (d) or (f) fails only because of that tightening the
+> code is `NEW_ACCOUNT_LIMIT` "New accounts are limited to 100 calls per day and 10 concurrent calls during their
+> first 24 hours.", otherwise `DAILY_CAP_REACHED` "Daily call limit reached for this organization.",
+> `HOURLY_CAP_REACHED` "Hourly call limit reached for this organization.", `CONCURRENCY_CAP_REACHED` "Concurrent call
+> limit reached for this organization.", `INTERNATIONAL_RATE_LIMITED` "International call limit per hour reached for
+> this organization." (no `field`). Unlimited caps still count (cap −1 in the scripts) so usage can be reported.
+> Batch dispatch passes `batch_concurrency_share`: the effective concurrency cap is max(1, floor(cap × share))
+> (specs/17 §8). Rollback undoes (b), (d)-(g) newest first (`counter_release.lua` decrements only an existing
+> positive counter, so it never creates a key without TTL; concurrency via `ZREM`); it is idempotent and logs
+> (`limits.rollback_failed`) and continues on Redis errors. Redis unavailable while acquiring → `SERVICE_UNAVAILABLE`
+> "Call limits are temporarily unavailable." after rolling back (fail closed: limits protect spend). Step 11:
+> `va_billing.holds.reserve_call_hold` (amount and rules of §5; `INSUFFICIENT_CREDITS` "Insufficient credits to
+> place this call."; `reference_type='call'`, `reference_id` = call id, `expires_at` = now + max_duration + 2 h;
+> `capture(session, org_id, hold_id)`/`release(session, org_id, hold_id)` are conditional updates from `held`,
+> filtered by `org_id` as well as RLS, that return whether they changed the row). Orgs with
+> `credit_limit_micros >= 1 000 000 000` skip holds; that is what `settings.billing.skip_holds` in §5 means, no such
+> setting exists. `va_billing.dispatch.admit_call` runs steps 9 → 10 → 11 and rolls the counters back when the hold
+> fails; scheduled calls run only step 9 at creation, limits and the hold are taken at dispatch (a hold taken days
+> ahead would expire first). `Admitted.compensate` undoes a successful admission when the insert or the workflow
+> start fails.
 
 If any later step fails, previously incremented counters (daily, hourly, concurrency, intl) are rolled back in reverse order
 (compensation in Python `finally`).

@@ -34,6 +34,7 @@ __all__ = [
     "CreditTransfer",
     "CreditTransferRepo",
     "grant_credits",
+    "held_micros",
 ]
 
 INSUFFICIENT_TRANSFER_MESSAGE: Final = "Insufficient credits for this transfer."
@@ -48,6 +49,16 @@ class CreditTransfer:
 
     out_entry: CreditLedger
     in_entry: CreditLedger
+
+
+async def held_micros(session: AsyncSession, org_id: uuid.UUID) -> int:
+    """The sum of ``org_id``'s ``held`` credit holds in micros (read under that org's RLS context)."""
+    statement = select(func.coalesce(func.sum(CreditHold.amount_micros), 0)).where(
+        CreditHold.org_id == org_id, CreditHold.status == "held"
+    )
+    async with use_org(session, org_id):
+        held = await session.scalar(statement)
+    return int(held or 0)
 
 
 class CreditTransferRepo:
@@ -76,7 +87,7 @@ class CreditTransferRepo:
             msg = "a credit transfer needs two different orgs"
             raise ValueError(msg)
         sender, receiver = await self._lock(from_org_id, to_org_id)
-        available = sender.credits_balance_micros - await self._held(from_org_id)
+        available = sender.credits_balance_micros - await held_micros(self.session, from_org_id)
         if amount_micros > available:
             raise AppError("INSUFFICIENT_CREDITS", INSUFFICIENT_TRANSFER_MESSAGE)
         out_entry = await self._entry(
@@ -110,15 +121,6 @@ class CreditTransferRepo:
         if from_org_id not in orgs or to_org_id not in orgs:
             raise AppError("NOT_FOUND", "Organization not found.")
         return orgs[from_org_id], orgs[to_org_id]
-
-    async def _held(self, org_id: uuid.UUID) -> int:
-        """The sum of the org's ``held`` credit holds in micros."""
-        statement = select(func.coalesce(func.sum(CreditHold.amount_micros), 0)).where(
-            CreditHold.org_id == org_id, CreditHold.status == "held"
-        )
-        async with use_org(self.session, org_id):
-            held = await self.session.scalar(statement)
-        return int(held or 0)
 
     async def _entry(  # noqa: PLR0913 - one ledger row's attributes
         self,
