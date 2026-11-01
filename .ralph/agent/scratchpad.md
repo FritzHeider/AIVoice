@@ -1753,3 +1753,193 @@ Re-ran: make lint 0, typecheck 0, placeholders 0, make test 6118 passed (va_llm 
 Finding 1 resolved: OrgProviderStore wraps lookup failures in OrgProviderError (not cached, models validated via
 TypeAdapter); complete resolves inside the span, falls back (dialogue/analysis) or raises provider_unavailable.
 Approved, ticked, committed.
+
+## Plan P03-T13b (Planner, 2026-11-01)
+Task: `va_llm` streaming dialogue (specs/10 §2, §2.1 dialogue row, §8, §11). Builds on gateway.py (T13a).
+
+### Spec decision to write: specs/10 §2 `> Decision (2026-11-01): streaming dialogue (P03-T13b).` Numbered rules:
+1. Entry point is `LlmGateway.stream_dialogue(request: DialogueRequest) -> DialogueStream` (async; returns as soon
+   as the producer task started, never waits for a token). `DialogueRequest` as in §2 but `provider: LlmProvider |
+   None = None` (None → `registry.resolve(org_id)`, OrgProviderError → platform fallback like rule 6) and
+   `model: str | None = None` (None → provider's `dialogue` model); `tools: tuple[ToolDef, ...] = ()`,
+   `messages: tuple[ChatMessage, ...]` (frozen model, arbitrary types allowed for LlmProvider).
+2. Body: T13a `ChatRequest.body()` plus `stream=True`, `stream_options={"include_usage": True}`,
+   `tool_choice="auto"` when tools are given; `X-VA-Call-Id` when `call_id`. Sent through
+   `client.chat.completions.with_streaming_response.create(...)` (via `Any`, like `_send`); the gateway parses the
+   SSE lines itself (`stream_wire.py`), never the SDK's chunk objects. The provider semaphore is held for the whole
+   stream.
+3. SSE parsing (`va_llm/stream_wire.py`, pure): lines `data: <json>` / `data: [DONE]`; blank lines and lines
+   starting `:` ignored; other fields (`event:`, `id:`) ignored. A chunk with an `error` object, a non-JSON data
+   line, or a chunk that is not an object / has malformed `choices` → `LlmProtocolError`. End of body without
+   `[DONE]` → `LlmConnectionError("stream ended without [DONE]")`. `StreamAssembler.feed(chunk) -> ChunkDeltas
+   (content: str, first_token: bool)`: non-empty `delta.content` counts as token; `delta.tool_calls` items with an
+   `index` accumulate `id`/`function.name` (first non-empty wins) and append `function.arguments`; a tool-call delta
+   counts as first token; `reasoning_content`/`reasoning` and role-only/empty deltas are ignored (never first
+   token); `finish_reason` kept (last non-null); `usage` (in the trailing `choices: []` chunk) parsed with the T13a
+   `_usage` rules (reuse: move `_usage`/`_object`/`_text`/`_count` helpers so both wire modules share them, no
+   copy). `assembler.tool_calls()` → tuple[ToolCall] ordered by index; a call without name → LlmProtocolError at
+   end.
+4. Deadlines on the injected clock: TTFT 2.5 s per target, measured from that target's send (fresh for the
+   fallback); total 20 s from `stream_dialogue` start covering both targets (a fallback's TTFT is
+   `min(2.5, remaining)`). Each read of the next line races the current deadline with `deadline.within`.
+5. Before the first token, any failure of the primary (HTTP error any status incl. 429, connect, TTFT timeout,
+   protocol error, end without `[DONE]`, open breaker) → one attempt on the platform fallback model (rule 6 of
+   T13a: skipped when it equals the primary target, no retries on the primary). Both fail → stream fails:
+   `text()` and `tool_calls()` raise `LlmUnavailableError(reason exhausted|breaker_open|provider_unavailable,
+   last)`, `stream.error` holds it.
+6. After the first token, a failure (disconnect, protocol error, total deadline) ends the stream: `text()` ends
+   normally after the delivered text (partial text kept), `stream.error` = the `LlmError` (caller emits the error
+   event), `finish_reason` None, `tool_calls()` returns the calls assembled so far that have a name. No fallback.
+7. `ttft_ms` (float, injected clock, from the producing target's send) set on the first token; observed in §3.3
+   `va_llm_ttft_ms{model, purpose="dialogue"}` when a catalog is given (`LlmMetrics.ttft(model, purpose, ms)`).
+8. Speculative (`speculative=True`): deltas are buffered until `commit()`; `commit()` releases the buffer and
+   later deltas to `text()`; `discard()` cancels the producer (closes the HTTP response), drops the buffer, and
+   `text()` then ends with nothing. `va_llm_speculation_total{outcome}` counts the first of commit/discard on a
+   speculative stream only; repeated calls are no-ops; `commit()` on a non-speculative stream is a no-op and
+   `discard()` closes it without the metric. `text()` may be iterated once (second call → RuntimeError).
+9. Cancellation: `DialogueStream` is an async context manager; `aclose()` cancels and awaits the producer. If the
+   task iterating `text()` is cancelled, the generator's `finally` cancels the producer immediately (no clock
+   wait), so the HTTP stream is closed before the cancellation completes (spec: within 50 ms).
+10. Breaker per attempt (T13a rule 7): success at the first token or at a token-less normal end; failure verdict
+   at a pre-token error by `error.breaker_failure`; cancelled before a verdict → `abandon()`. Post-token failures
+   do not touch the breaker.
+11. Metering: usage from the final chunk; absent (incl. discard, cancellation, mid-stream error) → `estimate_usage`
+   over prompt + text received + tool calls (`estimated=True`). Recorded exactly once when the producer ends
+   (completed, failed after a token, discarded, cancelled) for the target that produced tokens; discarded tokens
+   are metered (§8). Nothing is metered when no target produced a token.
+12. Metrics/spans: `va_llm_requests_total{call_type="dialogue"}` one per attempt (outcome `ok` when the attempt
+   produced the stream's result incl. a post-token failure? → no: post-token failure counts its error outcome);
+   `va_llm_request_duration_ms{call_type="dialogue"}` once per stream (start → producer end);
+   `va_llm_errors_total` per failed attempt; tokens via the meter. Span `llm.dialogue` (CLIENT, started with
+   `tracer.start_span` and ended by the producer) with the T13a attributes plus `llm.streaming=true`,
+   `llm.speculative`, `llm.ttft_ms` (when set), `llm.turn_index` (when set), `llm.outcome`
+   (`completed|failed|truncated|discarded|cancelled`); error status for failed/truncated.
+
+### Files
+- `packages/va_llm/src/va_llm/stream_wire.py` (new, pure): `parse_sse_line`, `StreamAssembler`, `ChunkDeltas`.
+- `packages/va_llm/src/va_llm/wire_fields.py` (new): move `_Invalid`, `_object`, `_text`, `_count`, `_usage`,
+  tool-call field readers from `wire.py` (public names `Invalid`, `read_object`, ...); `wire.py` imports them.
+- `packages/va_llm/src/va_llm/targets.py` (new): move `_Target` (→ `Target`), `_outcome` (→ `attempt_outcome`),
+  `_backstop` (→ `sdk_backstop`), `RETRYABLE_STATUSES` from gateway.py (gateway re-exports `RETRYABLE_STATUSES`).
+- `packages/va_llm/src/va_llm/metering.py`: add `Meter(metrics, costs, recorder)` with `async record(org_id,
+  call_id, call_type, provider_id, model, usage)` (moved body of `LlmGateway._meter`; both paths use it).
+- `packages/va_llm/src/va_llm/metrics.py`: `ttft(model, purpose, ms)` (catalog histogram, None-safe),
+  `speculated(outcome: Literal["committed","discarded"])`.
+- `packages/va_llm/src/va_llm/dialogue.py` (new): `DialogueRequest`, `DialogueStream` (public surface: `text()`,
+  `tool_calls()`, `ttft_ms`, `usage`, `finish_reason`, `error`, `provider_id`, `model`, `fell_back`, `attempts`,
+  `commit()`, `discard()`, `aclose()`, `__aenter__/__aexit__`), internal `_Producer` running attempts and
+  pushing into an `asyncio.Queue[str | _End]`. Keep radon ≤ B per function.
+- `packages/va_llm/src/va_llm/gateway.py`: `stream_dialogue(request)`; share target resolution
+  (`_open`-style resolve + fallback target) with dialogue.py via a small internal object (e.g.
+  `_StreamContext(clients, clock, metrics, breakers, meter, tracer, platform_fallback)`); keep gateway.py < ~420 lines.
+- `__init__.py`: export `DialogueRequest`, `DialogueStream`.
+- specs/10 §2 Decision (rules above, condensed); specs/27 §3.6 Decision: one sentence that streams count attempts
+  the same way and feed `va_llm_ttft_ms{purpose="dialogue"}`.
+- AGENTS.md bullet (P03-T13b).
+
+### Tests (packages/va_llm/tests/; helpers in `tests/support/llm_client_helpers.py`: `sse_body(chunks, done=True)`
+→ bytes, `content_chunks(*tokens, usage=...)`, `tool_call_chunks(...)`, a `StreamingBody` httpx `AsyncByteStream`
+that yields scripted parts and can hang (`asyncio.Event`) before part n, records `closed`/`cancelled`)
+- `test_stream_wire.py`: SSE line parsing (comments, blank, `[DONE]`, non-JSON → protocol), content deltas, reasoning
+  deltas ignored + not first token, role-only chunk not first token, tool-call assembly over 3 deltas by index with
+  interleaved indices, first token on tool-call header, usage chunk with `choices: []`, error chunk → protocol,
+  nameless call → protocol.
+- `test_dialogue_stream.py` (respx + ManualClock rig):
+  * text deltas in order; `ttft_ms` = clock time from send to first content (advance clock between parts by making
+    the body wait on an event + `run_for`), reasoning deltas before content excluded from TTFT; usage from final
+    chunk; finish_reason; tool_calls() assembled; request body has `stream`, `stream_options.include_usage`,
+    `tool_choice: "auto"` only with tools, `X-VA-Call-Id`.
+  * fallback before first token: 503 → fallback model answers (`fell_back`, model, attempts 2); 429 (Retry-After 0)
+    → fallback (no retry); connect error → fallback; TTFT: body hangs → `wait_for_sleep(2.5)`, `run_for(2.5)` →
+    fallback, first request closed; end without [DONE] before token → fallback; malformed chunk → fallback; open
+    primary breaker → fallback with zero primary requests; both fail → `text()` raises LlmUnavailableError
+    (reason exhausted, last set), `tool_calls()` raises; fallback == primary → no second attempt; org provider
+    error → platform fallback directly.
+  * after first token: body breaks (`httpx.ReadError`) → text yields the partial tokens and ends, `error` is
+    LlmConnectionError, no fallback request; total deadline: tokens then hang → `wait_for_sleep(...)` remaining of
+    20 s → truncated; usage estimated (`estimated=True`) and metered once.
+  * cancellation: consumer task iterating `text()` cancelled while body hangs → the response stream is closed
+    (StreamingBody.closed) right after `await task` with no clock advance; `aclose()`/context-manager exit same;
+    breaker abandoned (half-open probe slot freed).
+  * speculative: tokens not visible before `commit()` (text consumer blocked; check via `asyncio.wait(timeout=0)`-
+    style settle helper, never sleeps), commit releases buffered then live tokens; discard closes the response,
+    `text()` yields nothing, usage estimated and recorded, metric `discarded`; committed metric; double calls
+    counted once; commit on non-speculative no-op, discard closes without metric; second `text()` → RuntimeError.
+- `test_dialogue_metrics.py`: per-attempt `va_llm_requests_total` outcomes (server_error then ok on fallback),
+  duration observed once, `va_llm_ttft_ms{model,purpose="dialogue"}` only with catalog, tokens in/out, errors_total;
+  span `llm.dialogue` attributes (`llm.outcome`, `llm.ttft_ms`, `llm.fallback`, `llm.speculative`,
+  `llm.turn_index`) and error status on failed/truncated.
+- `test_dialogue_contract_fakellm.py` (`sim_gateway(realtime_llm_state())`): rule reply streamed token by token with
+  usage from the final chunk (`include_usage`); tool-call rule assembled into ToolCall with valid JSON args;
+  `server_error` fault → fallback model (sim request log shows 2 requests, second model = fallback); `disconnect`
+  fault → fallback; header-less `timeout` fault → `wait_held(state, 1)` then gateway clock `run_for(2.5)` →
+  fallback; `timeout` with `after_tokens=2` → `run_for` remaining → partial 2 tokens kept, `error` set;
+  speculative discard against a held stream closes it (sim `held` drops to 0).
+- Existing T13a tests stay green after the moves (targets/wire_fields/Meter refactor).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a packages/va_llm/src` (no C+), pip-audit + pnpm audit. va_llm coverage ≥ 95 %.
+
+### Risks
+- Verify that `with_streaming_response.create(stream=True)` raises `APIStatusError` on non-2xx when entered and that
+  `iter_lines()` is available on the async raw response; if not, fall back to `client.chat.completions.create(...,
+  stream=True)` → `AsyncStream.response` for raw lines. Either way parse lines ourselves.
+- httpx errors raised while iterating the body (ReadError, RemoteProtocolError) are not wrapped by the SDK: map
+  `httpx.HTTPError` → `LlmConnectionError` in the producer.
+- ManualClock: each line read registers a deadline sleep; tests must `wait_for_sleep(exact remaining)` before
+  `run_for`. Cancel timers promptly (`within` already does).
+- Span across tasks: use `tracer.start_span` + `trace.use_span(span, end_on_exit=False)` in the producer and end it
+  exactly once.
+- Unawaited producer at GC → warnings are errors: `DialogueStream` must always be closed in tests (context manager)
+  and the producer must never leave an exception unretrieved (store it in `error`).
+
+## Build P03-T13b (Builder, 2026-11-01)
+Implemented per plan. New: `va_llm.dialogue` (DialogueRequest, DialogueStream, DialogueDeps; producer task, END via
+task done-callback so text() never hangs even if cancelled before start), `stream_wire.StreamAssembler`,
+`wire_fields` (readers moved from wire.py), `targets` (Target/attempt_outcome/sdk_backstop/record_failure/
+platform_fallback moved from gateway.py), `metering.Meter` (shared by complete + streams), `LlmMetrics.ttft/
+speculated`. `LlmGateway.stream_dialogue(request)`. Deviations from plan: `tool_calls()` returns list (spec §2
+signature); the span is started in `DialogueStream.__init__` and ended in the done-callback; cancelled/discarded
+attempts are not counted in va_llm_requests_total (recorded in specs/27 Decision); `aclose()` re-raises only an
+unexpected producer crash. Contract tests run FakeLLM on a real socket (`served_gateway`) because httpx
+ASGITransport buffers whole bodies. Specs: specs/10 §2 Decision P03-T13b (12 rules), specs/27 §3.6 Decision.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 6195 passed (TOTAL 98%, va_llm 100%),
+spec refs 0, jscpd 0 clones, radon max B (avg A 2.46), pip-audit no known vulns, pnpm audit high clean
+(3 moderate pre-existing).
+
+## Review P03-T13b (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, make test 6195 passed (va_llm 100 %). Diff read against
+specs/10 §2/§2.1/§8/§11 and the new Decisions.
+Findings:
+1. `packages/va_llm/src/va_llm/dialogue.py` `discard()` (≈line 200) + `_ended` (≈line 255): when a speculative
+   stream's producer has already finished (the common case: the speculation completes while the caller is still
+   talking, then the turn is abandoned), the `_END` marker sits in `self._held`; `discard()` sets `self._held = None`
+   and `_stop()` returns at once (task done), so `_END` is dropped and nothing ever reaches `self._queue`. A consumer
+   already iterating `text()` (or one that calls `text()` afterwards) blocks forever. Reproduced with a throwaway
+   test: speculative stream → `await stream.tool_calls()` → `await stream.discard()` → `collect(stream)` never
+   finishes (both "consumer waiting before discard" and "text() after discard" variants hang). specs/10 §2 Decision
+   rule 8 requires "`discard()` ... drops the buffer, and `text()` then ends empty". Fix: on discard, after stopping
+   the producer, put `_END` on the queue when the held buffer contained it (or always ensure the queue ends once
+   the producer is done and the buffer is dropped); add tests for both variants (discard after the end with a waiting
+   consumer and with a later `text()` call).
+2. `dialogue.py` `_finish_span` (≈line 460): an unexpected producer crash ends the span with outcome `failed` but no
+   error status/exception because `self.error` is None (only `LlmError`s set it). specs/27 §3.6 Decision says
+   `failed` ends with error status. Record the crash exception (e.g. `task.exception()` in `_ended`) on the span and
+   set ERROR status; extend `test_an_unexpected_producer_crash_reaches_the_consumer` (or a metrics test) to assert the
+   span status.
+
+## Build P03-T13b fix (Builder, 2026-11-01)
+1. `discard()` now keeps the dropped held buffer; after stopping the producer it puts `_END` on the queue when the
+   buffer already held it (producer finished before discard; `_ended` never runs again). Tests:
+   `test_discard_after_the_end_ends_a_waiting_consumer`, `test_text_after_discarding_a_finished_stream_ends_empty`
+   (shared setup `_finished_speculation`; both hung before the fix).
+2. `_ended` passes `task.exception()` to `_finish_span(outcome, crash)`; a crash is recorded on the span with ERROR
+   status (description = exception type). The crash test now asserts status + exception event.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 6197 passed (TOTAL 98 %, va_llm dialogue.py 100 %),
+jscpd 0 clones, radon max B (avg A 2.48), spec refs 0, pip-audit no known vulns, pnpm audit high clean (3 moderate).
+
+## Review P03-T13b re-review (Reviewer, 2026-11-01)
+Re-ran lint 0, typecheck 0, placeholders 0, make test 6197 passed (va_llm 100 %), spec refs 0, jscpd 0 clones. Both
+findings fixed: `discard()` re-queues `_END` when the dropped buffer held it (two new tests); `_ended` records a producer
+crash on the span with ERROR status (crash test asserts it). Approved.

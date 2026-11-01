@@ -106,6 +106,50 @@ class DialogueStream:
 - Speculative mode: tokens are buffered until `commit()`; `discard()` cancels the HTTP stream (`await response.close()`).
 - Cancellation (barge-in): cancelling the consumer task closes the stream within 50 ms.
 
+> Decision (2026-11-01): streaming dialogue (P03-T13b). Modules `dialogue`, `stream_wire`, `wire_fields`, and
+> `targets` join the package.
+> 1. `LlmGateway.stream_dialogue(DialogueRequest) -> DialogueStream` returns before any token (a producer task does
+>    the work). `DialogueRequest` is frozen with `org_id`, `messages`, `tools`, `provider: LlmProvider | None = None`
+>    (None → `registry.resolve(org_id)`; an `OrgProviderError` goes straight to the platform fallback as in §1
+>    Decision rule 6), `model: str | None = None` (None → the provider's `dialogue` model), `temperature=0.7`,
+>    `max_tokens=250`, `speculative`, `call_id`, `turn_index`. `tool_calls()` returns `list[ToolCall]`.
+> 2. The request is the §1 body plus `stream=true`, `stream_options={"include_usage": true}`, and `tool_choice="auto"`
+>    when tools are given (`X-VA-Call-Id` with a call id), sent with the SDK's `with_streaming_response`; the
+>    gateway parses the raw SSE lines itself. The provider's concurrency slot is held for the whole stream.
+> 3. SSE: `data: <json>` chunks, `data: [DONE]` ends; blank lines, `:` comments, and other fields are ignored. A chunk
+>    with an `error` member, a non-JSON or non-object chunk, or malformed `choices`/`delta`/`tool_calls`/`usage` is an
+>    `LlmProtocolError`; a body that ends without `[DONE]` is an `LlmConnectionError`, a body read error too
+>    (`LlmTimeoutError` for an httpx read timeout). A token is a non-empty `delta.content` or any `delta.tool_calls`
+>    item; reasoning and role-only deltas are not. Tool calls accumulate by `index` (first non-empty `id`/`name`
+>    wins, `arguments` concatenate); a finished stream with a nameless call is a protocol error.
+> 4. Deadlines on the injected clock: TTFT 2.5 s per target from that target's attempt start (the provider slot wait
+>    included), total 20 s from `stream_dialogue` covering both targets (a fallback's TTFT is `min(2.5, remaining)`).
+>    Each line read races the current deadline.
+> 5. Before the first token any failure of the primary (any HTTP status incl. 429, connect, TTFT deadline, protocol
+>    error, missing `[DONE]`, open breaker) gets one attempt on the platform `fallback` model (none when it is the
+>    primary target); no retries. When both fail, `text()` and `tool_calls()` raise
+>    `LlmUnavailableError(reason="exhausted"|"breaker_open", last)` (the reason of the last target) and `error`
+>    holds it.
+> 6. After the first token a failure (read error, protocol error, total deadline) ends the stream without fallback:
+>    `text()` ends normally after the delivered deltas, `error` holds the `LlmError`, `finish_reason` stays None, and
+>    `tool_calls()` returns the named calls assembled so far.
+> 7. `ttft_ms` (injected clock, from the producing attempt's start) is set at the first token and observed in
+>    specs/27 §3.3 `va_llm_ttft_ms{model, purpose="dialogue"}` when the process passes its catalog.
+> 8. Speculative streams buffer deltas (and the end) until `commit()`; `discard()` cancels the producer, drops the
+>    buffer, and `text()` then ends empty. `va_llm_speculation_total{outcome}` counts the first commit/discard of a
+>    speculative stream; repeats are no-ops; `commit()` on a plain stream does nothing, `discard()` closes it
+>    without the metric. `text()` may be iterated once (`RuntimeError` otherwise).
+> 9. `DialogueStream` is an async context manager; `aclose()`, `discard()`, and cancelling (or abandoning) the
+>    consumer of `text()` cancel the producer and wait until the HTTP response is closed, with no clock wait.
+>    `aclose()` re-raises only an unexpected producer crash.
+> 10. Breakers (§2.2) per attempt: success at the first token or a token-less normal end; a pre-token failure records
+>    `success = not breaker_failure`; a cancelled attempt without a verdict frees the probe slot. Post-token failures
+>    leave the breaker alone.
+> 11. Metering (§11): exactly once when the producer ends, for the attempt that produced a token or completed
+>    without one; usage from the final chunk, else estimated over the prompt, the received text, and the tool calls
+>    (`estimated=True`; discarded and cancelled streams included). Nothing is metered when no attempt produced.
+> 12. Metrics and spans: specs/27 §3.6 Decision (P03-T13b).
+
 ### 2.1 Timeouts and fallback
 
 | Call type | Timeout | On timeout / error before first token | After first token |

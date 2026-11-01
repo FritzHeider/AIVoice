@@ -885,3 +885,13 @@ Grafana 3001
   (dialogue/analysis) or `LlmUnavailableError("provider_unavailable")`. In va_llm tests read logs with
   `service_helpers.json_log_stream`/`log_events` (structlog `capture_logs` misses events once another test has
   configured logging).
+- 2026-11-01 (P03-T13b): streaming dialogue = `va_llm.dialogue` (`DialogueRequest`, `DialogueStream`; rules: specs/10
+  §2 Decision P03-T13b), SSE parsing in `stream_wire.StreamAssembler`, shared field readers in `wire_fields`, shared
+  `Target`/`record_failure`/`platform_fallback` in `targets`, metering via `metering.Meter`. httpx's
+  `ASGITransport` buffers the whole response body, so streaming tests against FakeLLM need a real socket:
+  `llm_client_helpers.served_gateway(state)` (ManualClock gateway + uvicorn FakeLLM). respx streams: `streamed(*parts)`
+  over `StreamingBody` (bytes, an exception to raise, or an `asyncio.Event` to hang on; records `closed`/
+  `cancelled`), chunks via `chunk`/`content_stream`/`sse`. Every line read registers a deadline sleep: before the
+  first token `wait_for_sleep(TTFT_S)`, after it `wait_for_sleep(TOTAL_S - elapsed)`; `await _settle()` (a few
+  `sleep(0)`) before cancelling when the body must already be waiting. Always close a `DialogueStream`
+  (`async with await gateway.stream_dialogue(...) as stream`).

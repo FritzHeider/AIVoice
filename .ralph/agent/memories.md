@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793528014-c05e
+> va_llm P03-T13b: streaming dialogue in va_llm.dialogue (DialogueStream producer task; END delivered by task done-callback); httpx ASGITransport buffers whole bodies so FakeLLM streaming contract tests use llm_client_helpers.served_gateway (real uvicorn); respx streams via streamed(*parts)/StreamingBody (bytes|Exception|asyncio.Event hang); wait_for_sleep(TTFT_S) before first token, TOTAL_S after
+<!-- tags: llm, testing, streaming | created: 2026-11-01 -->
+
 ### mem-1793526011-80a2
 > va_llm P03-T13a: LlmGateway.complete raises only LlmUnavailableError(reason,last); openai 3.x typed for httpx2 -> build SDK clients via va_llm.clients.openai_client + sdk_timeout; respx records calls only on completion -> assert Hanging.requests/cancelled and mix via llm_client_helpers.scripted(); tests gateway_rig (ManualClock wait_for_sleep+run_for), sim_gateway(state)->(rig, control)
 <!-- tags: llm, testing, openai | created: 2026-11-01 -->

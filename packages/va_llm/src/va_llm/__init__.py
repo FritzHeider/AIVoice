@@ -2,6 +2,7 @@
 
 from va_llm.breaker import BreakerBoard, BreakerState, CircuitBreaker
 from va_llm.clients import CALL_ID_HEADER, LlmClients
+from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import (
     LlmConnectionError,
     LlmError,
@@ -35,6 +36,8 @@ __all__ = [
     "CircuitBreaker",
     "Completion",
     "CostTable",
+    "DialogueRequest",
+    "DialogueStream",
     "ForceTool",
     "LlmClients",
     "LlmConnectionError",

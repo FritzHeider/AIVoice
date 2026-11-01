@@ -22,6 +22,7 @@ __all__ = [
     "SPECULATION_METRIC",
     "AttemptOutcome",
     "LlmMetrics",
+    "SpeculationOutcome",
 ]
 
 type AttemptOutcome = Literal[
@@ -34,6 +35,8 @@ type AttemptOutcome = Literal[
     "parse_error",
     "breaker_open",
 ]
+
+type SpeculationOutcome = Literal["committed", "discarded"]
 
 REQUESTS_METRIC: Final = "va_llm_requests_total"
 DURATION_METRIC: Final = "va_llm_request_duration_ms"
@@ -72,6 +75,7 @@ class LlmMetrics:
         )
         self._tokens = catalog.counter("va_llm_tokens_total") if catalog is not None else None
         self._errors = catalog.counter("va_llm_errors_total") if catalog is not None else None
+        self._ttft = catalog.histogram("va_llm_ttft_ms") if catalog is not None else None
 
     def attempt(self, call_type: str, model: str, outcome: AttemptOutcome) -> None:
         self._requests.labels(call_type=call_type, model=model, outcome=outcome).inc()
@@ -90,3 +94,10 @@ class LlmMetrics:
     def error(self, model: str, kind: ErrorKind) -> None:
         if self._errors is not None:
             self._errors.labels(model=model, kind=kind).inc()
+
+    def ttft(self, model: str, purpose: str, ms: float) -> None:
+        if self._ttft is not None:
+            self._ttft.labels(model=model, purpose=purpose).observe(ms)
+
+    def speculated(self, outcome: SpeculationOutcome) -> None:
+        self.speculation.labels(outcome=outcome).inc()

@@ -26,10 +26,19 @@ from pydantic import SecretStr
 from starlette.applications import Starlette
 
 from va_common.metrics import Service, build_metrics, new_registry
-from va_llm import ChatMessage, LlmGateway, LlmMetrics, LlmProvider, ProviderRegistry, UsageRecord
+from va_llm import (
+    ChatMessage,
+    DialogueRequest,
+    DialogueStream,
+    LlmGateway,
+    LlmMetrics,
+    LlmProvider,
+    ProviderRegistry,
+    UsageRecord,
+)
 from va_llm.pricing import CostTable, ModelCost
 from va_llm.providers import OrgProviderSource, org_provider_id
-from va_sim.server import simulator_routes
+from va_sim.server import running_sims, simulator_routes
 from va_sim.settings import DEFAULT_LLM_MODELS
 from va_sim.state import SimState
 
@@ -40,18 +49,30 @@ __all__ = [
     "ORG_COMPLETIONS",
     "PLATFORM_KEY",
     "SIM_BASE_URL",
+    "BodyPart",
     "GatewayRig",
     "Hanging",
     "RecordingUsage",
     "StaticOrgProviders",
+    "StreamingBody",
+    "arm_fault",
+    "chunk",
+    "collect",
     "completion_body",
+    "content_stream",
+    "dialogue",
     "gateway_rig",
     "hanging",
     "make_provider",
+    "open_breaker",
     "org_provider",
     "scripted",
     "sent_json",
+    "served_gateway",
+    "served_requests",
     "sim_gateway",
+    "sse",
+    "streamed",
     "user",
 ]
 
@@ -109,6 +130,112 @@ def completion_body(
     if usage is not None:
         body["usage"] = {"prompt_tokens": usage[0], "completion_tokens": usage[1], "total_tokens": sum(usage)}
     return body
+
+
+def chunk(
+    delta: dict[str, Any] | None = None,
+    *,
+    finish_reason: str | None = None,
+    usage: tuple[int, int] | None = None,
+    choices: bool = True,
+) -> dict[str, Any]:
+    """One ``chat.completion.chunk``; ``choices=False`` gives the trailing usage chunk (``choices: []``)."""
+    body: dict[str, Any] = {"id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1, "model": "m"}
+    body["choices"] = (
+        [{"index": 0, "delta": delta if delta is not None else {}, "finish_reason": finish_reason}]
+        if choices
+        else []
+    )
+    if usage is not None:
+        body["usage"] = {"prompt_tokens": usage[0], "completion_tokens": usage[1], "total_tokens": sum(usage)}
+    return body
+
+
+def sse(*chunks: dict[str, Any], done: bool = True) -> list[bytes]:
+    """The SSE events of ``chunks`` (one body part each), then ``data: [DONE]`` unless ``done`` is false."""
+    parts = [b"data: " + orjson.dumps(item) + b"\n\n" for item in chunks]
+    return [*parts, b"data: [DONE]\n\n"] if done else parts
+
+
+def content_stream(
+    *tokens: str, usage: tuple[int, int] | None = (12, 5), finish_reason: str = "stop"
+) -> list[dict[str, Any]]:
+    """The chunks of a content reply: a role chunk, one chunk per token, the finish chunk, the usage chunk."""
+    chunks = [chunk({"role": "assistant", "content": ""})]
+    chunks.extend(chunk({"content": token}) for token in tokens)
+    chunks.append(chunk(finish_reason=finish_reason))
+    if usage is not None:
+        chunks.append(chunk(usage=usage, choices=False))
+    return chunks
+
+
+type BodyPart = bytes | Exception | asyncio.Event
+
+
+@dataclass
+class StreamingBody(httpx.AsyncByteStream):
+    """A response body yielding ``parts`` in order: bytes are sent, an exception is raised, an event is waited
+    for (the body hangs until the test sets it). Records whether it was closed and whether a wait was
+    cancelled."""
+
+    parts: list[BodyPart]
+    closed: bool = False
+    cancelled: bool = False
+    sent: int = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for part in self.parts:
+            if isinstance(part, asyncio.Event):
+                try:
+                    await part.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+            elif isinstance(part, Exception):
+                raise part
+            else:
+                self.sent += 1
+                yield part
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def streamed(*parts: BodyPart, status: int = 200) -> tuple[httpx.Response, StreamingBody]:
+    """An SSE response over a :class:`StreamingBody` of ``parts``."""
+    body = StreamingBody(list(parts))
+    return httpx.Response(status, headers={"content-type": "text/event-stream"}, stream=body), body
+
+
+def dialogue(org_id: uuid.UUID, *messages: ChatMessage, **fields: Any) -> DialogueRequest:
+    """A dialogue request (one user message unless ``messages`` are given)."""
+    return DialogueRequest(org_id=org_id, messages=messages or (user(),), **fields)
+
+
+async def collect(stream: DialogueStream) -> list[str]:
+    """Every delta of ``stream.text()``."""
+    return [delta async for delta in stream.text()]
+
+
+def open_breaker(rig: GatewayRig, model: str) -> None:
+    """Open the platform breaker of ``model`` with five failures."""
+    breaker = rig.gateway.breaker("platform", model)
+    for _ in range(5):
+        breaker.allow()
+        breaker.record(success=False)
+
+
+async def arm_fault(control: httpx.AsyncClient, **body: Any) -> None:
+    """Arm a FakeLLM fault (``PUT /sim/llm/fault``)."""
+    response = await control.put("/sim/llm/fault", json=body)
+    assert response.status_code < 300, response.text
+
+
+async def served_requests(control: httpx.AsyncClient) -> list[dict[str, Any]]:
+    """FakeLLM's chat request log."""
+    response = await control.get("/sim/llm/requests")
+    requests: list[dict[str, Any]] = response.json()["requests"]
+    return requests
 
 
 def sent_json(request: httpx.Request) -> dict[str, Any]:
@@ -245,3 +372,18 @@ async def sim_gateway(state: SimState) -> AsyncIterator[tuple[GatewayRig, httpx.
             yield rig, control
     finally:
         await state.aclose()
+
+
+@asynccontextmanager
+async def served_gateway(state: SimState) -> AsyncIterator[tuple[GatewayRig, httpx.AsyncClient]]:
+    """Like :func:`sim_gateway`, but FakeLLM runs on a real socket (httpx's ASGI transport buffers whole
+    response bodies, so streams need a server)."""
+    models = dict(zip(("dialogue", "analysis", "fallback"), DEFAULT_LLM_MODELS, strict=False))
+    models["router"] = DEFAULT_LLM_MODELS[0]
+    async with running_sims(state, ports={"llm": 0}) as urls:
+        platform = make_provider(base_url=f"{urls['llm']}/v1", key=SIM_KEY, models=models)
+        async with (
+            gateway_rig(platform=platform, costs={}) as rig,
+            httpx.AsyncClient(base_url=urls["llm"]) as control,
+        ):
+            yield rig, control

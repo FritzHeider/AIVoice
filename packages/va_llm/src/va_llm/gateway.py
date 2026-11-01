@@ -28,6 +28,7 @@ from va_common.time import Clock
 from va_llm.breaker import BreakerBoard, CircuitBreaker
 from va_llm.clients import CALL_ID_HEADER, LlmClients, sdk_timeout
 from va_llm.deadline import DeadlineExceeded, within
+from va_llm.dialogue import DialogueDeps, DialogueRequest, DialogueStream
 from va_llm.errors import (
     LlmConnectionError,
     LlmError,
@@ -40,28 +41,20 @@ from va_llm.errors import (
     UnavailableReason,
     map_openai_error,
 )
-from va_llm.metering import UsageRecord, UsageRecorder, estimate_usage
-from va_llm.metrics import AttemptOutcome, LlmMetrics
+from va_llm.metering import Meter, UsageRecorder, estimate_usage
+from va_llm.metrics import LlmMetrics
 from va_llm.models import ChatMessage, Completion, ToolChoice, ToolDef
 from va_llm.policy import POLICIES, CallPolicy, CallType
 from va_llm.pricing import CostTable
-from va_llm.providers import LlmProvider, ProviderRegistry
+from va_llm.providers import ProviderRegistry
+from va_llm.targets import RETRYABLE_STATUSES, Target, platform_fallback, record_failure, sdk_backstop
 from va_llm.wire import ChatRequest, ParsedCompletion, parse_completion
 
 __all__ = ["RETRYABLE_STATUSES", "LlmGateway"]
 
-RETRYABLE_STATUSES: Final = frozenset({500, 502, 503, 504})
 _MAX_RETRY_AFTER_S: Final = 1.0
-_SDK_READ_S: Final = 30.0
-_HTTP_SERVER: Final = 500
 
 _log = get_logger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class _Target:
-    provider: LlmProvider
-    model: str
 
 
 @dataclass(slots=True)
@@ -70,7 +63,7 @@ class _Run:
     org_id: uuid.UUID
     call_id: uuid.UUID | None
     request: ChatRequest
-    target: _Target
+    target: Target
     attempts: int = 0
     last: LlmError | None = None
     status: int | None = None
@@ -120,25 +113,6 @@ def _retry_wait(error: LlmError, policy: CallPolicy, delay: float | None, budget
     return wait if wait is not None and budget.allows(wait) else None
 
 
-def _outcome(error: LlmError) -> AttemptOutcome:
-    match error:
-        case LlmTimeoutError():
-            return "timeout"
-        case LlmRateLimitedError():
-            return "rate_limited"
-        case LlmHttpError(status=status):
-            return "server_error" if status >= _HTTP_SERVER else "client_error"
-        case LlmProtocolError():
-            return "parse_error"
-        case _:
-            return "transport_error"
-
-
-def _backstop(limit_s: float) -> httpx.Timeout:
-    """The SDK's own timeout: a backstop behind the clock deadline, never shorter than it."""
-    return httpx.Timeout(connect=2.0, read=max(_SDK_READ_S, limit_s + 1.0), write=5.0, pool=2.0)
-
-
 def _annotate(span: Span, run: _Run | None) -> None:
     if run is None:  # the org's provider could not be loaded: nothing was attempted
         return
@@ -169,10 +143,12 @@ class LlmGateway:
         self.clients = LlmClients(http)
         self._clock = clock
         self._metrics = metrics
-        self._recorder = recorder
-        self._costs = costs if costs is not None else CostTable()
+        self._meter_usage = Meter(metrics, costs if costs is not None else CostTable(), recorder)
         self._breakers = BreakerBoard(clock, metrics.breaker_state)
         self._tracer = trace.get_tracer("va_llm", tracer_provider=tracer_provider)
+        self._dialogue = DialogueDeps(
+            self.registry, self.clients, clock, metrics, self._breakers, self._meter_usage, self._tracer
+        )
 
     def breaker(self, provider_id: str, model: str) -> CircuitBreaker:
         """The breaker of ``(provider_id, model)``."""
@@ -181,6 +157,10 @@ class LlmGateway:
     async def prewarm(self) -> bool:
         """Open a connection to the platform provider (media-worker startup)."""
         return await self.clients.prewarm(self.registry.platform)
+
+    async def stream_dialogue(self, request: DialogueRequest) -> DialogueStream:
+        """Start one streaming dialogue turn (specs/10 §2); returns before the first token."""
+        return DialogueStream(self._dialogue, request)
 
     async def complete(  # noqa: PLR0913 - mirrors the chat-completions parameters
         self,
@@ -251,21 +231,16 @@ class LlmGateway:
                 raise LlmUnavailableError(
                     "provider_unavailable", provider_id=exc.provider_id, model=model or "", last=None
                 ) from exc
-            return _Run(call_type, org_id, call_id, request, self._platform_fallback(), fell_back=True)
+            return _Run(call_type, org_id, call_id, request, platform_fallback(self.registry), fell_back=True)
         return _Run(
-            call_type, org_id, call_id, request, _Target(provider, model or provider.models[policy.role])
+            call_type, org_id, call_id, request, Target(provider, model or provider.models[policy.role])
         )
 
-    def _platform_fallback(self) -> _Target:
-        platform = self.registry.platform
-        return _Target(platform, platform.models["fallback"])
-
-    def _fallback(self, policy: CallPolicy, primary: _Target) -> _Target | None:
+    def _fallback(self, policy: CallPolicy, primary: Target) -> Target | None:
         if not policy.falls_back:
             return None
-        target = self._platform_fallback()
-        same = target.provider.id == primary.provider.id and target.model == primary.model
-        return None if same else target
+        target = platform_fallback(self.registry)
+        return None if target.same_as(primary) else target
 
     async def _run(self, run: _Run, policy: CallPolicy) -> Completion:
         primary = run.target
@@ -281,7 +256,7 @@ class LlmGateway:
         return await self._on_target(run, policy, fallback, iter(()))
 
     async def _on_target(
-        self, run: _Run, policy: CallPolicy, target: _Target, delays: Iterator[float]
+        self, run: _Run, policy: CallPolicy, target: Target, delays: Iterator[float]
     ) -> Completion:
         run.target = target
         breaker = self._breakers.get(target.provider.id, target.model)
@@ -355,7 +330,7 @@ class LlmGateway:
             raw = await create(
                 model=run.target.model,
                 extra_headers=headers,
-                timeout=sdk_timeout(_backstop(limit_s)),
+                timeout=sdk_timeout(sdk_backstop(limit_s)),
                 **run.request.body(),
             )
         return int(raw.status_code), bytes(raw.content)
@@ -364,38 +339,14 @@ class LlmGateway:
         run.last = error
         if isinstance(error, LlmHttpError):
             run.status = error.status
-        self._metrics.attempt(run.call_type, run.target.model, _outcome(error))
-        self._metrics.error(run.target.model, error.error_kind)
-        _log.warning(
-            "llm.attempt_failed",
-            call_type=run.call_type,
-            provider=run.target.provider.id,
-            model=run.target.model,
-            kind=error.error_kind,
-            status=error.status if isinstance(error, LlmHttpError) else None,
-        )
+        record_failure(self._metrics, run.call_type, run.target, error)
 
     async def _meter(self, run: _Run, completion: Completion) -> None:
-        usage = completion.usage
-        self._metrics.tokens(completion.model, usage.prompt_tokens, usage.completion_tokens)
-        if self._recorder is None:
-            return
-        cost_in, cost_out = self._costs.cost_micros(
-            completion.model, usage.prompt_tokens, usage.completion_tokens
-        )
-        record = UsageRecord(
+        await self._meter_usage.record(
             org_id=run.org_id,
             call_id=run.call_id,
             call_type=run.call_type,
             provider_id=completion.provider_id,
             model=completion.model,
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            estimated=usage.estimated,
-            cost_in_micros=cost_in,
-            cost_out_micros=cost_out,
+            usage=completion.usage,
         )
-        try:
-            await self._recorder.record(record)
-        except Exception as exc:  # metering must never fail a completion
-            _log.warning("llm.usage_record_failed", model=completion.model, error=type(exc).__name__)

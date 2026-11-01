@@ -230,6 +230,15 @@ named `LAT_MS`.
 > `llm.tokens_out` on success; it ends with error status when the call raises.
 > `packages/va_llm/tests/test_metrics_spans.py` parses the `va_llm_` rows.
 
+> Decision (2026-11-01): streaming dialogue (`LlmGateway.stream_dialogue`, P03-T13b) counts
+> `va_llm_requests_total{call_type="dialogue"}` once per attempt that reached a verdict (`ok` for a completed stream,
+> the error outcome for a failure before or after the first token, `breaker_open` for a skipped target; a cancelled or
+> discarded attempt is not counted), observes `va_llm_request_duration_ms` once per stream (start to producer end),
+> adds `va_llm_errors_total` per failed attempt and §3.3 `va_llm_ttft_ms{model, purpose="dialogue"}` at the first
+> token. Each stream records one `llm.dialogue` CLIENT span (ended by the producer) with the P03-T13a attributes plus
+> `llm.streaming=true`, `llm.speculative`, `llm.outcome` (`completed|failed|truncated|discarded|cancelled`),
+> `llm.ttft_ms` and `llm.turn_index` when set; `failed` and `truncated` end with error status.
+
 ## 4. Per-call latency events
 
 The media worker emits for each completed turn (see `19` §2 `call.latency`, `07-media-pipeline.md` latency tracer):
