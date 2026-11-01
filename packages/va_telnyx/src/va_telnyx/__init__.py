@@ -1,5 +1,13 @@
 """VoiceAgents Telnyx client (specs/06-telephony-telnyx.md §1, §2, §3, §4, §5, §8)."""
 
+from va_telnyx.bootstrap import (
+    BootstrapResult,
+    WebhookUrls,
+    bootstrap_account,
+    org_resource_name,
+    platform_resource_name,
+    webhook_urls,
+)
 from va_telnyx.client import PLATFORM_ACCOUNT, TelnyxClient
 from va_telnyx.client_state import ClientState, ClientStateError, LegRole, command_id
 from va_telnyx.errors import (
@@ -58,6 +66,7 @@ __all__ = [
     "AnswerRequest",
     "AvailableNumber",
     "Balance",
+    "BootstrapResult",
     "CallAlreadyEnded",
     "CallControlApp",
     "ClientState",
@@ -103,13 +112,18 @@ __all__ = [
     "WebhookEnvelope",
     "WebhookEvent",
     "WebhookParseError",
+    "WebhookUrls",
     "WebhookVerificationError",
+    "bootstrap_account",
     "command_id",
     "load_public_key",
     "number_tags",
+    "org_resource_name",
     "parse_envelope",
     "parse_media_message",
     "parse_payload",
+    "platform_resource_name",
     "verify_media_ws",
     "verify_webhook",
+    "webhook_urls",
 ]

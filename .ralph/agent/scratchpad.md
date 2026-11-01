@@ -2206,3 +2206,120 @@ Batching, semaphore + TaskGroup cancellation, retry classification (429 Retry-Af
 own body parsing with dimension/index/zero-norm checks, normalisation, truncation on char boundary, fail-open cache,
 metering (estimated flag, swallowed recorder failure), metrics and spans all match; tests cover each with ManualClock
 (no wall sleeps). The conftest `asyncify` inline patch is test-only and justified. Approved.
+
+## Plan P03-T15a (Planner, 2026-11-01)
+P03-T15 was too big for one activation, so I split it in `plan/phase-03.md` into T15a (bootstrap library + script),
+T15b (python.Dockerfile, compose `sim` service, `make up` writes TELNYX_PUBLIC_KEY), and T15c (Redis-backed SimState,
+SIM_WORKERS). The parent P03-T15 gets ticked once all three are done. This plan covers T15a only (specs/06 §12, §13).
+
+### Spec decision to write: specs/06 §12 `> Decision (2026-11-01): bootstrap library and script (P03-T15a).`
+1. The logic lives in `va_telnyx.bootstrap` (the script now, the `BootstrapTelnyxAccount` activity later). It only
+   talks to `TelnyxClient`, never touches the DB or env.
+2. Names: `platform_resource_name(va_env) = "voiceagents-{va_env}"` and `org_resource_name(org_id) =
+   "voiceagents-org-{org_id}"`. Webhooks: `webhook_urls(edge_public_host, telnyx_account_id=None)` gives
+   `https://{host}/telnyx/voice[/{id}]` and `https://{host}/telnyx/messaging[/{id}]` (always https, as in §1 and §12,
+   even when the host is local; the sim only records the URL).
+3. Names must match exactly. The list filters are `contains` (apps, voice profiles) or provider-side, so results are
+   filtered to `name == wanted`. When several match exactly, use the first in list order and log
+   `telnyx_bootstrap.duplicate_resources` (kind, name, count, chosen id) at warning level. Nothing is deleted.
+4. Order: voice profile, then app (created with that profile; if it exists, one PATCH that sends only the fields
+   that differ: `webhook_event_url` and/or `outbound.outbound_voice_profile_id`), then the messaging profile (created,
+   or PATCHed when `webhook_url` differs). Nothing is sent when nothing differs.
+5. Result `BootstrapResult(call_control_app_id, outbound_voice_profile_id, messaging_profile_id, created: tuple[str,
+   ...], updated: tuple[str, ...])`. Kinds are `outbound_voice_profile`, `call_control_app`, `messaging_profile`.
+   `env_values()` returns the three `TELNYX_*_ID` keys in §12 step 4 order.
+6. Script `scripts/telnyx_bootstrap.py [--env-file PATH] [--write-env] [--json]`. Settings come from the env file
+   plus the environment (`VA_ENV`, `TELNYX_API_BASE`, `TELNYX_API_KEY`, `EDGE_PUBLIC_HOST`, `REDIS_URL` for the
+   rate limiter, which fails open when Redis is down). The default `--env-file` is `.env`; an explicitly given
+   missing file exits 2. stdout carries only the result: three `KEY=value` lines, or one JSON object with the
+   three keys plus `created`/`updated`. Logs go to stderr. A Telnyx error (`TelnyxError`) exits 1 with
+   `telnyx_bootstrap.failed` (error code and status only, never the key).
+7. `--write-env` updates the three keys in place. Each existing `KEY=...` line keeps its trailing `  # comment`;
+   a missing key is appended at the end; every other line stays byte for byte; the file is written through a temp
+   file plus `os.replace`; when no value changes, the file is not written.
+
+### Files
+- `packages/va_telnyx/src/va_telnyx/bootstrap.py` (new): `RESOURCE_PREFIX = "voiceagents"`, `ResourceKind` Literal,
+  `WebhookUrls` (frozen dataclass voice/messaging), `platform_resource_name(va_env: str) -> str`,
+  `org_resource_name(org_id: uuid.UUID | str) -> str`, `webhook_urls(edge_public_host: str, telnyx_account_id:
+  uuid.UUID | str | None = None) -> WebhookUrls`, `BootstrapResult` (frozen dataclass + `env_values() -> dict[str,
+  str]`), `ENV_KEYS` tuple, `async bootstrap_account(client: TelnyxClient, *, name: str, webhooks: WebhookUrls) ->
+  BootstrapResult`. Keep each step in its own small private coroutine (`_voice_profile`, `_app`, `_messaging`) plus an
+  `_exact(kind, name, items, key)` helper, so radon stays at B or better. Export the names from `va_telnyx/__init__.py`.
+- `scripts/telnyx_bootstrap.py` (new): `BootstrapSettings(RedisSettings)` with `service_name = "telnyx-bootstrap"`,
+  `telnyx_api_base: str = "http://localhost:9100/v2"`, `telnyx_api_key: str = "sim-telnyx-key"`,
+  `edge_public_host: str = "localhost:8100"` (the specs/02 §6 defaults). Also `parse_args(argv)`,
+  `load_settings(env_file: Path | None) -> BootstrapSettings` (pass `_env_file` through a `dict[str, Any]` because
+  mypy runs without the pydantic plugin), `async run_bootstrap(settings, *, http: httpx.AsyncClient, redis: Redis) ->
+  BootstrapResult`, `render_text(result) -> str`, `render_json(result) -> str`, `update_env_file(path, values:
+  Mapping[str, str]) -> bool` (True when written), and `main(argv=None) -> int`. The HTTP client comes from
+  `va_common.http.http_client(settings, timeout=...)` and Redis from `va_common.redis.redis_client(settings)`; both
+  are closed on exit. Logging goes to stderr via `configure_logging(settings, stream=sys.stderr, ...)`; see
+  `seed_dev.py` for the pattern.
+- specs/06 §12 Decision (above). `AGENTS.md`: add a Learned bullet and a Commands row
+  (`uv run python scripts/telnyx_bootstrap.py --env-file .env [--write-env]`).
+
+### Tests
+- `packages/va_telnyx/tests/test_bootstrap.py`, contract tests over FakeTelnyx using `telnyx_client_helpers.sim_clients`:
+  - first run: `created` lists all three kinds; the sim lists (raw GETs) show exactly one of each, named
+    `voiceagents-test`; the app's webhook and profile id are as expected; the messaging webhook is as expected.
+  - second run: same ids, `created == updated == ()`, still one of each.
+  - a resource named `voiceagents-test-old` (contains-match only) is ignored, and a new exact one is created.
+  - app webhook drift (raw PATCH to the sim) → rerun lists `updated == ("call_control_app",)` and restores the
+    webhook; profile drift (app points at another voice profile) → patched; messaging webhook drift → patched.
+  - two exact-name apps → the first is used, and the warning event is logged (`service_helpers.json_log_stream`).
+  - pure tests: `platform_resource_name("local")`, `org_resource_name(uuid)`, `webhook_urls` with and without an
+    account id, `env_values()` key order.
+- `packages/va_telnyx/tests/test_bootstrap_requests.py` (respx `telnyx_api` fixture): when only the webhook differs,
+  the PATCH body is exactly `{"webhook_event_url": ...}`; when only the profile differs, it is exactly
+  `{"outbound": {...}}`; nothing differs → no PATCH request; a create error (422) propagates as the mapped
+  `TelnyxError`.
+- `scripts/tests/test_telnyx_bootstrap.py`:
+  - `update_env_file`: replaces a value and keeps `  # comment`; appends missing keys; leaves other lines and
+    comments untouched; returns False and does not change mtime/content when nothing changed; keeps the final newline.
+  - `load_settings` reads the env file; an explicit missing file → `main` returns 2.
+  - end to end: `async with running_sims(new_state()) as urls` (va_sim `sim_helpers`), write a tmp env file with
+    `TELNYX_API_BASE={urls['telnyx']}/v2`, `VA_ENV=test`, and an unreachable `REDIS_URL` (the limiter fails open).
+    Run `main([... "--write-env", "--json"])` in a thread (`asyncio.to_thread`, since `main` calls `asyncio.run`) twice.
+    Check that stdout JSON ids are equal across runs, the second run has empty `created`, and the env file holds
+    the ids. Text mode prints exactly three `KEY=value` lines. If calling `main` from a thread is awkward, test
+    `run_bootstrap` directly with an `httpx.AsyncClient` on the running sim plus one sync `main` test where the
+    sim runs on a background thread. Add `isolate_env` (service_helpers) so a developer `.env` never leaks in.
+  - Telnyx failure (wrong API key → 401) → exit 1, and stderr does not contain the key.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a packages/va_telnyx/src scripts/telnyx_bootstrap.py`, `uvx pip-audit` on `uv export`
+plus `corepack pnpm audit`. va_telnyx coverage stays at or above 95 %.
+
+### Risks
+- The sim's messaging-profile list filter is exact (`filter[name]`), while apps and voice profiles use `contains`.
+  The code filters exactly in every case.
+- `main` uses `asyncio.run`, so it cannot run inside the pytest event loop. Use `to_thread`, or test sync with the
+  sim on a thread.
+- `RedisSettings` may require `REDIS_URL`; give it an unreachable URL in tests (`UNREACHABLE` in service_helpers).
+- Tests must not use a developer `.env`; always pass an explicit tmp `--env-file`.
+
+## Build P03-T15a (Builder, 2026-11-01)
+Implemented per plan. `va_telnyx.bootstrap` (`bootstrap_account`, `_Run` steps voice_profile → app → messaging,
+`_exact` exact-name filter + `telnyx_bootstrap.duplicate_resources` warning, `BootstrapResult.env_values()`,
+`platform_resource_name`/`org_resource_name`/`webhook_urls`), exported from `va_telnyx`. `scripts/telnyx_bootstrap.py`
+(BootstrapSettings(RedisSettings) with `service_name: ClassVar`, `load_settings`, `run_bootstrap`, `render_text/json`,
+`update_env_file` atomic via mkstemp + Path.replace keeping mode/comments/line endings, exit 2 missing env file or
+invalid settings, exit 1 on TelnyxError logging type/operation/status/codes only). specs/06 §12 Decision (7 rules),
+AGENTS.md Commands row + Learned bullet. Fixed a pre-existing check_spec_refs failure in plan/phase-03.md (T14b tick
+line `27 §3.6` → `specs/27 §3.6`).
+Deviations: when no `--env-file` is given, `.env` is used only if present (plan: default `.env`); `--write-env` then
+writes `.env`. Invalid settings also exit 2.
+Tests: test_bootstrap.py (9, FakeTelnyx contract), test_bootstrap_requests.py (5, respx exact PATCH bodies),
+scripts/tests/test_telnyx_bootstrap.py (12; end-to-end via `asyncio.to_thread(main)` + `running_sims`).
+Manual smoke: host sim on 19100, script printed 3 ids, second run created/updated empty, env file rewritten keeping
+the comment.
+
+## Review P03-T15a (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0, make test 6349 passed (TOTAL 98 %, bootstrap.py 100 %,
+script 98 %), check_spec_refs 0, jscpd 0 clones, radon avg A. Read bootstrap.py and scripts/telnyx_bootstrap.py
+against specs/06 §12 steps 1-4 and the 7-rule Decision: names, https webhook URLs, exact-name filtering with
+duplicate warning, order voice profile → app → messaging, PATCH only drifted fields, env_values order, stdout/stderr
+split, exit codes, key never logged (tested), atomic env rewrite keeping comments/mode. Defaults match .env.example.
+§13 "bootstrap idempotency" covered (run twice, drift patched). Approved.

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793533708-ff5c
+> va_telnyx P03-T15a: bootstrap_account in va_telnyx.bootstrap (exact-name find-or-create, drift PATCH only drifted fields); scripts/telnyx_bootstrap.py tested end-to-end via asyncio.to_thread(main) + running_sims(state, ports={'telnyx': 0}); settings subclasses must declare service_name as ClassVar[str]
+<!-- tags: telnyx, testing, scripts | created: 2026-11-01 -->
+
 ### mem-1793532827-54b2
 > va_llm P03-T14b: Embeddings (embeddings.py) separate from LlmGateway; pure embedding_wire (parse/normalize/truncate/emb:q:{sha} key), embedding_cache.QueryCache fail-open; tests embeddings_rig/erig fixture (fakeredis + ManualClock), embedding_body, sim_embeddings(state); specs/03 kbq: row replaced by emb:q 24h
 <!-- tags: llm, testing, embeddings | created: 2026-11-01 -->

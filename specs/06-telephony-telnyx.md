@@ -412,6 +412,34 @@ Idempotent; run with `uv run python scripts/telnyx_bootstrap.py --env-file .env`
 5. For BYO accounts the activity uses names `voiceagents-org-{org_id}` and the per-account webhook paths, then sets
    `telnyx_accounts.status='active'` or `error` with `status_detail`.
 
+> Decision (2026-11-01): bootstrap library and script (P03-T15a).
+> 1. The logic lives in `va_telnyx.bootstrap.bootstrap_account(client, name=, webhooks=)` (used by the script now and
+>    by the `BootstrapTelnyxAccount` activity later). It only talks to a `TelnyxClient`; it never touches the
+>    database or the environment.
+> 2. Names: `platform_resource_name(va_env)` = `voiceagents-{va_env}`, `org_resource_name(org_id)` =
+>    `voiceagents-org-{org_id}`. `webhook_urls(edge_public_host, telnyx_account_id=None)` gives
+>    `https://{host}/telnyx/voice[/{id}]` and `https://{host}/telnyx/messaging[/{id}]` (always https, also for a local
+>    host; the simulator only records the URL).
+> 3. Names match exactly. The list filters are `contains` (apps, voice profiles) or provider-side, so results are
+>    filtered to `name == wanted`. With several exact matches the first in list order is used and
+>    `telnyx_bootstrap.duplicate_resources` (kind, name, count, chosen_id) is logged at warning level; nothing is
+>    deleted.
+> 4. Order: voice profile; app (created with that profile, or one PATCH carrying only the drifted fields among
+>    `webhook_event_url` and `outbound.outbound_voice_profile_id`); messaging profile (created, or PATCHed when
+>    `webhook_url` differs). Nothing is sent when nothing differs.
+> 5. Result `BootstrapResult(call_control_app_id, outbound_voice_profile_id, messaging_profile_id, created, updated)`
+>    with kinds `outbound_voice_profile`, `call_control_app`, `messaging_profile`; `env_values()` returns the three
+>    `TELNYX_*_ID` keys in step 4 order.
+> 6. Script `scripts/telnyx_bootstrap.py [--env-file PATH] [--write-env] [--json]` reads `VA_ENV`, `TELNYX_API_BASE`,
+>    `TELNYX_API_KEY`, `EDGE_PUBLIC_HOST`, and `REDIS_URL` (rate limiter, fails open when Redis is down) from the
+>    environment plus the env file (environment wins). Without `--env-file` it uses `.env` when present; an explicit
+>    missing file or invalid settings exit 2. stdout carries only the result: three `KEY=value` lines, or one JSON
+>    object with the three keys plus `created`/`updated`; logs go to stderr. A `TelnyxError` exits 1 after logging
+>    `telnyx_bootstrap.failed` (error type, operation, HTTP status, Telnyx error codes; never the key).
+> 7. `--write-env` updates the three keys in place: an existing `KEY=...` line keeps its trailing comment and line
+>    ending, a missing key is appended, every other line stays byte for byte, the file mode is kept, and the file is
+>    replaced through a temp file plus `os.replace`; an unchanged file is not written.
+
 BYO creation flow (`POST /v1/accounts`, details in `16-phone-numbers.md` §7): validate key by `GET /balance`
 (200 required), store encrypted, generate `encrypted_key_handle = "tlx_" + base62(32 random bytes)`, run bootstrap
 activity, return handle.

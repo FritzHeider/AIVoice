@@ -204,7 +204,7 @@
     P03-T06b; tests may import both, production code never does); call-site test: every literal
     `function_name=` passed to `call_structured` in apps/ and packages/ is registered.
 
-- [x] P03-T14b `va_llm` embeddings client — `va_llm.Embeddings` (64-batches, 4 in flight, 1/4/10 s retries, 30 s deadline, truncation, 1024-d validation + L2 norm), `embedding_wire`, fail-open `embedding_cache` (`emb:q:{sha256}` 24 h), `EmbeddingUsageRecord`, three §3.6 metrics + `llm.embeddings` spans; specs/10 §10, 27 §3.6, 03 §11, 14 Decisions; 6323 passed, va_llm 100 %, lint/typecheck/placeholders 0
+- [x] P03-T14b `va_llm` embeddings client — `va_llm.Embeddings` (64-batches, 4 in flight, 1/4/10 s retries, 30 s deadline, truncation, 1024-d validation + L2 norm), `embedding_wire`, fail-open `embedding_cache` (`emb:q:{sha256}` 24 h), `EmbeddingUsageRecord`, three §3.6 metrics + `llm.embeddings` spans; specs/10 §10, specs/27 §3.6, specs/03 §11, specs/14 Decisions; 6323 passed, va_llm 100 %, lint/typecheck/placeholders 0
   - Spec refs: specs/10-llm-gateway.md §10 (embeddings), §11 (metering); specs/24-billing-and-limits.md (`kb_embedding_tokens`)
   - Depends on: P03-T14a
   - Deliverables: `Embeddings.embed(texts)` batching 64 with `dimensions=1024`, 4 batches in flight, retries on
@@ -213,11 +213,35 @@
   - Acceptance: tests for batching, truncation, normalization, caching, retries; FakeLLM contract test (1024-d
     deterministic unit vectors).
 
-- [ ] P03-T15 Telnyx bootstrap script and sim service wiring
+- [ ] P03-T15 Telnyx bootstrap script and sim service wiring (split into P03-T15a–c below; ticked when all three are)
   - Spec refs: specs/06-telephony-telnyx.md (bootstrap script); specs/29-infrastructure.md (docker-compose sim service)
   - Depends on: P03-T08b
   - Deliverables: `scripts/telnyx_bootstrap.py` (idempotent find-or-create by name, prints env lines), compose `sim` service with healthcheck, `.env` integration for sim public key, Redis-backed SimState sharing when `SIM_STATE_REDIS_URL` is set
   - Acceptance: running twice against the simulator creates resources once; two sim processes see the same registered scenario.
+
+- [x] P03-T15a Telnyx bootstrap library and script — `va_telnyx.bootstrap.bootstrap_account` (exact-name find-or-create, drift PATCH of only drifted fields, duplicate warning), `scripts/telnyx_bootstrap.py` (`--env-file`/`--write-env`/`--json`, atomic in-place env update keeping comments, exit 1/2); specs/06 §12 Decision; 6349 passed, bootstrap 100 %, script 98 %, lint/typecheck/placeholders 0, jscpd 0, radon A
+  - Spec refs: specs/06-telephony-telnyx.md §12, §13 (bootstrap idempotency)
+  - Depends on: P03-T08b
+  - Deliverables: `va_telnyx.bootstrap` (`bootstrap_account(client, name, voice_webhook_url, messaging_webhook_url)`,
+    exact-name find-or-create, drift PATCH; reused by the later `BootstrapTelnyxAccount` activity),
+    `scripts/telnyx_bootstrap.py` (`--env-file`, `--write-env`, `--json`; prints the three `TELNYX_*_ID=` lines)
+  - Acceptance: running twice against FakeTelnyx creates each resource once; webhook/profile drift is patched;
+    `--write-env` rewrites the three keys in place keeping comments and other lines.
+
+- [ ] P03-T15b Sim image, compose `sim` service, public key into `.env`
+  - Spec refs: specs/29-infrastructure.md §1.1, §2; specs/30-testing-and-evals.md §3
+  - Depends on: P03-T15a
+  - Deliverables: `infra/docker/python.Dockerfile` (SERVICE/MODULE args), compose `sim` service with healthcheck
+    (profiles infra/apps/e2e), `docker-compose.e2e.yml` accelerated override, `make up` waits for the sim and writes
+    `TELNYX_PUBLIC_KEY` into `.env`; `scripts/tests/test_compose.py` lockstep updated
+  - Acceptance: `make up` runs `sim` healthy; bootstrap script succeeds against the compose sim and prints ids.
+
+- [ ] P03-T15c Redis-backed SimState sharing
+  - Spec refs: specs/30-testing-and-evals.md §3 (`SIM_STATE_REDIS_URL`, `SIM_WORKERS`)
+  - Depends on: P03-T15b
+  - Deliverables: shared registry of scenarios (and other control-plane records named in the Decision) in Redis when
+    `SIM_STATE_REDIS_URL` is set; `SIM_WORKERS` processes
+  - Acceptance: two sim processes see the same registered scenario.
 
 - [ ] P03-T16 Live smoke tests for vendor clients
   - Spec refs: specs/30-testing-and-evals.md (live smoke tests)

@@ -25,6 +25,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Run a service on the host | `uv run python -m va_edge.serve` · `-m va_api.serve` · `-m va_media.main` · `-m va_worker.main` · `-m va_webhooks.main` · `-m va_events_sink.main` · `-m va_sim_server.main` (all take `--host`/`--port`) |
 | Pre-commit hooks | `uv run pre-commit install` once; `uv run pre-commit run --all-files` (ruff, placeholders, prettier, actionlint, gitleaks) |
 | Lint CI workflows | `uv run actionlint` |
+| Telnyx bootstrap | `uv run python scripts/telnyx_bootstrap.py --env-file .env [--write-env] [--json]` (sim by default; ids on stdout) |
 | Phase progress | `scripts/ralph/status.sh` |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
 
@@ -913,3 +914,9 @@ Grafana 3001
   The openai SDK resolves the platform in a worker thread before each new client's first request; under xdist +
   coverage that wall-clock hop outlasted ManualClock deadlines (hanging-first-request tests flaked/hung 60 s), so the
   va_llm conftest autouse `inline_sdk_platform_lookup` runs it inline. `Hanging.wait_started(n)` waits for arrivals.
+- 2026-11-01 (P03-T15a): Telnyx account bootstrap = `va_telnyx.bootstrap.bootstrap_account(client, name=, webhooks=)`
+  (names `platform_resource_name`/`org_resource_name`, URLs `webhook_urls(host, account_id=None)`; rules: specs/06 §12
+  Decision P03-T15a); the script `scripts/telnyx_bootstrap.py` only wires settings/HTTP/Redis and `update_env_file`.
+  Settings subclasses declare `service_name: ClassVar[str]` (a plain field shadows the base ClassVar and pydantic
+  warns, an error here). Scripts that call `asyncio.run` are tested end to end with `await asyncio.to_thread(main,
+  argv)` while `running_sims(state, ports={"telnyx": 0})` serves FakeTelnyx in the test loop.
