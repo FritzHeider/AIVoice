@@ -2083,3 +2083,126 @@ scan, validation rendering/cap/clip, repair message order and JSON-mode switch, 
 log fields (no output content) all match. Tests cover valid/repaired/invalid, JSON-mode paths, org-provider modes,
 unavailability during both requests, the refused names and dialogue, the drift and call-site scanner, and FakeLLM contracts.
 The double provider lookup (mode, then complete) hits the OrgProviderStore TTL cache. Approved.
+
+## Plan P03-T14b (Planner, 2026-11-01)
+Embeddings client for the platform provider (specs/10 §10, §11; specs/24 `kb_embedding_tokens`). Standalone class,
+not part of `LlmGateway` (no call-type policy, no breaker, no org providers: §10 says "on the platform provider").
+
+### Spec decision to write: specs/10 §10 `> Decision (2026-11-01): embeddings client (P03-T14b).` Numbered rules:
+1. `va_llm.Embeddings(provider, http, *, redis, clock, metrics, model, dimensions=1024, recorder=None, costs=None,
+   tracer_provider=None, concurrency=4)`; services pass `registry.platform` and `LlmSettings.embeddings_model` /
+   `embeddings_dimensions` (new settings fields mirroring the existing specs/02 §6 `EMBEDDINGS_MODEL` /
+   `EMBEDDINGS_DIMENSIONS` rows; defaults `Qwen/Qwen3-Embedding-8B` / 1024; no new env rows). One instance per
+   process (the 4-batch semaphore is per instance). It builds its own `AsyncOpenAI` via `clients.openai_client`.
+2. `embed(texts, *, org_id, document_id=None) -> list[list[float]]` (order preserved): empty list → `[]` with no
+   request; an empty string → `ValueError` (vendors 400 on it). Inputs split into batches of 64, at most
+   `concurrency` (4) batches in flight (asyncio.Semaphore + TaskGroup); a failed batch cancels the rest and its error
+   propagates (completed batches stay metered).
+3. Truncation (no tiktoken, DEC-006): an input above 8 000 estimated tokens (`metering.estimate_tokens`, 4 UTF-8
+   bytes/token) is cut to its first 32 000 UTF-8 bytes on a character boundary
+   (`text.encode()[:32000].decode(errors="ignore")`); logged once per batch `llm.embedding_truncated` (count only,
+   never text).
+4. Request: `client.embeddings.with_raw_response.create(model, input=[...], dimensions, encoding_format="float")`
+   with the SDK backstop timeout; deadline 30 s per attempt raced on the injected clock (`deadline.within`). Body
+   parsed by our own `parse_embeddings(body, expected=n, dimensions=d)` (new in `wire.py` or a new
+   `embedding_wire.py`): `data` list of n objects with distinct `index` 0..n-1 (sorted by index), each `embedding`
+   a list of numbers of length == dimensions with a non-zero norm, optional `usage.prompt_tokens` (int ≥ 0);
+   anything else → `LlmProtocolError`. Vectors L2-normalised (pure Python `math.fsum`/`sqrt`, float64).
+5. Retries: on 429, 500/502/503/504, connect errors, and timeouts, up to 3 retries after 1 s, 4 s, 10 s (the three
+   listed waits; 4 attempts at most — record that "3 attempts" is read as 3 retries). A 429's wait is
+   `max(delay, Retry-After)` capped at 30 s. Other 4xx and protocol errors are not retried. Exhaustion →
+   `LlmUnavailableError("exhausted", provider_id, model, last=<final error>)` (reuse errors.py, `map_openai_error`).
+6. `embed_query(text, *, org_id) -> list[float]`: Redis key `emb:q:{sha256(f"{model}|{dimensions}|{text}")}`
+   (hex), value orjson list of floats, `SET ... EX 86400`. Hit with a valid vector (right length, numbers) → returned
+   with no request; malformed cached value → treated as a miss and overwritten. Redis errors on GET/SET (any
+   `redis.RedisError` / `OSError`) → log `llm.embedding_cache_unavailable` and continue without the cache (fail
+   open). Add `emb:q:{hash}` to specs/03 Redis key table if absent (check §11 Redis keys; add row: string, 24 h).
+7. Metering: each successful batch → `EmbeddingUsageRecord(org_id, document_id, purpose: "ingest"|"query", model,
+   prompt_tokens, estimated, cost_micros)` to `EmbeddingUsageRecorder.record` (Protocol, new in `metering.py`);
+   `cost_micros = costs.cost_micros(model, prompt_tokens, 0)[0]`; missing usage → sum of `estimate_tokens(input)`
+   flagged estimated; recorder failure logged `llm.usage_record_failed` and swallowed. Billing maps it to
+   `kb_embedding_tokens` (quantity = prompt_tokens) later. `embed` purpose `ingest`, `embed_query` purpose `query`.
+8. Metrics (specs/27 §3.6 rows + Decision sentence): `va_llm_embedding_requests_total{model, outcome}` (outcome =
+   AttemptOutcome minus breaker_open, one per attempt), `va_llm_embedding_duration_ms{purpose}` histogram LAT_MS (one
+   per embed/embed_query call that sent requests), `va_llm_embedding_cache_total{result}` (hit/miss/error). Tokens
+   also go to §3.3 `va_llm_tokens_total{direction="in"}` and failed attempts to `va_llm_errors_total` (catalog,
+   like `complete`). Spans: one `llm.embeddings` CLIENT span per batch (attributes `llm.provider`, `llm.model`,
+   `llm.inputs`, `llm.attempts`, `llm.tokens_in`, `http.status_code`; ERROR status + exception on failure).
+
+### Files
+- `packages/va_llm/src/va_llm/embeddings.py` (new): `Embeddings`, `EMBED_BATCH_SIZE=64`, `MAX_INPUT_BYTES=32_000`,
+  `RETRY_DELAYS_S=(1.0, 4.0, 10.0)`, `ATTEMPT_TIMEOUT_S=30.0`, `query_cache_key(model, dims, text)`, `truncate(text)`.
+  Keep radon ≤ B; split cache into `embedding_cache.py` (`QueryCache(redis, metrics)` get/put) and wire parsing into
+  `embedding_wire.py` (pure: `parse_embeddings`, `l2_normalize`) if embeddings.py grows past ~250 lines.
+- `metering.py`: `EmbeddingUsageRecord`, `EmbeddingUsageRecorder`, `EmbeddingPurpose` Literal.
+- `metrics.py`: three new metrics + methods `embedding_attempt(model, outcome)`, `embedding_duration(purpose, ms)`,
+  `embedding_cache(result)`; reuse `tokens`/`error`.
+- `targets.attempt_outcome` reused for outcomes; `sdk_backstop` reused.
+- `settings.py`: `embeddings_model`, `embeddings_dimensions` fields.
+- `__init__.py`: export `Embeddings`, `EmbeddingUsageRecord`, `EmbeddingUsageRecorder`.
+- `pyproject.toml`: add `redis>=…` (match the version constraint other packages use) if va_common does not already
+  provide it transitively — declare it explicitly since va_llm imports `redis`.
+- specs/10 §10 Decision; specs/27 §3.6 rows + Decision; specs/03 Redis key row if missing; AGENTS.md bullet.
+
+### Tests (packages/va_llm/tests/; helpers in tests/support/llm_client_helpers.py: `embeddings_rig(...)` = Embeddings on
+ManualClock + fakeredis + fresh registry + RecordingRecorder + memory spans, `embedding_body(n, dims, usage=)`)
+- `test_embedding_wire.py` (pure): parse ok (out-of-order indexes sorted), wrong count/duplicate index/wrong length/
+  non-number/zero vector/missing data/bad usage → LlmProtocolError; normalisation gives unit norm; truncate keeps
+  ≤ 32 000 bytes on a char boundary (multi-byte text), short text untouched; cache key = sha256 of `model|dims|text`.
+- `test_embeddings.py` (respx `llm_api`): 130 texts → 3 requests of 64/64/2 with `dimensions: 1024`,
+  `encoding_format: "float"`, model, order preserved; ≤ 4 in flight (10 batches with hanging responses: exactly 4
+  requests seen before releasing one); empty list → no request; empty string → ValueError; truncation sends the cut
+  text; retries: 503,503,200 → success after waits 1 s, 4 s (ManualClock wait_for_sleep/run_for); 4 × 500 →
+  LlmUnavailableError with waits 1/4/10; 429 Retry-After 7 → waits 7; 400 → no retry; timeout (hang 30 s) retried;
+  wrong-length vector → LlmProtocolError-caused unavailability without retry; a failing batch cancels in-flight
+  siblings; usage records per batch (purpose, document_id, tokens, cost from COSTS, estimated when usage absent);
+  recorder failure swallowed; metrics (attempt outcomes, duration once, catalog tokens/errors); span attributes and
+  error status; API key never in errors/logs.
+- `test_embedding_cache.py`: miss → request + SET with TTL 86400 (fakeredis `ttl`), second call hit → no request,
+  metric hit/miss; different model/dims/text → different keys; corrupt cached value → miss and overwrite; Redis
+  down (a client whose commands raise ConnectionError) → still returns vectors, `error` metric, log event.
+- `test_embeddings_contract_fakellm.py` (sim over ASGI, `llm_state()`/realtime): 70 texts → 1024-d unit vectors,
+  deterministic (same text → identical vector across calls/batches), sim records 2 embedding requests with
+  dimensions 1024; armed `rate_limit` fault (endpoint embeddings) once → retried and succeeds; `server_error` faults
+  exhausting → LlmUnavailableError; usage tokens equal the sim's `prompt_tokens`.
+- `test_metrics_spans.py` keeps passing (registered rows == spec rows).
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones; reuse helpers rather than copying retry code from gateway), `uvx radon cc -s -a packages/va_llm/src`,
+pip-audit + `corepack pnpm audit`. va_llm coverage stays ≥ 95 % (currently 100 %).
+
+### Risks
+- respx records only completed calls: assert in-flight counts with the `Hanging` side effect's `requests`.
+- ManualClock: a retry wait starts after the respx answer; `await clock.wait_for_sleep(1.0)` before `run_for`.
+- TaskGroup cancellation of sibling batches must not leak hanging respx tasks (assert `cancelled`).
+- jscpd may flag similarity with gateway `_attempt`; factor shared bits (`targets.attempt_outcome`, `map_openai_error`).
+- fakeredis TTL check needs the real `redis.asyncio` API (`ttl`), available in fakeredis.
+
+## Build P03-T14b (Builder, 2026-11-01)
+Implemented per plan. New `va_llm.embeddings.Embeddings` (64-batches, semaphore of 4 + TaskGroup, first failure
+propagates and cancels siblings, 30 s per-attempt deadline via `within`, retries 1/4/10 s on 429/5xx/connect/timeout,
+429 = max(delay, Retry-After) capped 30 s, everything else → LlmUnavailableError("exhausted", last)), pure
+`embedding_wire` (parse_embeddings → LlmProtocolError, l2_normalize, truncate_input 32 000 bytes, query_cache_key
+`emb:q:{<hex>}` hash tag), `embedding_cache.QueryCache` (24 h, malformed = miss, Redis errors fail open). Metering:
+`EmbeddingUsageRecord`/`EmbeddingUsageRecorder` in metering.py. Metrics: three new §3.6 rows. Settings: embeddings_model,
+embeddings_dimensions. redis dep added to va_llm.
+Deviations: truncation is logged once per call (not per batch). Spec conflict: specs/03 §11 `kbq:{sha256}` 1 h and
+specs/14 §7 vs specs/10 §10 `emb:q` 24 h → followed specs/10 + plan; replaced the specs/03 row, Decisions in 03/14
+(14 also notes retries 1/4/10 instead of 1/2/4/8).
+Pre-existing flake fixed: va_llm hanging-first-request timeout tests hung under `-n auto --cov` (reproduced at HEAD with
+`pytest packages/va_llm packages/va_sim/tests/llm -n auto --cov`, failed in 6 of 7 runs; my new files moved tests across workers and
+make test hit it twice). Cause: openai SDK `asyncify(get_platform)` thread hop before a client's first request vs
+ManualClock deadlines. Fix: autouse `inline_sdk_platform_lookup` in va_llm conftest; then 3/3 green on that selection.
+Gates: fmt 0, lint 0, typecheck 0, placeholders 0 findings, make test 6323 passed twice (TOTAL 98 %, va_llm 100 %),
+spec refs 0, jscpd 0 clones, radon avg A (max B), pip-audit no known vulns, pnpm audit high clean (3 moderate
+pre-existing).
+
+## Review P03-T14b (Reviewer, 2026-11-01)
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, make test 6323 passed (TOTAL 98.41 %, va_llm 100 %).
+Read embeddings/embedding_wire/embedding_cache against specs/10 §10 + the new 8-rule Decision, specs/27 §3.6 rows and
+Decision, and the specs/03 §11 / specs/14 §6-§7 conflict resolution (kbq 1 h → emb:q 24 h; no code referenced kbq).
+Batching, semaphore + TaskGroup cancellation, retry classification (429 Retry-After cap, 5xx set, timeout/connect),
+own body parsing with dimension/index/zero-norm checks, normalisation, truncation on char boundary, fail-open cache,
+metering (estimated flag, swallowed recorder failure), metrics and spans all match; tests cover each with ManualClock
+(no wall sleeps). The conftest `asyncify` inline patch is test-only and justified. Approved.

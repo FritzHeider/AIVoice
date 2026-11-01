@@ -903,3 +903,13 @@ Grafana 3001
   `TOOL_NAMES`, and FakeLLM's `STRUCTURED_TOOL_NAMES` together. The registry is process-global: va_llm tests reset it
   with the autouse `fresh_structured_registry` fixture. Pydantic puts a model's docstring into the schema
   `description`, which is sent to the model, so write schema docstrings as instructions (or none).
+- 2026-11-01 (P03-T14b): embeddings = `va_llm.Embeddings(provider, http, *, redis, clock, metrics, model, dimensions)`
+  (rules: specs/10 §10 Decision P03-T14b), separate from `LlmGateway` (no policy/breaker/org providers); pure parsing,
+  normalisation, truncation and the `emb:q:{<sha256>}` key in `embedding_wire`, the fail-open Redis query cache in
+  `embedding_cache.QueryCache`. Usage goes to an `EmbeddingUsageRecorder` (`EmbeddingUsageRecord`, purpose
+  `ingest|query`). Tests: `llm_client_helpers.embeddings_rig()` (ManualClock + fakeredis + catalog metrics) via the
+  `erig` fixture, `embedding_body(n, dims)`, `EMBEDDINGS` respx URL, `sim_embeddings(state)` for FakeLLM contracts
+  (`GET /sim/llm/embeddings` is the sim's request log). Shared-server fakeredis: two `FakeAsyncRedis(server=s)`.
+  The openai SDK resolves the platform in a worker thread before each new client's first request; under xdist +
+  coverage that wall-clock hop outlasted ManualClock deadlines (hanging-first-request tests flaked/hung 60 s), so the
+  va_llm conftest autouse `inline_sdk_platform_lookup` runs it inline. `Hanging.wait_started(n)` waits for arrivals.

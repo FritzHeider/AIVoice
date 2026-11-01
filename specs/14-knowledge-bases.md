@@ -108,9 +108,15 @@ KB-level `chunk_size_tokens`/`chunk_overlap_tokens` override defaults (bounds 10
 L2-normalized before storage. KB records model + dimensions; retrieval refuses (500 `KB_ERROR`) if they differ from
 current settings (re-embed job `POST /internal/kb/{id}/reembed` exists for migrations).
 
+> Decision (2026-11-01): the client is `va_llm.Embeddings.embed(texts, org_id=, document_id=)` (P03-T14b), built
+> with `EMBEDDINGS_MODEL`/`EMBEDDINGS_DIMENSIONS`. Its retries follow specs/10 §10: 3 retries after 1 s, 4 s, and
+> 10 s, not the 1/2/4/8 s listed above.
+
 ## 7. Retrieval (`retrieve(org_id, kb_ids, query, top_k=5)`)
 
-1. Embed query (cache Redis `kbq:{sha256(model+query)}` 1 h).
+1. Embed query with `va_llm.Embeddings.embed_query` (cache Redis `emb:q:{sha256(model|dims|text)}` 24 h).
+   > Decision (2026-11-01): the query cache is the specs/10 §10 key and TTL; the earlier `kbq:{sha256(model+query)}`
+   > 1 h key is gone (specs/03 §11 updated, P03-T14b).
 2. SQL (tenant session):
 ```sql
 WITH vec AS (

@@ -443,6 +443,35 @@ a rule fires when `triggered && confidence ≥ 0.75`.
 - Query embeddings are cached in Redis `emb:q:{sha256(model|dims|text)}` for 24 h.
 - Metering: `kb_embedding_tokens` usage (quantity = `usage.prompt_tokens`).
 
+> Decision (2026-11-01): embeddings client (P03-T14b).
+> 1. `va_llm.Embeddings(provider, http, *, redis, clock, metrics, model, dimensions=1024, recorder=None, costs=None,
+>    tracer_provider=None, concurrency=4)`; services pass `registry.platform` and `LlmSettings.embeddings_model` /
+>    `embeddings_dimensions` (the specs/02 §6 `EMBEDDINGS_MODEL`/`EMBEDDINGS_DIMENSIONS` rows). It is separate from
+>    `LlmGateway`: no call-type policy, no breaker, no org providers. One instance per process (the in-flight limit
+>    is per instance).
+> 2. `embed(texts, *, org_id, document_id=None)` returns one vector per text in order; `[]` sends nothing; an empty
+>    text raises `ValueError` (providers reject it). Inputs go in batches of 64, at most `concurrency` batches in
+>    flight; when a batch fails the others are cancelled and its error propagates (finished batches stay metered).
+> 3. Truncation without tiktoken (DEC-006): an input over 8 000 estimated tokens (4 UTF-8 bytes per token) is cut
+>    to its first 32 000 UTF-8 bytes on a character boundary. Each call that cut inputs logs one
+>    `llm.embedding_truncated` (counts only, never text).
+> 4. Request `{model, input, dimensions, encoding_format: "float"}`, a 30 s deadline per attempt on the injected
+>    clock. The body is parsed by `va_llm.embedding_wire.parse_embeddings`: exactly one item per input, distinct
+>    `index` 0..n-1, each `embedding` `dimensions` finite numbers with a non-zero norm, optional
+>    `usage.prompt_tokens` (int ≥ 0). Anything else is an `LlmProtocolError`. Vectors are L2-normalised in float64.
+> 5. "3 attempts, 1 s/4 s/10 s" means 3 retries after those waits (4 attempts at most) on 429, 500/502/503/504,
+>    connect errors, and timeouts. A 429 waits `max(delay, Retry-After)`, capped at 30 s. Other 4xx and protocol
+>    errors are not retried. Every failure ends as `LlmUnavailableError("exhausted", last=<final error>)`.
+> 6. `embed_query(text, *, org_id)` reads `emb:q:{sha256(model|dims|text)}` (key on the untruncated text) and writes
+>    the unit vector as an orjson list with `SET ... EX 86400`. A malformed cached value is a miss and is
+>    overwritten. Redis errors fail open, logged `llm.embedding_cache_unavailable`.
+> 7. Metering: each successful batch hands an `EmbeddingUsageRecord(org_id, document_id, purpose ingest|query,
+>    provider_id, model, prompt_tokens, estimated, cost_micros)` to the `EmbeddingUsageRecorder`. Without `usage`,
+>    tokens are estimated per input and flagged. The cost uses the model's input price; a recorder failure is logged
+>    `llm.usage_record_failed` and swallowed. Billing turns the record into `kb_embedding_tokens` with quantity
+>    `prompt_tokens` (dedupe `kbemb:{document_id}`, specs/24).
+> 8. Metrics and spans: specs/27 §3.6 Decision (P03-T14b).
+
 ## 11. Metering
 
 Every completion records `llm_tokens_in` and `llm_tokens_out` usage events (price 0 for calls — included in

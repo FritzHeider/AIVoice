@@ -204,7 +204,7 @@
     P03-T06b; tests may import both, production code never does); call-site test: every literal
     `function_name=` passed to `call_structured` in apps/ and packages/ is registered.
 
-- [ ] P03-T14b `va_llm` embeddings client
+- [x] P03-T14b `va_llm` embeddings client — `va_llm.Embeddings` (64-batches, 4 in flight, 1/4/10 s retries, 30 s deadline, truncation, 1024-d validation + L2 norm), `embedding_wire`, fail-open `embedding_cache` (`emb:q:{sha256}` 24 h), `EmbeddingUsageRecord`, three §3.6 metrics + `llm.embeddings` spans; specs/10 §10, 27 §3.6, 03 §11, 14 Decisions; 6323 passed, va_llm 100 %, lint/typecheck/placeholders 0
   - Spec refs: specs/10-llm-gateway.md §10 (embeddings), §11 (metering); specs/24-billing-and-limits.md (`kb_embedding_tokens`)
   - Depends on: P03-T14a
   - Deliverables: `Embeddings.embed(texts)` batching 64 with `dimensions=1024`, 4 batches in flight, retries on

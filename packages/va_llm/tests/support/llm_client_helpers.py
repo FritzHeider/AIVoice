@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+import fakeredis
 import httpx
 import orjson
 from clock_helpers import ManualClock
@@ -30,6 +31,8 @@ from va_llm import (
     ChatMessage,
     DialogueRequest,
     DialogueStream,
+    Embeddings,
+    EmbeddingUsageRecord,
     LlmGateway,
     LlmMetrics,
     LlmProvider,
@@ -45,13 +48,17 @@ from va_sim.state import SimState
 __all__ = [
     "BASE_URL",
     "COMPLETIONS",
+    "EMBEDDINGS",
+    "EMBED_MODEL",
     "ORG_BASE_URL",
     "ORG_COMPLETIONS",
     "PLATFORM_KEY",
     "SIM_BASE_URL",
     "BodyPart",
+    "EmbeddingsRig",
     "GatewayRig",
     "Hanging",
+    "RecordingEmbeddingUsage",
     "RecordingUsage",
     "StaticOrgProviders",
     "StreamingBody",
@@ -61,6 +68,8 @@ __all__ = [
     "completion_body",
     "content_stream",
     "dialogue",
+    "embedding_body",
+    "embeddings_rig",
     "gateway_rig",
     "hanging",
     "make_provider",
@@ -70,6 +79,7 @@ __all__ = [
     "sent_json",
     "served_gateway",
     "served_requests",
+    "sim_embeddings",
     "sim_gateway",
     "sse",
     "streamed",
@@ -78,6 +88,8 @@ __all__ = [
 
 BASE_URL: Final = "http://llm.test/v1"
 COMPLETIONS: Final = f"{BASE_URL}/chat/completions"
+EMBEDDINGS: Final = f"{BASE_URL}/embeddings"
+EMBED_MODEL: Final = "emb-model"
 ORG_BASE_URL: Final = "http://org-llm.test/v1"
 ORG_COMPLETIONS: Final = f"{ORG_BASE_URL}/chat/completions"
 PLATFORM_KEY: Final = "platform-secret-key"
@@ -89,7 +101,11 @@ MODELS: Final = {
     "analysis": "ana-model",
     "fallback": "fb-model",
 }
-COSTS: Final = {"dlg-model": ModelCost(100, 400), "fb-model": ModelCost(1000, 3000)}
+COSTS: Final = {
+    "dlg-model": ModelCost(100, 400),
+    "fb-model": ModelCost(1000, 3000),
+    EMBED_MODEL: ModelCost(30, 0),
+}
 
 
 def make_provider(
@@ -274,13 +290,21 @@ class Hanging:
     response: httpx.Response = field(default_factory=lambda: httpx.Response(200, json=completion_body()))
     requests: list[httpx.Request] = field(default_factory=list)
     cancelled: int = 0
+    arrived: asyncio.Event = field(default_factory=asyncio.Event)
 
     @property
     def started(self) -> int:
         return len(self.requests)
 
+    async def wait_started(self, count: int) -> None:
+        """Wait until ``count`` requests have arrived (bound it with ``asyncio.timeout``)."""
+        while self.started < count:
+            self.arrived.clear()
+            await self.arrived.wait()
+
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        self.arrived.set()
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -311,20 +335,27 @@ def scripted(*steps: Step) -> Callable[[httpx.Request], Awaitable[httpx.Response
     return side_effect
 
 
-@dataclass
-class GatewayRig:
-    gateway: LlmGateway
-    clock: ManualClock
+class _Observed:
+    """``metric`` and ``spans`` readers of a rig's registry and span exporter."""
+
     registry: CollectorRegistry
     exporter: InMemorySpanExporter
-    usage: RecordingUsage
-    org_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
     def metric(self, name: str, **labels: str) -> float:
         return self.registry.get_sample_value(name, labels) or 0.0
 
     def spans(self) -> list[ReadableSpan]:
         return list(self.exporter.get_finished_spans())
+
+
+@dataclass
+class GatewayRig(_Observed):
+    gateway: LlmGateway
+    clock: ManualClock
+    registry: CollectorRegistry
+    exporter: InMemorySpanExporter
+    usage: RecordingUsage
+    org_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
 
 @asynccontextmanager
@@ -387,3 +418,97 @@ async def served_gateway(state: SimState) -> AsyncIterator[tuple[GatewayRig, htt
             httpx.AsyncClient(base_url=urls["llm"]) as control,
         ):
             yield rig, control
+
+
+def embedding_body(
+    count: int, dimensions: int = 4, *, usage: int | None = 7, value: float = 2.0
+) -> dict[str, Any]:
+    """An embeddings body of ``count`` vectors; vector ``i`` is ``[value + i, 0, ..., 0]``."""
+    data = [
+        {"object": "embedding", "index": index, "embedding": [value + index] + [0.0] * (dimensions - 1)}
+        for index in range(count)
+    ]
+    body: dict[str, Any] = {"object": "list", "data": data, "model": EMBED_MODEL}
+    if usage is not None:
+        body["usage"] = {"prompt_tokens": usage, "total_tokens": usage}
+    return body
+
+
+@dataclass
+class RecordingEmbeddingUsage:
+    """An embedding usage recorder that keeps every record (or raises ``failure`` when set)."""
+
+    records: list[EmbeddingUsageRecord] = field(default_factory=list)
+    failure: Exception | None = None
+
+    async def record(self, record: EmbeddingUsageRecord) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.records.append(record)
+
+
+@dataclass
+class EmbeddingsRig(_Observed):
+    embeddings: Embeddings
+    clock: ManualClock
+    registry: CollectorRegistry
+    exporter: InMemorySpanExporter
+    usage: RecordingEmbeddingUsage
+    redis: fakeredis.FakeAsyncRedis
+    org_id: uuid.UUID = field(default_factory=uuid.uuid4)
+
+
+@asynccontextmanager
+async def embeddings_rig(  # noqa: PLR0913 - every knob is keyword-only with a default
+    *,
+    provider: LlmProvider | None = None,
+    model: str = EMBED_MODEL,
+    dimensions: int = 4,
+    redis: fakeredis.FakeAsyncRedis | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+    costs: Mapping[str, ModelCost] = COSTS,
+) -> AsyncIterator[EmbeddingsRig]:
+    """An :class:`Embeddings` on a manual clock with fakeredis, a fresh registry (media-worker catalog
+    included), memory spans, and a recording usage recorder; the default transport is intercepted by respx."""
+    registry = new_registry(process_collectors=False)
+    tracer_provider, exporter = memory_provider()
+    clock = ManualClock()
+    usage = RecordingEmbeddingUsage()
+    cache = redis if redis is not None else fakeredis.FakeAsyncRedis()
+    async with httpx.AsyncClient(transport=transport) as http:
+        embeddings = Embeddings(
+            provider or make_provider(),
+            http,
+            redis=cache,
+            clock=clock,
+            metrics=LlmMetrics(registry, build_metrics(Service.MEDIA_WORKER, registry)),
+            model=model,
+            dimensions=dimensions,
+            recorder=usage,
+            costs=CostTable(costs),
+            tracer_provider=tracer_provider,
+        )
+        yield EmbeddingsRig(embeddings, clock, registry, exporter, usage, cache)
+    await cache.aclose()
+
+
+@asynccontextmanager
+async def sim_embeddings(state: SimState) -> AsyncIterator[tuple[EmbeddingsRig, httpx.AsyncClient]]:
+    """An :class:`Embeddings` on FakeLLM in-process (the simulator's embeddings model, 1024 dimensions) and a
+    client of the same app for the ``/sim/llm`` control API."""
+    provider = make_provider(base_url=SIM_BASE_URL, key=SIM_KEY)
+    transport = httpx.ASGITransport(app=Starlette(routes=simulator_routes("llm", state)))
+    try:
+        async with (
+            embeddings_rig(
+                provider=provider,
+                model=DEFAULT_LLM_MODELS[3],
+                dimensions=1024,
+                transport=transport,
+                costs={},
+            ) as rig,
+            httpx.AsyncClient(transport=transport, base_url="http://sim") as control,
+        ):
+            yield rig, control
+    finally:
+        await state.aclose()

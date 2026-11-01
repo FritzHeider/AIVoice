@@ -3,6 +3,7 @@
 from va_llm.breaker import BreakerBoard, BreakerState, CircuitBreaker
 from va_llm.clients import CALL_ID_HEADER, LlmClients
 from va_llm.dialogue import DialogueRequest, DialogueStream
+from va_llm.embeddings import Embeddings
 from va_llm.errors import (
     LlmConnectionError,
     LlmError,
@@ -15,7 +16,7 @@ from va_llm.errors import (
     StructuredOutputError,
 )
 from va_llm.gateway import LlmGateway
-from va_llm.metering import UsageRecord, UsageRecorder
+from va_llm.metering import EmbeddingUsageRecord, EmbeddingUsageRecorder, UsageRecord, UsageRecorder
 from va_llm.metrics import LlmMetrics
 from va_llm.models import ChatMessage, Completion, ForceTool, TokenUsage, ToolCall, ToolChoice, ToolDef
 from va_llm.org_providers import OrgProviderStore, encrypt_org_api_key
@@ -41,6 +42,9 @@ __all__ = [
     "CostTable",
     "DialogueRequest",
     "DialogueStream",
+    "EmbeddingUsageRecord",
+    "EmbeddingUsageRecorder",
+    "Embeddings",
     "ForceTool",
     "LlmClients",
     "LlmConnectionError",

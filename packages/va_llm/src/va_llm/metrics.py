@@ -18,10 +18,15 @@ from va_llm.errors import ErrorKind
 __all__ = [
     "BREAKER_METRIC",
     "DURATION_METRIC",
+    "EMBEDDING_CACHE_METRIC",
+    "EMBEDDING_DURATION_METRIC",
+    "EMBEDDING_REQUESTS_METRIC",
     "REQUESTS_METRIC",
     "SPECULATION_METRIC",
     "STRUCTURED_METRIC",
     "AttemptOutcome",
+    "EmbeddingCacheResult",
+    "EmbeddingPurpose",
     "LlmMetrics",
     "SpeculationOutcome",
     "StructuredOutcome",
@@ -42,11 +47,18 @@ type SpeculationOutcome = Literal["committed", "discarded"]
 
 type StructuredOutcome = Literal["valid", "repaired", "invalid"]
 
+type EmbeddingPurpose = Literal["ingest", "query"]
+
+type EmbeddingCacheResult = Literal["hit", "miss", "error"]
+
 REQUESTS_METRIC: Final = "va_llm_requests_total"
 DURATION_METRIC: Final = "va_llm_request_duration_ms"
 BREAKER_METRIC: Final = "va_llm_breaker_state"
 SPECULATION_METRIC: Final = "va_llm_speculation_total"
 STRUCTURED_METRIC: Final = "va_llm_structured_total"
+EMBEDDING_REQUESTS_METRIC: Final = "va_llm_embedding_requests_total"
+EMBEDDING_DURATION_METRIC: Final = "va_llm_embedding_duration_ms"
+EMBEDDING_CACHE_METRIC: Final = "va_llm_embedding_cache_total"
 
 
 class LlmMetrics:
@@ -84,6 +96,25 @@ class LlmMetrics:
             labelnames=("function", "outcome"),
             registry=registry,
         )
+        self.embedding_requests = Counter(
+            EMBEDDING_REQUESTS_METRIC,
+            "Embeddings requests (one per attempt) by outcome",
+            labelnames=("model", "outcome"),
+            registry=registry,
+        )
+        self.embedding_durations = Histogram(
+            EMBEDDING_DURATION_METRIC,
+            "Embeddings call duration in milliseconds, every batch and retry included",
+            labelnames=("purpose",),
+            buckets=LAT_MS,
+            registry=registry,
+        )
+        self.embedding_cache_results = Counter(
+            EMBEDDING_CACHE_METRIC,
+            "Query embedding cache lookups by result",
+            labelnames=("result",),
+            registry=registry,
+        )
         self._tokens = catalog.counter("va_llm_tokens_total") if catalog is not None else None
         self._errors = catalog.counter("va_llm_errors_total") if catalog is not None else None
         self._ttft = catalog.histogram("va_llm_ttft_ms") if catalog is not None else None
@@ -115,3 +146,12 @@ class LlmMetrics:
 
     def structured(self, function: str, outcome: StructuredOutcome) -> None:
         self.structured_outputs.labels(function=function, outcome=outcome).inc()
+
+    def embedding_attempt(self, model: str, outcome: AttemptOutcome) -> None:
+        self.embedding_requests.labels(model=model, outcome=outcome).inc()
+
+    def embedding_duration(self, purpose: EmbeddingPurpose, ms: float) -> None:
+        self.embedding_durations.labels(purpose=purpose).observe(ms)
+
+    def embedding_cache(self, result: EmbeddingCacheResult) -> None:
+        self.embedding_cache_results.labels(result=result).inc()

@@ -1431,6 +1431,10 @@ Redis Cluster compatibility: in every key below, the segment written `{id}` / `{
 Redis hash tag in the implementation — the identifier is wrapped in braces (`call:{0193c5d2-…}:ctx`) so all keys of one
 call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va_common.redis.keys` builds every key.
 
+> Decision (2026-11-01): the query embedding cache key is `emb:q:{sha256(model|dims|text)}` (24 h, specs/10 §10).
+> It replaces the old `kbq:{sha256}` row (1 h), which conflicted with specs/10; specs/14 §7 points at it too. The
+> digest is the hash tag (`emb:q:{<hex>}`); `va_llm.embedding_wire.query_cache_key` builds it (P03-T14b).
+
 | Key / channel | Type | TTL | Purpose |
 |---|---|---|---|
 | `call:{id}:ctx` | string (JSON CallContext) | max_duration + 1 h | Prefetched context for media worker |
@@ -1470,7 +1474,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:engine` | string (JSON EngineState) | 2 h | Engine state snapshot for recovery and inspection |
 | `call:{id}:kbcache` | hash | 2 h | Per-call KB retrieval cache |
 | `call:{id}:secure:{name}` | string (encrypted) | 15 min | Secure DTMF capture values (never sent to the LLM) |
-| `kbq:{sha256}` | string (vector) | 1 h | Query embedding cache |
+| `emb:q:{sha256}` | string (orjson list of floats, the unit vector) | 24 h | Query embedding cache keyed by the sha256 of model, dimensions, and text (specs/10 §10) |
 | `pathway_chat:{chat_id}` | string JSON | 24 h | Pathway test chat sessions |
 | `pathway:{id}:v:{env}` | string JSON | 10 min | Resolved pathway graph cache (invalidated on publish/promote) |
 | `numsearch:{sha256}` | string JSON | 60 s | Number search result cache |

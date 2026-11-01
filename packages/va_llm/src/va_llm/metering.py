@@ -13,12 +13,20 @@ from dataclasses import dataclass
 from typing import Final, Protocol
 
 from va_common.logging import get_logger
-from va_llm.metrics import LlmMetrics
+from va_llm.metrics import EmbeddingPurpose, LlmMetrics
 from va_llm.models import ChatMessage, TokenUsage, ToolCall
 from va_llm.policy import CallType
 from va_llm.pricing import CostTable
 
-__all__ = ["Meter", "UsageRecord", "UsageRecorder", "estimate_tokens", "estimate_usage"]
+__all__ = [
+    "EmbeddingUsageRecord",
+    "EmbeddingUsageRecorder",
+    "Meter",
+    "UsageRecord",
+    "UsageRecorder",
+    "estimate_tokens",
+    "estimate_usage",
+]
 
 _BYTES_PER_TOKEN: Final = 4
 _TOKENS_PER_MESSAGE: Final = 4
@@ -68,6 +76,27 @@ class UsageRecorder(Protocol):
     """Persists usage records (the billing phase writes ``usage_events``)."""
 
     async def record(self, record: UsageRecord) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingUsageRecord:
+    """One embeddings batch's input tokens and cost (micro-dollars), for the ``kb_embedding_tokens`` usage of
+    specs/10 §10 (quantity = ``prompt_tokens``; ``document_id`` is set for knowledge-base ingestion)."""
+
+    org_id: uuid.UUID
+    document_id: uuid.UUID | None
+    purpose: EmbeddingPurpose
+    provider_id: str
+    model: str
+    prompt_tokens: int
+    estimated: bool
+    cost_micros: int
+
+
+class EmbeddingUsageRecorder(Protocol):
+    """Persists embedding usage records (the billing phase writes ``usage_events``)."""
+
+    async def record(self, record: EmbeddingUsageRecord) -> None: ...
 
 
 class Meter:

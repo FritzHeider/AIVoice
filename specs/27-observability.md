@@ -200,6 +200,9 @@ named `LAT_MS`.
 | `va_llm_breaker_state` | gauge | `provider`, `model` (0 closed, 1 half-open, 2 open) |
 | `va_llm_speculation_total` | counter | `outcome` (committed/discarded) |
 | `va_llm_structured_total` | counter | `function`, `outcome` (valid/repaired/invalid) |
+| `va_llm_embedding_requests_total` | counter | `model`, `outcome` (ok/timeout/rate_limited/server_error/client_error/transport_error/parse_error) |
+| `va_llm_embedding_duration_ms` | histogram (LAT_MS) | `purpose` (ingest/query) |
+| `va_llm_embedding_cache_total` | counter | `result` (hit/miss/error) |
 
 > Decision (2026-11-01): vendor clients (`va_telnyx`, later `va_elevenlabs`/`va_llm`) run in several services, so
 > their metrics are not part of the per-service `CATALOG` of §3.1-§3.5: the library registers them in the registry
@@ -245,6 +248,17 @@ named `LAT_MS`.
 > (the repair output was valid), `invalid` (`StructuredOutputError`). A call whose request raises
 > `LlmUnavailableError` adds nothing here (its attempts are in `va_llm_requests_total`). Each request is one
 > `complete` call with its own `llm.<call_type>` span and duration observation.
+
+> Decision (2026-11-01): embeddings (`va_llm.Embeddings`, P03-T14b) count `va_llm_embedding_requests_total{model,
+> outcome}` once per attempt (the outcomes of `va_llm_requests_total` except `breaker_open`: embeddings have no
+> breaker) and observe `va_llm_embedding_duration_ms{purpose}` once per `embed` (`ingest`) or `embed_query`
+> (`query`) call that sent requests, every batch, retry, and wait included (a cache hit observes nothing).
+> `va_llm_embedding_cache_total{result}` counts each query-cache lookup: `hit`, `miss` (absent or malformed value),
+> `error` (Redis failed; the query is embedded anyway). With a catalog, each successful batch adds its input tokens to
+> §3.3 `va_llm_tokens_total{direction="in"}` and each failed attempt one `va_llm_errors_total{model, kind}`. Each batch
+> records one `llm.embeddings` CLIENT span with `llm.provider`, `llm.model`, `llm.purpose`, `llm.inputs`,
+> `llm.attempts`, `http.status_code` (last response, absent when nothing answered), and `llm.tokens_in` on success;
+> it ends with error status when the batch raises.
 
 ## 4. Per-call latency events
 

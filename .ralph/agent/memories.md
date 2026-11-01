@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793532827-54b2
+> va_llm P03-T14b: Embeddings (embeddings.py) separate from LlmGateway; pure embedding_wire (parse/normalize/truncate/emb:q:{sha} key), embedding_cache.QueryCache fail-open; tests embeddings_rig/erig fixture (fakeredis + ManualClock), embedding_body, sim_embeddings(state); specs/03 kbq: row replaced by emb:q 24h
+<!-- tags: llm, testing, embeddings | created: 2026-11-01 -->
+
 ### mem-1793529774-bd6f
 > va_llm P03-T14a: LlmGateway.call_structured -> structured_calls.run_structured (each request = one complete call); pure parts in va_llm.structured (TOOL_NAMES, tool_schema inlines $defs keyword-aware, validate_arguments -> InvalidOutputError); registry process-global -> va_llm conftest autouse fresh_structured_registry; drift test AST-scans call sites for literal function_name; pydantic docstrings become schema description sent to the model
 <!-- tags: llm, testing, structured | created: 2026-11-01 -->
@@ -217,6 +221,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793532827-46fa
+> va_llm tests: openai SDK resolves platform via asyncify(thread) before a new client's first request; under xdist+cov this outlasts ManualClock deadlines so the hanging first request is cancelled before respx and scripted answers shift (60 s timeout hangs). Fix: va_llm conftest autouse inline_sdk_platform_lookup patches openai._base_client.asyncify inline
+<!-- tags: llm, testing, clock | created: 2026-11-01 -->
 
 ### mem-1793518609-68fb
 > va_telnyx signature review: int(timestamp) on attacker headers can raise OverflowError/ValueError (huge digit strings); cap header length before int conversion so every failure is WebhookVerificationError

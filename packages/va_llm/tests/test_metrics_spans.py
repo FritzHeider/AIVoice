@@ -27,6 +27,9 @@ from va_llm import CallType, LlmMetrics, LlmUnavailableError
 from va_llm.metrics import (
     BREAKER_METRIC,
     DURATION_METRIC,
+    EMBEDDING_CACHE_METRIC,
+    EMBEDDING_DURATION_METRIC,
+    EMBEDDING_REQUESTS_METRIC,
     REQUESTS_METRIC,
     SPECULATION_METRIC,
     STRUCTURED_METRIC,
@@ -46,6 +49,9 @@ def test_registered_metrics_equal_the_spec_rows() -> None:
         metrics._breaker,
         metrics.speculation,
         metrics.structured_outputs,
+        metrics.embedding_requests,
+        metrics.embedding_durations,
+        metrics.embedding_cache_results,
     ):
         name = collector._name
         if isinstance(collector, Counter):
@@ -58,6 +64,9 @@ def test_registered_metrics_equal_the_spec_rows() -> None:
         BREAKER_METRIC,
         SPECULATION_METRIC,
         STRUCTURED_METRIC,
+        EMBEDDING_REQUESTS_METRIC,
+        EMBEDDING_DURATION_METRIC,
+        EMBEDDING_CACHE_METRIC,
     }
 
 
