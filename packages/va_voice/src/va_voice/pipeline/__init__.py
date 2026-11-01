@@ -8,6 +8,14 @@ from va_voice.pipeline.config import (
     SUPPORTED_FORMATS,
     PipelineConfig,
 )
+from va_voice.pipeline.dtmf import (
+    DTMF_DIGITS,
+    DTMF_SEQUENCE_TIMEOUT_MS,
+    DTMF_TERMINATOR,
+    DtmfBuffer,
+    DtmfSequence,
+    is_dtmf_digit,
+)
 from va_voice.pipeline.inbound import InboundPath
 from va_voice.pipeline.models import (
     AgentTurn,
@@ -41,6 +49,7 @@ from va_voice.pipeline.protocols import (
     TtsStream,
     VoiceActivityDetector,
 )
+from va_voice.pipeline.silence import NoInputAction, NoInputTimer
 from va_voice.pipeline.speaker import Interruption, Speaker
 from va_voice.pipeline.waits import wait_until_set, within
 
@@ -48,6 +57,9 @@ __all__ = [
     "DEFAULT_MAX_DURATION_MESSAGE",
     "DEFAULT_NO_INPUT_GOODBYE",
     "DEFAULT_NO_INPUT_PROMPT",
+    "DTMF_DIGITS",
+    "DTMF_SEQUENCE_TIMEOUT_MS",
+    "DTMF_TERMINATOR",
     "NULL_OBSERVER",
     "RESUME_PREFIX",
     "SUPPORTED_FORMATS",
@@ -59,6 +71,8 @@ __all__ = [
     "BrainOutput",
     "BrainTiming",
     "CallPipeline",
+    "DtmfBuffer",
+    "DtmfSequence",
     "EndCall",
     "EndReason",
     "InboundAudio",
@@ -67,6 +81,8 @@ __all__ = [
     "InterruptRecord",
     "Interruption",
     "MarkEcho",
+    "NoInputAction",
+    "NoInputTimer",
     "PipelineConfig",
     "PipelineObserver",
     "PipelineResult",
@@ -85,6 +101,7 @@ __all__ = [
     "UserTurn",
     "VoiceActivityDetector",
     "default_context_id",
+    "is_dtmf_digit",
     "merge_turns",
     "wait_until_set",
     "within",

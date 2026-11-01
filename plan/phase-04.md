@@ -78,7 +78,7 @@
   - Deliverables: barge-in in `CallPipeline` (InterruptPolicy on live VAD/partials while playing; transport.clear → outbound clear → TTS cancel → Brain stream cancel → truncate history; `Brain.on_interrupted`; interrupt events with reaction_ms; pre-audio new user turn cancels generation and concatenates text; false barge-in resume "Sorry — " once per turn)
   - Acceptance: in-memory harness tests: barge-in ordering recorded with timestamps and ≤ 120 ms reaction, backchannel ignored at level 2, interrupt blocked at level 0 (speech appended to next turn), level 4 any speech, non-interruptible SpeakStatic, truncated history ends with "—", pre-audio concat, false barge-in resume.
 
-- [ ] P04-T12c Pipeline silence policy and DTMF input
+- [x] P04-T12c Pipeline silence policy and DTMF input — no-input timer (NoInputTimer, reprompt via Brain/node/default, goodbye + no_input_timeout, reset on delivered turns), DtmfBuffer (2 000 ms / #), ignore_button_press, DTMF barge-in at level ≥ 1 without resume; 7413 passed, cov 98.54 %, lint/typecheck/placeholders pass
   - Spec refs: specs/07-media-pipeline.md §12, §13
   - Depends on: P04-T12b
   - Deliverables: no-input timer after playback completes (reprompts via `Brain.on_no_input`, goodbye + `no_input_timeout` end, reset on speech); DTMF buffering (2 000 ms / `#`), `ignore_button_press`, DTMF user turn `"[DTMF: 1 2 3 4]"` with `dtmf`, DTMF barge-in at levels ≥ 1

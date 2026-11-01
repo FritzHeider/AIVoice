@@ -1844,3 +1844,165 @@ APPROVED. Gates re-run: make lint/typecheck/placeholders pass (0 findings); make
 98.55 %. Finding 1: `_handle_action` runs the handler in its own task under `asyncio.shield`, `_settle_action` waits for
 orphans before the next reply, `_abandon_action` cancels at pipeline end; Decision block updated. Finding 2:
 `_close_attempt` no longer sets `_decided`; monitor + harness tests cover a segment spanning two lines.
+
+## Plan P04-T12c (Planner, 2026-11-01)
+Task: silence/no-input policy (specs/07 §12) and DTMF input (§13) in `CallPipeline`. Depends on T12b (ticked).
+
+### Decisions (record in specs/07 as `> Decision (2026-11-01): P04-T12c.` right after §13; one block for both)
+1. **No-input timer** lives in a new pipeline task `silence` (add to `_tasks()`; update the task list in the
+   P04-T12a Decision text "(`inbound`, ..., `watchdog`)" → add `silence`, `dtmf`). State: `_no_input_deadline_ms:
+   float | None`, `_silence_wake: asyncio.Event`, `_reprompts: int`.
+   - **Armed** by `_arm_no_input()` = `now + config.no_input_timeout_ms` only when the leg is idle: not `_closing`, no
+     reply running, `_jobs.empty()`, `not endpointer.turn_open`, `_held is None`, no commit pending (`_commit is
+     None`), DTMF buffer empty. Called (a) in `_reply_loop` right after `_flush_held()` before `await self._jobs.get()`
+     (= the agent's last utterance completed: `speak` returns only after the mark echo / grace, so this is "after the
+     last mark echo"; also covers an opener/reply that produced no audio), (b) at the end of `_on_discarded` (after
+     `_flush_held`), (c) after an ignored backchannel in `_route_turn` (after `_flush_held`). `_arm_no_input` always
+     re-reads the conditions; it never extends an already-armed deadline (arm only when `None`).
+   - **Disarmed** (`deadline = None`, wake set) by: any VAD `speech_start` (`_on_vad`), any DTMF digit accepted into
+     the buffer, `_deliver` / any job enqueue, `_closing` (watchdog/EndCall: `_arm` refuses anyway).
+   - **Expiry** (silence loop: deadline reached, re-check idle conditions; if not idle → just clear): if
+     `_reprompts < config.max_reprompts` → `_reprompts += 1`, `stats.no_input_reprompts += 1`, log info
+     `pipeline_no_input_reprompt` (count), enqueue `_NoInputJob()`; else log info `pipeline_no_input_timeout`, enqueue
+     `_GoodbyeJob()`. `max_reprompts=0` → goodbye at first expiry.
+   - `_NoInputJob` → `_run_reply(self._no_input_outputs(), None, None)` where `_no_input_outputs` is an async
+     generator: iterate `self._brain.on_no_input()` (closing it in `finally` with `_close`), yield each output; if the
+     Brain yielded nothing, yield `SpeakStatic(timing.no_input_prompt or config.no_input_prompt)` (node override, §12
+     default "Are you still there?"). Reprompt is interruptible (default SpeakStatic).
+   - `_GoodbyeJob` → `_run_reply(_single(EndCall(config.no_input_goodbye, "no_input_timeout")), None, None)`; the
+     existing `_end_call` path plays it non-interruptibly (bounded by `final_line_timeout_s`) and ends the pipeline
+     with `end_reason="no_input_timeout"` (already in `EndReason`). Goodbye text = `config.no_input_goodbye`
+     (org setting default, P04-T12a decision already supersedes the §12 literal; restate it in the block).
+   - **Reprompt count reset**: in `_deliver` (every turn handed to the Brain: speech, held, merged, DTMF) →
+     `_reprompts = 0`. VAD speech that produces no turn (discarded noise, ignored backchannel, false barge-in) only
+     disarms/re-arms the timer and does not reset the count. ("Any user speech" read as "speech that becomes a turn".)
+   - After a reprompt reply completes the reply loop re-arms → second expiry etc.
+2. **DTMF** in `_read_transport` (`InboundDtmf` branch → `await self._on_dtmf(event.digit)`), buffered with a new
+   `dtmf` task (same shape as the endpoint loop: `_dtmf_wake` event, `_dtmf_deadline_ms`).
+   - `config.ignore_button_press` → drop: `stats.ignored_dtmf += 1`, log debug `pipeline_dtmf_ignored` (keep the
+     event name). Digits outside `"0123456789*#ABCD"` → dropped with log warning `pipeline_dtmf_invalid` (no stats).
+   - Barge-in first: if `speaker.is_playing(now)`: `level = self._level()`; `decision =
+     self._monitor.evaluate_dtmf(playing=True, level=level)` (new monitor method wrapping
+     `InterruptPolicy.should_interrupt_dtmf`, returns the decision or `None` when falsy) → `await
+     self._barge_in(decision, now, level, speech_start_ms=now, resumable=False)`. Refactor `_barge_in` to take
+     `speech_start_ms: float | None` (speech path passes `self._monitor.speech_started_ms`) and `resumable: bool =
+     True`; a DTMF barge-in never arms the false-barge-in resume (digits are real input). reaction_ms = clear − digit
+     time. Level 0 / non-interruptible → no interrupt; the digit is still buffered (turn held behind playback by the
+     normal routing, §7 level-0 rule).
+   - Buffer: `_dtmf_digits: list[str]`, `_dtmf_first_ms`, `_dtmf_last_ms`. `#` terminates: flush the buffer now
+     (`#` itself is not part of `dtmf`); a `#` with an empty buffer is ignored (debug log). Other digits (incl. `*`)
+     append and set `_dtmf_deadline_ms = now + DTMF_SEQUENCE_TIMEOUT_MS` (module constant 2000, exported) and wake the
+     dtmf loop; disarm the no-input timer.
+   - Flush (`_flush_dtmf()` async): build `UserTurn(index=self._next_index(), text=f"[DTMF: {' '.join(digits)}]",
+     start_ms=first, end_ms=last, dtmf="".join(digits))`, `stats.dtmf_turns += 1`, log info `pipeline_dtmf_turn`
+     (digits count only — never log the digits: they may be PINs/card numbers), then `await self._route_turn(turn,
+     None, overlapped=False)`. DTMF turns carry no latency timer (`_route_turn` / `_TurnJob` must accept
+     `timer: TurnTimer | None`); never classified as backchannel (overlapped=False). Routing (closing / hold behind
+     audible reply / merge with a reply still generating) is the same as for speech turns.
+   - `merge_turns`: `dtmf` = concatenation of both non-None parts (`None` when both are None) so a held DTMF turn
+     merged with speech (or another DTMF turn) keeps every digit; text concatenation unchanged.
+   - Stream end (`_read_transport` after the loop): pending digits are dropped (call over) — no flush.
+3. Brain protocol: `on_no_input` docstring: "an empty stream lets the pipeline speak the node's / default
+   reprompt". No new Brain method (DTMF stays a UserTurn, P04-T12a decision).
+
+### Files
+- `packages/va_voice/src/va_voice/pipeline/pipeline.py`: new tasks `_silence_loop`, `_dtmf_loop`; `_on_dtmf`,
+  `_flush_dtmf`, `_arm_no_input`, `_disarm_no_input`, `_on_no_input_expired`, `_no_input_outputs`; jobs
+  `_NoInputJob`, `_GoodbyeJob` (frozen slots dataclasses, no fields) in the `_Job` union; `_reply_loop` dispatch via a
+  small `_outputs_for(job) -> tuple[AsyncIterator[BrainOutput], TurnTimer | None, UserTurn | None, bool]` helper to
+  keep radon ≤ B; module docstring paragraphs for silence + DTMF. `DTMF_SEQUENCE_TIMEOUT_MS: Final = 2000`,
+  `DTMF_TERMINATOR: Final = "#"` exported in `__all__`. If pipeline.py grows past ~850 lines, move the DTMF buffer
+  into a pure `va_voice/pipeline/dtmf.py` `DtmfBuffer` (`press(digit, now_ms) -> DtmfSequence | None`,
+  `deadline_ms`, `poll(now_ms) -> DtmfSequence | None`, `clear()`, `DtmfSequence(digits, first_ms, last_ms)` with
+  `.text`) — preferred: do this anyway (pure, unit-testable, keeps pipeline small).
+- `pipeline/barge_in.py`: `BargeInMonitor.evaluate_dtmf(*, playing: bool, level: int) -> InterruptDecision | None`;
+  `merge_turns` dtmf concatenation.
+- `pipeline/models.py`: `PipelineStats` + `no_input_reprompts`, `dtmf_turns`, `ignored_dtmf`.
+- `pipeline/protocols.py`: Brain.on_no_input docstring.
+- `pipeline/__init__.py`: export `DTMF_SEQUENCE_TIMEOUT_MS`, `DtmfBuffer`, `DtmfSequence` (if dtmf.py).
+- specs/07 Decision block after §13; AGENTS.md bullet (P04-T12c: silence/DTMF entry points + harness helpers).
+
+### Harness / fakes
+- `ScriptedBrain(no_input=[[...outputs...], ...])`: separate deque for `on_no_input` (stop popping `replies`
+  there); logs `("brain.no_input", t)`; empty deque → yields nothing (pipeline fallback). Keep `no_input_calls`.
+- `FakeCaller.press(digit)` already exists. Add `Harness.press(*digits)` convenience? optional.
+- Existing tests: the timer now fires after 8 s of idle virtual time. Grep tests whose `until`/run spans > 8 s idle
+  after the last utterance (e.g. watchdog tests with `max_duration_s` small, long idle `until(now >= ...)`): give
+  them `PipelineConfig(no_input_timeout_ms=30_000)` or bigger max_reprompts as needed, without weakening asserts.
+  Update `test_dtmf_and_unknown_marks_do_not_disturb_the_turn` (a "5" now becomes a DTMF turn after 2 s: either
+  assert it, or set `ignore_button_press=True`; rename accordingly).
+
+### Tests `packages/va_voice/tests/pipeline/test_pipeline_silence.py`, `test_pipeline_dtmf.py`, `test_dtmf_buffer.py`
+Silence (AcceleratedClock harness; `no_input_timeout_ms=3000` to keep runs short):
+- `test_silence_reprompts_then_hangs_up`: opener "Hi."; caller silent → `brain.no_input` at ≈ opener end + 3000 ms
+  (assert window ±40 ms vs the opener's AgentTurn.ended_ms), Brain yields nothing → agent turn text "Are you still
+  there?"; second reprompt; third expiry → goodbye `config.no_input_goodbye` spoken (agent turn, not interrupted) and
+  `result.end_reason == "no_input_timeout"`, `stats.no_input_reprompts == 2`.
+- `test_brain_reprompt_and_node_prompt`: Brain `no_input` script yields `SpeakStatic("Hello?")` → spoken; with empty
+  script and `BrainTiming(no_input_prompt="Still with me?")` → that text.
+- `test_speech_resets_reprompt_count`: max_reprompts=1; expiry → reprompt; caller turn delivered (reply "Okay.");
+  expiry → reprompt again (count reset) not goodbye; next expiry → goodbye.
+- `test_speech_start_postpones_timer`: caller noise (VAD speech then discarded turn, e.g. Said("") / short burst
+  below endpointer?) at 2000 ms of a 3000 ms timer → no reprompt at 3000; reprompt ≈ 3000 ms after the discard;
+  count unchanged.
+- `test_timer_not_armed_while_reply_or_turn_open`: slow reply (SpeakText tokens with long per-token delay > timeout)
+  → no reprompt during the reply; caller speaking a 4 s utterance → no reprompt mid-turn.
+- `test_max_reprompts_zero_hangs_up_at_first_expiry`; `test_no_input_not_during_closing` (EndCall in progress / watchdog).
+- `test_reprompt_is_interruptible` (barge-in on the reprompt works, no crash).
+DTMF:
+- `test_dtmf_sequence_delivered_after_timeout`: press 1,2,3,4 at 100 ms spacing → Brain gets UserTurn text
+  `"[DTMF: 1 2 3 4]"`, `dtmf == "1234"`, delivered ≈ 2000 ms after the last digit (window), stats.dtmf_turns 1,
+  observer.user_turns has it; no latency report for it.
+- `test_hash_terminates_sequence`: 9,8,# → delivered at once (same tick-ish, < 40 ms after `#`), `dtmf == "98"`;
+  lone `#` ignored; `*` kept (`"*5"`).
+- `test_ignore_button_press_drops_digits`: no Brain turn after 3 s, `stats.ignored_dtmf == n`, no barge-in while
+  playing.
+- `test_dtmf_interrupts_playback_at_level_1`: config interruptibility=1, long opener (SpeakText(hanging(...)) or long
+  static) playing → press "1" → `transport.clear` + `InterruptRecord(reason="dtmf")`, reaction_ms ≤ 120 (clear −
+  press), no false-barge-in resume afterwards, Brain then gets `"[DTMF: 1]"`.
+- `test_dtmf_does_not_interrupt_at_level_0` (and non-interruptible SpeakStatic at level 4): no clear, opener
+  completes, then the DTMF turn is delivered after playback (held).
+- `test_invalid_digit_dropped` (log `pipeline_dtmf_invalid`), `test_digits_reset_reprompts` and `test_dtmf_disarms_
+  no_input` (pressing at 2.5 s of 3 s timer → no reprompt before the DTMF turn), `test_pending_digits_dropped_at_
+  transport_close`, `test_dtmf_merges_with_held_speech` (merge_turns keeps dtmf).
+Pure: `test_dtmf_buffer.py` (press/poll/deadline/terminator/empty terminator/clear/text format) and monitor
+`evaluate_dtmf` + `merge_turns` dtmf cases in `test_barge_in_monitor.py`.
+Coverage: pipeline modules ≥ 95 % (aim 100 %).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice -q` (3× xdist on tests/pipeline for
+flakiness), `make test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src/va_voice/pipeline`, pip-audit + `corepack pnpm audit` (no new deps).
+
+### Risks
+- Existing harness tests idle > 8 s virtual now get reprompts/hang-ups → adjust configs, not assertions.
+- AcceleratedClock: silence/dtmf loops must sleep via `wait_until_set` on the injected clock (never busy-loop) or
+  virtual time freezes. Re-check idle conditions at expiry (a job may have been queued in the same tick).
+- `_arm_no_input` called from `_reply_loop` while `_route_turn` runs on another task: both mutate only sync state; keep
+  arm/disarm synchronous.
+- DTMF barge-in inside `_read_transport` awaits `_cancel_reply` — same as speech barge-in, already safe.
+- Never log digit values (PII).
+
+## Build P04-T12c (Builder, 2026-11-01)
+Implemented per plan. New pure modules `pipeline/silence.py` (`NoInputTimer`: arm-once, disarm, due, expire →
+reprompt|goodbye, reset) and `pipeline/dtmf.py` (`DtmfBuffer`, `DtmfSequence.text`, `is_dtmf_digit`,
+`DTMF_SEQUENCE_TIMEOUT_MS`, `DTMF_TERMINATOR`). `CallPipeline` gains tasks `silence` and `dtmf`, a shared
+`_until(wake, deadline)` helper (endpoint loop uses it too), `_idle()`/`_arm_no_input()`/`_disarm_no_input()`,
+`_NoInputJob`/`_GoodbyeJob` dispatched by `_run_job`, `_no_input_outputs` (Brain → node prompt → default),
+`_on_dtmf` (ignore / invalid / barge-in level ≥ 1 with `resumable=False` / buffer / `#`), `_route_dtmf`.
+`_route_turn` is serialised by an asyncio.Lock (speech + keypad turns from different tasks) and takes
+`timer: TurnTimer | None`. `BargeInMonitor.evaluate_dtmf`; `merge_turns` joins `dtmf`. Stats `no_input_reprompts`,
+`dtmf_turns`, `ignored_dtmf`. Pending digits dropped at transport close (`pipeline_dtmf_dropped`, info). Digits never
+logged. Decision block in specs/07 after §13; P04-T12a task list updated; AGENTS.md bullet.
+Harness: `ScriptedBrain(no_input=[[...]])` (no longer pops `replies`), logs `brain.no_input`. Only existing test touched:
+`test_max_duration_warns_then_ends` (idles 20 s → `no_input_timeout_ms=30_000`).
+Tests: `test_no_input_dtmf_units.py` (pure), `test_pipeline_silence.py` (11), `test_pipeline_dtmf.py` (10).
+Gates: fmt/lint pass; typecheck pass (887 files); placeholders 0; make test 7413 passed / 7 skipped, coverage 98.55 %
+(pipeline.py 97 %, dtmf/silence 100 %); pipeline tests 3× xdist green; spec refs 0; jscpd 0 clones; radon avg A (2.18);
+pip-audit clean; pnpm audit 3 moderate (high threshold passes).
+
+## Review P04-T12c (Reviewer, 2026-11-01)
+APPROVED. Gates re-run: make lint/typecheck/placeholders pass; make test 7413 passed / 7 skipped, coverage 98.54 %;
+pipeline tests 2x xdist green (132 passed). Diff checked against specs/07 §12/§13: timer armed only when idle after
+playback, disarmed on speech_start/digit/job, reprompt via Brain → node prompt → default, goodbye EndCall
+no_input_timeout; DTMF 2 000 ms / `#`, ignore_button_press, barge-in level ≥ 1 non-resumable, digits never logged.

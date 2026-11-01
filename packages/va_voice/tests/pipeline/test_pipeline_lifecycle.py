@@ -104,7 +104,7 @@ async def test_end_call_final_line_is_bounded() -> None:
 
 
 async def test_max_duration_warns_then_ends() -> None:
-    config = PipelineConfig(max_duration_s=30.0, max_duration_warning_s=10.0)
+    config = PipelineConfig(max_duration_s=30.0, max_duration_warning_s=10.0, no_input_timeout_ms=30_000)
     async with harness(config=config) as h:
         result = await h.result()
         assert result.end_reason == "max_duration"

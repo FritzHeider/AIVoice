@@ -1065,3 +1065,10 @@ Grafana 3001
   `ActionHandler.handle` runs shielded in `CallPipeline._action` (a reply cancel never cancels an action; the
   reply loop waits for it via `_settle_action`, the pipeline end cancels it). Slow actions in tests:
   `pipeline_fakes.SlowActions(duration_s, fail=)` passed as `harness(actions=...)` (the harness binds its clock).
+- 2026-11-01 (P04-T12c): silence/DTMF = `CallPipeline` tasks `silence` (`pipeline.silence.NoInputTimer`, armed only
+  via `_arm_no_input()` when `_idle()`; disarmed by VAD `speech_start`, digits and every job) and `dtmf`
+  (`pipeline.dtmf.DtmfBuffer`, 2 s / `#`); keypad turns go through the same `_route_turn` (now serialised by a lock,
+  `timer` may be `None`). The no-input timer now fires in every harness test that idles > 8 s of virtual time after
+  the last utterance: give such tests `PipelineConfig(no_input_timeout_ms=30_000)` instead of weakening asserts.
+  Harness: `ScriptedBrain(no_input=[[...]])` scripts `on_no_input` (empty = the pipeline's reprompt; logs
+  `brain.no_input` into `transport.calls`), `h.caller.press(digit)`. Never log DTMF digit values.

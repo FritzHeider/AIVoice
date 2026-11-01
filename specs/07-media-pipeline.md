@@ -450,6 +450,31 @@ Any user speech resets the count.
   map DTMF to edges (`11` §5) and variable extraction receives the raw digits.
 - Barge-in: a DTMF digit during playback interrupts at levels ≥ 1.
 
+> Decision (2026-11-01): P04-T12c. Both policies live in `va_voice.pipeline.CallPipeline` as two more tasks of its
+> `TaskGroup` (`silence`, `dtmf`), backed by the pure `va_voice.pipeline.silence.NoInputTimer` and
+> `va_voice.pipeline.dtmf.DtmfBuffer`. **No-input (§12):** the timer is armed (never extended while armed) only
+> when the leg is idle: the reply loop waits for work (the agent's last utterance has played to its mark echo or
+> grace, or the reply produced no audio), nobody is mid-turn, no turn is held, queued or committing, no digit is
+> pending, no action runs and the call is not closing. It is re-armed after a discarded noise turn, an ignored
+> backchannel and an empty `#`. Any VAD `speech_start`, any accepted digit and every queued job disarm it. On
+> expiry (re-checked against the idle rule) fewer than `max_reprompts` reprompts since the last delivered user
+> turn → `Brain.on_no_input()`; when that stream yields nothing the pipeline speaks the node's
+> `no_input_prompt` (`BrainTiming`), else `config.no_input_prompt` ("Are you still there?"), interruptibly.
+> Otherwise it plays `EndCall(config.no_input_goodbye, "no_input_timeout")` (the org setting default of
+> specs/04 §7 supersedes the literal above). "Any user speech resets the count" means speech (or keys) that
+> become a user turn delivered to the Brain; noise, ignored backchannels and false barge-ins only postpone the
+> timer. `max_reprompts = 0` says goodbye at the first expiry. **DTMF (§13):** symbols `0-9 * # A-D`; anything
+> else is dropped (`pipeline_dtmf_invalid`). `ignore_button_press` drops every digit before any other effect
+> (`stats.ignored_dtmf`). A digit while an utterance plays first runs the barge-in sequence when the effective
+> level is ≥ 1 (`InterruptRecord.reason = "dtmf"`, `speech_start_ms` = the digit's arrival, no false-barge-in
+> resume: a digit is real input); at level 0 or on a non-interruptible line it does nothing to playback. The
+> digit is then buffered: the sequence ends 2 000 ms after its last digit or at once on `#` (not part of the
+> sequence; a `#` with nothing pending is ignored). The sequence becomes `UserTurn(text="[DTMF: 1 2 3 4]",
+> dtmf="1234", start_ms=first digit, end_ms=last digit)` with its own turn index and no latency timer, and is
+> routed exactly like a speech turn (dropped while closing, held behind audible playback, merged with a reply
+> still generating; never a backchannel). `merge_turns` concatenates the `dtmf` parts so no digit is lost.
+> Digits pending when the transport closes are dropped. Digit values are never logged (PINs, card numbers).
+
 ## 14. Voicemail flow
 
 Triggered by Telnyx premium AMD `machine`, or by `voicemail.sensitive` LLM classification (`10` §9.4) on committed
@@ -502,7 +527,7 @@ class ConversationEngine(Protocol):
 > that phase 05 maps to write-behind persistence, `call.turn` and `call.latency`. One timeline: pipeline ms =
 > `clock.monotonic() × 1000`; VAD stream time maps onto it with `origin = arrival of the first in-order frame − 20 ms`,
 > STT partials take their arrival time. The tasks of §1 that belong to the pipeline run in one `TaskGroup`
-> (`inbound`, `stt`, `tts`, `outbound`, `endpoint`, `replies`, `watchdog`); the first end reason wins, any task
+> (`inbound`, `stt`, `tts`, `outbound`, `endpoint`, `replies`, `watchdog`; since P04-T12c also `silence`, `dtmf`); the first end reason wins, any task
 > failure ends with `error` (`pipeline_failed`), and the end of a vendor stream while running is an error. 16 kHz
 > legs (L16 in `TELNYX_L16_BYTE_ORDER`, or little-endian `pcm_16000` for the widget) send little-endian PCM to the
 > STT, feed the VAD without resampling and take `pcm_16000` TTS audio. Each utterance is one TTS context

@@ -147,6 +147,9 @@ class PipelineStats:
     ignored_backchannels: int = 0
     merged_turns: int = 0
     held_turns: int = 0
+    no_input_reprompts: int = 0
+    dtmf_turns: int = 0
+    ignored_dtmf: int = 0
 
 
 @dataclass(frozen=True, slots=True)

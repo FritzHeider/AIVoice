@@ -170,7 +170,12 @@ class Brain(Protocol):
 
     def on_user_turn(self, turn: UserTurn) -> AsyncIterator[BrainOutput]: ...
 
-    def on_no_input(self) -> AsyncIterator[BrainOutput]: ...
+    def on_no_input(self) -> AsyncIterator[BrainOutput]:
+        """The no-input timer expired (§12).
+
+        An empty stream lets the pipeline speak the node's ``no_input_prompt`` (or the default reprompt).
+        """
+        ...
 
     async def on_interrupted(self, spoken_text: str) -> None: ...
 

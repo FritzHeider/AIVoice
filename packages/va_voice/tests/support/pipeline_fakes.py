@@ -489,7 +489,8 @@ async def hanging(text: str) -> AsyncIterator[str]:
 
 
 class ScriptedBrain:
-    """A Brain that plays back scripted outputs: ``opener`` once, then one ``replies`` entry per user turn."""
+    """A Brain that plays back scripted outputs: ``opener`` once, then one ``replies`` entry per user turn and
+    one ``no_input`` entry per no-input expiry (none left = an empty stream: the pipeline's reprompt)."""
 
     def __init__(
         self,
@@ -497,9 +498,11 @@ class ScriptedBrain:
         replies: Iterable[Iterable[BrainOutput]] = (),
         *,
         timing: BrainTiming | None = None,
+        no_input: Iterable[Iterable[BrainOutput]] = (),
     ) -> None:
         self.opener = list(opener)
         self.replies: deque[list[BrainOutput]] = deque(list(reply) for reply in replies)
+        self.no_input: deque[list[BrainOutput]] = deque(list(reply) for reply in no_input)
         self.timing_value = timing if timing is not None else BrainTiming()
         self.user_turns: list[UserTurn] = []
         self.no_input_calls = 0
@@ -537,7 +540,8 @@ class ScriptedBrain:
 
     async def on_no_input(self) -> AsyncIterator[BrainOutput]:
         self.no_input_calls += 1
-        for output in self.replies.popleft() if self.replies else []:
+        self._log("brain.no_input")
+        for output in self.no_input.popleft() if self.no_input else []:
             yield output
 
     async def on_interrupted(self, spoken_text: str) -> None:

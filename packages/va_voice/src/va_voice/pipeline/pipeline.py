@@ -13,6 +13,16 @@
 - ``tts``: TTS audio to the speaker. ``outbound``: the 20 ms outbound clock.
 - ``watchdog``: ``max_duration_message`` at ``max_duration - warning`` (pre-empting any reply, not
   interruptible), then ends the pipeline at ``max_duration`` (``max_duration``).
+- ``silence``: the no-input timer (§12, Decision P04-T12c). Armed when the leg goes idle (the reply loop
+  waits for work, the agent's last utterance has played, nobody speaks, no turn or digit is pending),
+  disarmed by any caller speech or digit. On expiry it queues a reprompt (``Brain.on_no_input``; an empty
+  stream speaks the node's ``no_input_prompt`` or ``config.no_input_prompt``) while fewer than
+  ``max_reprompts`` were spoken since the last user turn, else ``EndCall(no_input_goodbye,
+  "no_input_timeout")``.
+- ``dtmf``: ends a keypad sequence ``DTMF_SEQUENCE_TIMEOUT_MS`` after its last digit (``#`` ends it at once
+  in the inbound task) and routes it as the user turn ``"[DTMF: 1 2 3]"`` with ``dtmf`` set (§13), like a
+  speech turn. A digit during interruptible playback (level ≥ 1) barges in first, without the false-barge-in
+  resume; ``ignore_button_press`` drops every digit.
 
 Barge-in (§7, §8, Decision P04-T12b): after every inbound frame batch and every STT partial the
 :class:`~va_voice.pipeline.barge_in.BargeInMonitor` evaluates the interruption policy while an utterance
@@ -46,6 +56,7 @@ from va_voice.latency import LatencyTracer, TurnMark, TurnTimer
 from va_voice.outbound import FrameMixer
 from va_voice.pipeline.barge_in import BargeInMonitor, merge_turns
 from va_voice.pipeline.config import PipelineConfig
+from va_voice.pipeline.dtmf import DtmfBuffer, DtmfSequence, is_dtmf_digit
 from va_voice.pipeline.inbound import InboundPath
 from va_voice.pipeline.models import (
     BrainAction,
@@ -64,6 +75,7 @@ from va_voice.pipeline.protocols import (
     ActionHandler,
     Brain,
     InboundAudio,
+    InboundDtmf,
     MarkEcho,
     PipelineObserver,
     SttEventLike,
@@ -72,6 +84,7 @@ from va_voice.pipeline.protocols import (
     TtsStream,
     VoiceActivityDetector,
 )
+from va_voice.pipeline.silence import NoInputTimer
 from va_voice.pipeline.speaker import Interruption, Speaker
 from va_voice.pipeline.waits import wait_until_set, within
 from va_voice.reorder import NULL_OBSERVER as NULL_REORDER_OBSERVER
@@ -108,7 +121,17 @@ class _ResumeJob:
     text: str
 
 
-type _Job = _TurnJob | _ResumeJob
+@dataclass(frozen=True, slots=True)
+class _NoInputJob:
+    """Speak a reprompt (§12)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _GoodbyeJob:
+    """Say ``no_input_goodbye`` and end with ``no_input_timeout`` (§12)."""
+
+
+type _Job = _TurnJob | _ResumeJob | _NoInputJob | _GoodbyeJob
 
 
 def default_context_id(index: int) -> str:
@@ -163,6 +186,11 @@ class CallPipeline:
         )
         self._jobs: asyncio.Queue[_Job] = asyncio.Queue()
         self._endpoint_wake = asyncio.Event()
+        self._route_lock = asyncio.Lock()
+        self._no_input = NoInputTimer(self._config.no_input_timeout_ms, self._config.max_reprompts)
+        self._silence_wake = asyncio.Event()
+        self._dtmf = DtmfBuffer()
+        self._dtmf_wake = asyncio.Event()
         self._commit: asyncio.Future[SttEventLike] | None = None
         self._turn_start_ms: float | None = None
         self._turn_index = 0
@@ -205,6 +233,14 @@ class CallPipeline:
     def barge_in(self) -> BargeInMonitor:
         return self._monitor
 
+    @property
+    def no_input(self) -> NoInputTimer:
+        return self._no_input
+
+    @property
+    def dtmf(self) -> DtmfBuffer:
+        return self._dtmf
+
     async def run(self) -> PipelineResult:
         """Run the leg until it ends; cancelling the caller cancels every task and re-raises."""
         if self._started:
@@ -234,6 +270,8 @@ class CallPipeline:
             ("endpoint", self._endpoint_loop()),
             ("replies", self._reply_loop()),
             ("watchdog", self._watchdog()),
+            ("silence", self._silence_loop()),
+            ("dtmf", self._dtmf_loop()),
         ]
 
     async def _guarded(self, name: str, work: Coroutine[Any, Any, None]) -> None:
@@ -261,16 +299,21 @@ class CallPipeline:
                 await self._check_barge_in()
             elif isinstance(event, MarkEcho):
                 self._speaker.on_mark(event.name)
-            else:
-                _log.debug("pipeline_dtmf_ignored")
+            elif isinstance(event, InboundDtmf):
+                await self._on_dtmf(event.digit)
         self._on_vad(await self._inbound.drain())
+        dropped = self._dtmf.clear()
+        if dropped:
+            _log.info("pipeline_dtmf_dropped", digits=dropped)
         raise self._ended("transport_closed")
 
     def _on_vad(self, events: list[VadEvent]) -> None:
         edges = [event for event in events if event.kind != "probability"]
         for event in edges:
-            if event.kind == "speech_start" and not self._endpointer.turn_open:
-                self._turn_start_ms = event.at_ms
+            if event.kind == "speech_start":
+                self._disarm_no_input()
+                if not self._endpointer.turn_open:
+                    self._turn_start_ms = event.at_ms
             self._endpointer.on_vad(event)
             self._monitor.on_vad(event)
         if edges:
@@ -318,7 +361,7 @@ class CallPipeline:
         level = self._level() if playing else 0
         decision = self._monitor.evaluate(now, playing=playing, level=level)
         if decision:
-            await self._barge_in(decision, now, level)
+            await self._barge_in(decision, now, level, speech_start_ms=self._monitor.speech_started_ms)
 
     def _level(self) -> int:
         return effective_level(
@@ -328,15 +371,26 @@ class CallPipeline:
             interruptible=self._speaker.current_interruptible,
         )
 
-    async def _barge_in(self, decision: InterruptDecision, at_ms: float, level: int) -> None:
-        """§7 steps 2-7: clear + TTS cancel (speaker), cancel the reply (LLM stream), truncate history."""
-        speech_start = self._monitor.speech_started_ms
+    async def _barge_in(
+        self,
+        decision: InterruptDecision,
+        at_ms: float,
+        level: int,
+        *,
+        speech_start_ms: float | None,
+        resumable: bool = True,
+    ) -> None:
+        """§7 steps 2-7: clear + TTS cancel (speaker), cancel the reply (LLM stream), truncate history.
+
+        ``resumable``: arm the false-barge-in resume (speech only; a digit is real input).
+        """
+        speech_start = speech_start_ms
         timer = self._reply_timer
         interruption = await self._speaker.interrupt(at_ms)
         if interruption is None:
             return
         truncated = interruption.truncated
-        if interruption.resumable and truncated.unspoken:
+        if resumable and interruption.resumable and truncated.unspoken:
             self._pending_resume = truncated.unspoken
         if timer is not None:
             timer.mark_interrupted()
@@ -397,17 +451,18 @@ class CallPipeline:
 
     # turns
 
+    async def _until(self, wake: asyncio.Event, deadline_ms: float | None) -> None:
+        """Sleep until ``deadline_ms`` (forever when ``None``) or until ``wake`` is set."""
+        now = self._now_ms()
+        if deadline_ms is None:
+            await wake.wait()
+        elif deadline_ms > now:
+            await wait_until_set(wake, self._clock, (deadline_ms - now + _WAKE_EPSILON_MS) / _MS_PER_SECOND)
+
     async def _endpoint_loop(self) -> None:
         while True:
             self._endpoint_wake.clear()
-            now = self._now_ms()
-            deadline = self._endpointer.deadline_ms()
-            if deadline is None:
-                await self._endpoint_wake.wait()
-            elif deadline > now:
-                await wait_until_set(
-                    self._endpoint_wake, self._clock, (deadline - now + _WAKE_EPSILON_MS) / _MS_PER_SECOND
-                )
+            await self._until(self._endpoint_wake, self._endpointer.deadline_ms())
             result = self._endpointer.poll(self._now_ms())
             if isinstance(result, EndOfTurn):
                 await self._end_of_turn(result)
@@ -443,6 +498,7 @@ class CallPipeline:
         self._stats.discarded_turns += 1
         _log.debug("pipeline_turn_discarded", started_ms=result.started_ms)
         self._flush_held()
+        self._arm_no_input()
 
     def _false_barge_in(self) -> None:
         """§7 false-barge-in protection: noise interrupted the agent; re-speak the unspoken remainder once."""
@@ -454,8 +510,15 @@ class CallPipeline:
         _log.info("pipeline_false_barge_in", chars=len(remainder))
         self._jobs.put_nowait(_ResumeJob(f"{RESUME_PREFIX}{remainder}"))
 
-    async def _route_turn(self, turn: UserTurn, timer: TurnTimer, *, overlapped: bool) -> None:
-        """§7/§8: deliver, merge with a reply still generating, hold behind audible playback, or drop."""
+    async def _route_turn(self, turn: UserTurn, timer: TurnTimer | None, *, overlapped: bool) -> None:
+        """§7/§8: deliver, merge with a reply still generating, hold behind audible playback, or drop.
+
+        Serialised: speech turns (endpoint task) and keypad turns (inbound / dtmf tasks) route one at a time.
+        """
+        async with self._route_lock:
+            await self._route_locked(turn, timer, overlapped=overlapped)
+
+    async def _route_locked(self, turn: UserTurn, timer: TurnTimer | None, *, overlapped: bool) -> None:
         if self._closing:
             # Recorded for the transcript, never answered: the call is ending.
             self._stats.user_turns += 1
@@ -466,6 +529,7 @@ class CallPipeline:
             self._stats.ignored_backchannels += 1
             _log.debug("pipeline_backchannel_ignored", turn_index=turn.index)
             self._flush_held()
+            self._arm_no_input()
             return
         running = self._reply_running()
         if running and self._speaker.reply_audio_started:
@@ -487,6 +551,8 @@ class CallPipeline:
 
     def _deliver(self, turn: UserTurn, timer: TurnTimer | None) -> None:
         self._pending_resume = None
+        self._no_input.reset()
+        self._disarm_no_input()
         self._stats.user_turns += 1
         self._observer.on_user_turn(turn)
         self._jobs.put_nowait(_TurnJob(turn, timer))
@@ -525,15 +591,25 @@ class CallPipeline:
         await self._settle_action()
         while True:
             self._flush_held()
+            self._arm_no_input()
             job = await self._jobs.get()
+            self._disarm_no_input()
             if self._closing:
                 _log.debug("pipeline_job_dropped", job=type(job).__name__)
                 continue
-            if isinstance(job, _ResumeJob):
-                await self._run_reply(_resume_outputs(job.text), None, None, resume=True)
-            else:
-                await self._run_reply(self._brain.on_user_turn(job.turn), job.timer, job.turn)
+            await self._run_job(job)
             await self._settle_action()
+
+    async def _run_job(self, job: _Job) -> None:
+        if isinstance(job, _TurnJob):
+            await self._run_reply(self._brain.on_user_turn(job.turn), job.timer, job.turn)
+        elif isinstance(job, _ResumeJob):
+            await self._run_reply(_single(SpeakStatic(job.text, interruptible=True)), None, None, resume=True)
+        elif isinstance(job, _NoInputJob):
+            await self._run_reply(self._no_input_outputs(), None, None)
+        else:
+            goodbye = EndCall(self._config.no_input_goodbye, "no_input_timeout")
+            await self._run_reply(_single(goodbye), None, None)
 
     async def _run_reply(
         self,
@@ -652,6 +728,113 @@ class CallPipeline:
             await self._clock.sleep(remaining_ms / _MS_PER_SECOND)
         raise self._ended("max_duration")
 
+    # silence (§12)
+
+    def _idle(self) -> bool:
+        """Nothing happens on the leg: no reply, job, action, open or held turn, pending commit or digit."""
+        return not (
+            self._closing
+            or self._reply_running()
+            or self._action is not None
+            or not self._jobs.empty()
+            or self._endpointer.turn_open
+            or self._held is not None
+            or self._commit is not None
+            or self._dtmf.pending
+            or self._speaker.is_playing(self._now_ms())
+        )
+
+    def _arm_no_input(self) -> None:
+        if self._idle() and self._no_input.arm(self._now_ms()):
+            self._silence_wake.set()
+
+    def _disarm_no_input(self) -> None:
+        if self._no_input.disarm():
+            self._silence_wake.set()
+
+    async def _silence_loop(self) -> None:
+        while True:
+            self._silence_wake.clear()
+            await self._until(self._silence_wake, self._no_input.deadline_ms)
+            if self._no_input.due(self._now_ms()):
+                self._on_no_input_expired()
+
+    def _on_no_input_expired(self) -> None:
+        if not self._idle():
+            self._no_input.disarm()
+            return
+        action = self._no_input.expire()
+        if action == "reprompt":
+            self._stats.no_input_reprompts += 1
+            _log.info("pipeline_no_input_reprompt", reprompts=self._no_input.reprompts)
+            self._jobs.put_nowait(_NoInputJob())
+        else:
+            _log.info("pipeline_no_input_timeout", reprompts=self._no_input.reprompts)
+            self._jobs.put_nowait(_GoodbyeJob())
+
+    async def _no_input_outputs(self) -> AsyncIterator[BrainOutput]:
+        """The Brain's reprompt; when it yields nothing, the node's ``no_input_prompt`` or the default."""
+        outputs = self._brain.on_no_input()
+        empty = True
+        try:
+            async for output in outputs:
+                empty = False
+                yield output
+        finally:
+            await _close(outputs)
+        if empty:
+            yield SpeakStatic(
+                self._timing.no_input_prompt or self._config.no_input_prompt, interruptible=True
+            )
+
+    # DTMF (§13)
+
+    async def _on_dtmf(self, digit: str) -> None:
+        if self._config.ignore_button_press:
+            self._stats.ignored_dtmf += 1
+            _log.debug("pipeline_dtmf_ignored")
+            return
+        if not is_dtmf_digit(digit):
+            _log.warning("pipeline_dtmf_invalid", length=len(digit))
+            return
+        now = self._now_ms()
+        self._disarm_no_input()
+        if self._speaker.is_playing(now):
+            level = self._level()
+            decision = self._monitor.evaluate_dtmf(playing=True, level=level)
+            if decision:
+                await self._barge_in(decision, now, level, speech_start_ms=now, resumable=False)
+        sequence = self._dtmf.press(digit, now)
+        self._dtmf_wake.set()
+        if sequence is not None:
+            await self._route_dtmf(sequence)
+        elif not self._dtmf.pending:
+            _log.debug("pipeline_dtmf_empty_terminator")
+            self._arm_no_input()
+
+    async def _dtmf_loop(self) -> None:
+        while True:
+            self._dtmf_wake.clear()
+            await self._until(self._dtmf_wake, self._dtmf.deadline_ms)
+            sequence = self._dtmf.poll(self._now_ms())
+            if sequence is not None:
+                await self._route_dtmf(sequence)
+
+    async def _route_dtmf(self, sequence: DtmfSequence) -> None:
+        """A finished keypad sequence becomes a user turn (no latency timer, never a backchannel)."""
+        turn = UserTurn(
+            index=self._next_index(),
+            text=sequence.text,
+            start_ms=sequence.first_ms,
+            end_ms=sequence.last_ms,
+            dtmf=sequence.digits,
+        )
+        self._stats.dtmf_turns += 1
+        # Never log the digits themselves: they may be PINs or card numbers.
+        _log.info("pipeline_dtmf_turn", turn_index=turn.index, digits=len(sequence.digits))
+        await self._route_turn(turn, None, overlapped=False)
+        self._arm_no_input()
+
     # helpers
 
     def _apply_timing(self) -> None:
@@ -689,9 +872,9 @@ def _user_turn(index: int, eot: EndOfTurn, start_ms: float, committed: SttEventL
     )
 
 
-async def _resume_outputs(text: str) -> AsyncIterator[BrainOutput]:
-    """The false-barge-in resume: one interruptible static line, no Brain involved."""
-    yield SpeakStatic(text, interruptible=True)
+async def _single(output: BrainOutput) -> AsyncIterator[BrainOutput]:
+    """One pipeline-made output, no Brain involved (false-barge-in resume, no-input goodbye)."""
+    yield output
 
 
 async def _close(outputs: AsyncIterator[BrainOutput]) -> None:

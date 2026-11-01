@@ -110,6 +110,11 @@ class BargeInMonitor:
         self._overlapped = False
         return decision
 
+    def evaluate_dtmf(self, *, playing: bool, level: int) -> InterruptDecision | None:
+        """A truthy decision when a DTMF digit interrupts playback at ``level`` (§13: levels ≥ 1)."""
+        decision = self._policy.should_interrupt_dtmf(level, agent_speaking=playing)
+        return decision if decision else None
+
     def _close_attempt(self) -> None:
         if self._attempt:
             self._attempt = False
@@ -119,6 +124,7 @@ class BargeInMonitor:
 def merge_turns(prev: UserTurn | None, new: UserTurn, *, supersede: bool = False) -> UserTurn:
     """``new`` with ``prev`` in front: text ``"{prev} {new}"``, the earlier start, both word lists.
 
+    ``dtmf`` joins both keypad parts (``None`` when neither has digits).
     ``supersede``: ``prev`` was already given to the Brain, which replaces it with the merged turn
     (``supersedes`` = ``prev.index``). A missing or blank ``prev`` leaves ``new`` unchanged.
     """
@@ -131,6 +137,12 @@ def merge_turns(prev: UserTurn | None, new: UserTurn, *, supersede: bool = False
         end_ms=new.end_ms,
         words=prev.words + new.words,
         language_code=new.language_code if new.language_code is not None else prev.language_code,
-        dtmf=new.dtmf,
+        dtmf=_join_dtmf(prev.dtmf, new.dtmf),
         supersedes=prev.index if supersede else new.supersedes,
     )
+
+
+def _join_dtmf(prev: str | None, new: str | None) -> str | None:
+    if prev is None:
+        return new
+    return prev if new is None else prev + new
