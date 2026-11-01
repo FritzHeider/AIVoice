@@ -7,6 +7,7 @@ dependencies = [
     "starlette>=1.0",
     "redis>=5.1",
     "va-common",
+    "va-voice",
 ]
 
 [build-system]
@@ -18,3 +19,4 @@ module-name = "va_media"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-voice = { workspace = true }

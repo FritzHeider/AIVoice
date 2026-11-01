@@ -12,7 +12,7 @@
   - Deliverables: `ReorderBuffer(window_frames=5)` emitting in-order frames, gap fill with silence after timeout, duplicate drop, metrics counters
   - Acceptance: hypothesis tests over random permutations within window.
 
-- [ ] P04-T03 Silero VAD wrapper
+- [x] P04-T03 Silero VAD wrapper — va_voice.vad_model.SileroModel (manifest-verified ORT session) + va_voice.vad.SileroVad/VadDecider/VadExecutor (MEDIA_VAD_THREADS); fixture WAVs speech/silence/noise/DTMF; test_synth_detected_by_silero 20 utterances ≥ 90 %; make test 6653 passed / 7 skipped (98 %), vad*.py 100 %, lint/typecheck/placeholders pass, jscpd 0
   - Spec refs: specs/07-media-pipeline.md (Silero VAD)
   - Depends on: P04-T01, P00-T10
   - Deliverables: `SileroVad` (onnxruntime session from `models/silero_vad.onnx`, state tensors, 512-sample windows at 16 kHz, thresholds, thread-pool execution), `VadEvent` stream (speech_start, speech_end, probability)

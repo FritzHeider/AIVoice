@@ -216,3 +216,149 @@ Gates: fmt ok, lint pass, mypy pass (828 files), placeholders 0, spec refs 0, ma
 Approved. Re-ran: lint pass, typecheck pass (828 files), placeholders 0, make test 6610 passed / 7 skipped (98.45 %),
 va_voice 92 passed 100 % coverage, jscpd 0 clones, radon A (1.65), spec refs 0. Diff matches specs/07 §5.1 (window 5,
 one silence per missing chunk, duplicates ≤ last emitted dropped) + Decision; metric added to specs/27 §3.3 and catalog.
+
+## Plan P04-T03 (Planner, 2026-11-01)
+Silero VAD wrapper — specs/07 §5.3 (+ §21 CPU budget, §22 VAD tests), specs/30 §3.1 `test_synth_detected_by_silero`.
+Facts: `models/silero_vad.onnx` (v5.1.2, sha in `models/MANIFEST.json`) is present locally (git-ignored, fetched by
+`make setup`); onnxruntime is NOT installed yet (latest 1.31.1, cp312 wheels for linux x86_64/aarch64 + macOS arm64).
+`apps/media_worker/src/va_media/vad_model.py` already verifies the manifest for the `vad` readiness check (P00-T12).
+CI (`.github/workflows/ci.yml` `check` job) never runs `scripts/fetch_models.sh` → real-model tests would fail there.
+
+### Dependencies / settings
+1. `packages/va_voice/pyproject.toml`: add `onnxruntime>=1.31.1`; `uv lock`/`uv sync --all-packages`. If it has no
+   `py.typed`, add a commented `[[tool.mypy.overrides]] module = ["onnxruntime", "onnxruntime.*"]
+   ignore_missing_imports = true` in root pyproject (only `va_voice/vad_model.py` imports it; wrap results in typed fns).
+2. New env var `MEDIA_VAD_THREADS` (media, default `2`, "VAD inference thread pool size per process") — add to the
+   specs/02 §6 table directly after `MEDIA_MAX_CALLS_PER_POD`, and to `.env.example` at the same position (with trailing
+   comment, `scripts/tests/test_env_example.py` rules); `MediaSettings.media_vad_threads: int = Field(default=2, ge=1)`
+   (+ a settings test in apps/media_worker/tests). No compose change (default suffices).
+3. CI: in `ci.yml` `check` job add a step `run: scripts/fetch_models.sh` after `uv sync` (optionally
+   `actions/cache` on `models/silero_vad.onnx` keyed by `hashFiles('models/MANIFEST.json')`); update
+   `scripts/tests/test_ci_workflow.py` if it pins the step list; run `uv run actionlint`.
+
+### Files
+4. `packages/va_voice/src/va_voice/vad_model.py` (moved + extended from va_media):
+   - `MODEL_NAME = "silero_vad"`, `MANIFEST_NAME = "MANIFEST.json"`, `class VadModelError(RuntimeError)`.
+   - `verify_model_file(models_dir: Path) -> Path` (sync; manifest entry lookup + sha256 via `hashlib.file_digest`,
+     same messages as today) — moved from va_media `_manifest_entry`/`_verify`.
+   - `class SileroModel`: `load(models_dir: Path) -> SileroModel` classmethod (sync — call via to_thread/executor;
+     verifies the manifest FIRST, then `ort.InferenceSession(path, sess_options, providers=["CPUExecutionProvider"])`
+     with `intra_op_num_threads=1`, `inter_op_num_threads=1`, `ORT_SEQUENTIAL`, log severity 3); checks input/output
+     names `input,state,sr` / `output,stateN` and raises `VadModelError` otherwise.
+     `infer(frame: NDArray[np.float32] (576,), state: NDArray[np.float32] (2,1,128)) -> tuple[float, NDArray]`
+     (feeds `sr=np.array(16000, dtype=np.int64)`). One session per process, shared by all streams (ORT `run` is
+     thread-safe); per-stream state lives in `SileroVad`.
+   - `class VadModel(Protocol)`: `infer(frame, state) -> tuple[float, NDArray[np.float32]]` (fake models in tests).
+   - `apps/media_worker/src/va_media/vad_model.py`: keep `VadStatus` and `async verify_vad_model(models_dir)` (=
+     `await asyncio.to_thread(verify_model_file, models_dir)`), re-export `VadModelError`, `MODEL_NAME`,
+     `MANIFEST_NAME` from va_voice; delete the duplicated private helpers (existing `test_vad_model.py` must still pass).
+     Add `va-voice` to apps/media_worker/pyproject.toml dependencies (+ workspace source).
+5. `packages/va_voice/src/va_voice/vad.py`:
+   - Constants (production thresholds, exported): `SAMPLE_RATE = 16_000`, `WINDOW_SAMPLES = 512`, `CONTEXT_SAMPLES = 64`,
+     `WINDOW_MS = 32.0`, `SPEECH_THRESHOLD = 0.5`, `SILENCE_THRESHOLD = 0.35`, `START_WINDOWS = 3`,
+     `ENERGY_FLOOR_DBFS = -55.0`.
+   - `@dataclass(frozen=True, slots=True) class VadEvent: kind: Literal["speech_start","speech_end","probability"];
+     at_ms: float; probability: float; speech: bool`. `probability` events: one per window, `at_ms` = window start,
+     `speech` = hysteresis decision after the energy floor. `speech_start.at_ms` = start of the first of the 3
+     consecutive speech windows (`SpeechStarted(t_start)`); `speech_end.at_ms` = end of the last speech window
+     (`SilenceStarted(t_last_voiced_end)`). Times are stream audio time (samples fed / 16), not wall clock → deterministic.
+   - `class VadDecider` (pure, sync): `step(at_ms, probability, rms_dbfs) -> list[VadEvent]` implementing hysteresis
+     (p ≥ 0.5 speech, p < 0.35 non-speech, between keeps previous, RMS < −55 dBFS forces non-speech), start rule
+     (3 consecutive speech windows while not speaking → speech_start), end candidate (first non-speech window while
+     speaking → speech_end, state back to not-speaking; resumption = the start rule again → a new speech_start, which
+     the endpointer reads as "candidate reset"). `reset()`. Properties `speaking`, `speech` (current frame decision).
+   - `class VadExecutor`: `__init__(threads: int)` → `ThreadPoolExecutor(max_workers=threads, thread_name_prefix="va-vad")`;
+     `async run(fn: Callable[[], T]) -> T` (`loop.run_in_executor`); `close()` (`shutdown(wait=True, cancel_futures=True)`);
+     async context manager; `from_settings(threads)` trivial — media worker passes `settings.media_vad_threads` later.
+   - `class SileroVad`: `__init__(model: VadModel, executor: VadExecutor)`; `async feed(pcm16k: NDArray[np.int16]) ->
+     list[VadEvent]`: append to a pending int16 buffer; take all complete 512-sample windows; ONE executor submission
+     runs them sequentially (`_infer_windows`: float32 = x/32768 via `va_voice.audio` conversion, prepend 64-sample
+     context, update context/state per window, compute `rms_dbfs` per window with `va_voice.audio.rms_dbfs`), then
+     the decider runs on the loop (cheap). Leftover < 512 samples stays pending. Concurrent `feed` on one instance
+     serialised with an `asyncio.Lock` (order preserved). `reset()` (state + context zeros, pending cleared, decider
+     reset, stream time back to 0 — "reset when the call leg changes"). Property `elapsed_ms`.
+     Input validation: int16 1-D else `ValueError`.
+   - Re-export from `va_voice/__init__.py` only if that module already re-exports (check; keep consistent).
+6. Fixtures `packages/va_voice/tests/fixtures/vad/` (committed, 16 kHz mono PCM16 WAV), produced by
+   `packages/va_voice/tests/support/vad_fixtures.py` (`build_fixtures() -> dict[str, bytes]`, `main(["--write"|"--check"])`,
+   deterministic: PCG64 raw draws only, sim synth with fixed seeds; tests directory `support` on pytest pythonpath +
+   mypy_path per AGENTS P00-T12 pattern — check whether `packages/va_voice/tests/support` needs adding):
+   - `speech.wav`: 0.5 s static (assets `static.pcm16k` slice, ≈ −40 dBFS) + body of `synthesize_pcm16(1, "hello
+     there how are you", sample_rate=16000, seed=…)` with the 180 ms marker preamble sliced off + 0.8 s static +
+     second body (other text/seed/f0 200 Hz) + 0.6 s static. A sidecar `speech.json` with truth segments (ms).
+   - `silence.wav` (2 s digital zero), `noise.wav` (2 s of `static.pcm16k`), `dtmf.wav` (`synthesize_dtmf` digits
+     "159#" at 16 kHz, 120 ms each with 80 ms gaps). Spec says TTS-generated fixtures, but tests may not call vendors and
+     FakeElevenLabs TTS emits tones: record a `> Decision` that the speech fixture is the §3.1 formant synthesis.
+   - `test_vad_fixtures_are_reproducible`: `build_fixtures()` == committed bytes (regenerate with
+     `uv run python packages/va_voice/tests/support/vad_fixtures.py --write`; add to AGENTS).
+7. Tests `packages/va_voice/tests/test_vad.py` (decider + stream with a scripted fake model) and
+   `test_vad_silero.py` (real model; module-scoped fixture `SileroModel.load(REPO_ROOT / "models")` + executor(2)):
+   - decider table: hysteresis band keeps previous decision; 2 speech windows → no start, 3 → start at first window
+     start; end candidate at end of last speech window; resume emits a second start; energy floor overrides p=0.99;
+     reset clears.
+   - stream: windows split across arbitrary feed sizes (hypothesis partition of a buffer) give identical events to one
+     big feed; leftover kept; context = last 64 samples of the previous window (assert the fake model saw it);
+     state threaded from output to next input; inference runs off the loop thread (fake model records
+     `threading.current_thread().name.startswith("va-vad")`); one executor submission per feed (counting executor);
+     concurrent feeds keep order; reset zeroes state/context/time; non-int16 / 2-D input → ValueError.
+   - real model: `load` rejects a sha mismatch / missing manifest entry (tmp dir copy) with `VadModelError`; input/output
+     shapes (prob in [0,1], state shape (2,1,128) changes after speech); `speech.wav` → exactly 2 speech_start/speech_end
+     pairs, starts within ±100 ms and ends within ±200 ms of `speech.json` truth (Builder: measure, then assert the
+     tightest honest bound); `silence.wav`/`noise.wav` → no speech_start and every window `speech=False`
+     (energy floor test: static ≈ −40 dBFS is above the floor so this proves the model, digital zero proves the floor);
+     `dtmf.wav` → no speech_start (if Silero flags DTMF, document the measured behaviour in the Decision and assert it);
+     state independence: two `SileroVad` on one model interleaved give the same events as run separately.
+   - `test_synth_detected_by_silero` (specs/30 §3.1): PCG64(seed fixed) draws 20 (seed, text length 20–60 chars, f0
+     100–220 Hz) tuples inside ONE test (never parametrize random values); for each: `synthesize_utterance` (μ-law
+     8 kHz, production wire) → `va_voice.audio` μ-law decode → `Resampler(8000, 16000)` + flush → `SileroVad.feed`;
+     windows lying fully inside the voiced body (after the 180 ms preamble, accounting resampler delay ≤ a few ms, skip
+     the first 3 windows of the body for hysteresis warm-up only if needed and document it) → ≥ 90 % `speech=True`.
+   - perf guard: mean real-model inference per window < 2 ms (time 300 windows with `time.perf_counter`, generous;
+     mark `@pytest.mark.bench` if it proves noisy — the exit-gate bench marker exists? check pytest markers config).
+8. Docs: specs/07 §5.3 `> Decision (2026-11-01)`: module layout (`va_voice.vad_model.SileroModel` shared session +
+   `va_voice.vad.SileroVad` per leg + `VadExecutor` sized by `MEDIA_VAD_THREADS`), event kinds/time base, resumption =
+   start rule again, energy-floor windows still run the model (state continuity), one executor hop per feed, speech
+   fixture = formant synthesis. AGENTS.md P04-T03 bullet (model must be fetched: `make setup` / CI step; fixture
+   regeneration command; fake-model seam).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_voice apps/media_worker scripts -q`, `make test`,
+`uv run python scripts/check_spec_refs.py`, `uv run actionlint`, `npx --yes jscpd@4 --silent`, `uvx radon cc -s -a
+packages/va_voice/src`, pip-audit (new onnxruntime + transitive deps: flatbuffers, protobuf, coloredlogs/sympy?) +
+pnpm audit.
+
+### Risks
+- onnxruntime pulls protobuf/sympy; pip-audit must stay clean. ORT may emit warnings at import (filterwarnings=error):
+  set `ort.set_default_logger_severity(3)`; if a DeprecationWarning fires, add a narrow filter with a reason.
+- Silero on synthetic formant speech must reach ≥ 90 %; the sim's Decision (5) tuned the envelope floor for this. If it
+  fails, the fix belongs in va_sim synthesis (spec-allowed knob) — not in thresholds (production thresholds are fixed).
+- Real-model latency under xdist + coverage: keep perf assertion generous or bench-marked.
+- Moving verification from va_media to va_voice must keep `apps/media_worker/tests/test_vad_model.py` green.
+
+## Build P04-T03 (Builder, 2026-11-01)
+Implemented per plan with these deviations/details:
+- `va_voice.vad_model`: `SileroModel.load` (verify_model_file → ORT CPU session, 1 thread, sequential, log severity 3;
+  ORT load failure → VadModelError; signature check in `__init__`), `infer` validates shapes, `initial_state()`,
+  `VadModel` Protocol. onnxruntime 1.31.1 (+flatbuffers) added; mypy override (no py.typed).
+- `va_voice.vad`: VadDecider / VadExecutor / SileroVad as planned. `reset()` is async (takes the feed lock). The pool
+  computes on copies (`_infer_windows` pure → `_Inference`), state committed only on completion, so a cancelled feed
+  drops its audio safely (tested).
+- `va_media.vad_model` delegates to va_voice; va-media-worker depends on va-voice. `MEDIA_VAD_THREADS` (default 2) in
+  specs/02 §6 + .env.example + MediaSettings (env-example counts 107/108/LITERAL 80). CI `check` job runs
+  `scripts/fetch_models.sh` after `uv sync` (test asserts step order); no cache step.
+- Fixtures generated by `packages/va_voice/tests/support/vad_fixtures.py` (truth in `SPEECH_SEGMENTS_MS`, no json
+  sidecar); noise = `office` asset (static is too quiet to prove much). Measured: starts +2..+12 ms, ends +56..+98 ms;
+  max p silence 0.01 / office 0.09 / DTMF 0.15; synth bodies 100 % speech; ~0.1 ms/window. Perf guard = median < 2 ms
+  (no bench marker yet).
+- specs/07 §5.3 Decision + AGENTS bullet.
+Gates: fmt ok; lint pass; typecheck pass (833 files); placeholders 0; spec refs 0; make test 6653 passed / 7 skipped
+(98.46 %; va_voice vad.py + vad_model.py 100 %); jscpd 0 clones; radon A (2.03); pip-audit clean; pnpm audit 3
+moderate (no high); actionlint ok.
+
+## Review P04-T03 (Reviewer, 2026-11-01)
+Approved. Re-ran: lint pass, typecheck pass, placeholders 0, make test 6653 passed / 7 skipped (98 %; vad.py and
+vad_model.py 100 %), va_voice 133 passed, jscpd 0 clones. Checked against specs/07 §5.3: I/O shapes, zero initial
+state/context, hysteresis 0.5/0.35, 3-window start at first window start, end candidate at last voiced window end,
+-55 dBFS floor, reset per leg, thread-pool inference; MEDIA_VAD_THREADS in specs/02 §6 + .env.example + settings; CI
+fetches models. Reviewer tidy-up: rewrapped the vad_model.py module docstring (broken line breaks).
+§5.3 local noise gate (§10) is not part of this task (SpectralGate comes later).

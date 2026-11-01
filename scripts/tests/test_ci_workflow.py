@@ -123,6 +123,12 @@ def test_check_job_runs_make_check_with_frozen_installs() -> None:
     assert "pnpm install --frozen-lockfile" in runs
 
 
+def test_check_job_fetches_models_before_the_gates() -> None:
+    steps = [str(step.get("run", "")) for step in JOBS["check"]["steps"]]
+    fetch = steps.index("scripts/fetch_models.sh")
+    assert steps.index("uv sync --all-packages --frozen") < fetch < steps.index("make check")
+
+
 def test_check_job_applies_compose_init_sql() -> None:
     sql = "infra/docker/postgres-init/01-roles.sql"
     assert sql in _runs("check")

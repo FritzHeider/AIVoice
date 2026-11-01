@@ -134,6 +134,25 @@ resampled to 16 kHz), (c) local recording buffer only when `test_mode` (Telnyx r
 - Local noise gate (§10) is applied to the VAD path only.
 - Reset state when the call leg changes (warm proxy uses its own instance).
 
+> Decision (2026-11-01): P04-T03 layout. `va_voice.vad_model.SileroModel.load(models_dir)` verifies the file
+> against `models/MANIFEST.json` (`verify_model_file`, also used by the media-worker `vad` readiness check) before
+> opening one onnxruntime CPU session per process (1 intra-op thread, sequential); it rejects any signature other
+> than the v5 `input,state,sr` → `output,stateN` above. `va_voice.vad.SileroVad(model, executor)` holds one leg's
+> state, context, and pending samples; `feed(pcm16k)` accepts any chunk size, keeps the remainder below 512
+> samples, and runs all completed windows in ONE hop to `VadExecutor` (a thread pool of `MEDIA_VAD_THREADS`
+> threads, specs/02 §6); the decision logic (`VadDecider`) runs on the loop. Feeds on one instance are serialised;
+> the pool works on copies of the state, committed only when the batch completes (a cancelled feed drops its
+> audio and leaves the stream consistent). Events are `VadEvent(kind, at_ms, probability, speech)` with kinds
+> `probability` (every window, `at_ms` = window start), `speech_start` (= `SpeechStarted`, `at_ms` = first of the 3
+> windows) and `speech_end` (= `SilenceStarted`, `at_ms` = end of the last speech window); "resets if speech
+> resumes" is a new `speech_start` after the start rule fires again. `at_ms` is stream audio time (windows × 32 ms
+> since the stream start or `reset()`), never wall time. Windows under the energy floor still run the model so the
+> recurrent state stays continuous. The fixture WAVs of §22 are generated (`packages/va_voice/tests/support/
+> vad_fixtures.py`): tests may not call ElevenLabs and the simulator's TTS emits tones, so "speech" is the specs/30
+> §3.1 formant synthesis at 16 kHz, noise is the `office` background asset, plus digital silence and DTMF.
+> Measured with the production thresholds: starts within +12 ms of the voiced body, ends +56..+98 ms after it (the
+> model's hangover), no speech on silence, office noise (max p 0.09), or DTMF (max p 0.15); ≈ 0.1 ms per window.
+
 ## 6. Endpointing (`va_voice.endpointing.Endpointer`)
 
 Inputs: VAD events, STT partial transcripts (with arrival times), node timing settings. Output: `EndOfTurn(t)`.

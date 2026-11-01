@@ -17,10 +17,10 @@ SPEC_VARS = es.parse_spec_table(SPEC_TEXT)
 ENV_TEXT = es.load_env_example()
 ASSIGNMENTS = es.parse_env_example(ENV_TEXT)
 
-EXPECTED_SPEC_NAMES = 107
-EXPECTED_LITERAL_KEYS = 106
+EXPECTED_SPEC_NAMES = 108
+EXPECTED_LITERAL_KEYS = 107
 EXPECTED_KIND_COUNTS = {
-    es.DevValueKind.LITERAL: 79,
+    es.DevValueKind.LITERAL: 80,
     es.DevValueKind.EMPTY: 16,
     es.DevValueKind.FREE: 12,
 }

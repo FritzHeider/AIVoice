@@ -16,6 +16,7 @@ def test_defaults_match_spec() -> None:
     assert settings.service_name == "media-worker"
     assert settings.media_drain_timeout_s == 2700
     assert settings.media_max_calls_per_pod == 60
+    assert settings.media_vad_threads == 2
     assert settings.redis_url == "redis://localhost:6379/0"
 
 
@@ -30,14 +31,21 @@ def test_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POD_ID", "media-7f9c")
     monkeypatch.setenv("MEDIA_MAX_CALLS_PER_POD", "2")
     monkeypatch.setenv("MEDIA_DRAIN_TIMEOUT_S", "30")
+    monkeypatch.setenv("MEDIA_VAD_THREADS", "4")
     settings = settings_of(MediaSettings)
-    assert (settings.pod_id, settings.media_max_calls_per_pod, settings.media_drain_timeout_s) == (
-        "media-7f9c",
-        2,
-        30,
-    )
+    assert (
+        settings.pod_id,
+        settings.media_max_calls_per_pod,
+        settings.media_drain_timeout_s,
+        settings.media_vad_threads,
+    ) == ("media-7f9c", 2, 30, 4)
 
 
 def test_max_calls_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         settings_of(MediaSettings, media_max_calls_per_pod=0)
+
+
+def test_vad_threads_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        settings_of(MediaSettings, media_vad_threads=0)

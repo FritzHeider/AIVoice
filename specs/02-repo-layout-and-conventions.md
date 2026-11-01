@@ -285,6 +285,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `DENO_PATH` | media, worker | `/usr/local/bin/deno` | |
 | `MEDIA_DRAIN_TIMEOUT_S` | media | `2700` | |
 | `MEDIA_MAX_CALLS_PER_POD` | media | `60` | admission control |
+| `MEDIA_VAD_THREADS` | media | `2` | Silero VAD inference thread pool size per process (`07-media-pipeline.md` §5.3) |
 | `POD_ID` | media | hostname | |
 | `WIDGET_PUBLIC_HOST` | api, widget | `localhost:8200` | widget audio WS host |
 | `LIVE_TESTS` | tests | `0` | `1` enables live vendor smoke tests |

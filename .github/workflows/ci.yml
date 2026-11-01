@@ -94,6 +94,9 @@ jobs:
         run: psql "postgresql://va:va@localhost:5432/va" -v ON_ERROR_STOP=1 -f infra/docker/postgres-init/01-roles.sql
       - name: Install Python dependencies
         run: uv sync --all-packages --frozen
+      # The Silero VAD tests run the real ONNX model (git-ignored, verified against models/MANIFEST.json).
+      - name: Fetch models
+        run: scripts/fetch_models.sh
       - name: Install Node dependencies
         run: pnpm install --frozen-lockfile
       - name: Quality gates

@@ -80,7 +80,7 @@ Grafana 3001
   (`specs: pass` optional). It substring-matches a plain string: emit without `--json` (JSON keys never match). Get them
   for real: audit = `uvx pip-audit` on `uv export` + `corepack pnpm audit`; complexity = `uvx radon cc -s -a`;
   duplication = `npx --yes jscpd@4`.
-- 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (106 keys since P02-T01);
+- 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (107 keys since P04-T03);
   `scripts/tests/test_env_example.py` fails when a variable exists on only one side, when a literal dev value differs,
   or when an assignment loses its trailing comment. Add new variables to the spec table and `.env.example` in the same
   commit. The mirror rules (literal / empty / free dev-value classes) are the `> Decision (2026-10-25)` block under
@@ -975,3 +975,12 @@ Grafana 3001
   `va_voice.reorder_metrics.CatalogReorderMetrics(build_metrics(Service.MEDIA_WORKER, ...))`
   (`va_audio_reorder_total`, `va_audio_gap_frames_total`). va_voice must stay transport-agnostic (never import
   `va_telnyx`).
+- 2026-11-01 (P04-T03): Silero VAD = `va_voice.vad_model.SileroModel.load(models_dir)` (manifest-verified, one ORT
+  session per process; onnxruntime has no `py.typed`, mypy override) + `va_voice.vad.SileroVad(model,
+  VadExecutor(settings.media_vad_threads))` per leg (`feed(pcm16k) -> list[VadEvent]`, `await reset()`); spec:
+  specs/07 §5.3 Decision. Real-model tests need `models/silero_vad.onnx` (`make setup`; CI runs
+  `scripts/fetch_models.sh` before `make check`). Fixture WAVs in `packages/va_voice/tests/fixtures/vad/` are
+  generated and must stay byte-identical: `uv run python packages/va_voice/tests/support/vad_fixtures.py --write`
+  (truth `SPEECH_SEGMENTS_MS` lives there; the support dir is on pytest `pythonpath` and mypy `mypy_path`). Unit
+  tests drive `SileroVad` with any object that has `infer(samples, state) -> (p, state)` (`ScriptedModel` in
+  `tests/test_vad.py`). The media worker's `vad_model` delegates to va_voice (va-media-worker depends on va-voice).

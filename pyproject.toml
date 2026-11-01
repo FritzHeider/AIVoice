@@ -106,7 +106,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:packages/va_voice/src:tests_live/support"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:packages/va_voice/src:packages/va_voice/tests/support:tests_live/support"
 files = [
   "scripts",
   "packages/va_common/src",
@@ -156,6 +156,11 @@ ignore_missing_imports = true
 module = ["soxr", "soxr.*"]
 ignore_missing_imports = true
 
+# onnxruntime ships no type information (no py.typed); only va_voice.vad_model calls it, behind typed methods.
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -174,6 +179,7 @@ pythonpath = [
   "packages/va_telnyx/tests/support",
   "packages/va_elevenlabs/tests/support",
   "packages/va_llm/tests/support",
+  "packages/va_voice/tests/support",
   "tests_live/support",
 ]
 timeout = 60

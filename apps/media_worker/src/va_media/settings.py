@@ -19,6 +19,8 @@ class MediaSettings(RedisSettings, DatabaseSettings, TemporalSettings):
 
     media_drain_timeout_s: float = Field(default=2700, gt=0)
     media_max_calls_per_pod: int = Field(default=60, ge=1)
+    # Silero VAD inference threads per process (specs/07-media-pipeline.md §5.3).
+    media_vad_threads: int = Field(default=2, ge=1)
     # Empty or unset → the hostname (the pod name under Kubernetes).
     pod_id: str = ""
 
