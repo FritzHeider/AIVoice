@@ -348,6 +348,9 @@
   - Depends on: P05-T17e1
   - Deliverables: per-pod batched Silero inference across legs, cheaper per-frame inbound/outbound paths (Telnyx frame decode/encode, frame batching, task-switch and GIL-handoff reduction), py-spy before/after evidence; the `capacity` flow joins `make e2e`
   - Acceptance: `make e2e-capacity` with 50 calls on one media process: zero dropped calls, all attached at once, zero underruns, overhead p50 ≤ 150 ms; `make check && make e2e` green including the capacity flow.
+  - Note (2026-11-02, operator): the runner moved from c7i.2xlarge (8 vCPU) to c7i.4xlarge (16 vCPU) after
+    P05-T17e1. Before optimising, re-run `make e2e-capacity` and record the 16-vCPU baseline in the scratchpad and
+    the tick; measure improvements against that baseline, not the 8-vCPU numbers in the P05-T17e1 tick.
 
 ## Phase exit gate
 `make check && make e2e` pass with all flows listed in prompts/phase-05.md.
