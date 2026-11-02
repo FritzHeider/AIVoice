@@ -1,0 +1,19 @@
+id: interruptibility_levels
+description: A backchannel, then a full sentence, both while the agent talks; run once per interruptibility level.
+match:
+  to: "+14155550110"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/interruptibility_levels.yaml]
+steps:
+  - say: {text: "uh-huh", barge_in_after_agent_ms: 1500}
+  - silence: {ms: 2500}
+  - say: {text: "Sorry, could you tell me your opening hours on the weekend?", barge_in_after_agent_ms: 800}
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 30000}
+  - hangup: {}
+assertions:
+  call_status: completed
+  answered_by: human
+  webhook_events: ["call.completed"]

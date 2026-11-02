@@ -481,6 +481,25 @@ async def test_timeline_reports_when_agent_speech_first_played(media_agent: Medi
         assert later["first_agent_speech_ms"] == first
 
 
+async def test_timeline_reports_every_agent_clear(media_agent: MediaAgent) -> None:
+    state = telnyx_state(RecordingTransport())
+    async with telnyx_client(state) as client:
+        ccid = await streaming(client, state, media_agent)
+        await media_agent.send(agent_media(ulaw_encode(tone(40))))
+        await media_agent.send({"event": "mark", "mark": {"name": "before"}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 1)
+        timeline = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()
+        assert timeline["clears"] == []
+        for name in ("first", "second"):
+            await media_agent.send({"event": "clear"})
+            await media_agent.send(agent_media(ulaw_encode(tone(40))))
+            await media_agent.send({"event": "mark", "mark": {"name": name}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 3)
+        clears = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()["clears"]
+        assert len(clears) == 2
+        assert timeline["answered_ms"] <= clears[0] <= clears[1]
+
+
 async def test_media_control_errors(media_agent: MediaAgent) -> None:
     state = telnyx_state(RecordingTransport())
     async with telnyx_client(state) as client:

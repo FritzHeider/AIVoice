@@ -862,3 +862,186 @@ Delivered:
 Re-ran: lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, make test 10757 passed 7 skipped (99.16 %),
 make e2e 8 passed in 140.6 s. Diff matches specs/30 §5 rows (answered_by voicemail via scenario mapping, AMD→hangup
 ≤ 2 s, DTMF gap ≥ 500 ms, transfer ordering + transfer-rate price bound against seed build plan $0.10/$0.04/$0.015).
+
+## Plan P05-T17d — E2E barge_in, interruptibility_levels (0–4), worker_crash_recovery
+
+Builds on the P05-T17b/c harness. Spec rows: specs/30 §5 (`barge_in`, `interruptibility_levels`,
+`worker_crash_recovery`); level rules specs/07 §7 (+ Decision P04-T05); liveness specs/01 §2.1 Decision P05-T06c,
+specs/07 §19. After this task `make e2e` must show every phase-exit flow (11 flows, 15 tests with the 5 levels).
+
+### 0. Facts checked while planning (do not re-derive)
+- FakeTelnyx counts `clear` frames (`media_session._handle` → `received["clear"]`) but records no time. Timeline
+  utterance entries have `start_ms`/`end_ms` (sim virtual ms = wall ms under the realtime e2e sim).
+- FakeElevenLabs TTS = `va_sim.elevenlabs.tts_audio.CHAR_MS` = 60 ms/char → a 300-char first_sentence ≈ 18 s.
+  `first_sentence` max_length 1000. Opener is `TaskBrain._say(...)` → `SpeakStatic(interruptible=True)` (barge-able).
+- Send Call has `interruptibility` (0–4, default 2), `block_interruptions`, `wait_for_greeting` (default False).
+- History after barge-in: `va_llm.prompts.interrupted_message(text_spoken)` = assistant message
+  `text_spoken.rstrip() + INTERRUPTION_MARK` (import the constant; never copy "—").
+- Call Object transcripts carry the FULL planned text + `interrupted`; `text_spoken` is not in the public API, so
+  the spoken text is checked through the next LLM request (sim LLM log) and `call.interrupt` data
+  (`played_chars`, `total_chars`, `played_ms`, `reaction_ms`; `reaction_ms` = t_clear − t_speech_start).
+- Silero: `va_voice.vad.START_WINDOWS = 3`, 32 ms windows (`WINDOW_MS`) → speech_start confirmation lag ≤ ~96 ms.
+- Worker crash path: docker kill media → FakeTelnyx WS closes → `streaming.failed` → edge signals workflow →
+  after `STREAM_FAILURE_GRACE` (5 s) `call_presence` still sees `call:{id}:owner` (`OWNER_TTL_MS` 15 s, renewed every
+  5 s) → not orphaned → heartbeat watch: `call:{id}:hb` (`HEARTBEAT_TTL_S` 10, set every 3 s) absent for
+  `HEARTBEAT_MISSING_AFTER_S` 20 (poll `HEARTBEAT_POLL_INTERVAL_S`) → `_HANGUP_ENDS["heartbeat_lost"]` → end_call
+  `worker_crash` then `hangup_call`; post-call child runs. Worst case kill→hangup = 10 + 20 + poll(3) + activities
+  ≈ 33–35 s, so the spec's "within 30 s" cannot hold in the worst case (see Decision below).
+- Compose `media` has `restart: unless-stopped`; `docker kill` counts as a manual stop (verify; if Docker restarts
+  it on its own, the harness restart step must tolerate an already running container).
+- TurnWriter flushes every 2 s (`TURN_FLUSH_INTERVAL_S`), event buffer every 1 s: turns written before the kill
+  survive → "partial transcript".
+
+### 1. Simulator: clear times on the timeline
+- `packages/va_sim/src/va_sim/telnyx/calls.py`: `Call.clear_ms: list[int] = field(default_factory=list)`, exposed
+  in `timeline()` as `"clears"` (list copy).
+- `media_session.py` `_handle` `AgentClear` branch: append `self._state.clock.virtual_ms()` (same clock helper the
+  session already uses for `first_agent_speech_ms`).
+- Test next to `test_timeline_reports_when_agent_speech_first_played` (packages/va_sim/tests/telnyx/): media_agent
+  sends media, then `clear` twice → timeline `clears` has 2 non-decreasing values ≥ answered_ms; no clear → `[]`.
+  Update the call-control timeline equality test (it compares the full dict).
+- specs/30 §3.2 (14) timeline field list: add `clears` (virtual ms of every agent `clear` received).
+
+### 2. Harness (`tests_e2e/support/`)
+- New pure module `tests_e2e/support/e2e_timing.py` (unit-tested in `tests_e2e/unit/`):
+  - `@dataclass(frozen=True) Window(start_ms: int, end_ms: int)`; `utterance_window(entry, tail_ms) -> Window`
+    (`end_ms` None → raise AssertionError with the entry).
+  - `clears_in(timeline, window) -> list[int]`; `first_clear_after(timeline, at_ms) -> int | None`.
+  - `interrupt_events(events) -> list[dict]` = rows whose `category == "interrupt"` (check
+    `DEFAULT_CATEGORY` for `call.interrupt` — "interrupt" — import from va_events if a mapping exists; else filter
+    by the message prefix used in `va_media.turns.TurnRecorder.on_interrupt` via a shared constant: if the message
+    is an f-string, filter by category only, `interrupt` is used by exactly one type — verify).
+  - `assistant_before(messages, user_text) -> str | None`: content of the assistant message right before the last
+    user message containing `user_text` (LLM request `messages` list).
+- `Harness` (e2e_harness.py):
+  - `async kill_media() -> int`: find the container with `docker ps -q --filter
+    label=com.docker.compose.project=voiceagents --filter label=com.docker.compose.service=media` (asyncio
+    subprocess, 30 s timeout, non-zero → AssertionError with stderr), `docker kill --signal KILL <id>`; returns
+    `await self.sim_clock_ms()` read right after the kill returns.
+  - `async restart_media(timeout_s=120)`: `docker start <id>` (same lookup with `ps -aq`), then poll
+    `{media}/readyz` (StackUrls has/gets `media = http://localhost:8200`) until 200 via `_poll`. Idempotent (a running
+    container is fine).
+  - `async transcripts(org, call_id) -> list[dict]` only if `call_object(...)["transcripts"]` isn't enough (prefer
+    the Call Object).
+- Constants come from production modules (va_sim CHAR_MS, va_voice.vad START_WINDOWS/WINDOW_MS, va_voice.interrupt
+  `LEVEL_RULES`, va_media.session HEARTBEAT_TTL_S, va_workflows liveness_inputs HEARTBEAT_MISSING_AFTER_S /
+  HEARTBEAT_POLL_INTERVAL_S, va_llm.prompts INTERRUPTION_MARK); never hard-code duplicates.
+
+### 3. Flows (`tests_e2e/scenarios/*.yaml`, `rules/*.yaml`, `tests_e2e/test_<flow>.py`)
+All: `pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]`, `harness.create_org()`, `send_task_call`, follow
+`test_cold_transfer.py`/`test_outbound_basic.py` style. `record` stays false (no 10 min recording wait).
+
+**barge_in** — `interruptibility: 4` (Decision: the decision point is then STT-independent; levels 1–3 timing is
+proven by interruptibility_levels).
+- `first_sentence` = a fixed 300-char string constant (assert `len == 300` in the test module).
+- Scenario: answer human after 1000 ms; steps `say: {text: "Wait, I have a quick question about my order.",
+  barge_in_after_agent_ms: 1200}`, `wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 15000}`,
+  `hangup: {}`. Assertions: completed, answered_by human, `webhook_events: [call.completed]`.
+- Asserts:
+  - failures empty;
+  - utterance 0 onset = `start_ms`; `clear = first_clear_after(timeline, start_ms)` not None and
+    `clear − start_ms ≤ LEVEL4_MIN_SPEECH (150) + START_WINDOWS×WINDOW_MS + 120 + 40` (Decision: onset
+    confirmation + one 20 ms frame each way; calibrate only within this formula);
+  - exactly one `call.interrupt` row; its `reaction_ms ≤ 150 + WINDOW_MS + 120`; `played_ms ≥ 1200`;
+    `abs(played_chars − played_ms / CHAR_MS) ≤ 0.1 × played_ms / CHAR_MS` (Decision: the spec's "1.2 s / 60 ms"
+    is evaluated at the decision's `played_ms`, which is ≥ 1.2 s by the level rule);
+  - Call Object: the first assistant transcript has `interrupted is True`;
+  - LLM: the first request of the call whose messages contain the caller's text has, right before that user
+    message, an assistant message `m` ending with `INTERRUPTION_MARK`; `spoken = m[:-len(mark)]`;
+    `FIRST_SENTENCE.startswith(spoken)`, `len(spoken) <= played_chars`, `len(spoken) < len(FIRST_SENTENCE)`, and no
+    message contains `FIRST_SENTENCE[len(spoken) + 40:]` (the unspoken remainder).
+
+**interruptibility_levels** — `@pytest.mark.parametrize("level", [0, 1, 2, 3, 4])`, one call each, `interruptibility=
+level`, same 300-char first_sentence (share the constant via a small `tests_e2e/support/e2e_texts.py` or the test
+module — jscpd!).
+- Scenario `interruptibility_levels.yaml` (loaded once per param: `load_scenario` gives a fresh number per call):
+  answer human 1000 ms; steps
+  1. `say: {text: "uh-huh", barge_in_after_agent_ms: 1500}` (measure its timeline duration; spec says ≈ 0.4 s — if
+     the synth makes it ≥ 600 ms VAD speech, pick "mm-hmm"/"uh huh" whichever is < 500 ms and record it),
+  2. `silence: {ms: 2500}`,
+  3. `say: {text: "Sorry, could you tell me your opening hours on the weekend?", barge_in_after_agent_ms: 800}`
+     (≥ 4 non-backchannel words, > 1.2 s continuous speech; at level 4 it waits for the reply turn),
+  4. `wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 30000}`,
+  5. `hangup: {}`.
+- Rules `rules/interruptibility_levels.yaml`: marker-scoped default reply = a long (≈ 200 chars) fixed sentence so
+  the level-4 reply is still playing when step 3 starts.
+- Windows: `uh = utterance_window(utterances[0], tail_ms=500)`, `sentence = utterance_window(utterances[1], 500)`.
+- Asserts per level (failures empty for all):
+  - 0: `clears_in(uh) == clears_in(sentence) == []`, zero interrupt rows, no transcript `interrupted`;
+  - 1: none in uh; exactly one in sentence and `clear − sentence.start ≥ 1200`; one interrupt row;
+  - 2: none in uh; one in sentence, `≥ 500`; one interrupt row;
+  - 3: none in uh; one in sentence, `≥ 250`; one interrupt row;
+  - 4: one in uh with `clear − uh.start ≥ 150`; one in sentence; two interrupt rows.
+  Take thresholds from `LEVEL_RULES` (never literals).
+
+**worker_crash_recovery**
+- Scenario: answer human 1000 ms; steps `wait_agent_speech {min_ms 300, then_silence_ms 700, timeout 8000}`,
+  `say: {text: "I'd like to book a table for two tonight."}`, `wait_agent_speech {min_ms 300, then_silence_ms 700,
+  timeout 15000}`, `silence: {ms: 120000}`. Assertions: completed, answered_by human, `end_reason: worker_crash`,
+  `webhook_events: [call.completed]`.
+- Flow: send call; `sim_call`; `wait_sim` until script step 2 status `ok`; poll the Call Object (or
+  `/v1/calls/{id}/transcript`) until ≥ 2 transcripts exist (deterministic flush evidence, no sleeps);
+  `kill_ms = await harness.kill_media()`; inside `try/finally: await harness.restart_media()`:
+  wait for the sim leg to end (`wait_sim(ccid, ended, timeout_s=60)`), then `finished(...)`.
+- Asserts:
+  - failures empty (end_reason worker_crash proves the stream_failed path did not win);
+  - `timeline.ended_ms − kill_ms ≤ HEARTBEAT_TTL_S×1000 + HEARTBEAT_MISSING_AFTER_S×1000 +
+    HEARTBEAT_POLL_INTERVAL_S×1000 + 2000` and `≥ HEARTBEAT_MISSING_AFTER_S×1000` (it was the watch, not a hangup);
+  - sim summary: a non-duplicate `hangup` command and `hangup_source == "caller"` (platform side, outgoing leg);
+  - Call Object `queue_status == "complete"` (post-call ran), `end_reason == "worker_crash"`, transcripts ≥ 2
+    (partial: opener + caller turn), `call_ended_by` per `va_domain.call_object.mapping.CALL_ENDED_BY` for
+    ended_by `worker_crash` (import the mapping, no literal);
+  - after `restart_media()`, media `/readyz` 200 (the fixture leaves the stack usable).
+
+### 4. Specs/docs
+- specs/30 §5 `> Decision (2026-11-02): barge-in, interruptibility, and worker crash flows (P05-T17d)`:
+  (1) timeline `clears`; (2) barge_in runs at level 4, onset→clear bound formula (level threshold + VAD
+  confirmation + 120 ms + frame transport), spoken length checked at the decision's played_ms, text_spoken via the
+  next LLM request; (3) interruptibility_levels script (uh-huh, silence, sentence with barge_in_after_agent_ms) and
+  the per-level window rules; (4) worker_crash_recovery bound = hb TTL + missing window + poll + 2 s (≈ 35 s; the
+  "30 s" row is the typical case — measured value reported), harness kills/restarts via docker labels.
+- AGENTS.md bullet (P05-T17d): timeline `clears`, `kill_media`/`restart_media`, e2e_timing helpers, the crash
+  timing chain (stream_failed grace loses to the owner TTL → heartbeat watch).
+
+### Gates
+- `make fmt lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`;
+  `uv run pytest packages/va_sim -q -k "timeline or clear"`; `uv run pytest tests_e2e/unit -q`.
+- `make e2e` (sim image changes → rebuild; background + Monitor heartbeat): all 15 tests green; report per-flow
+  durations, barge-in onset→clear ms, reaction_ms, crash kill→hangup ms.
+- Full `make test` in the background with heartbeat; jscpd 0 clones, radon, pip-audit/pnpm audit.
+
+### Risks
+- uh-huh VAD segment ≥ 600 ms (level 3 long-speech rule) or ≥ 900 ms → false interrupt at 2/3: measure the timeline
+  `end_ms − start_ms`; pick a shorter backchannel if needed (Decision).
+- Synthetic sentence may contain inter-word gaps that end the VAD segment before 1.2 s (level 1): if so, use a
+  longer/denser sentence; never relax the ≥ 1200 ms lower bound.
+- Level 0: the caller audio during playback becomes the next user turn; the call ends by the scenario `hangup`.
+- `docker kill` + restart policy: verify the container stays down until `restart_media`; always restart in
+  `finally` so later flows (and the next `make e2e`) keep a healthy media worker.
+- Pre-existing `fix:bed-window-flake` may hit `make test`; rerun that single test to show it is unrelated.
+
+## Build P05-T17d (2026-11-02)
+
+Delivered:
+- Sim: `Call.clear_ms` → timeline `clears` (virtual ms of each agent `clear`); test
+  `test_timeline_reports_every_agent_clear`; call-control timeline equality updated; specs/30 §3.2 (14) field list.
+- Harness: `tests_e2e/support/e2e_timing.py` (Window, utterance_window, clears_in, first_clear_after,
+  interrupt_events, assistant_before, whole_word_prefix; unit tests `tests_e2e/unit/test_e2e_timing.py`),
+  `e2e_texts.py` (300-char opener), `Harness.kill_media`/`restart_media` (docker CLI, compose labels), `wait_call`
+  (wait_complete uses it), module `docker`/`compose_container`.
+- Flows: barge_in (level 4), interruptibility_levels (0-4), worker_crash_recovery + scenarios/rules.
+- Deviations from plan, both recorded in the Decision: (a) `played_chars` = whole-word `text_spoken` length, so
+  the ±10 % check is [whole_word_prefix(0.9·played_ms/60), 1.1·played_ms/60] (a plain ±10 % failed once: 28 vs 31.2);
+  (b) onset→clear bound adds the synthetic voice's first 180 ms syllable (Silero onset measured bimodal ≈ +0 /
+  +200 ms; pipeline reaction_ms stays 156-174 ms, the tight check).
+- Measurements: barge_in onset→clear 183-381 ms, reaction_ms 156-174; levels: L1 clear 1243 ms after onset,
+  L2 544, L3 422, L4 uh-huh 164 / sentence ≈ 180; uh-huh VAD never interrupted at 1-3. Crash: kill→hangup 28.8 s
+  (bound 20-35 s), Docker did not auto-restart the killed container (RestartCount 0).
+- Gates: make e2e 15 passed in 296.6 s exit 0 (all 11 phase-exit flows); make test 10770 passed / 7 skipped,
+  cov 99.16 %; lint/typecheck/placeholders/spec refs clean; jscpd 0 clones; radon tests_e2e avg A 3.41;
+  pip-audit no known vulns; pnpm audit 3 moderate (no high). Stack left running in PROFILE=e2e.
+
+## Review P05-T17d (2026-11-02): approved
+Re-ran: lint/typecheck/placeholders/spec refs 0; jscpd 0 clones; make test 10770 passed 7 skipped (99 %);
+make e2e 15 passed in 300.3 s. Diff matches specs/30 §5 rows + Decision P05-T17d (thresholds imported from
+LEVEL_RULES / heartbeat constants / CALL_ENDED_BY, no literals; media restarted in finally).

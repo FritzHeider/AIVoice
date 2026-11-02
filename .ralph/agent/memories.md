@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793656519-ccbe
+> P05-T17d: e2e barge/interrupt flows read FakeTelnyx timeline clears; voice onset = utterance start_ms + va_sim.audio.MARKER_MS; pipeline played_chars is whole-word text_spoken length (compare via whole_word_prefix, not plain ±10%); Silero onset on synthetic caller voice is bimodal (~0 or ~200 ms late on first syllable); docker kill media -> heartbeat watch ends call worker_crash ~29 s later (owner TTL beats stream_failed grace); make_test.log from an earlier run keeps a stale exit= line, so truncate logs before monitoring
+<!-- tags: e2e, testing, sim | created: 2026-11-02 -->
+
 ### mem-1793650295-24c7
 > P05-T17b: docker e2e harness tests_e2e/ (support/e2e_harness Harness + e2e_assertions.evaluate, unit tests in tests_e2e/unit run by make test); seed POST /internal/test/orgs (va_api.routers.e2e_seed, local/test only); never /sim/reset in e2e; served sim must start from random seed (seed 0 replayed Telnyx event ids after restart -> edge dedup dropped call.initiated); tool-call-only LLM rounds mark llm_first_token at stream end; end_call final line runs on turn timer
 <!-- tags: e2e, testing, sim | created: 2026-11-02 -->

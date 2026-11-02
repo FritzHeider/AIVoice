@@ -1,0 +1,17 @@
+id: barge_in
+description: The caller talks over a long opener at interruptibility 4; the agent stops and answers.
+match:
+  to: "+14155550109"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/barge_in.yaml]
+steps:
+  - say: {text: "Wait, I have a quick question about my order.", barge_in_after_agent_ms: 1200}
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 15000}
+  - hangup: {}
+assertions:
+  call_status: completed
+  answered_by: human
+  webhook_events: ["call.completed"]

@@ -45,6 +45,8 @@ __all__ = [
     "RegisteredScenario",
     "StackUrls",
     "WaitTimeoutError",
+    "compose_container",
+    "docker",
     "iso_ms",
     "prepare_rules",
     "prepare_scenario",
@@ -61,6 +63,10 @@ POLL_S: Final = 0.25
 DEFAULT_WAIT_S: Final = 30.0
 COMPLETE_WAIT_S: Final = 180.0
 ORDER_WAIT_S: Final = 20.0
+DOCKER_TIMEOUT_S: Final = 60.0
+RESTART_WAIT_S: Final = 120.0
+COMPOSE_PROJECT: Final = os.environ.get("E2E_COMPOSE_PROJECT", "voiceagents")
+MEDIA_SERVICE: Final = "media"
 VA_ENV: Final = os.environ.get("E2E_VA_ENV", "local")
 _RUN_FIELD: Final = "{{run}}"
 _MARKER_FIELD: Final = "{{marker}}"
@@ -224,6 +230,43 @@ async def _poll[T](
         await asyncio.sleep(POLL_S)
 
 
+async def docker(*args: str) -> str:
+    """Run ``docker *args`` (bounded by :data:`DOCKER_TIMEOUT_S`); its stdout (AssertionError on failure)."""
+    process = await asyncio.create_subprocess_exec(
+        "docker", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        async with asyncio.timeout(DOCKER_TIMEOUT_S):
+            stdout, stderr = await process.communicate()
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+    if process.returncode != 0:
+        message = f"docker {' '.join(args)} exited {process.returncode}: {stderr.decode(errors='replace')}"
+        raise AssertionError(message)
+    return stdout.decode()
+
+
+async def compose_container(service: str, *, running_only: bool) -> str:
+    """The id of the compose ``service``'s single container (found by the compose labels)."""
+    listing = "-q" if running_only else "-aq"
+    ids = (
+        await docker(
+            "ps",
+            listing,
+            "--filter",
+            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+        )
+    ).split()
+    if len(ids) != 1:
+        message = f"expected one {'running ' if running_only else ''}{service} container, found {ids}"
+        raise AssertionError(message)
+    return ids[0]
+
+
 def _ok(response: httpx.Response, *statuses: int) -> httpx.Response:
     wanted = statuses or (200,)
     if response.status_code not in wanted:
@@ -360,11 +403,26 @@ class Harness:
         self, org: E2eOrg, call_id: str, *, timeout_s: float = COMPLETE_WAIT_S
     ) -> dict[str, Any]:
         """The Call Object once post-call processing set ``queue_status`` to ``complete``."""
-        return await _poll(
-            lambda: self.call_object(org, call_id),
+        return await self.wait_call(
+            org,
+            call_id,
             lambda call: call.get("queue_status") == "complete",
+            what="queue_status=complete",
             timeout_s=timeout_s,
-            what=f"call {call_id} queue_status=complete",
+        )
+
+    async def wait_call(
+        self,
+        org: E2eOrg,
+        call_id: str,
+        done: Callable[[dict[str, Any]], bool],
+        *,
+        what: str,
+        timeout_s: float = DEFAULT_WAIT_S,
+    ) -> dict[str, Any]:
+        """The Call Object once ``done`` holds."""
+        return await _poll(
+            lambda: self.call_object(org, call_id), done, timeout_s=timeout_s, what=f"call {call_id} {what}"
         )
 
     async def stop_call(self, org: E2eOrg, call_id: str) -> None:
@@ -408,6 +466,27 @@ class Harness:
         local = urlunsplit(parts._replace(netloc=f"localhost:{parts.port or 80}"))
         response = await self.http.get(local, headers={"Host": parts.netloc})
         return _ok(response).content
+
+    # --- containers ----------------------------------------------------------------------------------------
+
+    async def kill_media(self) -> int:
+        """SIGKILL the media worker container; the sim clock read right after ``docker kill`` returned."""
+        container = await compose_container(MEDIA_SERVICE, running_only=True)
+        await docker("kill", "--signal", "KILL", container)
+        return await self.sim_clock_ms()
+
+    async def restart_media(self, *, timeout_s: float = RESTART_WAIT_S) -> None:
+        """Start the media worker container again (a running one is fine) and wait for ``/readyz`` 200."""
+        container = await compose_container(MEDIA_SERVICE, running_only=False)
+        await docker("start", container)
+
+        async def ready() -> int:
+            try:
+                return (await self.http.get(f"{self.urls.media}/readyz")).status_code
+            except httpx.TransportError:
+                return 0
+
+        await _poll(ready, lambda status: status == 200, timeout_s=timeout_s, what="media /readyz")
 
     # --- simulators ----------------------------------------------------------------------------------------
 

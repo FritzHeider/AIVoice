@@ -1,0 +1,18 @@
+id: worker_crash_recovery
+description: The media worker is killed mid-call; the workflow heartbeat backstop hangs the call up.
+match:
+  to: "+14155550111"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "I would like to book a table for two tonight."}
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 15000}
+  - silence: {ms: 120000}
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: worker_crash
+  webhook_events: ["call.completed"]

@@ -382,8 +382,9 @@ Behavioural rules:
 > to, state, is_alive, scenario_id, client_state, created_at, answered_at, ended_at, hangup_cause, hangup_source,
 > commands: [{name, command_id, at, duplicate}], events: [{event_type, event_id, at}], dtmf_sent, transfers:
 > [{call_control_id, to, from, at}], recordings, stream, conference_id}`; `GET .../timeline` → `{call_control_id,
-> initiated_ms, answered_ms, ended_ms, first_agent_speech_ms, utterances}` (sim `virtual_ms`; utterances come with
-> the media client; `first_agent_speech_ms` since P05-T17c, see the §5 Decision).
+> initiated_ms, answered_ms, ended_ms, first_agent_speech_ms, clears, utterances}` (sim `virtual_ms`; utterances come
+> with the media client; `first_agent_speech_ms` since P05-T17c, `clears` = the `virtual_ms` of every agent `clear`
+> frame received, since P05-T17d; see the §5 Decisions).
 > Payload `state`: `bridging` (outgoing initiated), `parked` (incoming initiated, or after unbridge), `answered`,
 > `bridged`, `hangup`; `is_alive` is true only between answer and hang-up. `GET /sim/state` `telnyx` adds `calls`
 > and `conferences` counts; `/sim/reset` drops calls and conferences and cancels pending progress. (15) Accelerated
@@ -1370,6 +1371,40 @@ delays is covered by Temporal time-skipping integration tests.)
 > recognises them in `webhook_events` (`call.amd` shares the `voicemail` category, so flows select the `call.voicemail` row by
 > its message); `call.transferred` shares its category and has no fixed message, so flows check
 > its row directly.
+
+> Decision (2026-11-02): barge-in, interruptibility, and worker crash flows (P05-T17d). (1) The FakeTelnyx timeline
+> adds `clears`: the sim `virtual_ms` of every agent `clear` frame received on the media stream, in arrival order.
+> Caller *voice onset* = the utterance's timeline `start_ms` + `MARKER_MS` (the 180 ms FSK marker preamble that
+> precedes every synthesized caller body). (2) `barge_in` runs at `interruptibility: 4`, so the decision needs no STT
+> words (levels 1-3 are proven by `interruptibility_levels`). The "clear within 120 ms of voice onset" row is checked
+> as onset → first `clear` ≤ the level's speech minimum (150 ms) + Silero's onset (the synthetic voice's first
+> 180 ms syllable rises from -12 dB and is sometimes not yet called speech, measured ≈ 200 ms late, plus the start
+> confirmation `START_WINDOWS` × `WINDOW_MS`) + the 120 ms reaction budget + one 20 ms frame each way: no barge-in
+> policy can clear before the speech minimum has elapsed. The 120 ms reaction itself is the tight check below. The `call.interrupt` row's `reaction_ms` (speech start → clear inside the pipeline) must
+> stay ≤ speech minimum + one VAD window + 120 ms. The spoken length is checked at the decision's `played_ms` (≥
+> 1 200 ms by the scenario). `played_chars` is the length of `text_spoken`, which keeps whole words only, so it
+> must lie between the whole-word prefix of the opener at 90 % of `played_ms / 60` characters and 110 % of
+> `played_ms / 60`. `text_spoken` is not public, so the
+> "history contains only spoken text" row is read from the first FakeLLM request carrying the caller's words: the
+> assistant message right before it is a prefix of the opener (no longer than `played_chars`) followed by
+> `va_llm.prompts.INTERRUPTION_MARK`, and no message contains the unspoken remainder. The Call Object keeps the full
+> planned text with `interrupted: true`. (3) `interruptibility_levels`: one call per level 0-4 with the 300-character
+> opener; the caller says "uh-huh" 1 500 ms into the agent's speech, stays quiet 2 500 ms, then says a 10-word
+> question 800 ms into the agent's (current) speech. Windows are each utterance's `[start_ms, end_ms + 500)`.
+> Level 0: no `clear`, no `call.interrupt`, no interrupted turn. Levels 1-3: no `clear` for "uh-huh" (backchannel,
+> and shorter than the levels' speech-only minimum), exactly one for the question no earlier than the level's
+> `min_speech_ms` after voice onset, one `call.interrupt`. Level 4: one `clear` for each utterance (each ≥ 150 ms
+> after onset) and two `call.interrupt` rows (the barged "uh-huh" becomes a real turn whose reply the question then
+> interrupts). Thresholds are imported from `va_voice.interrupt.LEVEL_RULES`. (4) `worker_crash_recovery`: the
+> harness `docker kill`s (SIGKILL) the compose `media` container (found by its compose labels) once the agent has
+> answered the caller and the turn writer has flushed the opener and the caller turn, and starts it again (waiting
+> for `/readyz`) in a `finally`. The FakeTelnyx stream failure does not end the call: `call_presence` still sees the
+> `call:{id}:owner` key (15 s TTL) after the 5 s grace, so the heartbeat watch decides: `call:{id}:hb` outlives the
+> worker by up to `HEARTBEAT_TTL_S` (10 s), the watch needs it missing for `HEARTBEAT_MISSING_AFTER_S` (20 s) checked
+> every `HEARTBEAT_POLL_INTERVAL_S` (3 s), then `end_call` and `hangup_call` run. The bound is therefore kill → leg
+> end ≤ 10 + 20 + 3 + 2 s = 35 s (and ≥ 20 s, proving the watch ended it); the table's "30 s" is the typical case.
+> The call ends `worker_crash` (`call_ended_by` `ERROR`, specs/05 §9), the platform side sends the `hangup`, and
+> post-call processing completes with the transcripts written before the kill.
 
 ## 6. Load testing (`scripts/load/`)
 

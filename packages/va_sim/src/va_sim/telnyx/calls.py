@@ -195,6 +195,8 @@ class Call:
     answered_ms: int | None = None
     # First agent speech frame played to the far end (sim ``virtual_ms``; agent-speech threshold).
     first_agent_speech_ms: int | None = None
+    # Sim ``virtual_ms`` of every agent ``clear`` frame received on the media stream, in arrival order.
+    clear_ms: list[int] = field(default_factory=list)
     ended_at: datetime | None = None
     ended_ms: int | None = None
     hangup_cause: str | None = None
@@ -321,6 +323,7 @@ class Call:
             "answered_ms": self.answered_ms,
             "ended_ms": self.ended_ms,
             "first_agent_speech_ms": self.first_agent_speech_ms,
+            "clears": list(self.clear_ms),
             "utterances": list(self.timeline_utterances),
             "script": self.script_summary(),
         }

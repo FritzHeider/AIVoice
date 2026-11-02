@@ -318,7 +318,7 @@
   - Deliverables: scenarios, rules, and tests for the four flows (cold transfer through the task-mode `transfer_phone_number` tool until phase 07 Transfer nodes, recorded as a Decision)
   - Acceptance: `make e2e` green with the eight flows so far.
 
-- [ ] P05-T17d E2E barge-in, interruptibility, and worker crash recovery
+- [x] P05-T17d E2E barge-in, interruptibility, and worker crash recovery — sim timeline `clears`, e2e_timing helpers, kill/restart media harness; barge_in (level 4), interruptibility_levels 0-4, worker_crash_recovery (kill→hangup ≈ 29 s, bound 20-35 s); make e2e 15 passed (all 11 phase-exit flows), make test 10770 passed / 7 skipped (99 %), lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
   - Spec refs: specs/30-testing-and-evals.md §5 (`barge_in`, `interruptibility_levels`, `worker_crash_recovery`); specs/07 §7, §8
   - Depends on: P05-T17b
   - Deliverables: flows `barge_in`, `interruptibility_levels` (levels 0–4), `worker_crash_recovery` (harness kills and restarts the media container)

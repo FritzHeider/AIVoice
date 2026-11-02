@@ -308,6 +308,7 @@ class MediaSession:
                 self._playout.mark(name)
             case AgentClear():
                 self.received["clear"] += 1
+                self._call.clear_ms.append(self._state.clock.virtual_ms())
                 self._playout.clear()
 
     def _note_agent_audio(self, audio: bytes) -> None:

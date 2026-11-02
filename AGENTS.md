@@ -1554,3 +1554,10 @@ Grafana 3001
   `call.machine.*` events. `EVENT_MESSAGES` now knows `call.voicemail`/`call.transfer_started` (fixed messages
   imported from `va_media`); `call.amd` shares the `voicemail` category, so select voicemail rows by message;
   `call.transferred` has no fixed message, check its `transfer` row directly.
+- 2026-11-02 (P05-T17d): FakeTelnyx timeline `clears` (virtual ms of each agent `clear`); caller voice onset =
+  utterance `start_ms` + `va_sim.audio.MARKER_MS` (180 ms FSK preamble). Pure timing helpers:
+  `tests_e2e/support/e2e_timing.py` (`utterance_window`, `clears_in`, `first_clear_after`, `interrupt_events`,
+  `assistant_before`); shared long opener `e2e_texts.LONG_FIRST_SENTENCE` (300 chars). Harness `kill_media()` /
+  `restart_media()` (docker CLI via compose labels, project `E2E_COMPOSE_PROJECT` default `voiceagents`) and
+  `wait_call(org, call_id, done, what=)`. Crash timing: a killed media worker's stream failure loses to the owner TTL
+  (15 s > 5 s grace), so the heartbeat watch ends the call `worker_crash` 20-35 s after the kill.

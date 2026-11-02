@@ -1,0 +1,8 @@
+rules:
+  - id: barge-in-answer-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)\\bquestion\\b"
+    respond:
+      content: "Of course, what would you like to know?"

@@ -1,0 +1,14 @@
+rules:
+  - id: interruptibility-hours-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)opening hours"
+    respond:
+      content: "We are open from noon to ten on Saturday and Sunday."
+  - id: interruptibility-reply-{{run}}
+    priority: 5
+    match:
+      system_contains: ["{{marker}}"]
+    respond:
+      content: "Thank you, I will note that down for your reservation, and our team will also prepare the table you asked for, with a candle and the wine list ready, so that everything is in place when you arrive on the weekend."
