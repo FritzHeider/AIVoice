@@ -27,7 +27,7 @@ from pipeline_fakes import (
 
 from va_sim.clock import AcceleratedClock, RealtimeClock
 from va_voice.latency import LatencyTracer
-from va_voice.pipeline import ActionHandler, CallPipeline, PipelineConfig, PipelineResult
+from va_voice.pipeline import ActionHandler, Brain, CallPipeline, PipelineConfig, PipelineResult
 
 __all__ = ["Harness", "HarnessClock", "harness"]
 
@@ -89,7 +89,9 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
     streaming: bool = True,
     partial_after: int = 10,
     clock: HarnessClock | None = None,
+    engine: Brain | None = None,
 ) -> AsyncIterator[Harness]:
+    """``engine`` replaces the scripted Brain in the pipeline (``h.brain`` then stays unused)."""
     cfg = config if config is not None else PipelineConfig()
     clock = clock if clock is not None else AcceleratedClock()
     transport = FakeTransport(clock, echo_delay_ms=echo_delay_ms)
@@ -110,7 +112,7 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
         stt=stt,
         tts=tts,
         vad=vad,
-        brain=the_brain,
+        brain=the_brain if engine is None else engine,
         clock=clock,
         config=cfg,
         latency=None if latency is None else latency(clock),

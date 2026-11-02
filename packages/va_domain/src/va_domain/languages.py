@@ -12,11 +12,14 @@ __all__ = [
     "DEFAULT_TTS_LANGUAGE",
     "LANGUAGE_MAP",
     "TTS_SUPPORTED",
+    "UNKNOWN_LANGUAGE_NAME",
     "LanguageMapping",
+    "language_name",
     "lookup_language",
 ]
 
 DEFAULT_TTS_LANGUAGE: Final = "en"
+UNKNOWN_LANGUAGE_NAME: Final = "the caller's language"
 
 # The 32 languages of eleven_flash_v2_5.
 TTS_SUPPORTED: Final = frozenset(
@@ -127,3 +130,53 @@ _FOLDED: Final = {alias.casefold(): mapping for alias, mapping in LANGUAGE_MAP.i
 def lookup_language(value: str) -> LanguageMapping | None:
     """The mapping of a Bland ``language`` value (trimmed, case-insensitive), ``None`` when unknown."""
     return _FOLDED.get(value.strip().casefold())
+
+
+# English names of the fixed languages (keyed by scribe code), used by the Voice System Prompt's
+# "Respond in {language_name}" line (specs/10 §5).
+_NAMES: Final[dict[str, str]] = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "ja": "Japanese",
+    "zh": "Chinese",
+    "ko": "Korean",
+    "hi": "Hindi",
+    "ru": "Russian",
+    "pl": "Polish",
+    "tr": "Turkish",
+    "sv": "Swedish",
+    "da": "Danish",
+    "no": "Norwegian",
+    "fi": "Finnish",
+    "uk": "Ukrainian",
+    "cs": "Czech",
+    "el": "Greek",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "ar": "Arabic",
+    "he": "Hebrew",
+    "ta": "Tamil",
+    "bg": "Bulgarian",
+    "hr": "Croatian",
+    "sk": "Slovak",
+    "fil": "Filipino",
+    "ca": "Catalan",
+}
+
+
+def language_name(value: str) -> str:
+    """The English name of a fixed ``language`` value; detection rows and unknown values give
+    :data:`UNKNOWN_LANGUAGE_NAME`."""
+    mapping = lookup_language(value)
+    if mapping is None or mapping.scribe_code is None:
+        return UNKNOWN_LANGUAGE_NAME
+    return _NAMES[mapping.scribe_code]

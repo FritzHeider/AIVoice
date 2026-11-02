@@ -1273,3 +1273,15 @@ Grafana 3001
   (`system_tools(facts)`, `facts_for_call(context, settings, sms_capable=)`, `parse_system_call` → typed args |
   `InvalidToolCall(.tool_message(id))` | `None` for custom names, `resolve_transfer`). Rules: specs/10 §5/§6/§7
   Decisions P05-T09b. va_engine depends on va-llm. `calendar.day_name` follows the process locale: use a fixed table.
+- 2026-11-02 (P05-T09c): task-mode Brain = `va_engine.task_runner.TaskBrain(context=, settings=, gateway=, counter=,
+  facts=, clock=, executor=None, memory_context=None)` (rules: specs/11 §6 Decision P05-T09c); round planning is
+  pure in `va_engine.task_tools.plan_round`, actions are `va_engine.models.results.TransferRequest`/`PressButton`
+  (BrainAction subclasses), I/O tools go through the `va_engine.tool_executor.ToolExecutor` protocol, prompt inputs
+  via `va_engine.voice_inputs.voice_prompt_inputs`; `va_domain.languages.language_name(value)`. va-engine depends
+  on va-voice. Tests: `packages/va_engine/tests/support/task_helpers.py` (`served()` = FakeLLM on a socket +
+  ManualClock gateway → `Sim.brain(context, ...)`, `Sim.rules(yaml)`, `Sim.requests()`; `task_context(direction,
+  **config)`, `user_turn`, `drain(outputs)`, `RecordingExecutor`, `assert_tool_pairing`, `tool_messages`). FakeLLM
+  rules distinguish tool rounds with `call_index` (counted per `X-VA-Call-Id`, which is the context's call id).
+  `pipeline_harness.harness(engine=brain, clock=RealtimeClock())` runs a real Brain (then wait on
+  `h.observer.user_turns`, not `h.brain`); a harness barge-in at the default level needs ≥ 900 ms of caller speech
+  (or ≥ 500 ms with two content words in the partial).

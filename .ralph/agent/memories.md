@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793591347-ba72
+> P05-T09c: TaskBrain = va_engine.task_runner (pure plan_round in task_tools, TransferRequest/PressButton BrainActions, ToolExecutor protocol); internal async generators typed AsyncGenerator + consumed via contextlib.aclosing so closed replies run finally promptly; tests task_helpers.served()/Sim.brain/drain; FakeLLM call_index rules separate tool rounds; harness(engine=brain, clock=RealtimeClock()); harness barge-in at balanced level needs >=900 ms speech (400 ms was flaky)
+<!-- tags: engine, pipeline, testing | created: 2026-11-02 -->
+
 ### mem-1793588946-2976
 > P05-T09b: va_llm.tokens vendors cl100k_base gzip (never tiktoken.get_encoding: network); va_llm.prompts render_voice_system/fit_voice_system; va_llm.window ConversationWindow; va_engine.system_tools availability table + parse_system_call; calendar.day_name is locale-dependent - use fixed English table
 <!-- tags: engine, llm, testing | created: 2026-11-02 -->

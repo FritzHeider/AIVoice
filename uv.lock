@@ -2893,6 +2893,7 @@ dependencies = [
     { name = "tzdata" },
     { name = "va-domain" },
     { name = "va-llm" },
+    { name = "va-voice" },
 ]
 
 [package.metadata]
@@ -2904,6 +2905,7 @@ requires-dist = [
     { name = "tzdata", specifier = ">=2025.2" },
     { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-llm", editable = "packages/va_llm" },
+    { name = "va-voice", editable = "packages/va_voice" },
 ]
 
 [[package]]

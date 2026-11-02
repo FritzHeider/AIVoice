@@ -421,6 +421,42 @@ node `task_root` type Default with `prompt = task`, global prompt empty, tools =
 SMS-capable number, `lookup_knowledge` if KB ids in tools). `first_sentence` spoken verbatim (templated) at call
 start. No routing calls; extraction only via tools. All other behavior identical (prompt assembly §5.7 [1] empty).
 
+> Decision (2026-11-02): task-mode runner (P05-T09c). `va_engine.task_runner.TaskBrain` implements the
+> `va_voice.pipeline.Brain` protocol.
+> 1. Opener: `first_sentence` rendered with the templating engine (§8) and spoken as `SpeakStatic`; when blank
+>    the model writes the opener (one turn without a user message). A template with a syntax error is used as
+>    raw text (`template_invalid` log); each missing variable path is logged once per call.
+> 2. Every request renders the specs/10 §5 Voice System Prompt (instructions = templated `task`, variables =
+>    `request_data` overlaid by the call's variables, now/timezone/language from the config, counterpart = the
+>    callee for outbound and the dialled agent number for inbound calls), fitted with `fit_voice_system` (the
+>    tool note and tool JSON count as extra tokens), plus the tool usage note when tools are offered and the
+>    history trimmed by `ConversationWindow(llm.context_budget_tokens)`. Model, temperature and `max_tokens`
+>    come from the resolved config.
+> 3. Tools = `system_tools(facts)` + the custom tools of the `ToolExecutor` (`va_engine.tool_executor`). Without
+>    an executor `send_sms`, `schedule_callback` and `lookup_knowledge` are not offered (the phase 08 ToolRunner
+>    executes them through the executor, as it does custom tools).
+> 4. Tool loop per user turn (specs/10 §7): at most 3 rounds with tools; after the third, after two rounds that
+>    contained an invalid call, or once the call made 100 tool calls, the next request offers no tools (tool
+>    calls returned anyway are ignored). A round executes at most 4 calls (later ones are answered
+>    `{"error":"too_many_tool_calls"}`); executor calls run concurrently (at most 3 at once) and every call is
+>    answered in call order. `press_button` answers `{"status":"sent","digits":…}` and hands
+>    `PressButton(digits)` to the action handler. The first `end_call`/`transfer_call` of a round is terminal;
+>    later calls are answered `{"error":"skipped"}`. A `transfer_call` whose label does not resolve is answered as
+>    invalid arguments (`label: unknown transfer label`). Each assistant message with tool calls is followed by
+>    exactly one tool message per call; calls left unanswered when the reply is cut off are answered
+>    `{"error":"interrupted"}`.
+> 5. `end_call` sets `EngineState.ended`/`end_reason = "agent_end_call"` and ends the call after its final line
+>    (`final_message`, else `"Goodbye."` unless text was already spoken this turn). `transfer_call` speaks its
+>    `message` (not interruptible), then hands `TransferRequest(target, label, message)` to the action handler;
+>    the turn ends. Both act only after the spoken part of the reply finished playing.
+> 6. An LLM that is unavailable before the first token (both targets) makes the runner speak `error_phrase`; a
+>    failure after the first token keeps the spoken text and drops the round's tool calls.
+> 7. Barge-in (§5.1): the interrupted assistant message keeps only the heard text ending in `—` (`—` alone when
+>    nothing was heard) and its history record is marked `interrupted`. A turn that supersedes an earlier one
+>    (specs/07 §8) removes the earlier user message and everything after it. DTMF turns become
+>    `[Caller pressed: …]` user messages. `on_no_input` yields nothing (the pipeline reprompts); timing uses the
+>    call-level `PipelineConfig` (no node overrides).
+
 ## 7. Actions
 
 ```python

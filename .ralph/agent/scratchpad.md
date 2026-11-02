@@ -3118,3 +3118,178 @@ Re-ran: lint/typecheck/placeholders/spec refs 0, make test 9366 passed / 7 skipp
 Vendored cl100k gzip sha256 matches tiktoken's pin. Template verbatim; window keeps opener + current turn, no orphan
 tool messages (hypothesis-tested); system tool schemas/availability match the 10 §7 Decision (press_button follows
 13 §6 "always on voice", recorded). Approved.
+
+## Plan P05-T09c — `TaskBrain`: streaming replies, tool loop, system tool actions (Planner, 2026-11-02)
+`va_engine.task_runner.TaskBrain` implements `va_voice.pipeline.Brain` for task-mode calls. Key pipeline facts
+(read before coding): `Speaker.speak` awaits playback completion, so a Brain generator resumes after a yielded
+`SpeakText`/`SpeakStatic` only when the caller heard it (= specs/11 §7 "terminal actions after playback mark");
+an empty `SpeakText` (no clauses) is a no-op (`speak` returns None); `BrainAction`s are awaited (shielded) by the
+pipeline; on barge-in the pipeline cancels the reply task (generator closed → `GeneratorExit`/`CancelledError` at
+the current await) and then calls `on_interrupted(truncated.history_text)` (already ends with "—").
+
+### Decisions (one block `> Decision (2026-11-02): task-mode runner (P05-T09c).` under specs/11 §6; one line under
+### specs/13 §6 after the P05-T09b decision: end reason is the normative specs/05 §9 `agent_end_call`)
+1. va-engine depends on va-voice (pipeline models/protocols only); va_engine.models.results holds BrainAction
+   subclasses (`@dataclass(frozen=True, slots=True, kw_only=True)` because base `kind` has no default):
+   `TransferRequest(kind="transfer_call", target: str, label: str | None, message: str | None)`,
+   `PressButton(kind="press_button", digits: str)`. (Pathway Action union of §7 comes in phase 07.)
+2. Opener (`start()`): `first_sentence` rendered with templating (scope below); non-blank → `SpeakStatic(text)`
+   recorded as the assistant opener. Blank/None → one LLM round with no user message (model writes the opener;
+   FakeLLM default `Hello! How can I help you today?`). (T10 handles wait_for_greeting by deferring `start`.)
+3. Prompt per LLM request: `render_voice_system(fit_voice_system(voice_prompt_inputs(...), counter=, extra_tokens=
+   tokens of the tool note + tools JSON))`; instructions = `render_text(config.task, scope)` (task-mode §5.7 [1]
+   empty). Inputs (`va_engine.voice_inputs.voice_prompt_inputs(context, *, now, instructions, variables,
+   memory_context)`): now_local = now in `call_zone(context)`, timezone = config.timezone, direction = context.direction,
+   counterpart = outbound `to_number`, inbound `from`-side agent number (`context.to_number`), web "",
+   agent_name/company None (persona fields arrive in P13), language_name = `va_domain.languages.language_name(
+   config.language)`, variables = `{**config.request_data, **state.variables}` (renderer drops `_`-keys,
+   call_id, voice_id), memory_context = constructor arg (formatter arrives with memory, P13), knowledge none.
+   Template scope: `TemplateScope(variables=state.variables, request_data=config.request_data,
+   builtins=call_builtins(context, now=clock.now(), last_user_message=<last user text>), timezone=config.timezone,
+   missing=MissingVariables(sink=log "template_variable_missing" path=...))` — one `MissingVariables` per brain so
+   each missing path logs once. Parse templates (`parse_template`) once in the constructor; a
+   `TemplateSyntaxError` in task/first_sentence falls back to the raw text and logs `template_invalid`.
+4. Messages = `assemble_messages(system, tool_note=tool_usage_note(executor.tool_speech or DEFAULT_TOOL_SPEECH)
+   if tools else None, window=ConversationWindow(settings.llm.context_budget_tokens, counter).fit(self._messages)
+   .messages)`. `DialogueRequest(org_id=context.org_id, messages, tools, model=config.dialogue_model,
+   temperature=config.temperature, max_tokens=config.max_tokens, call_id=context.call_id,
+   turn_index=state.turn_index)`.
+5. Tools offered = `system_tools(facts)` + `executor.definitions()` (when an executor is given). `facts` comes from
+   the caller (`facts_for_call`); without a `ToolExecutor` the brain clears the executor-backed system tools
+   (`dataclasses.replace(facts, sms_capable=False, allow_schedule_callback=False, has_knowledge_bases=False)`):
+   send_sms / schedule_callback / lookup_knowledge / custom tools are executed by the phase 08 ToolRunner through
+   `ToolExecutor` (`va_engine.tool_executor`: Protocol with `definitions() -> tuple[ToolDef, ...]`,
+   `tool_speech: str | None` property, `async execute(call: ToolCall) -> str` returning the tool message content,
+   `handles(name) -> bool`). Executor-backed system tool names are passed to the executor too (typed parse first
+   via `parse_system_call` so invalid arguments never reach it).
+6. Tool loop per user turn (specs/10 §7, 13 §5): rounds with tools ≤ `MAX_TOOL_ROUNDS = 3`; after the third tool
+   round, or after 2 rounds that contained an invalid call, or once the call used `MAX_TOOL_CALLS_PER_CALL = 100`
+   tool calls, the next request goes with `tools=()` (speech only). Per round at most `MAX_TOOL_CALLS_PER_ROUND = 4`
+   calls are executed; extra calls get tool message `{"error":"too_many_tool_calls"}`. Order of handling within a
+   round: executor calls run concurrently (≤ 3, `asyncio.Semaphore` inside a `TaskGroup`), then action calls in
+   order (press_button → yield `PressButton`, result `{"status":"sent","digits":...}`; end_call / transfer_call
+   are terminal: the first terminal call ends processing, later calls get `{"error":"skipped"}`). Invalid/unknown →
+   `InvalidToolCall(...).tool_message(id)` (unknown custom name → detail `unknown_tool`). Every assistant
+   `tool_calls` message is followed by exactly one tool message per call id before the next request (invariant;
+   a `finally` fills missing ones with `{"error":"interrupted"}` when the generator is closed mid-round).
+7. Terminal tools: `end_call` → record tool result `{"status":"ending"}`, set `state.ended=True,
+   end_reason="agent_end_call"`, yield `EndCall(final_text=args.final_message or (None if the round already spoke
+   text this turn else "Goodbye."), reason="agent_end_call")`. `transfer_call` → `resolve_transfer(args, facts)`;
+   None (label not resolvable) → `InvalidToolCall("transfer_call", [{"path":"label","message":"unknown transfer
+   label"}])` and another round; else result `{"status":"transferring"}`, yield `SpeakStatic(args.message,
+   interruptible=False)` when message non-blank, then `TransferRequest(target, label, message)`, and the turn ends
+   (no further LLM round). `end_call_speech` static/prompt modes (13 §6) are node/config features of P07; the task
+   runner's final line is `final_message`.
+8. LLM failures: `LlmUnavailableError` (pre-token, both targets) is caught inside the recording token iterator
+   (never escapes into the pipeline's speaker); the brain then yields `SpeakStatic(config.error_phrase)` (recorded)
+   and ends the turn, log `task_llm_unavailable` (reason). A post-token failure (`stream.error` set) keeps the
+   spoken text, ignores tool calls, logs `task_llm_stream_failed`, ends the turn.
+9. History: `self._messages: list[ChatMessage]` is the LLM conversation; `state: EngineState(runner="task",
+   pathway_id=None, pathway_version=None, current_node_id="task_root", variables=dict(context.variables))` mirrors it
+   with `TurnRecord`s (node_id "task_root", `at_ms` = int ms since the brain was created on its clock; user turns use
+   `int(turn.end_ms)`): user text (DTMF: `dtmf_message(digits).content`), assistant content (when non-empty), one
+   `tool` record per call (content = tool message, tool_name, tool_call_id). `on_user_turn` increments
+   `state.turn_index`. DTMF turn → `dtmf_message(turn.dtmf)` user message. `turn.supersedes` = an earlier turn index
+   whose reply produced no audio: drop that user message and everything after it from `_messages` and the matching
+   records from `state.history` (positions remembered per user turn index; unknown index → ignore).
+10. Barge-in: each spoken item remembers its assistant message position (`_spoken_pos`; streamed rounds append the
+   partial text on close when non-empty). `on_interrupted(spoken)` replaces that message's content with `spoken`
+   (keeps `tool_calls`; `"—"` alone when nothing was heard), sets the record's `interrupted=True` and content; no
+   spoken position → no-op. The unspoken remainder is never in `_messages` (11 §5.1).
+11. `on_no_input()` yields nothing (pipeline reprompt); `timing()` → `BrainTiming()` (task mode has no node
+   overrides; call-level settings live in PipelineConfig).
+
+### Files
+- `packages/va_domain/src/va_domain/languages.py`: `language_name(value: str) -> str` (English name of the fixed
+  language — table `_NAMES` keyed by the scribe code of every fixed specs/08 §5 row: en English, es Spanish, fr
+  French, de German, it Italian, pt Portuguese, nl Dutch, ja Japanese, zh Chinese, ko Korean, hi Hindi, ru Russian,
+  pl Polish, tr Turkish, sv Swedish, da Danish, no Norwegian, fi Finnish, uk Ukrainian, cs Czech, el Greek, … every
+  remaining row); detection rows and unknown values → `"the caller's language"`).
+- `packages/va_engine/pyproject.toml`: add `va-voice` dep + `[tool.uv.sources] va-voice`; `uv lock`.
+- NEW `packages/va_engine/src/va_engine/models/results.py` (TransferRequest, PressButton).
+- NEW `packages/va_engine/src/va_engine/tool_executor.py` (ToolExecutor Protocol).
+- NEW `packages/va_engine/src/va_engine/voice_inputs.py` (`voice_prompt_inputs`).
+- NEW `packages/va_engine/src/va_engine/task_tools.py`: pure round helpers — `RoundPlan` (split calls into
+  executed/overflow, classify parse results), `tool_result(obj) -> str` (orjson compact), constants
+  `MAX_TOOL_ROUNDS`, `MAX_TOOL_CALLS_PER_ROUND`, `MAX_TOOL_CALLS_PER_CALL`, `EXECUTOR_CONCURRENCY = 3`, result
+  payloads. Keep radon ≤ B by splitting.
+- NEW `packages/va_engine/src/va_engine/task_runner.py`: `TaskBrain(*, context: CallContext, settings: OrgSettings,
+  gateway: DialogueSource, counter: TokenCounter, facts: SystemToolFacts, clock: Clock, executor: ToolExecutor |
+  None = None, memory_context: str | None = None)`; `DialogueSource` Protocol (`async stream_dialogue(request:
+  DialogueRequest) -> DialogueStream`; `LlmGateway` satisfies it); properties `state`, `messages`
+  (tuple, for tests/persistence); Brain methods per decisions. Raises `ValueError` at construction when
+  `config.runner_type != "task"` or `config.task` is None.
+- `packages/va_voice/tests/support/pipeline_harness.py`: kwarg `engine: Brain | None = None` passed to
+  `CallPipeline` instead of the ScriptedBrain (h.brain stays the unused ScriptedBrain); no change for existing tests.
+- specs/11 §6 Decision, specs/13 §6 line; AGENTS.md line; memory.
+
+### Tests (packages/va_engine/tests)
+Support: NEW `packages/va_engine/tests/support/task_helpers.py` (add dir to root pytest `pythonpath` and mypy
+`mypy_path`): `task_context(**config_overrides)` from `resolved_configs.resolved_config(...)` with runner task;
+`served_brain(state, **kw)` async cm = `served_gateway(realtime_llm_state())` → `(brain_factory, control)`;
+`drain(outputs) -> list[Rendered]` consumes SpeakText tokens to strings (`("text", "...")`, `("static", ...)`,
+`("end", final, reason)`, `("action", obj)`); `RecordingExecutor`. Rules through `add_rules(control, yaml)`;
+prompt assertions through `served_requests(control)`.
+- `test_task_runner.py` (brain level, served FakeLLM): opener static templated (`{{first_name}}` from
+  request_data, builtin `{{from}}`), opener from LLM when no first_sentence; plain reply streams and records
+  user/assistant messages + EngineState records/turn_index; system prompt sent = rendered voice prompt with task
+  instructions, tool note, tools = end_call (+ transfer_call when configured) + press_button; model/temperature/
+  max_tokens from config; end_call with final_message → `EndCall(final, "agent_end_call")` and state ended; end_call
+  without final_message after spoken content → `final_text=None`; with no content → "Goodbye."; transfer_call by
+  label and by default (`TransferRequest` target, message spoken first non-interruptible, no further request);
+  unresolvable label → invalid round then reply; press_button → `PressButton` then next round; invalid args
+  (`press_button` digits "12x") → tool message `{"error":"invalid_arguments",...}` in the next request; 3 tool
+  rounds then a request with no tools; 2 invalid rounds → tools dropped; > 4 calls in a round → overflow results;
+  call-wide cap; every request's tool messages pair with the previous assistant tool calls (invariant check
+  helper over all served requests); LLM unavailable (arm fault 500 for both models) → error phrase spoken; DTMF
+  turn → `[Caller pressed: 1 2]`; supersedes drops the earlier turn; on_interrupted replaces the last assistant
+  content with "Hello th—" style text and the next request carries it; interruption mid-round (close the
+  generator after a press_button action) fills `{"error":"interrupted"}`; executor: definitions offered, executor
+  calls run concurrently (RecordingExecutor with an Event proving overlap ≤ 3), results appended in call order;
+  no executor → send_sms/schedule_callback/lookup_knowledge not offered even when facts allow; constructor rejects
+  non-task configs; missing template variable logged once.
+- `test_task_pipeline.py` (va_voice harness, `clock=RealtimeClock()`, `engine=TaskBrain`, served FakeLLM with
+  `realtime_llm_state()`, `PipelineConfig(no_input_timeout_ms=30_000)`): plain reply turn heard (agent_turns text);
+  end_call with final_message → pipeline result `end_reason="agent_end_call"` and final line spoken; transfer_call
+  by label → action handler (`RecordingActions` test fake capturing BrainActions) receives `TransferRequest`;
+  press_button → handler gets `PressButton` and the follow-up reply is spoken; invalid arguments round recovers;
+  barge-in truncation: long reply interrupted by `h.caller.say(...)`, next served request's assistant message ends
+  with "—" and excludes the unspoken text.
+- `test_voice_inputs.py`: counterpart/direction for outbound/inbound/web, language_name, now_local zone, variables
+  merge order; `packages/va_domain/tests/test_languages.py` (or existing file): every fixed row has a name;
+  detection/unknown → "the caller's language".
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (no C+), pip-audit on `uv export`, `corepack pnpm audit`; va_engine coverage ≥ 85 % (aim ≥ 95 %
+on new modules). `make e2e`: not applicable yet (tests_e2e arrives P05-T17; the Brain is not wired into va_media
+until T10/T11).
+
+### Risks
+- Realtime harness + served FakeLLM: keep utterances short; never mix the sim AcceleratedClock with real sockets.
+  The gateway rig runs on a ManualClock, so its deadlines never fire in these tests (intended).
+- Generator closing semantics: the token iterator yielded inside `SpeakText` is closed by the speaker
+  (`_close_tokens`) — the recording wrapper must record partial text in its own `finally`, and the brain generator's
+  `finally` must close the `DialogueStream` (`async with`) and fill missing tool results.
+- OpenAI wire rule: assistant message with `tool_calls` and `content=None` when no text (FakeLLM accepts null
+  content only with tool_calls).
+- mypy: BrainAction subclass with `kw_only=True` + redefined `kind` default; check slots/frozen inheritance works.
+- radon: split the round processing into small methods.
+
+## Build P05-T09c (Builder, 2026-11-02)
+Implemented per plan: `va_engine.task_runner.TaskBrain` (+ `DialogueSource`), pure `task_tools.plan_round`,
+`models/results.py` (TransferRequest/PressButton, kw_only BrainAction subclasses work with slots), `tool_executor`
+Protocol, `voice_inputs.voice_prompt_inputs`, `va_domain.languages.language_name`; va-engine → va-voice dep;
+harness `engine=` kwarg. Internal generators are typed `AsyncGenerator` and always consumed via
+`contextlib.aclosing` so a closed reply runs every finally (stream aclose, `interrupted` tool answers) promptly.
+Deviations/notes: tool messages for press_button are written before the action is yielded (the action is shielded
+and completes even when the reply is cut), so `interrupted` fills only calls not yet reached; executor exceptions
+answer `{"error":"tool_failed"}` (logged). Pipeline barge-in test needs ≥ 900 ms caller speech at the balanced
+level (400 ms was flaky). Specs: 11 §6 Decision, 13 §6 Decision (agent_end_call). Tests: test_task_runner (35),
+test_task_pipeline (5, wall clock ~11 s), test_voice_inputs, test_task_tools, test_languages additions.
+
+## Review P05-T09c (Reviewer, 2026-11-02)
+Approved. Re-ran lint/typecheck/placeholders (pass), make test 9513 passed / 7 skipped (99.15 %), spec refs 0,
+jscpd 0 clones, radon avg A (only pre-existing C: CallParameters). Diff matches specs/11 §6 Decision, specs/10 §7
+tool loop, specs/13 §5 caps (4 per turn, 3 parallel, 100 per call), specs/05 §9 agent_end_call. Tool pairing
+invariant holds on cut replies (finally answers `interrupted`; partial replies carry no tool_calls).

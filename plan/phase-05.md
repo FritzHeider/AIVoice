@@ -144,7 +144,7 @@
   - Deliverables: `va_llm.prompts` (`prompts/voice_system.txt` verbatim + `render_voice_system`, tool usage note); `va_llm.window` (`ConversationWindow` budget trimming); `va_engine.system_tools` (built-in tool definitions, availability rules, argument validation, reserved names)
   - Acceptance: drift test of the prompt file against the specs/10 §5 block; placeholder rendering for every rule; window trimming keeps opener, drops complete turns with their tool messages, inserts the omission note; tool schemas and availability per call config.
 
-- [ ] P05-T09c `TaskBrain`: streaming replies, tool loop, system tool actions
+- [x] P05-T09c `TaskBrain`: streaming replies, tool loop, system tool actions — va_engine.task_runner.TaskBrain + task_tools.plan_round, TransferRequest/PressButton, ToolExecutor, voice_inputs, language_name; 43 new tests (brain + pipeline); make test 9513 passed, coverage 99.15 %, lint/typecheck/placeholders/jscpd/radon/spec refs pass
   - Spec refs: specs/11-pathways-engine.md §6, §5.1, §7; specs/10-llm-gateway.md §2, §4, §7 (tool loop); specs/13-tools-and-dynamic-data.md §6 (final-line semantics)
   - Depends on: P05-T09b, P04-T12
   - Deliverables: `va_engine.task_runner.TaskBrain` implementing `va_voice.pipeline.Brain` (`va_engine.models.results` BrainAction subclasses, templated `first_sentence` opener, streamed replies through `LlmGateway.stream_dialogue` with call temperature/max_tokens/model, up to 3 tool rounds, `end_call` → `EndCall`, `transfer_call` → `TransferRequest` BrainAction, `press_button` → `PressButton` BrainAction, invalid-argument round, barge-in truncation of history, `call.turn`-ready `EngineState`)

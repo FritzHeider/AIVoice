@@ -127,6 +127,11 @@ tool calls per call: 100.
 > Decision (2026-11-02): the wire schemas and availability of these tools follow the specs/10 §7 Decision P05-T09b
 > (`end_call` adds `final_message`, `transfer_call` uses `label`, `schedule_callback` uses `datetime_iso`); the
 > `press_button` pattern and `lookup_knowledge` schema above are kept. Implemented in `va_engine.system_tools`.
+>
+> Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
+> `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the
+> tool's `final_message`; without one it is `"Goodbye."` unless the reply already spoke text this turn (specs/11 §6
+> Decision P05-T09c). `end_call_speech` static/prompt modes arrive with pathway nodes (phase 07).
 
 `end_call` and `transfer_call` final-line semantics: tool parameters additionally accept (via call config
 `end_call_speech` / node `endCall`) `speech` (static), `speech_mode: "static"|"prompt"`, `speech_prompt`. Static:

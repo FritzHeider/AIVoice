@@ -11,6 +11,7 @@ dependencies = [
     "tzdata>=2025.2",
     "va-domain",
     "va-llm",
+    "va-voice",
 ]
 
 [build-system]
@@ -20,3 +21,4 @@ build-backend = "uv_build"
 [tool.uv.sources]
 va-domain = { workspace = true }
 va-llm = { workspace = true }
+va-voice = { workspace = true }
