@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793641286-4864
+> P05-T18a: va_billing.metering.finalize_call (org lock -> insert usage ON CONFLICT DO NOTHING RETURNING -> ledger only for new non-zero rows -> recompute price -> capture/release hold); call_rows.seed_call accepts id= ; billing DB tests seed start balance via grant_credits so ledger sums to balance
+<!-- tags: billing, testing | created: 2026-11-02 -->
+
 ### mem-1793639516-44e5
 > P05-T16b: call artifacts service va_api.services.call_artifacts (active/recording/transcript/events) reuses call_read.ReadDeps(+redis)/owned_call; transcript SRT/VTT in va_domain.call_object.transcript_formats with golden files; FastAPI query-model routes need cross_tenant REGISTRY.register_request; route returning RedirectResponse or model: set response_model= explicitly, annotate -> Model | Response
 <!-- tags: api, calls, testing | created: 2026-11-02 -->

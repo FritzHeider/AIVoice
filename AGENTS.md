@@ -1502,3 +1502,9 @@ Grafana 3001
   `ObjectStore.exists`, else the raw dual-channel key; `call_fakes.FakePresigner` answers `head_object` from
   `existing` (`fail_head` → 500). Routes with a FastAPI query model need `REGISTRY.register_request` in
   `cross_tenant_factories.py`; shared call-read seeding is `tests/support/call_read_helpers.an_org`.
+- 2026-11-02 (P05-T18a): call metering = `va_billing.metering.finalize_call(session, org_id, call_id, now=)` (in the
+  caller's `tenant_session`; pure planning `plan_call_usage(CallUsageFacts)`, `pricing_from_snapshot`,
+  `CallNotEndedError` for non-terminal calls; rules: specs/24 §4 Decision P05-T18a). Usage rows insert `ON CONFLICT DO
+  NOTHING ... RETURNING`, so only new rows hit the ledger. Tests: `packages/va_billing/tests/test_metering_db.py`
+  (`funded_org` grants the start balance through the ledger so `Σ ledger == balance`); `call_rows.seed_call` now
+  accepts an explicit `id=` (needed when a hold must reference the call before it exists).

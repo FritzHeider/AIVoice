@@ -81,6 +81,23 @@ Rounding: amount = `round_half_up(quantity × unit_price_per_unit)` computed in 
 5. If balance after < auto-recharge threshold → signal `AutoRechargeWorkflow`; if balance after < `low_balance_threshold`
    (org setting, default $5) and no notification in 24 h → `billing.low_balance`.
 
+> Decision (2026-11-02): call metering (P05-T18a). `va_billing.metering.finalize_call(session, org_id, call_id, now=)`
+> runs in the caller's `tenant_session` and posts only the three call meters (`call_connected_seconds`,
+> `call_transfer_seconds`, `call_attempt`). A seconds meter with 0 seconds is not posted; the `call_attempt` row is posted
+> for every outbound call that has a primary leg, even when its amount is 0, so the attempt is recorded. A call without a
+> primary leg never reached Telnyx and costs nothing; inbound calls have no attempt row. BYO Telnyx calls post the
+> transfer quantity at unit price 0. `unit_price_micros` of a seconds meter is the per-second price rounded half-up
+> (informational); the amount uses the exact `rate × seconds / 60` with `ROUND_HALF_UP`. Each newly inserted non-zero
+> usage row adds one `usage` ledger entry (negative amount, `description` = meter) with the usage row's idempotency key;
+> zero amounts get no ledger entry, and rows already posted are never charged again. `calls.price_micros` is recomputed
+> from all of the call's call-meter rows on every run. The hold is captured when the price is above 0 and released
+> otherwise (an already settled hold is left alone). The org row is locked `FOR UPDATE` first, so concurrent finalizes
+> serialise. Without a valid `calls.config.pricing` snapshot the org's current plan + overrides price the call
+> (`billing.pricing_snapshot_missing` is logged; `SERVICE_UNAVAILABLE` when the plan row is missing too); a
+> non-terminal call raises `CallNotEndedError`. Deferred to phase 15: COGS (`cost_micros` stays 0), the
+> `stt_seconds`/`tts_characters` meters, the `events:billing` mirror (step 4), auto-recharge and `billing.low_balance`
+> (step 5), and `bill_to_parent`.
+
 ## 5. Credit holds
 
 - Purpose: prevent a burst of calls from overspending.

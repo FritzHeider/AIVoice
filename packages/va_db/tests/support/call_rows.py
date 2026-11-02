@@ -35,7 +35,7 @@ async def seed_call(
         "to_number": "+14155550100",
         "from_number": "+14155550199",
     }
-    call = Call(id=new_id(), org_id=org, status=status, **{**defaults, **values})
+    call = Call(org_id=org, status=status, **{"id": new_id(), **defaults, **values})
     async with database.tenant_session(org) as session:
         session.add(call)
     return SeededCall(org_id=org, call_id=call.id)

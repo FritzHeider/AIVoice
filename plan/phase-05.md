@@ -278,15 +278,21 @@
   - Deliverables: `GET /v1/calls/active` (current_node_id from carrier_state), `GET /v1/calls/{call_id}/recording` (302 / `?format=json`, `?channel=`), `GET /v1/calls/{call_id}/transcript` (json/text/srt/vtt), `GET /v1/calls/{call_id}/events` (after_seq, limit, category)
   - Acceptance: SRT/VTT golden files; recording 404 / 302 / json; events paging by seq; cross-tenant 404s.
 
-- [ ] P05-T18 PostCallWorkflow v1: billing finalization and completion event
-  - Spec refs: specs/18-post-call-analysis.md (PostCallWorkflow step list, billing finalization hook); specs/24-billing-and-limits.md (metering rules, credit holds)
-  - Depends on: P05-T06, P05-T11
-  - Deliverables: `PostCallWorkflow` with the first steps that do not need later phases — recording copy (P05-T14), billing finalization (usage events for connected seconds, transfer seconds, attempt minimum; hold capture/release; `calls.price_micros`), `call.completed` event with the Call Object; later phases insert their steps at the positions defined in specs/18
-  - Acceptance: Temporal tests; price on the Call Object equals the metering rule result for connected, transferred, and failed calls.
+- [x] P05-T18a Call metering: `va_billing.metering.finalize_call` (usage events, ledger, hold settlement, call price) — pure plan_call_usage + finalize_call under org lock (ON CONFLICT usage, ledger for new non-zero rows, price recompute, hold capture/release); specs/24 §4 Decision; make test 10624 passed / 7 skipped, coverage 99.17 % (metering.py 100 %), lint/typecheck/placeholders/spec refs pass
+  - Spec refs: specs/24-billing-and-limits.md §3 (call meters, rounding), §4 (`finalize_call` steps 1-3), §5 (capture/release); specs/18-post-call-analysis.md §10
+  - Depends on: P05-T04b, P05-T06b
+  - Deliverables: pure call usage planning (`call_connected_seconds`, `call_transfer_seconds` with BYO = 0, outbound `call_attempt` minimum, Decimal ROUND_HALF_UP with ms quantities) from the `calls.config.pricing` snapshot; `finalize_call(session, org_id, call_id, now=)` posting `usage_events` + `credit_ledger` `usage` rows once per idempotency key under the org row lock, decrementing the balance, setting `calls.price_micros`, capturing (charged) or releasing (free) the call's hold; spec Decision for the parts deferred to phase 15 (COGS, stt/tts meters, `events:billing` mirror, auto-recharge, low balance, bill_to_parent)
+  - Acceptance: metering table tests from specs/24 §13 (10 s at $0.12/min → $0.02; 3 s → $0.015; no-answer → $0.015; inbound no minimum; transfer; BYO transfer 0; 61.437 s rounding); DB tests: connected/transferred/failed/never-dialed prices, finalize twice → one set of rows, concurrent finalize from two sessions → one set, balance equals ledger sum, non-final call refused.
+
+- [ ] P05-T18b PostCallWorkflow v1: finalize record, recording, billing, and `call.completed`
+  - Spec refs: specs/18-post-call-analysis.md §1 (steps 1, 2, 3, 11, 13; ordering, `postcall_steps`, failure handling, 30 min budget), §11; specs/06-telephony-telnyx.md §11 Decision P05-T14 item 3; specs/19-events-and-webhooks.md §2 (`call.completed`, `RECORDING_MISSING`), §4
+  - Depends on: P05-T18a, P05-T14, P05-T16a
+  - Deliverables: `PostCallWorkflow` (registered on the post-call queue by the worker) running `finalize_call_record` → (`await_recording`: stored `call.recording.saved` lookup, else signal wait 10 min, else `call.error` `RECORDING_MISSING`) → `store_recording` → `finalize_billing` (P05-T18a) → `emit_completed` (`queue_status='complete'`, `call.completed` with the Call Object incl. 7-day recording URL); steps recorded in `calls.config.postcall_steps` and skipped on re-execution; not-connected calls run 1, 11, 13; later phases insert their steps at the specs/18 positions
+  - Acceptance: Temporal time-skipping tests with fake activities (order, skips, recording timeout, failures still reach `emit_completed`); activity DB tests; `call.completed` price equals the metering result for connected, transferred, and failed calls; worker registration test.
 
 - [ ] P05-T17 End-to-end flows and concurrency check
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list)
-  - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16a, P05-T16b, P05-T18
+  - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16a, P05-T16b, P05-T18a, P05-T18b
   - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery, plus the e2e flows of tasks finished before the harness existed (voicemail_leave_message, voicemail_hangup, amd_ivr_mode from P05-T10; others named in earlier tasks' acceptance when they also predate it); a 50-concurrent-call simulator test against one media worker process
   - Acceptance: `make e2e` green; concurrency test reports no underruns and p50 platform overhead ≤ 150 ms.
 

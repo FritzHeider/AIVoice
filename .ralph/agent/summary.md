@@ -1,8 +1,8 @@
 # Loop Summary
 
 **Status:** Stopped: max runtime exceeded
-**Iterations:** 76
-**Duration:** 12h 4m 45s
+**Iterations:** 63
+**Duration:** 12h 10m 30s
 
 ## Tasks
 
@@ -14,4 +14,4 @@ _No events recorded._
 
 ## Final Commit
 
-627a5be: feat(media): call runtime runs the task-mode pipeline with ElevenLabs STT/TTS and the LLM gateway
+7e25f70: feat(api): active calls, recording links, transcript downloads, and call event pages
