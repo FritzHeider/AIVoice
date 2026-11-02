@@ -1,0 +1,26 @@
+rules:
+  - id: concurrent-greet-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)\\bana\\b"
+    respond:
+      content: "Thanks, Ana. I am calling to confirm your dental cleaning on Thursday. Does that still suit you?"
+  - id: concurrent-offer-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)move it to friday"
+    respond:
+      content: "Of course. On Friday I can offer ten in the morning or twelve noon. Which one would you like?"
+  - id: concurrent-end-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)\\bnoon\\b"
+    respond:
+      tool_calls:
+        - name: end_call
+          arguments:
+            reason: rescheduled
+            final_message: "Done, your cleaning is now on Friday at noon. Have a lovely day!"

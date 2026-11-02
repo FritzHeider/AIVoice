@@ -236,6 +236,7 @@ class CallRuntime:
         self._vad_executor = vad_executor
         self._clock = clock
         self._metrics = metrics
+        self._underruns = metrics.counter("va_audio_underruns_total")
         self._tracer_provider = tracer_provider
 
     @property
@@ -329,6 +330,7 @@ class CallRuntime:
                 phrases=self._phrases(context, config),
                 observer=_observer(recorder, monitor),
                 mixer=mixer,
+                on_underrun=self._underruns.inc,
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             _bind_transfer(actions, pipeline, brain, org.transfer_failed_message)

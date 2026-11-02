@@ -7,7 +7,7 @@ PNPM ?= $(shell command -v pnpm >/dev/null 2>&1 && echo pnpm || echo corepack pn
 # Compose profiles for `make up`, comma-separated (e.g. PROFILE=apps or PROFILE=infra,observability).
 PROFILE ?= infra
 
-.PHONY: help setup up down migrate seed fmt lint typecheck test test-ts e2e e2e-ui openapi placeholders check load
+.PHONY: help setup up down migrate seed fmt lint typecheck test test-ts e2e e2e-capacity e2e-ui openapi placeholders check load
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-14s %s\n", $$1, $$2}'
@@ -52,7 +52,11 @@ test-ts: ## TypeScript tests
 
 e2e: ## Simulator end-to-end suite (brings the compose e2e stack up first, rebuilding images)
 	scripts/dev_up.sh e2e
-	uv run pytest tests_e2e -m e2e
+	uv run pytest tests_e2e -m "e2e and not capacity"
+
+e2e-capacity: ## Single-pod 50-call concurrency check (E2E_CONCURRENT_CALLS overrides the count)
+	scripts/dev_up.sh e2e
+	uv run pytest tests_e2e -m capacity -s
 
 e2e-ui: ## Dashboard Playwright suite
 	$(PNPM) --filter dashboard exec playwright test

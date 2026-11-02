@@ -330,5 +330,24 @@
   - Deliverables: a simulator test (marker `slow`/`e2e`) running 50 concurrent scripted calls through one media worker process, reporting frame underruns and platform overhead percentiles
   - Acceptance: no underruns, p50 platform overhead ≤ 150 ms, report committed or printed as evidence.
 
+  > Planner split (2026-11-02, after build.blocked): the first build landed the measurement (underrun accounting,
+  > noise-gate profile cadence, e2e metrics helpers, Postgres connections, the 50-call flow) but one media process
+  > measured overhead p50 620 ms, 1.7k–3.5k underruns, loop lag p99 ≤ 200 ms: the main thread is saturated by
+  > per-frame Python work (py-spy: `InboundPath.push` ≈ 60 %, GIL handoffs to the two `va-vad` threads). P05-T17e is
+  > delivered as P05-T17e1 (ship the measurement, capacity flow not yet in `make e2e`) and P05-T17e2 (capacity work
+  > that makes the flow pass and puts it into `make e2e`). P05-T17e is ticked when both are.
+
+- [x] P05-T17e1 Concurrency measurement and capacity flow (opt-in) — marker `capacity`, `make e2e-capacity`, `E2E_CONCURRENT_CALLS`; make e2e 15 passed (capacity deselected); baseline 50 calls: 0 dropped, peak 50, overhead p50/p95 335/895 ms, 667 underruns, lag p99 ≤ 150 ms (gates fail as expected); 10 calls: p50 92 ms, 2 underruns, lag ≤ 5 ms; make test 10796 passed / 7 skipped (99.16 %), lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
+  - Spec refs: specs/30 §6; specs/07 §9, §10.1, §21; specs/29 §2
+  - Depends on: P05-T17b
+  - Deliverables: the working-tree work of the first P05-T17e build (outbound underrun accounting + `va_audio_underruns_total`, `pipeline_ended` outbound stats, SpectralGate profile cadence, `e2e_metrics`, harness `create_org(plan_id=, dollars=)`/`media_metrics`/`watch_active_calls`/`load_scenario(instance=)`/poll intervals, Postgres `max_connections=300`, `tests_e2e/test_concurrent_calls.py` + scenario/rules) with the flow marked `capacity` (deselected by `make e2e`, run by `make e2e-capacity`; call count from `E2E_CONCURRENT_CALLS`, default 50)
+  - Acceptance: `make check` and `make e2e` (15 flows, capacity deselected) green; `make e2e-capacity` runs and prints the report (baseline numbers recorded in the tick; failing gates expected and reported); `E2E_CONCURRENT_CALLS=10 make e2e-capacity` reported.
+
+- [ ] P05-T17e2 Media worker 50-call capacity
+  - Spec refs: specs/07 §5.3, §16, §21; specs/30 §6; phase 05 constraints
+  - Depends on: P05-T17e1
+  - Deliverables: per-pod batched Silero inference across legs, cheaper per-frame inbound/outbound paths (Telnyx frame decode/encode, frame batching, task-switch and GIL-handoff reduction), py-spy before/after evidence; the `capacity` flow joins `make e2e`
+  - Acceptance: `make e2e-capacity` with 50 calls on one media process: zero dropped calls, all attached at once, zero underruns, overhead p50 ≤ 150 ms; `make check && make e2e` green including the capacity flow.
+
 ## Phase exit gate
 `make check && make e2e` pass with all flows listed in prompts/phase-05.md.

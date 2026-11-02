@@ -9,7 +9,7 @@ import io
 import math
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -32,7 +32,9 @@ from telnyx_helpers import CALLEE, register
 from tenant_rows import open_database
 from tts_helpers import VOICE_ID
 
+import va_media.runtime
 from va_billing.keys import concurrency_key
+from va_common.metrics import ServiceMetrics
 from va_common.time import SystemClock, utcnow
 from va_db.models import Call, CallEvent, Message
 from va_db.repositories import CallTurnRepo
@@ -55,6 +57,7 @@ from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx.client_state import command_id
 from va_voice.audio import rms_dbfs
 from va_voice.phrase_cache import PhraseCache
+from va_voice.pipeline import CallPipeline
 from va_workflows.activities.prerender import OpenerPrerender
 
 OPENER: Final = "Hi, this is Maya."
@@ -72,6 +75,7 @@ class Rig:
     signaller: RecordingSignaller
     relay: EdgeRelay
     sms_number: str | None = None
+    metrics: ServiceMetrics | None = None
 
     @asynccontextmanager
     async def call(
@@ -176,6 +180,7 @@ async def rig(
                 parts.signaller,
                 relay,
                 parts.sms_number,
+                parts.metrics,
             )
 
 
@@ -185,7 +190,14 @@ def spoken(state: SimState) -> list[str]:
     return [text for text in texts if text]
 
 
-async def test_caller_turn_is_answered_by_the_task_brain() -> None:
+async def test_caller_turn_is_answered_by_the_task_brain(monkeypatch: pytest.MonkeyPatch) -> None:
+    hooks: list[Callable[[], None]] = []
+
+    def recording_pipeline(**kwargs: Any) -> CallPipeline:
+        hooks.append(kwargs["on_underrun"])
+        return CallPipeline(**kwargs)
+
+    monkeypatch.setattr(va_media.runtime, "CallPipeline", recording_pipeline)
     async with rig() as r:
         await add_rules(
             r.llm,
@@ -204,6 +216,12 @@ async def test_caller_turn_is_answered_by_the_task_brain() -> None:
         assert any("book a table" in text for text in r.user_messages())
         assert [request.rule_id for request in r.state.llm.requests] == ["table"]
         assert spoken(r.state) == [OPENER, "Sure, for how many people?"]
+        assert r.metrics is not None
+        registry = r.metrics.registry
+        assert registry.get_sample_value("va_audio_underruns_total") == 0
+        assert len(hooks) == 1
+        hooks[0]()
+        assert registry.get_sample_value("va_audio_underruns_total") == 1
 
 
 async def test_end_call_tool_ends_the_session_as_agent_end_call() -> None:

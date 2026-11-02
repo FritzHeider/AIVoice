@@ -20,6 +20,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
 | Pipeline benchmark | `uv run pytest -m bench packages/va_voice` (rewrites `packages/va_voice/BENCHMARKS.md`; commit it) |
 | Simulator end-to-end | `make e2e` (runs `scripts/dev_up.sh e2e`, rebuilding images, then `pytest tests_e2e -m e2e`; one flow on a running stack: `uv run pytest tests_e2e -m e2e -k outbound_basic -s`) |
+| Single-pod capacity check | `make e2e-capacity` (50 concurrent calls on one media worker, marker `capacity`, deselected by `make e2e`; `E2E_CONCURRENT_CALLS=10` for fewer; on a running stack: `uv run pytest tests_e2e -m capacity -s`) |
 | Dashboard e2e | `make e2e-ui` |
 | Live vendor smoke | `LIVE_TESTS=1 LIVE_TELNYX_API_KEY=… LIVE_ELEVENLABS_API_KEY=… LIVE_LLM_API_KEY=… uv run pytest tests_live -m live -rs` (optional `LIVE_FROM_NUMBER`, `VA_ENV`; commit the generated `tests_live/fixtures/stt_phrase.*` after the first run) |
 | Dashboard dev server | `corepack pnpm --filter dashboard dev` (port 3000; set `NEXT_TELEMETRY_DISABLED=1`) |
@@ -1561,3 +1562,20 @@ Grafana 3001
   `restart_media()` (docker CLI via compose labels, project `E2E_COMPOSE_PROJECT` default `voiceagents`) and
   `wait_call(org, call_id, done, what=)`. Crash timing: a killed media worker's stream failure loses to the owner TTL
   (15 s > 5 s grace), so the heartbeat watch ends the call `worker_crash` 20-35 s after the kill.
+- 2026-11-02 (P05-T17e): platform underrun = speech frame sent after Telnyx drained while the previous frame on the leg
+  was speech of the same utterance (specs/07 §9 Decision P05-T17e); `OutboundStats.underruns`, hook
+  `CallPipeline(on_underrun=)` (harness `harness(on_underrun=)`), the media runtime increments
+  `va_audio_underruns_total`; `pipeline_ended` logs `outbound_frames`/`late_frames`/`max_lateness_ms`/`underruns`.
+  `tests_e2e/test_concurrent_calls.py` = 50 simultaneous calls on the one media process (scale plan, $500 via
+  `create_org(plan_id=, dollars=)`); `Harness.media_metrics()` / `watch_active_calls(stop)` and pure
+  `tests_e2e/support/e2e_metrics.py` (`parse_metrics`, `sample`, `sample_sum`, `histogram_quantile(before, after,
+  name, q)`). Compose Postgres runs with `max_connections=300`: Temporal holds ~32 and each app 2 pools x (10 + 10
+  overflow); the default 100 ran out under 50 calls (`too many clients already`). `runtime_rig.SimRuntime.metrics`
+  / runtime sim `Rig.metrics` expose the runtime's catalog.
+- 2026-11-02 (P05-T17e1): the 50-call flow carries marker `capacity` (registered in pyproject): `make e2e` runs
+  `-m "e2e and not capacity"`, `make e2e-capacity` runs it alone (`E2E_CONCURRENT_CALLS` 1..50, parsed by
+  `tests_e2e/support/e2e_capacity.concurrent_calls`). Copies of one scenario in a test need
+  `load_scenario(name, instance=n)` (same id otherwise: they replace each other), and many concurrent pollers need
+  `finished(..., poll_s=1.0)` (0.25 s x 50 hits the plan's 100 req/s `default` bucket). Baseline: 50 calls overhead
+  p50 335 ms / 667 underruns / lag p99 ≤ 150 ms; 10 calls p50 92 ms / 2 underruns / lag ≤ 5 ms (so underruns also
+  appear without CPU pressure). The flow takes ~45 s.

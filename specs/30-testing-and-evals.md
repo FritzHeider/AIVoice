@@ -1424,6 +1424,24 @@ delays is covered by Temporal time-skipping integration tests.)
 - Output: `scripts/load/report.py` writes `load-report.md` with percentiles and pass/fail; CI nightly on staging runs a
   200-concurrent variant.
 
+> Decision (2026-11-02): single-pod concurrency check (P05-T17e). The phase-05 one-pod variant of the call swarm is
+> `tests_e2e/test_concurrent_calls.py` (marker `capacity`; runs against the compose stack's single media-worker
+> process and single-process simulator). An org on the `scale` plan (concurrency 100, `calls_send` capacity 50, so no call
+> is refused) funded with $500 dispatches 50 `concurrent_call` scenarios at once (realistic latency profile, three
+> caller turns, the agent ends the call). Gated: zero dropped calls (every scenario's assertions hold), all 50
+> attached to the media worker at the same time (peak of `va_media_active_calls`), zero platform underruns (delta of
+> `va_audio_underruns_total`; definition: specs/07 §9 Decision P05-T17e), and platform overhead p50 ≤ 150 ms over
+> all 150 caller turns (specs/00 §5; overhead per specs/30 §5 Decision P05-T17b). Reported, not gated: overhead p95
+> (vs 250 ms), simulator voice-to-voice p50/p95, and `va_event_loop_lag_ms` p50/p99 between two scrapes (specs/07
+> §21's 10 ms target). The 1 000-call swarm, `scripts/load/`, and the §21 lag/lateness asserts stay with phase 20.
+>
+> Decision (2026-11-02): until P05-T17e2 the capacity flow is opt-in (P05-T17e1): `make e2e` selects
+> `-m "e2e and not capacity"`, `make e2e-capacity` runs `-m capacity -s`, and `E2E_CONCURRENT_CALLS` (integer
+> 1..50, default 50) sets the call count. Baseline on the c7i.2xlarge dev host (whole compose stack on 8 vCPU):
+> 50 calls — none dropped, 50 attached at once, overhead p50/p95 335/895 ms, 667 underruns, loop lag p99 ≤ 150 ms;
+> 10 calls — none dropped, overhead p50/p95 92/255 ms, 2 underruns, loop lag p99 ≤ 5 ms. P05-T17e2 (media-worker
+> capacity work) makes the 50-call gates pass and moves the flow into `make e2e`.
+
 ## 7. Live smoke tests (`tests_live/`, `LIVE_TESTS=1`, staging)
 
 Env required: `LIVE_TELNYX_API_KEY`, `LIVE_TELNYX_CONNECTION_ID`, `LIVE_FROM_NUMBER`, `LIVE_TEST_ANSWER_NUMBER` (a

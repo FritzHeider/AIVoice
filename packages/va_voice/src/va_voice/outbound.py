@@ -15,6 +15,11 @@ ducked and the background never goes to the STT.
 background when no speech is queued, nothing when there is no background), sends a segment's mark right after
 the segment's last frame, and reports every frame to the utterance's
 :class:`~va_voice.playback.PlaybackTracker`.
+
+A platform **underrun** (specs/07 §9 Decision P05-T17e) is a speech frame sent after Telnyx's buffer drained
+while the previous frame sent on the leg was a speech frame of the same utterance (no idle frame, gap wait,
+clear, or finish in between): the send loop fell more than the lead behind mid-utterance. TTS starvation is
+not an underrun (it sends idle frames or waits in the gap branch, which breaks the continuity).
 """
 
 from __future__ import annotations
@@ -251,6 +256,7 @@ class OutboundStats:
     late_frames: int = 0
     max_lateness_ms: float = 0.0
     dropped_frames: int = 0
+    underruns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,10 +284,12 @@ class OutboundAudio:
 
     __slots__ = (
         "_clock",
+        "_continuing",
         "_framer",
         "_generation",
         "_mixer",
         "_on_finished",
+        "_on_underrun",
         "_open",
         "_pacer",
         "_pending_chars",
@@ -293,7 +301,7 @@ class OutboundAudio:
         "_wake",
     )
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 (collaborators of one leg; everything after the mixer is keyword-only)
         self,
         sink: OutboundSink,
         mixer: FrameMixer,
@@ -301,9 +309,12 @@ class OutboundAudio:
         clock: Clock,
         pacer: FramePacer | None = None,
         on_finished: Callable[[PlaybackTracker], None] | None = None,
+        on_underrun: Callable[[], None] | None = None,
     ) -> None:
         self._sink = sink
         self._on_finished = on_finished
+        self._on_underrun = on_underrun
+        self._continuing: PlaybackTracker | None = None
         self._mixer = mixer
         self._clock = clock
         self._pacer = pacer if pacer is not None else FramePacer()
@@ -402,6 +413,7 @@ class OutboundAudio:
         self._segment_frames = 0
         self._pending_chars = 0
         self._generation += 1
+        self._continuing = None
         self._pacer.reset()
         self._stats.dropped_frames += dropped
         return dropped
@@ -416,6 +428,7 @@ class OutboundAudio:
             await self._send_controls(self._generation)
             if self._queued_frames == 0 and not self._mixer.has_background:
                 self._pacer.mark_gap()
+                self._continuing = None
                 self._wake.clear()
                 await self._wake.wait()
                 continue
@@ -436,12 +449,18 @@ class OutboundAudio:
         else:
             speech = None
             wire = self._mixer.idle()
+        starved = speech is not None and self._continuing is speech.tracker and self._pacer.drained(now)
         await self._sink.send_audio(wire)
         if generation != self._generation:
             return
         lateness = self._pacer.on_sent(now)
         self._count(lateness, speech=speech is not None)
-        if isinstance(speech, _Frame):
+        self._continuing = speech.tracker if speech is not None else None
+        if starved:
+            self._stats.underruns += 1
+            if self._on_underrun is not None:
+                self._on_underrun()
+        if speech is not None:
             speech.tracker.frame_sent(now)
         await self._send_controls(generation)
 
@@ -456,6 +475,7 @@ class OutboundAudio:
                 await self._sink.send_mark(name)
                 self._stats.marks_sent += 1
             else:
+                self._continuing = None
                 item.tracker.finish()
                 if self._on_finished is not None:
                     self._on_finished(item.tracker)

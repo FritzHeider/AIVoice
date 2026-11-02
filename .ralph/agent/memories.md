@@ -442,6 +442,10 @@
 
 ## Fixes
 
+### mem-1793660249-6e32
+> P05-T17e: e2e load copies of one scenario need Harness.load_scenario(instance=n) (same run token = same scenario id, later registrations replace earlier ones -> calls get scenario_id null); 50 pollers at 0.25 s hit 429 on scale plan; compose Postgres max_connections default 100 runs out (temporal ~32). py-spy into containers: docker cp static binary from uvx cache, docker exec --privileged -u 0 /tmp/py-spy record --pid <python pid> --idle --threads [--native needs blocking mode]; --gil view undercounts main thread because numpy/soxr release the GIL
+<!-- tags: e2e, media, performance | created: 2026-11-02 -->
+
 ### mem-1793647998-0ae8
 > Flake: test_runtime_sim background-bed test (fixed 2000-2800 ms window on wall clock) can overlap the opener under full make test load; measure relative to opener end
 <!-- tags: media, testing, flaky | created: 2026-11-02 -->
@@ -659,3 +663,11 @@
 <!-- tags: tooling, ruff | created: 2026-10-25 -->
 
 ## Context
+
+### mem-1793661625-5011
+> P05-T17e1: capacity flow opt-in via pytest marker capacity (make e2e = -m 'e2e and not capacity', make e2e-capacity, E2E_CONCURRENT_CALLS 1..50). Baseline: 50 calls overhead p50 335 ms, 667 underruns, lag p99<=150; 10 calls p50 92 ms but still 2 underruns at lag<=5 ms -> underruns not purely CPU (check definition/sim drain in P05-T17e2)
+<!-- tags: e2e, performance, media | created: 2026-11-02 -->
+
+### mem-1793660249-9345
+> P05-T17e: media worker at 50 calls/process is main-thread bound (InboundPath ~60%: SpectralGate FFT, soxr, GIL re-take after C calls vs va-vad pool threads, asyncio overhead); SpectralGate per-hop np.percentile was 24 ms per call-second -> cadence 32 hops + np.partition = 2 ms; inline VAD (no pool) halves underruns but is not enough; next lever = batched Silero across legs
+<!-- tags: media, performance, vad | created: 2026-11-02 -->

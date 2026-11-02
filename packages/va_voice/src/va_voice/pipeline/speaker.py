@@ -117,6 +117,7 @@ class Speaker:
         next_index: Callable[[], int],
         context_ids: Callable[[int], str],
         phrases: PhraseSource | None = None,
+        on_underrun: Callable[[], None] | None = None,
     ) -> None:
         self._transport = transport
         self._tts = tts
@@ -129,7 +130,9 @@ class Speaker:
         self._context_ids = context_ids
         self._phrases = phrases
         self._wake = asyncio.Event()
-        self._outbound = OutboundAudio(transport, mixer, clock=clock, on_finished=self._on_finished)
+        self._outbound = OutboundAudio(
+            transport, mixer, clock=clock, on_finished=self._on_finished, on_underrun=on_underrun
+        )
         self._active: _Utterance | None = None
         self._reply_audio = False
 

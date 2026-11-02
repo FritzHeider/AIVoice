@@ -37,6 +37,7 @@ services:
     image: pgvector/pgvector:pg16
     profiles: [infra, apps, e2e]
     restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: va
       POSTGRES_PASSWORD: va

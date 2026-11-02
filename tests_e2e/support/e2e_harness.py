@@ -14,6 +14,7 @@ Waits poll an external system on the wall clock with a bounded deadline and fail
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 import secrets
@@ -30,6 +31,7 @@ import httpx
 import phonenumbers
 import yaml
 from e2e_assertions import evaluate
+from e2e_metrics import Scrape, parse_metrics, sample_sum
 
 from va_domain.org import OrgSettings
 from va_sim.elevenlabs.voice_catalog import KAREN_VOICE_ID
@@ -67,6 +69,7 @@ DOCKER_TIMEOUT_S: Final = 60.0
 RESTART_WAIT_S: Final = 120.0
 COMPOSE_PROJECT: Final = os.environ.get("E2E_COMPOSE_PROJECT", "voiceagents")
 MEDIA_SERVICE: Final = "media"
+ACTIVE_CALLS_METRIC: Final = "va_media_active_calls"
 VA_ENV: Final = os.environ.get("E2E_VA_ENV", "local")
 _RUN_FIELD: Final = "{{run}}"
 _MARKER_FIELD: Final = "{{marker}}"
@@ -217,7 +220,12 @@ class FinishedCall:
 
 
 async def _poll[T](
-    read: Callable[[], Awaitable[T]], done: Callable[[T], bool], *, timeout_s: float, what: str
+    read: Callable[[], Awaitable[T]],
+    done: Callable[[T], bool],
+    *,
+    timeout_s: float,
+    what: str,
+    poll_s: float = POLL_S,
 ) -> T:
     deadline = time.monotonic() + timeout_s
     while True:
@@ -227,7 +235,7 @@ async def _poll[T](
         if time.monotonic() >= deadline:
             message = f"timed out after {timeout_s} s waiting for {what}; last value: {value!r}"
             raise WaitTimeoutError(message)
-        await asyncio.sleep(POLL_S)
+        await asyncio.sleep(poll_s)
 
 
 async def docker(*args: str) -> str:
@@ -312,30 +320,46 @@ class Harness:
     # --- seeding -------------------------------------------------------------------------------------------
 
     async def create_org(
-        self, *, numbers: Sequence[Mapping[str, Any]] = (), settings: Mapping[str, Any] | None = None
+        self,
+        *,
+        numbers: Sequence[Mapping[str, Any]] = (),
+        settings: Mapping[str, Any] | None = None,
+        plan_id: str | None = None,
+        dollars: str | None = None,
     ) -> E2eOrg:
-        """A funded org with the default voice (FakeElevenLabs' Karen), a caller ID, and ``numbers``."""
+        """A funded org with the default voice (FakeElevenLabs' Karen), a caller ID, and ``numbers``
+        (``plan_id``/``dollars``: the seed endpoint's defaults, plan ``build`` and $50, unless given)."""
         voice = OrgSettings().default_voice
         caller_id = random_e164(CALLER_ID_NPA)
-        body = {
+        body: dict[str, Any] = {
             "name": f"E2E {self.run_token}",
             "settings": dict(settings or {}),
             "voices": [{"name": voice, "provider_voice_id": KAREN_VOICE_ID}],
             "numbers": [{"e164": caller_id}, *numbers],
         }
+        if plan_id is not None:
+            body["plan_id"] = plan_id
+        if dollars is not None:
+            body["dollars"] = dollars
         data = _ok(await self.http.post(f"{self.urls.api}{SEED_PATH}", json=body), 201).json()["data"]
         return E2eOrg(org_id=data["org_id"], api_key=data["api_key"], number=caller_id, voice=voice)
 
-    async def load_scenario(self, name: str, *, number: str | None = None) -> RegisteredScenario:
+    async def load_scenario(
+        self, name: str, *, number: str | None = None, instance: int | None = None
+    ) -> RegisteredScenario:
         """Register ``scenarios/<name>.yaml`` (run-unique id and number) and its LLM rule files; apply its
-        latency profile to the vendor simulators; remember the TTS log position for :meth:`tts_texts`."""
+        latency profile to the vendor simulators; remember the TTS log position for :meth:`tts_texts`.
+
+        ``instance`` registers one of several copies of the same scenario in one test: the id, the marker and
+        the rule ids then use ``<run_token>-<instance>``, so the copies never replace each other."""
         text = (SCENARIOS_DIR / f"{name}.yaml").read_text(encoding="utf-8")
-        scenario = prepare_scenario(text, name=name, run=self.run_token, number=number or random_e164())
+        run = self.run_token if instance is None else f"{self.run_token}-{instance}"
+        scenario = prepare_scenario(text, name=name, run=run, number=number or random_e164())
         marker = scenario_marker(scenario.id)
         rule_ids: list[str] = []
         for rule_file in scenario.llm_rules:
             rule_text = (SCENARIOS_DIR / rule_file).read_text(encoding="utf-8")
-            rules = prepare_rules(rule_text, run=self.run_token, marker=marker)
+            rules = prepare_rules(rule_text, run=run, marker=marker)
             response = await self.http.post(
                 f"{self.urls.llm}/sim/llm/rules", content=rules, headers={"Content-Type": "application/yaml"}
             )
@@ -373,11 +397,17 @@ class Harness:
         return await self.send_call(org, body)
 
     async def finished(
-        self, org: E2eOrg, call_id: str, *, ccid: str | None = None, number: str | None = None
+        self,
+        org: E2eOrg,
+        call_id: str,
+        *,
+        ccid: str | None = None,
+        number: str | None = None,
+        poll_s: float = POLL_S,
     ) -> FinishedCall:
-        """Wait for post-call completion, then read the event log and the timeline of the leg ``ccid`` (or of
-        the newest simulator call of ``number``)."""
-        call = await self.wait_complete(org, call_id)
+        """Wait for post-call completion (polling every ``poll_s``), then read the event log and the timeline
+        of the leg ``ccid`` (or of the newest simulator call of ``number``)."""
+        call = await self.wait_complete(org, call_id, poll_s=poll_s)
         events = await self.events(org, call_id)
         if ccid is None:
             if number is None:
@@ -400,7 +430,7 @@ class Harness:
         return body
 
     async def wait_complete(
-        self, org: E2eOrg, call_id: str, *, timeout_s: float = COMPLETE_WAIT_S
+        self, org: E2eOrg, call_id: str, *, timeout_s: float = COMPLETE_WAIT_S, poll_s: float = POLL_S
     ) -> dict[str, Any]:
         """The Call Object once post-call processing set ``queue_status`` to ``complete``."""
         return await self.wait_call(
@@ -409,9 +439,10 @@ class Harness:
             lambda call: call.get("queue_status") == "complete",
             what="queue_status=complete",
             timeout_s=timeout_s,
+            poll_s=poll_s,
         )
 
-    async def wait_call(
+    async def wait_call(  # noqa: PLR0913 - the wait knobs are keyword-only
         self,
         org: E2eOrg,
         call_id: str,
@@ -419,10 +450,15 @@ class Harness:
         *,
         what: str,
         timeout_s: float = DEFAULT_WAIT_S,
+        poll_s: float = POLL_S,
     ) -> dict[str, Any]:
         """The Call Object once ``done`` holds."""
         return await _poll(
-            lambda: self.call_object(org, call_id), done, timeout_s=timeout_s, what=f"call {call_id} {what}"
+            lambda: self.call_object(org, call_id),
+            done,
+            timeout_s=timeout_s,
+            what=f"call {call_id} {what}",
+            poll_s=poll_s,
         )
 
     async def stop_call(self, org: E2eOrg, call_id: str) -> None:
@@ -489,6 +525,21 @@ class Harness:
         await _poll(ready, lambda status: status == 200, timeout_s=timeout_s, what="media /readyz")
 
     # --- simulators ----------------------------------------------------------------------------------------
+
+    async def media_metrics(self) -> Scrape:
+        """One scrape of the media worker's ``/metrics``."""
+        return parse_metrics(_ok(await self.http.get(f"{self.urls.media}/metrics")).text)
+
+    async def watch_active_calls(self, stop: asyncio.Event, *, interval_s: float = POLL_S) -> int:
+        """Poll the media worker's attached-call gauge (all transports) until ``stop`` is set; the peak."""
+        peak = 0
+        while not stop.is_set():
+            active = sample_sum(await self.media_metrics(), ACTIVE_CALLS_METRIC)
+            peak = max(peak, int(active))
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(interval_s):
+                    await stop.wait()
+        return peak
 
     async def sim_calls(self) -> list[dict[str, Any]]:
         calls: list[dict[str, Any]] = _ok(await self.http.get(f"{self.urls.telnyx}/sim/telnyx/calls")).json()[

@@ -181,6 +181,7 @@ class CallPipeline:
         reorder_observer: ReorderObserver = NULL_REORDER_OBSERVER,
         before_opener: Callable[[], Awaitable[None]] | None = None,
         phrases: PhraseSource | None = None,
+        on_underrun: Callable[[], None] | None = None,
     ) -> None:
         self._config = config if config is not None else PipelineConfig()
         self._transport = transport
@@ -208,6 +209,7 @@ class CallPipeline:
             next_index=self._next_index,
             context_ids=context_ids,
             phrases=phrases,
+            on_underrun=on_underrun,
         )
         self._jobs: asyncio.Queue[_Job] = asyncio.Queue()
         self._endpoint_wake = asyncio.Event()
@@ -298,7 +300,16 @@ class CallPipeline:
         finally:
             await self._abandon_action()
         reason = self._end_reason if self._end_reason is not None else "error"
-        _log.info("pipeline_ended", end_reason=reason, turns=self._turn_index)
+        outbound = self._speaker.outbound.stats
+        _log.info(
+            "pipeline_ended",
+            end_reason=reason,
+            turns=self._turn_index,
+            outbound_frames=outbound.frames_sent,
+            late_frames=outbound.late_frames,
+            max_lateness_ms=round(outbound.max_lateness_ms, 1),
+            underruns=outbound.underruns,
+        )
         return PipelineResult(reason, self._turn_index, self._stats, self._error)
 
     def _tasks(self) -> list[tuple[str, Coroutine[Any, Any, None]]]:

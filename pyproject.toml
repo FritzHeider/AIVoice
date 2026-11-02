@@ -217,6 +217,7 @@ markers = [
   "e2e: simulator end-to-end",
   "live: real vendors, LIVE_TESTS=1",
   "bench: performance benchmarks, run with -m bench",
+  "capacity: single-pod concurrency check, run with make e2e-capacity",
 ]
 filterwarnings = ["error"]
 

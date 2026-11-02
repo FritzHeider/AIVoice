@@ -1045,3 +1045,278 @@ Delivered:
 Re-ran: lint/typecheck/placeholders/spec refs 0; jscpd 0 clones; make test 10770 passed 7 skipped (99 %);
 make e2e 15 passed in 300.3 s. Diff matches specs/30 §5 rows + Decision P05-T17d (thresholds imported from
 LEVEL_RULES / heartbeat constants / CALL_ENDED_BY, no literals; media restarted in finally).
+
+## Plan P05-T17e — 50-concurrent-call media worker check
+
+Last task of phase 05 (P05-T17 is ticked together with it). Spec refs: specs/30 §6 (pass criteria scaled to one
+pod), specs/00 §5 (≥ 50 simulated calls per pod with no underrun; overhead p50 ≤ 150 ms), specs/07 §21.
+
+### 0. Facts checked while planning (do not re-derive)
+- `va_audio_underruns_total` is in the media catalog (`va_common/metrics.py:154`) but NOTHING increments it.
+  `va_event_loop_lag_ms` histogram is live (`va_media.loop_lag.LoopLagMonitor`). Media serves `/metrics` on 8200
+  (host-reachable); `va_media_active_calls{transport="telnyx"}` gauge counts attached calls.
+- `ServiceMetrics.counter(name)` / `.histogram(name)` (`va_common/metrics.py:228`).
+- `OutboundAudio` (`va_voice/outbound.py`) has `OutboundStats` (frames, late_frames > 30 ms, max_lateness_ms) that
+  nobody reads; built only in `va_voice/pipeline/speaker.py:132`. `FramePacer.drained(now)` = Telnyx's playback
+  buffer is empty (we are > LEAD_FRAMES×20 = 60 ms behind the schedule).
+- Compose e2e stack: ONE media container = one uvicorn process (that is "one media worker process"). Sim container
+  runs all four sims in one process (`SIM_WORKERS` must be 1).
+- Plan limits: `build` = concurrency 50, calls_send 10/s (burst 20); `scale` = concurrency 100, calls_send 25/s
+  (burst 50) (`va_api.rate_limit.PLAN_RATE_LIMITS`). The seed endpoint `POST /internal/test/orgs` already accepts
+  `plan_id` (`va_api.routers.e2e_seed`, body.plan_id); `Harness.create_org` does not pass it yet.
+- `MEDIA_MAX_CALLS_PER_POD` default 60 → readiness `capacity` fails from 54 attached calls; 50 is fine.
+- Overhead per turn: `e2e_assertions.turn_overheads(timeline, events)` + `nearest_rank` (P05-T17b Decision).
+- `make load` / `scripts/load/` (1 000-call swarm, SIM_WORKERS) is phase 20 (P20 plan line 50) — not this task.
+
+### 1. Underrun accounting (production code, va_voice + media)
+Definition (record in the Decision): a **platform underrun** = a speech frame sent after Telnyx's buffer drained
+(`pacer.drained(now)` before `on_sent`) while the previous frame sent on the leg was a speech frame of the SAME
+utterance (no idle/background frame, no gap wait, no clear in between). That is: our send loop fell more than the
+60 ms lead behind in the middle of an utterance, so the caller heard a hole that was not caused by TTS audio being
+late. Vendor starvation (queue empty mid-utterance) is excluded: with a bed it sends idle frames, without one it
+waits in the gap branch — both reset the continuity.
+- `packages/va_voice/src/va_voice/outbound.py`:
+  - `OutboundStats.underruns: int = 0`.
+  - `OutboundAudio.__init__(..., on_underrun: Callable[[], None] | None = None)`; slot `_continuing:
+    PlaybackTracker | None` (+ `"_on_underrun"` in `__slots__`).
+  - `_send_frame`: compute `starved = isinstance(speech, _Frame) and self._continuing is speech.tracker and
+    self._pacer.drained(now)` BEFORE `on_sent`; after a successful send (generation unchanged) set
+    `self._continuing = speech.tracker` for speech frames, `None` for idle frames; if `starved`:
+    `stats.underruns += 1` and call `on_underrun()`.
+  - set `_continuing = None` in `clear()` and in the `run()` gap branch (next to `mark_gap()`), and when a `_Finish`
+    is processed in `_send_controls`.
+  - module docstring sentence on underruns.
+- `packages/va_voice/src/va_voice/pipeline/speaker.py`: `Speaker(..., on_underrun=None)` → `OutboundAudio(...,
+  on_underrun=on_underrun)`.
+- `packages/va_voice/src/va_voice/pipeline/pipeline.py`: `CallPipeline(..., on_underrun: Callable[[], None] | None =
+  None)` passed to the Speaker; extend the existing `pipeline_ended` log with `outbound_frames`, `late_frames`,
+  `max_lateness_ms` (round 1), `underruns` from `self._speaker.outbound.stats` (diagnostics for the load check).
+- `apps/media_worker/src/va_media/runtime.py` `_converse`: `CallPipeline(..., on_underrun=self._metrics.counter(
+  "va_audio_underruns_total").inc)` (look the counter up once in `CallRuntime.__init__`, attribute `_underruns`).
+- specs/27 §3 media table row `va_audio_underruns_total`: no change of name/labels; add the definition sentence to
+  the specs/07 §9 outbound text as `> Decision (2026-11-02): outbound underruns (P05-T17e)`.
+
+Unit tests (`packages/va_voice/tests/test_outbound.py`, ManualClock style already used there):
+- `test_on_time_speech_counts_no_underrun`: 20 frames pushed, run 0.5 s → `underruns == 0`, callback not called.
+- `test_stalled_loop_mid_utterance_counts_one_underrun`: push 20 frames, send a few, then block the sink (a gate
+  in a fake sink's `send_audio`) for 200 ms of clock time, release → `underruns == 1`, callback called once.
+- `test_tts_starvation_is_not_an_underrun` (no background): push 5 frames, let them drain, push 5 more after 300 ms
+  → 0. Same with a background mixer (idle frames fill the gap) → 0.
+- `test_clear_resets_continuity`: frames, clear, wait > 60 ms, new utterance → 0.
+- Speaker/pipeline: a `pipeline_fakes` harness test passing `on_underrun` (counter list) and asserting it reaches
+  `OutboundAudio` (e.g. `h.pipeline` speaker outbound `_on_underrun`-free check via behaviour: run a normal turn,
+  0 underruns; and the `pipeline_ended` log carries `underruns`/`outbound_frames` — `json_log_stream`).
+- Media: `apps/media_worker/tests` runtime unit/sim test asserting the runtime wires the catalog counter (call
+  `CallRuntime` with a registry, trigger `on_underrun` via the pipeline factory seam if one exists; otherwise assert
+  in `test_runtime_sim` that `va_audio_underruns_total` stays 0 after a normal call and is registered — minimal).
+
+### 2. Harness additions (`tests_e2e/support/`)
+- New pure module `tests_e2e/support/e2e_metrics.py` (unit tests `tests_e2e/unit/test_e2e_metrics.py`):
+  - `parse_metrics(text) -> dict[tuple[str, frozenset[tuple[str, str]]], float]` via
+    `prometheus_client.parser.text_string_to_metric_families` (sample name incl. `_total`/`_bucket` suffixes).
+  - `sample(metrics, name, **labels) -> float` (0.0 when absent).
+  - `histogram_quantile(before, after, name, q) -> float`: delta of cumulative `_bucket` counts between two scrapes,
+    nearest-rank upper bound of the bucket holding the q-quantile (`math.inf` → the largest finite bound + report);
+    `ValueError` when the delta count is 0.
+- `Harness`:
+  - `create_org(..., plan_id: str | None = None)` → body `plan_id` when given.
+  - `async media_metrics() -> dict[...]`: `GET {urls.media}/metrics` (StackUrls already has the media URL from
+    `restart_media`; reuse it).
+  - `async watch_active_calls(stop: asyncio.Event, interval_s=0.25) -> int`: polls `va_media_active_calls` (sum
+    over transports) until `stop` is set; returns the peak.
+
+### 3. The check: `tests_e2e/test_concurrent_calls.py` + scenario/rules
+- `pytestmark = [pytest.mark.e2e, pytest.mark.timeout(900)]`; constants `CONCURRENT_CALLS: Final = 50`,
+  `OVERHEAD_P50_MS: Final = 150` (specs/00 §5), `OVERHEAD_P95_MS: Final = 250` (reported, not asserted — acceptance
+  gates p50 only; print PASS/WARN), `LATE_THRESHOLD_MS` imported from `va_voice.outbound` for the report text.
+- Scenario `tests_e2e/scenarios/concurrent_call.yaml`: answer human after 1000 ms; steps
+  `wait_agent_speech {min_ms 300, then_silence_ms 700, timeout_ms 15000}`, `say "Hi, yes this is Ana."`,
+  `wait_agent_speech {then_silence_ms 700, timeout_ms 20000}`, `say "Could we move it to Friday?"`,
+  `wait_agent_speech {then_silence_ms 700, timeout_ms 20000}`, `say "Friday at noon works."`,
+  `expect_hangup {by: agent, timeout_ms: 20000}`; `profile: realistic`; assertions: completed, answered_by human,
+  end_reason agent_end_call, min_turns 6, `webhook_events: [call.completed]`.
+  Rules `rules/concurrent_call.yaml` (marker-scoped like outbound_basic): "ana" → a 2-sentence reply asking about the
+  appointment; "friday\?" → reply offering times; "noon" → `end_call` with a final message.
+- Flow:
+  1. `org = await harness.create_org(plan_id="scale")` (concurrency 100, burst 50; Decision); one shared caller ID.
+  2. `scenarios = [await harness.load_scenario("concurrent_call") for _ in range(50)]` (sequential; each a fresh
+     number + rule set; the profile POST is idempotent).
+  3. `before = await harness.media_metrics()`; start `watch_active_calls` task.
+  4. `call_ids = await asyncio.gather(*(harness.send_task_call(org, s, TASK, first_sentence=FIRST_SENTENCE,
+     wait_for_greeting=False) for s in scenarios))` — all 50 dispatched at once (a 429 is a failure: the plan
+     choice must make it impossible).
+  5. `finished = await asyncio.gather(*(harness.finished(org, c, number=s.number) ...))`; stop the watcher;
+     `after = await harness.media_metrics()`.
+- Asserts (collect a report first, print it, then assert so the report always shows):
+  - every call: `finished.failures(scenario) == []` (zero dropped calls);
+  - `peak_active == CONCURRENT_CALLS` (all 50 were attached to the one media process at the same time);
+  - `sample(after, "va_audio_underruns_total") - sample(before, ...) == 0`;
+  - overheads = flattened `turn_overheads` over all calls; count == total caller turns (3 × 50 = 150) and
+    `nearest_rank(overheads, 50) <= OVERHEAD_P50_MS`.
+- Report (print, markdown table; the Builder copies it into the plan tick and scratchpad): calls, peak attached,
+  dispatch spread (max−min of `created_at` or wall time of the gather), turns measured, overhead p50/p95/max,
+  sim e2e p50/p95 (`TurnOverhead.sim_ms`), underruns, event-loop lag p50/p99 from `histogram_quantile` (reported;
+  specs/07 §21's ≤ 10 ms p99 is reported, not gated — Decision), total test wall time. Builder also records
+  `docker stats --no-stream media sim` taken mid-run (manual evidence, not in the test).
+- jscpd: reuse `e2e_assertions` helpers; keep the rules/scenario text distinct from outbound_basic.
+
+### 4. Specs/docs
+- specs/30 §6 `> Decision (2026-11-02): single-pod concurrency check (P05-T17e)`: the phase-05 one-pod variant of
+  the swarm lives in `tests_e2e/test_concurrent_calls.py` (runs in `make e2e` against the compose stack's single
+  media process and single-process sim); 50 calls dispatched at once by an org on the `scale` plan; gated: zero
+  dropped calls, all 50 attached at once, zero platform underruns (definition: specs/07 §9 Decision P05-T17e), overhead
+  p50 ≤ 150 ms; reported: overhead p95, event-loop lag p99, sim e2e; the 1 000-call swarm, `scripts/load/`, and the
+  §21 lag/lateness p99 asserts stay with phase 20.
+- specs/07 §9 Decision (underrun definition, `on_underrun`, metric increment, `pipeline_ended` fields).
+- AGENTS.md bullet (P05-T17e): underrun definition + `CallPipeline(on_underrun=)`, `e2e_metrics` helpers,
+  `create_org(plan_id=)`, `media_metrics`/`watch_active_calls`, measured numbers, runtime of the check.
+- Plan: tick P05-T17e AND P05-T17 (all of a–e done) with evidence.
+
+### Gates
+- `make fmt lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`;
+  `uv run pytest packages/va_voice -q -k "outbound or speaker or pipeline"`; `uv run pytest tests_e2e/unit -q`;
+  media runtime tests touched.
+- `make e2e` (images rebuild for va_voice/media changes; background + Monitor heartbeat; truncate the log first):
+  all 16 tests green; report the concurrency table.
+- Full `make test` in the background with heartbeat; jscpd 0 clones, radon, pip-audit/pnpm audit.
+
+### Risks
+- The single-process sim (50 media streams + STT analysis + TTS synthesis on one loop) may lag and inflate the
+  sim-measured latency. If overhead p50 fails, first check sim CPU (`docker stats`) vs media loop lag; a sim-caused
+  failure must be fixed in the sim (e.g. offload CPU work it already does inline to threads), never by loosening the
+  150 ms gate. Record the measurement either way.
+- Rate limits: `scale` burst 50 exactly matches 50 calls; if any other bucket refuses (default bucket 100/s is
+  fine; caller-ID or destination limits), fix the test setup (e.g. distinct caller IDs), not the limiter.
+- Realistic profile + 3 turns ≈ 30–40 s per call; all overlap because dispatch takes < 3 s — the peak assert proves it.
+- Pre-existing `fix:bed-window-flake` may hit `make test`; rerun that single test to show it is unrelated.
+
+## Build P05-T17e (2026-11-02): partial, blocked on media-worker CPU
+
+Done in the working tree (uncommitted, gates below green):
+- Underrun accounting: `OutboundStats.underruns`, `OutboundAudio/Speaker/CallPipeline(on_underrun=)`, runtime
+  increments `va_audio_underruns_total`, `pipeline_ended` logs outbound_frames/late_frames/max_lateness_ms/underruns
+  (specs/07 §9 Decision P05-T17e). Tests: test_outbound_audio (5 new + 2 asserts), pipeline/test_pipeline_underruns,
+  runtime sim `test_caller_turn_is_answered_by_the_task_brain` checks the hook → counter (`Rig.metrics`).
+- SpectralGate profile refresh cadence 32 hops + partial-sort percentile (equal to np.percentile): 23.9 → 2.1 ms per
+  call-second (specs/07 §10.1 Decision P05-T17e; tests in test_noise.py).
+- Harness: `e2e_metrics` (+ unit tests), `create_org(plan_id=, dollars=)`, `media_metrics`, `watch_active_calls`,
+  `load_scenario(instance=)` (copies of one scenario in a test got the SAME id and replaced each other → 49 of 50
+  calls had no caller script), `finished/wait_complete/wait_call(poll_s=)` (50 pollers at 0.25 s → 429 on the scale
+  plan's 100 req/s and ~100 % api CPU). Flow `tests_e2e/test_concurrent_calls.py` + scenario/rules.
+- Compose Postgres `max_connections=300` (default 100 ran out: temporal ~32 + 5 apps × 2 pools; api 500 `too many
+  clients already`) — specs/29 Decision P05-T17e; specs/30 §6 Decision P05-T17e for the check itself.
+- Gates run: make fmt/lint/typecheck/placeholders 0; jscpd 0 clones; check_spec_refs 0; pytest packages/va_voice +
+  tests_e2e/unit + scripts/tests/test_compose 1101 passed; apps/media_worker 463 passed; pip-audit clean, pnpm audit
+  3 moderate. Full `make test` / `make e2e` NOT run (the new e2e flow fails by design until the CPU work lands).
+
+## Blocker P05-T17e
+
+What: one media-worker process cannot carry 50 concurrent simulated calls on this host (c7i.2xlarge, compose stack
+sharing 8 vCPU). Latest run (all 50 scenarios pass their assertions, 145 of 150 turns measured):
+overhead p50 620 ms / p95 1443 ms (gate 150 ms), underruns 1743–3496 (gate 0), event-loop lag p50 ≤ 25–50 ms,
+p99 ≤ 150–200 ms (target 10), media container ~140 % CPU, sim ~70 %, host ~55 % busy.
+Why: the media main thread is saturated by per-frame Python work: py-spy (--idle --native) shows
+`InboundPath.push` ≈ 60 % of the main thread, of which ≈ 15 % is a futex wait to re-take the GIL after soxr/FFT
+release it (two `va-vad` pool threads hold the GIL ~15 % of the time for Silero glue), plus asyncio task overhead.
+Attempts: (1) gate profile cadence 8 hops → lag p50 200→75 ms; (2) cadence 32 + partition → lag ≤ 50 ms;
+(3) VAD inline on the loop (MEDIA_VAD_THREADS=0 experiment, reverted) → lag ≤ 25 ms, underruns halved, still far off.
+A standalone 50-leg inbound loop (decode→resample→gated VAD, pool of 2) runs at lag p50 1.2 ms, so the remaining
+cost is the sum of WS JSON/base64 in and out, STT ship, outbound pacing/mixing, GIL handoffs and task switches.
+Proposal (Planner): split P05-T17e:
+  (a) ship what is done (underrun accounting, gate cadence, harness, Postgres connections, the concurrency flow
+      parameterised by `E2E_CONCURRENT_CALLS`, default 50, and gated as specced) once (b) lands, or
+  (b) new task "media worker 50-call capacity": batched Silero inference across legs (one ORT run per 32 ms tick
+      for every leg with a complete window; state shape (2, B, 128) supports a batch), batching inbound frames per
+      leg (process 2 frames per hop), cheaper Telnyx frame encode/decode (no per-frame dataclass replace / JSON
+      round-trip where avoidable), `sys.setswitchinterval` review, and re-measure with py-spy; acceptance = the
+      existing `test_concurrent_calls.py` gates. Optionally run the check with a sim on its own CPU budget.
+Note: the running media image contains the reverted inline-VAD experiment code (default env, 2 threads: same
+behaviour); the next `make e2e` rebuilds it.
+
+## Planner 2026-11-02: P05-T17e split after build.blocked
+
+Blocker accepted: the remaining gap (overhead p50 620 ms vs 150, thousands of underruns) is media-worker CPU work,
+a separate engineering task. Gates must not be loosened. Split in plan/phase-05.md:
+- P05-T17e1: ship the measurement work already in the working tree (green today) with the 50-call flow opt-in
+  (`capacity` marker, `make e2e-capacity`), so the tree is committed and `make e2e` stays green.
+- P05-T17e2: the capacity work (runtime task `perf:media-50-calls`, task-1793660249-aaad) + flow joins `make e2e`.
+P05-T17e and P05-T17 tick when both are done. The phase exit gate needs `make e2e` green, which with e2 includes
+the capacity flow — that is the phase constraint ("50 concurrent simulated calls per process").
+
+## Plan P05-T17e1 — Concurrency measurement and capacity flow (opt-in)
+
+Everything listed in "Build P05-T17e (2026-11-02): partial" above is already implemented and its gates are green;
+this task finalises and ships it. No production redesign.
+
+### 1. Opt-in marker
+- `pyproject.toml` `[tool.pytest.ini_options] markers`: add `"capacity: single-pod concurrency check, run with make e2e-capacity"`.
+- `tests_e2e/test_concurrent_calls.py`:
+  - `pytestmark = [pytest.mark.e2e, pytest.mark.capacity, pytest.mark.timeout(900)]`.
+  - `CONCURRENT_CALLS` → `concurrent_calls() -> int` reading `E2E_CONCURRENT_CALLS` (default 50; must be an int
+    in 1..50 else `pytest.fail` with a clear message — 50 is the `scale` plan burst and the specced target).
+    Derived expectations scale with it: peak attached == n, turns == CALLER_TURNS × n. Keep the gates identical
+    (zero dropped calls, peak == n, underruns == 0, overhead p50 ≤ 150 ms); the report prints n.
+  - Put the env parsing in a pure helper in `tests_e2e/support/e2e_metrics.py` (or a new tiny
+    `e2e_capacity.py`) with unit tests in `tests_e2e/unit/` (default, valid value, 0/51/"x" rejected) so
+    `make test` covers it.
+- `Makefile`:
+  - `e2e:` → `uv run pytest tests_e2e -m "e2e and not capacity"`.
+  - new `e2e-capacity: ## Single-pod 50-call concurrency check (E2E_CONCURRENT_CALLS overrides the count)` →
+    `scripts/dev_up.sh e2e` then `uv run pytest tests_e2e -m capacity -s`; add to `.PHONY`.
+  - Check `scripts/tests/test_compose.py:433` / `test_check_toolchain.py:238` still pass (they read the Makefile).
+- specs/02 §(make targets table, line ~141): `make e2e` row text → `-m "e2e and not capacity"`; new row
+  `make e2e-capacity`. specs/30 §6 Decision P05-T17e: append that until P05-T17e2 the flow is opt-in
+  (`capacity` marker, `make e2e-capacity`) with the measured baseline, and P05-T17e2 moves it into `make e2e`.
+- AGENTS.md: Commands table row for `make e2e-capacity`; extend the existing P05-T17e bullet (already in the
+  working tree) with the marker/env var and the baseline numbers; keep it factual.
+
+### 2. Evidence runs (Builder; background + Monitor heartbeat, truncate logs first)
+- `make e2e` → 15 passed, 1 deselected (capacity).
+- `make e2e-capacity` → expected to FAIL the overhead/underrun gates; copy the printed report (peak, overhead
+  p50/p95, underruns, loop-lag p50/p99, dropped calls) into the tick and scratchpad. It must not error out for
+  another reason (all calls complete, peak == 50); if calls drop, investigate before shipping.
+- `E2E_CONCURRENT_CALLS=10 make e2e-capacity` (stack already up: `uv run pytest tests_e2e -m capacity -s`
+  with the env var) → report; note whether 10 calls pass the gates (useful baseline for e2).
+- Full `make check` (incl. `make test` in background with heartbeat), jscpd 0 clones, radon, pip-audit,
+  pnpm audit, `check_spec_refs.py`.
+- If `fix:bed-window-flake` hits `make test`, rerun that single test and note it (pre-existing, separate task).
+
+### 3. Plan tick
+- Tick P05-T17e1 only (not P05-T17e / P05-T17) with the evidence + baseline numbers.
+
+### Risks
+- The capacity run takes several minutes and a failing report is expected; the build.done must state it clearly
+  ("capacity gates fail as expected; baseline: …") — Reviewer approves on the opt-in + baseline evidence.
+- The running media image contains the reverted inline-VAD experiment; `make e2e` rebuilds images, run it first.
+
+## Build P05-T17e1 (2026-11-02)
+
+- Opt-in: marker `capacity` (pyproject), `pytestmark` in `tests_e2e/test_concurrent_calls.py` (test renamed
+  `test_concurrent_calls_on_one_media_worker`; count from `E2E_CONCURRENT_CALLS` via new pure
+  `tests_e2e/support/e2e_capacity.concurrent_calls` + `tests_e2e/unit/test_e2e_capacity.py`), Makefile `e2e`
+  → `-m "e2e and not capacity"`, new `e2e-capacity`; specs/02 make table rows; specs/30 §6 opt-in Decision with
+  the baseline; AGENTS command row + P05-T17e1 bullet.
+- `make e2e`: 15 passed, 51 deselected, 297 s, exit 0.
+- `make e2e-capacity` (50): fails as expected on underruns. calls 50 (0 failed scenarios), peak 50, dispatch
+  1.58 s, 150 turns, overhead p50/p95/max 335/895/1096 ms, sim v2v p50/p95 2046/3371 ms, underruns 667, loop lag
+  p50 ≤ 10 / p99 ≤ 150 ms, wall 45.4 s.
+- `E2E_CONCURRENT_CALLS=10`: 10 calls, peak 10, 30 turns, overhead p50/p95/max 92/255/284 ms, sim v2v 1020/1186,
+  underruns 2, lag ≤ 5/≤ 5 ms → fails only on underruns. Lead for P05-T17e2: underruns appear without CPU
+  pressure, so check the underrun definition / sim drain timing as well as CPU.
+
+## Build P05-T17e1 resubmit (2026-11-02)
+
+The review.rejected event had an empty payload and no `## Review P05-T17e1` section exists: the Reviewer hit the
+300 s inactivity timeout (AGENTS.md P05-T10d gotcha), probably while `make test` ran in the foreground. No code
+changes. Re-ran: lint 0, typecheck 0, placeholders 0, check_spec_refs 0, tests_e2e/unit + touched va_voice +
+test_compose 166 passed, jscpd 0 clones, radon avg 2.32. Earlier evidence still stands (make test 10796 passed /
+7 skipped, 99.16 %; make e2e 15 passed, capacity deselected). Reviewer: run `make test` and `make e2e` with Bash
+`run_in_background` plus a Monitor heartbeat, never in the foreground.
+
+## Review P05-T17e1 (2026-11-02): approved
+
+Re-ran: make lint/typecheck/placeholders 0; make test 10796 passed / 7 skipped, 99.16 % (background + heartbeat);
+make e2e 15 passed, 51 deselected (capacity opt-in), 300 s; jscpd 0 clones; check_spec_refs 0. Diff checked against
+specs/07 §9/§10.1 Decisions (underrun definition matches OutboundAudio: continuity reset on gap, clear, finish, idle),
+specs/30 §6 opt-in Decision, specs/02 make table, specs/29 Postgres Decision. Capacity gates themselves remain for
+P05-T17e2 (task perf:media-50-calls).

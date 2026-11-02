@@ -22,7 +22,7 @@ from telnyx_client_helpers import sms_number
 from telnyx_helpers import VOICE_URL
 
 from va_common.http import http_client
-from va_common.metrics import Service, build_metrics, new_registry
+from va_common.metrics import Service, ServiceMetrics, build_metrics, new_registry
 from va_common.time import SystemClock
 from va_db.session import Database
 from va_domain.org import OrgSettings
@@ -105,6 +105,8 @@ class SimRuntime:
     """FakeTelnyx's platform account (in-process), the runtime's and the end routine's Telnyx."""
     signaller: RecordingSignaller
     sms_number: str | None
+    metrics: ServiceMetrics
+    """The runtime's media-worker catalog."""
 
 
 async def _no_byo_key(_account_id: uuid.UUID) -> str | None:
@@ -187,4 +189,4 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
             end_routine=end_routine,
             database=database,
         )
-        yield SimRuntime(RecordingRuntime(runtime), settings, telnyx, signaller, sms)
+        yield SimRuntime(RecordingRuntime(runtime), settings, telnyx, signaller, sms, metrics)

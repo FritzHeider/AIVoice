@@ -99,6 +99,7 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
     engine: Brain | None = None,
     before_opener: Callable[[], Awaitable[None]] | None = None,
     phrases: PhraseSource | None = None,
+    on_underrun: Callable[[], None] | None = None,
 ) -> AsyncIterator[Harness]:
     """``engine`` replaces the scripted Brain in the pipeline (``h.brain`` then stays unused)."""
     cfg = config if config is not None else PipelineConfig()
@@ -129,6 +130,7 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
         actions=actions,
         before_opener=before_opener,
         phrases=phrases,
+        on_underrun=on_underrun,
     )
     task = asyncio.get_running_loop().create_task(pipeline.run(), name="harness-pipeline")
     caller_task = asyncio.get_running_loop().create_task(caller.run(), name="harness-caller")

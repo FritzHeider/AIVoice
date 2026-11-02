@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ import pytest_asyncio
 from numpy.typing import NDArray
 from vad_fixtures import SPEECH_SEGMENTS_MS, read_fixture
 
+from va_voice import noise
 from va_voice.audio import rms_dbfs
 from va_voice.noise import (
     HOP,
@@ -23,6 +25,7 @@ from va_voice.noise import (
     MIN_PROFILE_FRAMES,
     PERCENTILE_TO_MEAN,
     PROFILE_FRAMES,
+    PROFILE_REFRESH_HOPS,
     SpectralGate,
 )
 from va_voice.vad import SileroVad, VadExecutor
@@ -93,6 +96,35 @@ def test_gating_starts_after_the_minimum_profile() -> None:
     assert out.size == (MIN_PROFILE_FRAMES - 1) * HOP
     gate.process(pcm[(MIN_PROFILE_FRAMES - 1) * HOP : MIN_PROFILE_FRAMES * HOP])
     assert gate.profile_ready
+
+
+@pytest.mark.parametrize("frames", [MIN_PROFILE_FRAMES, MIN_PROFILE_FRAMES + 1, 50, PROFILE_FRAMES])
+def test_the_profile_percentile_equals_numpy_percentile(frames: int) -> None:
+    rng = np.random.default_rng(frames)
+    history = np.abs(rng.normal(size=(frames, 257)))
+    assert np.allclose(noise._percentile(history), np.percentile(history, 20, axis=0), rtol=1e-12, atol=0)
+
+
+def test_the_profile_is_recomputed_on_a_cadence_not_every_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+    partition = np.partition
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return partition(*args, **kwargs)
+
+    monkeypatch.setattr(np, "partition", counting)
+    gate = SpectralGate()
+    gate.process(_noise(1.0, -30.0)[: (MIN_PROFILE_FRAMES + 1) * HOP])
+    # The first ready hop computes the profile at once (no gating without one).
+    assert len(calls) == 1
+    hops = 3 * PROFILE_REFRESH_HOPS
+    gate.process(_noise(2.0, -30.0, seed=4)[: hops * HOP])
+    assert len(calls) == 1 + hops // PROFILE_REFRESH_HOPS
+    # The last non-speech hop (the gate's one-hop latency) is folded in once; speech adds nothing after that.
+    gate.set_speech(True)
+    gate.process(_noise(1.0, -30.0, seed=5)[: hops * HOP])
+    assert len(calls) == 2 + hops // PROFILE_REFRESH_HOPS
 
 
 def test_the_profile_learns_only_during_non_speech() -> None:

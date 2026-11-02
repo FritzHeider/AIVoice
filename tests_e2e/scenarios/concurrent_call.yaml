@@ -1,0 +1,25 @@
+id: concurrent_call
+description: One of 50 simultaneous calls on one media worker; three caller turns, then the agent ends the call.
+match:
+  to: "+14155550150"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/concurrent_call.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 15000}
+  - say: {text: "Hi, yes this is Ana.", language: en}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 20000}
+  - say: {text: "Could we move it to Friday?"}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 20000}
+  - say: {text: "Friday at noon works."}
+  - expect_hangup: {by: agent, timeout_ms: 20000}
+profile: realistic
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: agent_end_call
+  min_turns: 6
+  transcript_contains: ["Ana", "Friday", "noon"]
+  webhook_events: ["call.completed"]

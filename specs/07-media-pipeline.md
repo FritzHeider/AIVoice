@@ -461,6 +461,17 @@ Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms 
 > stops the trackers (marks of stopped trackers are never sent; a frame in flight during a clear does not count).
 > Without background the loop parks on an event while nothing is queued (no sleeps, no idle frames).
 
+> Decision (2026-11-02): outbound underruns (P05-T17e). A **platform underrun** is a speech frame sent after
+> Telnyx's buffer drained (`FramePacer.drained(now)` before the send, i.e. the loop is more than the 60 ms lead
+> behind the schedule) while the previous frame sent on the leg was a speech frame of the same utterance, with no
+> idle/background frame, gap wait, `clear()`, or utterance finish in between: the caller hears a hole that the
+> platform caused. TTS starvation (the vendor delivering audio late) is not an underrun: the loop then sends idle
+> frames or parks in the gap branch, and either breaks the continuity. A `100005` pause longer than the lead does
+> count (the hole is audible). `OutboundStats.underruns` counts them per leg; `OutboundAudio(on_underrun=)` /
+> `Speaker(on_underrun=)` / `CallPipeline(on_underrun=)` report each one, and the media runtime increments
+> `va_audio_underruns_total` from that hook. The `pipeline_ended` log carries `outbound_frames`, `late_frames`,
+> `max_lateness_ms`, and `underruns`.
+
 ## 10. Audio conditioning
 
 ### 10.1 `noise_cancellation`
@@ -482,6 +493,14 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 > `g = 0.6 × g_prev + 0.4 × g_raw`. `process()` accepts any chunk size and returns the samples that are final, in
 > whole hops: the output stream is the input delayed by exactly 256 samples, so VAD times on the gated stream are
 > 16 ms late in stream time (subtract `LATENCY_MS`). VAD decisions are fed back with `set_speech(active)`.
+>
+> Decision (2026-11-02): profile refresh cadence (P05-T17e). Recomputing the per-bin percentile over the 94 × 257
+> ring on every hop cost ≈ 46 % of the media worker's event loop at 50 concurrent calls (py-spy). The profile is now
+> computed on the first hop at which it becomes ready and then recomputed every 32 hops (512 ms) while the ring has
+> new non-speech frames (`PROFILE_REFRESH_HOPS`); speech-only stretches never recompute it. The percentile is a
+> partial sort (`np.partition` of the two neighbouring ranks) with `np.percentile`'s linear interpolation, so the
+> values are unchanged. A trailing 1.5 s stationary-noise estimate barely moves within 512 ms, and the ≥ 10 dB
+> reduction still holds. Measured on stationary noise: ≈ 2 ms per call-second (was ≈ 24 ms).
 
 ### 10.2 Background tracks
 

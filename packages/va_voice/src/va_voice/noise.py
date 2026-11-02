@@ -6,7 +6,10 @@ Hann sums to exactly 1 at 50 % overlap, so plain overlap-add of the inverse tran
 when every gain is 1. The noise profile is the per-bin 20th percentile of the magnitudes of the trailing 1.5 s
 of frames seen while VAD reports non-speech (:meth:`SpectralGate.set_speech`), scaled from the 20th percentile
 to the mean of a Rayleigh distribution (stationary noise magnitudes); per-bin gains ``max(0.25, 1 - 1.5 x
-noise / mag)`` are smoothed over time with alpha = 0.6.
+noise / mag)`` are smoothed over time with alpha = 0.6. The percentile is recomputed when the profile first
+becomes ready and then at most every :data:`PROFILE_REFRESH_HOPS` hops (512 ms) while new non-speech frames
+arrive, with a partial sort that gives exactly ``np.percentile``'s linear interpolation (specs/07 §10.1
+Decision P05-T17e): a per-hop ``np.percentile`` was the media worker's largest CPU cost.
 
 Output is the input delayed by exactly 256 samples (16 ms) of stream time: :meth:`SpectralGate.process`
 returns whole hops (a multiple of 256 samples over the stream) as soon as they are final, so VAD event times
@@ -32,6 +35,7 @@ __all__ = [
     "OVER_SUBTRACTION",
     "PERCENTILE_TO_MEAN",
     "PROFILE_FRAMES",
+    "PROFILE_REFRESH_HOPS",
     "SMOOTHING",
     "SpectralGate",
 ]
@@ -49,6 +53,8 @@ PROFILE_FRAMES: Final = math.ceil(1.5 * SAMPLE_RATE / HOP)
 """Non-speech frames in the trailing 1.5 s profile window (94)."""
 MIN_PROFILE_FRAMES: Final = 16
 """Gains stay at 1 until this many non-speech frames (≈ 0.25 s) were seen."""
+PROFILE_REFRESH_HOPS: Final = 32
+"""The profile percentile is recomputed at most every 32 hops (512 ms) while new non-speech frames arrive."""
 LATENCY_SAMPLES: Final = HOP
 LATENCY_MS: Final = LATENCY_SAMPLES * 1000 // SAMPLE_RATE
 PERCENTILE_TO_MEAN: Final = math.sqrt(math.pi / 2) / math.sqrt(-2 * math.log(1 - NOISE_PERCENTILE / 100))
@@ -73,6 +79,7 @@ class SpectralGate:
         "_ring",
         "_ring_count",
         "_ring_next",
+        "_since_refresh",
         "_speech",
     )
 
@@ -84,6 +91,7 @@ class SpectralGate:
         self._gain = np.ones(_BINS, dtype=np.float64)
         self._ring_count = 0
         self._ring_next = 0
+        self._since_refresh = PROFILE_REFRESH_HOPS
         self._dirty = False
         self._speech = False
 
@@ -94,7 +102,8 @@ class SpectralGate:
 
     @property
     def noise_profile(self) -> NDArray[np.float64]:
-        """The current per-bin noise magnitude estimate (a copy; zeros before :attr:`profile_ready`)."""
+        """The per-bin noise magnitude estimate over the trailing non-speech window, refreshed on read
+        (a copy; zeros before :attr:`profile_ready`)."""
         self._refresh_profile()
         return self._noise.copy()
 
@@ -111,6 +120,7 @@ class SpectralGate:
         self._gain.fill(1.0)
         self._ring_count = 0
         self._ring_next = 0
+        self._since_refresh = PROFILE_REFRESH_HOPS
         self._dirty = False
         self._speech = False
 
@@ -141,7 +151,9 @@ class SpectralGate:
             self._dirty = True
         if not self.profile_ready:
             return np.fft.irfft(spectrum, n=FFT_SIZE)
-        self._refresh_profile()
+        self._since_refresh += 1
+        if self._since_refresh >= PROFILE_REFRESH_HOPS:
+            self._refresh_profile()
         raw = np.maximum(GAIN_FLOOR, 1.0 - OVER_SUBTRACTION * self._noise / np.maximum(magnitude, _EPSILON))
         self._gain = SMOOTHING * self._gain + (1.0 - SMOOTHING) * raw
         return np.fft.irfft(spectrum * self._gain, n=FFT_SIZE)
@@ -149,6 +161,17 @@ class SpectralGate:
     def _refresh_profile(self) -> None:
         if not self._dirty or not self.profile_ready:
             return
-        history = self._ring[: self._ring_count]
-        self._noise = PERCENTILE_TO_MEAN * np.percentile(history, NOISE_PERCENTILE, axis=0)
+        self._noise = PERCENTILE_TO_MEAN * _percentile(self._ring[: self._ring_count])
         self._dirty = False
+        self._since_refresh = 0
+
+
+def _percentile(history: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Per-bin :data:`NOISE_PERCENTILE` of ``history`` (frames x bins), equal to ``np.percentile(history,
+    NOISE_PERCENTILE, axis=0)`` (linear interpolation) at a fraction of its cost."""
+    position = NOISE_PERCENTILE / 100 * (history.shape[0] - 1)
+    low = math.floor(position)
+    high = min(low + 1, history.shape[0] - 1)
+    ordered = np.partition(history, (low, high), axis=0)
+    noise: NDArray[np.float64] = ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+    return noise

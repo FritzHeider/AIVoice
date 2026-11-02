@@ -93,6 +93,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     profiles: [infra, apps, e2e]
+    command: ["postgres", "-c", "max_connections=300"]
     environment: {POSTGRES_USER: va, POSTGRES_PASSWORD: va, POSTGRES_DB: va}
     ports: ["5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data, ./infra/docker/postgres-init:/docker-entrypoint-initdb.d:ro]
@@ -302,6 +303,13 @@ creates roles `va_app` and `va_system` (password `va` locally) and database `tem
 >    `up -d --wait --build --no-deps` of the application services (`--no-deps` keeps `up` from re-running `migrate`;
 >    `--force-recreate` is added when the sim key changed, because edge and media read it once at startup). In `local`
 >    and `test` the edge webhook URLs are `http://` (`va_telnyx.webhook_scheme`, matching the `ws://` media URL).
+
+> Decision (2026-11-02): Postgres `max_connections=300` (P05-T17e). The compose Postgres serves Temporal's
+> auto-setup (about 32 connections at rest) and every Python app, each with a `va_app` and a `va_system` pool of
+> `DATABASE_POOL_SIZE` plus SQLAlchemy's default overflow of 10. Under the 50-concurrent-call check (specs/30 §6
+> Decision P05-T17e) the default 100 ran out (`too many clients already` in the api), so the dev/e2e server allows
+> 300. The CI service container keeps the default: GitHub Actions services take no command, and the `check` job runs
+> no app containers.
 
 ## 3. Kubernetes Helm chart (`infra/helm/voiceagents`)
 

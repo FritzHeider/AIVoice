@@ -138,7 +138,8 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `make typecheck` | `uv run mypy` (strict, configured in root `pyproject.toml` for all packages) `&& pnpm -r typecheck` |
 | `make test` | `uv run pytest -n auto --cov --cov-report=term-missing --cov-fail-under=85` (unit + integration with testcontainers) |
 | `make test-ts` | `pnpm -r test` |
-| `make e2e` | Simulator end-to-end suite: `uv run pytest tests_e2e -m e2e` (spins compose profile `e2e`) |
+| `make e2e` | Simulator end-to-end suite: `uv run pytest tests_e2e -m "e2e and not capacity"` (spins compose profile `e2e`) |
+| `make e2e-capacity` | Single-pod concurrency check: `uv run pytest tests_e2e -m capacity -s` (spins compose profile `e2e`; `E2E_CONCURRENT_CALLS` overrides the call count, default 50; specs/30 §6) |
 | `make e2e-ui` | `pnpm --filter dashboard exec playwright test` |
 | `make openapi` | Regenerates `openapi/openapi.json` from `va_api.main:app` |
 | `make placeholders` | `uv run python scripts/check_no_placeholders.py` |

@@ -113,7 +113,7 @@ async def test_an_utterance_is_paced_with_a_lead_and_a_mark_after_its_last_frame
     assert tracker.t_first_frame_sent == 0.0
     stats = rig.out.stats
     assert (stats.frames_sent, stats.speech_frames, stats.idle_frames, stats.marks_sent) == (10, 10, 0, 2)
-    assert (stats.late_frames, stats.dropped_frames) == (0, 0)
+    assert (stats.late_frames, stats.dropped_frames, stats.underruns) == (0, 0, 0)
     assert stats.max_lateness_ms == pytest.approx(0.0, abs=1e-6)
     # Without background nothing is sent while idle and nobody sleeps.
     await rig.clock.run_for(1.0)
@@ -308,6 +308,8 @@ async def test_rate_limit_pauses_sends_and_reduces_the_lead(rig: Rig) -> None:
     await rig.clock.run_for(0.3)
     assert rig.sink.audio_times() == [0.0] * 4 + [20.0, 120.0, 120.0, 140.0, 160.0, 180.0, 200.0, 220.0]
     assert rig.out.stats.late_frames == 0
+    # The pause outlasts the 60 ms lead: the caller hears a hole mid-utterance.
+    assert rig.out.stats.underruns == 1
 
 
 async def test_a_late_loop_counts_late_frames() -> None:
@@ -328,6 +330,7 @@ async def test_a_late_loop_counts_late_frames() -> None:
         await task
     assert sink.audio_times() == [0.0, 60.0]
     assert out.stats.late_frames == 1
+    assert out.stats.underruns == 1
     assert out.stats.max_lateness_ms == pytest.approx(40.0)
 
 
@@ -356,3 +359,114 @@ async def test_utterance_misuse_is_rejected(rig: Rig) -> None:
     rig.out.start_utterance(PlaybackTracker(1))
     with pytest.raises(RuntimeError, match="still open"):
         rig.out.start_utterance(PlaybackTracker(2))
+
+
+@dataclass
+class UnderrunRig:
+    clock: ManualClock
+    sink: RecordingSink
+    out: OutboundAudio
+    underruns: list[float]
+
+
+async def _underrun_rig(mixer: FrameMixer) -> AsyncIterator[UnderrunRig]:
+    clock = ManualClock()
+    sink = RecordingSink(clock)
+    underruns: list[float] = []
+    out = OutboundAudio(sink, mixer, clock=clock, on_underrun=lambda: underruns.append(clock.monotonic()))
+    task = asyncio.create_task(out.run())
+    await settle()
+    try:
+        yield UnderrunRig(clock, sink, out, underruns)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest_asyncio.fixture
+async def urig() -> AsyncIterator[UnderrunRig]:
+    async for value in _underrun_rig(FrameMixer(ULAW_8000)):
+        yield value
+
+
+@pytest_asyncio.fixture
+async def bg_urig() -> AsyncIterator[UnderrunRig]:
+    bed = np.full(1600, 1000, dtype=np.int16)
+    async for value in _underrun_rig(FrameMixer(ULAW_8000, background=BackgroundLoop(bed, 160))):
+        yield value
+
+
+async def test_on_time_speech_counts_no_underrun(urig: UnderrunRig) -> None:
+    urig.out.start_utterance(PlaybackTracker(1))
+    urig.out.push_audio(_speech(20))
+    urig.out.finish_utterance()
+    await urig.clock.wait_for_sleep(FRAME)
+    await urig.clock.run_for(0.5)
+    assert len(urig.sink.audio_times()) == 20
+    assert (urig.out.stats.underruns, urig.underruns) == (0, [])
+
+
+async def test_a_stalled_send_loop_mid_utterance_counts_one_underrun(urig: UnderrunRig) -> None:
+    tracker = PlaybackTracker(1)
+    urig.out.start_utterance(tracker)
+    urig.out.push_audio(_speech(20))
+    urig.out.finish_utterance()
+    await urig.clock.wait_for_sleep(FRAME)
+    await urig.clock.run_for(0.04)
+    hold = asyncio.Event()
+    urig.sink.hold = hold
+    urig.sink.holding.clear()
+    await urig.clock.run_for(0.02)
+    await urig.sink.holding.wait()
+    urig.clock.advance(0.2)
+    hold.set()
+    await settle()
+    await urig.clock.run_for(0.5)
+    assert tracker.frames_sent == 20
+    assert urig.out.stats.underruns == 1
+    assert len(urig.underruns) == 1
+
+
+async def test_tts_starvation_without_a_background_is_not_an_underrun(urig: UnderrunRig) -> None:
+    tracker = PlaybackTracker(1)
+    urig.out.start_utterance(tracker)
+    urig.out.push_audio(_speech(5))
+    await urig.clock.wait_for_sleep(FRAME)
+    await urig.clock.run_for(0.3)
+    urig.out.push_audio(_speech(5))
+    urig.out.finish_utterance()
+    await settle()
+    await urig.clock.run_for(0.3)
+    assert tracker.frames_sent == 10
+    assert (urig.out.stats.underruns, urig.underruns) == (0, [])
+
+
+async def test_tts_starvation_under_a_background_is_not_an_underrun(bg_urig: UnderrunRig) -> None:
+    tracker = PlaybackTracker(1)
+    bg_urig.out.start_utterance(tracker)
+    bg_urig.out.push_audio(_speech(5))
+    await bg_urig.clock.run_for(0.3)
+    bg_urig.out.push_audio(_speech(5))
+    bg_urig.out.finish_utterance()
+    await bg_urig.clock.run_for(0.3)
+    assert tracker.frames_sent == 10
+    assert bg_urig.out.stats.idle_frames > 0
+    assert (bg_urig.out.stats.underruns, bg_urig.underruns) == (0, [])
+
+
+async def test_a_clear_resets_the_continuity(urig: UnderrunRig) -> None:
+    tracker = PlaybackTracker(1)
+    urig.out.start_utterance(tracker)
+    urig.out.push_audio(_speech(20))
+    await urig.clock.wait_for_sleep(FRAME)
+    await urig.clock.run_for(0.04)
+    urig.out.clear()
+    await urig.clock.run_for(0.2)
+    urig.out.start_utterance(tracker)
+    urig.out.push_audio(_speech(5))
+    urig.out.finish_utterance()
+    await settle()
+    await urig.clock.run_for(0.2)
+    assert tracker.frames_sent == 11
+    assert (urig.out.stats.underruns, urig.underruns) == (0, [])
