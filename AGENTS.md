@@ -1258,3 +1258,9 @@ Grafana 3001
   `sim_media.streamed_call(models_dir, body, **dial_overrides)` (wall-clock sim; `StreamedCall.sim_call().stream.
   session.received` counts what the sim got). `CallPipeline` runs over the transport with the va_voice
   `pipeline_fakes` on an `AcceleratedClock` (`test_transport_pipeline.py`).
+- 2026-11-02 (P05-T09a): `packages/va_engine` (dist `va-engine`, deps va-domain/orjson/phonenumbers) exists; only
+  `templating`, `builtins`, `models.state` so far (rules: specs/11 §8/§9 Decisions P05-T09a). Templates:
+  `parse_template(text)` once, then `render`/`render_url`/`render_json(value, TemplateScope(variables=, request_data=,
+  builtins=call_builtins(ctx, now=), node_vars=, input=, timezone=, missing=MissingVariables(sink)))`; scope values are
+  plain mappings. `EngineState.add_turn` enforces the 200-turn cap; read stored state with `load_engine_state`.
+  va_engine tests use `resolved_configs.resolved_config()` (va_domain tests/support) to build a `CallContext`.

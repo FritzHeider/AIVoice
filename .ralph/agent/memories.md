@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793587466-6df6
+> P05-T09a: packages/va_engine exists (templating parse_template/render/render_url/render_json + TemplateScope layers + MissingVariables; builtins.call_builtins; models.state EngineState.add_turn 200 cap). ruff TRY003 flags string literals passed to exceptions even through helper functions returning the exception: use module-level message constants
+<!-- tags: engine, templating, testing | created: 2026-11-02 -->
+
 ### mem-1793585754-b976
 > P05-T08: va_media.transport.TelnyxMediaTransport is the pipeline Transport over the media WS (events() once, serialized sends dropped after stream end, leg_format); media tests: FakeSocket.sent/send_gate + media_msg/dtmf_msg/mark_msg/error_msg; sim_media.streamed_call(models_dir, body, **dial) runs FakeTelnyx (wall clock) streaming to a served media worker; CallPipeline can run in media tests with va_voice pipeline_fakes
 <!-- tags: media, websocket, testing | created: 2026-11-02 -->

@@ -126,11 +126,29 @@
   - Deliverables: `TelnyxMediaTransport` implementing `Transport` (inbound frames via reorder buffer, outbound media/mark/clear, DTMF events, stop handling, hd_audio L16 path)
   - Acceptance: tests against FakeTelnyx media client.
 
-- [ ] P05-T09 Task-mode Brain and system tools
+- [ ] P05-T09 Task-mode Brain and system tools (split into P05-T09a–c below; tick when all three are ticked)
   - Spec refs: specs/11-pathways-engine.md (Task-mode single prompt runner); specs/10-llm-gateway.md (dialogue system prompt, tool calling); specs/13-tools-and-dynamic-data.md (built-in system tools end_call, transfer_call, press_button)
   - Depends on: P03-T13, P04-T12
   - Deliverables: `va_engine.task_runner.TaskBrain` (prompt assembly, streaming reply, system tools, temperature, request_data templating, first_sentence handling)
   - Acceptance: harness tests with FakeLLM rules including end_call and transfer_call tool invocations.
+
+- [x] P05-T09a `va_engine` package: templating engine, EngineState, built-in variables — va_engine templating/builtins/state, 99 tests (100 % package coverage); make test 9267 passed / 7 skipped (99.16 %), lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, radon no C+
+  - Spec refs: specs/11-pathways-engine.md §1 (layout), §8 (templating), §9 (EngineState)
+  - Depends on: P05-T03a
+  - Deliverables: new workspace package `packages/va_engine` (dist `va-engine`); `va_engine.templating` (tokenizer, resolver, filters, type-preserving JSON rendering, percent-encoded URL rendering, missing-variable reporting, limits); `va_engine.models.state` (`NodeFrame`, `TurnRecord`, `EngineState` with 200-turn cap and schema check); `va_engine.builtins.call_builtins` (§8 built-in variables from a `CallContext`)
+  - Acceptance: unit + hypothesis tests for every grammar rule, filter, escape, limit, resolution order, missing-var reporting once per variable; EngineState round-trip and unknown schema_version rejection; built-ins for outbound and inbound contexts.
+
+- [ ] P05-T09b Voice system prompt, conversation window, built-in tool definitions
+  - Spec refs: specs/10-llm-gateway.md §4, §5, §6, §7; specs/13-tools-and-dynamic-data.md §4, §6
+  - Depends on: P05-T09a, P03-T13b
+  - Deliverables: `va_llm.prompts` (`prompts/voice_system.txt` verbatim + `render_voice_system`, tool usage note); `va_llm.window` (`ConversationWindow` budget trimming); `va_engine.system_tools` (built-in tool definitions, availability rules, argument validation, reserved names)
+  - Acceptance: drift test of the prompt file against the specs/10 §5 block; placeholder rendering for every rule; window trimming keeps opener, drops complete turns with their tool messages, inserts the omission note; tool schemas and availability per call config.
+
+- [ ] P05-T09c `TaskBrain`: streaming replies, tool loop, system tool actions
+  - Spec refs: specs/11-pathways-engine.md §6, §5.1, §7; specs/10-llm-gateway.md §2, §4, §7 (tool loop); specs/13-tools-and-dynamic-data.md §6 (final-line semantics)
+  - Depends on: P05-T09b, P04-T12
+  - Deliverables: `va_engine.task_runner.TaskBrain` implementing `va_voice.pipeline.Brain` (`va_engine.models.results` BrainAction subclasses, templated `first_sentence` opener, streamed replies through `LlmGateway.stream_dialogue` with call temperature/max_tokens/model, up to 3 tool rounds, `end_call` → `EndCall`, `transfer_call` → `TransferRequest` BrainAction, `press_button` → `PressButton` BrainAction, invalid-argument round, barge-in truncation of history, `call.turn`-ready `EngineState`)
+  - Acceptance: va_voice pipeline harness tests with a FakeLLM-backed gateway and rules covering a plain reply, end_call with and without final_message, transfer_call by label and default, press_button, invalid arguments, interruption truncation.
 
 - [ ] P05-T10 Greeting, AMD, voicemail actions, IVR mode
   - Spec refs: specs/05-calls-api.md (wait_for_greeting, voicemail object, ivr_mode/amd, retry); specs/07-media-pipeline.md (wait_for_greeting, first_sentence pre-render); specs/06-telephony-telnyx.md (AMD config, premium results); specs/10-llm-gateway.md (voicemail/IVR classifier prompt)

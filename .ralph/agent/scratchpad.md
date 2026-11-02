@@ -2838,3 +2838,117 @@ InboundPath), track/empty/odd-L16 drops with one warning per kind, error codes p
 after stop/peer close/failed send, leg_format PCMU 8k / L16 16k only. Non-blocking note: `_send` decodes builder
 bytes as ASCII; orjson emits raw UTF-8, so a non-ASCII mark name would raise UnicodeDecodeError (mark names are
 ours, `seg:N:M`, so fine today). Approved.
+
+## Plan P05-T09a — `va_engine` package: templating, EngineState, built-ins (Planner, 2026-11-02)
+P05-T09 is too large for one Builder pass (new package + prompt/window + Brain with tool loop), so it is split in the
+plan file into T09a (this), T09b (va_llm.prompts voice system prompt + va_llm.window + va_engine.system_tools) and
+T09c (TaskBrain implementing va_voice Brain, harness tests with FakeLLM). T09a is pure Python, no I/O.
+
+### Decisions (one block `> Decision (2026-11-02): templating and engine state (P05-T09a).` under specs/11 §8; one
+### short block under §9 for the history cap)
+1. Package `packages/va_engine` (dist `va-engine`, uv_build, `py.typed`), deps: `pydantic`, `orjson`, `phonenumbers`,
+   `va-domain` (CallContext for built-ins). Only `templating.py`, `builtins.py`, `models/__init__.py`, `models/state.py`
+   land now; other §1 modules arrive with their tasks (T09b/T09c, phase 07).
+2. `parse_template(text) -> Template` raises `TemplateSyntaxError(message, position)` (a `ValueError`) for: an
+   unterminated `{{`, an empty expression, a bad path/filter, an unknown filter, a `default:`/`date:` argument that
+   is not a double- or single-quoted string (backslash escapes `\"`, `\\` inside), and the limits (text > 20 000
+   chars, > 500 expressions; subclass `TemplateLimitError`). Callers parse once; runtime callers that get a syntax
+   error speak/send the raw text and log `template.invalid` (the T09c Brain does this; save/publish validation
+   reports the error).
+3. Grammar exactly §8; ident = `[A-Za-z_][A-Za-z0-9_]*`; whitespace allowed around tokens inside `{{ }}`; `\{{`
+   renders literal `{{` (a lone `\` elsewhere is literal); a `}}` outside an expression is literal text.
+4. Lookup: first path segment is resolved through the scope's ordered layers (`input` only when given → node-local →
+   variables → request_data → built-ins); the name `request_data` itself also resolves to the whole request_data
+   mapping, `metadata` is a built-in mapping. A layer "has" a root when the key is present (a stored `null` is
+   found, value None). Further segments index dicts by key and lists by `[n]` (negative not allowed in grammar);
+   any miss → missing.
+5. Stringify: str as-is, None → "", bool → `true`/`false`, int/float → JSON form (orjson), list/dict → compact JSON.
+6. Filters (left to right, on the value; missing values enter filters as "missing"): `default:"x"` replaces a
+   missing value, None, or "" (and suppresses the missing report); `upper`/`lower`/`title`/`trim` on the string form;
+   `json` → orjson of the value (missing → `""` JSON string? no: missing → empty output and reported); `phone_spoken`
+   → phonenumbers national format digit groups, each group's digits space-joined, groups joined by `", "`
+   (`+14155550100` → `4 1 5, 5 5 5, 0 1 0 0`); unparseable → every digit space-joined; `date:"fmt"` → value parsed as
+   ISO 8601 datetime (aware → converted to the scope timezone; naive → taken as local) or date, then `strftime`;
+   unparseable → string form unchanged.
+7. Missing variable without a default → "" plus `scope.report_missing(path_text)`; `MissingVariables` (per call
+   object, set-backed) calls its sink once per distinct path; T09c turns the sink into the `call.error`
+   `TEMPLATE_VAR_MISSING` warning event.
+8. Modes: `render(template, scope)` text; `render_url(template, scope)` percent-encodes every expression value
+   (`urllib.parse.quote(s, safe="")`); `render_json(value, scope)` recursive over dict values and list items (keys
+   untouched); a string that consists of exactly one expression (no literal text, surrounding whitespace counts as
+   literal) returns the raw value with its type (filters applied; a filter yields a string), missing → "".
+9. Built-ins (`va_engine.builtins.call_builtins(context, *, now, last_user_message="", prev_node_prompt="")`):
+   `now_utc` (ISO 8601 `Z`-less `+00:00` isoformat, seconds precision), `now_local` (isoformat in
+   `config.timezone`, seconds), `today` (local date), `from`/`to` (context numbers as stored), `call_id`,
+   `voice_id` (config `voice_id` string), `timezone`, `language`, `agent_number` (outbound/web: from_number;
+   inbound: to_number), `user_number` (the other one), `batch_id` (str or None), `metadata` (config metadata),
+   `lastUserMessage`, `prevNodePrompt`.
+10. EngineState exactly as §9 (pydantic, `extra="forbid"`; `schema_version: Literal[1]` → unknown version is a
+    ValidationError; helper `load_engine_state(json: str | bytes)`). `add_turn(record)` appends and, past 200
+    turns, moves the oldest out into `history_summary`: each dropped turn becomes a `role: content` line, the summary
+    keeps only its last 4 000 chars (deterministic, no LLM; an LLM summary may replace it later). `TurnRecord.at_ms`
+    is `int`.
+
+### Files
+- NEW `packages/va_engine/pyproject.toml`, `README` not needed; `src/va_engine/__init__.py` (docstring only, no
+  imports), `py.typed`, `templating.py` (`Template`, `Expression`, `Literal` segment dataclasses, `Filter`,
+  `parse_template`, `TemplateScope` (frozen dataclass: `variables`, `request_data`, `builtins`, `node_vars=None`,
+  `input=None`, `timezone: str = "UTC"`, `missing: MissingVariables | None`), `MissingVariables(sink)`,
+  `render`, `render_url`, `render_json`, `render_text(text, scope)` convenience = parse+render),
+  `builtins.py`, `models/__init__.py` (re-exports), `models/state.py`.
+- Root `pyproject.toml`: dev group + `[tool.uv.sources] va-engine = { workspace = true }`, mypy `mypy_path`
+  (`packages/va_engine/src`) and `files` (src + tests); `uv lock`.
+- NEW `packages/va_engine/tests/test_templating.py`, `test_templating_props.py` (hypothesis: literal text without
+  `{{`/`\` round-trips; render(parse(t)) never raises for any parsed template; escaping), `test_builtins.py`,
+  `test_state.py`; conftest only if needed.
+- specs/11 §8 + §9 Decisions; AGENTS.md learning line.
+
+### Tests
+- Grammar: whitespace variants, nested paths `a.b[0].c`, filters chained, `\{{` escape, `}}` literal, every syntax
+  error case with position, limits (20 001 chars; 501 expressions) raise `TemplateLimitError`.
+- Resolution order: input beats node vars beats variables beats request_data beats built-ins; `request_data.x`;
+  `metadata.k`; stored null found (renders ""; `default` applies); list index out of range → missing.
+- Stringify table (str/None/bool/int/float/list/dict).
+- Each filter incl. `phone_spoken` NANP + non-NANP (`+442071838750`) + invalid; `date` with aware UTC datetime
+  converted to `America/New_York`, naive, date-only, unparseable; `json` of dict/str.
+- Missing reported once per distinct path across several renders; not reported when `default` given.
+- `render_url` percent-encodes `a b&c/` but not literal text; `render_json` type preservation (`"{{qty}}"` → 3,
+  `"x {{qty}}"` → "x 3", nested lists/dicts, keys untouched, missing single expression → "").
+- Built-ins for outbound and inbound contexts (build `CallContext` with `resolved_configs.resolved_config(...)`
+  from va_domain tests/support — check it is on pytest pythonpath; else build minimal config via that helper path),
+  fixed `now`.
+- EngineState: JSON round-trip, `schema_version: 2` rejected, unknown field rejected, 201st turn folds oldest into
+  summary, summary capped at 4 000 chars.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B; split the parser into small functions), pip-audit on `uv export`, `corepack pnpm audit`.
+Coverage ≥ 85 % package (aim 100 %). `make e2e`: not touched (tests_e2e/ arrives in P05-T17).
+
+### Risks
+- `Literal` name clash with `typing.Literal`: name the segment class `Text`/`LiteralText`.
+- phonenumbers national format for non-NANP includes leading `0` trunk prefix (`020 7183 8750`): acceptable, document.
+- `strftime` with user format strings: `%` directives only, no injection risk; catch `ValueError` → unchanged.
+- New workspace member: follow AGENTS P00-T05 checklist or mypy silently skips the package.
+
+## Build P05-T09a (Builder, 2026-11-02)
+Implemented per plan: new workspace package `packages/va_engine` (dist `va-engine`; root dev group, uv source, mypy
+path/files, uv.lock) with `templating` (scanner parser with positioned `TemplateSyntaxError`/`TemplateLimitError`,
+layered `TemplateScope`, filters default/upper/lower/title/trim/json/phone_spoken/date, `MissingVariables` once per
+path, `render`/`render_url`/`render_json`/`render_text`, `stringify`, `zone_named`), `builtins.call_builtins`/
+`call_zone`, `models.state` (NodeFrame/TurnRecord/EngineState extra=forbid, `add_turn` 200-turn cap folding into a
+4 000-char summary, `load_engine_state`). Error messages are module constants (ruff TRY003 flags literals even via
+helper functions). Specs: specs/11 §8 + §9 Decisions P05-T09a; AGENTS.md line.
+Tests: test_templating (grammar, 15 positioned syntax errors, limits, resolution order, null/missing, stringify,
+every filter, missing once, url/json modes), test_templating_props (hypothesis), test_builtins (outbound/inbound/web,
+unknown tz), test_state (round trip, schema_version 2 / unknown fields rejected, cap + summary tail). 99 tests, va_engine
+coverage 100 %.
+Gates: fmt 0, lint 0, typecheck 0 (1097 files), placeholders 0, spec refs 0, make test 9267 passed / 7 skipped
+(99.16 %), jscpd 0 clones, radon avg A (no C+), pip-audit clean, pnpm audit 3 moderate (pre-existing).
+make e2e: not touched (pure library; tests_e2e/ arrives in P05-T17).
+
+## Review P05-T09a (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 9267 passed / 7 skipped (99.16 %), jscpd 0,
+radon no C+ in va_engine. Diff matches specs/11 §8 grammar/filters/resolution order/escape/limits and §9 models
+(extra=forbid, schema_version Literal[1], 200-turn fold). Spot-checked render/render_json/render_url/phone_spoken/
+date-in-tz by hand. Non-blocking: stringify of NaN floats renders `null` (orjson); harmless. Approved.

@@ -456,6 +456,31 @@ filter     := "default:" quoted | "upper" | "lower" | "title" | "json" | "phone_
 - Implementation: hand-written tokenizer + recursive resolver, no `eval`, max template length 20 000 chars,
   max 500 expressions.
 
+> Decision (2026-11-02): templating and engine state (P05-T09a). `va_engine.templating.parse_template(text)` parses
+> once and raises `TemplateSyntaxError(message, position)` (a `ValueError`; `TemplateLimitError` for > 20 000 chars or
+> > 500 expressions) for an unterminated `{{`, an empty expression, a bad path, an unknown filter, or a `default:`/
+> `date:` argument that is not a double- or single-quoted string (`\` escapes the next character inside quotes).
+> Whitespace is allowed around every token; `\{{` renders `{{`, any other backslash and a `}}` outside an
+> expression are literal; list indexes are non-negative. A path's first segment is found in the first layer that
+> has the key (a stored `null` counts as found and renders `""`); the name `request_data` itself resolves to the
+> whole mapping after the `request_data` keys and before built-ins; any later miss (absent key, index out of range,
+> indexing a scalar) is "missing". Values render as: strings as-is, `null` → `""`, booleans `true`/`false`, numbers
+> and lists/objects as compact JSON. Filters run left to right; `default:"x"` replaces a missing, `null`, or `""`
+> value and clears the missing report; other filters leave a missing value missing. `json` emits the value as JSON,
+> `phone_spoken` speaks each group of the national format (parsed with region US when there is no `+`;
+> `+442071838750` → `0 2 0, 7 1 8 3, 8 7 5 0`; unparseable input → every digit space-joined, no digits → unchanged),
+> `date:"fmt"` reads ISO 8601 datetimes (aware ones converted to the call timezone, naive ones taken as local) or
+> dates and keeps the value unchanged when it cannot parse or format it; an unknown timezone falls back to UTC.
+> Missing paths are reported through a per-call `MissingVariables` (sink called once per distinct canonical path,
+> e.g. `a.b[0]`); the runner maps the sink to the `TEMPLATE_VAR_MISSING` warning. A runtime caller that hits a
+> syntax error speaks/sends the raw text and logs `template.invalid`; save/publish validation reports it.
+> `render_url` percent-encodes every expression value (`quote(s, safe="")`), never literal text; `render_json`
+> templates string values and list items (never keys), and a string that is exactly one expression (no surrounding
+> text or whitespace) yields the raw typed value (a filter's output is a string; missing → `""`). Built-ins come from
+> `va_engine.builtins.call_builtins(context, now=, last_user_message=, prev_node_prompt=)`: `now_utc`/`now_local`
+> are ISO 8601 with seconds precision, `voice_id` is the platform voice id, `agent_number` is `from_number` for
+> outbound and web calls and `to_number` for inbound (`user_number` the other side), `metadata` is `config.metadata`.
+
 ## 9. EngineState serialization
 
 ```python
@@ -494,6 +519,12 @@ class EngineState(BaseModel):
 Serialized with `model_dump_json()` into `conversations.engine_state` (SMS/widget) after every turn, and into Redis
 `call:{id}:engine` (TTL 2 h) every turn for voice (for warm-transfer proxies and crash forensics). Final state merges
 `variables` into `calls.variables`. Deserialization rejects unknown `schema_version`.
+
+> Decision (2026-11-02): history cap (P05-T09a). Every engine model forbids unknown fields
+> (`va_engine.models.load_engine_state` raises `ValidationError` for them and for an unknown `schema_version`).
+> `EngineState.add_turn(record)` appends; once `history` exceeds 200 turns the oldest move into `history_summary` as
+> `role: content` lines (newline-joined after the existing summary), and the summary keeps only its last 4 000
+> characters. The fold is deterministic (no LLM call); an LLM summary may replace it later without a schema change.
 
 ## 10. `EngineIO` protocol
 

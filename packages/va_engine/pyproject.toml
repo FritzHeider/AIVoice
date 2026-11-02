@@ -1,0 +1,19 @@
+[project]
+name = "va-engine"
+version = "0.1.0"
+description = "VoiceAgents conversation engine: templating, engine state, task and pathway runners"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "orjson>=3.13.0",
+    "phonenumbers>=9",
+    "pydantic>=2.9",
+    "tzdata>=2025.2",
+    "va-domain",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-domain = { workspace = true }

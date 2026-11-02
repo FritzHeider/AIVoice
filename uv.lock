@@ -11,6 +11,7 @@ members = [
     "va-db",
     "va-domain",
     "va-elevenlabs",
+    "va-engine",
     "va-events",
     "va-events-sink",
     "va-llm",
@@ -2838,6 +2839,27 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-engine"
+version = "0.1.0"
+source = { editable = "packages/va_engine" }
+dependencies = [
+    { name = "orjson" },
+    { name = "phonenumbers" },
+    { name = "pydantic" },
+    { name = "tzdata" },
+    { name = "va-domain" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "phonenumbers", specifier = ">=9" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "tzdata", specifier = ">=2025.2" },
+    { name = "va-domain", editable = "packages/va_domain" },
+]
+
+[[package]]
 name = "va-events"
 version = "0.1.0"
 source = { editable = "packages/va_events" }
@@ -3225,6 +3247,7 @@ dev = [
     { name = "va-db" },
     { name = "va-domain" },
     { name = "va-elevenlabs" },
+    { name = "va-engine" },
     { name = "va-events" },
     { name = "va-events-sink" },
     { name = "va-llm" },
@@ -3278,6 +3301,7 @@ dev = [
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-elevenlabs", editable = "packages/va_elevenlabs" },
+    { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-llm", editable = "packages/va_llm" },
