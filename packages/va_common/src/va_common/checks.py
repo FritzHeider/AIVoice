@@ -94,13 +94,17 @@ class TemporalConnector:
             raise ConnectionError(msg)
 
 
-async def signal_workflow(connector: TemporalConnector, workflow_id: str, signal: str, arg: object) -> bool:
-    """Signal ``signal`` with ``arg`` on the running workflow ``workflow_id``; ``False`` when no such workflow
-    runs (not started yet, or already closed). Connection and other RPC failures propagate."""
+async def signal_workflow(connector: TemporalConnector, workflow_id: str, signal: str, *args: object) -> bool:
+    """Signal ``signal`` with ``args`` (none, one, or more) on the running workflow ``workflow_id``; ``False``
+    when no such workflow runs (not started yet, or already closed). Connection and other RPC failures
+    propagate."""
     client = await connector.client()
     handle = client.get_workflow_handle(workflow_id)
     try:
-        await handle.signal(signal, arg)
+        if len(args) == 1:
+            await handle.signal(signal, args[0])
+        else:
+            await handle.signal(signal, args=list(args))
     except RPCError as exc:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise

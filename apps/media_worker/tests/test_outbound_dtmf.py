@@ -229,7 +229,9 @@ async def test_the_precall_sequence_goes_out_then_settles() -> None:
     assert r.clock.monotonic() == DTMF_PAUSE_S + PRECALL_SETTLE_S
     events = log_events(stream)
     assert [e["groups"] for e in events if e["event"] == "media.precall_dtmf_sent"] == [2]
-    assert "12" not in stream.getvalue()
+    # Compare whole values: the timestamp of a line may contain the digits (e.g. 08:12:36).
+    assert '"12"' not in stream.getvalue()
+    assert all("digits" not in e for e in events)
 
 
 async def test_a_telnyx_failure_ends_the_precall_sequence_and_the_gate_goes_on() -> None:

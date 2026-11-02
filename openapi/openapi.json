@@ -4686,6 +4686,111 @@
         "title": "SsoConnectionView",
         "type": "object"
       },
+      "StopActiveCallsRequest": {
+        "additionalProperties": false,
+        "description": "Restrict stop-all to ``call_ids`` (other orgs' and unknown ids are ignored); no body stops all calls.\n\nAt most 1 000 ids; duplicates count once.",
+        "examples": [
+          {
+            "call_ids": [
+              "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77"
+            ]
+          }
+        ],
+        "properties": {
+          "call_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 1000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Call Ids"
+          }
+        },
+        "title": "StopActiveCallsRequest",
+        "type": "object"
+      },
+      "StopActiveCallsResponse": {
+        "description": "The calls that were stopped (oldest first).",
+        "examples": [
+          {
+            "call_ids": [
+              "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77"
+            ],
+            "message": "Stopped 1 calls.",
+            "status": "success",
+            "stopped": 1
+          }
+        ],
+        "properties": {
+          "call_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Call Ids",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message",
+          "stopped",
+          "call_ids"
+        ],
+        "title": "StopActiveCallsResponse",
+        "type": "object"
+      },
+      "StopCallResponse": {
+        "description": "The call was canceled (not answered yet) or told to hang up (in progress).",
+        "examples": [
+          {
+            "message": "Call ended successfully.",
+            "status": "success"
+          },
+          {
+            "message": "Call canceled.",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "StopCallResponse",
+        "type": "object"
+      },
       "SubAccountCreate": {
         "description": "``POST /v1/orgs/create``: the sub-account's name, optional plan, and credits moved from the parent.",
         "examples": [
@@ -5951,6 +6056,130 @@
         ],
         "x-audit-exempt": "call creation is recorded in calls and call_events",
         "x-envelope": "legacy",
+        "x-scope": "calls:write"
+      }
+    },
+    "/v1/calls/active/stop": {
+      "post": {
+        "description": "Stop every active or scheduled call of the org, or only ``call_ids``.",
+        "operationId": "calls_stop_active",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/StopActiveCallsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopActiveCallsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Stop Active",
+        "tags": [
+          "Calls"
+        ],
+        "x-audit": [
+          "call.stop"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "calls.operate",
+        "x-scope": "calls:write"
+      }
+    },
+    "/v1/calls/{call_id}/stop": {
+      "post": {
+        "description": "Cancel a call that is not answered yet, or hang up a call in progress.",
+        "operationId": "calls_stop",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopCallResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Stop",
+        "tags": [
+          "Calls"
+        ],
+        "x-audit": [
+          "call.stop"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "calls.operate",
         "x-scope": "calls:write"
       }
     },

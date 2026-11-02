@@ -15,6 +15,7 @@ from va_db.call_states import (
     CALL_TRANSITIONS,
     END_REASONS,
     LEG_TRANSITIONS,
+    STOPPABLE_STATUSES,
     TERMINAL_STATUSES,
     EndReason,
     allowed_from,
@@ -89,6 +90,11 @@ def test_terminal_statuses_have_no_outgoing_transition() -> None:
     assert all(is_terminal(status) for status in TERMINAL_STATUSES)
     assert not any(is_terminal(status) for status in sources)
     assert set(CALL_TRANSITIONS) == set(get_args(CallStatus))
+
+
+def test_stoppable_statuses_are_every_live_status() -> None:
+    assert set(get_args(CallStatus)) - STOPPABLE_STATUSES == TERMINAL_STATUSES | {"transferred"}
+    assert not STOPPABLE_STATUSES & TERMINAL_STATUSES
 
 
 LEG_EDGES: frozenset[tuple[CallLegState, CallLegState]] = frozenset(

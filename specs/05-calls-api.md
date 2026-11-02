@@ -592,6 +592,41 @@ Optional body `{"call_ids": [uuid]}` to restrict. Stops every non-terminal call 
 Response `{"status":"success","message":"Stopped 14 calls.","stopped":14,"call_ids":[…]}`. Requires role `admin`+
 for session auth.
 
+> Decision (2026-11-02): stop endpoints (P05-T11c). Both routes need `calls:write` and the `calls.operate`
+> permission (specs/04 §3.2 row "Calls: send / stop / live control / takeover"); stop-all from a dashboard session
+> also needs role `owner`/`admin` (else `403 FORBIDDEN` "Stopping all active calls requires the admin role."), API
+> keys need only scope + permission. `/v1/calls/active/stop` is matched before `/v1/calls/{call_id}/stop`. The
+> service is `va_api.services.call_stop`:
+> 1. The status is read in a short `tenant_session`; a non-UUID, absent, or other-org id is `404 CALL_NOT_FOUND`
+>    "Call not found.".
+> 2. `scheduled`, `queued`, `dialing`, `ringing` → **cancel**: `signal_cancel` (no argument) on `call-<id>`
+>    (connect + signal within 5 s). `CallWorkflow` is the single owner of the leg: it hangs up a ringing leg with
+>    its own `command_id` and records `canceled` through `end_call` (hold and slot released, disposition
+>    `CANCELED`). This replaces the §7.2 "Telnyx `hangup` on the leg" bullet: the api never calls Telnyx.
+>    Response "Call canceled.".
+> 3. No such workflow (stopped between the commit and the start, or the workflow is already closing): a
+>    `scheduled`/`queued` call is canceled by the api in one transaction (status `canceled`, `end_reason`
+>    `canceled`, `ended_by` `api`, `ended_at`, disposition `CANCELED`, hold released, `call.ended` row, audit row);
+>    after the commit the event is broadcast and the concurrency slot released (Redis failures there are logged).
+>    A workflow started afterwards exits without dialing. If the call ended meanwhile (terminal or `transferred`)
+>    → `409 CALL_NOT_ACTIVE`; any other status (dialing/ringing/answered without a reachable workflow) →
+>    `503 SERVICE_UNAVAILABLE` "The call could not be stopped; retry." (a retry re-reads the status).
+> 4. `in_progress`, `transferring` → **stop**: one `{"id","type":"stop","reason":"api"}` message on
+>    `call:{<id>}:control`; no ack is awaited (the owner hangs up at once without a goodbye line and records
+>    `api_stop`/`api`, specs/07 §17-§18). Zero receivers is logged (`calls.stop_unheard`) and still a success (the
+>    heartbeat watch is the backstop). Response "Call ended successfully.".
+> 5. `transferred` and every terminal status → `409 CALL_NOT_ACTIVE` "The call has already ended.".
+> 6. Temporal failures other than NOT_FOUND, a timeout, or a Redis publish failure → `503 SERVICE_UNAVAILABLE`;
+>    nothing is audited then. On success one audit row `call.stop` (`before.status`, `after.action` `cancel` or
+>    `stop`) is written.
+> 7. Stop-all body `{"call_ids": [uuid]}` is optional (no body or `{}` = every call); at most 1 000 ids
+>    (`400 INVALID_INPUT`), duplicates collapsed, other orgs' and unknown ids ignored, unknown fields rejected. It
+>    acts on the org's calls in `scheduled`, `queued`, `dialing`, `ringing`, `in_progress`, `transferring`
+>    (`va_db.call_states.STOPPABLE_STATUSES`), oldest first, running rule 2-4 for each with at most 10 in
+>    parallel. A call that ended meanwhile is skipped silently; one that could not be stopped is skipped and
+>    logged (`calls.stop_failed`); if calls failed and none was stopped → `503 SERVICE_UNAVAILABLE`.
+>    `stopped`/`call_ids` list only the stopped calls in processing order.
+
 ### 7.4 `GET /v1/calls/active`
 
 Response `{"status":"success","count":3,"calls":[{"call_id","to","from","status","started_at","direction","runner_type","pathway_id","current_node_id","duration_seconds"}]}`.

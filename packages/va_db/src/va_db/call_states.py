@@ -21,6 +21,7 @@ __all__ = [
     "DURATION_PRECISION",
     "END_REASONS",
     "LEG_TRANSITIONS",
+    "STOPPABLE_STATUSES",
     "TERMINAL_STATUSES",
     "EndReason",
     "allowed_from",
@@ -115,6 +116,12 @@ CALL_TRANSITIONS: Final[Mapping[CallStatus, frozenset[CallStatus]]] = MappingPro
 TERMINAL_STATUSES: Final[frozenset[CallStatus]] = frozenset(
     {"completed", "failed", "canceled", "no_answer", "busy"}
 )
+
+STOPPABLE_STATUSES: Final[frozenset[CallStatus]] = frozenset(
+    {"scheduled", "queued", "dialing", "ringing", "in_progress", "transferring"}
+)
+"""The statuses ``POST /v1/calls/{id}/stop`` acts on (specs/05 §7.3 Decision P05-T11c): every status that is
+neither terminal nor ``transferred`` (the AI has left a transferred call)."""
 
 LEG_TRANSITIONS: Final[Mapping[CallLegState, frozenset[CallLegState]]] = MappingProxyType(
     {

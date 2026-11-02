@@ -22,6 +22,7 @@ from va_api.auth.verification import ResendLimiter
 from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.services.call_starter import CallStarter, TemporalCallStarter
+from va_api.services.call_stop import CallCanceller, TemporalCallCanceller
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
 from va_common.auth import ApiKeyHasher, PasswordHasher
@@ -73,6 +74,7 @@ class Container:
     call_limiter: CallLimiter
     event_publisher: EventPublisher
     call_starter: CallStarter
+    call_canceller: CallCanceller
     host_resolver: HostResolver
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
@@ -155,5 +157,6 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             call_limiter=CallLimiter(redis, clock=clock),
             event_publisher=EventPublisher(redis, call_events=None),
             call_starter=TemporalCallStarter(temporal, settings.temporal_task_queue),
+            call_canceller=TemporalCallCanceller(temporal),
             host_resolver=system_resolver,
         )

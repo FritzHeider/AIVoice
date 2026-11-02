@@ -18,7 +18,7 @@ import httpx
 import pytest
 from api_helpers import make_settings
 from auth_helpers import AuthContainer
-from call_fakes import FakeCallStarter, FakeResolver
+from call_fakes import FakeCallCanceller, FakeCallStarter, FakeResolver
 from docker_probe import docker_available
 from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
@@ -138,7 +138,7 @@ class SessionContainer(AuthContainer):
     login state store, the cached org settings reader, the agent onboarding request store and limiter, the
     OIDC discovery client built from the app settings when the app opens it (intercept it with respx), and
     the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
-    ``FakeResolver``)."""
+    ``FakeCallCanceller``, ``FakeResolver``)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -158,6 +158,7 @@ class SessionContainer(AuthContainer):
     call_limiter: CallLimiter = field(init=False)
     event_publisher: EventPublisher = field(init=False)
     call_starter: FakeCallStarter = field(default_factory=FakeCallStarter)
+    call_canceller: FakeCallCanceller = field(default_factory=FakeCallCanceller)
     host_resolver: FakeResolver = field(default_factory=FakeResolver)
 
     def __post_init__(self) -> None:
@@ -352,12 +353,13 @@ async def fund(container: SessionContainer, org_id: uuid.UUID, dollars: str) -> 
 
 async def hold(
     container: SessionContainer, org_id: uuid.UUID, dollars: str, status: CreditHoldStatus = "held"
-) -> None:
-    """A ``credit_holds`` row of ``dollars`` with ``status`` for ``org_id``."""
+) -> uuid.UUID:
+    """A ``credit_holds`` row of ``dollars`` with ``status`` for ``org_id``; returns its id."""
+    hold_id = new_id()
     async with container.database.system_session() as session:
         session.add(
             CreditHold(
-                id=new_id(),
+                id=hold_id,
                 org_id=org_id,
                 reference_type="call",
                 reference_id=str(new_id()),
@@ -366,6 +368,7 @@ async def hold(
                 expires_at=container.clock.now() + timedelta(hours=1),
             )
         )
+    return hold_id
 
 
 async def set_org(identity: IdentityDb, org_id: uuid.UUID, **values: Any) -> None:

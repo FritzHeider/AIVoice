@@ -27,9 +27,9 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import JsonValue
 from redis.exceptions import RedisError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_api.auth.context import RequestContext
+from va_api.services.call_event_rows import EVENTS_UNAVAILABLE_MESSAGE, broadcast_event, persist_event
 from va_api.services.call_inputs import CallInputs, load_call_inputs, resolve_inputs
 from va_api.services.call_starter import CallStarter, CallStartError
 from va_api.services.webhook_policy import check_call_webhook
@@ -50,15 +50,7 @@ from va_domain.call_resolution import CallResolution, PlatformModels, Resolution
 from va_domain.call_workflow import CallWorkflowInput, call_workflow_id
 from va_domain.calls import SendCallConfig, SendCallRequest
 from va_domain.org import OrgSettings
-from va_events import (
-    DomainEvent,
-    EventPublisher,
-    EventPublishError,
-    EventType,
-    insert_rows,
-    new_event,
-    row_for,
-)
+from va_events import DomainEvent, EventPublisher, EventType, new_event
 
 __all__ = [
     "EVENTS_UNAVAILABLE_MESSAGE",
@@ -75,7 +67,6 @@ __all__ = [
 
 QUEUED_MESSAGE: Final = "Call successfully queued."
 SCHEDULED_MESSAGE: Final = "Call successfully scheduled."
-EVENTS_UNAVAILABLE_MESSAGE: Final = "Call events are temporarily unavailable."
 START_FAILED_MESSAGE: Final = "The call could not be started. Please retry."
 START_FAILED_ERROR: Final = "Call workflow could not be started."
 ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."
@@ -137,7 +128,7 @@ async def dispatch_call(
         raise AppError("NOT_FOUND", ORG_NOT_FOUND_MESSAGE)
     call_id = new_id()
     created = await _create(deps, ctx, request, call_id, org_settings=org, encrypted_key=encrypted_key)
-    await _broadcast(deps.publisher, created.event)
+    await broadcast_event(deps.publisher, created.event)
     scheduled_for = _utc(created.config.start_time)
     try:
         await deps.starter.start(
@@ -188,7 +179,7 @@ async def _create(  # noqa: PLR0913 - the request's parts, keyword-only extras
             )
             session.add(_call_row(call_id, ctx.org_id, request, config, admitted))
             await session.flush()
-            event = await _persist_event(
+            event = await persist_event(
                 session, deps.publisher, _created_event(deps.clock, call_id, ctx, resolution)
             )
     except BaseException:
@@ -288,26 +279,6 @@ def _created_event(
     )
 
 
-async def _persist_event(session: AsyncSession, publisher: EventPublisher, event: DomainEvent) -> DomainEvent:
-    """Assign the seq (Redis) and write the ``call_events`` row in ``session``'s transaction."""
-    try:
-        sequenced = await publisher.sequence(event)
-    except EventPublishError as exc:
-        _log.warning("calls.event_sequence_failed", event_type=event.type.value, call_id=str(event.call_id))
-        raise AppError("SERVICE_UNAVAILABLE", EVENTS_UNAVAILABLE_MESSAGE) from exc
-    row = row_for(sequenced)
-    await insert_rows(session, [] if row is None else [row])
-    return sequenced
-
-
-async def _broadcast(publisher: EventPublisher, event: DomainEvent) -> None:
-    """Send a committed event to the stream and live channel; a Redis failure is logged, not raised."""
-    try:
-        await publisher.broadcast(event)
-    except EventPublishError:
-        _log.warning("calls.event_broadcast_failed", event_type=event.type.value, call_id=str(event.call_id))
-
-
 async def _undo_counters(admitted: Admitted, limiter: CallLimiter) -> None:
     """Give back the Redis counters and the concurrency slot (the hold row goes with the transaction).
 
@@ -363,12 +334,12 @@ async def _record_start_failure(deps: DispatchDeps, org_id: UUID, admitted: Admi
             if admitted.hold is not None:
                 await holds.release(session, org_id, admitted.hold.id)
             try:
-                event = await _persist_event(session, deps.publisher, error)
+                event = await persist_event(session, deps.publisher, error)
             except AppError:
                 event = None  # the failure itself must still be recorded; the event is lost with Redis
     finally:
         if not moved_on:  # pragma: no branch - moved_on is only set right before the return
             await _undo_counters(admitted, deps.limiter)
     if event is not None:
-        await _broadcast(deps.publisher, event)
+        await broadcast_event(deps.publisher, event)
     return True

@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.converter import DataConverter
+from temporalio.service import RPCError, RPCStatusCode
+from workflow_fakes import SignalRecorder, connector_of
 
 from va_common.checks import (
     Dependencies,
@@ -25,6 +27,7 @@ from va_common.checks import (
     open_dependencies,
     postgres_check,
     redis_check,
+    signal_workflow,
     temporal_check,
 )
 from va_common.http import http_client
@@ -223,3 +226,32 @@ async def test_dependencies_readiness_checks_is_a_copy() -> None:
     async with open_dependencies() as deps:
         deps.readiness_checks()["x"] = ok_check
         assert deps.readiness_checks() == {}
+
+
+async def test_signal_workflow_without_an_argument() -> None:
+    client = SignalRecorder()
+    assert await signal_workflow(connector_of(client), "call-1", "signal_cancel")
+    assert client.sent == [("call-1", "signal_cancel", ())]
+
+
+async def test_signal_workflow_with_one_argument_sends_it_positionally() -> None:
+    client = SignalRecorder()
+    assert await signal_workflow(connector_of(client), "call-1", "signal_carrier", {"a": 1})
+    assert client.sent == [("call-1", "signal_carrier", ({"a": 1},))]
+
+
+async def test_signal_workflow_with_two_arguments() -> None:
+    client = SignalRecorder()
+    assert await signal_workflow(connector_of(client), "w", "s", 1, 2)
+    assert client.sent == [("w", "s", (1, 2))]
+
+
+async def test_signal_workflow_missing_workflow_is_false() -> None:
+    client = SignalRecorder(RPCError("gone", RPCStatusCode.NOT_FOUND, b""))
+    assert not await signal_workflow(connector_of(client), "w", "s")
+
+
+async def test_signal_workflow_other_rpc_errors_propagate() -> None:
+    client = SignalRecorder(RPCError("down", RPCStatusCode.UNAVAILABLE, b""))
+    with pytest.raises(RPCError, match="down"):
+        await signal_workflow(connector_of(client), "w", "s")

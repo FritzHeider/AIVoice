@@ -171,6 +171,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls/active/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Calls Stop Active
+         * @description Stop every active or scheduled call of the org, or only ``call_ids``.
+         */
+        post: operations["calls_stop_active"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calls/{call_id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Calls Stop
+         * @description Cancel a call that is not answered yet, or hang up a call in progress.
+         */
+        post: operations["calls_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -3084,6 +3124,69 @@ export interface components {
             updated_at: string;
         };
         /**
+         * StopActiveCallsRequest
+         * @description Restrict stop-all to ``call_ids`` (other orgs' and unknown ids are ignored); no body stops all calls.
+         *
+         *     At most 1 000 ids; duplicates count once.
+         * @example {
+         *       "call_ids": [
+         *         "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77"
+         *       ]
+         *     }
+         */
+        StopActiveCallsRequest: {
+            /** Call Ids */
+            call_ids?: string[] | null;
+        };
+        /**
+         * StopActiveCallsResponse
+         * @description The calls that were stopped (oldest first).
+         * @example {
+         *       "call_ids": [
+         *         "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77"
+         *       ],
+         *       "message": "Stopped 1 calls.",
+         *       "status": "success",
+         *       "stopped": 1
+         *     }
+         */
+        StopActiveCallsResponse: {
+            /** Call Ids */
+            call_ids: string[];
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Stopped */
+            stopped: number;
+        };
+        /**
+         * StopCallResponse
+         * @description The call was canceled (not answered yet) or told to hang up (in progress).
+         * @example {
+         *       "message": "Call ended successfully.",
+         *       "status": "success"
+         *     }
+         * @example {
+         *       "message": "Call canceled.",
+         *       "status": "success"
+         *     }
+         */
+        StopCallResponse: {
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
          * SubAccountCreate
          * @description ``POST /v1/orgs/create``: the sub-account's name, optional plan, and credits moved from the parent.
          * @example {
@@ -3766,6 +3869,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SendCallResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_stop_active: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["StopActiveCallsRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StopActiveCallsResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_stop: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StopCallResponse"];
                 };
             };
             /** @description Invalid input */

@@ -528,3 +528,147 @@ touched src prints nothing. Checked: edge mapping writes `primary_hangup`/`hangu
 the routine reads; `worker_lost` is a specs/05 §9 reason (ended_by error); ender runs before `_cleanup` and its
 failure is logged; hangup uses the workflow command_id; tenant session only; no text/numbers logged.
 make e2e harness does not exist until P05-T17.
+
+## Plan P05-T11c — Stop endpoints (Planner, 2026-11-02)
+
+Spec refs: specs/05 §1, §7.2, §7.3, §8, §9; specs/07 §17; specs/04 §3.2 (`calls.operate`, row "Calls: send / stop /
+live control / takeover"), §13 (`call.stop`); specs/31 (`CALL_NOT_FOUND`, `CALL_NOT_ACTIVE`, `SERVICE_UNAVAILABLE`);
+specs/01 §2.1 Decision P05-T06c (signal_cancel honoured until answered). P05-T10c stays blocked until P05-T11 is
+ticked, so this is next. Write `> Decision (2026-11-02): stop endpoints (P05-T11c)` under specs/05 §7.3 with every
+numbered rule below.
+
+### Design (decided — do not re-litigate)
+1. **Status → action** (`va_api.services.call_stop`):
+   - `scheduled`, `queued`, `dialing`, `ringing` → **cancel**: signal `CANCEL_SIGNAL` (`va_domain.call_workflow`,
+     no argument) on `call_workflow_id(call_id)`. The workflow already hangs up a ringing leg with its command_id and
+     records `canceled` through `end_call` (releases hold/slot), so the API never calls Telnyx itself (single owner of
+     the leg; this replaces §7.2's "Telnyx hangup on the leg" bullet — say so in the Decision). Message
+     `"Call canceled."`.
+   - workflow NOT_FOUND on cancel (stop between commit and workflow start, or workflow already closing): in ONE
+     `tenant_session`: `CallRepo.transition(call_id, "canceled", from_={"scheduled","queued"}, end_reason="canceled",
+     ended_by="api", ended_at=now)`; release `credit_hold_id` via `va_billing.holds.release`; write the `call.ended`
+     row (`va_events.call_ended_event` → `EventPublisher.sequence` → `va_events.insert_rows`) and the audit row; after
+     commit `broadcast` the event and `CallLimiter.release_call(org_id, call_id)` (ZREM, Redis errors logged
+     `calls.slot_release_failed`). `CallTransitionError` → re-read: terminal → 409 `CALL_NOT_ACTIVE`; otherwise (a
+     dialing/ringing call without a workflow) → 503 `SERVICE_UNAVAILABLE` "The call could not be stopped; retry.".
+     A workflow started afterwards exits without dialing (call_starter docstring already guarantees it).
+   - `in_progress`, `transferring` → **stop**: `redis.publish(control_channel(call_id), StopControl(id=new_id(),
+     reason="api").model_dump_json())`; no ack wait (the owner hangs up immediately, specs/07 §17); 0 receivers →
+     warning `calls.stop_unheard` (heartbeat watch backstop) and still success. Message `"Call ended successfully."`.
+     Redis error → 503 `SERVICE_UNAVAILABLE`.
+   - `transferred` and every terminal status (`va_db.call_states.TERMINAL_STATUSES`) → 409 `CALL_NOT_ACTIVE`
+     message `"The call has already ended."`.
+   - Temporal failures other than NOT_FOUND (RPCError, OSError, RuntimeError from connect, TimeoutError after
+     `SIGNAL_TIMEOUT_S = 5.0` via `asyncio.timeout`, same pattern as `TemporalCallStarter`) → 503
+     `SERVICE_UNAVAILABLE`.
+2. **Canceller seam.** `va_api.services.call_stop.CallCanceller` Protocol `async def cancel(call_id) -> bool`
+   (False = no such workflow) + `TemporalCallCanceller(connector)` using `va_common.checks.signal_workflow`.
+   Generalise `signal_workflow(connector, workflow_id, signal, *args: object) -> bool` → `handle.signal(signal,
+   args=list(args))` (existing edge/media callers pass one positional arg and stay valid; their tests stay green).
+   Failures raise `CallCancelError` (cause chained). Container gains `call_canceller: CallCanceller` (built from the
+   existing `temporal` connector); `SessionContainer` gains `call_canceller: FakeCallCanceller` in
+   `tests/support/call_fakes.py` (`.cancelled: list[UUID]`, `.missing: bool` → returns False, `.fail:
+   CallCancelError | None`).
+3. **Lookup.** Path param `call_id: str`; parse with `uuid.UUID`; invalid / absent / other org → 404
+   `CALL_NOT_FOUND` "Call not found." (`NotFoundError` from `CallRepo.get` mapped). Status read in a short
+   `tenant_session(ctx.org_id)`; the side effect runs after it closes; then a second short session writes the audit
+   row `audit(session, ctx, "call.stop", "call", call_id, before={"status": s}, after={"action":
+   "cancel"|"stop"})` (fallback path writes it inside its own transaction instead).
+4. **`POST /v1/calls/{call_id}/stop`** on `calls_router` (legacy envelope): `operation_id="calls_stop"`,
+   `require_scope("calls:write")` + `dependencies=[Depends(require_permission("calls.operate"))]`,
+   `openapi_extra={"x-scope": "calls:write", "x-permission": "calls.operate", **audited("call.stop")}`, response
+   `StopCallResponse(status="success", message)` with both examples. No body.
+5. **`POST /v1/calls/active/stop`**, `operation_id="calls_stop_active"`, same scope/permission/audit marker; declared
+   BEFORE the `{call_id}` route (literal path wins). Optional body `StopActiveCallsRequest {call_ids: list[UUID] |
+   None = None}` (max 1 000 items, duplicates collapsed; extra fields forbidden; no body or `{}` = all). Session
+   principals additionally need role `owner`/`admin` (specs/05 §7.3; developers get 403 `FORBIDDEN`
+   "Stopping all active calls requires the admin role."); API keys need only scope + permission. New
+   `CallRepo.active_ids(call_ids: Collection[UUID] | None) -> list[tuple[UUID, CallStatus]]` = org's calls with status
+   in `STOPPABLE_STATUSES` (`scheduled, queued, dialing, ringing, in_progress, transferring`; define in
+   `va_db.call_states`), ordered by `created_at, id`. Each call goes through the single-call service with bounded
+   concurrency (`asyncio.Semaphore(10)` in a TaskGroup). Per-call `CALL_NOT_ACTIVE` (race) → skipped silently;
+   `SERVICE_UNAVAILABLE` → skipped, logged `calls.stop_failed`; ids the org does not own are ignored. If any call
+   failed with unavailability and none stopped → 503. Response `StopActiveCallsResponse(status="success",
+   message=f"Stopped {n} calls.", stopped=n, call_ids=[…])` (`call_ids` in the processed order). One audit row per
+   stopped call.
+6. Error codes already exist (`CALL_NOT_ACTIVE` 409, `CALL_NOT_FOUND` 404, `SERVICE_UNAVAILABLE` 503); no catalog
+   change. `make openapi` + both `gen:api` (dashboard, sdk schema.d.ts).
+7. **Cross-tenant suite.** Factory `call_id` in `cross_tenant_factories.py`: seeds an `in_progress` call of the
+   tenant's org (raw insert via the tenant session / `RowFactory` or `call_input_rows`-style helper, real
+   `created_at`), so the owner control is 200 (`publish` to fakeredis). `REFUSED` gains `(404, "CALL_NOT_FOUND")`
+   (resource-specific not-found codes are specs/31 "never reveal existence" codes). `calls_stop_active` needs no
+   path factory; its body comes from the request model's first example (`{"call_ids": [...]}` example uuid) — make
+   sure the example parses.
+8. Never log phone numbers. Bound log context has org_id; add call_id.
+
+### Tests (all must exist and pass)
+- `apps/api/tests/test_call_stop.py` (Postgres via `session_helpers.migrated_postgres()` module fixture,
+  `SessionContainer(identity=..., clock=FrozenClock(call_helpers.business_hours_today()))`, calls seeded with
+  `call_helpers.callable_org` + a row helper setting status/credit_hold_id): per status — scheduled/queued/dialing/
+  ringing → cancel signalled once with the call id, `"Call canceled."`, row unchanged; in_progress/transferring →
+  one StopControl on `control_channel` (subscribe on fakeredis before the request; parse with `parse_control`,
+  reason `api`), `"Call ended successfully."`; transferred/completed/failed/canceled/no_answer/busy → 409
+  `CALL_NOT_ACTIVE`; non-UUID id and another org's call → 404 `CALL_NOT_FOUND`; NOT_FOUND fallback on a queued call
+  → row `canceled/canceled/api`, hold `released`, `call.ended` row in call_events, slot ZREM'd; fallback on a
+  ringing call → 503; canceller failure → 503; Redis publish failure → 503; audit row `call.stop` written on success
+  and absent on failure; developer session allowed for single stop, analyst session 403 (no `calls.operate`), key
+  without `calls:write` 403.
+- stop-all: no body stops every stoppable call (mix of statuses, terminal ones untouched) with correct counts and
+  ids; `call_ids` filter restricts (foreign + unknown ids ignored, duplicates collapsed); >1 000 ids → 400
+  `INVALID_INPUT`; developer session 403, admin session 200, key 200; all-unavailable → 503; partial unavailability
+  → 200 with only the stopped ids; one audit row per stopped call.
+- `TemporalCallCanceller` unit tests with a fake connector/handle: signals `signal_cancel` with no args on
+  `call-<id>`, NOT_FOUND → False, other RPCError/OSError/timeout → `CallCancelError`.
+- `packages/va_common` test for `signal_workflow` with zero and one args (existing ones stay).
+- `packages/va_db` test for `CallRepo.active_ids` (filter, order, org isolation) and `STOPPABLE_STATUSES`.
+- Media: extend `test_a_stop_control_message_ends_the_call_as_api_stop` to assert no goodbye line was spoken
+  (no TTS request/generated text after the stop beyond what was already spoken; e.g. compare
+  `state.elevenlabs.tts_requests` count before/after, or assert no `max_duration_message`/final text) and exactly one
+  FakeTelnyx hangup.
+- Cross-tenant suite + `test_openapi` + `test_operations_contract` + `test_audit_markers` green.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make openapi` + both
+`gen:api` (then `make test-ts` or the two packages' `test`); `make test` in background (`make test >
+logs/make_test_p05t11c.log 2>&1`) with a heartbeat Monitor; coverage ≥ 85 %/package, new modules ~100 %;
+`npx --yes jscpd@4 --silent` → 0 clones; `uvx radon cc -s -n C apps/api/src packages/va_db/src packages/va_common/src`
+prints nothing; audit (`uvx pip-audit` on `uv export` + `corepack pnpm audit`). `make e2e` harness lands in
+P05-T17 — say so. build.done payload plain text (no --json): `tests: pass, lint: pass, typecheck: pass, audit: pass,
+coverage: pass, duplication: pass, complexity: N, specs: pass`.
+
+### Risks
+- Route order: `/active/stop` must be registered before `/{call_id}/stop`, else "active" hits the UUID parse → 404.
+- `call_events` partitions: fallback writes a row → container clock must be `business_hours_today()`-style real date.
+- The cross-tenant owner control must be 2xx: the `call_id` factory's call must be `in_progress` (publish works on
+  fakeredis with no subscriber).
+- FastAPI optional JSON body: `body: StopActiveCallsRequest | None = None` — make sure an empty POST is accepted and
+  OpenAPI marks the body optional.
+- Changing `signal_workflow` to `*args` must keep edge/media signaller tests green.
+
+## Build P05-T11c (Builder, 2026-11-02)
+
+Implemented per plan. New: `va_api.services.call_stop` (stop_call / stop_active_calls / TemporalCallCanceller /
+check_stop_all_role / parse_call_id), `va_api.services.call_event_rows` (persist_event / broadcast_event moved out of
+call_dispatch, which now imports them), routes `calls_stop_active` (registered first) + `calls_stop` on
+`calls_router`, schemas `StopCallResponse`/`StopActiveCallsRequest`/`StopActiveCallsResponse`, `Container.call_canceller`.
+`va_db.call_states.STOPPABLE_STATUSES`, `CallRepo.active_ids`. `signal_workflow(..., *args)` (one arg stays
+positional so the edge/media fakes are unchanged). Deviation from plan: the fallback's CallTransitionError maps to
+CALL_NOT_ACTIVE only for terminal/transferred; an answered/dialing/ringing current status is 503 (retry re-reads and
+publishes stop) — written into the specs/05 §7.3 Decision. Tests: api test_call_stop (32), test_call_canceller (7),
+va_common test_checks (+5, shared fake `workflow_fakes.py`), va_db (+2), media stop test asserts only the opener was
+synthesized + call.ended row; cross-tenant `call_id` factory + CALL_NOT_FOUND in REFUSED; openapi + both gen:api.
+make e2e harness does not exist until P05-T17.
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0, check_spec_refs 0, make test 9801 passed / 7 skipped,
+99.16 % (call_stop 98 %, call_event_rows/calls router/schemas/CallRepo 100 %), make test-ts 0, jscpd 0 clones,
+radon -n C on api/va_db/va_common src prints nothing (max CC in call_stop 9), pip-audit no known vulns, pnpm audit
+--audit-level high 0 (3 pre-existing moderate). Also fixed a pre-existing flake in media
+test_outbound_dtmf (asserted bare "12" absent from logs; a timestamp 08:12 matched) → compare quoted value.
+
+## Review P05-T11c (Reviewer, 2026-11-02) — APPROVED
+
+Re-ran: make lint 0, typecheck 0, placeholders 0, check_spec_refs 0, make test-ts 0, make test 9801 passed / 7
+skipped, 99.16 % (call_stop 98 %, call_event_rows 100 %), jscpd 0 clones, radon -n C on api/va_db/va_common src
+prints nothing. Checked: route order (/active/stop first), calls.operate + calls:write, owner/admin for session
+stop-all, CALL_NOT_FOUND/CALL_NOT_ACTIVE/SERVICE_UNAVAILABLE per specs/31, fallback cancel in one tenant
+transaction (disposition CANCELED, hold release, call.ended row, audit), ended_by api from END_REASONS, workflow
+sets CANCELED disposition on its own cancel path, no phone numbers logged. make e2e harness lands in P05-T17.

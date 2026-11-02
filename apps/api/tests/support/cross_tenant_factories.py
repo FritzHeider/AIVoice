@@ -7,6 +7,7 @@ imported from here); the suite reports any path parameter without one.
 
 from __future__ import annotations
 
+from call_rows import seed_call
 from cross_tenant import REGISTRY, FactoryContext
 from identity_db import unique_email
 from session_helpers import add_member, store_api_key, sub_account
@@ -49,7 +50,14 @@ async def _sub_account(context: FactoryContext) -> str:
     return str(child_id)
 
 
+async def _call(context: FactoryContext) -> str:
+    """An ``in_progress`` call of the tenant's org (stopping it publishes a control message)."""
+    call = await seed_call(context.identity.database, status="in_progress", org_id=context.tenant.org_id)
+    return str(call.call_id)
+
+
 REGISTRY.register_resource_factory("user_id", _member)
 REGISTRY.register_resource_factory("invitation_id", _invitation)
 REGISTRY.register_resource_factory("key_id", _api_key)
 REGISTRY.register_resource_factory("org_id", _sub_account)
+REGISTRY.register_resource_factory("call_id", _call)

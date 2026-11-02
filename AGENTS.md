@@ -1338,3 +1338,11 @@ Grafana 3001
   pipeline summary. Tests: `media_helpers.RecordingSignaller` (`signalled` event), `apps/media_worker/tests/
   test_call_end.py` (`BrokenDatabase`, fake Telnyx factory), runtime sim `ending_rig(media_db_url)` +
   `streamed_call(container=)` to share the media container's Redis with the routine.
+- 2026-11-02 (P05-T11c): stop endpoints = `va_api.services.call_stop` (`stop_call`, `stop_active_calls`,
+  `TemporalCallCanceller` → `Container.call_canceller`; rules: specs/05 §7.3 Decision P05-T11c). api call events in
+  the caller's transaction go through `va_api.services.call_event_rows.persist_event` / `broadcast_event`.
+  `va_common.checks.signal_workflow(connector, id, signal, *args)` sends zero/one/many args. Tests:
+  `SessionContainer.call_canceller` = `call_fakes.FakeCallCanceller` (`.cancelled`, `.missing`, `.fail`);
+  `workflow_fakes.SignalRecorder` + `connector_of` (va_common tests) fake a Temporal client for signals;
+  `session_helpers.hold(...)` returns the hold id; the cross-tenant `call_id` factory seeds an `in_progress` call.
+  Resource-specific not-found codes (`CALL_NOT_FOUND`) are accepted refusals in `cross_tenant.REFUSED`.

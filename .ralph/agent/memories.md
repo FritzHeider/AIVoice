@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793607833-39d1
+> P05-T11c: stop endpoints va_api.services.call_stop (TemporalCallCanceller via signal_workflow(*args), fallback cancel for scheduled/queued without workflow); shared Temporal signal fake packages/va_common/tests/workflow_fakes.py (SignalRecorder, connector_of); log-absence asserts must compare quoted JSON values, bare digits match timestamps
+<!-- tags: api, calls, testing | created: 2026-11-02 -->
+
 ### mem-1793602869-7053
 > P05-T11a: media in-call persistence = va_media.turns TurnRecorder (PipelineObserver, sync turn ops, ordered publish task chain + drain) + CallPersistence + va_media.turn_writer.TurnWriter (write-behind va_db.call_turns ops via CallTurnRepo) + runtime.open_persistence; media session fixture media_db_url in conftest; runtime sim tests on Postgres via rig(persistence=) + Rig.call(seeded=seed_call(...)); mypy flags 'while not self._closed: ... if self._closed' as unreachable - move the check into a helper returning bool
 <!-- tags: media, persistence, testing | created: 2026-11-02 -->

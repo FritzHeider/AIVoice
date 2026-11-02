@@ -570,5 +570,8 @@ async def test_a_stop_control_message_ends_the_call_as_api_stop(media_db_url: st
             await r.container.redis.publish(control_channel(call.call_id), stop.model_dump_json())
             assert await signalled(r) == [("api_stop", "api")]
             assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
-    row, _ = await ended_row(media_db_url, call)
+        # No goodbye line (specs/05 §7.2): at most (part of) the opener was ever synthesized.
+        assert all(OPENER.startswith(text) for text in spoken(r.state))
+    row, ends = await ended_row(media_db_url, call)
     assert (row.status, row.end_reason, row.ended_by) == ("completed", "api_stop", "api")
+    assert ends == [{"end_reason": "api_stop", "ended_by": "api"}]

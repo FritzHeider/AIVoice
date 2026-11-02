@@ -50,6 +50,7 @@ PATH_PARAM_OPERATIONS: Final = frozenset(
         "api_keys_update",
         "api_keys_revoke",
         "api_keys_roll",
+        "calls_stop",
     }
 )
 PUBLIC_ROUTES: Final = frozenset(
@@ -289,4 +290,4 @@ def test_public_markers() -> None:
 
 
 def test_the_phase_02_factories_are_registered() -> None:
-    assert {"user_id", "invitation_id", "key_id", "org_id"} <= REGISTRY.params()
+    assert {"user_id", "invitation_id", "key_id", "org_id", "call_id"} <= REGISTRY.params()

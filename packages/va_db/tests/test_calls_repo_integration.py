@@ -164,3 +164,21 @@ async def test_lookup_resolves_any_org_and_misses_unknown(database: Database) ->
         repo = CallLegLookupRepo(session)
         assert await repo.by_call_control_id(ccid) == LegRef(call.org_id, call.call_id, "transfer_target")
         assert await repo.by_call_control_id(f"v3:{new_id().hex}") is None
+
+
+async def test_active_ids_lists_stoppable_calls_oldest_first(database: Database) -> None:
+    first = await seed_call(database, status="scheduled")
+    org = first.org_id
+    later = datetime.now(UTC)
+    live = await seed_call(database, status="in_progress", org_id=org, created_at=later)
+    await seed_call(database, status="completed", org_id=org)
+    await seed_call(database, status="transferred", org_id=org)
+    other = await seed_call(database, status="in_progress")
+    async with database.tenant_session(org) as session:
+        repo = CallRepo(session, org)
+        everything = await repo.active_ids()
+        only_live = await repo.active_ids([live.call_id, other.call_id, new_id()])
+        none = await repo.active_ids([])
+    assert everything == [(first.call_id, "scheduled"), (live.call_id, "in_progress")]
+    assert only_live == [(live.call_id, "in_progress")]
+    assert none == []

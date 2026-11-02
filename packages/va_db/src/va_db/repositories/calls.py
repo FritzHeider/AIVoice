@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.errors import AppError
 from va_common.ids import new_id
-from va_db.call_states import allowed_from, leg_allowed_from
+from va_db.call_states import STOPPABLE_STATUSES, allowed_from, leg_allowed_from
 from va_db.models import Call, CallLeg, CallLegRole, CallLegState, CallStatus
 from va_db.repositories.base import NotFoundError, SystemRepository
 
@@ -90,6 +90,19 @@ class CallRepo:
             current = await self.get(call_id)
             raise CallTransitionError(call_id, to, current.status)
         return call
+
+    async def active_ids(
+        self, call_ids: Collection[uuid.UUID] | None = None
+    ) -> list[tuple[uuid.UUID, CallStatus]]:
+        """``(id, status)`` of the org's calls in :data:`va_db.call_states.STOPPABLE_STATUSES`, oldest first
+        (``created_at``, then ``id``); restricted to ``call_ids`` when given (other orgs' ids never match)."""
+        statement = select(Call.id, Call.status).where(
+            Call.org_id == self.org_id, Call.status.in_(sorted(STOPPABLE_STATUSES))
+        )
+        if call_ids is not None:
+            statement = statement.where(Call.id.in_(list(call_ids)))
+        rows = await self.session.execute(statement.order_by(Call.created_at, Call.id))
+        return [(call_id, status) for call_id, status in rows]
 
     async def update_fields(self, call_id: uuid.UUID, **values: Any) -> Call:
         """Set ``values`` without a status change (``answered_by``, ...); :class:`NotFoundError` if absent."""
