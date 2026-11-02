@@ -1,0 +1,24 @@
+id: outbound_basic
+description: Human answers, short exchange, agent ends the call with the end_call tool.
+match:
+  to: "+14155550101"
+answer:
+  after_ms: 1500
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/outbound_basic.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Hi, yes this is Ana.", language: en}
+  - wait_agent_speech: {then_silence_ms: 700}
+  - say: {text: "Tomorrow at 3 works."}
+  - expect_hangup: {by: agent, timeout_ms: 15000}
+profile: realistic
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: agent_end_call
+  min_turns: 4
+  transcript_contains: ["Ana", "Tomorrow at 3"]
+  max_e2e_ms_p95: 1200
+  webhook_events: ["call.completed"]

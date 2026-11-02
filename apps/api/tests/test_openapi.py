@@ -41,7 +41,9 @@ INTERNAL_PATHS = {
     "/internal/auth/agent-onboarding/{token}",
     "/internal/auth/agent-onboarding/{token}/approve",
     "/internal/auth/agent-onboarding/{token}/deny",
+    "/internal/test/orgs",
 }
+E2E_SEED_MARKER = "e2e seed (VA_ENV local/test only)"
 REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
@@ -254,7 +256,8 @@ def test_internal_operations_contract() -> None:
     document = internal_document()
     for where, operation in checked_operations(document, INTERNAL_TAG_NAMES):
         assert operation["x-envelope"] == "envelope", where
-        assert operation["x-public"] == "session-flow", where
+        expected = E2E_SEED_MARKER if where.endswith("/internal/test/orgs") else "session-flow"
+        assert operation["x-public"] == expected, where
         for code, response in operation["responses"].items():
             if code.startswith("2"):
                 examples = resolve(document, response["content"]["application/json"]["schema"])["examples"]

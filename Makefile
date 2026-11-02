@@ -50,7 +50,8 @@ test: ## Python unit + integration tests with coverage gate
 test-ts: ## TypeScript tests
 	$(PNPM) -r --if-present run test
 
-e2e: ## Simulator end-to-end suite
+e2e: ## Simulator end-to-end suite (brings the compose e2e stack up first, rebuilding images)
+	scripts/dev_up.sh e2e
 	uv run pytest tests_e2e -m e2e
 
 e2e-ui: ## Dashboard Playwright suite

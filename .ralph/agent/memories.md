@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793650295-24c7
+> P05-T17b: docker e2e harness tests_e2e/ (support/e2e_harness Harness + e2e_assertions.evaluate, unit tests in tests_e2e/unit run by make test); seed POST /internal/test/orgs (va_api.routers.e2e_seed, local/test only); never /sim/reset in e2e; served sim must start from random seed (seed 0 replayed Telnyx event ids after restart -> edge dedup dropped call.initiated); tool-call-only LLM rounds mark llm_first_token at stream end; end_call final line runs on turn timer
+<!-- tags: e2e, testing, sim | created: 2026-11-02 -->
+
 ### mem-1793643573-18f6
 > P05-T18b: PostCallWorkflow (va_workflows.post_call) + PostCallActivities; tests postcall_rig.FakePostCallActivities/run_post_call (budget timer always first TIMER_STARTED); swallowing ActivityError in step wrappers hides budget cancels -> re-raise CancelledError after timeout; RecordingStorage + signed_recording_url in va_common.storage; dialed canceled calls are charged attempt fee
 <!-- tags: workflows, temporal, testing | created: 2026-11-02 -->

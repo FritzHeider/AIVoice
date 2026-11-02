@@ -744,16 +744,20 @@ class CallPipeline:
         if isinstance(output, SpeakText | SpeakStatic):
             await self._speaker.speak(output, timer, resume=self._reply_resume)
         elif isinstance(output, EndCall):
-            await self._end_call(output)
+            await self._end_call(output, timer)
         else:
             await self._handle_action(output)
 
-    async def _end_call(self, output: EndCall) -> None:
-        """§18 step 1: stop accepting outputs, finish the final line (``final_line_timeout_s``), end."""
+    async def _end_call(self, output: EndCall, timer: TurnTimer | None = None) -> None:
+        """§18 step 1: stop accepting outputs, finish the final line (``final_line_timeout_s``), end.
+
+        A final line answering a user turn is that turn's reply: it runs on the turn's ``timer``, so the
+        turn's voice-to-voice latency is measured to the goodbye's first audio.
+        """
         self._closing = True
         text = (output.final_text or "").strip()
         if text:
-            final_line = self._speaker.speak(SpeakStatic(text, interruptible=False), None)
+            final_line = self._speaker.speak(SpeakStatic(text, interruptible=False), timer)
             if not await within(final_line, self._clock, self._config.final_line_timeout_s):
                 _log.warning("pipeline_final_line_timeout", timeout_s=self._config.final_line_timeout_s)
         raise self._ended(output.reason)

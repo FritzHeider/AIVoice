@@ -685,6 +685,42 @@
         "title": "DataResponse[RevokedSessionsResult]",
         "type": "object"
       },
+      "DataResponse_SeedOrgCreated_": {
+        "examples": [
+          {
+            "data": {
+              "api_key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+              "numbers": [
+                {
+                  "e164": "+16285550142",
+                  "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e11"
+                }
+              ],
+              "org_id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+              "voices": [
+                {
+                  "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e10",
+                  "name": "Karen"
+                }
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SeedOrgCreated"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[SeedOrgCreated]",
+        "type": "object"
+      },
       "DataResponse_SessionInfo_": {
         "examples": [
           {
@@ -1408,6 +1444,251 @@
           "revoked_sessions"
         ],
         "title": "RevokedSessionsResult",
+        "type": "object"
+      },
+      "SeedNumber": {
+        "additionalProperties": false,
+        "description": "An active number owned by the org on the platform Telnyx account.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "e164": {
+            "maxLength": 20,
+            "minLength": 2,
+            "title": "E164",
+            "type": "string"
+          },
+          "inbound_config": {
+            "additionalProperties": true,
+            "title": "Inbound Config",
+            "type": "object"
+          },
+          "telnyx_phone_number_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telnyx Phone Number Id"
+          }
+        },
+        "required": [
+          "e164"
+        ],
+        "title": "SeedNumber",
+        "type": "object"
+      },
+      "SeedNumberCreated": {
+        "properties": {
+          "e164": {
+            "title": "E164",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "e164"
+        ],
+        "title": "SeedNumberCreated",
+        "type": "object"
+      },
+      "SeedOrgCreated": {
+        "description": "The seeded org, its live ``*`` key (plaintext), and the created voices and numbers.",
+        "examples": [
+          {
+            "api_key": "va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e",
+            "numbers": [
+              {
+                "e164": "+16285550142",
+                "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e11"
+              }
+            ],
+            "org_id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e0f",
+            "voices": [
+              {
+                "id": "0192f4b1-7a2c-7d3e-9f40-5a6b7c8d9e10",
+                "name": "Karen"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "api_key": {
+            "title": "Api Key",
+            "type": "string"
+          },
+          "numbers": {
+            "items": {
+              "$ref": "#/components/schemas/SeedNumberCreated"
+            },
+            "title": "Numbers",
+            "type": "array"
+          },
+          "org_id": {
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "voices": {
+            "items": {
+              "$ref": "#/components/schemas/SeedVoiceCreated"
+            },
+            "title": "Voices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "org_id",
+          "api_key",
+          "voices",
+          "numbers"
+        ],
+        "title": "SeedOrgCreated",
+        "type": "object"
+      },
+      "SeedOrgRequest": {
+        "additionalProperties": false,
+        "description": "``POST /internal/test/orgs``.",
+        "examples": [
+          {
+            "dollars": "50",
+            "name": "E2E org",
+            "numbers": [
+              {
+                "capabilities": [
+                  "voice"
+                ],
+                "e164": "+16285550142",
+                "inbound_config": {}
+              }
+            ],
+            "plan_id": "build",
+            "settings": {
+              "compliance": {
+                "state_quiet_hours": false
+              }
+            },
+            "voices": [
+              {
+                "name": "Karen",
+                "provider_voice_id": "XrExE9yKIg1WjnnlVkGX"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "dollars": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "default": "50",
+            "title": "Dollars"
+          },
+          "name": {
+            "default": "E2E org",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "numbers": {
+            "items": {
+              "$ref": "#/components/schemas/SeedNumber"
+            },
+            "maxItems": 10,
+            "title": "Numbers",
+            "type": "array"
+          },
+          "plan_id": {
+            "default": "build",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "title": "Settings",
+            "type": "object"
+          },
+          "voices": {
+            "items": {
+              "$ref": "#/components/schemas/SeedVoice"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Voices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "voices"
+        ],
+        "title": "SeedOrgRequest",
+        "type": "object"
+      },
+      "SeedVoice": {
+        "additionalProperties": false,
+        "description": "An org voice row (provider ``elevenlabs``).",
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "provider_voice_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Provider Voice Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "provider_voice_id"
+        ],
+        "title": "SeedVoice",
+        "type": "object"
+      },
+      "SeedVoiceCreated": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "SeedVoiceCreated",
         "type": "object"
       },
       "SessionInfo": {
@@ -3140,6 +3421,62 @@
         "x-envelope": "envelope",
         "x-public": "session-flow"
       }
+    },
+    "/internal/test/orgs": {
+      "post": {
+        "description": "Create a funded org with voices, numbers, and a live ``*`` API key (``VA_ENV`` local/test only).",
+        "operationId": "internal_test_orgs_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeedOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SeedOrgCreated_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Internal Test Orgs Create",
+        "tags": [
+          "Internal"
+        ],
+        "x-audit-exempt": "test-only seed endpoint; the new org's log starts empty",
+        "x-envelope": "envelope",
+        "x-public": "e2e seed (VA_ENV local/test only)",
+        "x-scope": "public"
+      }
     }
   },
   "servers": [
@@ -3151,6 +3488,9 @@
   "tags": [
     {
       "name": "Auth"
+    },
+    {
+      "name": "Internal"
     }
   ]
 }

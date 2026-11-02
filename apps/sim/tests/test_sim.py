@@ -144,6 +144,15 @@ async def test_run_serves_all_simulators_until_stopped(
     assert container.closed == 1
 
 
+async def test_each_run_starts_from_a_fresh_seed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seeds: list[int] = []
+    for _ in range(2):
+        container = FakeContainer({"redis": ok_check})
+        async with serving(monkeypatch, tmp_path, container) as servers, httpx.AsyncClient() as client:
+            seeds.append((await client.get(f"{servers[0].url}/sim/state")).json()["seed"])
+    assert seeds[0] != seeds[1]
+
+
 async def test_run_shares_the_control_plane_through_the_state_redis(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

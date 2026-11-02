@@ -1,0 +1,8 @@
+rules:
+  - id: inbound-basic-book-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)book a table"
+    respond:
+      content: "Of course! For two tonight, what time would you like?"

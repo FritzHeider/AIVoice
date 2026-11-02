@@ -278,6 +278,10 @@ class Speaker:
                     yield clause
         finally:
             await _close_tokens(output.tokens)
+        if timer is not None:
+            # A reply without text (only tool calls) still waited for the model: its first output is the end
+            # of the stream. The first mark wins, so this never moves a text reply's first token.
+            timer.mark(TurnMark.LLM_FIRST_TOKEN)
         for clause in chunker.flush():
             yield clause
 

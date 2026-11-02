@@ -491,3 +491,182 @@ make test: 10716 passed, 7 skipped, 99.16 %, 1 failure = test_runtime_sim.py::te
 (P05-T15, untouched here; wall-clock window 2000-2800 ms still caught the opener under full -n auto load: -17 dBFS).
 Passes 3/3 alone and the module passes with -n 8, so it is a pre-existing load flake; follow-up task fix:bed-window-flake.
 Notes for later: test_migrate asserts head == "0005" (update it with each new migration); APP_SERVICES lists dashboard ahead of its Dockerfile (harmless).
+
+## Plan P05-T17b — E2E harness + outbound_basic, inbound_basic, stop_via_api, max_duration
+
+Facts gathered (2026-11-02):
+- `tests_e2e/` does not exist. `make e2e` runs `uv run pytest tests_e2e -m e2e`, and `testpaths` excludes it, so `make test` never collects it.
+- The compose e2e stack comes from T17a:
+  - Host ports: api 8000, edge 8100, media 8200, sim 9100/9200/9300.
+  - The sim uses the realtime clock. Webhooks go to `edge:8100`; media streams go to `media:8200`.
+- `/sim/reset` would wipe the call control app created by `telnyx_bootstrap` (TELNYX_CALL_CONTROL_APP_ID). The harness must NEVER call `/sim/reset`. Isolation comes from run-unique ids instead.
+- `POST /sim/telnyx/inbound {to, from, scenario?}` needs `to` to be owned by a sim account AND assigned to a connection. The sim inventory is fixed: 50-number blocks, reset on sim restart.
+- FakeLLM rules: `POST /sim/llm/rules` (YAML/JSON `RuleFile`), `DELETE /sim/llm/rules/{id}`; match on `system_contains`, `call_index`, `call_id`.
+- Sim timeline: `GET /sim/telnyx/calls/{ccid}/timeline` → `utterances[{start_ms,end_ms,first_agent_audio_ms,latency_ms}]`, `initiated_ms`, `answered_ms`, `ended_ms`, `script.steps`. `GET /sim/telnyx/calls` lists summaries (find a call by `to`/`from`).
+- Phone numbers: `phone_numbers.e164` is unique among active rows across orgs. `PhoneNumberRoutingRepo.get_active(e164)` (system) finds a stale owner.
+- Calling hours: `calling_hours_open` uses org `compliance.calling_hours` + `state_quiet_hours`. E2E runs at any hour, so the test org must open every window.
+
+### 1. `POST /internal/test/orgs` (api)
+- NEW `apps/api/src/va_api/routers/test_orgs.py` (+ `test_orgs_schemas.py`).
+  - Router `internal_test_router = APIRouter(prefix="/internal/test", include_in_schema=False)`, built the same way as `internal_auth_router` (check how `/internal/auth` is built and how `app.state.internal_openapi()` collects it).
+  - Add it to `main.ROUTERS`.
+  - Operation `internal_test_orgs_create`, tag `internal`, `openapi_extra={"x-scope": "public", "x-public": "test-seed (VA_ENV local/test only)", **audit_exempt("test-only seed endpoint")}`.
+  - Outside `VA_ENV` local/test it answers 404 `NOT_FOUND` (route exists, behaves absent). Use `request.app.state.settings.va_env`.
+- Body `TestOrgRequest` (extra forbid):
+  - `name: str = "E2E org"`
+  - `plan_id: str = "build"`
+  - `dollars: Decimal-string = "50"` (≥ 0)
+  - `settings: dict = {}`: sparse OrgSettings. Validate with `OrgSettings.model_validate` → `sparse_settings` merge; errors → `INVALID_INPUT` with `field_path`.
+  - `voices: list[{name, provider_voice_id}]` (1..10)
+  - `numbers: list[{e164 (normalize_e164), telnyx_phone_number_id: str|None, capabilities: list = ["voice"], inbound_config: dict = {}}]` (0..10). Validate `inbound_config` with `va_domain.numbers.load_inbound_config` → `INVALID_INPUT` field `numbers[i].inbound_config.<f>`.
+- Behaviour, in this order and never nesting sessions:
+  - (a) For each number: `system_session` + `PhoneNumberRoutingRepo.get_active(e164)`. When an active row exists (from a previous run after a sim restart), set it `status='released'`, `released_at=now` in `tenant_session(old.org_id)`. This is test-only and documented in the Decision.
+  - (b) Provision the org through the container's `OrgProvisioner`. The owner email is `e2e+<hex>@voiceagents.test` with a random password that is never returned (reuse the DevSeeder pieces in `va_api.dev_seed` where possible, e.g. its password/owner creation, instead of copying).
+  - (c) In one `tenant_session(org)`:
+    - set `orgs.plan_id`, `created_at = now − 30 days` (otherwise new-account limits apply), and settings (OrgRepo.lock + write sparse; invalidate the org_settings reader after commit);
+    - `grant_credits(..., idempotency_key=f"test-org:{org_id}")`;
+    - insert voices (org rows, provider elevenlabs, provider_voice_id) and numbers (status active, country from the e164, `purchased_at=now`);
+    - mint one live key with scopes `["*"]` (`mint_api_key` + `ApiKeyRepo.add`).
+- Response 201 `DataResponse[TestOrgResult]` `{org_id, api_key, voices:[{id,name}], numbers:[{id,e164}]}`. Give the response model an `examples` entry, since the operations contract test applies.
+- `withhold_on_replay` is not needed: no idempotency claim, because the route has no `require_scope`.
+- Run `make openapi` (internal.json changes) and add the path to `test_openapi.INTERNAL_PATHS`. The cross-tenant suite skips it via `x-public`.
+- Tests `apps/api/tests/test_test_orgs.py` (session container + module Postgres like the other integration tests):
+  - creates a usable org: the returned key authenticates `/v1/me` 200, balance = $50, voices and numbers listed;
+  - a Send Call with the returned org/voice/number passes validation and dispatches (`call_fakes.FakeCallStarter.started`) at a time outside default calling hours, when settings open all windows;
+  - VA_ENV production/staging → 404;
+  - an invalid inbound_config → 422 `INVALID_INPUT` with field;
+  - a re-used e164 releases the old org's row and the new row is active;
+  - unknown body field → 422.
+
+### 2. `tests_e2e/` harness (repo root; add `tests_e2e` to pytest `pythonpath`, mypy `files` + `mypy_path`; ruff per-file ignores same as `tests_live/**`)
+- `tests_e2e/conftest.py`:
+  - module `pytestmark` not needed; mark each test `@pytest.mark.e2e` and `@pytest.mark.timeout(600)` if pytest-timeout is installed (check; otherwise a harness-level deadline via `asyncio.timeout` in each wait helper).
+  - Session fixture `stack`: probes `GET localhost:8000/readyz`, `8100/readyz`, `8200/readyz`, `9100/sim/state` (5 s total). If any is down, call `pytest.exit("e2e stack is not running: run make e2e (or make up PROFILE=e2e)", returncode=3)`. Never skip silently.
+  - Function fixture `harness` yields a `Harness` and on teardown deletes its registered LLM rules and scenarios (`DELETE /sim/telnyx/scenarios/{id}`, `/sim/llm/rules/{id}`).
+  - Event loop: follow the repo's pytest-asyncio settings (asyncio_mode). Function-scoped clients only, to avoid loop-scope trouble.
+- `tests_e2e/harness.py`:
+  - `Stack` URLs come from env with defaults: `E2E_API_URL` (`http://localhost:8000`), `E2E_SIM_URL` (`http://localhost:9100`; ElevenLabs 9200, LLM 9300).
+  - `Harness.run_token` = `secrets.token_hex(4)`.
+  - `async create_org(**settings) -> E2eOrg`: calls `POST /internal/test/orgs` with:
+    - a voice named `OrgSettings().default_voice`'s default value, with `provider_voice_id=va_sim.elevenlabs.voice_catalog.KAREN_VOICE_ID`;
+    - settings opening calling hours: every weekday 00:00–24:00 (check `CallingWindow` format; use the widest valid window) and `state_quiet_hours: false`;
+    - a random `from` number (`+1628` + 7 random digits, valid per phonenumbers; reuse the `random_e164` approach).
+  - `load_scenario(name, **overrides) -> Scenario`:
+    - reads `tests_e2e/scenarios/<name>.yaml` and validates it locally with `va_sim.scenario.load_scenario`;
+    - rewrites `id` to `<name>-<token>` and `match.to`/`match.inbound_from` to a fresh random E.164;
+    - POSTs the YAML/JSON to `/sim/telnyx/scenarios`;
+    - registers each `llm_rules` file (relative to `tests_e2e/scenarios/`) via `POST /sim/llm/rules`, after substituting `{{run}}` → token in rule ids and in the `[[SCENARIO:<name>-<token>]]` marker.
+    - Rules live in `tests_e2e/scenarios/rules/*.yaml`.
+    - Read the control body format in `va_sim.control.yaml_or_json_body`.
+  - `scenario_marker(name)` returns `[[SCENARIO:<name>-<token>]]` (goes into `task`).
+  - `async send_call(org, body) -> call_id`: `POST /v1/calls` with Bearer key; asserts 200 and the `call_id`.
+  - `async wait_complete(org, call_id, timeout_s=180) -> dict`: polls `GET /v1/calls/{id}` every 0.5 s until `queue_status == "complete"`. Use `asyncio.sleep` on the wall clock; this is an external system, so the no-sleeps rule targets unit tests. Use a bounded deadline with a clear failure message that includes the last body.
+  - `async sim_call(to=None, from_=None) -> dict`: summary from `GET /sim/telnyx/calls` matching the scenario number, newest; `timeline(ccid)`.
+  - `async events(org, call_id) -> list`: all pages of `GET /v1/calls/{id}/events`.
+  - `async order_inbound_number() -> (e164, telnyx_number_id)`:
+    - sim REST with `Authorization: Bearer sim-telnyx-key`;
+    - finds the platform call control app id by listing `GET /v2/call_control_applications` and matching `va_telnyx.bootstrap.platform_resource_name(...)` (check the signature; fallback is a clear failure);
+    - `GET /v2/available_phone_numbers?filter[country_code]=US&filter[limit]=1`, then `POST /v2/number_orders {phone_numbers:[{phone_number}], connection_id}`, then poll `GET /v2/number_orders/{id}` until `success`;
+    - reads the `phone_numbers` id via `GET /v2/phone_numbers?filter[phone_number]=`.
+    - Teardown: `DELETE /v2/phone_numbers/{id}` so the inventory number returns.
+  - `async inbound(to, from_, scenario_id) -> ccid` via `POST /sim/telnyx/inbound`.
+  - `async recording_wav(url) -> bytes`: if the URL host is not resolvable from the host (compose `minio:9000`), connect to `localhost:<port>` and send the original `Host` header. SigV4 signs the Host header, so do NOT rewrite the URL's host. Inspect the real URL first; when presigning already uses a public endpoint setting, just GET it.
+  - `evaluate(assertions: ScenarioAssertions, call_object, events, timeline)`: evaluator for the §3.5 `assertions` block. Implement every key in the schema:
+    - `call_status`, `answered_by`, `end_reason`, `min_turns`, `transcript_contains` (substring over joined transcript texts), `variables` (`call.variables` subset);
+    - `max_e2e_ms_p95` over timeline `latency_ms` (nearest-rank p95);
+    - `webhook_events`: until the phase-06 dispatcher, check the event types appear in the `/events` stream, by category/data; see the gotcha "call_events rows have no type column", so map `call.completed` to what `emit_completed` writes. Decision.
+    - Returns a list of failure strings; tests `assert not failures, failures`.
+    - Unit-test the evaluator in pure tests at `tests_e2e/test_harness_unit.py`, unmarked. They are not collected by `make test` because tests_e2e is outside testpaths, so put the pure evaluator in `packages/va_sim/src/va_sim/assertions.py`? NO. Keep it in `tests_e2e/assertions.py` and make `make e2e` run those unit tests too (the `-m e2e` filter would deselect them, so mark them `e2e` as well, cheap). Builder's choice; justify.
+  - Webhook receiver: NOT in this task. No dispatcher exists until phase 06; record in the Decision that `tests_e2e/receiver.py` arrives with the dispatcher task.
+
+### 3. Scenarios, rules, flows (`tests_e2e/scenarios/*.yaml`, `tests_e2e/scenarios/rules/*.yaml`, `tests_e2e/test_<flow>.py`)
+- **outbound_basic** (spec §3.5 example, profile `realistic`):
+  - Call: `task` = prompt + marker, `first_sentence`, `record: true`, `voice` = the org voice name, `from` = the org number, `phone_number` = the scenario `to`. Do not pass `webhook`: the receiver comes in phase 06, so leave it out (Decision).
+  - Rules make the agent ask for a time, then on the 2nd/3rd user turn call the `end_call` system tool. Check its exact name/args in `va_engine.system_tools`, and use `call_index` with `system_contains` marker.
+  - Asserts:
+    - the §3.5 block;
+    - Call Object fields of specs/19 §4 present (compare key set against `va_domain.call_object.CallObject.model_fields` aliases);
+    - transcripts alternate roles;
+    - `recording_url` downloads a WAV with 2 channels (stdlib `wave`);
+    - one latency event per user turn;
+    - sim timeline p95 `latency_ms` ≤ 1200;
+    - platform overhead p95 ≤ 250 ms.
+  - Overhead per turn = sim `latency_ms` − (`eot_ms` + `stt_final_ms` + `llm_ttft_ms` + `tts_ttfa_ms`) from the platform's matching `call.latency` event. `eot_ms` counts as vendor/policy time because it is the endpointer's deliberate silence wait. Record this as the overhead definition in the Decision.
+  - If the measured numbers miss the targets, do NOT loosen them silently. Report the numbers; investigate (profile values via `GET /sim/{sim}/config`).
+- **inbound_basic**:
+  - `order_inbound_number`, then `create_org(numbers=[{e164, telnyx_phone_number_id, inbound_config: {prompt: <task with marker>, first_sentence: "Thanks for calling Bella Pasta."}}])`.
+  - Run a scenario with `match.inbound_from`, then `POST /sim/telnyx/inbound`.
+  - Asserts:
+    - sim `answered_ms − initiated_ms ≤ 1000`;
+    - the first agent TTS text (`GET /sim/elevenlabs/tts/requests`, the first record with non-empty generated_text for that call/voice; or the transcript's first assistant turn) equals first_sentence;
+    - Call Object `direction == "inbound"`, runner task (pathway runner arrives in phase 07: the existing specs/30 §5 Decision, extend it);
+    - status completed.
+  - Find the call id via `GET /v1/calls?...` list for the org (only one call).
+- **stop_via_api**:
+  - Scenario: answered, the caller says one line, then `silence: {ms: 60000}`.
+  - Set `PipelineConfig`-relevant call params so the no-input reprompt does not end the call first. Check the Send Call no-input params; worst case the reprompt is harmless.
+  - Once the sim summary shows answered + 10 s, `POST /v1/calls/{id}/stop`; record wall time.
+  - Assert sim `ended_ms` within 1000 ms of the stop request (map wall→virtual via `GET /sim/clock` before and after, realtime clock) and Call Object `ended_by` = the stop mapping for api (check `CALL_ENDED_BY` in `va_domain.call_object.mapping`; spec says `api`).
+- **max_duration**:
+  - `max_duration: 1`; the scenario keeps the caller engaged (`say` every ~5 s for 90 s, or silence plus a no-input config that doesn't hang up). Verify that the default no-input handling would otherwise end the call before 60 s.
+  - Assert `answered_ms` → `ended_ms` = 60 s ± 1 s and `end_reason == "max_duration"`. The wrap-up message plays 10 s before the limit; assert its TTS text appears.
+
+### 4. Makefile / docs
+- `e2e:` target becomes `scripts/dev_up.sh e2e && uv run pytest tests_e2e -m e2e -p no:randomly?`. Only add flags that exist. `dev_up.sh` is idempotent and rebuilds images, so a stale stack never runs old code.
+- `specs/30 §5`: add `> Decision (2026-11-02): e2e harness (P05-T17b)` covering:
+  - the `/internal/test/orgs` contract (body, response, 404 outside local/test, stale-number release);
+  - no `/sim/reset` and run-unique scenario/rule ids;
+  - completion = `queue_status=complete` polling and the events stream instead of webhooks until phase 06;
+  - the overhead definition;
+  - inbound_basic with the task runner;
+  - recording fetch via Host header.
+- If any spec table lists internal routes (specs/04?), add the route there.
+- AGENTS.md: a `Learned during the build` bullet (harness API, run token, never `/sim/reset` in e2e, `make e2e` rebuilds the stack, running one flow). Update the Commands row "Simulator end-to-end" if the invocation changes.
+
+### Gates
+- `make fmt lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`, `make openapi` + drift.
+- `uv run pytest apps/api -q -k "test_orgs or openapi or cross_tenant or audit_markers"` while iterating.
+- Full `make test` in the background with a Monitor heartbeat (AGENTS P05-T10d).
+- `make e2e` (also background + heartbeat): all four flows green. Include the per-flow durations and the outbound_basic p95/overhead numbers in the evidence.
+- jscpd, radon, pip-audit, pnpm audit.
+- Afterwards `make up` restores the infra stack, or leave the e2e stack up; say which.
+
+### Risks
+- Calling-hours, DNC, fraud-prefix, and international checks on random destinations: use valid US NANP numbers in an area code with a state rule, and open every window plus `state_quiet_hours: false`.
+- New-account limits: backdate `created_at`.
+- The presigned recording host is unreachable from the host.
+- Realistic-profile latency may exceed 1200 p95. Measure and report; do not weaken without a Decision.
+- No-input reprompt/hangup interfering with stop_via_api/max_duration.
+- FakeLLM `call_index` counts per `X-VA-Call-Id`. Check that the media/LLM gateway sends the call id header in the containers.
+- The inbound number inventory is fixed: always release in teardown.
+- Docker image rebuild time (several minutes): background + Monitor.
+- Pre-existing flake `fix:bed-window-flake` (runtime task) may hit `make test`. It is a separate task; rerun the single test to show it is unrelated.
+
+## Build P05-T17b (2026-11-02)
+
+Delivered:
+- `POST /internal/test/orgs` = `apps/api/src/va_api/routers/e2e_seed.py` (+ `e2e_seed_schemas.py`; files are NOT named
+  `test_*` because pytest would collect them from src). Deviation from plan: the org gets NO owner user (provision_in
+  owner=None, key created_by NULL) - the harness needs only the key; simpler than reusing DevSeeder. Calling hours are
+  not enforced for non-batch API calls unless `compliance.enforce_calling_hours`, so the harness passes no settings.
+  INVALID_INPUT is 400 here (not 422). Internal tag "Internal" added to INTERNAL_TAG_NAMES; PUBLIC_ROUTES and
+  INTERNAL_PATHS updated; openapi/internal.json regenerated. Tests apps/api/tests/test_e2e_seed.py (12, 100 % cov).
+- `tests_e2e/`: conftest (stack probe → pytest.exit(3)), support/e2e_harness.py, support/e2e_assertions.py,
+  scenarios/{outbound_basic,inbound_basic,stop_via_api,max_duration}.yaml + rules/, test_<flow>.py, unit/ (in
+  testpaths). FakeTelnyx scenario API has no DELETE → scenarios stay (run-unique ids/numbers).
+- Platform fixes found by the harness (Decisions in specs/07 §20 and specs/30 §5 (8)):
+  1. end_call final line spoken on the turn timer (pipeline._end_call) → end_call turns get an E2E latency event.
+  2. Speaker marks LLM_FIRST_TOKEN at stream end for text-less (tool-call-only) rounds → tool-call LLM time is vendor
+     time, not overhead (overhead turn 2 went 366 → 86 ms).
+  3. apps/sim runner starts from a random seed (`startup_seed()`): after a sim restart, seed 0 replayed event ids and
+     the edge dropped the inbound call.initiated as a duplicate (inbound_basic failed after rebuilds).
+- Measured (warm stack): outbound_basic sim latency [1031, 1029] ms (p95 1031 ≤ 1200), overhead [126, 86] ms
+  (p95 126 ≤ 250); first call after a rebuild was 1279 ms once (cold). Durations: max_duration 61.6 s, outbound 21.9 s,
+  inbound 13.8 s, stop 11.5 s; suite 109 s.
+- Stack left running in PROFILE=e2e.
+
+## Review P05-T17b (2026-11-02): approved
+Re-ran: lint/typecheck/placeholders 0, spec refs 0, gitleaks pass, jscpd 0 clones, make test 10750 passed 7 skipped
+(cov 99.16 %), make e2e 4 passed in 109 s. Diff checked: seed route gated on VA_ENV, x-public + audit_exempt, no
+nested sessions; pipeline/speaker latency changes covered by tests and the specs/07 §20 Decision; sim random seed
+covered. Stack left running in PROFILE=e2e.

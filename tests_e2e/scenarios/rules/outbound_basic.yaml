@@ -1,0 +1,19 @@
+rules:
+  - id: outbound-basic-ask-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)\\bana\\b"
+    respond:
+      content: "Great to reach you, Ana! What time works for your appointment tomorrow?"
+  - id: outbound-basic-end-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)tomorrow at 3"
+    respond:
+      tool_calls:
+        - name: end_call
+          arguments:
+            reason: booked
+            final_message: "Perfect, you are booked for tomorrow at 3. Goodbye!"

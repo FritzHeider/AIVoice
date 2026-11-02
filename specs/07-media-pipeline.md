@@ -972,6 +972,15 @@ OpenTelemetry: one span per turn `turn` with child spans `eot`, `stt_final`, `ro
 > measured, so a turn interrupted before its first audio has none. It is followed by `"STT: {n}ms"`, `"LLM: {n}ms"`,
 > and `"TTS: {n}ms"`, each only when that stage was measured.
 
+> Decision (2026-11-02): latency of tool-call and end-call replies (P05-T17b). (1) A dialogue round whose stream
+> carries no content (the model answered with tool calls only) has no "first non-empty content delta"; its
+> `llm_ttft_ms` ends when that stream ends, the moment the model's answer (the tool calls) has arrived. The first
+> mark wins, so a text reply keeps the time of its first delta, and a turn whose first round called a tool keeps
+> that round's time. (2) An `EndCall` output with `final_text` that answers a user turn is that turn's reply: the
+> final line is spoken on the turn's timer, so `tts_ttfa_ms` and `e2e_ms` are measured to the goodbye and the
+> turn gets its `"E2E: {n}ms"` event (before, an `end_call` turn had no summary event and its LLM time read as
+> platform overhead in the e2e harness).
+
 ## 21. Performance requirements and CPU budget
 
 Per call at 2 vCPU pod: VAD ≈ 0.3 ms / 32 ms window (≈ 1 % core), codec + mixing ≈ 0.2 %, JSON/base64 for 50 msgs/s

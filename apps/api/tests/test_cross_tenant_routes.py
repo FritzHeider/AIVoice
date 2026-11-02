@@ -83,6 +83,7 @@ PUBLIC_ROUTES: Final = frozenset(
         "/metrics",
         "agent_onboarding_keys_create",
         "agent_onboarding_keys_get",
+        "internal_test_orgs_create",
     }
 )
 

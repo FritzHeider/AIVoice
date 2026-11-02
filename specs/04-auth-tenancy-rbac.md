@@ -141,8 +141,9 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 > that marker is the only way out of the cross-tenant route suite (§14), and every `x-scope: public` route carries it
 > too (test-enforced). Values in use: `session-flow` (`/internal/auth/*`), `health` (`GET /v1/health`), `probe`
 > (`/healthz`, `/readyz`, `/metrics`), `poll-secret` (`POST /v1/agent-onboarding/keys`,
-> `GET /v1/agent-onboarding/keys/{request_id}`). The Stripe webhook and the widget's public routes and `widget.js`
-> get their own values when they are added.
+> `GET /v1/agent-onboarding/keys/{request_id}`), `e2e seed (VA_ENV local/test only)` (`POST /internal/test/orgs`,
+> specs/30 §5 Decision P05-T17b). The Stripe webhook and the widget's public routes and `widget.js` get their own
+> values when they are added.
 
 ## 3. RBAC
 

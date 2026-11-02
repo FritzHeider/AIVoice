@@ -1305,6 +1305,44 @@ delays is covered by Temporal time-skipping integration tests.)
 > the maintenance message (specs/16 §4 Decision P05-T12d). The ring-to-answer histogram is asserted against the
 > edge's 3 s accept budget there (the 1 s target belongs to the harness, which measures it without xdist load).
 
+> Decision (2026-11-02): e2e harness (P05-T17b). (1) Seed: `POST /internal/test/orgs` (envelope, no credentials,
+> `x-public: e2e seed (VA_ENV local/test only)`, audit-exempt) answers `NOT_FOUND` unless `VA_ENV` is `local` or
+> `test`. Body (unknown keys rejected): `name` (default `E2E org`), `plan_id` (`build`), `dollars` (decimal ≥ 0,
+> `50`), `settings` (sparse org settings, validated as `OrgSettings`; errors `INVALID_INPUT` with `field`
+> `settings.<path>`), `voices` (1-10 `{name, provider_voice_id}`, provider `elevenlabs`), `numbers` (0-10 `{e164,
+> telnyx_phone_number_id?, capabilities = ["voice"], inbound_config = {}}`; `inbound_config` validated as
+> specs/16 §4 `InboundConfig`, errors with `field` `numbers[i].inbound_config.<path>`). One `tenant_session` of the
+> new org creates it without members (`created_at` backdated 30 days so new-account limits do not apply), the
+> settings, a `grant` ledger row (idempotency key `test-org:{org_id}`), the voices, the active numbers, and one live
+> `*` API key named `e2e seed`; 201 `{data: {org_id, api_key, voices: [{id, name}], numbers: [{id, e164}]}}`. A
+> requested number still active in another org (a previous run against a restarted simulator, whose number inventory
+> starts over) is first set `released` in that org's own tenant session. (2) Isolation: the harness never calls
+> `/sim/reset` (it would drop the platform Call Control application created by `telnyx_bootstrap`). Each test has a
+> `run_token`; scenario ids become `<name>-<token>`, `match.to`/`match.inbound_from` a fresh random US number, and
+> LLM rule files substitute `{{run}}` (rule ids) and `{{marker}}` (the call prompt's `[[SCENARIO:<name>-<token>]]`).
+> Rules are deleted and ordered simulator numbers released after each test; scenarios stay registered (the control
+> API has no delete) but are inert. Loading a scenario applies its `profile` to the vendor simulators. (3)
+> Completion: until the phase-06 webhook dispatcher delivers webhooks (and `tests_e2e/receiver.py` arrives with it),
+> flows wait for `GET /v1/calls/{id}` `queue_status == "complete"` and read the event log `GET
+> /v1/calls/{id}/events`; `assertions.webhook_events` entries are checked against that log, by fixed message
+> (`call.completed` = "Call completed.", `call.ended` = "Call ended.") or by a category no other event type shares,
+> and an entry the log cannot identify is a failure. `outbound_basic` sends no `webhook` for the same reason;
+> `assertions.answered_by` `machine` compares with the Call Object's `voicemail`. (4) Platform overhead per caller
+> turn = sim timeline `latency_ms` − (`eot_ms` + `stt_final_ms` + `llm_ttft_ms` + `tts_ttfa_ms`) of the matching
+> `"E2E: {n}ms"` `call.latency` event (the n-th measured utterance pairs with the n-th summary); `eot_ms` is the
+> endpointer's deliberate silence wait, so it counts as policy time. p95 values are nearest-rank. (5)
+> `inbound_basic` runs the task runner (`inbound_config.prompt`) until pathway execution arrives in phase 07; the
+> number is ordered from the FakeTelnyx inventory onto the platform Call Control application through the Telnyx
+> REST API and seeded with the org. (6) Presigned recording URLs name `minio:9000`, which the host cannot resolve;
+> SigV4 signs the `Host` header, so the harness connects to `localhost:9000` and sends the original `Host`. (7)
+> `make e2e` runs `scripts/dev_up.sh e2e` (rebuilding images) before `pytest tests_e2e -m e2e`; a stack that does
+> not answer stops the session with exit code 3 instead of skipping. The pure evaluator and rewriting helpers live
+> in `tests_e2e/support/` and are unit-tested by `tests_e2e/unit/` under `make test`. (8) The served simulators
+> (`apps/sim`) start from a fresh random seed (`startup_seed()`, 32 bits) instead of seed 0: the platform persists
+> simulator ids (Telnyx webhook event ids are the edge's dedup key), so a restarted simulator replaying the ids of
+> its previous run had its `call.initiated` dropped as a duplicate. `/sim/reset` still accepts a `seed`, and
+> in-process tests build their state with an explicit seed.
+
 ## 6. Load testing (`scripts/load/`)
 
 - **API load (k6)** `scripts/load/api.js`: stages ramp 0→200 VUs over 2 min, hold 5 min; mix: 40 % `GET /v1/calls`,

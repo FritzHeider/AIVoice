@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -58,12 +59,19 @@ __all__ = [
     "main",
     "ports_from",
     "run",
+    "startup_seed",
 ]
 
 EXIT_UNSUPPORTED: Final = 2
 _WORKERS_UNSUPPORTED: Final = "SIM_WORKERS > 1 is not supported yet (specs/30 §3 Decision P03-T15c)"
 
 _log: Final = get_logger(__name__)
+_SEED_BITS: Final = 32
+
+
+def startup_seed() -> int:
+    """A fresh simulator seed for each start of the served simulators."""
+    return secrets.randbits(_SEED_BITS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +126,10 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
     A :class:`SimContainer` with a state Redis attaches the shared control plane before serving; its
     subscriber runs next to the servers and is cancelled once they have all returned.
     """
-    state = build_state(settings)
+    # A served simulator starts from a fresh seed: the platform persists simulator ids (webhook event ids are
+    # its dedup key, call control ids key call legs), so a restarted simulator must not hand out the ids of
+    # its previous run. Reproducible runs pass a seed to `POST /sim/reset` (specs/30 §5 Decision P05-T17b).
+    state = build_state(settings, seed=startup_seed())
     try:
         with observed(settings.service_name, settings, version=__version__, enabled=init_observability):
             await asyncio.to_thread(state.signing_key.write_public_key, public_key_file)

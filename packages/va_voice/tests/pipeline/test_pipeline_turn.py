@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+from collections.abc import AsyncIterator
 
 import numpy as np
 import pytest
@@ -12,7 +13,7 @@ from pipeline_harness import harness
 from va_common.time import Clock
 from va_voice.audio import L16_16000, PCM16LE_16000, ULAW_8000, AudioFormat
 from va_voice.latency import LatencyTracer
-from va_voice.pipeline import PipelineConfig, SpeakStatic, SpeakText
+from va_voice.pipeline import EndCall, PipelineConfig, SpeakStatic, SpeakText
 from va_voice.playback import mark_name
 from va_voice.text.pronunciation import PronunciationRule
 
@@ -241,3 +242,36 @@ async def test_ulaw_leg_resamples_for_the_vad() -> None:
         await h.until(lambda: len(h.vad.fed) >= 10)
         assert sum(chunk.size for chunk in h.vad.fed) > 0
         assert all(len(audio) == 160 for audio in h.stt.audio)
+
+
+async def test_an_end_call_answer_measures_the_turn_to_the_goodbye() -> None:
+    brain = ScriptedBrain(replies=[[EndCall("Perfect, see you then. Goodbye!")]])
+    async with harness(brain=brain, utterances=["Tomorrow at 3 works."]) as h:
+        await h.turn(600)
+        result = await h.result()
+        assert result.end_reason == "agent_hangup"
+        [report] = h.observer.reports
+        latency = report.latency
+        assert latency.e2e_ms is not None
+        assert latency.eot_ms is not None
+        assert latency.e2e_ms - latency.eot_ms <= 30
+        assert report.events[0].message == f"E2E: {latency.e2e_ms}ms"
+        assert [turn.text for turn in h.observer.agent_turns] == ["Perfect, see you then. Goodbye!"]
+
+
+async def tool_call_round(clock: Clock, delay_s: float) -> AsyncIterator[str]:
+    """An LLM stream that answers with tool calls only: no text, done after ``delay_s``."""
+    await clock.sleep(delay_s)
+    deltas: tuple[str, ...] = ()
+    for delta in deltas:
+        yield delta
+
+
+async def test_a_reply_without_text_marks_the_llm_answer_at_the_stream_end() -> None:
+    async with harness(brain=ScriptedBrain(replies=[[]]), utterances=["Tomorrow at 3 works."]) as h:
+        h.brain.replies[0].extend([SpeakText(tool_call_round(h.clock, 0.25)), EndCall("Goodbye!")])
+        await h.turn(600)
+        await h.result()
+        [report] = h.observer.reports
+        assert report.latency.llm_ttft_ms == pytest.approx(250, abs=25)
+        assert report.latency.e2e_ms is not None

@@ -1,0 +1,16 @@
+id: stop_via_api
+description: A long call the API stops about 10 s after the answer.
+match:
+  to: "+14155550103"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Hello, who is calling?"}
+  - silence: {ms: 60000}
+assertions:
+  call_status: completed
+  end_reason: api_stop
+  webhook_events: ["call.completed"]

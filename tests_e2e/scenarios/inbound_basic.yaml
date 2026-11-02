@@ -1,0 +1,17 @@
+id: inbound_basic
+description: A caller rings an org number; the agent greets with first_sentence, answers once; the caller hangs up.
+match:
+  inbound_from: "+14155550102"
+llm_rules: [rules/inbound_basic.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "I would like to book a table for two tonight."}
+  - wait_agent_speech: {then_silence_ms: 700}
+  - hangup: {}
+profile: realistic
+assertions:
+  call_status: completed
+  end_reason: user_hangup
+  min_turns: 3
+  transcript_contains: ["book a table", "what time"]
+  webhook_events: ["call.completed"]

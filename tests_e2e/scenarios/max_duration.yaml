@@ -1,0 +1,54 @@
+id: max_duration
+description: An engaged caller keeps talking; the call ends at max_duration (one minute).
+match:
+  to: "+14155550104"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 1."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 2."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 3."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 4."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 5."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 6."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 7."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 8."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 9."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 10."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 11."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 12."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 13."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 14."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 15."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 16."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 17."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 18."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 19."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Still here, number 20."}
+  - wait_agent_speech: {then_silence_ms: 700, timeout_ms: 8000}
+assertions:
+  call_status: completed
+  end_reason: max_duration
+  webhook_events: ["call.completed"]

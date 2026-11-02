@@ -19,7 +19,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | All gates | `make check` |
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
 | Pipeline benchmark | `uv run pytest -m bench packages/va_voice` (rewrites `packages/va_voice/BENCHMARKS.md`; commit it) |
-| Simulator end-to-end | `make e2e` (single flow: `uv run pytest tests_e2e -m e2e -k barge_in`) |
+| Simulator end-to-end | `make e2e` (runs `scripts/dev_up.sh e2e`, rebuilding images, then `pytest tests_e2e -m e2e`; one flow on a running stack: `uv run pytest tests_e2e -m e2e -k outbound_basic -s`) |
 | Dashboard e2e | `make e2e-ui` |
 | Live vendor smoke | `LIVE_TESTS=1 LIVE_TELNYX_API_KEY=… LIVE_ELEVENLABS_API_KEY=… LIVE_LLM_API_KEY=… uv run pytest tests_live -m live -rs` (optional `LIVE_FROM_NUMBER`, `VA_ENV`; commit the generated `tests_live/fixtures/stt_phrase.*` after the first run) |
 | Dashboard dev server | `corepack pnpm --filter dashboard dev` (port 3000; set `NEXT_TELEMETRY_DISABLED=1`) |
@@ -1531,3 +1531,18 @@ Grafana 3001
   volume (`TELNYX_PUBLIC_KEY` is blanked). A host-run api/edge/media collides with the container ports: `docker
   compose stop api edge media` first. Edge webhook URLs are `http://` in `local`/`test` (`va_telnyx.webhook_scheme`).
   Migrations are packaged (`va_db/migrations`), so tests find revisions at `migration_helpers.VERSIONS`.
+- 2026-11-02 (P05-T17b): docker e2e = `tests_e2e/` (specs/30 §5 Decision P05-T17b). Flows `tests_e2e/test_<flow>.py`
+  (`pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]`) take the `harness` fixture (`tests_e2e/conftest.py`;
+  the session `stack` fixture exits with code 3 when api/edge/media/sim do not answer). Harness =
+  `tests_e2e/support/e2e_harness.Harness`: `create_org(numbers=, settings=)` (calls `POST /internal/test/orgs`,
+  local/test only; org voice Karen = FakeElevenLabs `KAREN_VOICE_ID`, random +1628 caller ID), `load_scenario(name,
+  number=)` (scenario `<name>-<run_token>` on a fresh number, rule files from `scenarios/rules/` with `{{run}}`/
+  `{{marker}}` substituted, applies the scenario `profile`, remembers the TTS log position), `send_call`,
+  `wait_complete` (polls `queue_status=complete`; no webhooks until phase 06), `events`, `only_call`, `stop_call`,
+  `sim_call(number)`/`timeline(ccid)`/`wait_sim`/`wait_until_sim_ms`, `tts_texts()` (since the scenario was loaded),
+  `llm_requests(call_id)`, `order_inbound_number()` (released at teardown), `inbound`, `recording_wav` (MinIO via
+  `localhost` + original `Host`). Never call `/sim/reset` from e2e (drops the bootstrapped Call Control app). The pure
+  evaluator `e2e_assertions.evaluate(assertions, call, events, timeline)` and the scenario/rule rewriting are
+  unit-tested in `tests_e2e/unit/` (in `testpaths`, so `make test` runs them; `tests_e2e/test_*.py` only run via
+  `make e2e`). The first call after a stack (re)build is ~250 ms slower (cold path); outbound_basic measures p95
+  ≈ 1 030 ms and overhead ≈ 130 ms on a warm stack.
