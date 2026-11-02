@@ -118,7 +118,7 @@ from va_media.vad_model import VadStatus
 from va_media.voicemail import DbAnsweredBy, LlmAnswerClassifier, StructuredSource, VoicemailMonitor
 from va_media.voicemail_sms import VoicemailSms
 from va_media.workflow_signal import TemporalPipelineSignaller
-from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
+from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount, webhook_scheme
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.background import BackgroundAssetError, BackgroundLibrary
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
@@ -393,6 +393,7 @@ class CallRuntime:
             platform_profile_id=self._settings.telnyx_messaging_profile_id,
             edge_public_host=self._settings.edge_public_host,
             clock=self._clock,
+            webhook_scheme=webhook_scheme(self._settings.va_env.value),
         )
         return functools.partial(sender.send, context)
 

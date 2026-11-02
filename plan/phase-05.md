@@ -296,5 +296,39 @@
   - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery, plus the e2e flows of tasks finished before the harness existed (voicemail_leave_message, voicemail_hangup, amd_ivr_mode from P05-T10; others named in earlier tasks' acceptance when they also predate it); a 50-concurrent-call simulator test against one media worker process
   - Acceptance: `make e2e` green; concurrency test reports no underruns and p50 platform overhead ≤ 150 ms.
 
+  > Planner split (2026-11-02): the compose stack has no application services yet, the e2e sim clock cannot be
+  > accelerated against real-time services, migrations are not packaged into images, and there is no test-org seed
+  > endpoint, so P05-T17 is delivered as P05-T17a–e below. P05-T17 is ticked when all five are.
+
+- [x] P05-T17a Compose application services for the `apps`/`e2e` profiles — packaged migrations + `python -m va_db.migrate`, x-py-env + 7 app services with healthchecks, simkeys volume, `.env.compose` renderer, realtime e2e sim clock, staged dev_up; make up PROFILE=e2e all healthy, readyz 200 x3, seed + /v1/me 200; make test 10716 passed (1 unrelated wall-clock flake, passes on rerun), 99.16 %
+  - Spec refs: specs/29-infrastructure.md §1.1, §2 (`x-py-env`, migrate/api/edge/media/worker/webhooks/events-sink); specs/02 §6
+  - Depends on: P05-T16b, P05-T18b
+  - Deliverables: packaged migrations + `python -m va_db.migrate` (upgrade head + `call_events` partitions ahead); `x-py-env` anchor and the seven `build:` services with healthchecks; sim public key shared through a named volume (services read `.sim/telnyx_public_key`, `TELNYX_PUBLIC_KEY` blanked in containers); e2e override runs the sim on the realtime clock (spec Decision); `scripts/dev_up.sh` runs `migrate` before waiting on long-running services; `test_compose.py`/`test_dockerfile.py` updated
+  - Acceptance: `make up PROFILE=e2e` on a clean volume set brings every e2e service healthy (`docker compose ps` evidence), api `/readyz` 200, edge + media ready with the sim key; `make test` green; `make down` afterwards.
+
+- [ ] P05-T17b E2E harness and basic flows
+  - Spec refs: specs/30-testing-and-evals.md §2, §3.5 (harness), §5 (`outbound_basic`, `inbound_basic`, `stop_via_api`, `max_duration`)
+  - Depends on: P05-T17a
+  - Deliverables: `POST /internal/test/orgs` (only `VA_ENV` local/test; org + funded balance + live key + voice + number), `tests_e2e/` (conftest checking the stack, `harness.py` scenario/rules registration via sim control APIs, call triggering, completion wait on `GET /v1/calls/{id}` `queue_status=complete` until the phase-06 dispatcher delivers webhooks, assertion evaluator for the §3.5 `assertions` block, scenarios + LLM rules), flows `outbound_basic`, `inbound_basic` (task runner until phase 07 pathways), `stop_via_api`, `max_duration`; `make e2e` brings the stack up if needed
+  - Acceptance: `make e2e` runs these four flows green against the compose e2e stack.
+
+- [ ] P05-T17c E2E voicemail, IVR, and cold transfer flows
+  - Spec refs: specs/30-testing-and-evals.md §5 (`voicemail_leave_message`, `voicemail_hangup`, `amd_ivr_mode`, `cold_transfer`)
+  - Depends on: P05-T17b
+  - Deliverables: scenarios, rules, and tests for the four flows (cold transfer through the task-mode `transfer_phone_number` tool until phase 07 Transfer nodes, recorded as a Decision)
+  - Acceptance: `make e2e` green with the eight flows so far.
+
+- [ ] P05-T17d E2E barge-in, interruptibility, and worker crash recovery
+  - Spec refs: specs/30-testing-and-evals.md §5 (`barge_in`, `interruptibility_levels`, `worker_crash_recovery`); specs/07 §7, §8
+  - Depends on: P05-T17b
+  - Deliverables: flows `barge_in`, `interruptibility_levels` (levels 0–4), `worker_crash_recovery` (harness kills and restarts the media container)
+  - Acceptance: `make e2e` green with every flow of the phase exit gate.
+
+- [ ] P05-T17e 50-concurrent-call media worker check
+  - Spec refs: specs/30-testing-and-evals.md §6 (pass criteria, scaled to one pod); specs/00 §5; phase 05 constraints
+  - Depends on: P05-T17b
+  - Deliverables: a simulator test (marker `slow`/`e2e`) running 50 concurrent scripted calls through one media worker process, reporting frame underruns and platform overhead percentiles
+  - Acceptance: no underruns, p50 platform overhead ≤ 150 ms, report committed or printed as evidence.
+
 ## Phase exit gate
 `make check && make e2e` pass with all flows listed in prompts/phase-05.md.

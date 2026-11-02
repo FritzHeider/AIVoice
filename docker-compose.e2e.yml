@@ -1,6 +1,9 @@
-# e2e override (specs/29 §2): the simulators run on the accelerated clock. `make up PROFILE=e2e` (scripts/dev_up.sh)
-# adds this file whenever the profile list contains `e2e`.
+# e2e override (specs/29 §2 Decision P05-T17a): `make up PROFILE=e2e` (scripts/dev_up.sh) adds this file whenever the
+# profile list contains `e2e`. The simulators stay on the realtime clock: the accelerated clock starts at a fixed
+# virtual date and jumps ahead whenever the sim's event loop idles, while the real services stamp and verify against
+# wall time (Telnyx webhook and media WS signature tolerances, Temporal timers, 20 ms media pacing). The file is the
+# home of later e2e-only sim settings.
 services:
   sim:
     environment:
-      SIM_CLOCK: accelerated
+      SIM_CLOCK: realtime

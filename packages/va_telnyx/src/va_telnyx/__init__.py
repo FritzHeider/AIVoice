@@ -2,10 +2,12 @@
 
 from va_telnyx.bootstrap import (
     BootstrapResult,
+    WebhookScheme,
     WebhookUrls,
     bootstrap_account,
     org_resource_name,
     platform_resource_name,
+    webhook_scheme,
     webhook_urls,
 )
 from va_telnyx.client import PLATFORM_ACCOUNT, TelnyxClient
@@ -112,6 +114,7 @@ __all__ = [
     "WebhookEnvelope",
     "WebhookEvent",
     "WebhookParseError",
+    "WebhookScheme",
     "WebhookUrls",
     "WebhookVerificationError",
     "bootstrap_account",
@@ -125,5 +128,6 @@ __all__ = [
     "platform_resource_name",
     "verify_media_ws",
     "verify_webhook",
+    "webhook_scheme",
     "webhook_urls",
 ]

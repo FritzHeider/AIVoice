@@ -1406,7 +1406,8 @@ CREATE POLICY platform_read ON voices FOR SELECT USING (org_id IS NULL);
 CREATE POLICY platform_read ON dnc_entries FOR SELECT USING (org_id IS NULL);
 ```
 
-> Decision (2026-10-27): `packages/va_db/migrations/versions/0001_initial.py` holds the §2–§9a SQL blocks verbatim
+> Decision (2026-10-27): `packages/va_db/src/va_db/migrations/versions/0001_initial.py` (moved into the package by
+> P05-T17a, specs/29 §2) holds the §2–§9a SQL blocks verbatim
 > (lines over 110 columns are wrapped outside string literals; meaning unchanged) and runs one statement at a time,
 > because asyncpg prepares each statement. Additional rules for the migration:
 > - Roles: `CREATE ROLE va_app LOGIN` / `CREATE ROLE va_system LOGIN BYPASSRLS` only when absent, never with a

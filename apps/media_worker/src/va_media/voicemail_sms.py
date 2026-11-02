@@ -28,7 +28,15 @@ from va_domain.call_context import CallContext
 from va_engine.opener import render_call_text
 from va_events import EventPublishError, EventType, new_event
 from va_media.voicemail import VoicemailEvents
-from va_telnyx import Message, MessageCreate, TelnyxApiError, TelnyxError, UnknownTelnyxAccount, webhook_urls
+from va_telnyx import (
+    Message,
+    MessageCreate,
+    TelnyxApiError,
+    TelnyxError,
+    UnknownTelnyxAccount,
+    WebhookScheme,
+    webhook_urls,
+)
 
 __all__ = [
     "SMS_SENT_MESSAGE",
@@ -89,12 +97,14 @@ class VoicemailSms:
         platform_profile_id: str,
         edge_public_host: str,
         clock: Clock,
+        webhook_scheme: WebhookScheme = "https",
     ) -> None:
         self._database = database
         self._telnyx = telnyx
         self._events = events
         self._platform_profile_id = platform_profile_id
         self._edge_public_host = edge_public_host
+        self._webhook_scheme: WebhookScheme = webhook_scheme
         self._clock = clock
 
     async def send(self, context: CallContext) -> None:
@@ -131,7 +141,9 @@ class VoicemailSms:
             to=context.to_number,
             text=text,
             messaging_profile_id=profile,
-            webhook_url=webhook_urls(self._edge_public_host, sender.telnyx_account_id).messaging,
+            webhook_url=webhook_urls(
+                self._edge_public_host, sender.telnyx_account_id, scheme=self._webhook_scheme
+            ).messaging,
             use_profile_webhooks=False,
         )
         try:

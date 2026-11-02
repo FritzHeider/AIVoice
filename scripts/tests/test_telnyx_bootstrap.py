@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 from service_helpers import UNREACHABLE, isolate_env, reset_logging
 from sim_helpers import new_state
@@ -144,3 +145,16 @@ async def test_telnyx_failure_exits_1_without_leaking_the_key(
     assert "401" in captured.err
     assert secret not in captured.err
     assert "TELNYX_CALL_CONTROL_APP_ID" not in path.read_text(encoding="utf-8")
+
+
+async def test_local_and_test_envs_register_plain_http_webhooks(
+    telnyx_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _env_file(tmp_path, telnyx_url)
+    assert await asyncio.to_thread(telnyx_bootstrap.main, ["--env-file", str(path), "--json"]) == 0
+    app_id = json.loads(capsys.readouterr().out)["TELNYX_CALL_CONTROL_APP_ID"]
+    headers = {"Authorization": "Bearer sim-telnyx-key"}
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(f"{telnyx_url}/call_control_applications/{app_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["data"]["webhook_event_url"] == "http://edge.example.test/telnyx/voice"

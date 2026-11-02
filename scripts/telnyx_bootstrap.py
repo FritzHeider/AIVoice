@@ -35,6 +35,7 @@ from va_telnyx import (
     TelnyxRateLimiter,
     bootstrap_account,
     platform_resource_name,
+    webhook_scheme,
     webhook_urls,
 )
 
@@ -83,7 +84,7 @@ async def run_bootstrap(
     return await bootstrap_account(
         client,
         name=platform_resource_name(settings.va_env.value),
-        webhooks=webhook_urls(settings.edge_public_host),
+        webhooks=webhook_urls(settings.edge_public_host, scheme=webhook_scheme(settings.va_env.value)),
     )
 
 

@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import httpx
+import pytest
 from service_helpers import json_log_stream, log_events
 from telnyx_client_helpers import sim_clients
 from telnyx_helpers import telnyx_state
@@ -16,6 +17,7 @@ from va_telnyx import (
     bootstrap_account,
     org_resource_name,
     platform_resource_name,
+    webhook_scheme,
     webhook_urls,
 )
 
@@ -37,6 +39,11 @@ def test_resource_names_and_webhooks() -> None:
     assert org_resource_name("abc") == "voiceagents-org-abc"
     assert webhook_urls("localhost:8100").voice == "https://localhost:8100/telnyx/voice"
     assert webhook_urls("localhost:8100").messaging == "https://localhost:8100/telnyx/messaging"
+    plain = webhook_urls("edge:8100", scheme="http")
+    assert (plain.voice, plain.messaging) == (
+        "http://edge:8100/telnyx/voice",
+        "http://edge:8100/telnyx/messaging",
+    )
     byo = webhook_urls("edge.example.test", ACCOUNT)
     assert byo.voice == f"https://edge.example.test/telnyx/voice/{ACCOUNT}"
     assert byo.messaging == f"https://edge.example.test/telnyx/messaging/{ACCOUNT}"
@@ -150,3 +157,11 @@ async def test_duplicate_exact_names_use_the_first_and_warn() -> None:
         2,
         first_app.id,
     )
+
+
+@pytest.mark.parametrize(
+    ("va_env", "scheme"),
+    [("local", "http"), ("test", "http"), ("staging", "https"), ("production", "https")],
+)
+def test_webhook_scheme_follows_the_media_ws_scheme(va_env: str, scheme: str) -> None:
+    assert webhook_scheme(va_env) == scheme

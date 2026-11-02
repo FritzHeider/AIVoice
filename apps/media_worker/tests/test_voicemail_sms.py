@@ -24,7 +24,7 @@ from va_domain.call_context import CallContext
 from va_events import DomainEvent, EventPublishError, EventType
 from va_media.voicemail_sms import SMS_SENT_MESSAGE, VoicemailSms, voicemail_message_id
 from va_telnyx import Message as TelnyxMessage
-from va_telnyx import MessageCreate, TelnyxApiError, UnknownTelnyxAccount
+from va_telnyx import MessageCreate, TelnyxApiError, UnknownTelnyxAccount, WebhookScheme
 from va_telnyx.errors import TelnyxErrorItem, TelnyxTransportError
 
 pytestmark = pytest.mark.integration
@@ -120,6 +120,7 @@ def sender_of(
     events: FakeEvents | None = None,
     *,
     profile: str = PLATFORM_PROFILE,
+    scheme: WebhookScheme = "https",
 ) -> VoicemailSms:
     return VoicemailSms(
         database=database,
@@ -128,6 +129,7 @@ def sender_of(
         platform_profile_id=profile,
         edge_public_host=EDGE,
         clock=ManualClock(),
+        webhook_scheme=scheme,
     )
 
 
@@ -144,6 +146,14 @@ async def conversations_of(database: Database, context: CallContext) -> list[Con
 
 def logged(stream: Any, event: str) -> list[dict[str, Any]]:
     return [line for line in log_events(stream) if line["event"] == event]
+
+
+async def test_local_environments_get_a_plain_http_status_webhook(database: Database) -> None:
+    call = await make_call(database)
+    telnyx = FakeTelnyx()
+    await sender_of(database, telnyx, scheme="http").send(call.context)
+    (sent,) = telnyx.sent
+    assert sent.webhook_url == f"http://{EDGE}/telnyx/messaging"
 
 
 async def test_a_platform_number_sends_the_rendered_sms_and_records_it(database: Database) -> None:

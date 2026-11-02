@@ -1,7 +1,36 @@
 # Local development stack (specs/29 §2). Profiles: infra (dependencies), apps, e2e, observability.
 # `make up` starts the infra profile; `make up PROFILE=infra,observability` adds Jaeger, Prometheus, and Grafana.
-# The `sim` image is built from infra/docker/python.Dockerfile; `docker-compose.e2e.yml` accelerates its clock.
+# The Python images (sim and the application services) are built from infra/docker/python.Dockerfile;
+# `docker-compose.e2e.yml` holds the e2e-only sim settings. `scripts/dev_up.sh` runs `migrate` before the apps.
 name: voiceagents
+
+# Application services reach their dependencies by service name (specs/29 §2 and its P05-T17a Decision).
+# `.env.compose` is `.env` rendered by scripts/compose_env.py (Compose reads `KEY=  # comment` as the comment text);
+# dev_up.sh writes it before starting the apps, and it is optional so `docker compose config` works on a checkout.
+# TELNYX_PUBLIC_KEY is blanked: `.env` holds the key of the previous sim start, so edge and media read the current
+# one from the shared `simkeys` volume (`.sim/telnyx_public_key`, the local fallback).
+x-py-env: &py-env
+  env_file:
+    - path: .env.compose
+      required: false
+  environment: &py-env-vars
+    # jscpd:ignore-start  (mirrors the specs/29 §2 block; scripts/tests/test_compose.py compares them)
+    DATABASE_URL: postgresql+asyncpg://va:va@postgres:5432/va
+    REDIS_URL: redis://redis:6379/0
+    CLICKHOUSE_URL: http://default:@clickhouse:8123/va
+    TEMPORAL_HOST: temporal:7233
+    S3_ENDPOINT_URL: http://minio:9000
+    TELNYX_API_BASE: http://sim:9100/v2
+    ELEVENLABS_API_BASE: http://sim:9200
+    ELEVENLABS_WS_BASE: ws://sim:9200
+    LLM_DEFAULT_BASE_URL: http://sim:9300/v1
+    STRIPE_API_BASE: http://sim:9400
+    SMTP_URL: smtp://mailpit:1025
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    EDGE_PUBLIC_HOST: edge:8100
+    MEDIA_PUBLIC_HOST: media:8200
+    TELNYX_PUBLIC_KEY: ""
+    # jscpd:ignore-end
 
 services:
   postgres:
@@ -149,11 +178,164 @@ services:
       SIM_STRIPE_WEBHOOK_URL: http://api:8000/v1/billing/stripe/webhook
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     ports: ["9100:9100", "9200:9200", "9300:9300", "9400:9400"]
+    volumes:
+      - simkeys:/app/.sim
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9100/healthz')"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: api
+        MODULE: va_db.migrate
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: api
+        MODULE: va_api.serve
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  edge:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: telephony_edge
+        MODULE: va_edge.serve
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: unless-stopped
+    ports: ["8100:8100"]
+    volumes:
+      - simkeys:/app/.sim:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sim:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8100/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  media:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: media_worker
+        MODULE: va_media.main
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: unless-stopped
+    ports: ["8200:8200"]
+    stop_grace_period: 60s
+    volumes:
+      - simkeys:/app/.sim:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sim:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8200/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: worker
+        MODULE: va_worker.main
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9300/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  webhooks:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: webhook_dispatcher
+        MODULE: va_webhooks.main
+    profiles: [apps, e2e]
+    <<: *py-env
+    environment:
+      <<: *py-env-vars
+      WEBHOOK_ALLOW_PRIVATE: "true"
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9400/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  events-sink:
+    build:
+      context: .
+      dockerfile: infra/docker/python.Dockerfile
+      args:
+        SERVICE: events_sink
+        MODULE: va_events_sink.main
+    profiles: [apps, e2e]
+    <<: *py-env
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:9500/readyz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.112.0
@@ -218,3 +400,4 @@ volumes:
   miniodata: {}
   prometheusdata: {}
   grafanadata: {}
+  simkeys: {}

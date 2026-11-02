@@ -45,13 +45,27 @@ INFRA_SERVICES = {
     "sim",
 }
 OBSERVABILITY_ONLY = {"jaeger", "prometheus", "grafana"}
-NO_HEALTHCHECK = {"minio-init", "otel-collector"}
+NO_HEALTHCHECK = {"minio-init", "migrate", "otel-collector"}
 COMPARED_KEYS = ("image", "ports", "environment", "command", "entrypoint", "ulimits")
 COLLECTOR_EXTRA_PORTS = ["8889:8889", "13133:13133"]
 # Keys the specs/29 §2 Decision adds to services whose spec entry does not set them.
 DOCUMENTED_ADDITIONS = {("grafana", "environment")}
 # The specs/29 §2 Decision P03-T15b: the sim exports OTLP to the collector service.
 SIM_EXTRA_ENVIRONMENT = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317"}
+# specs/29 §2 Decision P05-T17a: the application services, their probe ports, and the documented deviations.
+APP_SERVICES = ("migrate", "api", "edge", "media", "worker", "webhooks", "events-sink")
+DEFERRED_BUILD_SERVICES = {"dashboard"}
+PROBE_PORTS = {
+    "api": 8000,
+    "edge": 8100,
+    "media": 8200,
+    "worker": 9300,
+    "webhooks": 9400,
+    "events-sink": 9500,
+}
+PY_ENV_ADDITIONS = {"TELNYX_PUBLIC_KEY": ""}
+OPTIONAL_ENV_FILE = [{"path": ".env.compose", "required": False}]
+SIM_KEY_READERS = ("edge", "media")
 
 Mapping = dict[str, Any]
 
@@ -140,8 +154,69 @@ def test_profiles_match_spec_with_collector_in_every_stack() -> None:
     assert {"infra", "apps", "e2e"} <= collector
 
 
-def test_build_services_are_sim_only() -> None:
-    assert [name for name, svc in SERVICES.items() if "build" in svc] == ["sim"]
+def _spec_py_env() -> Mapping:
+    section = _section(SPEC_29.read_text(encoding="utf-8"), "## 2. docker-compose")
+    match = re.search(r"```yaml\n(.*?)```", section, re.DOTALL)
+    assert match is not None
+    return cast("Mapping", yaml.safe_load(match.group(1))["x-py-env"])
+
+
+def test_build_services_match_spec_except_the_dashboard() -> None:
+    built = [name for name, svc in SERVICES.items() if "build" in svc]
+    assert built == ["sim", *APP_SERVICES]
+    spec_built = {name for name, svc in SPEC_SERVICES.items() if "build" in svc}
+    assert spec_built - set(built) == DEFERRED_BUILD_SERVICES
+    for name in built:
+        assert SERVICES[name]["build"] == SPEC_SERVICES[name]["build"], name
+        assert (ROOT / SERVICES[name]["build"]["dockerfile"]).is_file()
+
+
+def test_py_env_anchor_matches_spec() -> None:
+    spec = _spec_py_env()
+    expected = {**spec["environment"], **PY_ENV_ADDITIONS}
+    assert spec["env_file"] == [".env"]
+    assert COMPOSE["x-py-env"] == {"env_file": OPTIONAL_ENV_FILE, "environment": expected}
+    for name in APP_SERVICES:
+        environment = dict(SERVICES[name]["environment"])
+        if name == "webhooks":
+            assert environment.pop("WEBHOOK_ALLOW_PRIVATE") == "true"
+        assert environment == expected, name
+        assert SERVICES[name]["env_file"] == OPTIONAL_ENV_FILE, name
+
+
+@pytest.mark.parametrize("name", APP_SERVICES)
+def test_app_service_matches_spec(name: str) -> None:
+    svc, spec = SERVICES[name], SPEC_SERVICES[name]
+    assert svc["profiles"] == spec["profiles"] == ["apps", "e2e"]
+    assert svc.get("ports") == spec.get("ports")
+    assert svc.get("stop_grace_period") == spec.get("stop_grace_period")
+    depends = {dep: cond["condition"] for dep, cond in svc["depends_on"].items()}
+    spec_depends = {dep: cond["condition"] for dep, cond in spec["depends_on"].items()}
+    extra = {"sim": "service_healthy"} if name in SIM_KEY_READERS else {}
+    assert depends == {**spec_depends, **extra}
+
+
+@pytest.mark.parametrize("name", APP_SERVICES[1:])
+def test_app_healthchecks_probe_the_service_port(name: str) -> None:
+    check = SERVICES[name]["healthcheck"]
+    url = f"http://localhost:{PROBE_PORTS[name]}/readyz"
+    assert check["test"] == ["CMD", "python", "-c", f"import urllib.request;urllib.request.urlopen('{url}')"]
+    assert (check["interval"], check["timeout"], check["retries"]) == ("5s", "3s", 30)
+    spec_check = SPEC_SERVICES[name].get("healthcheck")
+    if spec_check is not None:
+        assert check["test"] == spec_check["test"]
+
+
+def test_migrate_runs_once_and_the_sim_key_is_shared() -> None:
+    assert SERVICES["migrate"]["restart"] == "no"
+    assert "healthcheck" not in SERVICES["migrate"]
+    assert SERVICES["sim"]["volumes"] == ["simkeys:/app/.sim"]
+    for name in SIM_KEY_READERS:
+        assert SERVICES[name]["volumes"] == ["simkeys:/app/.sim:ro"], name
+    readers = {
+        name for name, svc in SERVICES.items() if any("simkeys" in str(v) for v in svc.get("volumes", []))
+    }
+    assert readers == {"sim", *SIM_KEY_READERS}
 
 
 def test_sim_matches_spec() -> None:
@@ -156,10 +231,8 @@ def test_sim_matches_spec() -> None:
     assert (ROOT / sim["build"]["dockerfile"]).is_file()
 
 
-def test_e2e_override_only_accelerates_the_sim_clock() -> None:
-    assert _load_yaml(E2E_OVERRIDE_PATH) == {
-        "services": {"sim": {"environment": {"SIM_CLOCK": "accelerated"}}}
-    }
+def test_e2e_override_pins_the_realtime_sim_clock() -> None:
+    assert _load_yaml(E2E_OVERRIDE_PATH) == {"services": {"sim": {"environment": {"SIM_CLOCK": "realtime"}}}}
     assert SERVICES["sim"]["environment"]["SIM_CLOCK"] == "realtime"
 
 
@@ -194,6 +267,9 @@ def test_ports_match_agents_md() -> None:
         "fake ElevenLabs 9200": ("sim", 9200),
         "fake LLM 9300": ("sim", 9300),
         "fake Stripe 9400": ("sim", 9400),
+        "api 8000": ("api", 8000),
+        "telephony-edge 8100": ("edge", 8100),
+        "media-worker 8200": ("media", 8200),
     }
     flat = " ".join(ports_text.split())
     for phrase, (service, port) in expected.items():
@@ -211,12 +287,16 @@ def test_long_running_services_have_healthchecks() -> None:
         assert svc["healthcheck"]["test"], name
         assert svc["restart"] == "unless-stopped", name
     assert SERVICES["minio-init"]["restart"] == "no"
+    assert SERVICES["migrate"]["restart"] == "no"
 
 
 def test_depends_on_reference_healthy_services() -> None:
     for name, svc in SERVICES.items():
         for dep, cond in svc.get("depends_on", {}).items():
             assert dep in SERVICES, f"{name} -> {dep}"
+            if dep == "migrate":
+                assert cond["condition"] == "service_completed_successfully", f"{name} -> {dep}"
+                continue
             assert cond["condition"] == "service_healthy", f"{name} -> {dep}"
             assert "healthcheck" in SERVICES[dep], dep
             assert set(SERVICES[dep]["profiles"]) >= set(svc["profiles"]), f"{name} -> {dep}"
@@ -472,6 +552,74 @@ def test_dev_up_e2e_adds_the_override_file(tmp_path: Path, bash: str) -> None:
 
 
 @pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_starts_apps_after_the_key_bootstrap_and_migration(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(
+        tmp_path, ["postgres", "sim", "minio-init", "migrate", "api", "media", "events-sink"]
+    )
+    result = _run([bash, str(DEV_UP), "apps"], env=env)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    start = calls.index("compose --profile apps config --services") + 1
+    assert calls[start:] == [
+        "compose --profile apps up -d --wait --build --wait-timeout 240 postgres sim",
+        "compose --profile apps run --rm minio-init",
+        "uv run python scripts/sim_public_key.py --url http://localhost:9100 --env-file .env "
+        "--key-file .sim/telnyx_public_key",
+        "uv run python scripts/telnyx_bootstrap.py --env-file .env --write-env",
+        "uv run python scripts/compose_env.py --env-file .env --output .env.compose",
+        "compose --profile apps run --rm --build migrate",
+        "compose --profile apps up -d --wait --build --no-deps --wait-timeout 240 api media events-sink",
+        "compose --profile apps ps",
+    ]
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_bootstraps_telnyx_for_the_compose_edge(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["sim", "edge"])
+    (tmp_path / "uv").write_text(
+        f'#!/bin/sh\necho "uv $* EDGE=$EDGE_PUBLIC_HOST" >> "{log}"\n', encoding="utf-8"
+    )
+    result = _run([bash, str(DEV_UP), "e2e"], env=env)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert "uv run python scripts/telnyx_bootstrap.py --env-file .env --write-env EDGE=edge:8100" in calls
+    assert not any(" migrate" in line for line in calls)
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_recreates_apps_when_the_sim_key_changed(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["sim", "edge"])
+    # A copy of the script in its own checkout, so the fake key rotation never touches the repository's .sim/.
+    checkout = tmp_path / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / ".sim").mkdir()
+    script = checkout / "scripts" / "dev_up.sh"
+    shutil.copy2(DEV_UP, script)
+    (checkout / ".env").write_text("VA_ENV=local\n", encoding="utf-8")
+    (checkout / ".sim" / "telnyx_public_key").write_text("old-key\n", encoding="utf-8")
+    (tmp_path / "uv").write_text(
+        f'#!/bin/sh\necho "uv $*" >> "{log}"\n'
+        'case "$*" in *sim_public_key.py*) echo new-key > .sim/telnyx_public_key ;; esac\n',
+        encoding="utf-8",
+    )
+    result = _run([bash, str(script), "apps"], env=env)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert (
+        "compose --profile apps up -d --wait --build --no-deps --force-recreate --wait-timeout 240 edge"
+        in calls
+    )
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
+def test_dev_up_keeps_apps_when_the_sim_key_is_unchanged(tmp_path: Path, bash: str) -> None:
+    env, log = _fake_tools(tmp_path, ["sim", "edge"])
+    result = _run([bash, str(DEV_UP), "apps"], env=env)
+    assert result.returncode == 0, result.stderr
+    assert "--force-recreate" not in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bash", _bash_interpreters())
 def test_dev_up_rejects_empty_profile_list(tmp_path: Path, bash: str) -> None:
     env, log = _fake_tools(tmp_path, [])
     result = _run([bash, str(DEV_UP), ","], env=env)
@@ -491,7 +639,7 @@ def test_docker_compose_config_valid() -> None:
 
 
 @needs_docker_cli
-def test_docker_compose_e2e_override_renders_accelerated_sim() -> None:
+def test_docker_compose_e2e_override_renders_the_e2e_stack() -> None:
     result = _run(
         [
             "docker",
@@ -506,9 +654,18 @@ def test_docker_compose_e2e_override_renders_accelerated_sim() -> None:
         ]
     )
     assert result.returncode == 0, result.stderr
-    sim = cast("Mapping", yaml.safe_load(result.stdout))["services"]["sim"]
-    assert sim["environment"]["SIM_CLOCK"] == "accelerated"
+    services = cast("Mapping", yaml.safe_load(result.stdout))["services"]
+    sim = services["sim"]
+    assert sim["environment"]["SIM_CLOCK"] == "realtime"
     assert sim["environment"]["SIM_EDGE_WEBHOOK_URL"] == "http://edge:8100/telnyx/voice"
+    assert set(APP_SERVICES) <= set(services)
+    assert "temporal-ui" not in services
+    webhooks = services["webhooks"]["environment"]
+    assert (webhooks["WEBHOOK_ALLOW_PRIVATE"], webhooks["DATABASE_URL"]) == (
+        "true",
+        "postgresql+asyncpg://va:va@postgres:5432/va",
+    )
+    assert services["edge"]["environment"]["TELNYX_PUBLIC_KEY"] == ""
 
 
 @needs_docker_cli

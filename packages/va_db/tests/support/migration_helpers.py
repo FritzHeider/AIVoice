@@ -39,7 +39,7 @@ __all__ = [
 
 VA_DB_ROOT: Final = Path(__file__).resolve().parents[2]
 ALEMBIC_INI: Final = VA_DB_ROOT / "alembic.ini"
-VERSIONS: Final = VA_DB_ROOT / "migrations" / "versions"
+VERSIONS: Final = VA_DB_ROOT / "src" / "va_db" / "migrations" / "versions"
 
 
 def alembic_config(output: StringIO | None = None, *, configure_logger: bool = False) -> Config:

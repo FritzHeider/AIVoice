@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from va_common.logging import get_logger
+from va_common.stream_tokens import INSECURE_MEDIA_ENVS
 from va_telnyx.client import TelnyxClient
 from va_telnyx.provisioning_models import CallControlApp, MessagingProfile, OutboundVoiceProfile
 
@@ -22,10 +23,12 @@ __all__ = [
     "RESOURCE_PREFIX",
     "BootstrapResult",
     "ResourceKind",
+    "WebhookScheme",
     "WebhookUrls",
     "bootstrap_account",
     "org_resource_name",
     "platform_resource_name",
+    "webhook_scheme",
     "webhook_urls",
 ]
 
@@ -37,6 +40,7 @@ ENV_KEYS: Final = (
 )
 
 ResourceKind = Literal["outbound_voice_profile", "call_control_app", "messaging_profile"]
+WebhookScheme = Literal["http", "https"]
 
 _log = get_logger(__name__)
 
@@ -57,10 +61,20 @@ class WebhookUrls:
     messaging: str
 
 
-def webhook_urls(edge_public_host: str, telnyx_account_id: uuid.UUID | str | None = None) -> WebhookUrls:
+def webhook_scheme(va_env: str) -> WebhookScheme:
+    """``http`` in ``local``/``test`` (plain-HTTP edge, like the ``ws`` media URL), ``https`` elsewhere."""
+    return "http" if va_env in INSECURE_MEDIA_ENVS else "https"
+
+
+def webhook_urls(
+    edge_public_host: str,
+    telnyx_account_id: uuid.UUID | str | None = None,
+    *,
+    scheme: WebhookScheme = "https",
+) -> WebhookUrls:
     """The edge's voice and messaging webhook URLs; BYO accounts get their account id as the last segment."""
     suffix = "" if telnyx_account_id is None else f"/{telnyx_account_id}"
-    base = f"https://{edge_public_host}/telnyx"
+    base = f"{scheme}://{edge_public_host}/telnyx"
     return WebhookUrls(voice=f"{base}/voice{suffix}", messaging=f"{base}/messaging{suffix}")
 
 

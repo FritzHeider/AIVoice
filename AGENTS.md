@@ -13,7 +13,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Build one Python image | `docker build -f infra/docker/python.Dockerfile --build-arg SERVICE=sim --build-arg MODULE=va_sim_server.main -t va-sim:dev .` |
 | Copy sim key into `.env` | `uv run python scripts/sim_public_key.py` (run by `make up` when `sim` starts) |
 | Stop | `make down` |
-| Migrate DB | `make migrate` (SQL only: `uv run alembic -c packages/va_db/alembic.ini upgrade head --sql`; back out: `... downgrade base`) |
+| Migrate DB | `make migrate` (= `uv run python -m va_db.migrate`: head + `call_events` partitions ahead; SQL only: `uv run alembic -c packages/va_db/alembic.ini upgrade head --sql`; back out: `... downgrade base`) |
 | Seed dev data | `make seed` (prints dev keys `va_live_…`/`va_test_…`, dashboard login, a curl line; `make seed ARGS="--json"`, `--email`, `--reset-password`; needs `make up && make migrate`) |
 | Format | `make fmt` |
 | All gates | `make check` |
@@ -322,7 +322,8 @@ Grafana 3001
   `model_introspection.assert_org_indexed(table, nullable=...)` and `org_index_ddl(tables)`. Re-inserting a
   duplicate text-PK row in a test needs `session.expunge(original)` first (SQLAlchemy warns on the identity
   conflict, an error under filterwarnings).
-- 2026-10-27 (P01-T07): Alembic lives in `packages/va_db` (`alembic.ini`, `migrations/env.py`, `migrations/versions/`).
+- 2026-10-27 (P01-T07): Alembic lives in `packages/va_db` (`alembic.ini`; since P05-T17a the scripts are packaged in
+  `src/va_db/migrations/env.py` and `src/va_db/migrations/versions/`).
   It reads `DATABASE_URL` and runs as the login role, one transaction per revision. Revisions run SQL through
   `execute_script(sql)` (see `0001_initial.py`): asyncpg prepares every statement, so a multi-statement string
   fails, and `op.execute(str)` wraps the string in `text()`, which reads `"style":0` as a bind parameter. The
@@ -335,7 +336,7 @@ Grafana 3001
   These tests are sync because env.py calls `asyncio.run`. The roles-absent test renames the worker
   server's roles aside (`spec_roles_set_aside`) instead of booting a second container: under the full suite the
   Docker daemon timed out creating it. Test Postgres runs with `fsync=off`; before that, the forced checkpoint of `DROP DATABASE`
-  timed out (30 s) under xdist load. `ruff` per-file ignores for `packages/va_db/migrations/**`: `INP001`,
+  timed out (30 s) under xdist load. `ruff` per-file ignores for `packages/va_db/src/va_db/migrations/**`: `INP001`,
   `N999` (plus `RUF001` in 0001, whose spec comments are verbatim). A compose volume created before this task
   has `va_system` without BYPASSRLS; `make migrate` fixes it.
 - 2026-10-27 (P01-T08): `test_schema_matches_spec.py` applies every relational specs/03 ```sql block (§2-§10, via
@@ -935,7 +936,7 @@ Grafana 3001
   never exclude `uv.lock`, `packages/`, `apps/`, `models/`, `assets/`. The compose `sim` service runs in the infra
   profile; `make up` builds it (`up --wait --build`) and then `scripts/sim_public_key.py` rewrites
   `TELNYX_PUBLIC_KEY` in `.env` and `.sim/telnyx_public_key` (new key on every sim start). The e2e profile adds
-  `docker-compose.e2e.yml` (`SIM_CLOCK: accelerated`). A host-run sim on 9100-9400 now collides with the container:
+  `docker-compose.e2e.yml` (`SIM_CLOCK: realtime` since P05-T17a). A host-run sim on 9100-9400 now collides with the container:
   stop it (`docker compose stop sim`) or run the host sim with `--port 19100`. `env_file.update_env_file` is the
   shared dotenv updater for scripts.
 - 2026-11-01 (P03-T15c): with `SIM_STATE_REDIS_URL` the sims share scenarios, latencies, reset + seed, and utterance
@@ -1521,3 +1522,12 @@ Grafana 3001
   `fail_presign`). The worker e2e test now runs the real post-call child to completion (a dialed canceled call is charged
   the attempt fee). A step wrapper that catches `ActivityError` would swallow a budget cancel: `_begin`/`_fail` re-raise
   `CancelledError` once the budget is spent.
+- 2026-11-02 (P05-T17a): `make up PROFILE=e2e` (or `apps`) builds and starts the app containers (api 8000, edge 8100,
+  media 8200; worker/webhooks/events-sink probe on 9300/9400/9500 inside the network only). `dev_up.sh` stages:
+  deps → minio-init → sim key → `telnyx_bootstrap.py --write-env` with `EDGE_PUBLIC_HOST=edge:8100` → `run --rm
+  --build migrate` → `up --wait --no-deps` of the apps (`--force-recreate` when the sim key changed). Containers get
+  service-name URLs from the `x-py-env` anchor and `.env` through `.env.compose` (`scripts/compose_env.py`: Compose
+  reads `KEY=  # comment` as the comment text, which broke every blank secret/DSN) and read the sim key from the `simkeys`
+  volume (`TELNYX_PUBLIC_KEY` is blanked). A host-run api/edge/media collides with the container ports: `docker
+  compose stop api edge media` first. Edge webhook URLs are `http://` in `local`/`test` (`va_telnyx.webhook_scheme`).
+  Migrations are packaged (`va_db/migrations`), so tests find revisions at `migration_helpers.VERSIONS`.

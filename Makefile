@@ -26,7 +26,7 @@ down: ## Stop infra and services in every profile (volumes kept)
 	scripts/dev_down.sh
 
 migrate: ## Apply database migrations
-	uv run alembic -c packages/va_db/alembic.ini upgrade head
+	uv run python -m va_db.migrate
 
 seed: ## Seed development data
 	@uv run python scripts/seed_dev.py $(ARGS)

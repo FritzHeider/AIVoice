@@ -347,3 +347,147 @@ Findings 1-2 resolved: `_raise_if_out_of_time` guards every swallowing `except A
 blocking-activity budget tests for finalize_billing and find_saved_recording assert timers == [budget], cancelled
 activity, no later steps. Reviewer re-run: lint/typecheck/placeholders pass; make test 10677 passed, 7 skipped, 99%;
 jscpd 0 clones; radon A (3.0).
+
+## Planner 2026-11-02: P05-T17 split
+P05-T17 is too big for one Builder pass. Missing prerequisites:
+- No application services in compose.
+- The migrations are not in any wheel.
+- The accelerated sim clock starts at a fixed virtual date (`AcceleratedClock` DEFAULT_START), so webhook timestamps would fail the edge's wall-clock tolerance.
+- No `/internal/test/orgs`.
+- No webhook dispatcher until phase 06.
+
+Split into P05-T17a–e in plan/phase-05.md:
+- a: compose app services
+- b: harness plus outbound_basic, inbound_basic, stop_via_api, max_duration
+- c: voicemail, IVR, and cold transfer flows
+- d: barge_in, interruptibility_levels, worker_crash_recovery
+- e: the 50-concurrent-call check
+
+## Plan P05-T17a — Compose application services (`apps`/`e2e` profiles)
+
+### Design decisions
+Record all of these as `> Decision (2026-11-02): application services (P05-T17a)` under specs/29 §2, plus a short note under specs/30 §2/§5 for the clock.
+
+1. **Migrations are packaged.**
+   - Move `packages/va_db/migrations/` with `git mv` to `packages/va_db/src/va_db/migrations/` (`env.py`, `script.py.mako`, `versions/`). uv_build ships non-`.py` files under the module directory.
+   - `alembic.ini` gets `script_location = %(here)s/src/va_db/migrations`, so `make migrate` is unchanged.
+   - Update `pyproject.toml`:
+     - ruff per-file-ignores paths: `packages/va_db/src/va_db/migrations/**` and `.../versions/0001_initial.py`.
+     - mypy `files`: drop `packages/va_db/migrations`, since `src` covers it now.
+     - Check for a coverage omit on migrations and keep it equivalent.
+   - Update `packages/va_db/tests/support/migration_helpers.py` (`VERSIONS` path) and any other path reference: `grep -rn "va_db/migrations\|\"migrations\"" --include=*.py` and the Makefile.
+   - `migrations/__init__.py`: Alembic does not need it. If ruff INP001 complains under `src`, keep the per-file ignore. Do not add an `__init__.py` to `versions` (revision modules are loaded by path).
+2. **NEW `packages/va_db/src/va_db/migrate.py`.**
+   - `main(argv=None) -> int`: argparse `--months-ahead` (default `partitions.DEFAULT_MONTHS_AHEAD`) and `--sql`? No `--sql`; keep it minimal: `upgrade` only.
+   - It builds `alembic.config.Config()` programmatically with `script_location = "va_db:migrations"` (package resource notation) or `str(importlib.resources.files("va_db") / "migrations")`. Then it calls `alembic.command.upgrade(cfg, "head")`, which goes through env.py, reads `DATABASE_URL`, and runs as the login role.
+   - It then runs `ensure_call_event_partitions(conn, now=SystemClock().now(), months_ahead=...)` in one login-role transaction (`create_engine(settings, None)`, as P01-T13 requires).
+   - It logs the created partition names (configure_logging with `service_name` "migrate").
+   - Exit code: 0 on success, 1 on failure, with the error logged (no traceback swallowing beyond what Alembic prints).
+   - Do not call `asyncio.run` inside env.py's loop: `command.upgrade` is sync and env.py runs its own `asyncio.run`. Run partitions afterwards with a separate `asyncio.run`.
+   - `python -m va_db.migrate` needs `if __name__ == "__main__": raise SystemExit(main())`.
+   - Tests in `packages/va_db/tests/test_migrate.py`, sync, on `fresh_database(pg_url)`:
+     - `main([])` against a fresh DB migrates to head (check `alembic_version` = current head through `migration_helpers.query`).
+     - It creates `call_events_pYYYYMM` for the current month + 3 ahead.
+     - A second run is a no-op that returns 0.
+     - A bad `DATABASE_URL` (UNREACHABLE) returns 1.
+   - Set `DATABASE_URL` with monkeypatch. Settings come from env; check how env.py reads them.
+3. **docker-compose.yml.** Add the spec §2 `x-py-env` anchor and the services `migrate`, `api`, `edge`, `media`, `worker`, `webhooks`, `events-sink`, exactly as in the spec block, with these deviations (all in the Decision):
+   - a. `x-py-env.environment` also sets:
+     - `TELNYX_PUBLIC_KEY: ""`. `.env` holds the key of the previous sim start, because `make up` rewrites it after the wait.
+     - `PUBLIC_API_BASE_URL: http://api:8000`? NO: keep the host values for anything clients see. Override only the service-to-service URLs listed in the spec, plus `SMTP_URL` (already listed).
+     - Audit `.env.example` for any other `localhost` URL that a service dials (`grep localhost .env.example`). Leave browser- or client-facing values alone.
+   - b. Named volume `simkeys`:
+     - `sim` mounts `simkeys:/app/.sim`.
+     - edge, media (and api/worker if their settings use the key; check `TelnyxPublicKeySettings` users) mount `simkeys:/app/.sim:ro`.
+     - In `local`, `webhook_public_key()` falls back to `.sim/telnyx_public_key` relative to cwd `/app`.
+     - edge and media gain `depends_on: {sim: {condition: service_healthy}}`, because the key file must exist before their lifespan reads it.
+     - Check that the Dockerfile's `install -d -o 10001 /app/.sim` gives the volume the right ownership: a fresh named volume copies the image directory's ownership, so the sim (uid 10001) can write.
+   - c. Healthchecks, same python-urllib form as api/sim, each with `timeout: 3s`, `restart: unless-stopped`, and `OTEL_EXPORTER_OTLP_ENDPOINT` from the anchor:
+     - edge `http://localhost:8100/readyz`
+     - media `:8200/readyz`
+     - worker `:9300/readyz`
+     - webhooks `:9400/readyz`
+     - events-sink `:9500/readyz`
+     - Verify the actual probe ports in each app's settings/main. The worker, dispatcher, and sink publish no host ports, so the fake LLM and fake Stripe ports cannot collide.
+     - `migrate` gets `restart: "no"`.
+   - d. `media` `stop_grace_period: 60s` as in the spec. The `webhooks` `environment: {WEBHOOK_ALLOW_PRIVATE: "true"}` must MERGE with the anchor's environment. YAML `<<` does not deep-merge, so write the full environment mapping for webhooks: the anchor's keys + `WEBHOOK_ALLOW_PRIVATE`. Use a second anchor `&py-env-vars` for the mapping and `<<: *py-env-vars` inside it.
+   - e. `migrate` runs `python -m va_db.migrate` from the api image (`SERVICE: api, MODULE: va_db.migrate`, as in the spec; va_db is an api dependency, so the module is in the venv).
+4. **docker-compose.e2e.yml** sets `SIM_CLOCK: realtime`. Rewrite its comment to explain why (this is the Decision under specs/29 §2 and the specs/30 §2 note):
+   - `AcceleratedClock` virtual time starts at a fixed date and jumps whenever the sim's loop idles.
+   - Real services stamp and verify against wall time: Telnyx webhook signature tolerance at the edge, media WS signature timestamps, Temporal timers, and 20 ms media pacing.
+   - So an accelerated sim cannot drive a real stack.
+   - Keep the file so later e2e-only sim settings have a home. Its content becomes `services.sim.environment.SIM_CLOCK: realtime`.
+   - Alternative: delete the override and its dev_up special case. Do NOT do that; the spec names the file.
+   - Also update the AGENTS.md P03-T15b line that says the e2e profile adds SIM_CLOCK accelerated.
+5. **scripts/dev_up.sh.**
+   - When the selected profiles include a service named `migrate` (apps/e2e), run `docker compose ... run --rm --build migrate` after postgres is healthy and before `up --wait` of the long-running services.
+   - Add `migrate` to `ONE_SHOT_SERVICES`. The existing one-shot handling runs those AFTER the wait, so introduce a separate `PRE_WAIT_ONE_SHOT_SERVICES=(migrate)`. Sequence:
+     - `up -d --wait --build postgres`
+     - `run --rm migrate`
+     - `up -d --wait --build <long-running services>`
+   - `docker compose up --wait` exits 1 when a dependency one-shot exits (AGENTS P00-T09). If `depends_on: migrate: service_completed_successfully` still makes `up --wait` fail, or re-run migrate, remove `migrate` from the app services' `depends_on` and keep the ordering in dev_up (deviation in the Decision). Verify for real with Docker; it is available on this host (Docker 29.9).
+   - The sim key step stays as is.
+6. **Tests.**
+   - `scripts/tests/test_compose.py`:
+     - `SERVICES` list + new services.
+     - `test_build_services_are_sim_only` → the build services equal the spec's build services, with matching build args, MODULE and SERVICE.
+     - Each app service matches the spec (profiles, ports, depends_on modulo the documented deviations, stop_grace_period).
+     - The anchor environment equals the spec's + the `TELNYX_PUBLIC_KEY: ""` addition.
+     - The webhooks env includes `WEBHOOK_ALLOW_PRIVATE`.
+     - `simkeys` is mounted rw on sim and ro on edge/media.
+     - Every app healthcheck targets that app's probe port.
+     - The e2e override test now asserts realtime; rename `test_e2e_override_only_accelerates_the_sim_clock` → `test_e2e_override_pins_the_realtime_sim_clock`, and update `test_docker_compose_e2e_override_renders_*`.
+     - The dev_up fake-tool tests: an apps/e2e run logs `run --rm` migrate before the final `up --wait`. The infra run has no migrate step.
+     - The ports test: the AGENTS.md Ports line already lists api 8000, edge 8100, media 8200; check it.
+   - `scripts/tests/test_dockerfile.py` stays unchanged unless the Dockerfile changes. It should not need to: models/assets are copied and the migrations now ship inside the va_db wheel.
+   - Build the api image and check `docker run --rm --entrypoint python va-api:dev -c "import importlib.resources as r; print((r.files('va_db')/'migrations'/'env.py').is_file())"` prints True. That is evidence only, not a pytest.
+7. **specs/02 §6 table / `.env.example`:** no new variables, so no change, unless a new var is needed. Do not add any.
+
+### Manual verification (evidence required in build.done)
+- `make down && docker volume rm voiceagents_pgdata` is NOT needed. Use `scripts/dev_down.sh -v` only if the main stack has nothing to keep: dev data is reseedable, and `make seed` rebuilds it.
+- Then `make up PROFILE=e2e`, then `docker compose -f docker-compose.yml -f docker-compose.e2e.yml --profile e2e ps`: all long-running services healthy, and migrate exited 0.
+- `curl -fsS localhost:8000/readyz`, `localhost:8100/readyz`, `localhost:8200/readyz`.
+- `docker compose logs edge media | grep -i "public key"`: no refusal.
+- `make seed && curl -H "Authorization: <test key>" localhost:8000/v1/me` returns 200.
+- Optional smoke: `POST /v1/calls` to a FakeTelnyx default number reaches `in_progress`/`completed`. Not required; P05-T17b owns flows.
+- Then `make up` (infra) to restore the normal dev stack, or leave it running for T17b and say which.
+- Image builds are slow. Run `make up` with Bash `run_in_background` + Monitor heartbeats (AGENTS P05-T10d inactivity rule).
+
+### Gates
+make fmt, lint, typecheck, placeholders, spec refs; `uv run pytest scripts/tests packages/va_db -q` while iterating; full `make test` in the background with a heartbeat; jscpd, radon, pip-audit, pnpm audit.
+
+### Risks
+- Moving migrations changes `__file__`-relative paths in env.py and in the tests: grep thoroughly. `test_schema_matches_spec` / `load_revision` use `VERSIONS`.
+- ruff may newly flag migration files under `src` with rules applied only to src (D, ANN?). Keep the per-file ignores equivalent.
+- Coverage: migrations under `src` now count toward va_db coverage. env.py's offline branch is exercised by the `--sql` tests. If coverage drops below the threshold, add a coverage omit for `*/va_db/migrations/*` (they are exercised by the migration tests in subprocess-less runs, so they are probably covered anyway).
+- Container user 10001 writing to the `simkeys` volume.
+- The media container's real Silero model: `models/` is copied and `VA_MODELS_DIR=/app/models`. `make setup` must have fetched `silero_vad.onnx` before the build; `.dockerignore` keeps `models/`.
+- The worker needs `TELNYX_CALL_CONTROL_APP_ID`. In local the sim has no app until `scripts/telnyx_bootstrap.py --write-env` runs. Check what the worker does when it is empty: if `build_container` raises, readiness fails. Either run the bootstrap in dev_up after the sim is up (writing `.env` before the app services start: reorder to sim → key → bootstrap → apps), or document it. Prefer automating it in dev_up when `worker` is selected: `uv run python scripts/telnyx_bootstrap.py --env-file .env --write-env`, which is idempotent? Verify. Because `.env` is read by `env_file` at container create, the bootstrap must happen before `up` of the apps. FakeTelnyx resources reset on every sim restart, so it runs each time.
+
+## Build P05-T17a (2026-11-02)
+- Migrations moved (git mv) to `packages/va_db/src/va_db/migrations/`; alembic.ini/pyproject ruff+mypy paths/
+  migration_helpers.VERSIONS/specs/03 path updated. NEW `va_db.migrate` (`python -m va_db.migrate`, `make migrate`):
+  packaged alembic upgrade head + `ensure_call_event_partitions` (current month + 3); exit 0/1; tests test_migrate.py.
+- docker-compose.yml: `x-py-env` anchor (+ `&py-env-vars`, `TELNYX_PUBLIC_KEY: ""`), services migrate/api/edge/media/
+  worker/webhooks/events-sink (healthchecks on 8000/8100/8200/9300/9400/9500), `simkeys` volume (sim rw, edge/media
+  ro, both depend on sim healthy). Dashboard deferred (no dashboard.Dockerfile).
+- Found during real bring-up: (a) Compose dotenv reads `KEY=  # comment` as `# comment` → every blank `.env` key
+  (SENTRY_DSN, *_PREVIOUS peppers/secrets) broke all apps. Fix: `scripts/compose_env.py` renders `.env` via
+  python-dotenv to single-quoted `.env.compose`; anchor `env_file: [{path: .env.compose, required: false}]`
+  (required false also keeps CI `docker compose config` working without .env). (b) `va_telnyx.webhook_urls` hardcoded
+  https → sim could never reach the compose edge; added `webhook_scheme(va_env)` (http in local/test, like ws media)
+  used by telnyx_bootstrap.py and VoicemailSms.
+- dev_up.sh stages: deps up --wait → minio-init → sim key → (apps) telnyx_bootstrap --write-env with
+  EDGE_PUBLIC_HOST=edge:8100 → compose_env.py → run --rm --build migrate → up --wait --no-deps apps
+  (--force-recreate when the sim key changed). e2e override = SIM_CLOCK realtime. Decisions: specs/29 §2, specs/30 §3.2.
+- Evidence: clean volumes (`dev_down.sh -v`) + `make up PROFILE=e2e` exit 0, every service healthy (migrate ran
+  0001→0005, partitions p202611..p202702); readyz 8000/8100/8200 = 200; edge container key file == host key, no
+  `#`-valued env; sim SIM_CLOCK=realtime; `make seed` + `/v1/me` with test key = 200; `make down` afterwards.
+- Gates: make test 10717 passed / 7 skipped, 99.17 %; lint/typecheck/placeholders/spec refs 0; jscpd 0 clones; radon A (2.08); pip-audit clean; pnpm audit 3 moderate (no high). make e2e: no tests_e2e harness until P05-T17b. Infra stack restored with make up.
+
+## Review P05-T17a (2026-11-02): approved
+Reviewer re-ran: lint/typecheck/placeholders/spec refs 0; jscpd 0 clones; compose e2e config lists all 7 app services.
+make test: 10716 passed, 7 skipped, 99.16 %, 1 failure = test_runtime_sim.py::test_the_background_bed_fills_the_agent_track_between_utterances[None-True--40.0]
+(P05-T15, untouched here; wall-clock window 2000-2800 ms still caught the opener under full -n auto load: -17 dBFS).
+Passes 3/3 alone and the module passes with -n 8, so it is a pre-existing load flake; follow-up task fix:bed-window-flake.
+Notes for later: test_migrate asserts head == "0005" (update it with each new migration); APP_SERVICES lists dashboard ahead of its Dockerfile (harmless).

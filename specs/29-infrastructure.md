@@ -67,7 +67,7 @@ previews.
 
 ## 2. docker-compose (`docker-compose.yml`)
 
-Profiles: `infra` (default dependencies), `apps` (all services), `e2e` (apps + sim with accelerated clock),
+Profiles: `infra` (default dependencies), `apps` (all services), `e2e` (apps + sim, realtime clock: Decision P05-T17a),
 `observability` (otel-collector, prometheus, grafana, jaeger).
 
 ```yaml
@@ -213,7 +213,7 @@ services:
 volumes: {pgdata: {}, miniodata: {}}
 ```
 
-The `e2e` profile overrides `sim` with `SIM_CLOCK: accelerated` via `docker-compose.e2e.yml`. `infra/docker/postgres-init/01-roles.sql`
+The `e2e` profile adds `docker-compose.e2e.yml` (e2e-only sim settings; see the P05-T17a Decision below for the clock). `infra/docker/postgres-init/01-roles.sql`
 creates roles `va_app` and `va_system` (password `va` locally) and database `temporal`.
 
 > Decision (2026-10-25): P00-T09 implements the infra and observability services of this block; the `sim` service,
@@ -268,6 +268,40 @@ creates roles `va_app` and `va_system` (password `va` locally) and database `tem
 >    each), checks that the value is base64 of 32 bytes, sets `TELNYX_PUBLIC_KEY` in `.env` in place (comment kept),
 >    and writes the host `.sim/telnyx_public_key`. The simulator generates a new key on each start unless
 >    `SIM_ED25519_PRIVATE_KEY` is set, so the key is rewritten on every `make up`.
+
+> Decision (2026-11-02): application services (P05-T17a). The `x-py-env` anchor and the `migrate`, `api`, `edge`,
+> `media`, `worker`, `webhooks`, and `events-sink` services land as in the block above (build args, profiles, ports,
+> `stop_grace_period`, `depends_on`), with these deviations; `dashboard` arrives with `infra/docker/dashboard.Dockerfile`.
+> 1. Migrations ship inside the `va_db` wheel (`packages/va_db/src/va_db/migrations/`; `alembic.ini` points there), so
+>    `python -m va_db.migrate` works from the api image: it runs `alembic upgrade head` through the packaged `env.py`
+>    (login role from `DATABASE_URL`), then creates the `call_events` partitions of the current UTC month and the
+>    `--months-ahead` (default 3) months after it in one login-role transaction; both steps are idempotent; exit 0 on
+>    success, 1 on failure. `make migrate` runs the same module.
+> 2. The anchor reads `env_file` in the long form `{path: .env.compose, required: false}`: Compose's dotenv parser
+>    reads `KEY=  # comment` (the `.env.example` form of every blank variable) as the value `# comment`, while the
+>    services' python-dotenv reads it as empty, so `scripts/compose_env.py` renders `.env` (parsed with
+>    python-dotenv) as single-quoted literal assignments in `.env.compose` (git-ignored); `required: false` keeps
+>    `docker compose config` working on a checkout without it. The anchor also adds `TELNYX_PUBLIC_KEY: ""`: `.env` holds the key of
+>    the previous sim start, because `dev_up.sh` rewrites it only after the sim is up. A named volume `simkeys` is
+>    mounted at `/app/.sim` on `sim` (read-write) and on `edge` and `media` (read-only), so they read the current key
+>    through the `local` fallback `.sim/telnyx_public_key`; both also depend on `sim` being healthy. A fresh volume
+>    takes the image directory's ownership (uid 10001), so the non-root sim can write it.
+> 3. The anchor environment is named (`&py-env-vars`); `webhooks` merges it with `WEBHOOK_ALLOW_PRIVATE: "true"`
+>    because `<<` does not deep-merge mappings.
+> 4. Healthchecks use the same `python -c urllib` form against each service's `/readyz`: api 8000, edge 8100, media
+>    8200, worker 9300, webhooks 9400, events-sink 9500 (the last three publish no host port), each with
+>    `interval: 5s`, `timeout: 3s`, `retries: 30`; long-running services use `restart: unless-stopped`, `migrate`
+>    `restart: "no"`.
+> 5. `docker-compose.e2e.yml` pins `SIM_CLOCK: realtime` (specs/30 §3.2 Decision P05-T17a): the accelerated clock starts
+>    at a fixed virtual date and jumps whenever the sim idles, while the services verify signature timestamps and run
+>    timers on wall time.
+> 6. `scripts/dev_up.sh` starts in stages: dependencies (`up -d --wait --build`), one-shot jobs (`minio-init`), the sim
+>    key copy, then, when application services are selected, `scripts/telnyx_bootstrap.py --write-env` with
+>    `EDGE_PUBLIC_HOST=edge:8100` (FakeTelnyx forgets its resources on restart, and the app's webhook URL must be
+>    reachable from the sim container), `scripts/compose_env.py`, `docker compose run --rm --build migrate`, and finally
+>    `up -d --wait --build --no-deps` of the application services (`--no-deps` keeps `up` from re-running `migrate`;
+>    `--force-recreate` is added when the sim key changed, because edge and media read it once at startup). In `local`
+>    and `test` the edge webhook URLs are `http://` (`va_telnyx.webhook_scheme`, matching the `ws://` media URL).
 
 ## 3. Kubernetes Helm chart (`infra/helm/voiceagents`)
 

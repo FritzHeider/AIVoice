@@ -228,6 +228,13 @@ Behavioural rules:
   virtual timestamps advanced; the media worker must run with `FakeClock` injected via `VA_CLOCK=fake-shared` that reads
   virtual time from the sim's control API — only in e2e accelerated mode) — default e2e uses `realtime` for latency
   assertions and `accelerated` for long-flow tests (batch_100_calls, max_duration).
+
+> Decision (2026-11-02, P05-T17a): the compose e2e stack runs the simulators on the `realtime` clock only
+> (`docker-compose.e2e.yml`, specs/29 §2 Decision P05-T17a). The services verify Telnyx webhook and media WS signature
+> timestamps against wall time and run Temporal timers and 20 ms media pacing on the wall clock, while the accelerated
+> clock starts at a fixed virtual date and jumps whenever the sim idles; there is no `VA_CLOCK=fake-shared` mode.
+> Long flows (`max_duration`, `batch_100_calls`) use short configured limits instead of accelerated time; the
+> accelerated clock stays for the in-process simulator tests.
 - **AMD**: when dial has `answering_machine_detection=premium`, after answer the scenario's `answered_by` drives
   `call.machine.premium.detection.ended` (`human_residence` | `human_business` | `machine` | `silence` | `fax_detected`)
   at +1 800 ms, and for machine with `beep_at_ms` emits `call.machine.premium.greeting.ended` (`beep_detected`) at that time.

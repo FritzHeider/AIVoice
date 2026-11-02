@@ -434,6 +434,14 @@
 
 ## Fixes
 
+### mem-1793647998-0ae8
+> Flake: test_runtime_sim background-bed test (fixed 2000-2800 ms window on wall clock) can overlap the opener under full make test load; measure relative to opener end
+<!-- tags: media, testing, flaky | created: 2026-11-02 -->
+
+### mem-1793646897-5199
+> P05-T17a: docker compose env_file reads 'KEY=  # comment' as the comment text (python-dotenv reads empty) -> apps get junk secrets; dev_up renders .env to single-quoted .env.compose via scripts/compose_env.py. va_telnyx.webhook_urls(scheme=webhook_scheme(va_env)) is http in local/test so the compose sim reaches http edge. Migrations packaged in va_db/migrations; python -m va_db.migrate = head + call_events partitions
+<!-- tags: docker, compose, e2e | created: 2026-11-02 -->
+
 ### mem-1793645038-024d
 > Monitor on a log that make test truncates later reads the previous run's exit= line: delete the log (or sleep) before arming the monitor. Temporal workflow handlers that swallow ActivityError must re-raise CancelledError after a self-initiated cancel; a heartbeating blocking fake activity keeps time-skipping on wall time, so pair with a budget of ~2 s
 <!-- tags: testing, temporal, workflows | created: 2026-11-02 -->
