@@ -131,7 +131,7 @@ def test_null_observer_accepts_everything() -> None:
     NULL_OBSERVER.on_agent_turn(
         AgentTurn(1, "hello", "hello", interrupted=False, started_ms=1.0, ended_ms=2.0)
     )
-    NULL_OBSERVER.on_latency(TurnReport(TurnLatency(), []))
+    NULL_OBSERVER.on_latency(TurnReport(TurnLatency(), [], 0))
     NULL_OBSERVER.on_interrupt(
         InterruptRecord(1, 10.0, 5.0, 10.0, 5.0, 0.0, 0.0, 0, 5, level=2, reason="long_speech")
     )

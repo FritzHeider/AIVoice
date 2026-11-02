@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from media_helpers import write_models_dir
+from migration_helpers import migrated_postgres
 from service_helpers import isolate_env, reset_logging
 
 from va_media.settings import MediaSettings
@@ -21,3 +23,10 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 @pytest.fixture
 def models_dir(tmp_path: Path) -> Path:
     return write_models_dir(tmp_path / "models", b"onnx-model-bytes")
+
+
+@pytest.fixture(scope="session")
+def media_db_url() -> Iterator[str]:
+    """One migrated Postgres per xdist worker, shared by the media modules (filter by your own ids)."""
+    with migrated_postgres() as url:
+        yield url

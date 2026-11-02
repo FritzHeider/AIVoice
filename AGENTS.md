@@ -1320,3 +1320,12 @@ Grafana 3001
   inactivity timeout reached`) and turns the missing event into an empty `review.rejected`. `make test` (~25 min) is
   silent for longer: run it with Bash `run_in_background` (`make test > logs/make_test.log 2>&1`) and a Monitor that
   prints a heartbeat every ~2 min until `exit=` appears.
+- 2026-11-02 (P05-T11a): in-call persistence = `va_media.turns` (`TurnRecorder` = the call's `PipelineObserver`,
+  sync callbacks: turn ops go to the sink at once, events publish through one ordered task chain, `drain()`;
+  `CallPersistence(turns=, events=, event_rows=)` builds recorders and `finish_call`s) + `va_media.turn_writer.
+  TurnWriter` (write-behind ops from `va_db.call_turns`: `CallTurnRow`/`LatencyMerge`/`TurnDelete`, applied by
+  `va_db.repositories.CallTurnRepo`) + `va_media.runtime.open_persistence(database, redis, clock=)` (buffer +
+  writer loops; `CallRuntime(persistence=)`, default `None` = no recording). `TurnReport.turn_index` names the
+  user turn the latency belongs to. Shared trigger wait of write-behind loops: `va_events.batching.wait_for_trigger`.
+  Media Postgres tests use the session fixture `media_db_url` (conftest); runtime sim tests write to it with
+  `rig(persistence=...)` + `Rig.call(seeded=seed_call(...))` (`streamed_call(call_id=)` fixes the call id).

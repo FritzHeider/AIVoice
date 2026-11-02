@@ -12,6 +12,7 @@ dependencies = [
     "va-domain",
     "va-elevenlabs",
     "va-engine",
+    "va-events",
     "va-llm",
     "va-telnyx",
     "va-voice",

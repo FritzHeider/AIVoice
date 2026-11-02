@@ -19,6 +19,11 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    on without outbound DTMF); a :class:`~va_media.carrier_watch.CarrierWatch` task reads the carrier feed
    (Decision P05-T10b). With Redis, :class:`~va_media.phrases.CallPhrases` lets the Speaker play the opener
    pre-rendered at prefetch from the phrase cache instead of the TTS socket (Decision P05-T10d).
+5. with :class:`~va_media.turns.CallPersistence` (built by :func:`open_persistence`), a
+   :class:`~va_media.turns.TurnRecorder` observes the pipeline: ``call_turns`` rows through the write-behind
+   :class:`~va_media.turn_writer.TurnWriter` and ``call.turn``/``call.interrupt``/``call.latency`` events
+   through the per-process publisher and ``call_events`` buffer; when the pipeline ends the call's events are
+   awaited and its turns and event rows flushed (specs/07 §8 Decision P05-T11a).
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ from va_elevenlabs import (
 from va_engine.opener import phrase_voice
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import DialogueSource, TaskBrain
+from va_events import CallEventBuffer, DbCallEventWriter, EventPublisher
 from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
 from va_llm.providers import platform_provider
 from va_llm.tokens import TokenCounter, default_counter
@@ -79,12 +85,14 @@ from va_media.runtime_config import (
 from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
+from va_media.turn_writer import TurnWriter
+from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.phrase_cache import PhraseCacheMetrics
-from va_voice.pipeline import CallPipeline, PipelineConfig
+from va_voice.pipeline import NULL_OBSERVER, CallPipeline, PipelineConfig
 from va_voice.vad import SileroVad, VadExecutor
 from va_voice.vad_model import SileroModel, VadModel, VadModelError
 
@@ -95,6 +103,7 @@ __all__ = [
     "OrgSettingsSource",
     "RuntimeDependencies",
     "RuntimeFactory",
+    "open_persistence",
     "open_runtime",
 ]
 
@@ -157,9 +166,11 @@ class CallRuntime:
         metrics: ServiceMetrics,
         telnyx: TelnyxClientFactory | None = None,
         redis: Redis | None = None,
+        persistence: CallPersistence | None = None,
         tracer_provider: TracerProvider | None = None,
     ) -> None:
         self._settings = settings
+        self._persistence = persistence
         self._redis = redis
         self._telnyx = telnyx
         self._gateway = gateway
@@ -221,6 +232,7 @@ class CallRuntime:
             watcher = asyncio.create_task(watch.run(), name="carrier-watch")
             stack.push_async_callback(_stop_task, watcher)
             call_control_id = session.start.call_control_id
+            recorder = self._recorder(session)
             pipeline = CallPipeline(
                 transport=transport,
                 stt=vendors.stt,
@@ -248,10 +260,21 @@ class CallRuntime:
                     clock=self._clock,
                 ),
                 phrases=self._phrases(context, config),
+                observer=NULL_OBSERVER if recorder is None else recorder,
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
+            if recorder is not None and self._persistence is not None:
+                stack.push_async_callback(self._persistence.finish_call, recorder, context)
             result = await pipeline.run()
         return session_end(result)
+
+    def _recorder(self, session: CallSession) -> TurnRecorder | None:
+        """The call's turn recorder (``None`` without persistence: turns and events are not kept)."""
+        if self._persistence is None:
+            return None
+        return self._persistence.recorder(
+            session.context, clock=self._clock, answered_at=session.carrier_state.answered_at
+        )
 
     def _phrases(self, context: CallContext, config: PipelineConfig) -> CallPhrases | None:
         """Phrase cache lookups in the leg's TTS format (``None`` without Redis)."""
@@ -348,6 +371,28 @@ async def _load_model(vad: VadStatus, models_dir: Path) -> SileroModel | None:
 
 
 @asynccontextmanager
+async def open_persistence(
+    database: Database, redis: Redis, *, clock: Clock
+) -> AsyncIterator[CallPersistence]:
+    """The per-process ``call_events`` buffer, event publisher and turn writer, their flush loops running
+    until exit; on exit both loops stop and what is pending is written (failures logged)."""
+    rows = CallEventBuffer(DbCallEventWriter(database), clock=clock)
+    turns = TurnWriter(database, clock=clock)
+    loops = [
+        asyncio.create_task(rows.run(), name="call-events-flush"),
+        asyncio.create_task(turns.run(), name="call-turns-flush"),
+    ]
+    try:
+        yield CallPersistence(turns=turns, events=EventPublisher(redis, call_events=rows), event_rows=rows)
+    finally:
+        await turns.aclose()
+        await rows.aclose()
+        for loop in loops:
+            loop.cancel()
+        await asyncio.wait(loops)
+
+
+@asynccontextmanager
 async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword-only
     container: RuntimeDependencies,
     settings: MediaSettings,
@@ -386,6 +431,9 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             clock=clock,
         )
         executor = await stack.enter_async_context(VadExecutor(settings.media_vad_threads))
+        persistence = await stack.enter_async_context(
+            open_persistence(database, container.redis, clock=clock)
+        )
         await gateway.prewarm()
         yield CallRuntime(
             settings=settings,
@@ -398,4 +446,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             metrics=metrics,
             telnyx=telnyx,
             redis=container.redis,
+            persistence=persistence,
         )

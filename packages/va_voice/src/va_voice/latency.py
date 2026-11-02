@@ -323,6 +323,18 @@ class TurnTracer:
         started, ended = timer.started_ms, timer.ended_ms
         if started is None or ended is None:
             return
+        turn = self._tracer.start_span(
+            "turn",
+            context=self._parent,
+            start_time=self.to_ns(started),
+            attributes=self._turn_attributes(timer, latency),
+        )
+        context = trace.set_span_in_context(turn)
+        self._emit_stage_spans(context, timer, latency, measured)
+        self._emit_tool_spans(context, timer)
+        turn.end(end_time=self.to_ns(ended))
+
+    def _turn_attributes(self, timer: TurnTimer, latency: TurnLatency) -> dict[str, AttributeValue]:
         attributes: dict[str, AttributeValue] = {
             "va.call_id": self._call_id,
             "va.org_id": self._org_id,
@@ -334,10 +346,15 @@ class TurnTracer:
         if latency.e2e_ms is not None:
             attributes["va.e2e_ms"] = latency.e2e_ms
         attributes.update(timer.annotations("turn"))
-        turn = self._tracer.start_span(
-            "turn", context=self._parent, start_time=self.to_ns(started), attributes=attributes
-        )
-        context = trace.set_span_in_context(turn)
+        return attributes
+
+    def _emit_stage_spans(
+        self,
+        context: Context,
+        timer: TurnTimer,
+        latency: TurnLatency,
+        measured: dict[str, tuple[float, float]],
+    ) -> None:
         for metric, spec in METRIC_SPANS.items():
             bounds = measured.get(metric)
             if spec.span is None or bounds is None:
@@ -345,12 +362,13 @@ class TurnTracer:
             attrs: dict[str, AttributeValue] = {spec.attribute: getattr(latency, metric)}
             attrs.update(timer.annotations(spec.span))
             self._child(context, spec.span, bounds, attrs)
+
+    def _emit_tool_spans(self, context: Context, timer: TurnTimer) -> None:
         for tool in timer.tools:
             tool_attributes: dict[str, AttributeValue] = {"va.tool.duration_ms": _round_ms(tool.duration_ms)}
             if tool.status_code is not None:
                 tool_attributes["http.status_code"] = tool.status_code
             self._child(context, f"turn.tool {tool.name}", (tool.start_ms, tool.end_ms), tool_attributes)
-        turn.end(end_time=self.to_ns(ended))
 
     def _child(
         self, context: Context, name: str, bounds: tuple[float, float], attributes: dict[str, AttributeValue]
@@ -363,10 +381,12 @@ class TurnTracer:
 
 @dataclass(frozen=True, slots=True)
 class TurnReport:
-    """What a finished turn produced: the ``call_turns.latency`` values and the ``call.latency`` events."""
+    """What a finished turn produced: the ``call_turns.latency`` values and the ``call.latency`` events of the
+    user turn ``turn_index``."""
 
     latency: TurnLatency
     events: list[LatencyEvent]
+    turn_index: int
 
 
 class LatencyTracer:
@@ -393,7 +413,7 @@ class LatencyTracer:
             self._metrics.observe(latency)
         if self._tracer is not None:
             self._tracer.emit(timer, intervals)
-        return TurnReport(latency, latency_events(latency, timer.turn_index))
+        return TurnReport(latency, latency_events(latency, timer.turn_index), timer.turn_index)
 
     def barge_in(self, *, honored: bool, reaction_ms: float | None = None) -> None:
         if self._metrics is not None:

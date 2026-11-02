@@ -387,6 +387,30 @@ is concatenated to the previous user turn text (`"{prev} {new}"`) before re-runn
 > cancels an action still in flight (`pipeline_action_abandoned`). A turn cannot cancel `EndCall`: it sets closing
 > first, and turns arriving while closing are never answered.
 
+> Decision (2026-11-02) P05-T11a: in-call persistence. Each attached call's pipeline observer is
+> `va_media.turns.TurnRecorder` (built by `CallPersistence.recorder` when the runtime has persistence). Rows:
+> `on_user_turn` → a `user` row (text as handed to the Brain, keypad turns as `"[DTMF: …]"`, `language_code`);
+> a turn with `supersedes` first deletes the superseded `user` row (its text is the front of the new turn) and
+> only the new turn gets a `call.turn`; `on_agent_turn` → an `assistant` row (`text` = planned original,
+> `text_spoken`, `interrupted`); `on_latency` → the measured `TurnLatency` values merged into the `user` row of
+> `TurnReport.turn_index` (`latency = latency || new`, a no-op when that row is gone). `start_ms`/`end_ms` =
+> pipeline ms − the pipeline clock when the recorder was built + (wall now − carrier `answered_at`) at that
+> moment (0 when the carrier state has no `answered_at`), rounded, at least 0. Rows are queued synchronously on
+> the per-process `va_media.turn_writer.TurnWriter` (write-behind): flushed every 2 s on the injected clock, on
+> call end, and at shutdown, in queue order, one tenant transaction per org, ops idempotent
+> (`va_db.repositories.CallTurnRepo.upsert_many` = `ON CONFLICT (call_id, turn_index, role) DO UPDATE`, latency
+> merged); a failed org's ops are re-queued in order, at most 10 000 ops kept (oldest dropped,
+> `media.turns_dropped`). Events: `call.turn` (message = text cut to 200 characters, data `{turn_index, role,
+> text, node_id: null, interrupted}`), `call.interrupt` (data `{turn_index, played_chars, total_chars,
+> played_ms, reaction_ms}`, message `"Interrupted after {played} of {total} characters"`), and every
+> `TurnReport.events` item as `call.latency`, published in callback order by one chain of background tasks
+> through the per-process `EventPublisher` whose `call_events` sink is the per-process `CallEventBuffer`; a
+> publish failure is logged `media.event_publish_failed` (types only, never text) and never ends the call. When
+> the pipeline ends, the runtime awaits the call's pending events, then flushes the call's turns
+> (`TurnWriter.flush_call`) and the event buffer (failures logged; the periodic flush retries). The buffer and
+> writer loops are started by `va_media.runtime.open_persistence` inside `open_runtime` and closed (pending rows
+> written) after the sessions drained.
+
 ## 9. Outbound clock and playback tracking
 
 `OutboundClock` runs every 20 ms (drift-corrected using `loop.time()` targets, not sleep accumulation):

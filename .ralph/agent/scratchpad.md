@@ -229,3 +229,156 @@ FakeElevenLabs, runtime opener without TTS socket request, miss/Redis-failure fa
 and cache_text both strip then apply the pronunciation guide; chars accounting matches the live path.
 Non-blocking note: worker/media settings do not refuse the `sim-eleven-key` default in staging/production (same
 as before this task). make e2e harness does not exist until P05-T17.
+
+## Plan P05-T11a — In-call persistence: turn write-behind and live call events (Planner, 2026-11-02)
+
+P05-T11 was split into T11a (this), T11b (end routine: hangup, final row, slot, workflow signal, worker_lost
+hangup in CallWorkflow, stream_closed → user_hangup with 3 s wait), T11c (stop endpoints). P05-T10c depends on
+P05-T11 (all three). Spec refs: specs/07 §8 steps 2/6/7, §16 Decision P04-T12a ("observer → write-behind,
+call.turn, call.latency"), §20 Decision (latency events), specs/03 call_turns DDL, specs/19 §1 step 4 + §2 rows
+`call.turn` (data role, text, node_id, interrupted), `call.interrupt` (played_chars, total_chars), `call.latency`.
+Write `> Decision (2026-11-02): in-call persistence (P05-T11a)` under specs/07 §8 covering every rule below.
+
+### Design (decided)
+1. **Repo** `va_db.repositories.CallTurnRepo(session, org_id)` (new module `repositories/call_turns.py`,
+   exported): `upsert_many(rows: Sequence[CallTurnRow])` = one `INSERT ... ON CONFLICT (call_id, turn_index, role)
+   DO UPDATE SET text, text_spoken, interrupted, start_ms, end_ms, node_id, node_name, language_code, latency =
+   call_turns.latency || EXCLUDED.latency` (ids from `va_common.ids` uuid7); `delete_turn(call_id, turn_index,
+   role)`; `list_for_call(call_id)` ordered by `(turn_index, role)` (used by tests and later P05-T16).
+   `CallTurnRow` = frozen dataclass in `va_db.call_turns` (org_id, call_id, turn_index, role, text, text_spoken,
+   interrupted, start_ms, end_ms, node_id, language_code, latency dict). Tenant session only (RLS).
+2. **Turn writer** `va_media.turn_writer.TurnWriter(database, *, clock, interval_s=2.0)`: per-process
+   write-behind like `CallEventBuffer` (reuse its structure, not copy: if the loop/lock/trim logic would clone,
+   factor a small generic `va_events.batching` helper or make TurnWriter compose a shared base; jscpd must stay 0).
+   API: `add(row)`, `add_delete(org_id, call_id, turn_index)`, `run()` (flush every 2 s, supervised by the media
+   lifespan), `flush_call(call_id)` (writes that call's pending ops now; used at call end in T11b), `aclose()`.
+   One tenant transaction per org per flush; a failed org's ops are re-queued in order (bounded pending, oldest
+   dropped with `media.turns_dropped` warning); ops for one call keep their order (delete after its upsert).
+3. **Recorder** `va_media.turns.TurnRecorder` implements `va_voice.pipeline.PipelineObserver` (sync callbacks →
+   schedule work on supervised background tasks owned by the recorder; `aclose()`/`drain()` awaits them):
+   - timeline: `TurnRecorder(context, writer, publisher, *, origin_ms, answered_offset_ms)`; `start_ms/end_ms =
+     round(pipeline_ms - origin_ms + answered_offset_ms)` clamped ≥ 0; `origin_ms` = `clock.monotonic()*1000` when
+     the runtime builds the pipeline, `answered_offset_ms` = `clock.now() - carrier_state.answered_at` in ms when the
+     snapshot has `answered_at` (≥ 0), else 0.
+   - `on_user_turn`: row role `user` (text, language_code, start/end); a `supersedes` index → `add_delete` of
+     that user row (the superseding turn carries its text) and a `call.turn` for the new turn only. DTMF turns are
+     stored with their `"[DTMF: …]"` text. Event `call.turn` data `{turn_index, role:"user", text, node_id: null,
+     interrupted: false}`, message = text truncated to 200 chars.
+   - `on_agent_turn`: role `assistant`, `text`=original, `text_spoken`, `interrupted`, start/end from
+     started_ms/ended_ms; `call.turn` with role `assistant`.
+   - `on_latency(report)`: add `turn_index` to `va_voice.latency.TurnReport` (from the timer) if absent; latency
+     goes onto the **user** row of that index through the upsert merge (`latency || EXCLUDED.latency`, so a later
+     latency-only upsert must not clobber text: implement as a separate `merge_latency(call_id, turn_index,
+     role, latency)` op in the writer, or include the full row — choose the separate op, UPDATE ... SET latency =
+     latency || :l; if the row is not yet flushed, the writer applies ops in order so the UPDATE follows the
+     INSERT). Each `report.events` item → `call.latency` event (message, data verbatim).
+   - `on_interrupt(record)`: `call.interrupt` with data `{turn_index, played_chars, total_chars, played_ms,
+     reaction_ms}`; if `InterruptRecord` lacks played/total chars, add them in `va_voice.pipeline` (the pipeline has
+     the truncated text: `len(text_spoken)`, `len(text)`), keep existing tests green.
+   - Events go through `EventPublisher.publish(new_event(EventType.X, org_id=, call_id=, clock=, ...))` whose
+     `call_events` sink is the per-process `CallEventBuffer(DbCallEventWriter(database))`; publish failures
+     (`EventPublishError`) are logged `media.event_publish_failed` (type only), never raised into the pipeline.
+     Never log turn text.
+4. **Lifespan/runtime wiring** (`va_media.main` + `runtime.open_runtime`): build `CallEventBuffer` +
+   `EventPublisher(redis, call_events=buffer)` + `TurnWriter` once; run `buffer.run()` and `writer.run()` under the
+   lifespan supervisor (or the runtime's AsyncExitStack with supervised tasks — follow how `ChannelHub.run` is
+   supervised); `aclose()` both on shutdown (after sessions drained). `CallRuntime(..., recorder_factory=)` or
+   direct `writer=`/`publisher=` kw-only (default None → `NULL_OBSERVER`, so existing tests stay valid);
+   `_converse` passes `observer=TurnRecorder(...)` to `CallPipeline` and, in a `finally`, `await
+   recorder.drain()` then `await writer.flush_call(call_id)` and `await buffer.flush_call(call_id)` (T11b will move
+   this into the end routine; keep it in one helper `_flush_call(context)`).
+5. No migration (call_turns exists). AGENTS.md: one learned line (TurnRecorder/TurnWriter, test helpers).
+
+### Tests
+- `packages/va_db/tests/test_call_turn_repo.py` (Postgres, module DB via existing support): upsert insert+update
+  idempotent, latency merge keeps text, delete, list order, RLS (other org sees nothing).
+- `apps/media_worker/tests/test_turn_writer.py` (Postgres + unit with a fake writer): interval flush on
+  ManualClock, flush_call only that call, failure re-queue keeps order, per-org transactions, aclose flushes,
+  pending cap drops oldest.
+- `apps/media_worker/tests/test_turns.py` (unit, fake writer + `publisher_rig`-style fakeredis publisher): user/
+  agent rows with answer offset, supersede → delete + one event, DTMF turn, interrupted agent turn text_spoken,
+  latency merge op + events (no e2e → only stage events), interrupt event data, publish failure swallowed and
+  logged without text.
+- `packages/va_voice` tests for any new `TurnReport.turn_index` / `InterruptRecord` chars fields.
+- `apps/media_worker/tests/test_runtime_sim.py` (extend; real Postgres via the media test DB support or the
+  va_db `running_postgres` helpers; SystemClock-timed rows need a current `call_events` partition — seed the call
+  with `call_rows.seed_call`): a FakeTelnyx+FakeElevenLabs+FakeLLM conversation (opener + one caller utterance +
+  reply) leaves `call_turns` rows `assistant 0 / user 1 / assistant 2` (indexes per the pipeline counter) and
+  `call_events` rows `call.turn` x3 plus `call.latency` for the answered turn, all with the context's org_id.
+
+### Gates
+`make fmt`, `make lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`, `make test` in the
+background with a heartbeat Monitor (≥ 85 %/package, new modules ~100 %), `npx --yes jscpd@4 --silent` (0),
+`uvx radon cc -s -a` on touched src (no C+), audit. `make e2e` harness does not exist until P05-T17 — say so.
+
+### Risks
+- PipelineObserver callbacks are sync: never await in them; background tasks must be tracked and drained, or a
+  call's last turns are lost / tasks leak across tests (filterwarnings=error).
+- Ordering between the upsert and the latency merge for one turn: the writer must apply a call's ops in order
+  within one transaction.
+- Media tests that build `CallRuntime` without writer/publisher must keep working (defaults None).
+- `call_events` partitions: use real time (`SystemClock`) for rows written to Postgres in tests.
+
+## Build P05-T11a (Builder, 2026-11-02)
+
+Implemented per plan. Pieces: `va_db.call_turns` (`CallTurnRow`, `LatencyMerge`, `TurnDelete`, `TurnOp`);
+`va_db.repositories.CallTurnRepo` (`upsert_many` ON CONFLICT DO UPDATE with `latency || EXCLUDED.latency`, in-batch
+key collapse, `merge_latency`, `delete_turn`, `list_for_call`, refuses rows of another org);
+`va_voice.latency.TurnReport.turn_index` (InterruptRecord already had played/total chars);
+`va_events.batching.wait_for_trigger` (shared by `CallEventBuffer` and the turn writer, keeps jscpd 0);
+`va_media.turn_writer.TurnWriter` (sync `add`, 2 s loop, `flush_call`, per-org transactions, in-order requeue,
+`TurnWriteError`, cap 10 000); `va_media.turns.TurnRecorder` (observer, ordered publish chain, `drain`) +
+`CallPersistence` (`recorder(context, clock=, answered_at=)`, `finish_call`); `va_media.runtime.open_persistence`
+entered by `open_runtime`; `CallRuntime(persistence=)` (default None → NULL_OBSERVER) with `finish_call` pushed on
+the call's exit stack. va-media-worker now depends on va-events (uv.lock updated). Spec: specs/07 §8 Decision
+(2026-11-02) P05-T11a. Tests: va_db `test_call_turn_repo.py`, media `test_turn_writer.py`, `test_turns.py`,
+`test_runtime_sim.py::test_a_conversation_leaves_ordered_turns_and_call_events` (real Postgres; session fixture
+`media_db_url` moved to the media conftest; `streamed_call(call_id=)`, `Rig.call(seeded=)`).
+Note: radon reports `TurnTracer.emit` C (11) in latency.py — pre-existing, not modified (only TurnReport changed).
+Evidence: make fmt ok; make lint pass; make typecheck pass (1148 files); placeholders 0; check_spec_refs 0;
+make test 9712 passed / 7 skipped, 99.16 %, exit 0 (logs/make_test_p05t11a.log; new modules 100 %, runtime 99 %
+with the pre-existing no-Redis line); jscpd 0 clones; radon: no C+ in new code (latency.py `TurnTracer.emit` C is
+pre-existing, untouched); pip-audit clean; pnpm audit 3 moderate (pre-existing, no TS change). make e2e: the
+tests_e2e harness does not exist until P05-T17 (not run).
+
+## Plan P05-T11a — blocker resolution (Planner, 2026-11-02, after build.blocked)
+
+Cause: backpressure turned `build.done` into `build.blocked` because the payload said `complexity: 11`
+(radon `TurnTracer.emit` C (11) in `packages/va_voice/src/va_voice/latency.py`, a file this task touches). The
+loop needs every touched src function at ≤ B (≤ 10), and the payload's complexity number must be the real max.
+Everything else in the build stands (do NOT redo the implementation). Acceptance in plan/phase-05.md amended.
+
+### Builder steps (only these)
+1. Refactor `TurnTracer.emit` (latency.py:319) without behaviour change, e.g.:
+   - `_turn_attributes(timer, latency) -> dict[str, AttributeValue]` (call/org/turn_index/interrupted, optional
+     node_id, optional e2e_ms, `timer.annotations("turn")`);
+   - `_emit_stage_spans(context, timer, latency, measured)` (the METRIC_SPANS loop);
+   - `_emit_tool_spans(context, timer)` (the tools loop, status code optional).
+   `emit` keeps: measure → latency → early return on missing started/ended → start turn span → helpers → end.
+   Check `uvx radon cc -s packages/va_voice/src/va_voice/latency.py` → every block A/B.
+2. Existing `packages/va_voice/tests/test_latency.py` span tests must stay green unchanged (they pin span names,
+   attributes, timings); run `uv run pytest packages/va_voice -q`.
+3. Re-run gates: make fmt, make lint typecheck placeholders, check_spec_refs, `make test` in background with a
+   heartbeat Monitor, jscpd, `uvx radon cc -s -n C apps/media_worker/src packages/va_db/src packages/va_events/src
+   packages/va_voice/src` (must print nothing), audit.
+4. Emit build.done WITHOUT `--json`, plain text containing `tests: pass`, `lint: pass`, `typecheck: pass`,
+   `audit: pass`, `coverage: pass`, `duplication: pass`, `complexity: <max CC number of touched src, ≤ 10>`,
+   `specs: pass`. Do not append explanations after the complexity number that mention C/11.
+
+## Build P05-T11a blocker fix (Builder, 2026-11-02)
+
+`TurnTracer.emit` split into `_turn_attributes`, `_emit_stage_spans`, `_emit_tool_spans` (no behaviour change;
+test_latency span tests unchanged and green). latency.py now all A; max CC over touched src = 9.
+Evidence: make fmt 0; make lint 0; make typecheck pass (1148 files); placeholders 0; check_spec_refs 0;
+radon -n C over media_worker/va_db/va_events/va_voice src prints nothing; make test 9712 passed / 7 skipped,
+99.16 %, exit=0 (logs/make_test_p05t11a_fix.log); jscpd 0 clones; pip-audit clean; pnpm audit 3 moderate
+(pre-existing). make e2e harness does not exist until P05-T17 (not run).
+
+## Review P05-T11a (Reviewer, 2026-11-02) — APPROVED
+
+Re-ran: make lint 0, make typecheck 0, placeholders 0, check_spec_refs 0, make test 9712 passed / 7 skipped,
+99.16 % (turns/turn_writer/call_turns/repo/batching 100 %, runtime 99 %), jscpd 0 clones, radon -n C on touched
+src prints nothing. Diff checked against specs/03 call_turns DDL (UNIQUE (call_id, turn_index, role) backs the
+ON CONFLICT), specs/19 §2 call.turn/interrupt/latency data, specs/07 §8 Decision P05-T11a; pipeline timeline is
+clock.monotonic()*1000, matching the recorder origin. No text in logs, tenant sessions only, publish failures
+logged. make e2e harness does not exist until P05-T17.

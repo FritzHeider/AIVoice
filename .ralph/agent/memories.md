@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793602869-7053
+> P05-T11a: media in-call persistence = va_media.turns TurnRecorder (PipelineObserver, sync turn ops, ordered publish task chain + drain) + CallPersistence + va_media.turn_writer.TurnWriter (write-behind va_db.call_turns ops via CallTurnRepo) + runtime.open_persistence; media session fixture media_db_url in conftest; runtime sim tests on Postgres via rig(persistence=) + Rig.call(seeded=seed_call(...)); mypy flags 'while not self._closed: ... if self._closed' as unreachable - move the check into a helper returning bool
+<!-- tags: media, persistence, testing | created: 2026-11-02 -->
+
 ### mem-1793593160-73e2
 > P05-T10a: va_media.runtime CallRuntime is the media session body (open_runtime entered by create_app only when no body= injected; tests outside media_app must pass body=read_until_stop). Runtime sim tests: one realtime_telnyx() SimState + running_sims(elevenlabs,llm) + streamed_call(state=,loader=FakeContextLoader(**cfg)); assert via state.elevenlabs.tts_requests generated_text (first record empty) and state.llm.requests since sim stream is gone after hangup
 <!-- tags: media, pipeline, testing | created: 2026-11-02 -->

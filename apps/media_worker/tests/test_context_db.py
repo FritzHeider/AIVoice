@@ -5,14 +5,13 @@ specs/07 §3 Decision P05-T07b)."""
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 import fakeredis
 import pytest
 from call_rows import SeededCall, seed_call, seed_leg
 from media_helpers import call_context
-from migration_helpers import migrated_postgres
 from resolved_configs import resolved_config
 from service_helpers import json_log_stream, log_events
 from tenant_rows import open_database
@@ -24,12 +23,6 @@ from va_domain.call_context import CallContext, call_context_key
 from va_media.context import ContextRefusedError, DbCallContextLoader
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture(scope="module")
-def media_db_url() -> Iterator[str]:
-    with migrated_postgres() as url:
-        yield url
 
 
 @pytest.fixture

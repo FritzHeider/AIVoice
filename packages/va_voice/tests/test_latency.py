@@ -109,7 +109,7 @@ def test_misordered_marks_are_unmeasured_and_logged_once() -> None:
     timer.mark(M.USER_SPEECH_END, 100.0)
     timer.mark(M.EOT, 150.0)
     report = LatencyTracer(FrozenClock()).finish(timer)
-    assert report.latency == TurnLatency(eot_ms=50)
+    assert (report.latency, report.turn_index) == (TurnLatency(eot_ms=50), 4)
     warnings = [e for e in log_events(stream) if e["event"] == "turn_latency_misordered"]
     assert [(e["metric"], e["turn_index"], e["start_ms"], e["end_ms"]) for e in warnings] == [
         ("llm_ttft_ms", 4, 500.0, 400.0)

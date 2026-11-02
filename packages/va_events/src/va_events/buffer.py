@@ -19,6 +19,7 @@ from typing import Final
 
 from va_common.logging import get_logger
 from va_common.time import Clock
+from va_events.batching import wait_for_trigger
 from va_events.call_events import CallEventRow, CallEventWriteError, CallEventWriter
 
 __all__ = ["DEFAULT_FLUSH_INTERVAL_S", "DEFAULT_FLUSH_ROWS", "DEFAULT_MAX_PENDING", "CallEventBuffer"]
@@ -117,14 +118,7 @@ class CallEventBuffer:
         self._wake.clear()
         if len(self._pending) >= self._max_rows or self._closed:
             return
-        sleeper = asyncio.ensure_future(self._clock.sleep(self._interval_s))
-        woken = asyncio.ensure_future(self._wake.wait())
-        try:
-            await asyncio.wait({sleeper, woken}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            sleeper.cancel()
-            woken.cancel()
-            await asyncio.gather(sleeper, woken, return_exceptions=True)
+        await wait_for_trigger(self._clock, self._wake, self._interval_s)
 
     def _requeue(self, rows: Sequence[CallEventRow]) -> None:
         self._pending.extendleft(reversed(rows))

@@ -180,11 +180,29 @@
   - Deliverables: AMD result handling from the carrier channel (human/machine/fax, 3 s answer window, `detect_timeout_ms`), `voicemail.sensitive` LLM classification, actions `hangup`/`leave_message`/`leave_message_and_sms`/`ignore` (beep wait via `call.machine.premium.greeting.ended` or 1 200 ms silence, max 20 s), voicemail SMS via va_telnyx messaging, `call.amd`/`call.voicemail` events, `answered_by`, end reasons `voicemail_hangup`/`voicemail_left`/`fax_detected`
   - Acceptance: simulator tests for every action and trigger (premium AMD machine, sensitive classifier, fax, timeout → human).
 
-- [ ] P05-T11 Call ending, persistence, max duration, stop API
+- [ ] P05-T11 Call ending, persistence, max duration, stop API (split into P05-T11a–c below; tick when all three are ticked)
   - Spec refs: specs/05-calls-api.md (POST /v1/calls/{id}/stop, stop all, §9 end reasons); specs/07-media-pipeline.md (max_duration timer, error phrase); specs/03-data-model.md (call_turns, call_events)
   - Depends on: P05-T08
   - Deliverables: end paths (agent, user hangup, timeout, API, error), Telnyx hangup, turn write-behind flush, final call row update, lock release, workflow signal, stop endpoints via control channel
   - Acceptance: e2e max_duration and stop_via_api pass; end_reason/ended_by correct for each path.
+
+- [x] P05-T11a In-call persistence: turn write-behind and live call events from the media worker — CallTurnRepo upsert/merge/delete, TurnWriter write-behind, TurnRecorder + call.turn/interrupt/latency events, open_persistence in open_runtime; make test 9712 passed / 7 skipped (99.16 %), new modules 100 %, lint/typecheck/placeholders/spec refs pass, jscpd 0, radon no C+
+  - Spec refs: specs/07-media-pipeline.md §8 steps 2, 6, 7, §16 Decision P04-T12a, §20 Decision; specs/03-data-model.md (call_turns); specs/19-events-and-webhooks.md §1 step 4, §2 (`call.turn`, `call.interrupt`, `call.latency`); specs/01 §2.1 step 6
+  - Depends on: P05-T10a
+  - Deliverables: `va_db.repositories.CallTurnRepo` (idempotent batch upsert on `(call_id, turn_index, role)`, delete of a superseded user turn); `va_media.turns.TurnRecorder` (`PipelineObserver`: user/agent turn rows relative to the answer time, latency onto the turn row, `call.turn`/`call.interrupt`/`call.latency` events through a per-process `EventPublisher` + `CallEventBuffer`), write-behind flush every 2 s and on call end; per-process event buffer and turn writer supervised by the media lifespan
+  - Acceptance: unit tests for row/event mapping (supersede, interrupted agent turn, latency without e2e); Postgres tests for the upsert/flush/retry; FakeTelnyx+FakeElevenLabs+FakeLLM runtime test where a conversation leaves ordered `call_turns` rows and `call.turn`/`call.latency` `call_events` rows; `uvx radon cc -s -n C` on every touched src file reports nothing (the pre-existing `va_voice.latency.TurnTracer.emit` C (11) is refactored to ≤ B, behaviour and spans unchanged).
+
+- [ ] P05-T11b Media end-of-call routine: hangup, final call row, slot release, workflow signal
+  - Spec refs: specs/07-media-pipeline.md §18, §19 (worker_lost, Telnyx WS closed); specs/05 §8, §9; specs/06 §5 Decision P05-T02 item 7; specs/01 §2.1 steps 7-8, §3
+  - Depends on: P05-T11a
+  - Deliverables: `va_media.call_end` end routine run inside the session before the lock is released (end reason resolution incl. `stream_closed` → `user_hangup`/`max_duration` from the carrier hangup, 3 s wait, else hangup + `error`; Telnyx `hangup` of the primary leg with `command_id`; turn/event flush; `completed` with `end_reason`/`ended_by`/`ended_at`/connected + transfer seconds through logic shared with the `end_call` activity; `call.ended`; slot release; `signal_pipeline_finished` over a media Temporal client); `CallWorkflow` hangs up after a `worker_lost` pipeline end; `max_duration`/`no_input_timeout`/`agent_end_call`/`error`/`api_stop`/`insufficient_credits`/`ivr_dead_end` paths verified end to end
+  - Acceptance: runtime sim tests per end path assert `calls.status/end_reason/ended_by/connected_seconds`, one FakeTelnyx hangup (none after a callee hangup or ownership loss), the slot released, the signal sent; workflow test for the `worker_lost` hangup.
+
+- [ ] P05-T11c Stop endpoints: `POST /v1/calls/{call_id}/stop` and `POST /v1/calls/active/stop`
+  - Spec refs: specs/05-calls-api.md §7.2, §7.3; specs/07 §17; specs/04 §3.2 (calls.operate); specs/31 (`CALL_NOT_ACTIVE`)
+  - Depends on: P05-T11b
+  - Deliverables: stop service (pre-answer → `signal_cancel`; in progress → `stop` control message; terminal/transferred → 409), stop-all with optional `call_ids`, `calls.operate` permission, OpenAPI + cross-tenant registrations
+  - Acceptance: API tests per status, stop-all counts and filter, 404 for another org's call, control message published; media runtime test where a published stop ends the call with `api_stop`/`api` and no goodbye line.
 
 - [ ] P05-T12 Inbound call routing
   - Spec refs: specs/01-architecture.md §2 (inbound); specs/06-telephony-telnyx.md (inbound routing algorithm); specs/16-phone-numbers.md §4 (InboundConfig model)

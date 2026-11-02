@@ -5,8 +5,8 @@ enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OI
 :class:`InvitationRepo` (an org's invitations; specs/04 §6), :class:`CreditTransferRepo` (parent and
 sub-account credit moves; specs/04 §8.4) and :func:`grant_credits` (manual grants), the envelope's
 :class:`OrgDataKeyStore` (specs/28 §3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1),
-the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), and
-the system-scope ones.
+the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), the
+tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -27,6 +27,7 @@ from va_db.repositories.base import (
     require_positive,
 )
 from va_db.repositories.billing_reconcile import BalanceDrift, BillingReconcileRepo
+from va_db.repositories.call_turns import CallTurnRepo
 from va_db.repositories.calls import (
     CallLegLookupRepo,
     CallLegRepo,
@@ -126,6 +127,7 @@ __all__ = [
     "CallLegRepo",
     "CallRepo",
     "CallTransitionError",
+    "CallTurnRepo",
     "ClaimOutcome",
     "CreditTransfer",
     "CreditTransferRepo",

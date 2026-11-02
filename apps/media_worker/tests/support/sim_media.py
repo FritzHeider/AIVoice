@@ -68,22 +68,24 @@ class StreamedCall:
 
 
 @asynccontextmanager
-async def streamed_call(
+async def streamed_call(  # noqa: PLR0913 - keyword-only test seams
     models_dir: Path,
     body: Any,
     *,
     state: SimState | None = None,
     loader: FakeContextLoader | None = None,
     answered: bool = False,
+    call_id: uuid.UUID | None = None,
     **dial_overrides: Any,
 ) -> AsyncIterator[StreamedCall]:
     """Dial a FakeTelnyx call whose media stream attaches to a media worker running ``body`` (``state``: a
     wall-clock sim state shared with other simulators; ``loader``: the call context source; ``answered``:
-    the carrier state already says ``answered``, as the edge would store it)."""
+    the carrier state already says ``answered``, as the edge would store it; ``call_id``: the call's id, a
+    fresh one by default)."""
     state = state if state is not None else realtime_telnyx()
     keys = MediaKeys()  # the stream token secret; FakeTelnyx signs the handshake with its own key
     port = free_port()
-    call_id = uuid.uuid4()
+    call_id = call_id if call_id is not None else uuid.uuid4()
     container = FakeMediaContainer()
     if answered:
         await container.redis.hset(carrier_state_key(call_id), mapping={"answered": "1"})

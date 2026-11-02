@@ -17,27 +17,34 @@ from typing import Any, Final
 import fakeredis
 import httpx
 import pytest
+from call_rows import SeededCall, seed_call
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, call_context
+from resolved_configs import resolved_config
 from service_helpers import settings_of
 from sim_media import StreamedCall, realtime_telnyx, streamed_call
+from sqlalchemy import select
 from starlette.applications import Starlette
 from telnyx_helpers import CALLEE, register
+from tenant_rows import open_database
 from tts_helpers import VOICE_ID
 
 from va_common.http import http_client
 from va_common.metrics import Service, build_metrics, new_registry
 from va_common.time import SystemClock, utcnow
+from va_db.models import CallEvent
+from va_db.repositories import CallTurnRepo
 from va_domain.org import OrgSettings
 from va_elevenlabs import ElevenLabsRest
 from va_elevenlabs.tts_models import DEFAULT_TTS_MODEL
 from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
 from va_llm.providers import platform_provider
 from va_llm.tokens import default_counter
-from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime
+from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, open_persistence
 from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
 from va_media.settings import MediaSettings
+from va_media.turns import CallPersistence
 from va_sim.server import running_sims, simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
@@ -92,14 +99,24 @@ class Rig:
 
     @asynccontextmanager
     async def call(
-        self, *, answered: bool = True, opener_text: str | None = None, **config: Any
+        self,
+        *,
+        answered: bool = True,
+        opener_text: str | None = None,
+        seeded: SeededCall | None = None,
+        **config: Any,
     ) -> AsyncIterator[StreamedCall]:
-        """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait)."""
+        """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait);
+        ``seeded``: use that call's id and org (a call row on a real database)."""
         values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": OPENER, **config}
         loader = FakeContextLoader(**values)
         loader.opener_text = opener_text
+        call_id = None
+        if seeded is not None:
+            call_id = seeded.call_id
+            loader.contexts[call_id] = call_context(call_id, org_id=seeded.org_id, **values)
         async with streamed_call(
-            MODELS_DIR, self.body, state=self.state, loader=loader, answered=answered
+            MODELS_DIR, self.body, state=self.state, loader=loader, answered=answered, call_id=call_id
         ) as streamed:
             yield streamed
 
@@ -124,7 +141,10 @@ async def no_byo_key(_account_id: uuid.UUID) -> str | None:
 
 @asynccontextmanager
 async def rig(
-    org: OrgSettings | None = None, *, redis: fakeredis.FakeAsyncRedis | None = None
+    org: OrgSettings | None = None,
+    *,
+    redis: fakeredis.FakeAsyncRedis | None = None,
+    persistence: CallPersistence | None = None,
 ) -> AsyncIterator[Rig]:
     state = realtime_telnyx()
     telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
@@ -169,6 +189,7 @@ async def rig(
                     clock=clock,
                 ),
                 redis=phrase_redis,
+                persistence=persistence,
             )
             yield Rig(state, llm, RecordingRuntime(runtime), org_settings, phrase_redis, urls["elevenlabs"])
 
@@ -368,3 +389,48 @@ async def test_without_a_cached_opener_it_goes_through_the_socket(*, broken: boo
             end = await r.body.end()
         assert end == STREAM_CLOSED
         assert socket_texts(r.state) == [PRERENDERED]
+
+
+@pytest.mark.integration
+async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url: str) -> None:
+    async with open_database(media_db_url) as database:
+        call = await seed_call(database, status="in_progress", config=resolved_config())
+        async with (
+            open_persistence(database, fakeredis.FakeAsyncRedis(), clock=SystemClock()) as persistence,
+            rig(persistence=persistence) as r,
+        ):
+            await add_rules(
+                r.llm,
+                "rules:\n  - id: table\n    match: {last_user_regex: 'table'}\n"
+                "    respond: {content: 'Sure, for how many people?'}\n",
+            )
+            r.scenario(
+                "wait_agent_speech: {}",
+                "say: {text: I would like to book a table}",
+                "wait_agent_speech: {}",
+                "hangup: {}",
+            )
+            async with r.call(seeded=call):
+                assert await r.body.end() == STREAM_CLOSED
+            # The call's turns and event rows were flushed when its pipeline ended, before the writers close.
+            async with database.tenant_session(call.org_id) as session:
+                turns = await CallTurnRepo(session, call.org_id).list_for_call(call.call_id)
+                events = list(
+                    await session.scalars(
+                        select(CallEvent).where(CallEvent.call_id == call.call_id).order_by(CallEvent.seq)
+                    )
+                )
+    assert [(t.turn_index, t.role) for t in turns] == [(0, "assistant"), (1, "user"), (2, "assistant")]
+    assert turns[0].text_ == OPENER
+    assert "book a table" in turns[1].text_.lower()
+    assert turns[2].text_ == "Sure, for how many people?"
+    assert turns[1].latency.get("stt_final_ms") is not None
+    assert all(t.org_id == call.org_id for t in turns)
+    assert turns[0].start_ms <= turns[1].start_ms <= turns[2].start_ms
+    assert [e.seq for e in events] == list(range(1, len(events) + 1))
+    assert all(e.org_id == call.org_id for e in events)
+    turn_events = [(e.data["turn_index"], e.data["role"]) for e in events if e.category == "call"]
+    assert turn_events == [(0, "assistant"), (1, "user"), (2, "assistant")]
+    latency = [e for e in events if e.category == "latency"]
+    assert latency
+    assert {e.data["turn_index"] for e in latency} == {1}
