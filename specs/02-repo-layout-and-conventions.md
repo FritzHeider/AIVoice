@@ -263,7 +263,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `ELEVENLABS_API_BASE` | worker, api | `http://localhost:9200` (sim) | real: `https://api.elevenlabs.io` |
 | `ELEVENLABS_WS_BASE` | media | `ws://localhost:9200` | real: `wss://api.elevenlabs.io` (US: `wss://api.us.elevenlabs.io`) |
 | `ELEVENLABS_API_KEY` | media, worker, api | `sim-eleven-key` | |
-| `ELEVENLABS_TTS_MODEL` | media | `eleven_flash_v2_5` | |
+| `ELEVENLABS_TTS_MODEL` | media, worker | `eleven_flash_v2_5` | |
 | `ELEVENLABS_STT_MODEL` | media | `scribe_v2_realtime` | |
 | `ELEVENLABS_BATCH_STT_MODEL` | worker | `scribe_v2` | |
 | `LLM_DEFAULT_BASE_URL` | media, worker, api | `http://localhost:9300/v1` (sim) | real: `https://api.telnyx.com/v2/ai/openai` |

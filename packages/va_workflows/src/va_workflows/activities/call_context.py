@@ -5,6 +5,10 @@ The activity reads the ``calls`` row in the call's tenant session, builds the co
 :func:`va_db.call_context.build_call_context` (carrying the current trace context so the media worker can
 continue the trace), and saves it under ``call:{<id>}:ctx``. A call that already reached a terminal status
 (stopped before dialling) gets no context. An unknown call (or another org's) fails without retries.
+
+With an :class:`~va_workflows.activities.prerender.OpenerPrerender` the context carries the rendered opener
+(``opener_text``) and, after the context is saved, the opener and the standard fillers are rendered into the
+phrase cache (specs/07 §11 step 5, Decision P05-T10d); a failed render never fails the activity.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from va_workflows.activities.context_inputs import PREFETCH_RETRY, PREFETCH_TIME
 from va_workflows.activities.errors import CALL_NOT_FOUND
 from va_workflows.activities.inputs import CallActivityInput
 from va_workflows.activities.lookup import load_call
+from va_workflows.activities.prerender import OpenerPrerender
 
 __all__ = [
     "CALL_NOT_FOUND",
@@ -38,10 +43,23 @@ _log = get_logger(__name__)
 class CallContextActivities:
     """Activities that prepare the per-call context; one instance per worker process."""
 
-    def __init__(self, database: Database, store: CallContextStore, clock: Clock) -> None:
+    def __init__(
+        self,
+        database: Database,
+        store: CallContextStore,
+        clock: Clock,
+        *,
+        prerender: OpenerPrerender | None = None,
+    ) -> None:
         self._database = database
         self._store = store
         self._clock = clock
+        self._prerender = prerender
+
+    @property
+    def prerender(self) -> OpenerPrerender | None:
+        """The opener pre-render (``None``: contexts carry no ``opener_text``, nothing is cached)."""
+        return self._prerender
 
     @activity.defn(name="prefetch_call_context")
     async def prefetch_call_context(self, request: CallActivityInput) -> PrefetchResult:
@@ -52,10 +70,17 @@ class CallContextActivities:
             if context is None:
                 _log.info("call_context.skipped", status=status)
                 return PrefetchResult(stored=False, status=status)
+            prerender = self._prerender
+            if prerender is not None:
+                opener = prerender.opener_for(context, self._clock.now())
+                context = context.model_copy(update={"opener_text": opener})
             await self._store.save(context)
             ttl_s = context.ttl_s()
             _log.info("call_context.stored", status=status, ttl_s=ttl_s)
-            return PrefetchResult(stored=True, status=status, ttl_s=ttl_s)
+            opener_cached = False
+            if prerender is not None:
+                opener_cached = (await prerender.render(context)).opener
+            return PrefetchResult(stored=True, status=status, ttl_s=ttl_s, opener_cached=opener_cached)
 
     async def _build(
         self, request: CallActivityInput, carrier: dict[str, str]

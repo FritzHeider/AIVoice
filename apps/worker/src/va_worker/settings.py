@@ -16,6 +16,7 @@ from va_common.settings import (
     TemporalSettings,
 )
 from va_compliance.international import parse_allowed_countries
+from va_elevenlabs.settings import ElevenLabsRestSettings
 from va_telnyx.settings import SIM_TELNYX_API_KEY, TelnyxApiSettings
 from va_workflows.activities.dial_request import DialSettings
 
@@ -32,6 +33,7 @@ class WorkerSettings(
     CryptoSettings,
     StreamTokenSettings,
     TelnyxApiSettings,
+    ElevenLabsRestSettings,
 ):
     """Settings of the Temporal worker host: the call activities dial through Telnyx (platform key, Call
     Control App, media host, stream token secret) and decrypt BYO Telnyx keys (envelope encryption).
@@ -40,7 +42,8 @@ class WorkerSettings(
     ``test`` so the module imports without environment; :meth:`dial_settings` refuses them then. Staging and
     production refuse an empty secret, an empty app id, and an empty or simulator Telnyx key at
     construction (the platform key check lives in :class:`~va_telnyx.settings.TelnyxApiSettings`). Errors
-    name the variable, never its value.
+    name the variable, never its value. The ElevenLabs REST settings serve the opener pre-render (specs/07
+    §11 Decision P05-T10d).
     """
 
     service_name: ClassVar[str] = "worker"

@@ -13,8 +13,10 @@ dependencies = [
     "va-common",
     "va-compliance",
     "va-db",
+    "va-elevenlabs",
     "va-events",
     "va-telnyx",
+    "va-voice",
     "va-workflows",
 ]
 
@@ -30,6 +32,8 @@ va-billing = { workspace = true }
 va-common = { workspace = true }
 va-compliance = { workspace = true }
 va-db = { workspace = true }
+va-elevenlabs = { workspace = true }
 va-events = { workspace = true }
 va-telnyx = { workspace = true }
+va-voice = { workspace = true }
 va-workflows = { workspace = true }

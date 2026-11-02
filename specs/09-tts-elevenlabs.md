@@ -251,6 +251,10 @@ fillers/backchannels ("Sure.", "Got it.", "One moment.", "Let me check that for 
 >    does not cancel it (the phrase is still stored), a failure reaches every waiter, `aclose()` cancels renders
 >    in flight. Each `get_or_render` counts `va_tts_cache_hits_total` when Redis served it, else
 >    `va_tts_cache_misses_total`.
+>
+> Decision (2026-11-02): the prefetch of the templated `first_sentence` and the fillers, and cached playback in
+> the Speaker, are specs/07 §11 Decision P05-T10d (worker: `va_workflows.activities.prerender`; media:
+> `va_media.phrases.CallPhrases` over `va_voice.phrase_cache.read_phrase`).
 
 ## 10. Standalone TTS product endpoints
 

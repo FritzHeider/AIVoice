@@ -378,6 +378,10 @@
 
 ## Fixes
 
+### mem-1793600670-6fa9
+> Empty review.rejected = Reviewer killed by Ralph 300 s inactivity timeout (diagnostics log 'Execution inactivity timeout'); run make test in background + Monitor heartbeat every 2 min
+<!-- tags: tooling, testing | created: 2026-11-02 -->
+
 ### mem-1793554070-c45d
 > failure: ruff check --fix --select RUF022,RUF100,SIM300 on packages/va_db stripped unrelated noqa comments in 16 files; fix=git checkout untouched files; never include RUF100 in a --select --fix
 <!-- tags: tooling, lint | created: 2026-11-01 -->

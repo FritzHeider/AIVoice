@@ -3,7 +3,8 @@ Decision P05-T06d).
 
 One instance of each activity class per process, sharing one call limiter, one event publisher (activities
 write their ``call_events`` rows in their own transactions, so it has no sink), and one Redis call context
-store. The shared Telnyx HTTP pool and client factory come from :mod:`va_telnyx.settings`.
+store. The shared Telnyx HTTP pool and client factory come from :mod:`va_telnyx.settings`; the opener
+pre-render (specs/07 §11 Decision P05-T10d) shares the process's phrase cache.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from va_workflows.activities.call_context import CallContextActivities
 from va_workflows.activities.call_end import CallEndActivities
 from va_workflows.activities.dial_request import DialSettings
 from va_workflows.activities.liveness import CallLivenessActivities
+from va_workflows.activities.prerender import OpenerPrerender
 from va_workflows.activities.telephony import TelephonyActivities
 from va_workflows.registration import CALL_WORKFLOWS
 
@@ -45,7 +47,7 @@ class WorkerActivities:
     liveness: CallLivenessActivities
 
     @classmethod
-    def build(
+    def build(  # noqa: PLR0913 - the process's shared collaborators, keyword-only
         cls,
         *,
         database: Database,
@@ -53,11 +55,12 @@ class WorkerActivities:
         telnyx: TelnyxClientFactory,
         dial: DialSettings,
         clock: Clock,
+        prerender: OpenerPrerender | None = None,
     ) -> WorkerActivities:
         limiter = CallLimiter(redis, clock=clock)
         publisher = EventPublisher(redis, call_events=None)
         return cls(
-            context=CallContextActivities(database, CallContextStore(redis), clock),
+            context=CallContextActivities(database, CallContextStore(redis), clock, prerender=prerender),
             telephony=TelephonyActivities(
                 database=database,
                 telnyx=telnyx,

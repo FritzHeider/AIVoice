@@ -34,6 +34,7 @@ from va_voice.phrase_cache import (
     decode_entry,
     encode_entry,
     phrase_cache_key,
+    read_phrase,
 )
 from va_voice.text.alignment import AlignmentTimeline
 
@@ -523,3 +524,43 @@ async def test_prefetch_maps_failures_to_none_and_logs_them() -> None:
 async def test_prefetch_reraises_programming_errors() -> None:
     with pytest.raises(ValueError, match="empty"):
         await make_cache(FakeSynth()).prefetch(VOICE, ULAW_8000, [""])
+
+
+async def test_read_phrase_serves_a_stored_entry_without_rendering() -> None:
+    redis = FakeAsyncRedis()
+    synth = FakeSynth()
+    rendered = await make_cache(synth, redis).get_or_render(VOICE, TEXT, ULAW_8000, ttl_s=PER_CALL_TTL_S)
+    assert await read_phrase(redis, VOICE, TEXT, ULAW_8000) == replace(rendered, cached=True)
+    assert len(synth.calls) == 1
+
+
+async def test_read_phrase_misses_absent_entries_and_other_formats() -> None:
+    redis = FakeAsyncRedis()
+    await make_cache(FakeSynth(), redis).get_or_render(VOICE, TEXT, ULAW_8000)
+    assert await read_phrase(redis, VOICE, "Got it.", ULAW_8000) is None
+    assert await read_phrase(redis, VOICE, TEXT, PCM16LE_16000) is None
+
+
+async def test_read_phrase_treats_a_malformed_entry_as_a_miss() -> None:
+    redis = FakeAsyncRedis()
+    key = phrase_cache_key(VOICE, TEXT, ULAW_8000)
+    await redis.set(key, b"garbage")
+    stream = json_log_stream()
+    assert await read_phrase(redis, VOICE, TEXT, ULAW_8000) is None
+    assert [e["entry"] for e in log_events(stream) if e["event"] == "tts.phrase_cache_malformed"] == [key]
+    assert await redis.get(key) == b"garbage"
+
+
+async def test_read_phrase_fails_open_when_redis_is_down() -> None:
+    server = FakeServer()
+    redis = FakeAsyncRedis(server=server)
+    server.connected = False
+    stream = json_log_stream()
+    assert await read_phrase(redis, VOICE, TEXT, ULAW_8000) is None
+    [event] = [e for e in log_events(stream) if e["event"] == "tts.phrase_cache_unavailable"]
+    assert (event["operation"], event["entry"]) == ("get", phrase_cache_key(VOICE, TEXT, ULAW_8000))
+
+
+async def test_read_phrase_rejects_unsupported_formats() -> None:
+    with pytest.raises(ValueError, match="unsupported phrase format"):
+        await read_phrase(FakeAsyncRedis(), VOICE, TEXT, L16_16000)

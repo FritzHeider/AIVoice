@@ -3194,8 +3194,10 @@ dependencies = [
     { name = "va-common" },
     { name = "va-compliance" },
     { name = "va-db" },
+    { name = "va-elevenlabs" },
     { name = "va-events" },
     { name = "va-telnyx" },
+    { name = "va-voice" },
     { name = "va-workflows" },
 ]
 
@@ -3210,8 +3212,10 @@ requires-dist = [
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-compliance", editable = "packages/va_compliance" },
     { name = "va-db", editable = "packages/va_db" },
+    { name = "va-elevenlabs", editable = "packages/va_elevenlabs" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
+    { name = "va-voice", editable = "packages/va_voice" },
     { name = "va-workflows", editable = "packages/va_workflows" },
 ]
 
@@ -3229,8 +3233,10 @@ dependencies = [
     { name = "va-common" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-engine" },
     { name = "va-events" },
     { name = "va-telnyx" },
+    { name = "va-voice" },
 ]
 
 [package.metadata]
@@ -3244,8 +3250,10 @@ requires-dist = [
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
+    { name = "va-voice", editable = "packages/va_voice" },
 ]
 
 [[package]]

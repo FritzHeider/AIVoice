@@ -13,8 +13,10 @@ dependencies = [
     "va-common",
     "va-db",
     "va-domain",
+    "va-engine",
     "va-events",
     "va-telnyx",
+    "va-voice",
 ]
 
 [build-system]
@@ -26,5 +28,7 @@ va-billing = { workspace = true }
 va-common = { workspace = true }
 va-db = { workspace = true }
 va-domain = { workspace = true }
+va-engine = { workspace = true }
 va-events = { workspace = true }
 va-telnyx = { workspace = true }
+va-voice = { workspace = true }

@@ -1,6 +1,6 @@
 """The call runtime end to end on the simulators (wall clock): FakeTelnyx streams a scripted call to a served
 media worker whose body is :class:`CallRuntime` over FakeElevenLabs (STT/TTS), FakeLLM, and FakeTelnyx for
-outbound DTMF (specs/07 §16 Decision P05-T10a, §11 Decision P05-T10b)."""
+outbound DTMF (specs/07 §16 Decision P05-T10a, §11 Decisions P05-T10b and P05-T10d)."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from typing import Any, Final
 
 import fakeredis
 import httpx
+import pytest
 from llm_helpers import add_rules
-from media_helpers import FakeContextLoader
+from media_helpers import FakeContextLoader, call_context
 from service_helpers import settings_of
 from sim_media import StreamedCall, realtime_telnyx, streamed_call
 from starlette.applications import Starlette
@@ -26,8 +27,10 @@ from tts_helpers import VOICE_ID
 
 from va_common.http import http_client
 from va_common.metrics import Service, build_metrics, new_registry
-from va_common.time import SystemClock
+from va_common.time import SystemClock, utcnow
 from va_domain.org import OrgSettings
+from va_elevenlabs import ElevenLabsRest
+from va_elevenlabs.tts_models import DEFAULT_TTS_MODEL
 from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
 from va_llm.providers import platform_provider
 from va_llm.tokens import default_counter
@@ -39,8 +42,10 @@ from va_sim.server import running_sims, simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx.settings import telnyx_factory
+from va_voice.phrase_cache import PhraseCache
 from va_voice.vad import VadExecutor
 from va_voice.vad_model import SileroModel
+from va_workflows.activities.prerender import OpenerPrerender
 
 MODELS_DIR: Final = Path(__file__).resolve().parents[3] / "models"
 WAIT_S: Final = 20.0
@@ -82,12 +87,17 @@ class Rig:
     llm: httpx.AsyncClient
     body: RecordingRuntime
     org_settings: StaticOrgSettings
+    redis: fakeredis.FakeAsyncRedis
+    elevenlabs_url: str
 
     @asynccontextmanager
-    async def call(self, *, answered: bool = True, **config: Any) -> AsyncIterator[StreamedCall]:
+    async def call(
+        self, *, answered: bool = True, opener_text: str | None = None, **config: Any
+    ) -> AsyncIterator[StreamedCall]:
         """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait)."""
         values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": OPENER, **config}
         loader = FakeContextLoader(**values)
+        loader.opener_text = opener_text
         async with streamed_call(
             MODELS_DIR, self.body, state=self.state, loader=loader, answered=answered
         ) as streamed:
@@ -113,7 +123,9 @@ async def no_byo_key(_account_id: uuid.UUID) -> str | None:
 
 
 @asynccontextmanager
-async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
+async def rig(
+    org: OrgSettings | None = None, *, redis: fakeredis.FakeAsyncRedis | None = None
+) -> AsyncIterator[Rig]:
     state = realtime_telnyx()
     telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
     async with running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls:
@@ -127,6 +139,7 @@ async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
         metrics = build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
         clock = SystemClock()
         org_settings = StaticOrgSettings(org if org is not None else OrgSettings())
+        phrase_redis = redis if redis is not None else fakeredis.FakeAsyncRedis()
         async with (
             http_client(settings, timeout=LLM_HTTP_TIMEOUT) as http,
             VadExecutor(1) as executor,
@@ -155,8 +168,9 @@ async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
                     resolve_key=no_byo_key,
                     clock=clock,
                 ),
+                redis=phrase_redis,
             )
-            yield Rig(state, llm, RecordingRuntime(runtime), org_settings)
+            yield Rig(state, llm, RecordingRuntime(runtime), org_settings, phrase_redis, urls["elevenlabs"])
 
 
 def spoken(state: SimState) -> list[str]:
@@ -294,3 +308,63 @@ async def test_wait_for_greeting_holds_the_opener_until_the_callee_speaks() -> N
         assert len(r.state.llm.requests) == 1
         assert "Hello who is this" in r.user_messages()[0]
         assert len(spoken(r.state)) == 1
+
+
+PRERENDERED: Final = "Hello Ana, this is Maya calling from the clinic about your visit."
+
+
+def socket_texts(state: SimState) -> list[str]:
+    """Text generated over the TTS WebSocket (REST renders excluded)."""
+    texts = [r.generated_text.strip() for r in state.elevenlabs.tts_requests if r.transport != "rest"]
+    return [text for text in texts if text]
+
+
+async def prerender(r: Rig, **config: Any) -> str | None:
+    """Run the worker's pre-render over FakeElevenLabs REST into the rig's Redis; the context's opener."""
+    values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": PRERENDERED, **config}
+    context = call_context(uuid.uuid4(), **values)
+    async with httpx.AsyncClient() as http:
+        rest = ElevenLabsRest("sim-eleven-key", r.elevenlabs_url, http, clock=SystemClock())
+        cache = PhraseCache(rest, r.redis)
+        job = OpenerPrerender(
+            cache=cache, org_settings=StaticOrgSettings(OrgSettings()), model_id=DEFAULT_TTS_MODEL
+        )
+        context = context.model_copy(update={"opener_text": job.opener_for(context, utcnow())})
+        result = await job.render(context)
+        await cache.aclose()
+    assert result.opener
+    return context.opener_text
+
+
+async def test_a_prerendered_opener_plays_from_the_phrase_cache() -> None:
+    async with rig() as r:
+        opener = await prerender(r, wait_for_greeting=False)
+        assert opener == PRERENDERED
+        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        async with r.call(
+            opener_text=opener, first_sentence=PRERENDERED, wait_for_greeting=False
+        ) as streamed:
+            end = await r.body.end()
+            agent_audio = bytes(streamed.sim_call().audio.agent)
+        assert end == STREAM_CLOSED
+        # The caller heard the cached opener (over a second of PCM16 8 kHz agent audio, not silence).
+        assert len(agent_audio) > 16_000
+        assert any(agent_audio)
+        assert socket_texts(r.state) == []
+        assert r.state.llm.requests == []
+
+
+def broken_redis() -> fakeredis.FakeAsyncRedis:
+    server = fakeredis.FakeServer()
+    server.connected = False
+    return fakeredis.FakeAsyncRedis(server=server)
+
+
+@pytest.mark.parametrize("broken", [False, True], ids=["no_entry", "redis_down"])
+async def test_without_a_cached_opener_it_goes_through_the_socket(*, broken: bool) -> None:
+    async with rig(redis=broken_redis() if broken else None) as r:
+        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        async with r.call(opener_text=PRERENDERED, first_sentence=PRERENDERED, wait_for_greeting=False):
+            end = await r.body.end()
+        assert end == STREAM_CLOSED
+        assert socket_texts(r.state) == [PRERENDERED]

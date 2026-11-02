@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -10,9 +12,11 @@ from call_rows import SeededCall, load_call, seed_call
 from fakeredis import FakeAsyncRedis
 from obs_helpers import memory_provider
 from resolved_configs import resolved_config
+from rest_client_helpers import SimRest, sim_rest
 from service_helpers import json_log_stream, log_events
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
+from tts_helpers import VOICE_ID
 
 from va_common.ids import new_id
 from va_common.time import FrozenClock
@@ -21,6 +25,8 @@ from va_db.call_states import TERMINAL_STATUSES
 from va_db.models import CallStatus
 from va_db.session import Database
 from va_domain.call_context import call_context_key
+from va_domain.org import OrgSettings
+from va_voice.phrase_cache import PhraseCache
 from va_workflows.activities.call_context import (
     CALL_NOT_FOUND,
     PREFETCH_RETRY,
@@ -29,6 +35,7 @@ from va_workflows.activities.call_context import (
     PrefetchResult,
 )
 from va_workflows.activities.inputs import CallActivityInput
+from va_workflows.activities.prerender import OpenerPrerender
 
 NOW = datetime(2026, 11, 1, 12, tzinfo=UTC)
 
@@ -132,7 +139,83 @@ async def test_another_orgs_call_is_not_found(
 
 
 def test_the_retry_policy_is_bounded_and_skips_missing_calls() -> None:
-    assert timedelta(seconds=10) == PREFETCH_TIMEOUT
+    assert timedelta(seconds=20) == PREFETCH_TIMEOUT
     assert PREFETCH_RETRY.maximum_attempts == 3
     assert PREFETCH_RETRY.maximum_interval == timedelta(seconds=5)
     assert list(PREFETCH_RETRY.non_retryable_error_types or []) == [CALL_NOT_FOUND]
+
+
+def _opener_config(**overrides: object) -> dict[str, object]:
+    return {
+        **resolved_config(),
+        "first_sentence": "Hi {{first_name}}, this is Maya.",
+        "request_data": {"first_name": "Ana"},
+        "wait_for_greeting": False,
+        "provider_voice_id": VOICE_ID,
+        **overrides,
+    }
+
+
+@dataclass
+class _Orgs:
+    async def get(self, org_id: uuid.UUID) -> OrgSettings | None:
+        del org_id
+        return OrgSettings()
+
+
+@pytest.fixture
+async def phrases() -> AsyncIterator[tuple[SimRest, PhraseCache]]:
+    async with sim_rest() as sim:
+        cache = PhraseCache(sim.client, FakeAsyncRedis())
+        try:
+            yield sim, cache
+        finally:
+            await cache.aclose()
+
+
+def _prerendering(database: Database, redis: FakeAsyncRedis, cache: PhraseCache) -> CallContextActivities:
+    prerender = OpenerPrerender(cache=cache, org_settings=_Orgs(), model_id="eleven_flash_v2_5")
+    return CallContextActivities(database, CallContextStore(redis), FrozenClock(NOW), prerender=prerender)
+
+
+async def test_the_prerendered_opener_is_stored_and_cached(
+    database: Database, redis: FakeAsyncRedis, phrases: tuple[SimRest, PhraseCache]
+) -> None:
+    sim, cache = phrases
+    call = await seed_call(database, status="queued", config=_opener_config())
+
+    result = await _run(_prerendering(database, redis, cache), call)
+
+    assert result == PrefetchResult(stored=True, status="queued", ttl_s=result.ttl_s, opener_cached=True)
+    stored = await CallContextStore(redis).load(call.call_id)
+    assert stored is not None
+    assert stored.opener_text == "Hi Ana, this is Maya."
+    texts = [record["text"] for record in await sim.records("/sim/elevenlabs/tts/requests", "requests")]
+    assert "Hi Ana, this is Maya." in texts
+
+
+async def test_the_context_is_stored_when_the_render_fails(
+    database: Database, redis: FakeAsyncRedis, phrases: tuple[SimRest, PhraseCache]
+) -> None:
+    sim, cache = phrases
+    await sim.send("PUT", "/sim/elevenlabs/tts/fault", {"kind": "error", "times": 100})
+    call = await seed_call(database, status="queued", config=_opener_config())
+
+    result = await _run(_prerendering(database, redis, cache), call)
+
+    assert (result.stored, result.opener_cached) == (True, False)
+    stored = await CallContextStore(redis).load(call.call_id)
+    assert stored is not None
+    assert stored.opener_text == "Hi Ana, this is Maya."
+
+
+async def test_a_terminal_call_renders_nothing(
+    database: Database, redis: FakeAsyncRedis, phrases: tuple[SimRest, PhraseCache]
+) -> None:
+    sim, cache = phrases
+    call = await seed_call(database, status="canceled", config=_opener_config())
+
+    result = await _run(_prerendering(database, redis, cache), call)
+
+    assert result == PrefetchResult(stored=False, status="canceled")
+    assert await sim.records("/sim/elevenlabs/tts/requests", "requests") == []

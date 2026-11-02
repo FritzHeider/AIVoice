@@ -9,6 +9,7 @@ from temporalio import activity
 from temporalio.contrib.pydantic import pydantic_data_converter
 from worker_helpers import dialing_settings
 
+from va_common.http import http_client
 from va_telnyx.settings import TELNYX_HTTP_TIMEOUT, telnyx_http
 from va_worker import main as worker_main
 from va_worker.main import build_container
@@ -79,7 +80,7 @@ async def test_container_closes_what_it_opened(monkeypatch: pytest.MonkeyPatch) 
     closed = track_closes(monkeypatch)
     async with build_container(dialing_settings(**UNREACHABLE)):
         assert closed == []
-    assert sorted(closed) == ["engine", "engine", "engine", "http", "redis"]
+    assert sorted(closed) == ["engine", "engine", "engine", "http", "http", "redis"]
 
 
 async def test_the_telnyx_pool_uses_the_spec_timeouts() -> None:
@@ -91,3 +92,24 @@ async def test_the_telnyx_pool_uses_the_spec_timeouts() -> None:
             5,
             2,
         )
+
+
+async def test_the_prefetch_activity_prerenders_with_the_configured_tts_model() -> None:
+    settings = dialing_settings(**UNREACHABLE, elevenlabs_tts_model="eleven_turbo_v2_5")
+    async with build_container(settings) as container:
+        prerender = container.activities.context.prerender
+        assert prerender is not None
+        assert prerender.model_id == "eleven_turbo_v2_5"
+
+
+async def test_the_elevenlabs_client_uses_its_socket_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts: list[object] = []
+    original = http_client
+
+    def recording(settings: object, *, timeout: object, **kwargs: object) -> object:
+        timeouts.append(timeout)
+        return original(settings, timeout=timeout, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worker_main, "http_client", recording)
+    async with build_container(dialing_settings(**UNREACHABLE)):
+        assert timeouts == [worker_main.ELEVENLABS_HTTP_TIMEOUT]

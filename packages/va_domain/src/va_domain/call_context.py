@@ -4,6 +4,8 @@
 :mod:`va_domain.carrier`) with a TTL of the maximum call duration plus one hour. ``config`` is the resolved
 :class:`~va_domain.calls.config.SendCallConfig`. ``variables`` and ``context_sections`` are filled by pre-call
 dynamic data, ``memory`` by the contact's memory (specs/20 §2.3); each stays empty until its producer exists.
+``opener_text`` is the templated ``first_sentence`` rendered once at prefetch (specs/07 §11 step 5, Decision
+P05-T10d): the media worker speaks it verbatim, so it matches the phrase cache entry rendered for it.
 """
 
 from __future__ import annotations
@@ -98,6 +100,7 @@ class CallContext(BaseModel):
     memory: CallMemory | None = None
     trace_context: dict[str, str] = Field(default_factory=dict)
     created_at: AwareDatetime
+    opener_text: str | None = None
 
     def ttl_s(self) -> int:
         """Seconds the stored context lives: see :func:`call_context_ttl_s`."""

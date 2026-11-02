@@ -17,7 +17,8 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    :class:`~va_media.actions.MediaActions` (``press_button``), both over the call's Telnyx client (platform
    or BYO account; an account that cannot be resolved is logged ``media.telnyx_unavailable`` and the call goes
    on without outbound DTMF); a :class:`~va_media.carrier_watch.CarrierWatch` task reads the carrier feed
-   (Decision P05-T10b).
+   (Decision P05-T10b). With Redis, :class:`~va_media.phrases.CallPhrases` lets the Speaker play the opener
+   pre-rendered at prefetch from the phrase cache instead of the TTS socket (Decision P05-T10d).
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from va_elevenlabs import (
     TtsError,
     TtsSocket,
 )
+from va_engine.opener import phrase_voice
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import DialogueSource, TaskBrain
 from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
@@ -64,6 +66,7 @@ from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
+from va_media.phrases import CallPhrases
 from va_media.runtime_config import (
     ERROR_END,
     pipeline_config,
@@ -80,6 +83,7 @@ from va_media.vad_model import VadStatus
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
+from va_voice.phrase_cache import PhraseCacheMetrics
 from va_voice.pipeline import CallPipeline, PipelineConfig
 from va_voice.vad import SileroVad, VadExecutor
 from va_voice.vad_model import SileroModel, VadModel, VadModelError
@@ -152,9 +156,11 @@ class CallRuntime:
         clock: Clock,
         metrics: ServiceMetrics,
         telnyx: TelnyxClientFactory | None = None,
+        redis: Redis | None = None,
         tracer_provider: TracerProvider | None = None,
     ) -> None:
         self._settings = settings
+        self._redis = redis
         self._telnyx = telnyx
         self._gateway = gateway
         self._counter = counter
@@ -241,10 +247,22 @@ class CallRuntime:
                     telnyx=telnyx,
                     clock=self._clock,
                 ),
+                phrases=self._phrases(context, config),
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             result = await pipeline.run()
         return session_end(result)
+
+    def _phrases(self, context: CallContext, config: PipelineConfig) -> CallPhrases | None:
+        """Phrase cache lookups in the leg's TTS format (``None`` without Redis)."""
+        if self._redis is None:
+            return None
+        return CallPhrases(
+            self._redis,
+            phrase_voice(context, model_id=self._settings.elevenlabs_tts_model),
+            config.tts_format,
+            metrics=PhraseCacheMetrics(self._metrics),
+        )
 
     async def _telnyx_client(self, context: CallContext) -> TelnyxClient | None:
         """The call's Telnyx client (platform or BYO); ``None`` without a factory or when the BYO key cannot
@@ -379,4 +397,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             clock=clock,
             metrics=metrics,
             telnyx=telnyx,
+            redis=container.redis,
         )

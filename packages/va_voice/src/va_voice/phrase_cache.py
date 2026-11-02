@@ -53,6 +53,7 @@ __all__ = [
     "decode_entry",
     "encode_entry",
     "phrase_cache_key",
+    "read_phrase",
 ]
 
 KEY_PREFIX: Final = "tts:cache:"
@@ -260,6 +261,27 @@ def decode_entry(raw: bytes | str, text: str, fmt: AudioFormat) -> CachedPhrase 
     return CachedPhrase(text, fmt, audio, alignment, duration_ms, cached=True)
 
 
+async def read_phrase(redis: Redis, voice: PhraseVoice, text: str, fmt: AudioFormat) -> CachedPhrase | None:
+    """The stored phrase without rendering (``None`` on a miss, a malformed value, or a Redis failure, each
+    logged by entry name only); ``ValueError`` for an unsupported ``fmt``."""
+    _format(fmt)
+    return await _read_entry(redis, phrase_cache_key(voice, text, fmt), text, fmt)
+
+
+async def _read_entry(redis: Redis, key: str, text: str, fmt: AudioFormat) -> CachedPhrase | None:
+    try:
+        raw = await redis.get(key)
+    except (RedisError, OSError) as exc:
+        _log.warning("tts.phrase_cache_unavailable", operation="get", entry=key, error=type(exc).__name__)
+        return None
+    if raw is None:
+        return None
+    phrase = decode_entry(raw, text, fmt)
+    if phrase is None:
+        _log.warning("tts.phrase_cache_malformed", entry=key)
+    return phrase
+
+
 class PhraseCache:
     """Serves phrases from Redis, rendering misses through ``synth`` (one render per key at a time)."""
 
@@ -292,7 +314,7 @@ class PhraseCache:
         key = phrase_cache_key(voice, text, fmt)
         flight = self._flights.get(key)
         if flight is None:
-            cached = await self._read(key, text, fmt)
+            cached = await _read_entry(self._redis, key, text, fmt)
             if cached is not None:
                 self._count(hit=True)
                 return cached
@@ -379,19 +401,6 @@ class PhraseCache:
         duration_ms = _round_half_up(fmt.duration_ms(len(audio)))
         phrase = CachedPhrase(text, fmt, audio, alignment, duration_ms, cached=False)
         await self._write(key, phrase, ttl_s)
-        return phrase
-
-    async def _read(self, key: str, text: str, fmt: AudioFormat) -> CachedPhrase | None:
-        try:
-            raw = await self._redis.get(key)
-        except (RedisError, OSError) as exc:
-            _log.warning("tts.phrase_cache_unavailable", operation="get", entry=key, error=type(exc).__name__)
-            return None
-        if raw is None:
-            return None
-        phrase = decode_entry(raw, text, fmt)
-        if phrase is None:
-            _log.warning("tts.phrase_cache_malformed", entry=key)
         return phrase
 
     async def _write(self, key: str, phrase: CachedPhrase, ttl_s: int) -> None:

@@ -1306,3 +1306,17 @@ Grafana 3001
   `streamed_call(..., answered=True)` seeds the carrier state (else every outbound call waits 2 s); the rig's
   `CallRuntime(telnyx=telnyx_factory(...))` talks to the in-process FakeTelnyx at `http://sim/v2`, and
   `streamed.sim_call().dtmf_sent` lists the groups (read it inside the `async with`).
+- 2026-11-02 (P05-T10d): opener pre-render = `va_workflows.activities.prerender.OpenerPrerender` (worker container
+  builds it over `ElevenLabsRest` + `PhraseCache` + `OrgSettingsReader`; `CallContextActivities(..., prerender=)`
+  saves `CallContext.opener_text` first, then renders; never raises). Key helpers shared by worker and media live
+  in `va_engine.opener` (`render_opener`, `phrase_voice`, `phrase_format`, `cache_text`); the Speaker looks up the
+  PRONOUNCED text, so any key must go through `cache_text`. Pipeline seam: `CallPipeline(phrases=PhraseSource)`
+  (`va_media.phrases.CallPhrases` over `va_voice.phrase_cache.read_phrase`); harness `harness(phrases=...)`. A
+  cached `SpeakStatic` opens no TTS context (`tts.started == []`). `ElevenLabsRestSettings` (worker) and
+  `ElevenLabsSettings` (media) share `ElevenLabsAccountSettings` (key + TTS model). Runtime sim test rig:
+  `rig(redis=...)`, `Rig.call(opener_text=...)`; FakeElevenLabs REST records have `transport == "rest"`, and the
+  sim stream object is gone after hangup — read `streamed.sim_call().audio.agent` instead.
+- 2026-11-02 (P05-T10d): Ralph kills an iteration after 300 s with no agent activity (diagnostics log: `Execution
+  inactivity timeout reached`) and turns the missing event into an empty `review.rejected`. `make test` (~25 min) is
+  silent for longer: run it with Bash `run_in_background` (`make test > logs/make_test.log 2>&1`) and a Monitor that
+  prints a heartbeat every ~2 min until `exit=` appears.

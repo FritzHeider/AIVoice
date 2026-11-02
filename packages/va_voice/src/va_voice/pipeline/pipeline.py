@@ -85,6 +85,7 @@ from va_voice.pipeline.protocols import (
     InboundAudio,
     InboundDtmf,
     MarkEcho,
+    PhraseSource,
     PipelineObserver,
     SttEventLike,
     SttStream,
@@ -167,6 +168,7 @@ class CallPipeline:
         context_ids: Callable[[int], str] = default_context_id,
         reorder_observer: ReorderObserver = NULL_REORDER_OBSERVER,
         before_opener: Callable[[], Awaitable[None]] | None = None,
+        phrases: PhraseSource | None = None,
     ) -> None:
         self._config = config if config is not None else PipelineConfig()
         self._transport = transport
@@ -193,6 +195,7 @@ class CallPipeline:
             stats=self._stats,
             next_index=self._next_index,
             context_ids=context_ids,
+            phrases=phrases,
         )
         self._jobs: asyncio.Queue[_Job] = asyncio.Queue()
         self._endpoint_wake = asyncio.Event()

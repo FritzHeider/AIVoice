@@ -529,6 +529,30 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 > `text_norm.normalized` text was not delivered before in the call (repeating menus are no progress), or any
 > Brain action. The opener pre-render (step 5, phrase cache) is P05-T10d.
 
+> Decision (2026-11-02): opener pre-render (P05-T10d). `prefetch_call_context` renders the templated
+> `first_sentence` once (`va_engine.opener.render_opener`: task runner only, the call's variables,
+> `request_data` and built-ins at prefetch time, stripped; blank → none; a template syntax error speaks the raw
+> text) and stores it in `CallContext.opener_text` (optional, context version stays 1). With
+> `wait_for_greeting` nothing is pre-rendered (the opener may answer the greeting). After the context is saved,
+> `va_workflows.activities.prerender.OpenerPrerender` renders, within one 8 s budget, the opener (per-call
+> entry, TTL 1 h) and the voice's standard fillers (shared, 30 days) through ElevenLabs REST into the phrase
+> cache (specs/09 §9). The key uses the voice the TTS socket opens with (`va_engine.opener.phrase_voice`:
+> `provider_voice_id`, `ELEVENLABS_TTS_MODEL`, `voice_settings`, the fixed language row's TTS code or none),
+> the leg's TTS format (`pcm_16000` with `hd_audio`, else `ulaw_8000`), and the text after the pronunciation
+> guide (`cache_text`), i.e. exactly what the live path would send. Orgs with `privacy.zero_retention` or
+> `hipaa_mode` get nothing rendered (REST has no `enable_logging=false`); a missing org, unreadable org
+> settings, a REST failure or the budget expiring are logged (entry name, never the text) and never fail the
+> activity (timeout raised to 20 s); `PrefetchResult.opener_cached` reports the outcome. The task runner
+> speaks `opener_text` verbatim (so time built-ins cannot drift from the cached audio); a context without it
+> (rebuilt by the media worker) renders `first_sentence` at call time. In the media worker every call gets a
+> `va_media.phrases.CallPhrases` (read-only lookups, `va_tts_cache_hits_total`/`misses_total`); the pipeline
+> `Speaker` plays a `SpeakStatic` whose pronounced text has an entry in the leg's TTS format from the cache:
+> no TTS context is opened, the whole audio goes through the same outbound clock as one segment, the stored
+> alignment fills the timeline (barge-in truncation works as for live audio; an entry without alignment
+> interpolates), and a barge-in clears the far end without a TTS cancel. A miss, an empty entry, another
+> format, or a failing lookup (Redis down, logged `pipeline_phrase_lookup_failed`) speaks it through the live
+> socket. `SpeakText` never looks up.
+
 ## 12. Silence and no-input policy
 
 After the agent finishes an utterance (last mark echo), start `no_input_timer = no_input_timeout_ms` (default 8 000;

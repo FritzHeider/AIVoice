@@ -29,6 +29,7 @@ from va_domain.org import OrgSettings
 from va_engine.builtins import call_builtins
 from va_engine.models.results import PressButton, TransferRequest
 from va_engine.models.state import EngineState, TurnRecord
+from va_engine.opener import parse_field
 from va_engine.system_tools import SystemToolFacts, system_tools
 from va_engine.task_tools import (
     EXECUTOR_CONCURRENCY,
@@ -41,14 +42,7 @@ from va_engine.task_tools import (
     RoundPlan,
     plan_round,
 )
-from va_engine.templating import (
-    MissingVariables,
-    Template,
-    TemplateScope,
-    TemplateSyntaxError,
-    parse_template,
-    render,
-)
+from va_engine.templating import MissingVariables, Template, TemplateScope, render
 from va_engine.tool_executor import ToolExecutor
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
@@ -134,12 +128,10 @@ async def _no_outputs() -> AsyncIterator[BrainOutput]:
         yield output
 
 
-def _template(text: str, field_name: str) -> Template | str:
-    try:
-        return parse_template(text)
-    except TemplateSyntaxError as exc:
-        _log.warning("template_invalid", field=field_name, position=exc.position)
-        return text
+def _prerendered(context: CallContext) -> str | None:
+    """The opener rendered at prefetch (``None`` when absent or blank)."""
+    text = (context.opener_text or "").strip()
+    return text or None
 
 
 class TaskBrain:
@@ -177,9 +169,10 @@ class TaskBrain:
         speech = executor.tool_speech if executor is not None else None
         self._tool_note = tool_usage_note(speech or DEFAULT_TOOL_SPEECH)
         self._window = ConversationWindow(settings.llm.context_budget_tokens, counter)
-        self._task = _template(config.task, "task")
+        self._task = parse_field(config.task, "task")
         opener = config.first_sentence
-        self._opener = _template(opener, "first_sentence") if opener and opener.strip() else None
+        self._opener = parse_field(opener, "first_sentence") if opener and opener.strip() else None
+        self._opener_text = _prerendered(context)
         self._missing = MissingVariables(sink=self._missing_variable)
         self._started = clock.monotonic()
         self._messages: list[ChatMessage] = []
@@ -210,11 +203,13 @@ class TaskBrain:
 
     async def start(self, greeting: UserTurn | None = None) -> AsyncGenerator[BrainOutput]:
         """The opener; a ``greeting`` (``wait_for_greeting``) is appended first as the caller's message, so a
-        generated opener answers it (specs/07 §11 step 4)."""
+        generated opener answers it (specs/07 §11 step 4). The ``opener_text`` rendered at prefetch is spoken
+        verbatim (it matches the phrase cache entry, Decision P05-T10d); without it ``first_sentence`` is
+        rendered now."""
         if greeting is not None:
             self._accept(greeting)
         if self._opener is not None:
-            text = self._render(self._opener).strip()
+            text = self._opener_text or self._render(self._opener).strip()
             if text:
                 yield self._say(text)
                 return

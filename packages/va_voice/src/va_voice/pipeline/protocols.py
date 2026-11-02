@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from va_voice.latency import TurnReport
+    from va_voice.phrase_cache import CachedPhrase
     from va_voice.pipeline.models import (
         AgentTurn,
         BrainAction,
@@ -37,6 +38,7 @@ __all__ = [
     "InboundAudio",
     "InboundDtmf",
     "MarkEcho",
+    "PhraseSource",
     "PipelineObserver",
     "SttEventLike",
     "SttStream",
@@ -150,6 +152,16 @@ class TtsStream(Protocol):
     async def cancel(self, context_id: str) -> None: ...
 
     def audio(self) -> AsyncIterator[TtsChunkLike]: ...
+
+
+class PhraseSource(Protocol):
+    """Pre-rendered phrases of the call's voice (specs/07 §11 step 5, Decision P05-T10d).
+
+    ``text`` is the phrase after the pronunciation guide (what the TTS context would be sent); a phrase that
+    is not stored is ``None``. The Speaker plays a hit instead of opening a TTS context.
+    """
+
+    async def lookup(self, text: str) -> CachedPhrase | None: ...
 
 
 class VoiceActivityDetector(Protocol):

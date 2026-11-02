@@ -9,6 +9,11 @@ complete on that mark's echo, or once the playback estimate passes the end plus 
 utterance that is cancelled or fails stops its tracker, drops queued audio locally, cancels its TTS context
 and is recorded as interrupted when the caller heard any of it.
 
+Cached phrases (specs/07 §11 step 5, Decision P05-T10d): with a :class:`PhraseSource`, a ``SpeakStatic`` whose
+pronounced text is stored in the phrase cache in the leg's TTS format plays from the cache: no TTS context is
+opened, the audio goes through the same outbound clock, and the stored alignment fills the timeline. A miss, a
+format mismatch, or a failing lookup speaks it through the live socket.
+
 Barge-in (Decision P04-T12b): :meth:`Speaker.interrupt` stops the playing utterance at the decision
 instant (tracker, local queue) before its first await, then clears the far end and cancels the TTS context;
 the pipeline then cancels the reply task, whose :meth:`Speaker.speak` closes the LLM token stream and records
@@ -22,14 +27,14 @@ import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_voice.latency import TurnMark, TurnTimer
 from va_voice.outbound import FrameMixer, OutboundAudio
 from va_voice.pipeline.models import AgentTurn, PipelineStats, SpeakStatic, SpeakText
-from va_voice.pipeline.protocols import PipelineObserver, Transport, TtsChunkLike, TtsStream
+from va_voice.pipeline.protocols import PhraseSource, PipelineObserver, Transport, TtsChunkLike, TtsStream
 from va_voice.pipeline.waits import wait_until_set
 from va_voice.playback import (
     LEAD_MS_ESTIMATE,
@@ -39,7 +44,10 @@ from va_voice.playback import (
     truncate_assistant_message,
 )
 from va_voice.text.chunker import ClauseChunker
-from va_voice.text.pronunciation import PronunciationApplier
+from va_voice.text.pronunciation import PronouncedText, PronunciationApplier
+
+if TYPE_CHECKING:
+    from va_voice.phrase_cache import CachedPhrase
 
 __all__ = ["Interruption", "Speaker"]
 
@@ -87,6 +95,7 @@ class Speaker:
         "_next_index",
         "_observer",
         "_outbound",
+        "_phrases",
         "_reply_audio",
         "_stats",
         "_transport",
@@ -107,6 +116,7 @@ class Speaker:
         stats: PipelineStats,
         next_index: Callable[[], int],
         context_ids: Callable[[int], str],
+        phrases: PhraseSource | None = None,
     ) -> None:
         self._transport = transport
         self._tts = tts
@@ -117,6 +127,7 @@ class Speaker:
         self._stats = stats
         self._next_index = next_index
         self._context_ids = context_ids
+        self._phrases = phrases
         self._wake = asyncio.Event()
         self._outbound = OutboundAudio(transport, mixer, clock=clock, on_finished=self._on_finished)
         self._active: _Utterance | None = None
@@ -189,14 +200,19 @@ class Speaker:
             raise RuntimeError(message)
         utterance: _Utterance | None = None
         try:
-            async with contextlib.aclosing(self._clauses(output, timer)) as clauses:
-                async for clause in clauses:
-                    if utterance is None:
-                        utterance = await self._open(timer, output.interruptible, resume=resume)
-                    await self._send_clause(utterance, clause)
-            if utterance is None:
-                return None
-            await self._tts.flush(utterance.context_id)
+            cached = await self._cached(output)
+            if cached is not None:
+                utterance = await self._open(timer, output.interruptible, resume=resume, live=False)
+                self._play_cached(utterance, *cached)
+            else:
+                async with contextlib.aclosing(self._clauses(output, timer)) as clauses:
+                    async for clause in clauses:
+                        if utterance is None:
+                            utterance = await self._open(timer, output.interruptible, resume=resume)
+                        await self._send_clause(utterance, clause)
+                if utterance is None:
+                    return None
+                await self._tts.flush(utterance.context_id)
             await utterance.final.wait()
             self._outbound.finish_utterance(utterance.chars)
             await self._await_playback(utterance.tracker)
@@ -265,7 +281,41 @@ class Speaker:
         for clause in chunker.flush():
             yield clause
 
-    async def _open(self, timer: TurnTimer | None, interruptible: bool, *, resume: bool) -> _Utterance:
+    async def _cached(self, output: SpeakText | SpeakStatic) -> tuple[PronouncedText, CachedPhrase] | None:
+        """The stored phrase of a ``SpeakStatic`` in the TTS format (``None``: speak it live)."""
+        if self._phrases is None or not isinstance(output, SpeakStatic):
+            return None
+        text = output.text.strip()
+        if not text:
+            return None
+        pronounced = self._applier.apply(text)
+        try:
+            phrase = await self._phrases.lookup(pronounced.text)
+        except Exception as exc:
+            _log.warning("pipeline_phrase_lookup_failed", error_type=type(exc).__name__)
+            return None
+        if phrase is None or not phrase.audio:
+            return None
+        if phrase.fmt != self._tts_format:
+            _log.info("pipeline_phrase_format_mismatch", phrase_format=phrase.fmt.name)
+            return None
+        return pronounced, phrase
+
+    def _play_cached(self, utterance: _Utterance, pronounced: PronouncedText, phrase: CachedPhrase) -> None:
+        """The whole phrase at once: timeline clause + chunk, outbound audio, and the context is final."""
+        timeline = utterance.tracker.timeline
+        timeline.add_clause(pronounced)
+        if utterance.timer is not None:
+            utterance.timer.mark(TurnMark.TTS_FIRST_TEXT)
+            utterance.timer.mark(TurnMark.TTS_FIRST_AUDIO)
+        timeline.add_chunk(phrase.audio, phrase.alignment)
+        self._outbound.push_audio(phrase.audio)
+        utterance.chars = len(pronounced.original)
+        utterance.final.set()
+
+    async def _open(
+        self, timer: TurnTimer | None, interruptible: bool, *, resume: bool, live: bool = True
+    ) -> _Utterance:
         index = self._next_index()
         tracker = PlaybackTracker(index, self._tts_format)
         utterance = _Utterance(
@@ -273,7 +323,8 @@ class Speaker:
         )
         self._active = utterance
         self._outbound.start_utterance(tracker)
-        await self._tts.start_context(utterance.context_id)
+        if live:
+            await self._tts.start_context(utterance.context_id)
         return utterance
 
     async def _send_clause(self, utterance: _Utterance, clause: str) -> None:
