@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from media_helpers import FakeMediaContainer, auth_values, media_app
+from media_helpers import FakeContextLoader, FakeMediaContainer, auth_values, media_app
 from service_helpers import UNREACHABLE, failing, json_log_stream, log_events, make_client, settings_of
 
 from va_common import observability
@@ -131,6 +131,7 @@ async def test_observability_initialised_as_media_worker(
         settings_of(MediaSettings, **auth_values()),
         container_factory=FakeMediaContainer(),
         models_dir=models_dir,
+        context_loader=FakeContextLoader().factory,
     )
     async with make_client(app):
         pass

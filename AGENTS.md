@@ -1237,3 +1237,16 @@ Grafana 3001
   `FakeSocket` for session unit tests, `auth_values()` for hand-built `MediaSettings`. Sync on
   `registry.wait_idle(5)` after a close (the registry releases after the WS closes). Starlette turns a send
   OSError into `WebSocketDisconnect`; a refusal closed before the client sends makes a later `ws.send` raise.
+- 2026-11-02 (P05-T07b): after `start` the attach loads the call context (`va_media.context.DbCallContextLoader`,
+  status check per specs/28 §6.2), subscribes the call's channels on the pod-wide `va_media.channels.ChannelHub`
+  (one pub/sub connection; its `run` is the only reader; `subscribe` returns after both Redis confirmations), reads
+  `carrier_state` (`va_media.carrier_state.CarrierSnapshot`), then runs `CallSession(context=, feed=,
+  carrier_state=, control_handler=)`. Control messages are `va_domain.control` (`parse_control`); handlers implement
+  `va_media.control.ControlHandler` (`DefaultControlHandler` = stop/credits/drain notice). `create_app` takes
+  `context_loader=` (factory `(container, clock)`, default `db_context_loader` needs `container.database`) and
+  `control_handler=`. Tests: `media_helpers.served(models_dir, loader=, control_handler=, **settings)` (moved from
+  test_server; `Served.loader` is a `FakeContextLoader` with `.contexts`/`.refusals`/`.loads`), `call_context(
+  call_id, org_id=)` for a valid `CallContext`; a `create_app` without `media_app` needs
+  `context_loader=FakeContextLoader().factory` unless the container has a `database`. Drain waits on the
+  injected clock (`registry.wait_idle(t, clock=)`, `LiveSessions.wait_idle`), so ManualClock drain tests
+  `wait_for_sleep(MEDIA_DRAIN_TIMEOUT_S)` + `run_for`.

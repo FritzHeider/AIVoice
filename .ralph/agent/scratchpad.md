@@ -2541,3 +2541,169 @@ Decision P05-T07a: refusals after accept with no read, check order auth→4421�
 tolerance, heartbeat EX 10 every 3 s deleted at end, media:pods HSET/HDEL, readiness at ceil(90 %), metrics from the
 specs/27 catalog, Redis keys per specs/03 §11, MEDIA_PUBLIC_HOST scope updated. Tests use ManualClock waits, no sleeps.
 Approved.
+
+## Plan P05-T07b — Media session: CallContext load, control/carrier channels, drain notice + timeout (Planner, 2026-11-02)
+P05-T07a approved + ticked. Still NO pipeline: sessions run the body seam; the control handler is a seam too
+(defaults below), later tasks (T09 say/inject, T11 stop/end routine, T13 transfer) replace it.
+
+### Decisions (one block `> Decision (2026-11-02): media session channels and drain (P05-T07b).` under specs/07 §3
+### after the P05-T07a block; one line under §17 pointing at `va_domain.control`; one line under §19 drain)
+1. Order after the lock + `start` (spec step 3 moves after step 4 because the org is resolved from the `start`
+   frame's `call_control_id` when the Redis context is missing; `start` is not media, so "without reading media"
+   holds): (a) `CallContextStore.load(call_id)`; present → org = `ctx.org_id`; absent → system
+   `CallLegLookupRepo.by_call_control_id(start.call_control_id)` must return the same `call_id` with role `primary`,
+   else close 4401 reason `call_unknown`. (b) In `tenant_session(org)`: `CallRepo` read of the call; missing →
+   4401 `call_unknown`; `status not in ("dialing","ringing","in_progress")` → 4401 `call_status` (specs/28 §6.2).
+   (c) Context absent → `build_call_context(call, now=clock.now())`, saved to Redis (log `media.context_rebuilt`;
+   a Redis save error is logged, the call proceeds with the rebuilt context). DB/Redis errors in (a)/(b) → 1011
+   reason `database` / `redis`. Ownership is released on every refusal here. No `va_system` repo is added
+   (`CallLegLookupRepo` already exists; test_repositories count stays 12).
+2. Channels: ONE pod-wide Redis pub/sub connection (`va_media.channels.ChannelHub`, supervised task `channels` in
+   the lifespan) — a pubsub connection per session would exhaust the default 50-connection pool at 60 calls.
+   `hub.subscribe(call_id)` subscribes `call:{<id>}:control` and `call:{<id>}:carrier` and returns once Redis
+   confirmed both subscriptions (2 s on the injected clock, else `ChannelError` → close 1011 reason `subscribe`),
+   THEN the session reads `HGETALL call:{<id>}:carrier_state` (subscribe-before-snapshot: an event published after
+   the confirmation is delivered; one stored before is in the snapshot; one in both is harmless because consumers
+   use the snapshot as state and events as changes). Unsubscribe at session end (always, in `finally`).
+3. Carrier feed per session: bounded queue (256; overflow drops the oldest, warns `media.carrier_overflow`),
+   messages parsed as `va_domain.carrier.CarrierEvent`; malformed or another call's id → dropped, warn
+   `media.carrier_invalid`; deduped by `telnyx_event_id` (last 512 ids). Snapshot = `CarrierSnapshot(fields)` with
+   `answered`, `answered_at`, `amd_result`, `answered_by`, `hangup_cause` accessors (field names written by
+   `va_edge.mapping`). The session does not consume events itself yet (body seam does, from P05-T08 on).
+4. Control: `va_domain.control` typed messages (§17), discriminated on `type`, `extra="forbid"`, frozen, `id: UUID`
+   required: `StopControl(reason: str = "api")`, `SayControl(text)`, `InjectContextControl(text)` (text non-empty
+   after strip), `TransferControl(phone_number, mode: Literal["cold","warm"] = "cold")`, `TakeoverControl(
+   phone_number)`, `CreditsExhaustedControl`, `DrainNoticeControl`; `parse_control(raw)` raises
+   `ControlMessageError`; `control_channel(call_id)`, `control_ack_key(call_id, message_id)` =
+   `call:{<id>}:control_ack:<msg_id>`, `CONTROL_ACK_TTL_S = 30`. Session task `control_listener` handles messages
+   one at a time in arrival order through `ControlHandler.handle(session, message) -> bool`; `True` → `SET
+   control_ack_key 1 EX 30` (Redis error logged `media.control_ack_failed`); invalid → warn `media.control_invalid`,
+   no ack. A handler exception fails the session (specs/07 §1: a task failure cancels the group → 1011 after cleanup).
+   Default handler (`va_media.control.DefaultControlHandler`): `stop` → `request_end("api_stop","api")`, ack;
+   `credits_exhausted` → `request_end("insufficient_credits","system")`, ack (the spoken variant arrives with the
+   pipeline); `drain_notice` → log `media.drain_notice`, ack; `say`/`inject_context`/`transfer`/`takeover` → log
+   `media.control_unsupported`, no ack (the API then answers "queued").
+5. Drain: `drain(app)` → `DrainState.begin` → each live session gets a local `DrainNoticeControl` (uuid7 id,
+   delivered into its control queue, not published, ack skipped for local messages) → wait for idle up to
+   `MEDIA_DRAIN_TIMEOUT_S` on the injected clock → timeout: every remaining session `request_end("worker_lost",
+   "error")`, log `media.drain_timeout` with the count, then wait (≤ 10 s, injected clock) for the registry to empty
+   so cleanup runs. New streams keep being refused 4503 meanwhile (existing check).
+6. Metrics: `va_media_admission_rejected_total{reason}` gains `call_unknown`, `call_status`, `database`, `subscribe`
+   (label values only; no catalog row change — confirm `test_metrics` still passes).
+
+### Files
+- NEW `packages/va_domain/src/va_domain/control.py`: models + `ControlMessage` (Annotated union, `Field(
+  discriminator="type")`), `ControlMessageError(ValueError)`, `parse_control(raw: str | bytes) -> ControlMessage`
+  (TypeAdapter), key builders, `CONTROL_ACK_TTL_S`. Export from nowhere else (import-free `__init__` stays as is).
+- `apps/media_worker/pyproject.toml`: add `va-db` (workspace source) → `uv lock`.
+- `va_media/main.py`: `Container` gains `database: Database` (`Database.from_settings(settings)`, `stack`/deps cleanup
+  `database.dispose`; NO readiness check — specs/07 §2 lists draining/capacity/redis only); `MediaDependencies`
+  unchanged except optional; `create_app(..., context_loader: ContextLoaderFactory | None = None, control_handler:
+  ControlHandler | None = None)` where `ContextLoaderFactory = Callable[[MediaDependencies, Clock], CallContextLoader]`
+  (default reads `container.database` → `DbCallContextLoader`); `MediaState` gains `clock` and `sessions:
+  LiveSessions`; lifespan starts `ChannelHub(container.redis, clock).run` as supervised `channels`; `drain(app)` per
+  Decision 5 (replace `registry.wait_idle(real timeout)` with injected-clock waits; keep `wait_idle` for tests or
+  give it a `clock` parameter using `va_voice.pipeline.waits.within`).
+- NEW `va_media/context.py`: `LoadedCall(context: CallContext, status: str)`; `CallContextLoader` Protocol `async
+  load(call_id: UUID, call_control_id: str) -> CallContext`; `ContextRefusal(Exception)` with `reason:
+  Literal["call_unknown","call_status","database","redis"]`; `DbCallContextLoader(database, store, clock)`
+  implementing Decision 1 (`ACTIVE_STATUSES = frozenset({"dialing","ringing","in_progress"})`).
+- NEW `va_media/channels.py`: `ChannelHub(redis, clock, *, confirm_timeout_s=2.0)`: `run()` (reader loop; Redis
+  errors logged `media.channels_failed`, retried after 1 s on the clock; re-subscribe on reconnect handled by
+  redis-py `on_connect` — verify, else re-issue subscriptions), `async subscribe(call_id) -> CallFeed`, `async
+  unsubscribe(feed)`; `ChannelError`. `CallFeed`: `control` queue (`ControlMessage | local`), carrier queue,
+  `async next_control()`, `async next_carrier() -> CarrierEvent`, `deliver_local(message)`; dedupe/overflow per
+  Decision 3. Serialize subscribe/unsubscribe with an asyncio.Lock; confirmations via per-channel `asyncio.Event`
+  set by the reader on `subscribe` messages.
+- NEW `va_media/carrier_state.py` (or inside channels): `CarrierSnapshot` + `async read_carrier_state(redis,
+  call_id) -> CarrierSnapshot`.
+- NEW `va_media/control.py`: `ControlHandler` Protocol, `DefaultControlHandler`, `run_control_listener(session,
+  feed, handler, redis)` (or a `CallSession` method).
+- `va_media/session.py`: constructor gains `context: CallContext`, `feed: CallFeed`, `carrier_state:
+  CarrierSnapshot`, `control_handler: ControlHandler`; `_race` adds the `control_listener` task (priority list:
+  lost, requested, body, control — a control-task exception propagates like a body exception); `notify(message)`
+  for local delivery; bind `org_id` into the log context in `run`.
+- `va_media/server.py`: after `wait_for_start`: loader → (refusals per Decision 1, release lock) → `hub.subscribe`
+  (failure → release + 1011 `subscribe`) → snapshot read (Redis error → 1011 `redis`) → register in
+  `LiveSessions` → `session.run` → finally unsubscribe + unregister. `MediaAttach` gains `loader`, `hub`,
+  `sessions`, `control_handler`. Keep `_attach` under radon B (split helpers: `_admit_call`, `_open_session`).
+- NEW `va_media/sessions.py` (`LiveSessions`: add/remove/`all()`), or fold into `CallRegistry` if simpler.
+- Specs: specs/07 §3 Decision, §17 + §19 pointer lines. AGENTS.md learning line.
+
+### Tests
+- `packages/va_domain/tests/test_control.py`: every §17 JSON example parses to its model (parse the ```json block
+  of specs/07 §17 like other drift tests); unknown type / extra field / missing id / blank text → error; key
+  builders hash-tag form; round trip `model_dump_json`.
+- `apps/media_worker/tests/test_channels.py` (fakeredis shared server, ManualClock): subscribe returns after
+  confirmations; published control → `next_control` typed; carrier published after subscribe delivered, duplicate
+  `telnyx_event_id` dropped, other call's id dropped, malformed dropped (log), overflow drops oldest; two calls
+  isolated; unsubscribe stops delivery; confirmation timeout → `ChannelError` (a hub whose `run` is not started:
+  `wait_for_sleep(2)` + `run_for`); reader Redis error logged and loop continues.
+- `test_carrier_state.py`: snapshot accessors from an edge-shaped hash (`answered`, `answered_at`, `amd_result`,
+  `answered_by`, `hangup_cause`), empty hash → nothing answered.
+- `test_context_db.py` (module Postgres via va_db support `running_postgres`/`fresh_database`/`upgrade` +
+  `call_rows.seed_call`/`seed_leg`, `SystemClock`): Redis context used as is (no DB rebuild, status still checked);
+  missing context rebuilt from `calls.config` and saved with TTL; unknown ccid / ccid of another call / non-primary
+  leg → `call_unknown`; status `completed`/`queued` → `call_status`; broken Redis → `redis`; disposed DB →
+  `database`.
+- `test_control.py` (media; FakeSocket + fakeredis + ManualClock): stop → session ends `SessionEnd("ended",
+  "api_stop","api")` and ack key set with EX 30; credits_exhausted → `insufficient_credits`; drain_notice logged +
+  acked; say → no ack, session continues; handler raising → `run` raises after cleanup; local message not acked.
+- `test_server.py` additions (real uvicorn, `FakeContextLoader` via `media_app(context_loader=...)`): refusal
+  `call_status` → 4401 + lock released + metric; `call_unknown` → 4401; loader DB error → 1011; attach subscribes
+  (publish control `stop` from the test → WS closed 1000, ack key present, `va_media_calls_ended_total{end_reason=
+  "api_stop"}`); carrier event published before attach (stored in carrier_state) visible in `session.carrier_state`,
+  one after attach visible via `feed.next_carrier()` (RecordingBody exposes the session).
+- `test_drain_flow.py` additions: drain refuses a new stream 4503 while an attached call keeps running and receives
+  `drain_notice` (log + its handler called); the call ending lets drain finish before the timeout; drain timeout
+  (settings `media_drain_timeout_s` small + ManualClock `wait_for_sleep`/`run_for`) ends the remaining session with
+  `worker_lost` (metric label) and drain returns after cleanup.
+- `test_main.py`: container builds `database` and disposes it; readiness checks unchanged (no `postgres`).
+- `test_sim_contract.py`: give the app a `FakeContextLoader` returning a context for the dialed call (no DB in that
+  test), keep attach + hangup → `stream_closed`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B), pip-audit on `uv export`, `corepack pnpm audit`. `make e2e`: tests_e2e/ arrives in P05-T17.
+
+### Risks
+- redis-py asyncio PubSub: `listen()` ends when nothing is subscribed; wait on a "has subscriptions" event instead
+  of busy looping. Concurrent `subscribe` while the reader awaits on the same connection is allowed (writes and
+  reads are separate) but guard with the lock. fakeredis supports pubsub; confirm `subscribe` messages arrive.
+- Pubsub connection comes from the client's pool (one connection held for the process) — fine.
+- ManualClock: `within`/confirm timeouts park on the clock; tests that expect success must not advance it.
+- Existing media tests build `media_app` without a loader: make the helper default to a `FakeContextLoader`
+  that returns a minimal valid context (`resolved_configs.resolved_config(...)` from va_domain tests/support is on
+  pythonpath? if not, add the support dir to media pytest pythonpath/mypy_path or build `SendCallConfig` minimal).
+- va-db import pulls SQLAlchemy into the media worker image: expected (DB write-behind arrives in T11 anyway).
+
+## Build P05-T07b (Builder, 2026-11-02)
+Implemented per plan (specs/07 §3 Decision P05-T07b; §17 and §19 pointer lines; AGENTS.md learning):
+- va_domain.control: 7 frozen extra-forbid models discriminated on `type`, `parse_control` → `ControlMessageError`
+  (never echoes text), `control_channel`, `control_ack_key`, `CONTROL_ACK_TTL_S=30`, `CONTROL_TYPES`.
+- va_media: `context` (DbCallContextLoader: Redis ctx → else system CallLegLookupRepo primary leg of same call →
+  tenant CallRepo status check dialing/ringing/in_progress → rebuild + save; `ContextRefusedError(reason)`),
+  `channels` (pod-wide ChannelHub: subscribe waits for both confirmations 2 s on injected clock, single reader
+  `run` with 5 s socket read timeout, errors retried after 1 s; CallFeed control queue + 256 carrier deque with
+  512-id dedupe), `carrier_state` (CarrierSnapshot), `control` (ControlHandler protocol, DefaultControlHandler),
+  `sessions` (LiveSessions), session (context/feed/carrier_state/control_handler, control_listener task, acks
+  shielded + awaited in cleanup, `notify`, org_id bound), server (_open_session/_load_context/_run_session;
+  refusals 4401 call_unknown/call_status, 1011 database/redis/subscribe; lock released), main (Container.database
+  disposed, no postgres readiness, `db_context_loader` (TypeError without database), `channels` supervised task,
+  drain: local drain_notice → registry.wait_idle(clock) → worker_lost + 10 s LiveSessions grace).
+  CallRegistry.wait_idle(timeout, clock=). media_worker depends on va-db (uv.lock).
+- Tests: va_domain test_control (spec §17 block drift); media test_channels, test_carrier_state, test_control,
+  test_context_db (module Postgres), test_attach_channels (real uvicorn), drain flow additions, test_main
+  container/loader. `Served`/`served` moved into media_helpers with `FakeContextLoader` + `call_context`.
+Gates: fmt 0, lint 0, typecheck 0 (1083 files), placeholders 0, spec refs 0, make test 9142 passed / 7 skipped,
+coverage 99.14% (va_media ≥ 93% per file, 99%+ overall; va_domain.control 100%), jscpd 0 clones, radon avg A
+(no C+), pip-audit clean, pnpm audit 3 moderate (pre-existing). make e2e: tests_e2e/ not present yet (P05-T17).
+
+## Review P05-T07b (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, make test 9142 passed / 7 skipped (99.14 %), spec refs 0, jscpd 0,
+radon no C+. Diff matches the plan/§3 Decision: context refusals 4401/1011 with lock release, single-reader
+pub/sub hub with confirmations before the carrier_state snapshot, §17 models drift-checked, acks shielded and
+awaited in cleanup, drain notice local + worker_lost on injected clock. Reviewer added the missing
+`call:{id}:control_ack:{msg_id}` row to the specs/03 §11 normative keyspace table. Non-blocking notes for later
+tasks: `stop` currently only ends the session (hangup arrives with the T11 end routine); `assert` used for type
+narrowing in `DbCallContextLoader.load`. Approved.

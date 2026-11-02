@@ -1459,6 +1459,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:hb` | string ts | 10 s | Worker heartbeat |
 | `call:{id}:carrier_state` | hash | 2 h | Latest carrier state (answered, amd_result, bridged…) |
 | `call:{id}:control` | pub/sub channel | — | Control messages to owner |
+| `call:{id}:control_ack:{msg_id}` | string `1` | 30 s | Owner handled the control message (specs/07 §17) |
 | `call:{id}:carrier` | pub/sub channel | — | Carrier events to owner |
 | `call:{id}:live` | pub/sub channel | — | Live events for dashboard/API SSE listeners |
 | `events:calls`, `events:sms`, `events:widget`, `events:billing`, `events:system` | streams (MAXLEN ~ 1 000 000) | — | Event bus |

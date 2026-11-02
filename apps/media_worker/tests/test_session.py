@@ -12,7 +12,7 @@ from datetime import datetime
 import fakeredis
 import pytest
 from clock_helpers import ManualClock
-from media_helpers import FakeSocket, stop_msg
+from media_helpers import FakeSocket, call_context, stop_msg
 from redis.exceptions import ConnectionError as RedisConnectionError
 from service_helpers import json_log_stream, log_events
 
@@ -78,7 +78,7 @@ async def rig(*, flaky: bool = False) -> AsyncIterator[Rig]:
     socket = FakeSocket()
     metrics = build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
     session = CallSession(
-        call_id=call_id,
+        context=call_context(call_id),
         socket=socket,
         start=START,
         ownership=ownership,

@@ -18,8 +18,10 @@ from urllib.parse import urlencode
 
 import fakeredis
 import uvicorn
+from clock_helpers import ManualClock
 from nacl.signing import SigningKey
 from redis.asyncio import Redis
+from resolved_configs import resolved_config
 from service_helpers import FakeContainer, RecordingServer, ok_check, settings_of
 from starlette.applications import Starlette
 from websockets.asyncio.client import ClientConnection, connect
@@ -27,8 +29,14 @@ from websockets.asyncio.client import ClientConnection, connect
 from va_common.health import CheckFn
 from va_common.service import StopController, run_server
 from va_common.stream_tokens import mint_stream_token, stream_token_expiry
+from va_common.time import Clock
+from va_domain.call_context import CallContext
+from va_domain.calls.config import SendCallConfig
+from va_media.context import CallContextLoader, ContextRefusedError
+from va_media.control import ControlHandler
 from va_media.loop_lag import LoopLagMonitor
-from va_media.main import create_app
+from va_media.main import MediaDependencies, MediaState, create_app
+from va_media.server import MediaAttach
 from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.socket import SocketClosedError
@@ -36,6 +44,38 @@ from va_media.stream import read_until_stop
 
 PUBLIC_HOST: Final = "media.test:8200"
 TELNYX_PATH: Final = "/ws/telnyx"
+CONTEXT_CREATED_AT: Final = datetime.fromisoformat("2026-11-02T12:00:00+00:00")
+
+
+def call_context(call_id: uuid.UUID, *, org_id: uuid.UUID | None = None) -> CallContext:
+    """A valid context for ``call_id`` built from the basic task-call snapshot."""
+    return CallContext(
+        call_id=call_id,
+        org_id=org_id if org_id is not None else uuid.uuid4(),
+        direction="outbound",
+        to_number="+14155550100",
+        from_number="+14155550199",
+        config=SendCallConfig.model_validate(resolved_config()),
+        created_at=CONTEXT_CREATED_AT,
+    )
+
+
+class FakeContextLoader:
+    """A context for any call (``contexts`` overrides), or :class:`ContextRefusedError` for ``refusals``."""
+
+    def __init__(self) -> None:
+        self.contexts: dict[uuid.UUID, CallContext] = {}
+        self.refusals: dict[uuid.UUID, ContextRefusedError] = {}
+        self.loads: list[tuple[uuid.UUID, str]] = []
+
+    async def load(self, call_id: uuid.UUID, call_control_id: str) -> CallContext:
+        self.loads.append((call_id, call_control_id))
+        if call_id in self.refusals:
+            raise self.refusals[call_id]
+        return self.contexts.setdefault(call_id, call_context(call_id))
+
+    def factory(self, _container: MediaDependencies, _clock: Clock) -> CallContextLoader:
+        return self
 
 
 def write_models_dir(
@@ -102,10 +142,13 @@ def media_app(  # noqa: PLR0913 - keyword-only test knobs
     keys: MediaKeys | None = None,
     clock: Any = None,
     body: SessionBody = read_until_stop,
+    loader: FakeContextLoader | None = None,
+    control_handler: ControlHandler | None = None,
     **overrides: Any,
 ) -> Starlette:
-    """The media app with fake dependencies, no observability, an idle lag monitor (1 h ticks), and
-    authentication configured from ``keys`` (fresh ones by default) for :data:`PUBLIC_HOST`."""
+    """The media app with fake dependencies, no observability, an idle lag monitor (1 h ticks), a
+    :class:`FakeContextLoader` (``loader``), and authentication configured from ``keys`` (fresh ones by
+    default) for :data:`PUBLIC_HOST`."""
     values: dict[str, Any] = {"pod_id": "pod-test", **auth_values(keys), **overrides}
     return create_app(
         settings_of(MediaSettings, **values),
@@ -115,6 +158,8 @@ def media_app(  # noqa: PLR0913 - keyword-only test knobs
         monitor=monitor if monitor is not None else LoopLagMonitor(interval_s=3600),
         clock=clock,
         body=body,
+        context_loader=(loader if loader is not None else FakeContextLoader()).factory,
+        control_handler=control_handler,
     )
 
 
@@ -259,3 +304,64 @@ class FakeSocket:
     async def close(self, code: int) -> None:
         if self.closed_with is None:
             self.closed_with = code
+
+
+@dataclass
+class Served:
+    app: Starlette
+    url: str
+    keys: MediaKeys
+    clock: ManualClock
+    container: FakeMediaContainer
+    body: RecordingBody
+    loader: FakeContextLoader
+
+    @property
+    def media(self) -> MediaState:
+        state: MediaState = self.app.state.media
+        return state
+
+    def metric(self, name: str, **labels: str) -> float | None:
+        attach: MediaAttach = self.app.state.media_attach
+        return attach.metrics.registry.get_sample_value(name, labels)
+
+    def rejected(self, reason: str) -> float | None:
+        return self.metric("va_media_admission_rejected_total", reason=reason)
+
+    @asynccontextmanager
+    async def connect(self, call_id: uuid.UUID, **kwargs: Any) -> AsyncIterator[ClientConnection]:
+        async with signed_connect(self.url, self.keys, self.clock.now(), call_id, **kwargs) as ws:
+            yield ws
+
+    async def attach(self, ws: ClientConnection) -> CallSession:
+        await ws.send(connected_msg())
+        await ws.send(start_msg())
+        return await self.body.wait_started()
+
+
+@asynccontextmanager
+async def served(
+    models_dir: Path,
+    *,
+    body: Any = None,
+    container: FakeMediaContainer | None = None,
+    loader: FakeContextLoader | None = None,
+    **overrides: Any,
+) -> AsyncIterator[Served]:
+    """The media app served with a :class:`ManualClock`, a :class:`RecordingBody` (unless ``body``), and a
+    :class:`FakeContextLoader` (unless ``loader``)."""
+    keys, clock = MediaKeys(), ManualClock()
+    recording = RecordingBody()
+    used = container if container is not None else FakeMediaContainer()
+    contexts = loader if loader is not None else FakeContextLoader()
+    app = media_app(
+        models_dir,
+        used,
+        keys=keys,
+        clock=clock,
+        body=body if body is not None else recording,
+        loader=contexts,
+        **overrides,
+    )
+    async with served_media(app) as url:
+        yield Served(app, url, keys, clock, used, recording, contexts)

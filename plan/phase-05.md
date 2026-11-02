@@ -114,7 +114,7 @@
   - Deliverables: `va_media.server` `/ws/telnyx` (Ed25519 + stream token + `stream_auth_token`, close 4401/4409/4421/4503), `va_media.ownership` (Lua acquire/renew/release), `va_media.session.CallSession` (renewer, heartbeat, body seam, `SessionEnd`), `va_media.pods.PodRegistry` (`media:pods` every 2 s), readiness at 90 % capacity, drain refuses new streams
   - Acceptance: tests for bad signature/token (4401, nothing read), duplicate stream attach (second rejected 4409), admission at capacity and while draining (4503), lock loss aborts with `worker_lost`, heartbeat written every 3 s and deleted at end, `media:pods` entry published and removed.
 
-- [ ] P05-T07b Media session control/carrier channels and drain notice/timeout
+- [x] P05-T07b Media session control/carrier channels and drain notice/timeout — DbCallContextLoader (ctx or primary-leg org, status check 4401, rebuild), pod-wide ChannelHub (confirmed subscribe, carrier dedupe/overflow), va_domain.control models + acks EX 30, DefaultControlHandler, local drain_notice + worker_lost at timeout; 9142 passed, 99.14% cov, lint/typecheck/placeholders/spec refs pass, jscpd 0, radon no C+
   - Spec refs: specs/07-media-pipeline.md §3 steps 3 and 6, §17, §19 (drain); specs/01-architecture.md §3
   - Depends on: P05-T07a
   - Deliverables: CallContext load on attach (Redis, else rebuilt from `calls.config`), control channel subscription with typed messages (`va_domain.control`), `control_ack` writes, carrier channel subscription + `carrier_state` snapshot read with dedupe, `drain_notice` to sessions, drain timeout ends remaining sessions with `worker_lost`

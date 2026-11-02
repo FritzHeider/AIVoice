@@ -87,6 +87,42 @@ Readiness fails when draining, when active calls ≥ 90 % of `MEDIA_MAX_CALLS_PE
 >    reads the stream and ends with `stream_closed` on Telnyx `stop` or a disconnect. A body exception closes the
 >    WS 1011 after the same cleanup.
 
+> Decision (2026-11-02): media session channels and drain (P05-T07b).
+> 1. Step 3 runs after step 4, because the org comes from the `start` frame's `call_control_id` when the Redis
+>    context is missing (`start` is not media, so the call is still refused without reading media).
+>    `va_media.context.DbCallContextLoader`: `call:{<id>}:ctx` present → org = its `org_id`; absent → the system
+>    `CallLegLookupRepo.by_call_control_id` must return the same call with role `primary`, else 4401 reason
+>    `call_unknown`. The `calls` row is then read in `tenant_session(org)`: missing → 4401 `call_unknown`;
+>    `status` not in `dialing`/`ringing`/`in_progress` → 4401 `call_status` (specs/28 §6.2, also when a context
+>    was stored). A missing context is rebuilt with `va_db.call_context.build_call_context` and saved (a save
+>    error is logged, the call proceeds). Database / Redis failures close 1011 (reasons `database` / `redis`).
+>    The ownership lock is released on every refusal after it was taken.
+> 2. Step 6 uses ONE pod-wide pub/sub connection (`va_media.channels.ChannelHub`, supervised task `channels`),
+>    not one per session (a pooled connection per call would exhaust the pool at 60 calls). `subscribe(call_id)`
+>    subscribes `call:{<id>}:control` and `call:{<id>}:carrier` and returns once Redis confirmed both (2 s on the
+>    injected clock, else 1011 reason `subscribe`); only then is `HGETALL call:{<id>}:carrier_state` read
+>    (`va_media.carrier_state.CarrierSnapshot`; a Redis error closes 1011 `redis`). Subscribe-before-snapshot:
+>    an event published after the confirmation is delivered, one stored before is in the snapshot, one in both is
+>    harmless (the snapshot is state, events are changes). The session end unsubscribes. The hub task is the only
+>    reader of the connection; its read errors are logged and retried after 1 s (redis-py re-subscribes on
+>    reconnect).
+> 3. Per call (`CallFeed`): carrier events are parsed as `va_domain.carrier.CarrierEvent` into a 256-entry queue
+>    (overflow drops the oldest, `media.carrier_overflow`); malformed events and events of another call are
+>    dropped (`media.carrier_invalid`), redeliveries of the last 512 `telnyx_event_id`s are dropped silently.
+> 4. Control messages are `va_domain.control` models (discriminated on `type`, unknown fields rejected, `id`
+>    required, `text`/`phone_number` non-blank); an invalid message is dropped (`media.control_invalid`, the
+>    text is never logged). The session task `control_listener` hands them in arrival order to a
+>    `ControlHandler`; `True` → `SET call:{<id>}:control_ack:<id> 1 EX 30` (written even when the message ended
+>    the session; a Redis error is logged); a handler exception fails the session (1011). Until the pipeline and
+>    transfers exist, the default handler acknowledges `stop` (`end_reason='api_stop'`, `ended_by='api'`),
+>    `credits_exhausted` (`insufficient_credits`, `system`) and `drain_notice` (logged), and leaves `say`,
+>    `inject_context`, `transfer`, `takeover` unacknowledged (`media.control_unsupported`).
+> 5. Drain (§19): every live session gets a local `drain_notice` (delivered to its listener, never published,
+>    never acknowledged), the worker waits for its calls up to `MEDIA_DRAIN_TIMEOUT_S` on the injected clock, then
+>    ends the remaining sessions with `end_reason='worker_lost'`, `ended_by='error'` (logged
+>    `media.drain_timeout`) and waits up to 10 s more for their cleanup. New streams keep being refused 4503.
+> 6. `va_media_admission_rejected_total{reason}` gains `call_unknown`, `call_status`, `database`, `subscribe`.
+
 ## 4. Audio formats and framing (`va_voice.audio`)
 
 | Stream | Format | Frame |
@@ -601,6 +637,9 @@ class ConversationEngine(Protocol):
 > Decision (2026-11-01): the carrier channel message is `va_domain.carrier.CarrierEvent` (P05-T02): the three fields
 > above plus `call_id`, `org_id`, `telnyx_event_id` (dedupe key), and `occurred_at` (specs/06 §5 Decision P05-T02).
 
+> Decision (2026-11-02): the control messages are the `va_domain.control` models (`parse_control`,
+> `control_channel`, `control_ack_key`); handling and acknowledgement rules: §3 Decision P05-T07b.
+
 ## 18. End of call routine
 
 1. Stop accepting engine outputs; if the end was agent-initiated, finish the final line (wait mark echo, max 8 s).
@@ -624,6 +663,8 @@ ends with `end_reason='max_duration'`.
   > (`call:{<id>}:hb` absent 20 s → `end_reason='worker_crash'` + hangup); see specs/01 §2.1 Decision P05-T06c.
 - Drain on SIGTERM: add pod to `media:pods:draining`, readiness false, publish `drain_notice` to sessions (engine
   logs only), wait for sessions to end or `MEDIA_DRAIN_TIMEOUT_S`, then end remaining with `end_reason='worker_lost'`.
+  > Decision (2026-11-02): the drain notice is delivered locally to each session's control listener (not
+  > published to Redis); the timeout and the 10 s cleanup grace run on the injected clock (§3 Decision P05-T07b).
 - STT socket failure: reconnect (50/100/200 ms, 3 attempts) buffering ≤ 2 s audio; resend buffered audio; on final
   failure → error path.
 - TTS socket failure: reconnect, re-init context, resend the current segment text from the unsent position.

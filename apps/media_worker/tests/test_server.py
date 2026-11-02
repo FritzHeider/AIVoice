@@ -5,80 +5,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import fakeredis
-from clock_helpers import ManualClock
 from media_helpers import (
     FakeMediaContainer,
-    MediaKeys,
-    RecordingBody,
     close_code,
     connected_msg,
-    media_app,
-    served_media,
-    signed_connect,
+    served,
     start_msg,
     stop_msg,
 )
 from service_helpers import json_log_stream, log_events
-from starlette.applications import Starlette
-from websockets.asyncio.client import ClientConnection
 
 from va_domain.carrier import heartbeat_key, owner_key
-from va_media.main import MediaState
-from va_media.server import MediaAttach
 from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
-
-
-@dataclass
-class Served:
-    app: Starlette
-    url: str
-    keys: MediaKeys
-    clock: ManualClock
-    container: FakeMediaContainer
-    body: RecordingBody
-
-    @property
-    def media(self) -> MediaState:
-        state: MediaState = self.app.state.media
-        return state
-
-    def metric(self, name: str, **labels: str) -> float | None:
-        attach: MediaAttach = self.app.state.media_attach
-        return attach.metrics.registry.get_sample_value(name, labels)
-
-    def rejected(self, reason: str) -> float | None:
-        return self.metric("va_media_admission_rejected_total", reason=reason)
-
-    @asynccontextmanager
-    async def connect(self, call_id: uuid.UUID, **kwargs: Any) -> AsyncIterator[ClientConnection]:
-        async with signed_connect(self.url, self.keys, self.clock.now(), call_id, **kwargs) as ws:
-            yield ws
-
-    async def attach(self, ws: ClientConnection) -> CallSession:
-        await ws.send(connected_msg())
-        await ws.send(start_msg())
-        return await self.body.wait_started()
-
-
-@asynccontextmanager
-async def served(
-    models_dir: Path, *, body: Any = None, container: FakeMediaContainer | None = None, **overrides: Any
-) -> AsyncIterator[Served]:
-    keys, clock = MediaKeys(), ManualClock()
-    recording = RecordingBody()
-    used = container if container is not None else FakeMediaContainer()
-    app = media_app(
-        models_dir, used, keys=keys, clock=clock, body=body if body is not None else recording, **overrides
-    )
-    async with served_media(app) as url:
-        yield Served(app, url, keys, clock, used, recording)
 
 
 async def test_bad_signature_closes_4401_without_reading(models_dir: Path) -> None:

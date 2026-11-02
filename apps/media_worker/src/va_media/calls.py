@@ -11,6 +11,9 @@ import asyncio
 
 from prometheus_client import Gauge
 
+from va_common.time import Clock
+from va_voice.pipeline.waits import wait_until_set
+
 __all__ = ["CallRegistry", "CapacityError"]
 
 
@@ -72,8 +75,11 @@ class CallRegistry:
         if self._gauge is not None:
             self._gauge.set(self.active)
 
-    async def wait_idle(self, timeout_s: float) -> bool:
-        """Wait until no call is attached; ``False`` when ``timeout_s`` elapses first."""
+    async def wait_idle(self, timeout_s: float, *, clock: Clock | None = None) -> bool:
+        """Wait until no call is attached; ``False`` when ``timeout_s`` (of ``clock`` time when given, else of
+        the event loop's) elapses first."""
+        if clock is not None:
+            return await wait_until_set(self._idle, clock, timeout_s)
         try:
             async with asyncio.timeout(timeout_s):
                 await self._idle.wait()
