@@ -208,7 +208,11 @@ class TaskBrain:
 
     # The Brain protocol.
 
-    async def start(self) -> AsyncGenerator[BrainOutput]:
+    async def start(self, greeting: UserTurn | None = None) -> AsyncGenerator[BrainOutput]:
+        """The opener; a ``greeting`` (``wait_for_greeting``) is appended first as the caller's message, so a
+        generated opener answers it (specs/07 §11 step 4)."""
+        if greeting is not None:
+            self._accept(greeting)
         if self._opener is not None:
             text = self._render(self._opener).strip()
             if text:
@@ -219,16 +223,20 @@ class TaskBrain:
                 yield output
 
     async def on_user_turn(self, turn: UserTurn) -> AsyncGenerator[BrainOutput]:
-        self._state.turn_index += 1
         if turn.supersedes is not None:
             self._drop_turn(turn.supersedes)
+        self._accept(turn)
+        async with contextlib.aclosing(self._respond()) as outputs:
+            async for output in outputs:
+                yield output
+
+    def _accept(self, turn: UserTurn) -> None:
+        """Append the caller's turn (keypad turns as the DTMF message) and remember where it starts."""
+        self._state.turn_index += 1
         self._marks[turn.index] = (len(self._messages), self._records_added)
         message = dtmf_message(turn.dtmf) if turn.dtmf else ChatMessage(role="user", content=turn.text)
         self._last_user = message.content or ""
         self._append(message, at_ms=int(turn.end_ms))
-        async with contextlib.aclosing(self._respond()) as outputs:
-            async for output in outputs:
-                yield output
 
     def on_no_input(self) -> AsyncIterator[BrainOutput]:
         """Nothing: the pipeline speaks its reprompt."""

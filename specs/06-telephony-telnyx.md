@@ -498,6 +498,11 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 - Outbound: `send_dtmf` for `precall_dtmf_sequence` (split on `w`: each `w` → 500 ms `asyncio.sleep` between
   `send_dtmf` calls of contiguous digit groups) and for Press Button nodes / `press_button` tool.
 
+> Decision (2026-11-02): the media worker sends both (specs/07 §11 Decision P05-T10b) through its own
+> `TelnyxClientFactory` (`va_telnyx.settings.telnyx_factory`, shared with the worker; `TELNYX_API_BASE`/
+> `TELNYX_API_KEY` via `TelnyxApiSettings`, BYO keys via `va_db.telnyx_keys.TelnyxKeyResolver`); `W` in a
+> `press_button` sequence is a 1 s pause.
+
 ## 10. Transfers (exact command sequences)
 
 ### 10.1 Cold transfer

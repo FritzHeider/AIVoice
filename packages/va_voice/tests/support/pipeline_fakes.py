@@ -489,8 +489,9 @@ async def hanging(text: str) -> AsyncIterator[str]:
 
 
 class ScriptedBrain:
-    """A Brain that plays back scripted outputs: ``opener`` once, then one ``replies`` entry per user turn and
-    one ``no_input`` entry per no-input expiry (none left = an empty stream: the pipeline's reprompt)."""
+    """A Brain that plays back scripted outputs (``greetings`` records what ``start`` got): ``opener`` once,
+    then one ``replies`` entry per user turn and one ``no_input`` entry per no-input expiry (none left = an
+    empty stream: the pipeline's reprompt)."""
 
     def __init__(
         self,
@@ -505,6 +506,7 @@ class ScriptedBrain:
         self.no_input: deque[list[BrainOutput]] = deque(list(reply) for reply in no_input)
         self.timing_value = timing if timing is not None else BrainTiming()
         self.user_turns: list[UserTurn] = []
+        self.greetings: list[UserTurn | None] = []
         self.no_input_calls = 0
         self.interrupted: list[str] = []
         self.closed = 0
@@ -520,7 +522,10 @@ class ScriptedBrain:
         if self._calls is not None and self._clock is not None:
             self._calls.append((name, _now_ms(self._clock)))
 
-    async def start(self) -> AsyncIterator[BrainOutput]:
+    async def start(self, greeting: UserTurn | None = None) -> AsyncIterator[BrainOutput]:
+        """Records ``greeting`` (``brain.start`` in the shared calls) and plays the opener."""
+        self.greetings.append(greeting)
+        self._log("brain.start")
         try:
             for output in self.opener:
                 yield output

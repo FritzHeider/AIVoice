@@ -116,7 +116,7 @@ class _PlainOutputs:
 
 
 class _PlainBrain(ScriptedBrain):
-    def start(self) -> AsyncIterator[BrainOutput]:
+    def start(self, greeting: UserTurn | None = None) -> AsyncIterator[BrainOutput]:  # noqa: ARG002
         return _PlainOutputs([SpeakStatic("Hello.")])
 
 

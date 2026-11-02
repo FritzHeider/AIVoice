@@ -19,6 +19,8 @@ __all__ = [
     "DEFAULT_MAX_DURATION_MESSAGE",
     "DEFAULT_NO_INPUT_GOODBYE",
     "DEFAULT_NO_INPUT_PROMPT",
+    "GREETING_TIMEOUT_MAX_MS",
+    "GREETING_TIMEOUT_MIN_MS",
     "NO_INPUT_TIMEOUT_MAX_MS",
     "NO_INPUT_TIMEOUT_MIN_MS",
     "SUPPORTED_FORMATS",
@@ -34,6 +36,8 @@ DEFAULT_NO_INPUT_GOODBYE: Final = "I haven't heard anything, so I'll end the cal
 DEFAULT_NO_INPUT_PROMPT: Final = "Are you still there?"
 """Reprompt when the node has no ``noInputPrompt`` (specs/07 §12)."""
 
+GREETING_TIMEOUT_MIN_MS: Final = 1000
+GREETING_TIMEOUT_MAX_MS: Final = 30_000
 NO_INPUT_TIMEOUT_MIN_MS: Final = 3000
 NO_INPUT_TIMEOUT_MAX_MS: Final = 30_000
 MAX_INTERRUPTIBILITY: Final = 4
@@ -45,7 +49,12 @@ SUPPORTED_FORMATS: Final = (ULAW_8000, L16_16000, PCM16LE_16000)
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
-    """Settings of one call leg's pipeline; invalid values raise ``ValueError``."""
+    """Settings of one call leg's pipeline; invalid values raise ``ValueError``.
+
+    ``wait_for_greeting``/``greeting_timeout_ms``: stay silent after the greeting gate until the first user
+    turn or the timeout (§11 step 4). ``ivr_dead_end_s``: with ``ivr_mode``, end with ``ivr_dead_end`` after
+    this long without progress (specs/05 §9).
+    """
 
     fmt: AudioFormat = ULAW_8000
     l16_byte_order: L16ByteOrder = "big"
@@ -53,6 +62,9 @@ class PipelineConfig:
     block_interruptions: bool = False
     interruption_threshold_ms: int | None = None
     ivr_mode: bool = False
+    ivr_dead_end_s: float = 120.0
+    wait_for_greeting: bool = False
+    greeting_timeout_ms: int = 6000
     max_duration_s: float = 1800.0
     max_duration_message: str = DEFAULT_MAX_DURATION_MESSAGE
     max_duration_warning_s: float = 10.0
@@ -75,6 +87,11 @@ class PipelineConfig:
             (self.fmt in SUPPORTED_FORMATS, f"unsupported leg format {self.fmt.name}"),
             (0 <= self.interruptibility <= MAX_INTERRUPTIBILITY, "interruptibility must be within 0..4"),
             (self._threshold_ok(), f"interruption_threshold_ms must be within {_THRESHOLDS}"),
+            (self.ivr_dead_end_s > 0, "ivr_dead_end_s must be > 0"),
+            (
+                GREETING_TIMEOUT_MIN_MS <= self.greeting_timeout_ms <= GREETING_TIMEOUT_MAX_MS,
+                f"greeting_timeout_ms must be within {GREETING_TIMEOUT_MIN_MS}..{GREETING_TIMEOUT_MAX_MS}",
+            ),
             (self.max_duration_s > 0, "max_duration_s must be > 0"),
             (
                 0 <= self.max_duration_warning_s < self.max_duration_s,

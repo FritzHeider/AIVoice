@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar, Final
 
-from pydantic import SecretStr, model_validator
+from pydantic import model_validator
 
 from va_common.email import EmailSettings
 from va_common.settings import (
@@ -16,18 +16,22 @@ from va_common.settings import (
     TemporalSettings,
 )
 from va_compliance.international import parse_allowed_countries
+from va_telnyx.settings import SIM_TELNYX_API_KEY, TelnyxApiSettings
 from va_workflows.activities.dial_request import DialSettings
 
 __all__ = ["SIM_TELNYX_API_KEY", "WorkerSettings"]
-
-SIM_TELNYX_API_KEY: Final = "sim-telnyx-key"
-"""The FakeTelnyx platform key (the ``TELNYX_API_KEY`` dev value); refused in staging and production."""
 
 _DEPLOYED: Final = frozenset({Environment.STAGING, Environment.PRODUCTION})
 
 
 class WorkerSettings(
-    RedisSettings, DatabaseSettings, TemporalSettings, EmailSettings, CryptoSettings, StreamTokenSettings
+    RedisSettings,
+    DatabaseSettings,
+    TemporalSettings,
+    EmailSettings,
+    CryptoSettings,
+    StreamTokenSettings,
+    TelnyxApiSettings,
 ):
     """Settings of the Temporal worker host: the call activities dial through Telnyx (platform key, Call
     Control App, media host, stream token secret) and decrypt BYO Telnyx keys (envelope encryption).
@@ -35,13 +39,12 @@ class WorkerSettings(
     ``STREAM_TOKEN_SECRET`` and ``TELNYX_CALL_CONTROL_APP_ID`` may be empty at construction in ``local``/
     ``test`` so the module imports without environment; :meth:`dial_settings` refuses them then. Staging and
     production refuse an empty secret, an empty app id, and an empty or simulator Telnyx key at
-    construction. Errors name the variable, never its value.
+    construction (the platform key check lives in :class:`~va_telnyx.settings.TelnyxApiSettings`). Errors
+    name the variable, never its value.
     """
 
     service_name: ClassVar[str] = "worker"
 
-    telnyx_api_base: str = "http://localhost:9100/v2"
-    telnyx_api_key: SecretStr = SecretStr(SIM_TELNYX_API_KEY)
     telnyx_call_control_app_id: str = ""
     media_public_host: str = "localhost:8200"
     # Destinations ever dialable; a scheduled call outside them fails admission (specs/24 §6 item 7).
@@ -56,15 +59,11 @@ class WorkerSettings(
             for name, empty in (
                 ("STREAM_TOKEN_SECRET", not self.stream_token_secret.get_secret_value()),
                 ("TELNYX_CALL_CONTROL_APP_ID", not self.telnyx_call_control_app_id.strip()),
-                ("TELNYX_API_KEY", not self.telnyx_api_key.get_secret_value().strip()),
             )
             if empty
         ]
         if missing:
             msg = f"{', '.join(missing)} must be configured when VA_ENV={self.va_env.value}"
-            raise ValueError(msg)
-        if self.telnyx_api_key.get_secret_value().strip() == SIM_TELNYX_API_KEY:
-            msg = f"TELNYX_API_KEY must not be the simulator key when VA_ENV={self.va_env.value}"
             raise ValueError(msg)
         return self
 

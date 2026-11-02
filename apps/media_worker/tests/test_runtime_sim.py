@@ -1,6 +1,6 @@
 """The call runtime end to end on the simulators (wall clock): FakeTelnyx streams a scripted call to a served
-media worker whose body is :class:`CallRuntime` over FakeElevenLabs (STT/TTS) and FakeLLM (specs/07 §16
-Decision P05-T10a)."""
+media worker whose body is :class:`CallRuntime` over FakeElevenLabs (STT/TTS), FakeLLM, and FakeTelnyx for
+outbound DTMF (specs/07 §16 Decision P05-T10a, §11 Decision P05-T10b)."""
 
 from __future__ import annotations
 
@@ -10,14 +10,17 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
+import fakeredis
 import httpx
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader
 from service_helpers import settings_of
 from sim_media import StreamedCall, realtime_telnyx, streamed_call
+from starlette.applications import Starlette
 from telnyx_helpers import CALLEE, register
 from tts_helpers import VOICE_ID
 
@@ -32,8 +35,10 @@ from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime
 from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
 from va_media.settings import MediaSettings
-from va_sim.server import running_sims
+from va_sim.server import running_sims, simulator_routes
 from va_sim.state import SimState
+from va_sim.telnyx.store import DEFAULT_API_KEY
+from va_telnyx.settings import telnyx_factory
 from va_voice.vad import VadExecutor
 from va_voice.vad_model import SileroModel
 
@@ -79,9 +84,13 @@ class Rig:
     org_settings: StaticOrgSettings
 
     @asynccontextmanager
-    async def call(self, **config: Any) -> AsyncIterator[StreamedCall]:
-        loader = FakeContextLoader(provider_voice_id=VOICE_ID, first_sentence=OPENER, **config)
-        async with streamed_call(MODELS_DIR, self.body, state=self.state, loader=loader) as streamed:
+    async def call(self, *, answered: bool = True, **config: Any) -> AsyncIterator[StreamedCall]:
+        """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait)."""
+        values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": OPENER, **config}
+        loader = FakeContextLoader(**values)
+        async with streamed_call(
+            MODELS_DIR, self.body, state=self.state, loader=loader, answered=answered
+        ) as streamed:
             yield streamed
 
     def scenario(self, *steps: str) -> None:
@@ -99,14 +108,21 @@ class Rig:
         return found
 
 
+async def no_byo_key(_account_id: uuid.UUID) -> str | None:
+    return None
+
+
 @asynccontextmanager
 async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
     state = realtime_telnyx()
+    telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
     async with running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls:
         settings = settings_of(
             MediaSettings,
             elevenlabs_ws_base=urls["elevenlabs"].replace("http://", "ws://"),
             llm_default_base_url=f"{urls['llm']}/v1",
+            telnyx_api_base="http://sim/v2",
+            telnyx_api_key=DEFAULT_API_KEY,
         )
         metrics = build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
         clock = SystemClock()
@@ -115,6 +131,7 @@ async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
             http_client(settings, timeout=LLM_HTTP_TIMEOUT) as http,
             VadExecutor(1) as executor,
             httpx.AsyncClient(base_url=urls["llm"]) as llm,
+            httpx.AsyncClient(transport=httpx.ASGITransport(app=telnyx_app)) as telnyx_http,
         ):
             gateway = LlmGateway(
                 ProviderRegistry(platform_provider(settings)),
@@ -131,6 +148,13 @@ async def rig(org: OrgSettings | None = None) -> AsyncIterator[Rig]:
                 vad_executor=executor,
                 clock=clock,
                 metrics=metrics,
+                telnyx=telnyx_factory(
+                    settings,
+                    http=telnyx_http,
+                    redis=fakeredis.FakeAsyncRedis(),
+                    resolve_key=no_byo_key,
+                    clock=clock,
+                ),
             )
             yield Rig(state, llm, RecordingRuntime(runtime), org_settings)
 
@@ -217,3 +241,56 @@ async def test_missing_org_ends_with_error() -> None:
             end = await r.body.end()
         assert end == ERROR_END
         assert len(r.org_settings.reads) == 1
+
+
+def dtmf_groups(streamed: StreamedCall) -> list[str]:
+    return [entry.digits for entry in streamed.sim_call().dtmf_sent]
+
+
+async def test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks() -> None:
+    async with rig() as r:
+        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        async with r.call(precall_dtmf_sequence="12w3", first_sentence=None) as streamed:
+            end = await r.body.end()
+            sent = streamed.sim_call().dtmf_sent
+        assert end == STREAM_CLOSED
+        assert [entry.digits for entry in sent] == ["12", "3"]
+        # The opener is generated (FakeLLM) only after the last group and the 500 ms settle.
+        [opener_request] = r.state.llm.requests
+        last_group = datetime.fromisoformat(sent[-1].at)
+        first_group = datetime.fromisoformat(sent[0].at)
+        assert (last_group - first_group).total_seconds() >= 0.5
+        assert (datetime.fromisoformat(opener_request.received_at) - last_group).total_seconds() >= 0.5
+
+
+async def test_a_press_button_tool_call_reaches_telnyx() -> None:
+    async with rig() as r:
+        await add_rules(
+            r.llm,
+            "rules:\n  - id: menu\n    match: {last_user_regex: 'press', call_index: 0}\n"
+            "    respond: {tool_calls: [{name: press_button, arguments: {digits: '5w6'}}]}\n",
+        )
+        r.scenario(
+            "wait_agent_speech: {}",
+            "say: {text: please press five then six}",
+            "wait_agent_speech: {}",
+            "hangup: {}",
+        )
+        async with r.call() as streamed:
+            end = await r.body.end()
+            groups = dtmf_groups(streamed)
+        assert end == STREAM_CLOSED
+        assert groups == ["5", "6"]
+        assert r.state.llm.requests[0].rule_id == "menu"
+
+
+async def test_wait_for_greeting_holds_the_opener_until_the_callee_speaks() -> None:
+    async with rig() as r:
+        r.scenario("say: {text: Hello who is this}", "wait_agent_speech: {}", "hangup: {}")
+        async with r.call(wait_for_greeting=True, first_sentence=None):
+            end = await r.body.end()
+        assert end == STREAM_CLOSED
+        # The first model request is the opener, and it already answers the callee's greeting.
+        assert len(r.state.llm.requests) == 1
+        assert "Hello who is this" in r.user_messages()[0]
+        assert len(spoken(r.state)) == 1

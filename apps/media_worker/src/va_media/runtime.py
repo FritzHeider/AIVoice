@@ -12,7 +12,12 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
 3. opens the realtime STT and TTS sockets concurrently (closed on every path, including cancellation by the
    session race); an open failure ends the call with ``error`` before any audio;
 4. runs :class:`CallPipeline` with a per-call :class:`SileroVad` and :class:`TaskBrain` and maps its end
-   reason onto the :class:`~va_media.session.SessionEnd`.
+   reason onto the :class:`~va_media.session.SessionEnd`. The pipeline's ``before_opener`` is the
+   :class:`~va_media.greeting.GreetingGate` (answered wait, precall DTMF), its action handler
+   :class:`~va_media.actions.MediaActions` (``press_button``), both over the call's Telnyx client (platform
+   or BYO account; an account that cannot be resolved is logged ``media.telnyx_unavailable`` and the call goes
+   on without outbound DTMF); a :class:`~va_media.carrier_watch.CarrierWatch` task reads the carrier feed
+   (Decision P05-T10b).
 """
 
 from __future__ import annotations
@@ -28,8 +33,9 @@ from typing import Final, Protocol
 import httpx
 from opentelemetry.sdk.trace import TracerProvider
 from redis.asyncio import Redis
+from sqlalchemy.exc import SQLAlchemyError
 
-from va_common.crypto import Envelope, open_kms_provider
+from va_common.crypto import CryptoError, Envelope, open_kms_provider
 from va_common.http import http_client
 from va_common.logging import get_logger
 from va_common.metrics import ServiceMetrics
@@ -37,6 +43,7 @@ from va_common.time import Clock
 from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
+from va_db.telnyx_keys import TelnyxKeyResolver
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
 from va_elevenlabs import (
@@ -54,6 +61,9 @@ from va_engine.task_runner import DialogueSource, TaskBrain
 from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
 from va_llm.providers import platform_provider
 from va_llm.tokens import TokenCounter, default_counter
+from va_media.actions import MediaActions
+from va_media.carrier_watch import CarrierWatch
+from va_media.greeting import GreetingGate
 from va_media.runtime_config import (
     ERROR_END,
     pipeline_config,
@@ -67,6 +77,8 @@ from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
 from va_media.vad_model import VadStatus
+from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
+from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.pipeline import CallPipeline, PipelineConfig
 from va_voice.vad import SileroVad, VadExecutor
@@ -139,9 +151,11 @@ class CallRuntime:
         vad_executor: VadExecutor,
         clock: Clock,
         metrics: ServiceMetrics,
+        telnyx: TelnyxClientFactory | None = None,
         tracer_provider: TracerProvider | None = None,
     ) -> None:
         self._settings = settings
+        self._telnyx = telnyx
         self._gateway = gateway
         self._counter = counter
         self._org_settings = org_settings
@@ -177,24 +191,30 @@ class CallRuntime:
             _log.error("media.pipeline_config_invalid", detail=str(exc))
             return ERROR_END
         try:
-            return await self._converse(context, org, transport, config, self._vad_model)
+            return await self._converse(session, org, transport, config, self._vad_model)
         finally:
             transport.log_summary()
 
     async def _converse(
         self,
-        context: CallContext,
+        session: CallSession,
         org: OrgSettings,
         transport: TelnyxMediaTransport,
         config: PipelineConfig,
         vad_model: VadModel,
     ) -> SessionEnd:
+        context = session.context
         async with AsyncExitStack() as stack:
             try:
                 vendors = await self._open_vendors(stack, context, org, config)
             except (SttError, TtsError, OSError) as exc:
                 _log.error("media.vendor_open_failed", detail=type(exc).__name__)
                 return ERROR_END
+            telnyx = await self._telnyx_client(context)
+            watch = CarrierWatch(session.feed, session.carrier_state)
+            watcher = asyncio.create_task(watch.run(), name="carrier-watch")
+            stack.push_async_callback(_stop_task, watcher)
+            call_control_id = session.start.call_control_id
             pipeline = CallPipeline(
                 transport=transport,
                 stt=vendors.stt,
@@ -211,10 +231,31 @@ class CallRuntime:
                 clock=self._clock,
                 config=config,
                 latency=self._latency(context),
+                actions=MediaActions(
+                    call_id=context.call_id, call_control_id=call_control_id, telnyx=telnyx, clock=self._clock
+                ),
+                before_opener=GreetingGate(
+                    context=context,
+                    call_control_id=call_control_id,
+                    watch=watch,
+                    telnyx=telnyx,
+                    clock=self._clock,
+                ),
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             result = await pipeline.run()
         return session_end(result)
+
+    async def _telnyx_client(self, context: CallContext) -> TelnyxClient | None:
+        """The call's Telnyx client (platform or BYO); ``None`` without a factory or when the BYO key cannot
+        be resolved (logged)."""
+        if self._telnyx is None:
+            return None
+        try:
+            return await self._telnyx.for_account(context.config.telnyx_account_id)
+        except (UnknownTelnyxAccount, CryptoError, SQLAlchemyError, OSError) as exc:
+            _log.warning("media.telnyx_unavailable", error_type=type(exc).__name__)
+            return None
 
     async def _open_vendors(
         self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, config: PipelineConfig
@@ -268,6 +309,14 @@ class CallRuntime:
         )
 
 
+async def _stop_task(task: asyncio.Task[None]) -> None:
+    """Cancel the carrier watch; a failure it ended with is logged (the call went on without it)."""
+    task.cancel()
+    await asyncio.wait({task})
+    if not task.cancelled() and task.exception() is not None:
+        _log.error("media.carrier_watch_failed", error_type=type(task.exception()).__name__)
+
+
 async def _load_model(vad: VadStatus, models_dir: Path) -> SileroModel | None:
     if not vad.loaded:
         return None
@@ -292,7 +341,8 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
 ) -> AsyncIterator[CallRuntime]:
     """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
     database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
-    platform LLM connection is prewarmed (a failure is logged, never raised)."""
+    platform LLM connection is prewarmed (a failure is logged, never raised). The Telnyx pool and client
+    factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound DTMF."""
     database = getattr(container, "database", None)
     if not isinstance(database, Database):
         msg = "the media container has no database"
@@ -308,6 +358,15 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             metrics=LlmMetrics(metrics.registry, metrics),
             costs=CostTable(load_costs(settings.llm_model_costs_json)),
         )
+        telnyx_pool = telnyx_http(settings)
+        stack.push_async_callback(telnyx_pool.aclose)
+        telnyx = telnyx_factory(
+            settings,
+            http=telnyx_pool,
+            redis=container.redis,
+            resolve_key=TelnyxKeyResolver(database, envelope),
+            clock=clock,
+        )
         executor = await stack.enter_async_context(VadExecutor(settings.media_vad_threads))
         await gateway.prewarm()
         yield CallRuntime(
@@ -319,4 +378,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             vad_executor=executor,
             clock=clock,
             metrics=metrics,
+            telnyx=telnyx,
         )

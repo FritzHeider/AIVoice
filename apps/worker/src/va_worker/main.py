@@ -36,8 +36,9 @@ from va_common.time import SystemClock
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 from va_db.telnyx_keys import TelnyxKeyResolver
+from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_worker import __version__
-from va_worker.activities import WorkerActivities, main_registrations, telnyx_factory, telnyx_http
+from va_worker.activities import WorkerActivities, main_registrations
 from va_worker.runner import ClientSource, TemporalWorkers, WorkerFactory, temporal_worker
 from va_worker.settings import WorkerSettings
 from va_worker.task_queues import TaskQueueRegistration

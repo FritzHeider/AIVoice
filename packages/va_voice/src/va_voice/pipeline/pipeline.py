@@ -9,7 +9,11 @@
 - ``endpoint``: sleeps until the endpointer's deadline (woken by every VAD edge and partial); at
   ``EndOfTurn`` it commits the STT, waits for the committed transcript (``stt_commit_timeout_ms``, else the
   latest partial), and queues a :class:`UserTurn` for the Brain.
-- ``replies``: runs the opener, then each user turn's Brain outputs in order, one reply task at a time.
+- ``replies``: opens the call (§11, Decision P05-T10b): awaits the ``before_opener`` hook (the media
+  worker's greeting gate: answered wait, precall DTMF), then with ``wait_for_greeting`` stays silent until
+  the first user turn (speech or keypad) or ``greeting_timeout_ms`` and runs ``Brain.start(greeting)`` with
+  that turn (``None`` on timeout); the no-input timer is never armed before the opener. Then it runs each
+  user turn's Brain outputs in order, one reply task at a time.
 - ``tts``: TTS audio to the speaker. ``outbound``: the 20 ms outbound clock.
 - ``watchdog``: ``max_duration_message`` at ``max_duration - warning`` (pre-empting any reply, not
   interruptible), then ends the pipeline at ``max_duration`` (``max_duration``).
@@ -19,6 +23,9 @@
   stream speaks the node's ``no_input_prompt`` or ``config.no_input_prompt``) while fewer than
   ``max_reprompts`` were spoken since the last user turn, else ``EndCall(no_input_goodbye,
   "no_input_timeout")``.
+- ``ivr`` (``ivr_mode`` only): ends the pipeline with ``ivr_dead_end`` (silently: the reply in progress is
+  cut off) when ``ivr_dead_end_s`` pass from the opener without progress (:class:`IvrProgress`: a delivered
+  turn with new text, or a telephony action).
 - ``dtmf``: ends a keypad sequence ``DTMF_SEQUENCE_TIMEOUT_MS`` after its last digit (``#`` ends it at once
   in the inbound task) and routes it as the user turn ``"[DTMF: 1 2 3]"`` with ``dtmf`` set (§13), like a
   speech turn. A digit during interruptible playback (level ≥ 1) barges in first, without the false-barge-in
@@ -44,7 +51,7 @@ records and latency reports go to the :class:`PipelineObserver`, telephony actio
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -58,6 +65,7 @@ from va_voice.pipeline.barge_in import BargeInMonitor, merge_turns
 from va_voice.pipeline.config import PipelineConfig
 from va_voice.pipeline.dtmf import DtmfBuffer, DtmfSequence, is_dtmf_digit
 from va_voice.pipeline.inbound import InboundPath
+from va_voice.pipeline.ivr import IvrProgress
 from va_voice.pipeline.models import (
     BrainAction,
     BrainOutput,
@@ -158,6 +166,7 @@ class CallPipeline:
         actions: ActionHandler | None = None,
         context_ids: Callable[[int], str] = default_context_id,
         reorder_observer: ReorderObserver = NULL_REORDER_OBSERVER,
+        before_opener: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config if config is not None else PipelineConfig()
         self._transport = transport
@@ -168,6 +177,7 @@ class CallPipeline:
         self._latency = latency if latency is not None else LatencyTracer(clock)
         self._observer = observer
         self._actions = actions
+        self._before_opener = before_opener
         self._stats = PipelineStats()
         self._endpointer = Endpointer()
         self._inbound = InboundPath(
@@ -191,6 +201,9 @@ class CallPipeline:
         self._silence_wake = asyncio.Event()
         self._dtmf = DtmfBuffer()
         self._dtmf_wake = asyncio.Event()
+        self._ivr = IvrProgress(self._config.ivr_dead_end_s * _MS_PER_SECOND)
+        self._ivr_wake = asyncio.Event()
+        self._opened = False
         self._commit: asyncio.Future[SttEventLike] | None = None
         self._turn_start_ms: float | None = None
         self._turn_index = 0
@@ -241,6 +254,10 @@ class CallPipeline:
     def dtmf(self) -> DtmfBuffer:
         return self._dtmf
 
+    @property
+    def ivr(self) -> IvrProgress:
+        return self._ivr
+
     async def run(self) -> PipelineResult:
         """Run the leg until it ends; cancelling the caller cancels every task and re-raises."""
         if self._started:
@@ -262,7 +279,7 @@ class CallPipeline:
         return PipelineResult(reason, self._turn_index, self._stats, self._error)
 
     def _tasks(self) -> list[tuple[str, Coroutine[Any, Any, None]]]:
-        return [
+        tasks: list[tuple[str, Coroutine[Any, Any, None]]] = [
             ("inbound", self._read_transport()),
             ("stt", self._read_stt()),
             ("tts", self._read_tts()),
@@ -273,6 +290,9 @@ class CallPipeline:
             ("silence", self._silence_loop()),
             ("dtmf", self._dtmf_loop()),
         ]
+        if self._config.ivr_mode:
+            tasks.append(("ivr", self._ivr_loop()))
+        return tasks
 
     async def _guarded(self, name: str, work: Coroutine[Any, Any, None]) -> None:
         try:
@@ -587,8 +607,7 @@ class CallPipeline:
     # replies
 
     async def _reply_loop(self) -> None:
-        await self._run_reply(self._brain.start(), None, None)
-        await self._settle_action()
+        await self._open_call()
         while True:
             self._flush_held()
             self._arm_no_input()
@@ -600,8 +619,42 @@ class CallPipeline:
             await self._run_job(job)
             await self._settle_action()
 
+    async def _open_call(self) -> None:
+        """§11: the ``before_opener`` hook, the greeting wait (step 4), then the opener."""
+        if self._before_opener is not None:
+            await self._before_opener()
+        job = await self._await_greeting() if self._config.wait_for_greeting else None
+        self._opened = True
+        self._ivr.start(self._now_ms())
+        self._ivr_wake.set()
+        if job is None:
+            await self._run_reply(self._brain.start(), None, None)
+        else:
+            self._note_turn(job.turn)
+            await self._run_reply(self._brain.start(job.turn), job.timer, job.turn)
+        await self._settle_action()
+
+    async def _await_greeting(self) -> _TurnJob | None:
+        """The first user turn within ``greeting_timeout_ms`` (``None`` on timeout).
+
+        Only turns are queued before the opener (no-input is never armed, resumes need playback).
+        """
+        getter = asyncio.ensure_future(self._jobs.get())
+        if not await within(getter, self._clock, self._config.greeting_timeout_ms / _MS_PER_SECOND):
+            self._stats.greeting_timeouts += 1
+            _log.info("pipeline_greeting_timeout", timeout_ms=self._config.greeting_timeout_ms)
+            return None
+        job = getter.result()
+        if not isinstance(job, _TurnJob):
+            _log.debug("pipeline_job_dropped", job=type(job).__name__)
+            return None
+        self._stats.greeting_turns += 1
+        _log.info("pipeline_greeting_turn", turn_index=job.turn.index)
+        return job
+
     async def _run_job(self, job: _Job) -> None:
         if isinstance(job, _TurnJob):
+            self._note_turn(job.turn)
             await self._run_reply(self._brain.on_user_turn(job.turn), job.timer, job.turn)
         elif isinstance(job, _ResumeJob):
             await self._run_reply(_single(SpeakStatic(job.text, interruptible=True)), None, None, resume=True)
@@ -668,6 +721,8 @@ class CallPipeline:
         raise self._ended(output.reason)
 
     async def _handle_action(self, action: BrainAction) -> None:
+        self._ivr.on_action(self._now_ms())
+        self._ivr_wake.set()
         if self._actions is None:
             _log.info("pipeline_action_unhandled", kind=action.kind)
             return
@@ -728,12 +783,31 @@ class CallPipeline:
             await self._clock.sleep(remaining_ms / _MS_PER_SECOND)
         raise self._ended("max_duration")
 
+    # IVR dead end (specs/05 §9)
+
+    def _note_turn(self, turn: UserTurn) -> None:
+        if self._ivr.on_turn(turn.text, self._now_ms()):
+            self._ivr_wake.set()
+
+    async def _ivr_loop(self) -> None:
+        while True:
+            self._ivr_wake.clear()
+            await self._until(self._ivr_wake, self._ivr.deadline_ms)
+            if self._ivr.due(self._now_ms()):
+                break
+        _log.info("pipeline_ivr_dead_end", dead_end_s=self._config.ivr_dead_end_s)
+        self._closing = True
+        await self._stop_reply()
+        raise self._ended("ivr_dead_end")
+
     # silence (§12)
 
     def _idle(self) -> bool:
-        """Nothing happens on the leg: no reply, job, action, open or held turn, pending commit or digit."""
+        """The call is open and nothing happens on the leg: no reply, job, action, open or held turn, pending
+        commit or digit."""
         return not (
             self._closing
+            or not self._opened
             or self._reply_running()
             or self._action is not None
             or not self._jobs.empty()

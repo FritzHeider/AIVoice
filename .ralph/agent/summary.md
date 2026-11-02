@@ -1,8 +1,8 @@
 # Loop Summary
 
-**Status:** Completed successfully
-**Iterations:** 48
-**Duration:** 3h 56m 31s
+**Status:** Stopped: max runtime exceeded
+**Iterations:** 76
+**Duration:** 12h 4m 45s
 
 ## Tasks
 
@@ -14,4 +14,4 @@ _No events recorded._
 
 ## Final Commit
 
-6f47963: docs: mark phase 04 complete in build status
+627a5be: feat(media): call runtime runs the task-mode pipeline with ElevenLabs STT/TTS and the LLM gateway

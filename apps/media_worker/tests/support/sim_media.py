@@ -12,12 +12,20 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from media_helpers import FakeContextLoader, MediaKeys, media_app, served_media, stream_query
+from media_helpers import (
+    FakeContextLoader,
+    FakeMediaContainer,
+    MediaKeys,
+    media_app,
+    served_media,
+    stream_query,
+)
 from sim_helpers import LATENCIES
 from starlette.applications import Starlette
 from telnyx_helpers import VOICE_URL, RecordingTransport, create_app, dial, telnyx_client
 
 from va_common.time import utcnow
+from va_domain.carrier import carrier_state_key
 from va_sim.clock import RealtimeClock
 from va_sim.settings import WebhookDefaults
 from va_sim.state import SimState
@@ -66,22 +74,28 @@ async def streamed_call(
     *,
     state: SimState | None = None,
     loader: FakeContextLoader | None = None,
+    answered: bool = False,
     **dial_overrides: Any,
 ) -> AsyncIterator[StreamedCall]:
     """Dial a FakeTelnyx call whose media stream attaches to a media worker running ``body`` (``state``: a
-    wall-clock sim state shared with other simulators; ``loader``: the call context source)."""
+    wall-clock sim state shared with other simulators; ``loader``: the call context source; ``answered``:
+    the carrier state already says ``answered``, as the edge would store it)."""
     state = state if state is not None else realtime_telnyx()
     keys = MediaKeys()  # the stream token secret; FakeTelnyx signs the handshake with its own key
     port = free_port()
+    call_id = uuid.uuid4()
+    container = FakeMediaContainer()
+    if answered:
+        await container.redis.hset(carrier_state_key(call_id), mapping={"answered": "1"})
     app = media_app(
         models_dir,
+        container,
         keys=keys,
         body=body,
         loader=loader,
         media_public_host=f"127.0.0.1:{port}",
         telnyx_public_key=state.signing_key.public_key_b64,
     )
-    call_id = uuid.uuid4()
     token = keys.token(call_id, utcnow())
     async with served_media(app, port=port), telnyx_client(state) as client:
         connection = await create_app(client)

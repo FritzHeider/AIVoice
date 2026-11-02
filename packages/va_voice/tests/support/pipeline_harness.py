@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 from pipeline_fakes import (
@@ -90,6 +90,7 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
     partial_after: int = 10,
     clock: HarnessClock | None = None,
     engine: Brain | None = None,
+    before_opener: Callable[[], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Harness]:
     """``engine`` replaces the scripted Brain in the pipeline (``h.brain`` then stays unused)."""
     cfg = config if config is not None else PipelineConfig()
@@ -118,6 +119,7 @@ async def harness(  # noqa: PLR0913 (test knobs, all keyword-only)
         latency=None if latency is None else latency(clock),
         observer=observer,
         actions=actions,
+        before_opener=before_opener,
     )
     task = asyncio.get_running_loop().create_task(pipeline.run(), name="harness-pipeline")
     caller_task = asyncio.get_running_loop().create_task(caller.run(), name="harness-caller")

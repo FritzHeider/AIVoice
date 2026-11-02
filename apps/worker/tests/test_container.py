@@ -9,8 +9,8 @@ from temporalio import activity
 from temporalio.contrib.pydantic import pydantic_data_converter
 from worker_helpers import dialing_settings
 
+from va_telnyx.settings import TELNYX_HTTP_TIMEOUT, telnyx_http
 from va_worker import main as worker_main
-from va_worker.activities import TELNYX_HTTP_TIMEOUT, telnyx_http
 from va_worker.main import build_container
 from va_workflows.registration import CALL_WORKFLOWS
 

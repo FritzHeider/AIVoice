@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from collections.abc import AsyncIterator
@@ -22,6 +23,7 @@ from va_db.session import Database
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
 from va_llm.tokens import default_counter
+from va_media import runtime as runtime_module
 from va_media.main import create_app
 from va_media.runtime import CallRuntime, RuntimeDependencies, open_runtime
 from va_media.runtime_config import ERROR_END
@@ -29,6 +31,7 @@ from va_media.session import CallSession, SessionBody, StreamStart
 from va_media.settings import MediaSettings
 from va_media.stream import read_until_stop
 from va_media.vad_model import VadStatus
+from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.media import MediaFormat
 from va_voice.vad import VadExecutor
 from va_voice.vad_model import SileroModel
@@ -106,7 +109,7 @@ def _metrics() -> ServiceMetrics:
     return build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
 
 
-def _runtime(executor: VadExecutor, *, vad_model: Any = None) -> CallRuntime:
+def _runtime(executor: VadExecutor, *, vad_model: Any = None, telnyx: Any = None) -> CallRuntime:
     return CallRuntime(
         settings=_settings(),
         gateway=cast("Any", None),
@@ -116,6 +119,7 @@ def _runtime(executor: VadExecutor, *, vad_model: Any = None) -> CallRuntime:
         vad_executor=executor,
         clock=SystemClock(),
         metrics=_metrics(),
+        telnyx=telnyx,
     )
 
 
@@ -209,6 +213,7 @@ async def test_open_runtime_loads_the_vad_model_and_prewarms_the_llm() -> None:
         ) as runtime:
             assert isinstance(runtime, CallRuntime)
             assert isinstance(runtime.vad_model, SileroModel)
+            assert isinstance(runtime._telnyx, TelnyxClientFactory)
     finally:
         await database.dispose()
     assert vad.loaded
@@ -269,3 +274,52 @@ async def test_unsupported_leg_format_ends_with_error() -> None:
         end = await _runtime(executor, vad_model=SileroModel.load(MODELS_DIR))(_session(view))
     assert end == ERROR_END
     assert [event["event"] for event in log_events(stream)] == ["media.pipeline_config_invalid"]
+
+
+class FakeTelnyxFactory:
+    """``for_account``: the platform sentinel for ``None``, :class:`UnknownTelnyxAccount` otherwise."""
+
+    def __init__(self) -> None:
+        self.platform = cast("TelnyxClient", object())
+        self.accounts: list[uuid.UUID | None] = []
+
+    async def for_account(self, account_id: uuid.UUID | None) -> TelnyxClient:
+        self.accounts.append(account_id)
+        if account_id is None:
+            return self.platform
+        raise UnknownTelnyxAccount(account_id)
+
+
+async def test_the_call_telnyx_client_comes_from_the_factory() -> None:
+    stream = json_log_stream()
+    factory = FakeTelnyxFactory()
+    byo = uuid.uuid4()
+    async with VadExecutor(1) as executor:
+        runtime = _runtime(executor, telnyx=factory)
+        assert await runtime._telnyx_client(call_context(uuid.uuid4())) is factory.platform
+        assert await runtime._telnyx_client(call_context(uuid.uuid4(), telnyx_account_id=str(byo))) is None
+        assert await _runtime(executor)._telnyx_client(call_context(uuid.uuid4())) is None
+    assert factory.accounts == [None, byo]
+    [unavailable] = [e for e in log_events(stream) if e["event"] == "media.telnyx_unavailable"]
+    assert unavailable["error_type"] == "UnknownTelnyxAccount"
+
+
+async def test_a_failed_carrier_watch_is_logged_when_stopped() -> None:
+    stream = json_log_stream()
+
+    async def broken() -> None:
+        message = "feed broke"
+        raise RuntimeError(message)
+
+    failed = asyncio.ensure_future(broken())
+    await asyncio.wait({failed})
+    await runtime_module._stop_task(failed)
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    running = asyncio.ensure_future(forever())
+    await runtime_module._stop_task(running)
+    assert running.cancelled()
+    [event] = [e for e in log_events(stream) if e["event"] == "media.carrier_watch_failed"]
+    assert event["error_type"] == "RuntimeError"

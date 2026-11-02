@@ -17,6 +17,7 @@ from va_voice.pipeline.dtmf import (
     is_dtmf_digit,
 )
 from va_voice.pipeline.inbound import InboundPath
+from va_voice.pipeline.ivr import IvrProgress
 from va_voice.pipeline.models import (
     AgentTurn,
     BrainAction,
@@ -80,6 +81,7 @@ __all__ = [
     "InboundPath",
     "InterruptRecord",
     "Interruption",
+    "IvrProgress",
     "MarkEcho",
     "NoInputAction",
     "NoInputTimer",

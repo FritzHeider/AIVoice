@@ -107,7 +107,19 @@ def test_media_public_host_and_scheme() -> None:
     assert settings_of(MediaSettings).media_public_host == "localhost:8200"
     assert settings_of(MediaSettings).media_ws_scheme == "ws"
     assert settings_of(MediaSettings, va_env="test").media_ws_scheme == "ws"
-    assert settings_of(MediaSettings, va_env="staging").media_ws_scheme == "wss"
+    staging = settings_of(MediaSettings, va_env="staging", telnyx_api_key="KEY" + secrets.token_hex(12))
+    assert staging.media_ws_scheme == "wss"
+
+
+def test_deployed_media_settings_refuse_the_simulator_telnyx_key() -> None:
+    with pytest.raises(ValidationError, match="TELNYX_API_KEY must not be the simulator key"):
+        settings_of(MediaSettings, va_env="production")
+
+
+def test_telnyx_defaults_are_the_simulator() -> None:
+    settings = settings_of(MediaSettings)
+    assert settings.telnyx_api_base == "http://localhost:9100/v2"
+    assert settings.telnyx_api_key.get_secret_value() == "sim-telnyx-key"
 
 
 def test_stream_secret_validation_hides_the_value() -> None:

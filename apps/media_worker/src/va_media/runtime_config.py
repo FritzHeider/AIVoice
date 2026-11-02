@@ -68,6 +68,8 @@ def pipeline_config(
         block_interruptions=config.block_interruptions,
         interruption_threshold_ms=config.interruption_threshold_ms,
         ivr_mode=config.ivr_mode,
+        wait_for_greeting=config.wait_for_greeting,
+        greeting_timeout_ms=config.greeting_timeout_ms,
         max_duration_s=max_duration_s,
         max_duration_message=org.max_duration_message,
         max_duration_warning_s=min(MAX_DURATION_WARNING_S, max_duration_s / 2),

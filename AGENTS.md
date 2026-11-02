@@ -1296,3 +1296,13 @@ Grafana 3001
   `to: CALLEE`; assert on `state.elevenlabs.tts_requests[*].generated_text` (the socket's own record is empty) and
   `state.llm.requests` — the sim stream object is gone once the call hung up. Real Silero model path in tests:
   `Path(__file__).resolve().parents[3] / "models"` (the `models_dir` fixture holds fake bytes).
+- 2026-11-02 (P05-T10b): `CallPipeline(before_opener=)` runs before the opener; `PipelineConfig.wait_for_greeting`/
+  `greeting_timeout_ms` make the reply loop hand the first user turn to `Brain.start(greeting)` (every Brain's
+  `start` takes `greeting: UserTurn | None = None`); `ivr_mode` adds the `ivr` task (`IvrProgress`, `ivr_dead_end_s`).
+  The no-input timer is never armed before the opener. Media: `GreetingGate` (answered wait 2 s + precall DTMF),
+  `CarrierWatch` (the only reader of `CallFeed.next_carrier`; T10c adds AMD there), `MediaActions` (press_button),
+  `dtmf_out` (groups/pauses). Telnyx settings/pool/factory moved to `va_telnyx.settings` (`TelnyxApiSettings`,
+  `telnyx_http`, `telnyx_factory`, `SIM_TELNYX_API_KEY`), mixed into worker and media settings. Runtime sim tests:
+  `streamed_call(..., answered=True)` seeds the carrier state (else every outbound call waits 2 s); the rig's
+  `CallRuntime(telnyx=telnyx_factory(...))` talks to the in-process FakeTelnyx at `http://sim/v2`, and
+  `streamed.sim_call().dtmf_sent` lists the groups (read it inside the `async with`).

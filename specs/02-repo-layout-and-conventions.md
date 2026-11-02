@@ -254,7 +254,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `KMS_PROVIDER` | api, worker, media | `local` | `local` (AES-256-GCM master key from env) or `aws` |
 | `LOCAL_MASTER_KEY` | same | 64 hex chars | 32-byte master key for envelope encryption in local/test |
 | `AWS_KMS_KEY_ID` | same | empty | KMS key ARN in AWS |
-| `TELNYX_API_BASE` | worker, edge, api | `http://localhost:9100/v2` (sim) | real: `https://api.telnyx.com/v2` |
+| `TELNYX_API_BASE` | worker, edge, api, media | `http://localhost:9100/v2` (sim) | real: `https://api.telnyx.com/v2` |
 | `TELNYX_API_KEY` | same | `sim-telnyx-key` | platform master Telnyx key |
 | `TELNYX_PUBLIC_KEY` | edge, media | sim public key printed by `make up` | Ed25519 public key (base64) for webhook verification |
 | `TELNYX_CALL_CONTROL_APP_ID` | worker, edge | created by `scripts/telnyx_bootstrap.py` | platform Call Control Application id (connection_id) |

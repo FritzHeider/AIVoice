@@ -573,3 +573,32 @@ async def test_inbound_calls_name_the_dialled_number(sim: Sim) -> None:
     await drain(brain.on_user_turn(user_turn(1, "hi")))
     [served_request] = await sim.requests()
     assert f"The caller called {AGENT_NUMBER}." in served_request["messages"][0]["content"]
+
+
+async def test_a_greeting_comes_before_the_static_opener(sim: Sim) -> None:
+    context = task_context(first_sentence="Hi, this is Maya.")
+    brain = sim.brain(context)
+    assert await drain(brain.start(user_turn(0, "Hello?"))) == [("static", "Hi, this is Maya.", True)]
+    assert [(m.role, m.content) for m in brain.messages] == [
+        ("user", "Hello?"),
+        ("assistant", "Hi, this is Maya."),
+    ]
+    assert brain.state.turn_index == 1
+    assert [r.role for r in brain.state.history] == ["user", "assistant"]
+    assert await sim.requests() == []
+
+
+async def test_a_generated_opener_answers_the_greeting(sim: Sim) -> None:
+    brain = sim.brain(task_context(first_sentence=None))
+    assert await drain(brain.start(user_turn(0, "Hello, who is this?"))) == [
+        ("text", "Okay. You said: Hello, who is this?.")
+    ]
+    [served_request] = await sim.requests()
+    assert served_request["messages"][-1] == {"role": "user", "content": "Hello, who is this?"}
+
+
+async def test_a_keypad_greeting_is_a_caller_pressed_message(sim: Sim) -> None:
+    brain = sim.brain(task_context(first_sentence=None))
+    await drain(brain.start(user_turn(0, "", dtmf="9")))
+    [served_request] = await sim.requests()
+    assert served_request["messages"][-1] == {"role": "user", "content": "[Caller pressed: 9]"}

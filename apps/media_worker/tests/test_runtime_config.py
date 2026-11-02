@@ -41,6 +41,8 @@ def test_pipeline_config_maps_call_and_org_settings() -> None:
         max_reprompts=1,
         ignore_button_press=True,
         pronunciation_guide=[rule],
+        wait_for_greeting=True,
+        greeting_timeout_ms=9000,
     )
     org = OrgSettings.model_validate(
         {"max_duration_message": "Time is up, bye.", "no_input_goodbye": "Nobody there, bye."}
@@ -53,6 +55,7 @@ def test_pipeline_config_maps_call_and_org_settings() -> None:
         200,
     )
     assert (config.ivr_mode, config.ignore_button_press) == (True, True)
+    assert (config.wait_for_greeting, config.greeting_timeout_ms) == (True, 9000)
     assert (config.max_duration_s, config.max_duration_warning_s) == (150.0, 10.0)
     assert (config.max_duration_message, config.no_input_goodbye) == (
         "Time is up, bye.",
@@ -73,6 +76,11 @@ def test_pipeline_config_defaults_follow_org_defaults() -> None:
     )
     assert config.max_duration_s == 300.0
     assert config.tts_format == ULAW_8000
+    snapshot = _context().config
+    assert (config.wait_for_greeting, config.greeting_timeout_ms) == (
+        snapshot.wait_for_greeting,
+        snapshot.greeting_timeout_ms,
+    )
 
 
 def test_short_calls_warn_half_way() -> None:
@@ -145,6 +153,7 @@ def test_unavailable_zero_retention_is_logged() -> None:
         ("agent_end_call", SessionEnd("ended", "agent_end_call", "agent")),
         ("max_duration", SessionEnd("ended", "max_duration", "timeout")),
         ("no_input_timeout", SessionEnd("ended", "no_input_timeout", "system")),
+        ("ivr_dead_end", SessionEnd("ended", "ivr_dead_end", "system")),
         ("error", ERROR_END),
     ],
 )

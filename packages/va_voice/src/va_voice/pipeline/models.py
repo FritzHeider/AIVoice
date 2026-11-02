@@ -150,6 +150,8 @@ class PipelineStats:
     no_input_reprompts: int = 0
     dtmf_turns: int = 0
     ignored_dtmf: int = 0
+    greeting_turns: int = 0
+    greeting_timeouts: int = 0
 
 
 @dataclass(frozen=True, slots=True)

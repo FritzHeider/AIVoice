@@ -164,8 +164,10 @@ class Brain(Protocol):
     DTMF reaches the Brain as a :class:`~va_voice.pipeline.models.UserTurn` with ``dtmf`` set (§13).
     """
 
-    def start(self) -> AsyncIterator[BrainOutput]:
-        """The opener (§11 step 5)."""
+    def start(self, greeting: UserTurn | None = None) -> AsyncIterator[BrainOutput]:
+        """The opener (§11 step 5); with ``wait_for_greeting`` (§11 step 4) ``greeting`` is the callee's
+        first turn, or ``None`` when ``greeting_timeout_ms`` passed in silence (and without
+        ``wait_for_greeting``)."""
         ...
 
     def on_user_turn(self, turn: UserTurn) -> AsyncIterator[BrainOutput]: ...
