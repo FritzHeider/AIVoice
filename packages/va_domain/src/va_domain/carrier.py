@@ -23,6 +23,7 @@ __all__ = [
     "call_workflow_id",
     "carrier_channel",
     "carrier_state_key",
+    "heartbeat_key",
     "owner_key",
 ]
 
@@ -68,3 +69,8 @@ def carrier_channel(call_id: uuid.UUID) -> str:
 def owner_key(call_id: uuid.UUID) -> str:
     """``call:{<id>}:owner``: the media worker ownership lock (value = pod id)."""
     return f"call:{{{call_id}}}:owner"
+
+
+def heartbeat_key(call_id: uuid.UUID) -> str:
+    """``call:{<id>}:hb``: the media worker heartbeat (``SET ... EX 10`` every 3 s, specs/07 §19)."""
+    return f"call:{{{call_id}}}:hb"

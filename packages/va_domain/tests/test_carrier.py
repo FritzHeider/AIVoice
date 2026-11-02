@@ -15,6 +15,7 @@ from va_domain.carrier import (
     call_workflow_id,
     carrier_channel,
     carrier_state_key,
+    heartbeat_key,
     owner_key,
 )
 
@@ -63,6 +64,7 @@ def test_keys_use_the_hash_tag_form() -> None:
     assert carrier_state_key(CALL_ID) == f"call:{tag}:carrier_state"
     assert carrier_channel(CALL_ID) == f"call:{tag}:carrier"
     assert owner_key(CALL_ID) == f"call:{tag}:owner"
+    assert heartbeat_key(CALL_ID) == f"call:{tag}:hb"
 
 
 def test_workflow_id_signal_and_ttl() -> None:

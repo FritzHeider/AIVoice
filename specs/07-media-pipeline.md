@@ -584,6 +584,8 @@ ends with `end_reason='max_duration'`.
 - Renewal every 5 s via Lua `if GET == POD_ID then PEXPIRE 15000`. Failure to renew (key lost) → end immediately with
   `end_reason='worker_lost'` without hangup race (workflow issues hangup).
 - Heartbeat `SET call:{id}:hb <ts> EX 10` every 3 s.
+  > Decision (2026-11-02): the heartbeat is watched by the `CallWorkflow` activity `watch_call_heartbeat`
+  > (`call:{<id>}:hb` absent 20 s → `end_reason='worker_crash'` + hangup); see specs/01 §2.1 Decision P05-T06c.
 - Drain on SIGTERM: add pod to `media:pods:draining`, readiness false, publish `drain_notice` to sessions (engine
   logs only), wait for sessions to end or `MEDIA_DRAIN_TIMEOUT_S`, then end remaining with `end_reason='worker_lost'`.
 - STT socket failure: reconnect (50/100/200 ms, 3 attempts) buffering ≤ 2 s audio; resend buffered audio; on final

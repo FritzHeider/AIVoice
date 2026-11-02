@@ -2036,3 +2036,185 @@ yet (flows arrive with T06c/P05-T17).
 ## Review P05-T06b round 2 (Reviewer, 2026-11-01)
 Finding 1 fixed: `_unchanged` releases the slot for terminal statuses; tests cover terminal/live races. Gates re-run:
 lint 0, typecheck 0, placeholders 0, make test 8914 passed / 7 skipped, coverage 99.12%. Approved.
+
+## Plan P05-T06c — `CallWorkflow` orchestration and liveness activities (Planner, 2026-11-01)
+Split: the original T06c also asked for worker registration/container. No production Telnyx settings, rate limiter,
+BYO key resolver or factory construction exist yet, so that wiring is the new **P05-T06d** (plan file updated;
+umbrella P05-T06 now ticks after a–d). T06c = the workflow + liveness activities + shared contracts, tested on the
+Temporal time-skipping server with fake activities. `WorkflowEnvironment.start_time_skipping()` works here (it
+downloads the test server binary on first use; verified once in this iteration).
+
+### Decisions (write as `> Decision (2026-11-01): CallWorkflow (P05-T06c).` under specs/01 §2.1 after step 9; one-line
+### pointers under specs/05 §7.2 (signal_cancel semantics) and specs/07 §19 (heartbeat watch is an activity))
+1. Contracts. `va_domain.call_workflow` gains `CANCEL_SIGNAL = "signal_cancel"` (no argument),
+   `PIPELINE_FINISHED_SIGNAL = "signal_pipeline_finished"`, `PipelineFinished(end_reason: str, ended_by: str)`
+   (frozen, extra forbid; P05-T11's media worker sends it as `model_dump(mode="json")`). New `va_domain.post_call`:
+   `POSTCALL_WORKFLOW_NAME = "PostCallWorkflow"`, `PostCallWorkflowInput(call_id, org_id)`,
+   `postcall_workflow_id(call_id) -> "postcall-<id>"`, `postcall_task_queue(main_queue) -> "<prefix>-postcall"`
+   (ValueError unless it ends with `-main`, same rule as `va_worker.task_queues.task_queue_names`).
+   `va_domain.carrier.heartbeat_key(call_id) -> "call:{<id>}:hb"` (specs/03 §11; media worker writes it in P05-T07).
+2. Signals are recorded only (deterministic handlers): carrier events are deduped by `telnyx_event_id` and only
+   `leg == "primary"` events count (others logged at debug via `workflow.logger`). Recognised: `call.answered`
+   (sets `answered`), `call.hangup` (sets `hung_up`), `call.machine.premium.detection.ended` with
+   `payload.result == "fax_detected"` (sets `fax`), `streaming.failed` (sets `stream_failed_at = workflow.now()` only
+   once answered). `call.recording.*` and other machine events are ignored here (P05-T14 routes recordings to
+   post-call). `signal_cancel` sets `cancel_requested`; once answered it is ignored and logged
+   (`calls.cancel_ignored_in_progress`: the stop API uses the control channel, specs/05 §7.2).
+3. Flow (`run(start: CallWorkflowInput) -> CallWorkflowResult(outcome, end_reason: str | None)`; `phase` query):
+   a. `scheduled`: when `scheduled_for > workflow.now()`, `wait_condition(cancel_requested, timeout=delay)`; cancel →
+      `end_call(canceled)` → child → `outcome="canceled"`. A cancel signal before any later step also ends with
+      `end_call(canceled)` (+ `hangup_call("canceled")` once a dial went out).
+   b. `prefetch_call_context` (PREFETCH_TIMEOUT/RETRY). `CallNotFound` (ActivityError whose cause is an
+      `ApplicationError` of type `CALL_NOT_FOUND`) → return `outcome="not_found"` with no further activity and no
+      child. Any other failure after retries is logged (`calls.prefetch_failed`) and the call proceeds (the media
+      worker rebuilds the context, specs/07 §3). `stored=False` (terminal) → cleanup + child, outcome `"skipped"`.
+   c. `dial(DialInput(final_attempt=...))`: `requeue` → `wait_condition(cancel, 15 s)` and again;
+      `final_attempt = (now + 15 s - first_requeue_at) >= 30 min`. `dialing`/`already_dialed` → ringing (keep
+      `max_duration_s`, see item 5). `skipped`/`blocked`/`failed` → cleanup + child (outcome = the result kind).
+      `CallNotFound` → `not_found`. Other ActivityError after retries → `end_call("error", "The call could not be
+      dialed.")` then `hangup_call("dial_failed")` (the dial may have reached Telnyx) → child, outcome `"error"`.
+   d. `ringing`: `wait_condition(answered or hung_up or cancel, timeout=RING_BACKSTOP = 300 s)` (max `dial_timeout_s`
+      is 120 s). cancel → `end_call(canceled)` + `hangup_call("canceled")`; hung up before answer → cleanup (edge
+      already recorded no_answer/busy/failed; cleanup reason `carrier_error`, message "Carrier hung up before
+      answer."); answered → in progress; timeout → `end_call("error", "No answer or hangup from the carrier in
+      time.")` + `hangup_call("ring_backstop")`.
+   e. `in_progress`: start `watch_call_heartbeat` (handle via `workflow.start_activity`); backstop deadline =
+      answer time (`workflow.now()` when the answered state is first observed by run) + `max_duration_s + 120`.
+      Loop `wait_condition(<any action pending or watch.done()>, timeout=min(backstop left, stream check left))`:
+      - `pipeline_finished` → cleanup (reason `error`, message "Pipeline finished without recording the end.";
+        a no-op when the worker already ended the row) → outcome `"completed"`; no hangup (the worker did it).
+      - `fax` → `end_call("fax_detected")` + `hangup_call("fax_detected")`, outcome `"fax_detected"`.
+      - stream failed and 5 s elapsed → `call_presence`: `owner` false → `end_call("error", "Media stream
+        failed.")` + `hangup_call("stream_failed")`, outcome `"stream_failed"`; owner true → clear and continue;
+        presence ActivityError → log `calls.presence_failed`, clear and continue (the heartbeat watch still guards).
+      - `hung_up` → wait up to PIPELINE_GRACE = 30 s for `pipeline_finished`; then cleanup with reason
+        `worker_crash` (no-op if the edge/worker already ended it); outcome `"completed"` or `"worker_crash"`
+        (when cleanup `changed`).
+      - watch returned (`heartbeat_lost`) → `end_call("worker_crash")` + `hangup_call("worker_crash")`.
+      - watch ActivityError → log `calls.heartbeat_watch_failed`, keep waiting without a watch.
+      - backstop → `end_call("max_duration")` + `hangup_call("max_duration")`, outcome `"max_duration"`.
+      Always cancel a still-running watch and await it (swallow `ActivityError`/`CancelledError`).
+   f. `_end_and_hangup(reason, hangup_reason, message=None)`: `end_call` FIRST (specs/06 §6 Decision P05-T06b item 5);
+      if `end_call` raises ActivityError, still try `hangup_call` (ActivityError swallowed + logged), then re-raise.
+      Cleanup = `end_call` (idempotent slot release). Finish = start child `PostCallWorkflow` with
+      `PostCallWorkflowInput`, id `postcall-<id>`, task queue `postcall_task_queue(workflow.info().task_queue)`,
+      `ParentClosePolicy.ABANDON`; `WorkflowAlreadyStartedError` → logged, tolerated. The child is started for every
+      outcome except `not_found` (specs/18 §1: non-connected calls run steps 1, 6, 11, 13).
+4. Liveness activities `va_workflows.activities.liveness.CallLivenessActivities(*, redis, clock)`:
+   - `@activity.defn(name="watch_call_heartbeat") watch_call_heartbeat(WatchInput{call_id, org_id, missing_after_s:
+     int = 20, poll_interval_s: float = 3.0}) -> WatchResult{reason: Literal["heartbeat_lost"], missing_s: float}`:
+     loop `activity.heartbeat()`, `EXISTS heartbeat_key`; present → `last_seen = now`; `now - last_seen >=
+     missing_after_s` → return; Redis error → log `calls.heartbeat_probe_failed` and treat as seen (a Redis outage
+     must not hang up every call); sleep on the injected clock. `last_seen` starts at activity start (a worker that
+     never attaches after answer is caught 20 s later). Policy `WATCH_HEARTBEAT_TIMEOUT = 30 s`,
+     `WATCH_RETRY` (1 s ×2 → 10 s, unlimited attempts), start-to-close = `max_duration_s + 600 s`.
+   - `@activity.defn(name="call_presence") call_presence(CallActivityInput) -> CallPresence{owner: bool, heartbeat:
+     bool}` (`EXISTS owner_key`, `EXISTS heartbeat_key`); Redis error → retryable `StateUnavailable`. 5 s / 3 attempts.
+5. `DialOutcome` gains `max_duration_s: int | None = None` (`ceil(config.max_duration * 60)`), set by `dial` for
+   `dialing` and `already_dialed` (the workflow cannot read config). Missing (None) → backstop uses 14 400 s.
+6. Sandbox: the workflow schedules activities **by name** (`workflow.execute_activity("dial", ..., result_type=...)`)
+   and imports only import-free modules inside `workflow.unsafe.imports_passed_through()`. Move `PrefetchResult`,
+   `PREFETCH_TIMEOUT`, `PREFETCH_RETRY` from `activities/call_context.py` to a new import-free
+   `activities/context_inputs.py` (re-exported by call_context.py so existing tests/imports keep working); liveness
+   inputs/results/policies in import-free `activities/liveness_inputs.py`.
+
+### Files
+- `packages/va_domain/src/va_domain/call_workflow.py` (signals, `PipelineFinished`), NEW `va_domain/post_call.py`,
+  `va_domain/carrier.py` (`heartbeat_key`).
+- NEW `packages/va_workflows/src/va_workflows/activities/context_inputs.py`, `activities/liveness_inputs.py`,
+  `activities/liveness.py`; edit `activities/call_context.py` (re-export), `activities/telephony_inputs.py` +
+  `activities/telephony.py` (`max_duration_s`).
+- NEW `packages/va_workflows/src/va_workflows/calls/__init__.py` (exports `CallWorkflow`, `CallWorkflowResult`),
+  `calls/call_workflow.py` (workflow class; keep each method ≤ radon B: split phases into `_scheduled`, `_prefetch`,
+  `_dial`, `_ring`, `_converse`, `_end_and_hangup`, `_cleanup`, `_start_post_call`), `calls/state.py` (pure
+  `CallSignals` dataclass: `record(event, now) -> None`, flags, dedupe set — unit-testable without Temporal),
+  `calls/policies.py` (constants: `REQUEUE_DELAY = 15 s`, `REQUEUE_BUDGET = 30 min`, `RING_BACKSTOP = 300 s`,
+  `MAX_DURATION_GRACE = 120 s`, `STREAM_FAILURE_GRACE = 5 s`, `PIPELINE_GRACE = 30 s`, `DEFAULT_MAX_DURATION_S =
+  14_400`).
+- NEW `packages/va_workflows/src/va_workflows/registration.py`: `CALL_WORKFLOWS: Final = (CallWorkflow,)` (T06d builds
+  the registration from it).
+- `packages/va_workflows/pyproject.toml`: nothing new expected (temporalio already a dependency).
+- Specs: Decisions above; AGENTS.md learning line (time-skipping env downloads the test server; workflows schedule
+  activities by name; import-free input modules; pydantic converter in tests).
+
+### Tests (packages/va_workflows/tests)
+- `support/workflow_rig.py`: `async with workflow_env()` → `WorkflowEnvironment.start_time_skipping()` with a client
+  using `pydantic_data_converter` (`Client(**{**env.client.config(), "data_converter": pydantic_data_converter})`);
+  `FakeCallActivities` (scripted: `prefetch` result or exception, a queue of dial outcomes / exceptions,
+  `end_call` returning `EndCallResult(changed, status)`, `hangup_call`, `call_presence` result, watch mode
+  `park` (heartbeat + wait for cancel) | `lose` (return `heartbeat_lost`) | `fail`; records `calls: list[(name,
+  input)]`; `dialed: asyncio.Event`), `run_call(env, fakes, start, signals=...)` starting a `Worker` on task queue
+  `va-test-main` with `CallWorkflow` + the fakes (and optionally a stub `PostCallWorkflow` on `va-test-postcall`
+  recording its input), `carrier(type, call, leg="primary", payload=...)` builder with unique `telnyx_event_id`s.
+- `test_call_workflow.py` (time-skipping): scheduled start dials after the delay (`workflow.now()` ≥ scheduled_for
+  at dial: the fake records `activity.info()`-independent time via a `now` captured from `env.get_current_time()`);
+  cancel while scheduled → only `end_call(canceled)` + child, no prefetch/dial; queued normal completion
+  (answered + pipeline_finished → prefetch, dial, watch started then cancelled, end_call cleanup, child
+  `postcall-<id>` on `va-test-postcall` with the input; no hangup); requeue ×2 then dialing (second-to-last dial
+  `final_attempt=False`); requeue budget spent → last `DialInput.final_attempt=True` after 30 min; blocked/failed/
+  skipped outcomes → cleanup + child, no hangup; `CallNotFound` from prefetch or dial → `not_found`, nothing else;
+  dial ActivityError → end_call(error) then hangup(dial_failed); no-answer (hangup before answer) → cleanup with
+  `carrier_error`, no hangup; cancel while ringing → end_call(canceled) then hangup(canceled); cancel after answer
+  ignored; ring backstop → end_call(error) + hangup(ring_backstop) after 300 s; worker crash (watch `lose`) →
+  end_call(worker_crash) then hangup(worker_crash); fax premium result → fax path; fax on a `transfer_target` leg
+  ignored; duplicate `telnyx_event_id` counted once; streaming.failed with presence owner false → stream_failed
+  path after ≥ 5 s, owner true → continues to normal completion; hangup after answer without pipeline_finished →
+  end_call(worker_crash) after 30 s, no hangup; max-duration backstop at `max_duration_s + 120` → end_call(
+  max_duration) + hangup(max_duration); end_call failing → hangup still attempted, workflow fails; child already
+  started tolerated (pre-start a workflow with id `postcall-<id>`). Every assertion on the ordered activity names.
+- `test_call_signals.py`: pure `CallSignals` (dedupe, leg filter, fax only for `fax_detected`, streaming.failed
+  before answer ignored, cancel after answer ignored).
+- `test_liveness_activities.py` (ActivityEnvironment, fakeredis, ManualClock): heartbeat present keeps watching
+  (cancel via `env.cancel()` ends with CancelledError), missing 20 s → `heartbeat_lost` with `missing_s`, never-attached
+  worker → lost after 20 s, Redis error treated as seen, heartbeats recorded (`env.on_heartbeat`); presence
+  owner/heartbeat combinations, Redis error → `StateUnavailable` retryable.
+- `packages/va_domain/tests`: `postcall_workflow_id`, `postcall_task_queue` (ValueError cases), `heartbeat_key`,
+  `PipelineFinished` round trip; apps/worker test that `postcall_task_queue(q) == task_queue_names(q)[1]`.
+- Update dial activity tests for `max_duration_s`.
+- Coverage 100 % line+branch for the new modules.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (workflow methods ≤ B), `uvx pip-audit` on `uv export --no-emit-workspace`, `corepack pnpm audit`.
+`make e2e`: `tests_e2e/` does not exist until P05-T17 — report that.
+
+### Risks
+- Time-skipping and a running activity: if the parked watch fake keeps time from skipping (or its heartbeat timeout
+  fires in skipped time and retries forever), give the fake a mode that waits on cancellation and pass a long
+  heartbeat timeout only through a test seam? Prefer: keep production constants; in the max-duration test the watch
+  fake returns only on cancel and heartbeats every 1 s of wall time; if skipping still stalls, use watch mode `fail`
+  (non-retryable ApplicationError) in that one test, which also covers the "watch failed" branch. Record the outcome.
+- Workflow sandbox: anything importing va_db/redis/httpx at module import inside the workflow file fails validation;
+  import only va_domain + import-free activity modules, passed through.
+- `wait_condition(..., timeout=)` raises `asyncio.TimeoutError` on timeout.
+- Never use `datetime.now()`/random in workflow code; `workflow.now()` only.
+- Determinism of signal ordering in tests: send signals after `fakes.dialed` is set when the test depends on the
+  workflow already being past dial.
+
+## Build P05-T06c (Builder, 2026-11-02)
+Implemented per plan, with these deviations/notes:
+- Contracts: `va_domain.call_workflow` (`CANCEL_SIGNAL`, `PIPELINE_FINISHED_SIGNAL`, `PipelineFinished`),
+  NEW `va_domain.post_call` (`POSTCALL_WORKFLOW_NAME`, `PostCallWorkflowInput`, `postcall_workflow_id`,
+  `postcall_task_queue`), `va_domain.carrier.heartbeat_key`. specs/18 §1 said queue `va-main-postcall`; Decision
+  added there: derived `va-postcall` (matches `va_worker.task_queues`), worker test asserts equality.
+- Activities: import-free `activities/context_inputs.py` (re-exported by call_context.py), `liveness_inputs.py`,
+  `liveness.py` (`CallLivenessActivities`: `watch_call_heartbeat`, `call_presence`); `DialOutcome.max_duration_s`
+  + `telephony_inputs.max_duration_seconds` set for dialing/already_dialed.
+- Workflow `va_workflows/calls/` (`call_workflow.py`, `state.py` CallSignals, `policies.py`, `results.py`
+  CallWorkflowResult/CallOutcome incl. `not_answered`), `registration.CALL_WORKFLOWS`. Watch is stopped before the
+  end actions; hangup-grace wait happens after stopping it.
+- Time-skipping findings (AGENTS.md line): a running activity blocks time skipping and `env.sleep`; tests that
+  need timers during the conversation use watch mode `fail`. Querying mid-run while `env.sleep` wedged the test
+  server → dropped that approach; the grace-wakeup branch is covered by the parked watch fake signalling
+  `pipeline_finished` on cancellation (rig worker heartbeat throttle 100 ms so cancels arrive fast).
+- Specs: Decisions in specs/01 §2.1 (full), pointers in specs/05 §7.2, specs/07 §19, specs/18 §1.
+- Only uncovered branch in call_workflow.py: `timeout > 0` false (unreachable guard before wait_condition).
+Gates: make fmt 0, lint 0, typecheck 0, placeholders 0, spec refs 0, make test 8980 passed / 7 skipped, coverage 99.13% (new modules 100% except one unreachable guard branch), jscpd 0 clones, radon max B(10), pip-audit clean, pnpm audit 3 moderate (pre-existing, unchanged). make e2e: tests_e2e/ not present yet.
+
+## Review P05-T06c (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 8980 passed / 7 skipped (cov 99.13%; new modules
+100% except unreachable `timeout > 0` guard), jscpd 0 clones, radon no C+. Diff matches the plan and specs/01 §2.1
+Decision P05-T06c; deterministic workflow (workflow.now, signals record only, activities by name), end_call before
+hangup, child ABANDON on derived post-call queue. Observation (not blocking): the pipeline-finished cleanup records
+`error` instead of the worker's `PipelineFinished.end_reason`; only matters when the worker's own write failed.
+Approved. Next: P05-T06d worker wiring.

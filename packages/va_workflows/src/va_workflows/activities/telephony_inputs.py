@@ -7,6 +7,7 @@ Workflows import this module to schedule the activities, so it imports only pyda
 
 from __future__ import annotations
 
+import math
 from datetime import timedelta
 from typing import Final, Literal
 
@@ -32,6 +33,7 @@ __all__ = [
     "HangupInput",
     "HangupResult",
     "WorkflowEndReason",
+    "max_duration_seconds",
 ]
 
 type DialResultKind = Literal["dialing", "already_dialed", "skipped", "requeue", "blocked", "failed"]
@@ -69,6 +71,11 @@ END_CALL_TIMEOUT: Final = timedelta(seconds=15)
 END_CALL_RETRY: Final = _policy(6, [CALL_NOT_FOUND, INVALID_END_REASON])
 
 
+def max_duration_seconds(max_duration_min: float) -> int:
+    """``max_duration`` (minutes) in whole seconds, rounded up."""
+    return math.ceil(max_duration_min * 60)
+
+
 class _Result(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -81,12 +88,15 @@ class DialInput(CallActivityInput):
 
 class DialOutcome(_Result):
     """What ``dial`` did; ``status`` is the call's status afterwards, ``code`` the dispatch error code of a
-    ``blocked``/``requeue`` outcome or the Telnyx error code of a ``failed`` one."""
+    ``blocked``/``requeue`` outcome or the Telnyx error code of a ``failed`` one. ``max_duration_s`` (the
+    call's ``max_duration`` in whole seconds, rounded up) is set for ``dialing``/``already_dialed`` so the
+    workflow can arm its backstop without reading the configuration."""
 
     result: DialResultKind
     status: str
     call_control_id: str | None = None
     code: str | None = None
+    max_duration_s: int | None = None
 
 
 class HangupInput(CallActivityInput):

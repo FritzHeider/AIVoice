@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from service_helpers import settings_of
 
+from va_domain.post_call import postcall_task_queue
 from va_worker.settings import WorkerSettings
 from va_worker.task_queues import REGISTRATIONS, task_queue_names
 
@@ -22,6 +23,11 @@ def test_defaults_match_spec() -> None:
 def test_task_queue_names_from_main_queue() -> None:
     assert task_queue_names("va-main") == ("va-main", "va-postcall", "va-ingest", "va-system")
     assert task_queue_names("staging-va-main")[1] == "staging-va-postcall"
+
+
+@pytest.mark.parametrize("base", ["va-main", "staging-va-main"])
+def test_the_postcall_child_queue_is_a_polled_queue(base: str) -> None:
+    assert postcall_task_queue(base) == task_queue_names(base)[1]
 
 
 @pytest.mark.parametrize("base", ["va", "va-postcall", "-main", ""])

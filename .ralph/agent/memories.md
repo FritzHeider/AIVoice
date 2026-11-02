@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793579146-289e
+> P05-T06c: CallWorkflow tests on Temporal time-skipping server: a running activity blocks time skipping AND env.sleep (use watch mode fail when timers must elapse); querying a running workflow while env.sleep wedged the test server; signals sent from inside fake activities (FakeCallActivities.send) are deterministic; Worker default/max_heartbeat_throttle_interval=100ms makes activity cancels arrive fast; execute_activity by name returns Any to mypy
+<!-- tags: workflows, temporal, testing | created: 2026-11-02 -->
+
 ### mem-1793575125-f13d
 > P05-T06b: va_workflows activities TelephonyActivities(dial,hangup_call)/CallEndActivities(end_call) keyword-only ctor; test rig packages/va_workflows/tests/support/telephony_rig.py (FakeTelnyx ASGI + recorded requests, fakeredis, SystemClock); FakeTelnyx AcceleratedClock jumps to time-limit while awaiting Postgres -> realtime=True for live-call tests; FakeTelnyx answers repeated command_id as duplicate ok even after hangup; DialSettings.allowed_countries must include US or admission blocks INTERNATIONAL_NOT_ENABLED
 <!-- tags: workflows, telnyx, testing | created: 2026-11-01 -->

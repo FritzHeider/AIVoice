@@ -121,6 +121,35 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    `call.recording.saved` (timeout 10 min), copies recording to S3, optional diarized re-transcription, summary,
    disposition, analysis schema extraction, citations, evals, memory update, billing finalization, final
    `call.completed` webhook.
+   > Decision (2026-11-02): CallWorkflow (P05-T06c). `va_workflows.calls.CallWorkflow` (name `CallWorkflow`,
+   > input `va_domain.call_workflow.CallWorkflowInput`, result `CallWorkflowResult(outcome, end_reason)`, query
+   > `phase`). Signals only record state: `signal_carrier_event` (deduplicated by `telnyx_event_id`, primary leg
+   > only; `call.answered`, `call.hangup`, `call.machine.premium.detection.ended` with `result=fax_detected`,
+   > `streaming.failed` once answered), `signal_cancel` (no argument; ignored once answered, the stop API uses the
+   > control channel then) and `signal_pipeline_finished` (`PipelineFinished(end_reason, ended_by)`). Flow:
+   > (a) a scheduled call sleeps until `scheduled_for` (a cancel ends it with `end_call(canceled)`); (b)
+   > `prefetch_call_context` — `CallNotFound` ends the workflow with outcome `not_found` and nothing else (no
+   > post-call); any other failure is logged and the call proceeds (the worker rebuilds the context); a terminal
+   > call only gets the cleanup; (c) `dial` — `requeue` waits 15 s (cancellable) and dials again, the attempt is
+   > `final_attempt` once another 15 s would pass 30 min since the first requeue; `skipped`/`blocked`/`failed`
+   > get the cleanup; an activity failure after retries ends the call (`error`, "The call could not be dialed.")
+   > and sends `hangup_call("dial_failed")`; (d) ringing waits for answer/hangup/cancel up to 300 s (`error` +
+   > `hangup_call("ring_backstop")` after that); a hangup before the answer gets the cleanup (outcome
+   > `not_answered`); a cancel ends the call `canceled` then hangs up; (e) once answered it runs the
+   > `watch_call_heartbeat` activity and a backstop at answer + `max_duration` (from `DialOutcome.max_duration_s`,
+   > 14 400 s when absent) + 120 s: `signal_pipeline_finished` → cleanup only (reason `error`, "Pipeline finished
+   > without recording the end.", a no-op when the worker recorded the end); fax → `fax_detected`; watch returns
+   > → `worker_crash`; `streaming.failed` + 5 s with no `call:{<id>}:owner` (activity `call_presence`) → `error`
+   > "Media stream failed."; carrier hangup → wait 30 s for `signal_pipeline_finished`, then cleanup with
+   > `worker_crash`; backstop → `max_duration`; each of these (except the pipeline/hangup cleanups) hangs up after
+   > `end_call`. The cleanup is `end_call` (idempotent, releases the slot). A failed watch is logged and the
+   > backstop still applies. (f) The `PostCallWorkflow` child (`va_domain.post_call`, id `postcall-<id>`) is
+   > started with `ParentClosePolicy.ABANDON` for every outcome except `not_found`; an already started child is
+   > kept. `watch_call_heartbeat` (heartbeat timeout 30 s, unlimited retries, start-to-close `max_duration +
+   > 600 s`) probes `call:{<id>}:hb` every 3 s and returns after 20 s without it (counted from the watch start); a
+   > Redis error counts as seen. `call_presence` reads the owner and heartbeat keys (5 s, 3 attempts,
+   > `StateUnavailable` on Redis errors). Activities are scheduled by name; their inputs live in import-free
+   > modules (`activities.context_inputs`, `liveness_inputs`, `telephony_inputs`).
 
 ### 2.2 Inbound call
 

@@ -13,6 +13,11 @@ pipeline finishes or after a call ends without connecting (no_answer/busy/failed
 run; step 6 assigns the system tag from §4.3 without the LLM). Every step is an activity with its own retry policy and is **idempotent** keyed by `(call_id, step)`; completed
 steps are recorded in `calls.config.postcall_steps` (jsonb array of step names) — re-execution skips completed steps.
 
+> Decision (2026-11-02): the child's task queue is derived from the main queue by replacing its `-main` suffix
+> (`va-main` → `va-postcall`, `va_domain.post_call.postcall_task_queue`), the queue the worker polls
+> (`va_worker.task_queues`); input `PostCallWorkflowInput(call_id, org_id)`, `ParentClosePolicy.ABANDON`, started
+> for every call `CallWorkflow` found (specs/01 §2.1 Decision P05-T06c).
+
 | # | Step (activity) | Runs when | Timeout / retries | Output |
 |---|---|---|---|---|
 | 1 | `finalize_call_record` | always | 30 s / 5 | flush pending `call_turns`, compute `connected_seconds`/`transfer_seconds` from `call_legs` timestamps, set `calls.status` final, `answered_by`, `end_reason` (`05-calls-api.md` §9), `ended_by` |

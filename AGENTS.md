@@ -1205,3 +1205,15 @@ Grafana 3001
   `broken_redis()`). FakeTelnyx's accelerated clock jumps to the next carrier timer (time limit!) whenever the loop
   waits on Postgres: tests that need a live carrier call use `realtime=True`. FakeTelnyx answers a repeated
   `command_id` as a duplicate (`ok`), even after the call ended.
+- 2026-11-02 (P05-T06c): `CallWorkflow` = `va_workflows.calls` (pure signal state `calls.state.CallSignals`, timers
+  `calls.policies`, result `calls.results`; rules: specs/01 §2.1 Decision P05-T06c); liveness activities
+  `va_workflows.activities.liveness.CallLivenessActivities(redis=, clock=)`; `va_workflows.registration.CALL_WORKFLOWS`.
+  Workflow modules import only import-free modules inside `workflow.unsafe.imports_passed_through()` and schedule
+  activities by name (`execute_activity("dial", ..., result_type=X)` returns `Any` to mypy: assign to a typed
+  variable). Tests: `tests/support/workflow_rig.py` (`workflow_env()` = time-skipping server with the pydantic
+  converter, ~1 s per test; `FakeCallActivities` with the production activity names, `send={activity: [signals]}`
+  delivers carrier/cancel/pipeline signals from inside that activity; `run_call` → `CallRun(result, post_call,
+  phase, history)`; stub child in `postcall_stub.py`). Time skips only while no activity is running (a parked
+  activity blocks skipping and `env.sleep` alike), so conversations that must wait on a timer use watch mode
+  `fail`; querying a running workflow while awaiting `env.sleep` wedged the test server — query only after the
+  result. A watch started and cancelled in the same workflow task is never dispatched (absent from `names()`).

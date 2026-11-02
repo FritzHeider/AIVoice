@@ -59,7 +59,18 @@ from va_workflows.activities.telephony import (
     destination_region,
     release_slot,
 )
-from va_workflows.activities.telephony_inputs import DialInput, DialOutcome
+from va_workflows.activities.telephony_inputs import DialInput, DialOutcome, max_duration_seconds
+
+MAX_DURATION_S = 300
+"""``max_duration_min`` 5 of the ``01_task_basic`` configuration the rig seeds."""
+
+
+def test_max_duration_seconds_rounds_up() -> None:
+    assert (max_duration_seconds(5.0), max_duration_seconds(0.5), max_duration_seconds(1.001)) == (
+        300,
+        30,
+        61,
+    )
 
 
 @pytest.fixture
@@ -109,7 +120,9 @@ async def test_a_queued_call_is_dialled_with_the_exact_body(r: Rig) -> None:
     [body] = r.dials()
     ccid = outcome.call_control_id
     assert ccid is not None
-    assert outcome == DialOutcome(result="dialing", status="dialing", call_control_id=ccid)
+    assert outcome == DialOutcome(
+        result="dialing", status="dialing", call_control_id=ccid, max_duration_s=MAX_DURATION_S
+    )
     url = body.pop("stream_url")
     state = decode(body.pop("client_state"))
     assert body == expected_dial_body(call.call_id, connection_id=r.app_id, to=CALLEE, from_=CALLER)
@@ -152,7 +165,10 @@ async def test_a_retry_after_the_leg_was_recorded_sends_nothing(r: Rig) -> None:
     again = await _dial(r.telephony(), call)
 
     assert again == DialOutcome(
-        result="already_dialed", status="dialing", call_control_id=first.call_control_id
+        result="already_dialed",
+        status="dialing",
+        call_control_id=first.call_control_id,
+        max_duration_s=MAX_DURATION_S,
     )
     assert len(r.dials()) == 1
 
@@ -189,9 +205,15 @@ async def test_a_call_past_the_dial_is_already_dialled(r: Rig, status: CallStatu
 
     outcome = await _dial(r.telephony(), call)
 
-    assert (outcome.result, outcome.status) == ("already_dialed", status)
+    assert (outcome.result, outcome.status, outcome.max_duration_s) == (
+        "already_dialed",
+        status,
+        MAX_DURATION_S,
+    )
     assert outcome.call_control_id is not None
-    assert await _dial(r.telephony(), leg_less) == DialOutcome(result="already_dialed", status=status)
+    assert await _dial(r.telephony(), leg_less) == DialOutcome(
+        result="already_dialed", status=status, max_duration_s=MAX_DURATION_S
+    )
     assert r.dials() == []
 
 

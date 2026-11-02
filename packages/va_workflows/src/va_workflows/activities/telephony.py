@@ -57,7 +57,13 @@ from va_workflows.activities.errors import (
 )
 from va_workflows.activities.events import broadcast_events, call_event, ended_event, persist_events
 from va_workflows.activities.lookup import load_call
-from va_workflows.activities.telephony_inputs import DialInput, DialOutcome, HangupInput, HangupResult
+from va_workflows.activities.telephony_inputs import (
+    DialInput,
+    DialOutcome,
+    HangupInput,
+    HangupResult,
+    max_duration_seconds,
+)
 
 __all__ = [
     "ACCOUNT_UNAVAILABLE_MESSAGE",
@@ -144,7 +150,7 @@ def carrier_rejection(error: TelnyxApiError) -> CarrierFailure:
     return CarrierFailure(CARRIER_REJECTED_PREFIX + text, first.code or "unknown")
 
 
-def _outcome(result: str, status: str, **extra: str | None) -> DialOutcome:
+def _outcome(result: str, status: str, **extra: str | int | None) -> DialOutcome:
     return DialOutcome.model_validate({"result": result, "status": status, **extra})
 
 
@@ -247,7 +253,14 @@ class TelephonyActivities:
             leg = await CallLegRepo(session, call.org_id).primary(call.id)
             if leg is not None or call.status != "dialing":
                 ccid = None if leg is None else leg.call_control_id
-                raise _Done(_outcome("already_dialed", call.status, call_control_id=ccid))
+                raise _Done(
+                    _outcome(
+                        "already_dialed",
+                        call.status,
+                        call_control_id=ccid,
+                        max_duration_s=max_duration_seconds(config_of(call).max_duration_min),
+                    )
+                )
 
     async def _transition(self, session: AsyncSession, call: Call, to: CallStatus, **values: object) -> Call:
         try:
@@ -394,7 +407,12 @@ class TelephonyActivities:
             )
         await broadcast_events(self._publisher, events)
         _log.info("calls.dialed", call_control_id=result.call_control_id)
-        return _outcome("dialing", "dialing", call_control_id=result.call_control_id)
+        return _outcome(
+            "dialing",
+            "dialing",
+            call_control_id=result.call_control_id,
+            max_duration_s=max_duration_seconds(plan.config.max_duration_min),
+        )
 
     async def _carrier_failure(self, plan: _Dial, failure: CarrierFailure) -> DialOutcome:
         message = failure.message[:_ERROR_MESSAGE_CHARS]

@@ -9,13 +9,8 @@ continue the trace), and saves it under ``call:{<id>}:ctx``. A call that already
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Final
-
 from opentelemetry import propagate
-from pydantic import BaseModel, ConfigDict
 from temporalio import activity
-from temporalio.common import RetryPolicy
 
 from va_common.logging import bound_context, get_logger
 from va_common.time import Clock
@@ -24,6 +19,7 @@ from va_db.call_states import is_terminal
 from va_db.models import CallStatus
 from va_db.session import Database
 from va_domain.call_context import CallContext
+from va_workflows.activities.context_inputs import PREFETCH_RETRY, PREFETCH_TIMEOUT, PrefetchResult
 from va_workflows.activities.errors import CALL_NOT_FOUND
 from va_workflows.activities.inputs import CallActivityInput
 from va_workflows.activities.lookup import load_call
@@ -36,27 +32,7 @@ __all__ = [
     "PrefetchResult",
 ]
 
-PREFETCH_TIMEOUT: Final = timedelta(seconds=10)
-PREFETCH_RETRY: Final = RetryPolicy(
-    initial_interval=timedelta(seconds=1),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(seconds=5),
-    maximum_attempts=3,
-    non_retryable_error_types=[CALL_NOT_FOUND],
-)
-
 _log = get_logger(__name__)
-
-
-class PrefetchResult(BaseModel):
-    """``stored`` tells whether a context was saved, ``status`` is the call's status when it was read, and
-    ``ttl_s`` the context's Redis TTL when stored."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    stored: bool
-    status: str
-    ttl_s: int | None = None
 
 
 class CallContextActivities:

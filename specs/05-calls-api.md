@@ -578,6 +578,9 @@ returns the call object directly; the object's own `status` field is the call st
 
 - Scheduled call: cancels the workflow timer (`CallWorkflow.signal_cancel`), status `canceled`, hold released,
   disposition `CANCELED`. Response `{"status":"success","message":"Call canceled."}`.
+  > Decision (2026-11-02): `signal_cancel` takes no argument and is honoured by `CallWorkflow` until the call is
+  > answered (scheduled, queued, requeued, dialing, ringing); after the answer it is ignored (specs/01 §2.1
+  > Decision P05-T06c).
 - Queued/dialing/ringing: Telnyx `hangup` on the leg if a `call_control_id` exists; status → `canceled`.
 - In progress: publishes `{"type":"stop","reason":"api"}` on `call:{id}:control`; owner worker hangs up immediately
   (no goodbye line), `ended_by='api'`, `end_reason='api_stop'`. Response `{"status":"success","message":"Call ended successfully."}`.
