@@ -1508,3 +1508,16 @@ Grafana 3001
   NOTHING ... RETURNING`, so only new rows hit the ledger. Tests: `packages/va_billing/tests/test_metering_db.py`
   (`funded_org` grants the start balance through the ledger so `Σ ledger == balance`); `call_rows.seed_call` now
   accepts an explicit `id=` (needed when a hold must reference the call before it exists).
+- 2026-11-02 (P05-T18b): `PostCallWorkflow` = `va_workflows.post_call` (pure `plan.planned_steps`/`remaining`, result
+  `PostCallResult`; rules: specs/18 §1 Decision P05-T18b) + `va_workflows.activities.post_call.PostCallActivities(
+  database=, publisher=, clock=, storage=RecordingStorage|None, step_ms=)` (inputs/policies in `post_call_inputs`);
+  registered on the post-call queue by `va_worker.activities.main_registrations` (`POSTCALL_WORKFLOWS`). Step names are
+  `va_domain.post_call.POSTCALL_STEPS`; completed steps go to `calls.config.postcall_steps` via
+  `va_db.post_call_steps.mark_step`. `RecordingStorage` moved to `va_common.storage` (with
+  `signed_recording_url`, which never raises). `build_container(settings, metrics=None)`: `create_app` passes the probe
+  registry. Tests: `packages/va_workflows/tests/support/postcall_rig.py` (`FakePostCallActivities` scripts each
+  activity, `send={activity: [recording events]}` signals from inside it, `run_post_call` → `PostCallRun.timers()`; the
+  30 min budget timer is always the first TIMER_STARTED); `recording_rig.MemoryS3` presigns (`PRESIGN_HOST`,
+  `fail_presign`). The worker e2e test now runs the real post-call child to completion (a dialed canceled call is charged
+  the attempt fee). A step wrapper that catches `ActivityError` would swallow a budget cancel: `_begin`/`_fail` re-raise
+  `CancelledError` once the budget is spent.

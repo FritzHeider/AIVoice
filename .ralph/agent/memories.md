@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793643573-18f6
+> P05-T18b: PostCallWorkflow (va_workflows.post_call) + PostCallActivities; tests postcall_rig.FakePostCallActivities/run_post_call (budget timer always first TIMER_STARTED); swallowing ActivityError in step wrappers hides budget cancels -> re-raise CancelledError after timeout; RecordingStorage + signed_recording_url in va_common.storage; dialed canceled calls are charged attempt fee
+<!-- tags: workflows, temporal, testing | created: 2026-11-02 -->
+
 ### mem-1793641286-4864
 > P05-T18a: va_billing.metering.finalize_call (org lock -> insert usage ON CONFLICT DO NOTHING RETURNING -> ledger only for new non-zero rows -> recompute price -> capture/release hold); call_rows.seed_call accepts id= ; billing DB tests seed start balance via grant_credits so ledger sums to balance
 <!-- tags: billing, testing | created: 2026-11-02 -->
@@ -429,6 +433,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793645038-024d
+> Monitor on a log that make test truncates later reads the previous run's exit= line: delete the log (or sleep) before arming the monitor. Temporal workflow handlers that swallow ActivityError must re-raise CancelledError after a self-initiated cancel; a heartbeating blocking fake activity keeps time-skipping on wall time, so pair with a budget of ~2 s
+<!-- tags: testing, temporal, workflows | created: 2026-11-02 -->
 
 ### mem-1793640192-b97e
 > failure: make test (review P05-T16b) exit=2, packages/va_workflows/tests/test_end_call_activity.py::test_a_transferred_call_splits_connected_and_transfer_seconds connected_seconds 61.072 vs 60 (+-1 s wall-clock tolerance) under xdist load; passes alone 3/3; next=derive expected durations from the rig clock instead of wall time

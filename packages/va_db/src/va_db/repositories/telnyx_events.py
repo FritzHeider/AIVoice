@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -13,9 +14,10 @@ from sqlalchemy.dialects.postgresql import insert
 from va_db.models import Org, TelnyxEvent
 from va_db.repositories.base import NotFoundError, SystemRepository, require_positive
 
-__all__ = ["RETRY_CLAIM_LIMIT", "NewTelnyxEvent", "TelnyxEventRepo"]
+__all__ = ["RECORDING_SAVED_EVENT", "RETRY_CLAIM_LIMIT", "NewTelnyxEvent", "TelnyxEventRepo"]
 
 RETRY_CLAIM_LIMIT: Final = 200
+RECORDING_SAVED_EVENT: Final = "call.recording.saved"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,3 +122,20 @@ class TelnyxEventRepo(SystemRepository):
         )
         claimed = list((await self.session.scalars(statement)).all())
         return sorted(claimed, key=lambda row: (row.created_at, row.id))
+
+    async def recording_saved(
+        self, call_id: uuid.UUID, call_control_ids: Sequence[str] = ()
+    ) -> TelnyxEvent | None:
+        """The newest stored ``call.recording.saved`` of the call: attributed to ``call_id`` or sent for one
+        of its legs' ``call_control_ids`` (an event stored before the edge resolved its call); ``None`` when
+        none was stored (``PostCallWorkflow`` step 2, specs/18 §1 Decision P05-T18b)."""
+        belongs = TelnyxEvent.call_id == call_id
+        if call_control_ids:
+            belongs = or_(belongs, TelnyxEvent.call_control_id.in_(list(call_control_ids)))
+        statement = (
+            select(TelnyxEvent)
+            .where(TelnyxEvent.event_type == RECORDING_SAVED_EVENT, belongs)
+            .order_by(TelnyxEvent.occurred_at.desc(), TelnyxEvent.id.desc())
+            .limit(1)
+        )
+        return await self.session.scalar(statement)

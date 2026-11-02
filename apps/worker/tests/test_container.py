@@ -10,10 +10,11 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from worker_helpers import dialing_settings
 
 from va_common.http import http_client
+from va_common.metrics import Service, build_metrics, new_registry
 from va_telnyx.settings import TELNYX_HTTP_TIMEOUT, telnyx_http
 from va_worker import main as worker_main
 from va_worker.main import build_container
-from va_workflows.registration import CALL_WORKFLOWS
+from va_workflows.registration import CALL_WORKFLOWS, POSTCALL_WORKFLOWS
 
 MAIN_ACTIVITIES = {
     "prefetch_call_context",
@@ -24,6 +25,15 @@ MAIN_ACTIVITIES = {
     "call_presence",
     "schedule_retry_call",
 }
+POSTCALL_ACTIVITIES = [
+    "finalize_call_record",
+    "find_saved_recording",
+    "report_recording_missing",
+    "mark_postcall_step",
+    "finalize_billing",
+    "emit_completed",
+    "store_recording",
+]
 
 
 def _forbid_opening(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -67,10 +77,17 @@ async def test_the_main_queue_runs_call_workflow_with_its_activities(queue: str)
         assert names == MAIN_ACTIVITIES
         assert len(registration.activities) == len(MAIN_ACTIVITIES)
         assert postcall.task_queue == queue.removesuffix("-main") + "-postcall"
-        assert tuple(postcall.workflows) == ()
-        assert [activity._Definition.must_from_callable(fn).name for fn in postcall.activities] == [
-            "store_recording"
-        ]
+        assert tuple(postcall.workflows) == POSTCALL_WORKFLOWS
+        postcall_names = [activity._Definition.must_from_callable(fn).name for fn in postcall.activities]
+        assert postcall_names == POSTCALL_ACTIVITIES
+
+
+async def test_post_call_steps_observe_into_the_given_registry() -> None:
+    metrics = build_metrics(Service.WORKER, new_registry(process_collectors=False))
+    async with build_container(dialing_settings(**UNREACHABLE), metrics) as container:
+        post_call = container.activities.post_call
+        assert post_call.has_storage
+        assert post_call._step_ms is metrics.histogram("va_postcall_duration_ms")
 
 
 async def test_recordings_go_to_the_configured_bucket_with_sse_per_kms_provider() -> None:

@@ -1,5 +1,6 @@
-"""The worker's own wiring runs ``CallWorkflow`` end to end: real activities on the migrated database,
-FakeTelnyx, fakeredis, and the Temporal time-skipping server (specs/01-architecture.md §1 Decision P05-T06d).
+"""The worker's own wiring runs ``CallWorkflow`` and its ``PostCallWorkflow`` end to end: real activities on
+the migrated database, FakeTelnyx, fakeredis, and the Temporal time-skipping server (specs/01-architecture.md
+§1 Decision P05-T06d).
 
 The workflow is started the way the api starts it: a JSON dict argument through a client with Temporal's
 default converter, decoded by the worker's pydantic converter.
@@ -15,8 +16,8 @@ from datetime import timedelta
 import pytest
 from call_rows import SeededCall, load_call
 from service_helpers import settings_of
-from telephony_rig import Rig, rig
-from temporalio.client import Client, WorkflowExecutionStatus
+from telephony_rig import Rig, call_event_rows, rig
+from temporalio.client import Client
 from temporalio.converter import DataConverter
 from temporalio.testing import WorkflowEnvironment
 from workflow_rig import workflow_env
@@ -29,7 +30,9 @@ from va_domain.call_workflow import CALL_WORKFLOW_NAME, CANCEL_SIGNAL, CallWorkf
 from va_domain.post_call import postcall_workflow_id
 from va_worker.activities import WorkerActivities, main_registrations
 from va_worker.runner import TemporalWorkers
+from va_workflows.activities.post_call import COMPLETED_MESSAGE
 from va_workflows.calls import CallWorkflowResult
+from va_workflows.post_call import PostCallResult
 
 pytestmark = pytest.mark.integration
 
@@ -108,5 +111,23 @@ async def test_a_dialed_call_canceled_while_ringing(database: Database) -> None:
         assert dial["connection_id"] == r.app_id
         assert len(r.commands("hangup")) == 1
         assert await r.limiter.active_calls(call.org_id) == 0
-        child = await env.client.get_workflow_handle(postcall_workflow_id(call.call_id)).describe()
-        assert (child.status, child.task_queue) == (WorkflowExecutionStatus.RUNNING, POSTCALL_QUEUE)
+        post_call = env.client.get_workflow_handle(
+            postcall_workflow_id(call.call_id), result_type=PostCallResult
+        )
+        finished = await post_call.result()
+        assert (finished.status, finished.ran, finished.failed, finished.completed) == (
+            "completed",
+            ("finalize_call_record", "finalize_billing", "emit_completed"),
+            (),
+            "emitted",
+        )
+        assert (await post_call.describe()).task_queue == POSTCALL_QUEUE
+        row = await load_call(database, call)
+        assert row.queue_status == "complete"
+        # Dialed, so the outbound attempt fee is charged even though nobody answered (specs/24 §4).
+        assert row.price_micros == finished.price_micros
+        assert finished.price_micros is not None
+        assert finished.price_micros > 0
+        assert row.config["postcall_steps"] == ["finalize_call_record", "finalize_billing", "emit_completed"]
+        completed = [e for e in await call_event_rows(database, call) if e.message == COMPLETED_MESSAGE]
+        assert [e.data["status"] for e in completed] == ["canceled"]

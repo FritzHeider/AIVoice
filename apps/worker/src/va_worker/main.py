@@ -23,7 +23,7 @@ from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import open_kms_provider
 from va_common.health import CheckFn
 from va_common.http import http_client
-from va_common.metrics import Service, build_metrics
+from va_common.metrics import Service, ServiceMetrics, build_metrics
 from va_common.service import (
     ProbeState,
     StopController,
@@ -34,7 +34,7 @@ from va_common.service import (
     serve,
     service_scope,
 )
-from va_common.storage import open_object_store, sse_for
+from va_common.storage import RecordingStorage, open_object_store, sse_for
 from va_common.time import SystemClock
 from va_db.org_settings import OrgSettingsReader
 from va_db.session import Database
@@ -43,7 +43,7 @@ from va_elevenlabs import ElevenLabsRest
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.phrase_cache import PhraseCache
 from va_worker import __version__
-from va_worker.activities import RecordingStorage, WorkerActivities, main_registrations
+from va_worker.activities import WorkerActivities, main_registrations
 from va_worker.runner import ClientSource, TemporalWorkers, WorkerFactory, temporal_worker
 from va_worker.settings import WorkerSettings
 from va_worker.task_queues import TaskQueueRegistration
@@ -83,15 +83,19 @@ class Container:
 
 
 @asynccontextmanager
-async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
+async def build_container(
+    settings: WorkerSettings, metrics: ServiceMetrics | None = None
+) -> AsyncIterator[Container]:
     """Postgres engine, Redis client, Temporal connector (pydantic converter), the database, the envelope,
     the Telnyx client factory (BYO keys through :class:`TelnyxKeyResolver`), the opener pre-render (ElevenLabs
-    REST + phrase cache + org settings reader), the object store (recordings), and the activity instances.
+    REST + phrase cache + org settings reader), the object store (recordings), and the activity instances;
+    ``metrics`` is the registry the probes serve (a fresh one when ``None``).
 
     No network I/O until used. ``RuntimeError`` before anything is opened when ``STREAM_TOKEN_SECRET`` or
     ``TELNYX_CALL_CONTROL_APP_ID`` is empty, or (local KMS provider) ``LOCAL_MASTER_KEY`` is not configured.
     """
     dial = settings.dial_settings()
+    service_metrics = metrics if metrics is not None else build_metrics(Service.WORKER)
     async with (
         open_kms_provider(settings) as kms_provider,
         open_dependencies() as deps,
@@ -116,6 +120,7 @@ async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
             clock=clock,
             prerender=await stack.enter_async_context(_opener_prerender(settings, database, redis, clock)),
             storage=RecordingStorage(store, settings.s3_bucket_recordings, sse_for(settings)),
+            postcall_step_ms=service_metrics.histogram("va_postcall_duration_ms"),
         )
         yield Container(
             temporal=temporal,
@@ -151,21 +156,26 @@ async def _opener_prerender(
 def create_app(  # noqa: PLR0913 - keyword-only test seams
     settings: WorkerSettings | None = None,
     *,
-    container_factory: ContainerFactory = build_container,
+    container_factory: ContainerFactory | None = None,
     init_observability: bool = True,
     readiness_timeout_s: float = 1.0,
     worker_factory: WorkerFactory = temporal_worker,
     stop: StopController | None = None,
 ) -> Starlette:
-    """Build the probe app whose lifespan runs the Temporal workers."""
+    """Build the probe app whose lifespan runs the Temporal workers (the default container observes into the
+    registry the probes serve)."""
     cfg = settings if settings is not None else WorkerSettings()
     controller = stop if stop is not None else StopController()
     workers = TemporalWorkers(worker_factory=worker_factory)
+    metrics = build_metrics(Service.WORKER)
+    factory: ContainerFactory = (
+        container_factory if container_factory is not None else partial(build_container, metrics=metrics)
+    )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         async with service_scope(
-            app.state, cfg, container_factory, version=__version__, init_observability=init_observability
+            app.state, cfg, factory, version=__version__, init_observability=init_observability
         ) as container:
             supervisor = Supervisor(controller.task_failed)
             supervisor.start(
@@ -182,7 +192,7 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     app.state.stop = controller
     app.state.probes = ProbeState(
         __version__,
-        build_metrics(Service.WORKER).registry,
+        metrics.registry,
         checks=container_checks(app.state),
         liveness=workers.liveness,
         readiness_timeout_s=readiness_timeout_s,

@@ -149,3 +149,201 @@ Gates: fmt/lint/typecheck/placeholders/spec refs pass; `make test` 10624 passed,
 ## Review P05-T18a (2026-11-02): approved
 Re-ran lint, typecheck, placeholders, and spec refs: all pass. make test: 10624 passed, 7 skipped, 99.17 %; metering.py at 100 %.
 Diff matches specs/24 §3-§5 and the Decision. Concurrency is serialised by the org FOR UPDATE lock (populate_existing). Tests cover the §13 metering table, idempotency, and concurrency.
+
+## Plan P05-T18b — PostCallWorkflow v1 (steps 1, 2, 3, 11, 13) + worker registration
+
+Spec: specs/18 §1 (steps 1/2/3/11/13, ordering, `postcall_steps`, failure handling), §10, §11; specs/06 §11 Decision
+P05-T14 item 3; specs/19 §2/§2.1 (`call.completed`, `RECORDING_MISSING`), §4 (Call Object, Decision P05-T16a).
+Steps 4-10 and 12 are later phases; the plan list is built so they slot in by number.
+
+### Design (record as `> Decision (2026-11-02): PostCallWorkflow v1 (P05-T18b)` under specs/18 §1)
+1. Step names (`va_domain.post_call.PostCallStep` Literal + `POSTCALL_STEPS` tuple in spec order of the 13 names, only
+   five implemented now): `finalize_call_record`, `await_recording`, `store_recording`, `finalize_billing`,
+   `emit_completed`. `calls.config.postcall_steps` = JSON array of completed names, appended by the activity
+   `mark_postcall_step` after each successful step (a crash between step and mark re-runs an idempotent step).
+2. `finalize_call_record` ALWAYS runs (it returns the facts the workflow plans with; its writes are guarded): call must be
+   terminal (`is_terminal`), else retryable `CallNotEnded`; missing call → non-retryable `CallNotFound` (workflow returns
+   `call_not_found`, no other step). Backfills only missing values: `ended_at` NULL → primary leg `ended_at` or now;
+   `ended_by` NULL with a known `end_reason` → `END_REASONS[reason]`; answered call with `ended_at` and
+   `connected_seconds == 0 and transfer_seconds == 0` → `call_durations(answered_at, ended_at, transfer_started_at=` the
+   `transfer_target` leg's `started_at`)`. Turns are not flushed here: the media end routine flushes its TurnWriter
+   before the session closes (specs/07 §18 Decision P05-T11b). Returns `CallRecordFacts(connected=answered_at is not
+   None, recording_wanted, recording_storage, done_steps)`. `recording_wanted` = `config.record is True` or
+   `config.post_call_evals` truthy or `config.retranscribe is True`; `recording_storage` = the activity instance was
+   built with storage. Wanted but no storage → log `postcall.recording_storage_missing`, skip 2-3.
+3. await_recording (workflow logic, not one activity): activity `find_saved_recording` reads the stored
+   `call.recording.saved` (`telnyx_events`, system scope via new `TelnyxEventRepo.recording_saved(call_id,
+   call_control_ids)`: event_type match AND (`call_id = :id` OR `call_control_id IN` the call's leg ccids, which the
+   activity reads in a tenant session first), newest `occurred_at` first, first row) → `CarrierEvent(type, leg="primary",
+   call_id, org_id, telnyx_event_id, occurred_at, payload=row.payload["data"]["payload"])` or None. None → wait for
+   signal `recording_saved` (handler stores the first `CarrierEvent`, ignores others) via
+   `workflow.wait_condition(..., timeout=10 min)`. Timeout → activity `report_recording_missing` (`call.error`,
+   `data={"code": "RECORDING_MISSING"}`, level `warning`, message "The call recording did not arrive.") — idempotent:
+   skips when a `call.error` row with that code exists for the call. Signal arriving before the lookup returns is fine
+   (check the signal slot first). On re-execution with `await_recording` done and `store_recording` not done → look up
+   again (the edge stores every event before signalling); None → skip step 3.
+4. Not connected (`answered_at` NULL): steps 1, 11, 13 only (specs/18 §1; step 6 is later). Connected: 1, (2, 3 when
+   wanted+storage), 11, 13.
+5. Failure handling: every step after 1 is wrapped; an `ActivityError` after retries is logged
+   (`workflow.logger.warning("postcall.step_failed", step)`) and appended to `failed`; the workflow continues. Step 11
+   failure: log only — the phase-15 reconcile scans ended calls (`BillingReconcileRepo.calls_ended_between`) so no
+   separate list. `emit_completed` always runs last.
+6. 30 min budget: the parent abandons the child, so the child itself races the pre-completion steps
+   (`asyncio.wait({task}, timeout=1800)` on the workflow timer; cancel the task on timeout, `timed_out=True`) and then
+   runs `emit_completed`. No workflow execution timeout.
+7. Metrics: the catalog has `va_postcall_duration_ms{step}` (WORKER), not §11's names; activities observe it (ms) for
+   finalize_call_record / find_saved_recording / finalize_billing / emit_completed. No failures counter (Temporal SDK
+   metrics count activity failures). Record that.
+8. `emit_completed`: in one tenant transaction, reload the call (terminal required; else non-retryable `CallNotEnded`
+   result `not_ended`, logged error), skip when `queue_status == 'complete'` (`already_completed`, no event), set
+   `queue_status='complete'`, build the Call Object with `load_call_objects(session, [call], recording_urls=...)` (7-day
+   URL via new `va_common.storage.signed_recording_url`), persist `call.completed` (`data = object.model_dump(mode="json")`
+   — use the same dump the api uses for GET /v1/calls/{id}; check `routers/calls.py`), commit, broadcast. Webhook
+   delivery is phase 06 (the dispatcher reads the event).
+9. `finalize_billing`: `va_billing.finalize_call` in `tenant_session`; `CallNotEndedError` → retryable `CallNotEnded`;
+   `AppError CALL_NOT_FOUND/NOT_FOUND` → non-retryable `CallNotFound`; other `AppError` (SERVICE_UNAVAILABLE) → retryable
+   `BillingUnavailable`. Returns `BillingResult(price_micros, hold, posted)`.
+
+### Files
+1. `packages/va_domain/src/va_domain/post_call.py`: add `PostCallStep`, `POSTCALL_STEPS`, `POSTCALL_STEPS_KEY =
+   "postcall_steps"`, `RECORDING_WAIT_S = 600`, `POSTCALL_BUDGET_S = 1800`.
+2. NEW `packages/va_workflows/src/va_workflows/activities/post_call_inputs.py` (import-free like recording_inputs):
+   `PostCallStepInput(call_id, org_id, step)`, `CallRecordFacts`, `SavedRecording(event: CarrierEvent | None)`,
+   `BillingResult`, `CompletedResult(status: Literal["emitted","already_completed","not_ended"])`, timeouts/retry
+   policies: record 30 s/5 attempts; billing 30 s/10; emit 30 s/10; find/report/mark 10 s/5 (2 s doubling to 30 s),
+   non-retryable error types listed (`CALL_NOT_FOUND`).
+3. `activities/errors.py`: add `CALL_NOT_ENDED = "CallNotEnded"`, `BILLING_UNAVAILABLE = "BillingUnavailable"`.
+4. NEW `activities/post_call.py`: `PostCallActivities(*, database, publisher, clock, storage: RecordingStorage-like
+   (store, bucket) | None, step_ms: Histogram | None)` with `@activity.defn` methods `finalize_call_record`,
+   `find_saved_recording`, `report_recording_missing`, `mark_postcall_step`, `finalize_billing`, `emit_completed`
+   (all keyword `CallActivityInput`/`PostCallStepInput`). `mark_postcall_step`: one UPDATE
+   `config = jsonb_set(config, '{postcall_steps}', coalesce(config->'postcall_steps','[]') || to_jsonb(:step))
+   WHERE id/org AND NOT coalesce(config->'postcall_steps','[]') ? :step` (put the SQL builder in
+   `va_db.post_call_steps` with `done_steps(config) -> tuple[str,...]` and `mark_step(session, org_id, call_id, step)`).
+   Move `RecordingStorage` dataclass from `va_worker.activities` to `va_common.storage` (worker re-imports it).
+5. `packages/va_common/src/va_common/storage.py`: `RecordingStorage`, `signed_recording_url(store, bucket, key, *, now)
+   -> SignedUrl | None` (ClientError/BotoCoreError/ValueError → warning `storage.recording_url_failed`, None);
+   `va_api.services.call_read.recording_urls` loops over it (behaviour unchanged, keep its log event name via the
+   helper or adjust the api test that asserts `calls.recording_url_failed`).
+6. `packages/va_db/src/va_db/repositories/telnyx_events.py`: `recording_saved(call_id, call_control_ids) ->
+   TelnyxEvent | None` (add to the specs/03 §2 Decision text for TelnyxEventRepo methods).
+7. NEW `packages/va_workflows/src/va_workflows/post_call/` (`__init__` exports `PostCallWorkflow`):
+   `plan.py` (pure: `planned_steps(facts) -> tuple[PostCallStep,...]`, `remaining(planned, done)`),
+   `results.py` (`PostCallResult(status: "completed"|"call_not_found", ran, skipped, failed, recording:
+   "stored"|"already_stored"|"failed"|"missing"|"not_wanted"|"no_storage"|"skipped", price_micros|None,
+   timed_out, completed: CompletedResult status|None)`), `post_call_workflow.py`
+   (`@workflow.defn(name=POSTCALL_WORKFLOW_NAME)`, `@workflow.signal(name=RECORDING_SAVED_SIGNAL)`, a
+   `@workflow.query` `postcall_phase`). Activities scheduled by name (pattern of CallWorkflow).
+8. `va_workflows/registration.py`: `POSTCALL_WORKFLOWS = (PostCallWorkflow,)`.
+9. `apps/worker/src/va_worker/activities.py`: `WorkerActivities.post_call: PostCallActivities` (always built;
+   storage passed through), `postcall_queue()` = post-call methods + `store_recording` when storage;
+   `main_registrations` always returns both registrations, post-call with `POSTCALL_WORKFLOWS`. Docstrings updated.
+   Metrics: `create_app` builds `metrics = build_metrics(Service.WORKER)` once (ProbeState registry) and the container
+   factory gets it: `ContainerFactory = Callable[[WorkerSettings, ServiceMetrics], ...]`, lifespan passes
+   `lambda s: container_factory(s, metrics)` to `service_scope`; `build_container(settings, metrics)` →
+   `WorkerActivities.build(..., metrics=metrics)` → `metrics.histogram("va_postcall_duration_ms")`. Update worker test
+   fakes accordingly.
+10. specs/18 Decision (above), specs/03 §2 TelnyxEventRepo method note, specs/27 note only if catalog text needs it
+    (no catalog change). AGENTS.md dated line (P05-T18b).
+
+### Tests
+- NEW `packages/va_workflows/tests/support/postcall_rig.py`: `FakePostCallActivities` (production names, scripted
+  results/exceptions per activity incl. `store_recording`, records calls in order, `send={name: [signals]}` like
+  FakeCallActivities), `run_post_call(env, fakes, facts=..., signals=...) -> (PostCallResult, history)`.
+- NEW `tests/test_post_call_workflow.py` (time-skipping): connected+record order = record → find → store → billing →
+  emit with marks after each; not connected = record, billing, emit only; record=false skips 2-3; no storage skips 2-3;
+  stored event found → no wait; signal delivered (from inside `find_saved_recording` fake returning None) → store gets
+  the signalled event; no signal → 10 min timer then `report_recording_missing`, no store, emit still runs (assert
+  TIMER_STARTED 600 s from history); `done_steps` from facts skip completed steps (billing+emit already done → only
+  record runs; await done but store not → find again then store); store/billing failures (non-retryable fakes) →
+  `failed` lists them, emit still runs; emit failure → result shows failed; `CallNotFound` from step 1 → only step 1;
+  budget: a fake billing that hangs past 30 min (use a long `asyncio.sleep` inside a fake activity is NOT skippable —
+  instead have the wait for the recording signal + a fake whose scripted timer pushes past the budget: set the budget
+  shorter via module constant monkeypatch is not possible in sandbox — so test the race with a workflow-level
+  parameter `PostCallWorkflowInput` stays unchanged; put the budget in `post_call.plan.POSTCALL_BUDGET` and test
+  `timed_out` by a fake `find_saved_recording` None + no signal where RECORDING_WAIT > budget is impossible) → resolve:
+  implement the race against `POSTCALL_BUDGET_S` but pass the budget and recording wait through
+  `PostCallTimings` read from `PostCallWorkflowInput.timings: PostCallTimings | None = None` (defaults = spec values;
+  `CallWorkflow` never sets it) so the test can set budget 60 s < wait 600 s and assert `timed_out` + emit ran.
+  Add `timings` to the domain input model (extra field, default None).
+- Pure `tests/test_post_call_plan.py` for `planned_steps`/`remaining`.
+- NEW `tests/test_post_call_activities.py` (DB, `telephony_rig` style or `call_rows.seed_call`, SystemClock):
+  finalize_call_record backfills (ended_at/ended_by/durations from legs incl. transfer_target) and leaves set values;
+  non-terminal → `CallNotEnded` ApplicationError retryable; unknown → `CallNotFound` non-retryable; recording_wanted
+  combos; find_saved_recording by call_id and by ccid, None when absent, payload = data.payload; report_recording_missing
+  writes one `call.error` (twice → still one); mark_postcall_step appends once (twice → once, order kept);
+  finalize_billing + emit_completed: `call.completed` data `price` == `price_micros / 1e6` for connected, transferred,
+  failed (no_answer with leg) calls; emit twice → one event, `already_completed`; queue_status 'complete'; recording
+  URL present with a `FakePresigner`-like store (reuse `recording_rig.MemoryS3` + real ObjectStore) and absent without
+  storage; histogram observed per step.
+- `packages/va_db/tests`: `TelnyxEventRepo.recording_saved` test (system session) in the existing telnyx_events test
+  module; `va_db.post_call_steps` tests.
+- `packages/va_common/tests`: `signed_recording_url` success + failure → None.
+- Worker: `apps/worker/tests/test_container.py` registration test — post-call queue has `PostCallWorkflow` and the six
+  activities (+ `store_recording` with storage); main queue unchanged. Keep `test_worker_call_flow.py` green (default
+  record=false → post-call runs 1, 11, 13 against the real DB; adjust its assertions if it inspects post-call state).
+
+### Gates
+make fmt, lint, typecheck, placeholders, spec refs; `uv run pytest packages/va_workflows packages/va_db
+packages/va_common apps/worker apps/api -q -k "post_call or postcall or recording or container or telnyx_event or
+call_read"` while iterating; full `make test` in background with a Monitor heartbeat; jscpd, radon, pip-audit, pnpm audit.
+No e2e harness yet (P05-T17).
+
+### Risks
+- Sandbox: workflow module may import only import-free modules inside `imports_passed_through` (post_call_inputs,
+  va_domain.post_call, errors).
+- `asyncio.wait` with timeout in Temporal Python workflows is deterministic (workflow timer); cancel the inner task and
+  await it (catch `CancelledError`) before `emit_completed`.
+- `test_worker_call_flow.py` now runs a real PostCallWorkflow; make sure the worker test waits for/terminates it or the
+  env teardown hangs.
+- Time-skipping: a running activity blocks skipping; the 10 min recording wait happens with no activity running.
+- `CallObject` dump must match the API's JSON exactly (reuse the router's serialization call).
+
+## Build P05-T18b (2026-11-02)
+Built as planned. Where it differs from the plan:
+- `emit_completed` and `finalize_call_record` are both in `plan.ALWAYS_RUN`, so step 13 runs on every execution and is never listed as skipped.
+- When the budget runs out the body is cancelled. The step wrappers catch `ActivityError`, so `_begin`/`_fail` re-raise `CancelledError` once `_out_of_time` is set; otherwise a cancelled activity would let billing still run.
+- If a `recording_saved` signal arrives while `find_saved_recording` is running, the signal wins over the lookup result.
+- `RecordingStorage` moved to `va_common.storage`, which also gains `signed_recording_url`. `va_api.call_read.recording_urls` now uses it and keeps its log event name.
+- `build_container(settings, metrics=None)`: `create_app` passes the probe registry through `partial`, so the container-factory signature for test fakes is unchanged.
+- Worker e2e: the canceled dialed call now runs a real post-call child to completion (steps 1, 11, 13), and is charged the attempt fee.
+Gates:
+- fmt/lint/typecheck/placeholders/spec refs: pass.
+- make test: 10673 passed, 7 skipped, 99.14% coverage. post_call activities at 98%, workflow at 93%.
+- After `_backfill` was split, the targeted tests were re-run: 80 passed.
+- radon average 2.90, no C grade. jscpd 0 clones. pip-audit clean. pnpm audit: 3 moderate, none high.
+- No `tests_e2e` yet (P05-T17), so no e2e run.
+
+## Review P05-T18b (2026-11-02)
+Lint, typecheck, and placeholders were re-run and pass; make test was re-run as well (result below). The diff matches specs/18 §1 and the Decision for steps 1/2/3/11/13, the registrations, mark_step, the recording lookup, and the emit_completed Call Object dump. One defect remains in the budget compensation, which this task's Decision (item 5) promises:
+
+1. `packages/va_workflows/src/va_workflows/post_call/post_call_workflow.py:227` (`_find_saved_recording`), `:243`
+   (`_report_recording_missing`), and `:326` (`_mark`) catch `ActivityError` and return without checking `_out_of_time`.
+   Temporal reports a cancelled activity as `ActivityError(cause=CancelledError)`, as the builder's own `_begin` docstring says.
+   - If the 30 min budget runs out while `find_saved_recording` is running, `body.cancel()` is used up by that activity.
+   - `_find_saved_recording` then returns None, and `_await_recording` goes into `wait_condition` for the full `recording_wait_s`.
+   - `run()` awaits `body` with no timeout, so `emit_completed` happens up to 10 min after the budget instead of at it.
+   - The same happens when the budget runs out during `report_recording_missing`: that activity's swallowed cancel lets the code go on and call `_mark`.
+   - Required: in every `except ActivityError` branch, re-raise `asyncio.CancelledError` when `self._out_of_time` is set (the same guard as `_fail`), and check it again before `wait_condition`.
+2. No test covers the budget expiring while an activity is running. That is the path the `_begin`/`_fail` CancelledError re-raise was written for. The only budget test (`test_the_budget_cancels_the_wait_and_still_completes`) cancels during the signal wait, with no activity running.
+   - Required: add time-skipping tests with a short `PostCallTimings.budget_s` and a fake activity that blocks until cancelled (heartbeating, so the cancel is delivered). Cover one case for `finalize_billing` and one for `find_saved_recording`.
+   - Each test asserts that `timed_out` is True, that `emit_completed` ran right after the budget, and that no later step ran (for example, no `finalize_billing` after the cancelled find). Assert on history timers, not on wall time.
+   - Keep the AGENTS.md P05-T13 gotcha in mind (the server wedges when a failing or completing dispatched activity is cancelled): the fake must block and react to the cancel, not fail.
+make test (reviewer re-run): 10673 passed, 7 skipped, 99% total coverage. post_call_workflow.py is at 93%; the uncovered lines are 227-229, 243-245, 306, 312. These are exactly the budget-cancel and swallow branches in findings 1-2.
+
+## Build P05-T18b fix (2026-11-02): review findings 1-2
+1. `PostCallWorkflow._raise_if_out_of_time()` (shared by `_begin`/`_fail`) is now the first statement of every
+   `except ActivityError` branch that swallows (`_find_saved_recording`, `_report_recording_missing`, `_mark`) and runs
+   before the recording `wait_condition`, so a budget cancel delivered as `ActivityError(cause=CancelledError)` ends the
+   body at once.
+2. `postcall_rig.FakePostCallActivities(block=frozenset({...}))`: the named activity heartbeats until cancelled
+   (`cancelled` lists it); the rig worker uses the 100 ms heartbeat throttle. New tests with `budget_s=2` (a running
+   activity keeps the time-skipping server on wall time): budget during `finalize_billing` and during
+   `find_saved_recording` (timers == [budget] only, no recording wait/report/billing; fails without fix 1). Plus plain
+   lookup failure → wait → missing, and report failure → no `await_recording` mark. post_call_workflow.py 98 %.
+
+## Review P05-T18b fix (2026-11-02): approved
+Findings 1-2 resolved: `_raise_if_out_of_time` guards every swallowing `except ActivityError` and the recording wait;
+blocking-activity budget tests for finalize_billing and find_saved_recording assert timers == [budget], cancelled
+activity, no later steps. Reviewer re-run: lint/typecheck/placeholders pass; make test 10677 passed, 7 skipped, 99%;
+jscpd 0 clones; radon A (3.0).

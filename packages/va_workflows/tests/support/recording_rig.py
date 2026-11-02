@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BUCKET",
+    "PRESIGN_HOST",
     "SAMPLE_RATE",
     "STARTED_AT",
     "MemoryS3",
@@ -41,6 +42,7 @@ __all__ = [
 ]
 
 BUCKET: Final = "va-recordings-test"
+PRESIGN_HOST: Final = "https://s3.test"
 SAMPLE_RATE: Final = 8000
 STARTED_AT: Final = datetime(2026, 11, 2, 12, 0, 1, tzinfo=UTC)
 
@@ -61,6 +63,7 @@ class MemoryS3:
     objects: dict[tuple[str, str], StoredObject] = field(default_factory=dict)
     uploads: int = 0
     fail_uploads: int = 0
+    fail_presign: bool = False
     before_upload: UploadHook | None = None
 
     async def upload_file(
@@ -79,6 +82,17 @@ class MemoryS3:
         self.uploads += 1
         body = await asyncio.to_thread(Path(filename).read_bytes)
         self.objects[(bucket, key)] = StoredObject(body, dict(ExtraArgs or {}))
+
+    async def generate_presigned_url(
+        self,
+        operation: str,
+        Params: dict[str, str],  # noqa: N803
+        ExpiresIn: int,  # noqa: N803
+    ) -> str:
+        """``{PRESIGN_HOST}/{bucket}/{key}?op=<operation>&expires=<s>`` (``fail_presign`` raises)."""
+        if self.fail_presign:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "GetObject")
+        return f"{PRESIGN_HOST}/{Params['Bucket']}/{Params['Key']}?op={operation}&expires={ExpiresIn}"
 
     def store(self) -> ObjectStore:
         return ObjectStore(cast("S3Client", self))

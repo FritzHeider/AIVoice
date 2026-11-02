@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from botocore.exceptions import ClientError
 from pydantic import SecretStr, ValidationError
-from service_helpers import isolate_env, settings_of
+from service_helpers import isolate_env, json_log_stream, log_events, settings_of
 
 from va_common.settings import CryptoSettings, KmsProviderName
 from va_common.storage import (
@@ -22,6 +22,7 @@ from va_common.storage import (
     open_object_store,
     recording_key,
     recording_variant_key,
+    signed_recording_url,
     signed_url,
     sse_for,
 )
@@ -153,6 +154,26 @@ async def test_signed_url_expires_after_the_ttl() -> None:
     signed = await signed_url(_store(FakeS3()), "b", "k", now=now, ttl_s=MAX_PRESIGN_TTL_S)
     assert signed.expires_at == now + timedelta(days=7)
     assert signed.url.endswith(f"X-Amz-Expires={MAX_PRESIGN_TTL_S}")
+
+
+class _FailingPresign(FakeS3):
+    async def generate_presigned_url(self, method: str, **kwargs: Any) -> str:
+        self.calls.append(("generate_presigned_url", (method,), kwargs))
+        raise _client_error("AccessDenied")
+
+
+async def test_recording_urls_live_seven_days_and_failures_become_none() -> None:
+    now = datetime(2026, 11, 2, 12, tzinfo=UTC)
+    signed = await signed_recording_url(_store(FakeS3()), "b", "k", now=now)
+    assert signed is not None
+    assert signed.expires_at == now + timedelta(days=7)
+    stream = json_log_stream()
+    failed = await signed_recording_url(
+        _store(_FailingPresign()), "b", "k", now=now, failure_event="test.url_failed", call_id="c1"
+    )
+    assert failed is None
+    [event] = [e for e in log_events(stream) if e["event"] == "test.url_failed"]
+    assert (event["error_type"], event["call_id"]) == ("ClientError", "c1")
 
 
 def test_settings_defaults_and_secret_handling() -> None:

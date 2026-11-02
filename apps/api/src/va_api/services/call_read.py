@@ -16,7 +16,6 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Final, get_args
 from zoneinfo import ZoneInfo
 
-from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Request
 from redis.asyncio import Redis
 from sqlalchemy import ColumnElement, func, select, tuple_
@@ -26,8 +25,7 @@ from va_api.auth.context import RequestContext
 from va_api.routers.calls_read_schemas import CallListQuery
 from va_api.services.call_stop import CALL_NOT_FOUND_MESSAGE
 from va_common.errors import AppError
-from va_common.logging import get_logger
-from va_common.storage import RECORDING_URL_TTL_S, ObjectStore, SignedUrl, signed_url
+from va_common.storage import ObjectStore, SignedUrl, signed_recording_url
 from va_common.time import Clock
 from va_db.call_object import load_call_list_items, load_call_objects
 from va_db.models import Call, CallStatus
@@ -56,8 +54,6 @@ _STATUS_NAMES: Final[Mapping[str, tuple[str, ...]]] = {
     **BLAND_STATUS_FILTER,
 }
 """Accepted ``status`` names: internal statuses, then Bland names (``completed`` covers ``transferred``)."""
-
-_log = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,13 +98,14 @@ async def recording_urls(
     for call in calls:
         if call.recording_s3_key is None:
             continue
-        try:
-            urls[call.id] = await signed_url(
-                store, bucket, call.recording_s3_key, now=now, ttl_s=RECORDING_URL_TTL_S
-            )
-        except (ClientError, BotoCoreError, ValueError) as exc:
-            _log.warning("calls.recording_url_failed", call_id=str(call.id), error_type=type(exc).__name__)
-            urls[call.id] = None
+        urls[call.id] = await signed_recording_url(
+            store,
+            bucket,
+            call.recording_s3_key,
+            now=now,
+            failure_event="calls.recording_url_failed",
+            call_id=str(call.id),
+        )
     return urls
 
 

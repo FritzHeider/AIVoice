@@ -23,10 +23,11 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import aioboto3
 from aiobotocore.config import AioConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import SecretStr
 from pydantic_settings import SettingsConfigDict
 
+from va_common.logging import get_logger
 from va_common.settings import BaseServiceSettings, CryptoSettings, KmsProviderName
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ __all__ = [
     "PLAYBACK_URL_TTL_S",
     "RECORDING_URL_TTL_S",
     "ObjectStore",
+    "RecordingStorage",
     "RecordingVariant",
     "S3Settings",
     "ServerSideEncryption",
@@ -44,6 +46,7 @@ __all__ = [
     "open_object_store",
     "recording_key",
     "recording_variant_key",
+    "signed_recording_url",
     "signed_url",
     "sse_for",
 ]
@@ -58,6 +61,8 @@ MAX_PRESIGN_TTL_S: Final = 604_800
 _NOT_FOUND_CODES: Final = frozenset({"404", "NoSuchKey", "NotFound"})
 
 type RecordingVariant = Literal["mixed", "caller", "agent"]
+
+_log = get_logger(__name__)
 
 
 class S3Settings(BaseServiceSettings):
@@ -94,6 +99,15 @@ class SignedUrl:
 
     url: str
     expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingStorage:
+    """Where recordings live: the object store, ``S3_BUCKET_RECORDINGS``, and the upload SSE headers."""
+
+    store: ObjectStore
+    bucket: str
+    sse: ServerSideEncryption | None
 
 
 def sse_for(crypto: CryptoSettings) -> ServerSideEncryption | None:
@@ -182,6 +196,24 @@ async def signed_url(store: ObjectStore, bucket: str, key: str, *, now: datetime
     """A presigned GET URL for ``key`` and its expiry (``now + ttl_s``)."""
     url = await store.presign_get(bucket, key, expires_s=ttl_s)
     return SignedUrl(url, now + timedelta(seconds=ttl_s))
+
+
+async def signed_recording_url(
+    store: ObjectStore,
+    bucket: str,
+    key: str,
+    *,
+    now: datetime,
+    failure_event: str = "storage.recording_url_failed",
+    **log_fields: str,
+) -> SignedUrl | None:
+    """The Call Object ``recording_url`` (7 days); ``None`` (``failure_event`` logged with ``log_fields``)
+    when presigning failed, because a missing URL must never fail the read or event that carries it."""
+    try:
+        return await signed_url(store, bucket, key, now=now, ttl_s=RECORDING_URL_TTL_S)
+    except (ClientError, BotoCoreError, ValueError) as exc:
+        _log.warning(failure_event, error_type=type(exc).__name__, **log_fields)
+        return None
 
 
 def _client_config(settings: S3Settings) -> AioConfig:

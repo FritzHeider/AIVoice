@@ -10,6 +10,8 @@ from typing import Final
 from temporalio.exceptions import ApplicationError
 
 __all__ = [
+    "BILLING_UNAVAILABLE",
+    "CALL_NOT_ENDED",
     "CALL_NOT_FOUND",
     "DISPATCH_UNAVAILABLE",
     "EVENTS_UNAVAILABLE",
@@ -22,6 +24,10 @@ __all__ = [
     "retryable",
 ]
 
+BILLING_UNAVAILABLE: Final = "BillingUnavailable"
+"""The plan or pricing data needed to price a call could not be read (retried)."""
+CALL_NOT_ENDED: Final = "CallNotEnded"
+"""A post-call step found the call in a non-terminal status (retried: the end is being recorded)."""
 CALL_NOT_FOUND: Final = "CallNotFound"
 """The call does not exist in the org (never retried)."""
 DISPATCH_UNAVAILABLE: Final = "DispatchUnavailable"

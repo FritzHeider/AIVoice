@@ -42,6 +42,40 @@ the `billing_reconcile` list (`24-billing-and-limits.md` §9) and 13 still runs.
 Total budget target: `call.completed` webhook ≤ 20 s after hangup p95 when no recording/retranscription is needed,
 ≤ 90 s with recording + retranscription.
 
+> Decision (2026-11-02): PostCallWorkflow v1 (P05-T18b) implements steps 1, 2, 3, 11, 13
+> (`va_workflows.post_call.PostCallWorkflow`, activities `va_workflows.activities.post_call.PostCallActivities`;
+> later phases add the other steps by their names in `va_domain.post_call.POSTCALL_STEPS`).
+> 1. `calls.config.postcall_steps` is appended by the activity `mark_postcall_step` after each successful step (one
+>    guarded UPDATE, `va_db.post_call_steps.mark_step`); a crash between a step and its mark re-runs the idempotent step.
+>    `finalize_call_record` and `emit_completed` run on every execution (step 1 returns the planning facts, step 13 ends
+>    every run); both are guarded.
+> 2. `finalize_call_record` requires a terminal call (else retryable `CallNotEnded`; a missing call is non-retryable
+>    `CallNotFound` and the workflow returns `call_not_found` without other steps). It only backfills unset values:
+>    `ended_at` from the primary leg (else now), `ended_by` from §9 of specs/05, and for an answered call with zero
+>    connected and transfer seconds the durations from `answered_at`, `ended_at`, and the `transfer_target` leg's
+>    `started_at`. Turns are not flushed here: the media worker flushes them before its session closes (specs/07 §18
+>    Decision P05-T11b). The recording is wanted when `record` or `retranscribe` is true or `post_call_evals` is set;
+>    steps 2-3 run for a connected call only, and only when the worker has object storage (else logged
+>    `postcall.recording_storage_missing`).
+> 3. Step 2 first reads the stored `call.recording.saved` webhook (`find_saved_recording`, system-scope
+>    `TelnyxEventRepo.recording_saved`, newest by `occurred_at`, matched by `call_id` or a leg's `call_control_id`), so a
+>    signal sent before the child existed is not lost; otherwise it waits for the `recording_saved` signal (the first one
+>    wins). After 10 min it records `call.error` (`warning`, `data.code = RECORDING_MISSING`, once per call) and skips
+>    step 3. A re-execution with step 2 done and step 3 not done looks the webhook up again.
+> 4. Every step after step 1 is wrapped: a failure after retries is logged (`postcall.step_failed`) and listed in the
+>    result's `failed`; the workflow continues. A step-11 failure needs no separate list: the billing reconcile
+>    (specs/24 §9) scans ended calls. A failed step 1 still runs 11 and 13 (they check the call themselves).
+> 5. The 30 min budget is enforced by the child itself (the parent abandons it): steps 1-11 race a workflow timer; on
+>    expiry they are cancelled and `emit_completed` still runs (result `timed_out`). `PostCallWorkflowInput.timings`
+>    (`PostCallTimings`, unset in production) exists so tests can shorten the waits.
+> 6. `emit_completed` locks the call row, returns `not_ended` (logged error, nothing written) for a non-terminal call and
+>    `already_completed` when `queue_status = 'complete'`; otherwise it sets `queue_status = 'complete'` and records
+>    `call.completed` whose `data` is the Call Object exactly as `GET /v1/calls/{id}` serialises it (7-day recording URL
+>    via `va_common.storage.signed_recording_url`, `null` when presigning fails) in the same transaction. Webhook
+>    delivery reads that event (specs/19, phase 06).
+> 7. Observability: §11's histogram is the catalog's `va_postcall_duration_ms{step}` (WORKER, milliseconds), observed
+>    by every step activity; failures are counted by the Temporal SDK activity metrics, so no separate failure counter.
+
 ## 2. Post-call re-transcription (ElevenLabs batch STT)
 
 1. Split the dual-channel WAV into two mono 8 kHz PCM16 WAVs in memory (parse RIFF with the Python

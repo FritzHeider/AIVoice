@@ -19,6 +19,7 @@ from va_domain.call_workflow import (
 )
 from va_domain.post_call import (
     POSTCALL_WORKFLOW_NAME,
+    PostCallTimings,
     PostCallWorkflowInput,
     postcall_task_queue,
     postcall_workflow_id,
@@ -80,6 +81,13 @@ def test_post_call_contract() -> None:
     assert postcall_workflow_id(CALL) == f"postcall-{CALL}"
     restored = PostCallWorkflowInput.model_validate({"call_id": str(CALL), "org_id": str(ORG)})
     assert restored == PostCallWorkflowInput(call_id=CALL, org_id=ORG)
+    assert restored.timings is None
+
+
+def test_post_call_timings_default_to_the_spec_waits() -> None:
+    assert PostCallTimings() == PostCallTimings(recording_wait_s=600, budget_s=1800)
+    with pytest.raises(ValidationError):
+        PostCallTimings(budget_s=0)
 
 
 @pytest.mark.parametrize(
