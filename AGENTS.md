@@ -1373,3 +1373,16 @@ Grafana 3001
   deterministic: insert it into the DB in one test only) and `machine_call(r, call, voicemail)` drives a beeping
   machine to `voicemail_left`; outbound SMS records live in `state.telnyx.accounts[DEFAULT_API_KEY].messages`.
   SQLAlchemy 2.1 deprecates `ARRAY.any()` (error here): use `column.contains([value])`.
+- 2026-11-02 (P05-T10f): voicemail retry = `va_domain.call_retry` (`retry_wanted`, `retry_attempt`, `child_config`,
+  `RETRY_ATTEMPT_KEY = "retry_attempt"`, a non-config `calls.config` key like `pricing`) + the activity
+  `va_workflows.activities.retry.RetryActivities.schedule_retry_call` (inputs/policy in `retry_inputs`, `RetryPlan`;
+  on the worker main queue). The child is an ordinary scheduled call (dial-time admission records refusals on the
+  child); `CallWorkflow` runs the activity after the post-call start (not for `not_found`) and starts the child
+  `CallWorkflow` abandoned (`CallWorkflowResult.retry_call_id`). Rules: specs/07 §14 Decision P05-T10f. Created-event
+  messages are `va_events.QUEUED_MESSAGE`/`SCHEDULED_MESSAGE`. Tests: `FakeCallActivities.retry` (default
+  `no_retry`), `names()` omits `schedule_retry_call` (`retry_calls()` lists it), `telephony_rig.Rig.retry()`.
+  The time-skipping test server does NOT skip time for an abandoned child awaited from the client (`result()`
+  and `env.sleep` stall ~20 s then "No completion event found"): assert the child's start input and
+  `TIMER_STARTED` duration from its history (find the event by type), then terminate it if still running. The
+  child runs on the same worker and fakes: assert parent activities with `FakeCallActivities.calls_of(call_id)` /
+  `retry_calls(call_id)` (filtered by workflow id) and script `retry=[plan, NO_RETRY]` so the child stops there.

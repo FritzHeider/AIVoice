@@ -40,6 +40,7 @@ from va_telnyx import TelnyxClientFactory, TelnyxRateLimiter
 from va_telnyx.retry import RetryPolicy
 from va_workflows.activities.call_end import CallEndActivities
 from va_workflows.activities.dial_request import DialSettings
+from va_workflows.activities.retry import RetryActivities
 from va_workflows.activities.telephony import TelephonyActivities
 
 __all__ = [
@@ -107,6 +108,9 @@ class Rig:
             redis=redis or self.redis,
             clock=self.clock,
         )
+
+    def retry(self) -> RetryActivities:
+        return RetryActivities(database=self.database, publisher=self.publisher, clock=self.clock)
 
     def dials(self) -> list[dict[str, Any]]:
         """Bodies of every ``POST /calls`` sent through the factory's clients."""

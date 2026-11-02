@@ -22,6 +22,7 @@ MAIN_ACTIVITIES = {
     "end_call",
     "watch_call_heartbeat",
     "call_presence",
+    "schedule_retry_call",
 }
 
 

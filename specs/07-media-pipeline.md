@@ -665,7 +665,7 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
 > for the classifier; message `Voicemail detected`) and, for the classifier, sets `answered_by='voicemail'` on the
 > answered call (the edge sets it for AMD); failures are logged and never undo the action. (6) Both voicemail ends
 > set `disposition_tag='VOICEMAIL'` when the call has none (`va_db.call_end.record_answered_end`). (7) The
-> `_and_sms` SMS follows the P05-T10e Decision below; the retry child call is P05-T10f.
+> `_and_sms` SMS follows the P05-T10e Decision below; the retry child call follows the P05-T10f Decision below.
 > Transcripts and the message text are never logged.
 
 > Decision (2026-11-02): Voicemail SMS (P05-T10e). (1) `Takeover.after_message` (an async hook, capped by
@@ -696,6 +696,31 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
 > (`media.voicemail_sms_failed` with a `reason`: `sms_not_enabled`, `no_messaging_profile`, `telnyx_unavailable`,
 > `telnyx_error`, `database`; `media.voicemail_sms_skipped` for `no_sms`/`blank_message`;
 > `media.voicemail_sms_duplicate`) and never changes the call's end.
+
+> Decision (2026-11-02): Voicemail retry (P05-T10f). (1) Trigger: the ended call's recorded `end_reason` —
+> `voicemail_hangup`/`voicemail_left` always, `no_answer`/`busy` only with `retry.on_no_answer`
+> (`va_domain.call_retry.retry_wanted`). `CallWorkflow` asks the `schedule_retry_call` activity after its lifecycle
+> and the post-call start, for every call it found (phase `retry`, between `post_call` and `ended`); the activity
+> reads the row, so voicemail ends recorded by the media worker and carrier no-answer ends recorded by the edge are
+> handled alike. An activity failure is logged (`calls.retry_failed`) and never fails the workflow. (2) Attempts:
+> `max_attempts` is the number of retry calls in the chain. The original call is attempt 0; each child stores its
+> attempt in `calls.config.retry_attempt` (a non-configuration key next to `pricing`); a child is created only while
+> the ending call's attempt is below `max_attempts`, and inherits `retry` unchanged so the chain continues.
+> (3) The child is an ordinary **scheduled** call: `start_time = now + retry.wait`, `status`/`queue_status` =
+> `scheduled`/`new`, `parent_call_id` = the parent, the parent's dispatch columns (numbers, runner, voice, number,
+> memory, `external_id`, `test_call`, `request_data`, `metadata`), no credit hold, `workflow_id = call-<child>`,
+> and `config` = the parent's stored config with `voicemail.action = retry.voicemail_action`, `voicemail.message =
+> retry.voicemail_message` when set (else the parent's message), `start_time`, and `retry_attempt`. Because it is a
+> scheduled call, the `dial` activity admits it at its start time (compliance, limits, credit hold; specs/24 §6
+> Decision P05-T04b) and a refusal is recorded on the child as `failed`/`dispatch_blocked` with
+> `call.dispatch_blocked`; the parent is never changed. (4) The child's `call.scheduled` event ("Call successfully
+> scheduled.") is written in the same transaction, data `{status, scheduled_for, warnings: [], parent_call_id,
+> retry_attempt}`. (5) The parent's `CallWorkflow` starts the child's `CallWorkflow` as a child workflow (same task
+> queue, `ParentClosePolicy.ABANDON`, input `scheduled_for`), which sleeps until the start time;
+> `WorkflowAlreadyStarted` is logged and ignored. Its result carries `retry_call_id`. (6) Idempotency: the activity
+> locks the parent row (`FOR UPDATE`) and looks for a child with `parent_call_id` = parent and a `retry_attempt` key
+> (warm transfers may use `parent_call_id` too); a found child is returned as `already_scheduled` with its id and
+> start time, so an activity retry after a lost commit, or a replay, never creates a second child.
 
 ## 15. `hd_audio` mode
 

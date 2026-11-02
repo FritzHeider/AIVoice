@@ -78,7 +78,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | Type | Category | Emitted by | When | Webhook `webhook_events` key |
 |---|---|---|---|---|
 | `call.queued` | queue | api | call row created | `queue` |
-| `call.scheduled` | queue | api | `start_time` in the future | `queue` |
+| `call.scheduled` | queue | api, worker | `start_time` in the future (worker: voicemail retry child, specs/07 §14) | `queue` |
 | `call.dispatch_blocked` | queue | worker | blocked by cap/DNC/window/credits (data.reason) | `queue` |
 | `call.dialing` | call | worker | Telnyx dial accepted | `call` |
 | `call.ringing` | call | edge | `call.initiated` (outbound) / inbound received | `call` |

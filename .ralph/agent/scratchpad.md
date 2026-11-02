@@ -1064,3 +1064,194 @@ specs/31 SMS_NOT_ENABLED 400, specs/02 §6 env table (media added). Tenant sessi
 text logged; hook bounded 15 s; runtime sim proves SMS between message and hangup and failure still ends voicemail_left.
 Known edge: a hook cancelled at its timeout after the row committed leaves it `queued` (no retry by design).
 Next: P05-T10f (voicemail retry child call).
+
+## Plan P05-T10f — Voicemail retry child call (Planner, 2026-11-02)
+
+Spec refs: specs/07 §14 step 5; specs/05 §3 `retry` rows + `parent_call_id`; specs/01 §2.1 (Decision P05-T06c);
+specs/30 `retry_on_voicemail` (e2e itself lands in P05-T17).
+
+### Design (decided — do not re-litigate)
+Key idea: the child is an ordinary **scheduled** call. The `dial` activity already admits scheduled calls
+(compliance, limits, credit hold) and records a refusal as `failed`/`dispatch_blocked` + `call.dispatch_blocked`
+(`TelephonyActivities._admit/_block`), so the "normal dispatch checks" and "refusal recorded on the child" come
+for free. The parent workflow never sleeps for `retry.wait`; the child `CallWorkflow` does (scheduled start).
+
+1. **Decision rules** — new pure, import-free module `packages/va_workflows/src/va_workflows/activities/retry_inputs.py`
+   (workflow-safe, like `telephony_inputs`): `RETRY_TIMEOUT = timedelta(seconds=20)`, `RETRY_RETRY = RetryPolicy(
+   initial_interval=1 s, backoff 2, maximum_interval=10 s, maximum_attempts=5)`, `RetryPlan(BaseModel, frozen,
+   extra=forbid)`: `child_call_id: uuid.UUID | None = None`, `scheduled_for: datetime | None = None`,
+   `attempt: int | None = None`, `reason: RetrySkip | None = None` with `type RetrySkip = Literal["no_retry",
+   "not_ended", "end_reason", "attempts_exhausted", "already_scheduled"]` (already_scheduled still returns the
+   existing child id + its `start_time`, so the workflow (re)starts it idempotently).
+   New pure module `packages/va_domain/src/va_domain/call_retry.py` (unit-testable, no DB):
+   - `VOICEMAIL_END_REASONS: Final = frozenset({"voicemail_hangup", "voicemail_left"})`,
+     `NO_ANSWER_END_REASONS: Final = frozenset({"no_answer", "busy"})`.
+   - `RETRY_ATTEMPT_KEY: Final = "retry_attempt"` (a non-config key in `calls.config`, like `pricing`;
+     `build_call_context` already drops unknown keys — verify `config_of`/`SendCallConfig` parsing ignores it; if
+     `config_of` validates `calls.config` strictly, strip `RETRY_ATTEMPT_KEY` there the same way `pricing` is).
+   - `retry_wanted(retry: RetryConfig | None, end_reason: str | None) -> bool` (voicemail ends always; no_answer/busy
+     only with `on_no_answer`).
+   - `retry_attempt(stored_config: Mapping[str, object]) -> int` (int ≥ 0, default 0; anything else → 0).
+   - `child_config(stored_config: Mapping[str, JsonValue], retry: RetryConfig, attempt: int) -> dict[str, JsonValue]`:
+     a copy of the parent's stored config (including `pricing`, `retry` kept as is so later attempts continue)
+     with `voicemail.action = retry.voicemail_action`, `voicemail.message = retry.voicemail_message` when set
+     (else the parent's message stays), `start_time` = the child's scheduled time (ISO `…Z`), and
+     `retry_attempt = attempt`. Other voicemail fields (sensitive, detect_timeout_ms, sms) unchanged.
+   Attempt semantics: `max_attempts` = number of retry child calls in the chain (default 1 → one retry). The
+   parent's attempt = `retry_attempt(config)` (original call 0); a child is created only when `attempt <
+   retry.max_attempts`, with `attempt + 1`. Use the `retry` of the call being ended (inherited unchanged).
+2. **Activity** — new `packages/va_workflows/src/va_workflows/activities/retry.py`:
+   `class RetryActivities` kw-only ctor `database: Database, publisher: EventPublisher, clock: Clock`;
+   `@activity.defn(name="schedule_retry_call") async def schedule_retry_call(self, call: CallActivityInput) -> RetryPlan`.
+   In ONE `tenant_session(call.org_id)`:
+   a. load the parent with `SELECT … FOR UPDATE` (filter id + org_id; missing → `ApplicationError(type=
+      CALL_NOT_FOUND, non_retryable=True)` via the existing helper style in `activities.lookup`/`errors`);
+   b. not terminal (`va_db.call_states.is_terminal`) → `reason="not_ended"`; `config_of(call).retry` + `end_reason`
+      through `retry_wanted` → `no_retry` / `end_reason`; attempt check → `attempts_exhausted`;
+   c. existing child: `select(Call.id, Call.start_time).where(Call.org_id == org, Call.parent_call_id == parent.id,
+      Call.config.has_key(RETRY_ATTEMPT_KEY))` (JSONB `?`; if `has_key` is awkward use
+      `Call.config[RETRY_ATTEMPT_KEY].isnot(None)`) → `already_scheduled` with its id/start_time;
+   d. else `scheduled_for = clock.now() + timedelta(seconds=retry.wait)`, child id `va_common.ids.new_id()`, insert a
+      `Call` copying the parent's columns exactly as `call_dispatch._call_row` sets them (direction outbound,
+      to/from numbers, runner/pathway/persona/agent/experiment ids+versions, voice, phone_number_id, memory_id,
+      external_id, test_call, request_data, metadata_) with `status="scheduled"`, `queue_status="new"`,
+      `start_time=scheduled_for`, `parent_call_id=parent.id`, `config=child_config(...)`, `credit_hold_id=None`,
+      `workflow_id=call_workflow_id(child_id)` (batch columns stay NULL);
+   e. events via `activities.events.persist_events` in the same transaction: on the child `call.scheduled`
+      (message `SCHEDULED_MESSAGE` text "Call successfully scheduled." — import or duplicate the constant into
+      `va_events`/`va_domain` if the api constant is not importable; do NOT import va_api), data `{status:
+      "scheduled", scheduled_for: "…Z", warnings: [], parent_call_id, retry_attempt}`; then `broadcast_events`
+      after commit. Log `calls.retry_scheduled attempt= wait_s=` / `calls.retry_skipped reason=` (no numbers).
+   DB errors propagate (Temporal retries; the parent lock + existing-child check make a retry after a lost
+   commit return `already_scheduled`).
+   Wire into `apps/worker/src/va_worker/activities.py`: `WorkerActivities.retry = RetryActivities(database=,
+   publisher=, clock=)` and add `self.retry.schedule_retry_call` to `main_queue()`.
+3. **Workflow** (`calls/call_workflow.py`): in `run`, after `_start_post_call` (not for `not_found`), call
+   `await self._schedule_retry(start)`:
+   `execute_activity("schedule_retry_call", self._call, start_to_close_timeout=RETRY_TIMEOUT,
+   retry_policy=RETRY_RETRY, result_type=RetryPlan)`; `ActivityError` → `workflow.logger.warning(
+   "calls.retry_failed error=%s")` and return. When `plan.child_call_id` is set: `workflow.start_child_workflow(
+   CALL_WORKFLOW_NAME, CallWorkflowInput(call_id=child, org_id=start.org_id, scheduled_for=plan.scheduled_for),
+   id=call_workflow_id(child), task_queue=workflow.info().task_queue, parent_close_policy=ABANDON)`;
+   `WorkflowAlreadyStartedError` → info log. Phase `retry` between `post_call` and `ended` (update the
+   `phase` docstring). `CallWorkflowResult` gains `retry_call_id: uuid.UUID | None = None` (set when a child
+   was started or already existed) so tests/observers can see it. Skip the activity entirely for outcomes where
+   no retry is possible without reading the DB? — NO: always call it (except `not_found`); the row decides.
+4. **Spec**: add `> Decision (2026-11-02): Voicemail retry (P05-T10f).` under specs/07 §14 (replace the
+   "the retry child call is P05-T10f" clause in item (7) of P05-T10c with a pointer) covering: trigger =
+   parent's recorded `end_reason` (`voicemail_hangup`/`voicemail_left`; `no_answer`/`busy` with `on_no_answer`)
+   read by `schedule_retry_call` after the lifecycle and post-call start; `max_attempts` = retry calls in the
+   chain, counted with `calls.config.retry_attempt`; child = scheduled call (`start_time = now + wait`,
+   `parent_call_id`, parent's config + retry voicemail settings), so the dial-time admission applies and a
+   refusal is the child's `failed/dispatch_blocked`; child `CallWorkflow` started as an abandoned child workflow;
+   `call.scheduled` data adds `parent_call_id`/`retry_attempt`; idempotency (parent row lock + existing child).
+   Also add a one-line Decision pointer under the specs/05 `retry` row (§3) and note `retry_attempt` next to
+   `pricing` where specs/05 §5 Decision P05-T05b item 2 lists the extra `config` keys. Check specs/19 §2
+   `call.scheduled` data description and add the two fields there if data is enumerated.
+
+### Tests (all must exist and pass)
+- `packages/va_domain/tests/test_call_retry.py`: `retry_wanted` table (each end reason × on_no_answer ×
+  retry None); `retry_attempt` (missing/0/2/garbage); `child_config` replaces action/message, keeps message when
+  retry has none, keeps sms/sensitive/pricing/retry, sets start_time and attempt, does not mutate the input; the
+  result validates as `SendCallConfig` after dropping `pricing`/`retry_attempt` (use `config_of`-style parsing).
+- `packages/va_workflows/tests/test_retry_activity.py` (Postgres, same fixtures as `test_end_call_activity.py`,
+  `call_rows.seed_call`): voicemail_left parent with retry → child row (scheduled, start_time = clock + wait,
+  parent_call_id, copied columns, config voicemail from retry, retry_attempt 1, workflow_id) + one `call.scheduled`
+  call_events row with the data fields; no_answer with/without on_no_answer; busy; user_hangup → `end_reason`;
+  no retry → `no_retry`; non-terminal → `not_ended`; parent attempt == max_attempts → `attempts_exhausted`;
+  max_attempts 2: child (attempt 1) ending voicemail creates attempt 2; second invocation → `already_scheduled`
+  same id, still one child; other org → CallNotFound non-retryable.
+- Child dispatch refusal through the REAL dial activity: in the same module (or `test_dial_activity.py`), take the
+  created child and run `TelephonyActivities.dial` with the telephony rig after making admission fail (e.g. add a
+  DNC entry for the destination via the existing helpers, or the cap/credits approach already used in
+  `test_dial_activity.py` for blocked scheduled calls — reuse it) → child `failed`/`dispatch_blocked`, outcome
+  `blocked`.
+- `packages/va_workflows/tests/test_call_workflow.py` (time-skipping, extend `FakeCallActivities` with
+  `retry: list[RetryPlan | Exception]` default `[RetryPlan(reason="no_retry")]` and the `schedule_retry_call`
+  activity; register it in `activities()`): (a) voicemail end (pipeline_finished `voicemail_left`) + plan with child
+  → a child `CallWorkflow` with id `call-<child>` is started on the test task queue and, running with the same
+  fakes, sleeps until `scheduled_for` (assert the child's first `prefetch_call_context` scheduled time ≥
+  scheduled_for via `fakes.scheduled`) and its dial is attempted; parent result `retry_call_id`; (b) not_answered
+  path calls `schedule_retry_call` too (both on_no_answer outcomes are DB decisions, so assert the activity call +
+  a child for the plan with a child and none for a skip plan); (c) attempts exhausted plan → no child workflow;
+  (d) child dial returns `blocked` → child result outcome `blocked` (refusal on the child, parent unaffected);
+  (e) activity failure → parent still completes, logged, no child; (f) `not_found` → activity not called;
+  (g) `already_scheduled` with an already running child → no error (WorkflowAlreadyStarted handled).
+  Fetch the child's result with `env.client.get_workflow_handle(f"call-{child}").result()`; the child fakes must
+  make the child end quickly (second entries in `dials`/`retry` lists).
+- Worker: `apps/worker/tests` registration test lists `schedule_retry_call` in the main queue (update the
+  existing expected-names assertion).
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t10f.log 2>&1`) with a heartbeat Monitor (~25 min); coverage ≥ 85 %
+per package, new modules ~100 %; `npx --yes jscpd@4 --silent` → 0 clones (the copied-column block vs
+`_call_row` may clone: factor a shared `va_db` helper `outbound_call_columns(...)` or restructure); `uvx radon cc
+-s -n C` on touched src prints nothing; audit (`uvx pip-audit` on `uv export` + `corepack pnpm audit`). No
+OpenAPI change. `make e2e` harness lands in P05-T17 — say so. build.done payload plain text. AGENTS.md:
+`va_domain.call_retry`, `schedule_retry_call`/`RetryActivities`, `retry_attempt` config key, child =
+scheduled call admitted at dial, `FakeCallActivities.retry`.
+
+### Risks
+- Child workflow in the time-skipping env: the child's scheduled sleep lets time skip only while no activity
+  runs; make the parent finish first (ABANDON) and give the child fakes deterministic outcomes.
+- `config_of` strictness on unknown keys (`retry_attempt`) — check `va_db.call_context.config_of` first.
+- `parent_call_id` is also used by warm transfers later: the child lookup keys on `retry_attempt` presence.
+- `retry.wait` minimum 60 s vs the specs/30 e2e `wait: 10` — leave validation as is; P05-T17 decides (test-mode).
+
+## Build P05-T10f (Builder, 2026-11-02)
+
+Implemented per plan. Deviations / notes:
+- `va_domain.call_retry.child_config(stored, retry, attempt, scheduled_for)` takes the scheduled time (writes
+  `start_time` ISO `…Z`). The check for an existing child runs before the attempts check, so a repeated attempt
+  always returns `already_scheduled`.
+- Child columns are copied with a `COPIED_COLUMNS` tuple (no clone of `_call_row`). `SCHEDULED_MESSAGE`/`QUEUED_MESSAGE`
+  moved to `va_events.call_messages` (the api imports them from there; `call_dispatch.__all__` still re-exports them).
+- Workflow tests: the time-skipping test server does not skip time for an abandoned child awaited from the client
+  (`result()` and `env.sleep` stall). So `test_call_workflow_retry.py` checks the child's start input
+  (`scheduled_for`), its parent, its task queue, and its `TIMER_STARTED` duration, then terminates it. "Fires at the
+  start time" is already covered by the existing scheduled-call workflow test, and a child refusal goes through the
+  REAL `dial` in `test_retry_activity.py` (DNC → child `failed/dispatch_blocked`, parent unchanged).
+- `FakeCallActivities.names()` leaves out `schedule_retry_call` so the existing trails stay focused; `retry_calls()`
+  lists it.
+Gates:
+- fmt, lint, typecheck (1179 files), placeholders (0), spec refs (0) pass.
+- jscpd: 0 clones. radon -n C on the touched src: empty.
+- pip-audit: no known vulnerabilities. pnpm audit: 3 moderate, 0 high.
+- make test: 9996 passed, 7 skipped, 99 % total; new modules 100 % (exit 0).
+- make e2e: the harness lands in P05-T17.
+
+## Review P05-T10f (Reviewer, 2026-11-02) — REJECTED (1 finding)
+Re-ran: lint pass, typecheck pass (1179 files), placeholders 0, spec refs 0. make test: **2 failed**, 9994 passed,
+7 skipped (logs/make_test_review_p05t10f.log, exit 2). The design, activity, spec Decisions, and DB tests look correct.
+1. Flaky workflow tests: `packages/va_workflows/tests/test_call_workflow_retry.py:94`
+   (`test_a_voicemail_end_starts_the_retry_child_workflow`, `fakes.calls` had 2 extra items starting with
+   `prefetch_call_context`) and `:127` (`test_an_unanswered_call_asks_for_a_retry_too`, `retry_calls()` had an extra
+   input whose call_id is the CHILD's). Running the module alone failed 1 of 3 times. Cause: the child `CallWorkflow`
+   runs on the same task queue and worker with the same `FakeCallActivities`, and the time-skipping server sometimes
+   skips its scheduled timer before `run_call` returns, so the child's own activities (prefetch, ..., schedule_retry_call)
+   land in `fakes.calls`. Fix it deterministically (no sleeps/retries), e.g. assert only on activity inputs whose
+   `call_id == start.call_id` (add a `FakeCallActivities.calls_for(call_id)` helper, also for `retry_calls`), or make
+   the child unable to run before the asserts (start it on a queue nobody polls is NOT possible since production uses
+   the parent's queue — so filter by call id). Keep the child's start-input / parent / TIMER_STARTED asserts, but they
+   too must tolerate the child having progressed (the timer may already have fired: read the TIMER_STARTED event by
+   type from the history instead of `events[-1]`, and terminate only if still running). Run the module ≥ 10× in a
+   loop (`for i in $(seq 10); do uv run pytest packages/va_workflows/tests/test_call_workflow_retry.py -q; done`) plus
+   under `-n 8` to prove stability, then the full `make test`.
+Non-blocking: specs/19 §2 row `call.scheduled` lists emitter `api`; the worker emits it for retry children now —
+add `worker` there if the catalog test allows it.
+
+## Rework P05-T10f (Builder, 2026-11-02) — after review.rejected
+1. Flaky retry workflow tests fixed deterministically: `FakeCallActivities` records each activity's workflow id
+   (`workflow_ids`); `calls_of(call_id)` and `retry_calls(call_id)` filter to that call's own `CallWorkflow`. The retry
+   tests assert on the parent only, script `retry=[plan, NO_RETRY]` (a child that runs early gets no retry of its own),
+   find `TIMER_STARTED` by type, dropped the child `close_time is None` assert, and `stop(handle)` terminates only
+   while running. Module 10× serial + 3× `-n 8` (with test_call_workflow.py): all pass.
+Non-blocking: specs/19 §2 `call.scheduled` emitter now `api, worker` (catalog test passes).
+Gates rework: fmt/lint/typecheck/placeholders/spec refs pass; jscpd 0; radon -n C empty; pip-audit none; pnpm 0 high; make test 9996 passed 7 skipped 99.13% exit 0 (logs/make_test_p05t10f_r1.log). make e2e: harness lands in P05-T17.
+
+## Review P05-T10f rework (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint, typecheck, placeholders (0), spec refs (0) pass; make test 9996 passed, 7 skipped, 99.13 %, exit 0
+(logs/make_test_review2_p05t10f.log); test_call_workflow_retry.py 5× serial all pass. Finding 1 fixed (calls_of /
+retry_calls filter by workflow id, child scripted NO_RETRY, TIMER_STARTED by type, stop only if running);
+specs/19 §2 emitter updated. make e2e harness lands in P05-T17.

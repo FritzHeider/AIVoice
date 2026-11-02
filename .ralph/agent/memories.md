@@ -394,6 +394,10 @@
 
 ## Fixes
 
+### mem-1793615226-47e9
+> P05-T10f: Temporal time-skipping test server does not skip time for an abandoned child workflow awaited from the client (result()/env.sleep stall ~20s, 'No completion event found'); assert child start input + TIMER_STARTED duration from history and terminate it. Voicemail retry = va_domain.call_retry + schedule_retry_call activity (child = scheduled call admitted at dial)
+<!-- tags: workflows, temporal, testing | created: 2026-11-02 -->
+
 ### mem-1793600670-6fa9
 > Empty review.rejected = Reviewer killed by Ralph 300 s inactivity timeout (diagnostics log 'Execution inactivity timeout'); run make test in background + Monitor heartbeat every 2 min
 <!-- tags: tooling, testing | created: 2026-11-02 -->

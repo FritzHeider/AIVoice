@@ -52,7 +52,7 @@ from va_domain.call_resolution import CallResolution, PlatformModels, Resolution
 from va_domain.call_workflow import CallWorkflowInput, call_workflow_id
 from va_domain.calls import SendCallConfig, SendCallRequest
 from va_domain.org import OrgSettings
-from va_events import DomainEvent, EventPublisher, EventType, new_event
+from va_events import QUEUED_MESSAGE, SCHEDULED_MESSAGE, DomainEvent, EventPublisher, EventType, new_event
 
 __all__ = [
     "EVENTS_UNAVAILABLE_MESSAGE",
@@ -68,8 +68,6 @@ __all__ = [
     "dispatch_call",
 ]
 
-QUEUED_MESSAGE: Final = "Call successfully queued."
-SCHEDULED_MESSAGE: Final = "Call successfully scheduled."
 START_FAILED_MESSAGE: Final = "The call could not be started. Please retry."
 START_FAILED_ERROR: Final = "Call workflow could not be started."
 ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."

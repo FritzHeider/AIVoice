@@ -15,6 +15,7 @@ from va_events.call_events import (
     insert_rows,
     row_for,
 )
+from va_events.call_messages import QUEUED_MESSAGE, SCHEDULED_MESSAGE
 from va_events.catalog import DEFAULT_CATEGORY, STREAMS, EventType, Stream, stream_for
 from va_events.consumer import StreamConsumer, StreamEntry
 from va_events.model import DomainEvent, EventFields, decode, encode, event_uuid, is_call_event, new_event
@@ -23,6 +24,8 @@ from va_events.publisher import EventPublisher, EventPublishError, WebhookRouter
 __all__ = [
     "DEFAULT_CATEGORY",
     "ENDED_MESSAGE",
+    "QUEUED_MESSAGE",
+    "SCHEDULED_MESSAGE",
     "STREAMS",
     "CallEventBuffer",
     "CallEventRow",

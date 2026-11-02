@@ -128,6 +128,9 @@ Unknown top-level fields are ignored (logged at debug) for Bland forward-compati
 | `retry` | object | — | `{wait: integer seconds 60–86 400, voicemail_action: "hangup"|"leave_message"|"ignore", voicemail_message?: string, max_attempts?: 1–5 (default 1)}` | When the call reaches voicemail (or no-answer when `retry.on_no_answer=true`), a child call is created after `wait` seconds with `parent_call_id` set and the given voicemail settings. Missing `wait` → `400 RETRY_NOT_PROVIDED`. |
 | `retry.on_no_answer` | boolean | `false` | | Ours: also retry on `no_answer`/`busy`. |
 
+> Decision (2026-11-02): the retry child is a scheduled call created after the parent ends; attempts, trigger,
+> admission and idempotency are in specs/07 §14 Decision P05-T10f.
+
 ### 3.7 Advanced
 
 | Parameter | Type | Default | Validation | Semantics |
@@ -502,7 +505,8 @@ Error example `400`:
 > 2. Row: `direction='outbound'`, `status`/`queue_status` = `queued`/`queued`, or `scheduled`/`new` when `start_time`
 >    is set; runner, voice, number, memory, `external_id`, `start_time`, `request_data`, `metadata` from the resolved
 >    config; `test_call` from the request; `config` = the resolved `SendCallConfig` JSON plus `pricing` (the
->    specs/24 §4 rate snapshot); `credit_hold_id`; `workflow_id = call-<id>`.
+>    specs/24 §4 rate snapshot; voicemail retry children also carry `retry_attempt`, specs/07 §14 Decision P05-T10f);
+>    `credit_hold_id`; `workflow_id = call-<id>`.
 > 3. Event `call.queued` ("Call successfully queued.") or `call.scheduled` ("Call successfully scheduled.", data
 >    `scheduled_for` UTC `…Z`), data `status` and `warnings` (`[{code, message, field?}]`, the resolution warnings such
 >    as `TASK_IGNORED`). Its seq is assigned in Redis before the commit and its `call_events` row is inserted in the

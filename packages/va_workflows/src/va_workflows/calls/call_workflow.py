@@ -5,7 +5,9 @@ The workflow waits for a scheduled start, prefetches the call context, dials (re
 concurrency cap is full), waits for the answer, and then guards the conversation the media worker runs: the
 heartbeat watch, the ``max_duration + 120 s`` backstop, fax detection, and a failed media stream. Every end
 it decides is recorded with ``end_call`` *before* ``hangup_call`` (specs/06 §6 Decision P05-T06b item 5).
-Finally it starts the ``PostCallWorkflow`` child (abandoned on close) for every call it found.
+Finally it starts the ``PostCallWorkflow`` child (abandoned on close) for every call it found, and asks
+``schedule_retry_call`` for a voicemail retry: a created child call gets its own ``CallWorkflow`` as an
+abandoned child workflow that sleeps until the child's scheduled start (specs/07 §14 Decision P05-T10f).
 
 Workflow code is deterministic: signals only record state, time comes from ``workflow.now()``, and activities
 are scheduled by name with inputs from import-free modules.
@@ -14,6 +16,7 @@ are scheduled by name with inputs from import-free modules.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Final, Literal
@@ -28,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
         PIPELINE_FINISHED_SIGNAL,
         CallWorkflowInput,
         PipelineFinished,
+        call_workflow_id,
     )
     from va_domain.carrier import CARRIER_SIGNAL, CarrierEvent
     from va_domain.post_call import (
@@ -49,6 +53,7 @@ with workflow.unsafe.imports_passed_through():
         WatchResult,
         watch_timeout,
     )
+    from va_workflows.activities.retry_inputs import RETRY_CALL_RETRY, RETRY_CALL_TIMEOUT, RetryPlan
     from va_workflows.activities.telephony_inputs import (
         DIAL_RETRY,
         DIAL_TIMEOUT,
@@ -157,7 +162,7 @@ class CallWorkflow:
     @workflow.query(name="phase")
     def phase(self) -> str:
         """``starting`` → (``scheduled``) → ``prefetch`` → ``dialing`` (⇄ ``requeued``) → ``ringing`` →
-        ``in_progress`` (→ ``hung_up``) → ``ending`` → ``post_call`` → ``ended``."""
+        ``in_progress`` (→ ``hung_up``) → ``ending`` → ``post_call`` → ``retry`` → ``ended``."""
         return self._phase
 
     @workflow.run
@@ -171,8 +176,12 @@ class CallWorkflow:
             return CallWorkflowResult(outcome="not_found")
         self._phase = "post_call"
         await self._start_post_call(start)
+        self._phase = "retry"
+        retry_call_id = await self._schedule_retry(start)
         self._phase = "ended"
-        return result
+        if retry_call_id is None:
+            return result
+        return result.model_copy(update={"retry_call_id": retry_call_id})
 
     async def _lifecycle(self, start: CallWorkflowInput) -> CallWorkflowResult:
         if await self._wait_until_scheduled(start.scheduled_for):
@@ -466,3 +475,32 @@ class CallWorkflow:
             )
         except WorkflowAlreadyStartedError:
             workflow.logger.info("calls.post_call_already_started")
+
+    async def _schedule_retry(self, start: CallWorkflowInput) -> uuid.UUID | None:
+        """Create the voicemail retry child when the ended call asks for one and start its ``CallWorkflow``
+        (abandoned when this workflow closes); the child's id, ``None`` when there is none."""
+        try:
+            plan: RetryPlan = await workflow.execute_activity(
+                "schedule_retry_call",
+                self._call,
+                start_to_close_timeout=RETRY_CALL_TIMEOUT,
+                retry_policy=RETRY_CALL_RETRY,
+                result_type=RetryPlan,
+            )
+        except ActivityError as exc:
+            workflow.logger.warning("calls.retry_failed error=%s", _cause_type(exc))
+            return None
+        child_id = plan.child_call_id
+        if child_id is None:
+            return None
+        try:
+            await workflow.start_child_workflow(
+                CALL_WORKFLOW_NAME,
+                CallWorkflowInput(call_id=child_id, org_id=start.org_id, scheduled_for=plan.scheduled_for),
+                id=call_workflow_id(child_id),
+                task_queue=workflow.info().task_queue,
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+            )
+        except WorkflowAlreadyStartedError:
+            workflow.logger.info("calls.retry_already_started")
+        return child_id

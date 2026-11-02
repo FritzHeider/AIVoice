@@ -28,13 +28,14 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from va_domain.call_workflow import CallWorkflowInput
+from va_domain.call_workflow import CallWorkflowInput, call_workflow_id
 from va_domain.carrier import CARRIER_SIGNAL, CarrierEvent, CarrierLeg
 from va_domain.post_call import PostCallWorkflowInput, postcall_workflow_id
 from va_workflows.activities.context_inputs import PrefetchResult
 from va_workflows.activities.errors import CALL_NOT_FOUND
 from va_workflows.activities.inputs import CallActivityInput
 from va_workflows.activities.liveness_inputs import CallPresence, WatchInput, WatchResult
+from va_workflows.activities.retry_inputs import RetryPlan
 from va_workflows.activities.telephony_inputs import (
     DialInput,
     DialOutcome,
@@ -47,6 +48,7 @@ from va_workflows.calls import CallWorkflow, CallWorkflowResult
 
 __all__ = [
     "POSTCALL_QUEUE",
+    "RETRY",
     "TASK_QUEUE",
     "CallRun",
     "FakeCallActivities",
@@ -118,10 +120,14 @@ def _scripted[T](value: T | Exception) -> T:
     return value
 
 
+RETRY = "schedule_retry_call"
+
+
 @dataclass
 class FakeCallActivities:
     """Activities with the production names, scripted per test; ``calls`` lists ``(name, input)`` in order and
-    ``scheduled`` the server time each activity attempt was scheduled at."""
+    ``scheduled`` the server time each activity attempt was scheduled at. ``retry`` scripts
+    ``schedule_retry_call`` (by default no retry)."""
 
     prefetch: PrefetchResult | Exception = field(
         default_factory=lambda: PrefetchResult(stored=True, status="queued", ttl_s=3900)
@@ -135,16 +141,34 @@ class FakeCallActivities:
     presence: list[CallPresence | Exception] = field(
         default_factory=lambda: [CallPresence(owner=False, heartbeat=False)]
     )
+    retry: list[RetryPlan | Exception] = field(default_factory=lambda: [RetryPlan(reason="no_retry")])
     watch: WatchMode = "park"
     send: dict[str, list[Signal]] = field(default_factory=dict)
     on_watch_cancel: list[Signal] = field(default_factory=list)
     calls: list[tuple[str, BaseModel]] = field(default_factory=list)
     scheduled: list[tuple[str, datetime]] = field(default_factory=list)
+    workflow_ids: list[str] = field(default_factory=list)
     watch_cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     client: Client | None = None
 
     def names(self) -> list[str]:
-        return [name for name, _ in self.calls]
+        """The lifecycle activities in order; ``schedule_retry_call``, which every finished call runs last,
+        is left out (``retry_calls`` lists it)."""
+        return [name for name, _ in self.calls if name != RETRY]
+
+    def retry_calls(self, call_id: uuid.UUID | None = None) -> list[CallActivityInput]:
+        """``schedule_retry_call`` inputs, only those of ``call_id``'s workflow when given."""
+        calls = self.calls if call_id is None else self.calls_of(call_id)
+        return [value for called, value in calls if called == RETRY and isinstance(value, CallActivityInput)]
+
+    def calls_of(self, call_id: uuid.UUID) -> list[tuple[str, BaseModel]]:
+        """The ``calls`` made by ``call_id``'s own ``CallWorkflow`` (a retry child shares these fakes)."""
+        wanted = call_workflow_id(call_id)
+        return [
+            call
+            for call, workflow_id in zip(self.calls, self.workflow_ids, strict=True)
+            if workflow_id == wanted
+        ]
 
     def inputs[M: BaseModel](self, name: str, model: type[M]) -> list[M]:
         return [value for called, value in self.calls if called == name and isinstance(value, model)]
@@ -157,11 +181,13 @@ class FakeCallActivities:
             self.hangup_call,
             self.call_presence,
             self.watch_call_heartbeat,
+            self.schedule_retry_call,
         ]
 
     async def _enter(self, name: str, request: BaseModel) -> None:
         info = activity.info()
         self.calls.append((name, request))
+        self.workflow_ids.append(info.workflow_id or "")
         self.scheduled.append((name, info.current_attempt_scheduled_time))
         await self._signal(self.send.pop(name, []))
 
@@ -203,6 +229,11 @@ class FakeCallActivities:
     async def call_presence(self, request: CallActivityInput) -> CallPresence:
         await self._enter("call_presence", request)
         return _scripted(self._next(self.presence))
+
+    @activity.defn(name=RETRY)
+    async def schedule_retry_call(self, request: CallActivityInput) -> RetryPlan:
+        await self._enter(RETRY, request)
+        return _scripted(self._next(self.retry))
 
     @activity.defn(name="watch_call_heartbeat")
     async def watch_call_heartbeat(self, request: WatchInput) -> WatchResult:

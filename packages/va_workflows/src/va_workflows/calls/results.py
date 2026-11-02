@@ -5,6 +5,7 @@ Kept in its own import-free module so the workflow can import it through the san
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -36,9 +37,11 @@ lost the call and asked the workflow to record the end and hang up)."""
 
 class CallWorkflowResult(BaseModel):
     """``end_reason`` is the reason the workflow recorded itself (``None`` when another component, or an
-    earlier step, had already ended the call)."""
+    earlier step, had already ended the call); ``retry_call_id`` is the voicemail retry child call the
+    workflow started (or found already created; specs/07 §14 Decision P05-T10f)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     outcome: CallOutcome
     end_reason: str | None = None
+    retry_call_id: uuid.UUID | None = None

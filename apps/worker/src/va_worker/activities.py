@@ -28,6 +28,7 @@ from va_workflows.activities.call_end import CallEndActivities
 from va_workflows.activities.dial_request import DialSettings
 from va_workflows.activities.liveness import CallLivenessActivities
 from va_workflows.activities.prerender import OpenerPrerender
+from va_workflows.activities.retry import RetryActivities
 from va_workflows.activities.telephony import TelephonyActivities
 from va_workflows.registration import CALL_WORKFLOWS
 
@@ -45,6 +46,7 @@ class WorkerActivities:
     telephony: TelephonyActivities
     call_end: CallEndActivities
     liveness: CallLivenessActivities
+    retry: RetryActivities
 
     @classmethod
     def build(  # noqa: PLR0913 - the process's shared collaborators, keyword-only
@@ -73,6 +75,7 @@ class WorkerActivities:
                 database=database, limiter=limiter, publisher=publisher, redis=redis, clock=clock
             ),
             liveness=CallLivenessActivities(redis=redis, clock=clock),
+            retry=RetryActivities(database=database, publisher=publisher, clock=clock),
         )
 
     def main_queue(self) -> tuple[Callable[..., Any], ...]:
@@ -84,6 +87,7 @@ class WorkerActivities:
             self.call_end.end_call,
             self.liveness.watch_call_heartbeat,
             self.liveness.call_presence,
+            self.retry.schedule_retry_call,
         )
 
 
