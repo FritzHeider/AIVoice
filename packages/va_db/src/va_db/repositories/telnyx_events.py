@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from va_db.models import Org, TelnyxEvent
@@ -51,13 +51,28 @@ class TelnyxEventRepo(SystemRepository):
         )
         return await self.session.scalar(statement)
 
-    async def mark_processed(self, event_id: uuid.UUID, *, now: datetime, error: str | None = None) -> None:
+    async def mark_processed(
+        self,
+        event_id: uuid.UUID,
+        *,
+        now: datetime,
+        error: str | None = None,
+        settled_attempts: int | None = None,
+    ) -> None:
         """Set ``processed_at`` and ``process_error`` (``None`` = processed without error) and count the
-        attempt in ``process_attempts``."""
+        attempt in ``process_attempts``.
+
+        ``settled_attempts`` marks an outcome that must never be retried although ``process_error`` records a
+        reason (an inbound refusal, specs/06 §7 Decision P05-T12b): ``process_attempts`` is raised to at least
+        that value (the reprocessor's ``max_attempts``), so :meth:`claim_retries` skips the row.
+        """
+        attempts = TelnyxEvent.process_attempts + 1
+        if settled_attempts is not None:
+            attempts = func.greatest(attempts, require_positive("settled_attempts", settled_attempts))
         statement = (
             update(TelnyxEvent)
             .where(TelnyxEvent.id == event_id)
-            .values(processed_at=now, process_error=error, process_attempts=TelnyxEvent.process_attempts + 1)
+            .values(processed_at=now, process_error=error, process_attempts=attempts)
             .returning(TelnyxEvent.id)
         )
         if await self.session.scalar(statement) is None:

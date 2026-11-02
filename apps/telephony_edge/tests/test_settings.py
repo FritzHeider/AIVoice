@@ -20,6 +20,14 @@ def test_defaults_match_spec() -> None:
     assert settings.temporal_task_queue == "va-main"
     assert (settings.edge_public_host, settings.media_public_host) == ("localhost:8100", "localhost:8200")
     assert settings.telnyx_public_key == ""
+    assert settings.telnyx_api_base == "http://localhost:9100/v2"
+    assert settings.telnyx_api_key.get_secret_value() == "sim-telnyx-key"
+    assert (settings.kms_provider.value, settings.local_master_key.get_secret_value()) == ("local", "")
+
+
+def test_staging_refuses_the_simulator_telnyx_key() -> None:
+    with pytest.raises(ValueError, match="TELNYX_API_KEY must not be the simulator key"):
+        settings_of(EdgeSettings, va_env="staging", kms_provider="aws", aws_kms_key_id="arn:aws:kms:key")
 
 
 def test_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

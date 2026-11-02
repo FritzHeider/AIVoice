@@ -2,8 +2,9 @@
 
 The app serves the Telnyx webhook routes (specs/06-telephony-telnyx.md §4, :mod:`va_edge.intake`), the probes
 of specs/27-observability.md §9 (readiness: Postgres, Redis, Temporal), and the telephony-edge metrics catalog
-(§3.2). Stored voice events are applied by :class:`va_edge.carrier.CarrierEventHandler` (specs/06 §5) unless
-a test passes its own ``handlers``. The lifespan refuses to start without a valid ``TELNYX_PUBLIC_KEY`` (in
+(§3.2). Stored voice events are applied by :class:`va_edge.carrier.CarrierEventHandler` (specs/06 §5), and
+incoming calls routed by :class:`va_edge.routing.InboundRouter` (specs/06 §7), unless a test passes its own
+``handlers``. The lifespan refuses to start without a valid ``TELNYX_PUBLIC_KEY`` (in
 ``local`` the simulator's key file is the fallback) and runs the event processor and the reprocessor as
 supervised tasks; a crash of either stops the process. Importing this module performs no I/O.
 """
@@ -34,6 +35,7 @@ from va_edge.intake import WebhookIntake, db_key_lookup, telnyx_routes
 from va_edge.keys import WebhookKeys
 from va_edge.processor import EventHandler, EventProcessor
 from va_edge.reprocessor import TelnyxEventReprocessor
+from va_edge.routing import InboundAcceptor, InboundRouter
 from va_edge.settings import EdgeSettings
 from va_edge.signals import TemporalCarrierSignaller
 from va_events.call_events import DbCallEventWriter, DirectCallEventWriter
@@ -55,11 +57,19 @@ def platform_key(settings: EdgeSettings) -> VerifyKey:
 
 
 def carrier_handlers(
-    container: EdgeDependencies, *, clock: Clock, metrics: ServiceMetrics
+    container: EdgeDependencies,
+    *,
+    clock: Clock,
+    metrics: ServiceMetrics,
+    acceptor: InboundAcceptor | None = None,
 ) -> Mapping[str, EventHandler]:
     """The production registry: :class:`CarrierEventHandler` for every voice event type, publishing domain
-    events with direct ``call_events`` writes and signalling ``CallWorkflow`` through Temporal."""
+    events with direct ``call_events`` writes, signalling ``CallWorkflow`` through Temporal, and routing
+    incoming calls through :class:`InboundRouter` (accepted calls go to ``acceptor``)."""
     database = container.database
+    router = InboundRouter(
+        database, container.limiter, container.telnyx, clock=clock, metrics=metrics, acceptor=acceptor
+    )
     publisher = EventPublisher(
         container.redis, call_events=DirectCallEventWriter(DbCallEventWriter(database))
     )
@@ -70,6 +80,7 @@ def carrier_handlers(
         TemporalCarrierSignaller(container.temporal),
         clock=clock,
         metrics=metrics,
+        inbound=router,
     )
     return handler.handlers()
 
@@ -81,6 +92,7 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     init_observability: bool = True,
     readiness_timeout_s: float = 1.0,
     handlers: Mapping[str, EventHandler] | None = None,
+    acceptor: InboundAcceptor | None = None,
     clock: Clock | None = None,
     stop: StopController | None = None,
 ) -> FastAPI:
@@ -110,7 +122,7 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
         registry = (
             handlers
             if handlers is not None
-            else carrier_handlers(container, clock=edge_clock, metrics=metrics)
+            else carrier_handlers(container, clock=edge_clock, metrics=metrics, acceptor=acceptor)
         )
         processor = EventProcessor(database, clock=edge_clock, metrics=metrics, handlers=registry)
         reprocessor = TelnyxEventReprocessor(database, processor, clock=edge_clock)

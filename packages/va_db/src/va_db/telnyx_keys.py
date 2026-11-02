@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import uuid
 
-from va_common.crypto import Envelope, column_aad
-from va_db.repositories import TelnyxAccountLookupRepo
+from va_common.crypto import Envelope, KmsProvider, column_aad
+from va_db.repositories import OrgDataKeyStore, TelnyxAccountLookupRepo
 from va_db.session import Database
 
 __all__ = ["TelnyxKeyResolver", "api_key_aad", "seal_api_key"]
@@ -36,6 +36,11 @@ class TelnyxKeyResolver:
     def __init__(self, database: Database, envelope: Envelope) -> None:
         self._database = database
         self._envelope = envelope
+
+    @classmethod
+    def for_provider(cls, database: Database, kms_provider: KmsProvider) -> TelnyxKeyResolver:
+        """A resolver decrypting with org data keys stored in ``database`` under ``kms_provider``."""
+        return cls(database, Envelope(kms_provider, OrgDataKeyStore(database)))
 
     def __repr__(self) -> str:
         return "TelnyxKeyResolver()"

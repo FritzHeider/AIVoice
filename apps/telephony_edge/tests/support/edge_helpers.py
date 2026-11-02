@@ -21,6 +21,7 @@ from service_helpers import UNREACHABLE, FakeContainer, make_client, settings_of
 from temporalio.client import Client
 from temporalio.converter import DataConverter
 
+from va_billing.limits import CallLimiter
 from va_common.checks import TemporalConnector
 from va_common.health import CheckFn
 from va_common.ids import new_id
@@ -36,7 +37,9 @@ from va_edge.container import EdgeDependencies
 from va_edge.main import create_app
 from va_edge.processor import EventHandler, EventProcessor, StoredEvent
 from va_edge.settings import EdgeSettings
+from va_telnyx import TelnyxClientFactory, TelnyxRateLimiter
 from va_telnyx.client_state import ClientState, encode
+from va_telnyx.retry import RetryPolicy
 from va_telnyx.webhooks import parse_envelope
 
 __all__ = [
@@ -53,6 +56,7 @@ __all__ = [
     "make_processor",
     "metric",
     "never_temporal",
+    "offline_telnyx",
     "post",
     "running",
     "signed_headers",
@@ -143,14 +147,48 @@ class RecordingSignaller:
             raise self.error
 
 
+class _OfflineTransport(httpx.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        msg = f"tests never reach Telnyx ({request.url})"
+        raise httpx.ConnectError(msg, request=request)
+
+
+async def _no_byo_key(_account_id: uuid.UUID) -> str | None:
+    return None
+
+
+def offline_telnyx(redis: FakeAsyncRedis | None = None) -> TelnyxClientFactory:
+    """A Telnyx client factory whose every request fails to connect (no client retries)."""
+    return TelnyxClientFactory(
+        base_url="http://telnyx.test/v2",
+        http=httpx.AsyncClient(transport=_OfflineTransport()),
+        limiter=TelnyxRateLimiter(redis or FakeAsyncRedis(), clock=SystemClock()),
+        platform_api_key="KEY-offline",
+        resolve_key=_no_byo_key,
+        retry=RetryPolicy(delays_s=()),
+    )
+
+
+@dataclass(kw_only=True)
+class _EdgeParts:
+    """The container parts every edge test container shares: fakeredis, no Temporal, a Telnyx factory (offline
+    unless given), and a call limiter on the same fakeredis."""
+
+    redis: FakeAsyncRedis = field(default_factory=FakeAsyncRedis)
+    temporal: TemporalConnector = field(default_factory=never_temporal)
+    telnyx: TelnyxClientFactory = field(default_factory=offline_telnyx)
+    limiter: CallLimiter = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.limiter = CallLimiter(self.redis, clock=SystemClock())
+
+
 @dataclass
-class DbContainer:
-    """An edge container over a real database (no readiness dependencies), fakeredis, and no Temporal."""
+class DbContainer(_EdgeParts):
+    """An edge container over a real database (no readiness dependencies) and the shared test parts."""
 
     url: str
     database: Database = field(init=False)
-    redis: FakeAsyncRedis = field(default_factory=FakeAsyncRedis)
-    temporal: TemporalConnector = field(default_factory=never_temporal)
 
     def readiness_checks(self) -> dict[str, CheckFn]:
         return {}
@@ -170,12 +208,10 @@ def unreachable_database() -> Database:
 
 
 @dataclass
-class ProbeContainer(FakeContainer):
+class ProbeContainer(FakeContainer, _EdgeParts):
     """A probe-test container whose database is never reachable (no connection is opened unless used)."""
 
     database: Database = field(default_factory=unreachable_database)
-    redis: FakeAsyncRedis = field(default_factory=FakeAsyncRedis)
-    temporal: TemporalConnector = field(default_factory=never_temporal)
 
 
 @asynccontextmanager

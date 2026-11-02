@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793620529-d99b
+> P05-T12b: va_edge.routing InboundRouter + pure decide; handlers that settle with a reason raise va_edge.processor.EventSettled (mark_processed settled_attempts=max); edge container needs telnyx factory + limiter + LOCAL_MASTER_KEY; routing_helpers.routing_rig assigns random DB numbers to FakeTelnyx accounts directly (sim inventory is fixed); accelerated sim clock runs bridged calls to time limit while edge awaits Postgres -> assert event history
+<!-- tags: edge, telnyx, testing | created: 2026-11-02 -->
+
 ### mem-1793618340-c1ba
 > P05-T12a: InboundConfig subclasses CallParameters (extra=forbid, OUTBOUND_ONLY_FIELDS rejected) like CallDefaults; Send Call loaders moved to va_db.call_inputs (loader.load_call_inputs ctx-free, load_inbound_inputs); merge_layers never applies org default voice (load_voice does); shared loader row builders packages/va_db/tests/support/call_input_seed.Seed
 <!-- tags: calls, domain, testing | created: 2026-11-02 -->

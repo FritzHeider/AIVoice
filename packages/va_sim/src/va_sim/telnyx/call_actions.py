@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Action", "Needs", "call_actions", "pending_media", "state_error", "transfer_outcome"]
 
-type Needs = Literal["any", "answered", "ringing_incoming"]
+type Needs = Literal["any", "answered", "ringing_incoming", "ringing_or_answered"]
 type Check = Callable[[Account, Call, Any], JSONResponse | None]
 type Run = Callable[[Account, Call, Any], None]
 
@@ -66,6 +66,7 @@ def state_error(needs: Needs, call: Call, action: str) -> JSONResponse | None:
         "any": True,
         "answered": call.answered,
         "ringing_incoming": call.direction == "incoming" and call.answered_at is None,
+        "ringing_or_answered": call.answered or (call.direction == "incoming" and call.answered_at is None),
     }[needs]
     return None if fits else invalid_state(f"Call is not in a state that accepts {action}.")
 
@@ -183,7 +184,7 @@ def call_actions(state: SimState) -> Mapping[str, Action]:
         "answer": Action(AnswerRequest, "ringing_incoming", answer, check_answer),
         "reject": Action(RejectRequest, "ringing_incoming", reject),
         "hangup": Action(HangupRequest, "any", hangup),
-        "transfer": Action(TransferRequest, "answered", transfer),
+        "transfer": Action(TransferRequest, "ringing_or_answered", transfer),
         "bridge": Action(BridgeRequest, "answered", bridge, check_bridge),
         "send_dtmf": Action(SendDtmfRequest, "answered", send_dtmf),
         "record_start": Action(RecordStartRequest, "answered", record_start, check_record_start),

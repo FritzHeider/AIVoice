@@ -251,7 +251,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `DASHBOARD_BASE_URL` | api | `http://localhost:3000` | CORS + email links |
 | `SECRET_KEY` | api | 64 random hex chars | session signing |
 | `STREAM_TOKEN_SECRET` | worker, edge, media | 64 random hex chars | HMAC for media WS tokens |
-| `KMS_PROVIDER` | api, worker, media | `local` | `local` (AES-256-GCM master key from env) or `aws` |
+| `KMS_PROVIDER` | api, worker, media, edge | `local` | `local` (AES-256-GCM master key from env) or `aws` |
 | `LOCAL_MASTER_KEY` | same | 64 hex chars | 32-byte master key for envelope encryption in local/test |
 | `AWS_KMS_KEY_ID` | same | empty | KMS key ARN in AWS |
 | `TELNYX_API_BASE` | worker, edge, api, media | `http://localhost:9100/v2` (sim) | real: `https://api.telnyx.com/v2` |

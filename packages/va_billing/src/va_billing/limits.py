@@ -274,27 +274,55 @@ class CallLimiter:
 
         return forget
 
+    async def acquire_inbound(
+        self,
+        org_id: uuid.UUID,
+        call_id: uuid.UUID,
+        *,
+        limits: EffectiveLimits,
+        org_created_at: datetime,
+        max_duration_min: int,
+    ) -> bool:
+        """Take a concurrency slot for an inbound call (specs/06 §7 step 7, Decision P05-T12b).
+
+        Only the concurrency cap applies to calls someone else placed (with the new-account tightening and no
+        batch share); ``False`` when the org is at its cap. Taking the slot again for the same ``call_id`` is
+        idempotent. Redis errors are ``SERVICE_UNAVAILABLE``.
+        """
+        now = self._clock.now()
+        cap, _ = _concurrency_caps(limits, 1.0, young=is_new_account(org_created_at, now))
+        try:
+            return await self._take_slot(org_id, call_id, cap, now, max_duration_min)
+        except (RedisError, OSError) as exc:
+            raise AppError("SERVICE_UNAVAILABLE", LIMITS_UNAVAILABLE_MESSAGE) from exc
+
+    async def _take_slot(
+        self, org_id: uuid.UUID, call_id: uuid.UUID, cap: int | None, now: datetime, max_duration_min: int
+    ) -> bool:
+        now_ms = int(now.timestamp() * 1000)
+        expiry_ms = now_ms + (max_duration_min + CONCURRENCY_GRACE_MIN) * _MS_PER_MIN
+        return await self._scripts.concurrency_acquire(
+            keys.concurrency_key(org_id), str(call_id), cap, now_ms=now_ms, expiry_ms=expiry_ms
+        )
+
     async def _concurrency(
         self, inputs: LimitInputs, now: datetime, young: bool, ticket: LimitTicket
     ) -> None:
-        plan_cap = _shared(inputs.limits.concurrency, inputs.concurrency_share)
-        cap = (
-            _shared(
-                _tightened(inputs.limits.concurrency, NEW_ACCOUNT_CONCURRENCY_CAP), inputs.concurrency_share
-            )
-            if young
-            else plan_cap
-        )
-        key = keys.concurrency_key(inputs.org_id)
-        member = str(inputs.call_id)
-        now_ms = int(now.timestamp() * 1000)
-        expiry_ms = now_ms + (inputs.max_duration_min + CONCURRENCY_GRACE_MIN) * _MS_PER_MIN
-        if await self._scripts.concurrency_acquire(key, member, cap, now_ms=now_ms, expiry_ms=expiry_ms):
-            ticket.add("concurrency", self._forget(key, member))
+        cap, plan_cap = _concurrency_caps(inputs.limits, inputs.concurrency_share, young=young)
+        if await self._take_slot(inputs.org_id, inputs.call_id, cap, now, inputs.max_duration_min):
+            ticket.add("concurrency", self._forget(keys.concurrency_key(inputs.org_id), str(inputs.call_id)))
             return
         if young and (plan_cap is None or (cap is not None and cap < plan_cap)):
             raise AppError("NEW_ACCOUNT_LIMIT", NEW_ACCOUNT_CAPS_MESSAGE)
         raise AppError("CONCURRENCY_CAP_REACHED", CONCURRENCY_CAP_MESSAGE)
+
+
+def _concurrency_caps(limits: EffectiveLimits, share: float, *, young: bool) -> tuple[int | None, int | None]:
+    """(cap in force, plan cap) of the org's concurrency, both scaled by ``share``."""
+    plan_cap = _shared(limits.concurrency, share)
+    if not young:
+        return plan_cap, plan_cap
+    return _shared(_tightened(limits.concurrency, NEW_ACCOUNT_CONCURRENCY_CAP), share), plan_cap
 
 
 _COUNTER_ERRORS: Final = {

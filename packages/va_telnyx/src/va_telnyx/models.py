@@ -136,8 +136,9 @@ class TransferRequest(RequestModel):
     timeout_secs: TimeoutSecs = 30
     time_limit_secs: TimeLimitSecs
     early_media: Literal[True] = True
-    target_leg_client_state: str
-    client_state: str
+    # Optional: an inbound fallback transfer precedes any call row (specs/06 §7 Decision P05-T12b).
+    target_leg_client_state: str | None = None
+    client_state: str | None = None
     command_id: CommandId
     webhook_url: str | None = None
     answering_machine_detection: Literal["disabled"] = "disabled"

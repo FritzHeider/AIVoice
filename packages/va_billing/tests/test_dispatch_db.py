@@ -131,7 +131,12 @@ async def test_load_billing_org(database: Database) -> None:
     )
     async with database.tenant_session(org_id) as session:
         org = await load_billing_org(session, org_id)
-    assert (org.plan_id, org.credit_limit_micros, org.created_at) == ("start", 7, NOW - timedelta(hours=1))
+    assert (org.plan_id, org.status, org.credit_limit_micros, org.created_at) == (
+        "start",
+        "active",
+        7,
+        NOW - timedelta(hours=1),
+    )
     assert org.limits.daily_calls == 3
     assert org.limits.concurrency == 10
     assert org.settings.default_country == "GB"

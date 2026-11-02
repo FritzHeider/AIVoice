@@ -20,7 +20,7 @@ from starlette.applications import Starlette
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
-from va_common.crypto import Envelope, open_kms_provider
+from va_common.crypto import open_kms_provider
 from va_common.health import CheckFn
 from va_common.http import http_client
 from va_common.metrics import Service, build_metrics
@@ -36,7 +36,6 @@ from va_common.service import (
 )
 from va_common.time import SystemClock
 from va_db.org_settings import OrgSettingsReader
-from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 from va_db.telnyx_keys import TelnyxKeyResolver
 from va_elevenlabs import ElevenLabsRest
@@ -105,10 +104,8 @@ async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
         http = telnyx_http(settings)
         stack.push_async_callback(http.aclose)
         clock = SystemClock()
-        envelope = Envelope(kms_provider, OrgDataKeyStore(database))
-        factory = telnyx_factory(
-            settings, http=http, redis=redis, resolve_key=TelnyxKeyResolver(database, envelope), clock=clock
-        )
+        resolver = TelnyxKeyResolver.for_provider(database, kms_provider)
+        factory = telnyx_factory(settings, http=http, redis=redis, resolve_key=resolver, clock=clock)
         activities = WorkerActivities.build(
             database=database,
             redis=redis,

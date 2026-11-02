@@ -1395,3 +1395,16 @@ Grafana 3001
   ...)` (steps 5-8), `loader.load_inbound_inputs(..., number=InboundNumber(...))`, `resolve_inputs`, `domain_errors`;
   `va_api.services.call_inputs` only adds `check_call_permissions`. Loader row builders are
   `packages/va_db/tests/support/call_input_seed.Seed` (the api `call_input_rows.Seed` subclasses it with `load`/`fails`).
+- 2026-11-02 (P05-T12b): inbound routing = `va_edge.routing` (pure `decide(RoutingFacts)` → `Reject`/`Fallback`/
+  `Accept(config)`; `InboundRouter(database, limiter, telnyx, clock=, metrics=, acceptor=)` wired by
+  `main.carrier_handlers(..., acceptor=)` / `create_app(acceptor=)`; P05-T12c implements `InboundAcceptor.accept(
+  InboundCall)`). A handler that finished for good but must record a reason raises `va_edge.processor.EventSettled
+  (reason)` (stored in `process_error`, attempts set to max via `mark_processed(settled_attempts=)`, never
+  retried). The edge container now needs `telnyx` (factory) + `limiter` and `LOCAL_MASTER_KEY` (BYO keys):
+  `edge_helpers.DbContainer`/`ProbeContainer` default to `offline_telnyx()`; real-container tests pass
+  `local_master_key=secrets.token_hex(32)`. Router tests: `routing_helpers.routing_rig(database)` (FakeTelnyx
+  in-process with `first_command_timeout=False`, recorded commands `rig.commands(ccid)`, `rig.number(org, config)`
+  inserts a random +1628 number in the DB and assigns it to the sim account directly — the sim inventory is fixed,
+  `rig.place`/`ring`/`route`). FakeTelnyx `transfer` works on a ringing incoming leg (answered when the target
+  answers). `test_calls_recording.py::test_record_start_stop_saves_a_dual_channel_wav` flakes under `--cov` with
+  `-n 8` on HEAD too (accelerated clock reaches the time limit).

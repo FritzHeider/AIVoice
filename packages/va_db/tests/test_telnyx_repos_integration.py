@@ -86,6 +86,36 @@ async def test_mark_processed_counts_attempts(database: Database) -> None:
     assert (row.process_attempts, row.process_error, row.processed_at) == (2, None, now)
 
 
+async def test_settled_events_keep_their_reason_and_are_never_claimed(database: Database) -> None:
+    settled = await _record(database)
+    retried = await _record(database)
+    now = datetime.now(UTC)
+    async with database.system_session() as session:
+        repo = TelnyxEventRepo(session)
+        await repo.mark_processed(settled.id, now=now, error="unknown_number", settled_attempts=5)
+        await repo.mark_processed(retried.id, now=now, error="unknown_number")
+    row = await _row(database, settled.id)
+    assert (row.process_attempts, row.process_error, row.processed_at) == (5, "unknown_number", now)
+    assert await _claim(database, datetime.now(UTC) + _MINUTE) & {settled.id, retried.id} == {retried.id}
+
+
+async def test_settling_never_lowers_the_attempt_count(database: Database) -> None:
+    stored = await _record(database)
+    async with database.system_session() as session:
+        await session.execute(
+            update(TelnyxEvent).where(TelnyxEvent.id == stored.id).values(process_attempts=7)
+        )
+        await TelnyxEventRepo(session).mark_processed(
+            stored.id, now=datetime.now(UTC), error="caller_dnc", settled_attempts=5
+        )
+    assert (await _row(database, stored.id)).process_attempts == 8
+    with pytest.raises(ValueError, match="settled_attempts must be at least 1"):
+        async with database.system_session() as session:
+            await TelnyxEventRepo(session).mark_processed(
+                stored.id, now=datetime.now(UTC), settled_attempts=0
+            )
+
+
 async def test_claim_retries_takes_stale_unprocessed_and_failed_events(database: Database) -> None:
     unprocessed = await _record(database)
     failed = await _record(database)

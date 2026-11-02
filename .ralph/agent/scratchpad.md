@@ -1407,3 +1407,157 @@ Re-ran: lint, typecheck (py + TS), placeholders 0, spec refs 0, jscpd 0 clones, 
 passed, 7 skipped, 99.13 %, exit 0 (logs/make_test_review_p05t12a.log). Diff matches specs/16 §4 table + runner rule;
 loader move complete (no stale va_api.services imports); anonymous callers kept raw; BYO account errors 502
 CARRIER_CONNECTION_ERROR; Decisions in specs/04/05/06/16. make e2e harness lands in P05-T17.
+
+## Plan P05-T12b — Edge inbound routing decisions: reject and fallback transfer (Planner, 2026-11-02)
+Scope: `call.initiated` (direction `incoming`, no call yet) → decide reject / fallback transfer / accept. Accept
+itself (call row, context, answer, CallWorkflow) is P05-T12c: here only the `InboundAcceptor` seam + its failure path.
+
+### Design (decided — do not re-litigate)
+1. **Pure decision** `apps/telephony_edge/src/va_edge/routing.py`:
+   - `RoutingFacts` frozen dataclass: `number: PhoneNumber row data` reduced to (`phone_number_id`, `org_id`, `e164`,
+     `telnyx_account_id`), `config: InboundConfig` (or `InboundConfigError` → see below), `org_status: str`,
+     `available_micros: int` (balance − held + credit_limit, via `va_billing.holds.available_balance`),
+     `min_attempt_micros: int` (effective pricing), `caller_dnc: bool`, `caller_blocked_prefix: bool`, `now`.
+   - `RoutingDecision` = `Reject(cause: Literal["CALL_REJECTED","USER_BUSY"], reason: str)` |
+     `Fallback(to: str, reason: str)` | `Accept(...)`. `reason` values (stored in `process_error`, exact strings):
+     `unknown_number`, `invalid_inbound_config`, `caller_not_allowed`, `caller_blocked`, `org_<status>`
+     (`org_suspended`, `org_deleted`, …), `insufficient_credits`, `caller_dnc`, `maintenance`,
+     `concurrency_cap`, `accept_unavailable`, `accept_failed`.
+   - `decide(facts) -> RoutingDecision` order = specs/06 §7 with the specs/16 §4 caller lists inserted after step 2:
+     2a `blocked_callers` contains caller → Reject CALL_REJECTED `caller_blocked` (never fallback);
+     2b `allowed_callers` non-empty and caller absent → Reject CALL_REJECTED `caller_not_allowed`;
+     3 org status ≠ active → `_refuse(reason)` = Fallback if `fallback_number` else Reject CALL_REJECTED;
+     4 `available < min_attempt` → `_refuse("insufficient_credits")`;
+     5 `block_dnc_callers` and (caller DNC hit or platform fraud blocked prefix) → Reject CALL_REJECTED `caller_dnc`;
+     6 `maintenance_active(config.maintenance, now)` → Fallback if fallback; else if `maintenance.message` → Accept
+       with `maintenance_message=True` (T12c answers/plays/hangs up); else Reject CALL_REJECTED `maintenance`;
+     7 concurrency is checked by the router (needs Redis), not here: `decide` returns `Accept`, router then acquires.
+   - Caller matching: compare the caller normalized with `normalize_e164(caller, region_of(called))` (fallback raw)
+     against the lists; anonymous callers never match `allowed_callers` (→ rejected when the list is non-empty).
+   - Stored config that fails `load_inbound_config` → `_refuse("invalid_inbound_config")` with only the raw
+     `fallback_number` if it is a valid E.164 string (log `telnyx.inbound_config_invalid` with the field path).
+2. **Router** `va_edge.routing.InboundRouter` (implements `va_edge.carrier.InboundRouter` protocol; rename the
+   Protocol in carrier.py to `InboundRoute` if the name clashes, keep one import site):
+   `__init__(database, limiter: CallLimiter, telnyx: TelnyxClientFactory, *, clock, metrics, acceptor:
+   InboundAcceptor | None = None)`; `route(event, payload: CallInitiated)`:
+   - number lookup `PhoneNumberRoutingRepo.get_active(payload.to)` in `system_session()` (unknown → Reject via the
+     **platform** client, reason `unknown_number`);
+   - facts in ONE `tenant_session(number.org_id)`: `load_billing_org` (status via `OrgRepo`/overview — add `status`
+     to `BillingOrg` if absent), `available_balance`, DNC `va_compliance.dnc.find_block(session, org_id, caller,
+     now=)` only when `block_dnc_callers`, fraud `blocked_prefix` with org settings like dispatch does (reuse the
+     same arguments `check_call_compliance` builds; extract a tiny helper in va_compliance if needed, no copy);
+   - Accept → concurrency: new `CallLimiter.acquire_inbound(org_id, call_id, *, limits, org_created_at,
+     max_duration_min) -> bool` (same cap rules as `_concurrency`: new-account tightening, no batch share; reuses
+     `concurrency_acquire` script; `call_id = uuid7()` pre-allocated here and handed to the acceptor);
+     `max_duration_min` = `config.max_duration or 30`. Full → `_refuse("concurrency_cap")` with cause `USER_BUSY`
+     when no fallback (step 7).
+   - Accept with slot → `acceptor.accept(InboundCall(call_id, event, payload, number, config, maintenance_message))`;
+     acceptor `None` → reason `accept_unavailable`, raising → `accept_failed` (log `error_type`): release the slot
+     (`limiter.release_call`) then `_refuse` (fallback = specs/16 §4 "pipeline failure").
+   - Commands use `telnyx.for_account(number.telnyx_account_id)` (BYO number → BYO client; unknown → platform):
+     `reject(ccid, cause, command_id=f"reject-{ccid}")`; `transfer(ccid, TransferRequest(to=fallback,
+     from_=payload.to, time_limit_secs=14_400, timeout_secs=30, command_id=f"fallback-{ccid}"))` — make
+     `client_state` and `target_leg_client_state` optional (`str | None = None`) in `va_telnyx.models.TransferRequest`
+     (no call row exists; body() omits None); check the cold-transfer callers still pass them.
+   - `CallAlreadyEnded` / Telnyx 422 "not in a state" on reject/transfer (caller hung up first) → log and finish.
+   - Outcome recording: refusal raises `va_edge.processor.EventSettled(reason)` (new exception) AFTER the command
+     succeeded; the processor catches it, stores `process_error=reason`, result `processed`, logs
+     `telnyx.inbound_refused` at info (reason, decision kind, never the caller number), and calls
+     `TelnyxEventRepo.mark_processed(..., error=reason, settled=True)` which sets `process_attempts =
+     GREATEST(process_attempts + 1, :max_attempts)` so the reprocessor never retries a settled refusal (pass the
+     processor's `max_attempts`). Telnyx/DB failures before the command still raise normally → retried (commands
+     are idempotent by `command_id`).
+   - Metric: add `va_inbound_routing_total{decision,reason}` to the telephony-edge catalog (specs/27 §3.2 row; check
+     `test_metrics` row counts) — decision ∈ accept|reject|fallback.
+3. **Wiring**: `EdgeSettings` gains `TelnyxApiSettings` + `CryptoSettings`; specs/02 §6 scope columns for
+   `TELNYX_API_*` already include edge, add `edge` to `KMS_PROVIDER` (`api, worker, media, edge`) and keep
+   `.env.example` comments in sync (scripts/tests/test_env_example.py). `EdgeDependencies` gains `telnyx:
+   TelnyxClientFactory` and `limiter: CallLimiter`; `build_container` builds `telnyx_http` + `telnyx_factory(...,
+   resolve_key=TelnyxKeyResolver(database, envelope))` inside `open_kms_provider` (copy the worker's composition
+   order; refuse empty `LOCAL_MASTER_KEY` like api/worker). `carrier_handlers(container, clock=, metrics=,
+   acceptor=None)` constructs the router and passes `inbound=router`; `create_app(acceptor=...)` test seam.
+   Update edge test containers (`edge_helpers.DbContainer`/`ProbeContainer`) with a FakeTelnyx-backed factory
+   (`telnyx_client_helpers.sim_http(state)` pattern) and fakeredis limiter.
+4. **FakeTelnyx**: `transfer` accepts `ringing_incoming` too (new `Needs` value `"ringing_or_answered"`); when leg B
+   answers and A is unanswered, the sim answers A first (`call.answered` on A, then bridge events). Add the
+   specs/30 FakeTelnyx Decision P05-T12b. Real Telnyx allows transfer of an unanswered incoming call (the
+   original leg is answered when the target answers); record in specs/06 §7 Decision.
+5. **Spec Decisions** (same commit): specs/06 §7 `> Decision (2026-11-02): inbound routing (P05-T12b)` — order
+   incl. caller lists, reasons list, causes, command ids `reject-{ccid}`/`fallback-{ccid}`, transfer from = called
+   number, 14 400 s limit, settled events not retried, accept failure → fallback/reject, maintenance with message
+   and no fallback → accept (message-only in T12c), concurrency slot taken at routing with a pre-allocated call id,
+   min_attempt = plan `min_attempt_micros` (specs/24 "no attempt minimum" concerns charging, not this floor).
+   specs/03 §2 if `TelnyxEventRepo.mark_processed` semantics are described there; specs/27 metric row.
+
+### Tests (all must exist and pass)
+- `apps/telephony_edge/tests/test_routing.py` (pure `decide`): table over every branch/order (blocked beats
+  allowed; suspended with/without fallback; credits exactly at min = accept, one below = refuse; dnc only when
+  `block_dnc_callers`; maintenance inside/outside/with message without fallback/with both; invalid config with
+  and without valid raw fallback; anonymous caller vs allowed list; caller normalized `(415) …`-style national
+  form from same region matches E.164 list entry).
+- `apps/telephony_edge/tests/test_routing_db.py` (edge_db_url, Postgres + fakeredis + FakeTelnyx via ASGI with
+  recorded requests): unknown number → platform reject `CALL_REJECTED`, `process_error='unknown_number'`,
+  attempts exhausted (reprocessor `claim_retries` does not return it); suspended org + fallback → transfer body
+  (`to`, `from`=called, `command_id=fallback-…`, no client_state); suspended without fallback → reject; low credits;
+  DNC caller (own-org DNC row) with flag on/off; maintenance → transfer; concurrency full (pre-filled zset) →
+  USER_BUSY / fallback; accept path calls a recording acceptor with a fresh call id and holds the slot; acceptor
+  None / raising → slot released + fallback or reject with `accept_unavailable`/`accept_failed`; BYO number uses
+  the BYO account key (assert Authorization header seen by FakeTelnyx); reject on an already-hung-up leg logs and
+  settles; Telnyx 5xx before the command → normal `process_error` and retry later (attempts not exhausted).
+- `test_processor.py`: `EventSettled` stored as `processed` with reason, attempts set to max, info log, metric
+  `result=processed`.
+- `packages/va_db/tests`: `mark_processed(settled=True)` unit/DB test.
+- `packages/va_billing/tests`: `acquire_inbound` (cap, new-account tightening, idempotent member, expiry).
+- `packages/va_sim/tests/telnyx/test_calls_transfer.py`: transfer of a ringing incoming call answers A when B
+  answers; B busy leaves A ringing; answered behaviour unchanged.
+- `apps/telephony_edge/tests/test_sim_contract.py` (+ new cases): `POST /sim/telnyx/inbound` through the edge
+  app (webhooks replayed via RecordingTransport as existing tests do, or webhook_url pointing at the served edge):
+  unknown number → sim call ends `call_rejected`; suspended org no fallback → rejected; suspended org with
+  fallback → sim shows a transfer leg to the fallback; maintenance with fallback → transferred; blocked caller →
+  rejected.
+- `test_main.py`/`test_startup.py`: container builds the factory/limiter; settings refuse empty LOCAL_MASTER_KEY
+  where the api does.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t12b.log 2>&1`) with a heartbeat Monitor; new modules ~100 %; jscpd 0;
+`uvx radon cc -s -n C` on touched src empty; pip-audit + pnpm audit. `make e2e`: harness lands in P05-T17 — say so.
+AGENTS.md line: `va_edge.routing` (decide/InboundRouter/InboundAcceptor seam, `EventSettled`, edge container
+telnyx/limiter, FakeTelnyx ringing transfer).
+
+### Risks
+- `EdgeSettings` gaining crypto/Telnyx settings breaks every edge test settings builder: update `edge_settings()`
+  helper once (random LOCAL_MASTER_KEY).
+- Handler budget 2 s: routing does system lookup + one tenant session + Redis + one Telnyx call — fine, but tests
+  with FrozenClock app clock fire the budget instantly (use SimTimeClock/SystemClock as in test_sim_contract).
+- Shared edge DB: unique numbers per test (`random_e164`), seeded FakeTelnyx with `secrets.randbits(32)`.
+- `metrics` catalog count tests (`test_metrics`) need the new row in specs/27 §3.2.
+
+## Build P05-T12b (Builder, 2026-11-02)
+- `va_edge.routing`: pure `decide(RoutingFacts)` as a chain of steps (caller lists → org status/credits → DNC →
+  maintenance) returning `Reject`/`Fallback`/`Accept(config, maintenance_message)`; `InboundRouter` (number lookup
+  system scope, facts in one tenant session via `load_billing_org` + `available_balance` + `find_block`,
+  `acquire_inbound` slot under pre-allocated call id, `InboundAcceptor` seam, commands via
+  `for_account(number.telnyx_account_id)`, `EventSettled(reason)` after the command).
+- Deviations from plan (recorded in the specs/06 §7 Decision): (a) metric = existing `va_inbound_calls_total{result:
+  rejected|fallback|answered}` from specs/27 §3.2 instead of a new `va_inbound_routing_total` (catalog already had
+  it); (b) DNC uses `find_block` only (platform + own + inherited parent DNC rows = "platform blacklist"); the
+  destination fraud prefixes are not applied to callers; (c) the processor does not log the refusal; the router
+  logs `telnyx.inbound_refused`.
+- `EventSettled` in processor → `mark_processed(settled_attempts=max_attempts)` (GREATEST); `BillingOrg.status`;
+  `CallLimiter.acquire_inbound` (shared `_concurrency_caps`/`_take_slot`); `TransferRequest` client states optional;
+  FakeTelnyx `transfer` on ringing incoming legs (`ringing_or_answered`, A answered when B answers).
+- Edge settings + `TelnyxApiSettings` + `CryptoSettings` (specs/02 KMS_PROVIDER scope + edge); container builds the
+  Telnyx factory (`TelnyxKeyResolver.for_provider`, shared with the worker) and `CallLimiter`.
+- Tests: test_routing (pure), test_routing_db (20 Postgres+FakeTelnyx cases), test_sim_contract (+6 through the edge
+  app), test_processor settled, va_db settled attempts, va_billing acquire_inbound, sim transfer tests, va_telnyx
+  stateless transfer body, settings/container.
+- Pre-existing flake noticed: va_sim test_record_start_stop_saves_a_dual_channel_wav fails under `--cov -n 8` on
+  HEAD sim code too (accelerated clock). Not touched.
+- make test: 10216 passed, 7 skipped, 99.14 %, exit 0 (logs/make_test_p05t12b.log); lint/typecheck/placeholders/spec refs pass; jscpd 0; pip-audit none, pnpm 3 moderate/0 high. radon -n C on touched src empty (CallEngine.answer peer handling extracted to _bridge_on_answer; sim + edge re-run 499 passed). make e2e: harness lands in P05-T17.
+
+## Review P05-T12b (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint, typecheck (mypy 1191 files + TS), placeholders 0, spec refs 0, jscpd 0 clones, radon -n C empty on touched
+src; make test 10216 passed, 7 skipped, 99.13 %, exit 0 (logs/make_test_review_p05t12b.log), routing.py 100 %.
+Diff matches specs/06 §7 steps 1-7 + specs/16 §4 caller lists/fallback; Decisions in specs/02/03/06/30. Acceptor seam
+is None in production until P05-T12c (accepted calls refuse with accept_unavailable). make e2e harness lands in P05-T17.

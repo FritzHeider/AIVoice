@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 from datetime import timedelta
 
@@ -9,9 +10,10 @@ import pytest
 from billing_helpers import NOW, LimiterRig, another_call, inputs, random_e164
 
 from va_billing import keys
-from va_billing.limits import LimitTicket, frequency_cap, is_new_account
+from va_billing.limits import LimitInputs, LimitTicket, frequency_cap, is_new_account
 from va_billing.plans import effective_limits
 from va_common.errors import AppError
+from va_common.ids import new_id
 from va_domain.org import OrgSettings
 
 YOUNG = NOW - timedelta(hours=2)
@@ -302,3 +304,59 @@ async def test_rollback_logs_and_continues_on_redis_errors(rig: LimiterRig) -> N
     ticket.add("second", failing)
     await ticket.rollback()
     assert calls == ["failing", "working"]
+
+
+# ---- inbound calls (specs/06 §7 step 7) -------------------------------------------------------------------
+
+
+async def inbound(rig: LimiterRig, base: LimitInputs, call_id: uuid.UUID | None = None) -> bool:
+    return await rig.limiter.acquire_inbound(
+        base.org_id,
+        call_id or new_id(),
+        limits=base.limits,
+        org_created_at=base.org_created_at,
+        max_duration_min=base.max_duration_min,
+    )
+
+
+async def test_inbound_takes_only_a_concurrency_slot(rig: LimiterRig) -> None:
+    base = inputs(overrides={"concurrency": 2})
+    call_id = new_id()
+    assert await inbound(rig, base, call_id)
+    assert await inbound(rig, base, call_id)
+    assert await rig.limiter.active_calls(base.org_id) == 1
+    assert await rig.value(keys.daily_key(base.org_id, NOW)) is None
+    assert await rig.value(keys.hourly_key(base.org_id, NOW)) is None
+    assert await inbound(rig, base)
+    assert not await inbound(rig, base)
+    await rig.limiter.release_call(base.org_id, call_id)
+    assert await inbound(rig, base)
+
+
+async def test_inbound_shares_the_cap_with_outbound_calls(rig: LimiterRig) -> None:
+    base = inputs(overrides={"concurrency": 1})
+    await rig.limiter.acquire(base)
+    assert not await inbound(rig, base)
+
+
+async def test_inbound_new_account_tightening(rig: LimiterRig) -> None:
+    base = inputs(plan_id="enterprise", created_at=YOUNG)
+    assert all([await inbound(rig, base) for _ in range(10)])
+    assert not await inbound(rig, base)
+    unlimited = inputs(plan_id="enterprise")
+    assert all([await inbound(rig, unlimited) for _ in range(20)])
+
+
+async def test_inbound_slot_expires_after_max_duration(rig: LimiterRig) -> None:
+    base = inputs(overrides={"concurrency": 1}, max_duration_min=10)
+    assert await inbound(rig, base)
+    rig.clock.advance(timedelta(minutes=15, seconds=1))
+    assert await inbound(rig, base)
+    assert await rig.limiter.active_calls(base.org_id) == 1
+
+
+async def test_inbound_redis_down_is_service_unavailable(rig: LimiterRig) -> None:
+    rig.server.connected = False
+    with pytest.raises(AppError) as caught:
+        await inbound(rig, inputs())
+    assert caught.value.code == "SERVICE_UNAVAILABLE"

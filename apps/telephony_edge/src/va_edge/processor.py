@@ -8,7 +8,8 @@ queue; a full queue refuses the event (backpressure), which then stays unprocess
 :class:`va_edge.reprocessor.TelnyxEventReprocessor` claims it.
 
 Processing = parse the stored envelope, run the handler registered for the ``event_type`` within the 2 s
-budget, and mark the row processed (``process_error`` on failure). A type without a handler is marked
+budget, and mark the row processed (``process_error`` on failure; a handler raising :class:`EventSettled`
+records its reason there without a retry). A type without a handler is marked
 processed; a type ``va_telnyx`` does not model counts as ``unhandled``. Handlers must be idempotent: an
 event may be processed again after a crash, a lost mark, or a reclaim.
 """
@@ -40,6 +41,7 @@ __all__ = [
     "MAX_ERROR_CHARS",
     "EventHandler",
     "EventProcessor",
+    "EventSettled",
     "HandlerTimeoutError",
     "ProcessResult",
     "StoredEvent",
@@ -93,6 +95,16 @@ class StoredEvent:
 
 
 type EventHandler = Callable[[StoredEvent, EventPayload], Awaitable[None]]
+
+
+class EventSettled(Exception):  # noqa: N818 - an outcome, not an error
+    """Raised by a handler whose event is finished for good although a reason must be recorded (an inbound
+    refusal, specs/06 §7 Decision P05-T12b): the row stores ``reason`` in ``process_error``, counts as
+    ``processed``, and is never retried."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class HandlerTimeoutError(Exception):
@@ -178,10 +190,15 @@ class EventProcessor:
 
     async def _process(self, event: StoredEvent) -> None:
         started = self._clock.monotonic()
-        result, error = await self._handle(event)
+        result, error, settled = await self._handle(event)
         try:
             async with self._database.system_session() as session:
-                await TelnyxEventRepo(session).mark_processed(event.id, now=self._clock.now(), error=error)
+                await TelnyxEventRepo(session).mark_processed(
+                    event.id,
+                    now=self._clock.now(),
+                    error=error,
+                    settled_attempts=self._max_attempts if settled else None,
+                )
         except Exception as exc:  # the shard must survive a database failure; the row is reclaimed later
             _log.error(
                 "telnyx.event_mark_failed",
@@ -193,12 +210,15 @@ class EventProcessor:
         self._total.labels(event_type=event.event_type, result=result).inc()
         self._latency.labels(event_type=event.event_type).observe((self._clock.monotonic() - started) * 1000)
 
-    async def _handle(self, event: StoredEvent) -> tuple[ProcessResult, str | None]:
+    async def _handle(self, event: StoredEvent) -> tuple[ProcessResult, str | None, bool]:
+        """(result, ``process_error``, whether the event is settled despite the error)."""
         try:
             payload = parse_payload(WebhookEnvelope.model_validate(event.envelope).data)
             handler = self._handlers.get(event.event_type)
             if handler is not None:
                 await self._within_budget(handler(event, payload))
+        except EventSettled as settled:
+            return "processed", settled.reason[:MAX_ERROR_CHARS], True
         except Exception as exc:  # any handler failure is stored on the row and retried by the reprocessor
             attempt = event.attempts + 1
             _log.error(
@@ -209,8 +229,8 @@ class EventProcessor:
                 abandoned=attempt >= self._max_attempts,
                 error_type=type(exc).__name__,
             )
-            return "error", f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
-        return ("unhandled" if isinstance(payload, UnknownEventPayload) else "processed"), None
+            return "error", f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS], False
+        return ("unhandled" if isinstance(payload, UnknownEventPayload) else "processed"), None, False
 
     async def _within_budget(self, work: Awaitable[None]) -> None:
         task = asyncio.ensure_future(work)

@@ -7,7 +7,9 @@ dependencies = [
     "fastapi>=0.162.0",
     "orjson>=3.13.0",
     "pynacl>=1.5",
+    "va-billing",
     "va-common",
+    "va-compliance",
     "va-db",
     "va-domain",
     "va-events",
@@ -24,7 +26,9 @@ build-backend = "uv_build"
 module-name = "va_edge"
 
 [tool.uv.sources]
+va-billing = { workspace = true }
 va-common = { workspace = true }
+va-compliance = { workspace = true }
 va-db = { workspace = true }
 va-domain = { workspace = true }
 va-events = { workspace = true }

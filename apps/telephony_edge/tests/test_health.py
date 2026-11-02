@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 import pytest
 from edge_helpers import Keypair, ProbeContainer, edge_settings
 from service_helpers import UNREACHABLE, failing, make_client, ok_check, readiness_of
 
+from va_billing.limits import CallLimiter
 from va_common import observability
 from va_edge import __version__
 from va_edge.main import build_container, create_app
+from va_telnyx import TelnyxClientFactory
 
 KEY = Keypair.generate().public_b64
 ALL_OK = {"postgres": ok_check, "redis": ok_check, "temporal": ok_check}
@@ -38,7 +41,7 @@ async def test_readyz_all_ok() -> None:
 
 
 async def test_readyz_real_container_reports_unreachable_dependencies() -> None:
-    settings = edge_settings(KEY, **UNREACHABLE)
+    settings = edge_settings(KEY, local_master_key=secrets.token_hex(32), **UNREACHABLE)
     status, body = await readiness_of(create_app(settings, init_observability=False))
     assert (status, body["failing"]) == (503, ["postgres", "redis", "temporal"])
     assert set(body["checks"].values()) <= {"error", "timeout"}
@@ -65,8 +68,16 @@ async def test_container_closed_on_shutdown() -> None:
 
 
 async def test_build_container_registers_checks_in_spec_order() -> None:
-    async with build_container(edge_settings(KEY)) as deps:
+    async with build_container(edge_settings(KEY, local_master_key=secrets.token_hex(32))) as deps:
         assert list(deps.readiness_checks()) == ["postgres", "redis", "temporal"]
+        assert isinstance(deps.telnyx, TelnyxClientFactory)
+        assert isinstance(deps.limiter, CallLimiter)
+
+
+async def test_build_container_refuses_an_unset_master_key() -> None:
+    with pytest.raises(RuntimeError, match="LOCAL_MASTER_KEY is not configured"):
+        async with build_container(edge_settings(KEY)):
+            pytest.fail("the container must not open")
 
 
 async def test_observability_init_and_shutdown_called(monkeypatch: pytest.MonkeyPatch) -> None:

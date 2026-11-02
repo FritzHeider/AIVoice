@@ -121,7 +121,15 @@ class CallEngine(CallMedia):
         if call.direction == "outgoing":
             self.schedule_amd(call)
         self.later(call, call.time_limit_s, lambda: self.hang_up(call, "time_limit", "unknown"), name="limit")
-        if peer is not None and peer.answered and peer.bridged_with is None:
+        if peer is not None:
+            self._bridge_on_answer(peer, call)
+
+    def _bridge_on_answer(self, peer: Call, call: Call) -> None:
+        """Bridge the answered ``call`` to the leg it was dialled for (answering a still-ringing incoming leg
+        first: Telnyx answers a transferred incoming call once the target answers)."""
+        if peer.direction == "incoming" and peer.answered_at is None:
+            self.answer(peer)
+        if peer.answered and peer.bridged_with is None:
             self.bridge(peer, call, park=False)
 
     def hang_up(self, call: Call, cause: str, source: str) -> None:
@@ -191,7 +199,8 @@ class CallEngine(CallMedia):
         self.run_transfer_script(b, a)
 
     def transfer(self, account: Account, a: Call, outcome: LegOutcome, timeout_s: float, **leg: Any) -> Call:
-        """Dial leg B for answered leg ``a``; B bridges to ``a`` when it answers."""
+        """Dial leg B for leg ``a`` (answered, or a ringing incoming leg answered when B answers); B bridges
+        to ``a`` when it answers."""
         b = self.new_call(
             account,
             call_session_id=a.call_session_id,

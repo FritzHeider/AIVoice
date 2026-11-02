@@ -16,9 +16,11 @@ from telnyx_helpers import (
     dial,
     error_of,
     events,
+    inbound_call,
     ok,
     payloads,
     register,
+    ringing_inbound,
     settle,
     summary,
     telnyx_client,
@@ -231,4 +233,59 @@ async def test_leg_answering_after_its_link_to_peer_ended_is_hung_up() -> None:
         assert [e for e, _ in events(transport, proxy)] == ["call.initiated", "call.answered", "call.hangup"]
         hangup = payloads(transport, "call.hangup")[-1]
         assert (hangup["hangup_cause"], hangup["hangup_source"]) == ("normal_clearing", "caller")
+        assert payloads(transport, "call.bridged") == []
+
+
+async def test_transfer_of_a_ringing_incoming_call_answers_it_when_the_target_answers() -> None:
+    transport = RecordingTransport()
+    state = telnyx_state(transport)
+    async with telnyx_client(state) as client:
+        a = await ringing_inbound(client, state)
+        await ok(client, a, "transfer", to=TARGET, **{"from": "+14155552001"})
+        assert (await summary(client, a))["answered_at"] is None
+        await at(state, 2.0)
+        [transfer] = (await summary(client, a))["transfers"]
+        b = transfer["call_control_id"]
+        answered = payloads(transport, "call.answered")
+        assert [p["call_control_id"] for p in answered] == [b, a]
+        bridged = payloads(transport, "call.bridged")
+        assert [p["call_control_id"] for p in bridged] == [a, b]
+        assert (await summary(client, a))["state"] == "bridged"
+
+
+async def test_busy_transfer_target_leaves_the_incoming_call_ringing() -> None:
+    transport = RecordingTransport()
+    state = telnyx_state(transport)
+    register(state, 'id: busy\nmatch: {to: "+14155552001"}\ntransfer_target: {result: busy}\n')
+    async with telnyx_client(state) as client:
+        app = await create_app(client)
+        a = (await inbound_call(client, state, app["id"], scenario="busy"))["call_control_id"]
+        await ok(client, a, "transfer", to=TARGET)
+        await at(state, 3.0)
+        [hangup] = payloads(transport, "call.hangup")
+        assert (hangup["call_control_id"], hangup["hangup_cause"]) == (
+            (await summary(client, a))["transfers"][0]["call_control_id"],
+            "user_busy",
+        )
+        assert payloads(transport, "call.answered") == []
+        detail = await summary(client, a)
+        assert (detail["answered_at"], detail["ended_at"]) == (None, None)
+
+
+async def test_caller_hanging_up_during_a_ringing_transfer_cancels_the_target_leg() -> None:
+    transport = RecordingTransport()
+    state = telnyx_state(transport)
+    register(state, 'id: slow\nmatch: {to: "+14155552001"}\ntransfer_target: {answer_after_ms: 4000}\n')
+    async with telnyx_client(state) as client:
+        app = await create_app(client)
+        a = (await inbound_call(client, state, app["id"], scenario="slow"))["call_control_id"]
+        await ok(client, a, "transfer", to=TARGET)
+        response = await client.post(f"/sim/telnyx/calls/{a}/hangup", json={})
+        assert response.status_code < 300, response.text
+        await settle(state)
+        hangups = payloads(transport, "call.hangup")
+        assert {p["call_control_id"] for p in hangups} == {
+            a,
+            (await summary(client, a))["transfers"][0]["call_control_id"],
+        }
         assert payloads(transport, "call.bridged") == []

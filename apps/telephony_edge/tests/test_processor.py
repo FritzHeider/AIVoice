@@ -22,7 +22,7 @@ from edge_helpers import (
 from service_helpers import json_log_stream, log_events
 
 from va_db.session import Database
-from va_edge.processor import EventProcessor, StoredEvent
+from va_edge.processor import EventProcessor, EventSettled, StoredEvent
 from va_telnyx.webhooks import EventPayload
 
 pytestmark = pytest.mark.integration
@@ -72,6 +72,24 @@ async def test_handler_failure_is_stored_and_counted(database: Database) -> None
     [failed] = [line for line in log_events(stream) if line["event"] == "telnyx.event_failed"]
     assert (failed["attempt"], failed["abandoned"], failed["error_type"]) == (1, False, "RuntimeError")
     assert "boom" not in str(failed)
+
+
+async def test_settled_event_keeps_its_reason_without_a_retry(database: Database) -> None:
+    async def settling(_event: StoredEvent, _payload: EventPayload) -> None:
+        raise EventSettled("unknown_number")
+
+    event = await stored_event(database)
+    stream = json_log_stream()
+    processor = make_processor(database, {"call.answered": settling}, max_attempts=4)
+    async with running(processor):
+        processor.offer(event)
+        await processor.join()
+    row = await event_row(database, event.id)
+    assert (row.process_error, row.process_attempts) == ("unknown_number", 4)
+    assert row.processed_at is not None
+    assert _count(processor, "call.answered", "processed") == 1
+    assert _count(processor, "call.answered", "error") == 0
+    assert "telnyx.event_failed" not in [line["event"] for line in log_events(stream)]
 
 
 async def test_last_attempt_is_logged_as_abandoned(database: Database) -> None:

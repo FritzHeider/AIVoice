@@ -215,6 +215,24 @@ COMMANDS: list[tuple[str, Invoke, dict[str, Any]]] = [
         },
     ),
     (
+        "transfer",
+        lambda c: c.transfer(
+            CCID,
+            TransferRequest(
+                to="+14155550188", from_="+14155552001", time_limit_secs=14_400, command_id="fallback-1"
+            ),
+        ),
+        {
+            "to": "+14155550188",
+            "from": "+14155552001",
+            "timeout_secs": 30,
+            "time_limit_secs": 14_400,
+            "early_media": True,
+            "command_id": "fallback-1",
+            "answering_machine_detection": "disabled",
+        },
+    ),
+    (
         "bridge",
         lambda c: c.bridge(CCID, "v3:other", command_id="bridge-1", client_state=STATE),
         {"call_control_id": "v3:other", "client_state": STATE, "command_id": "bridge-1"},

@@ -39,10 +39,12 @@ PLAN_UNAVAILABLE_MESSAGE = "Billing is not configured for this organization."
 
 @dataclass(frozen=True, slots=True)
 class BillingOrg:
-    """The calling org as steps 9-11 need it: raw ``orgs.limits``, settings, effective limits and prices."""
+    """The calling org as steps 9-11 (and inbound routing, specs/06 §7) need it: status, raw ``orgs.limits``,
+    settings, effective limits and prices."""
 
     org_id: uuid.UUID
     plan_id: str
+    status: str
     kyc_level: int
     created_at: datetime
     credit_limit_micros: int
@@ -76,6 +78,7 @@ async def load_billing_org(session: AsyncSession, org_id: uuid.UUID) -> BillingO
     return BillingOrg(
         org_id=org.id,
         plan_id=org.plan_id,
+        status=org.status,
         kyc_level=org.kyc_level,
         created_at=org.created_at,
         credit_limit_micros=org.credit_limit_micros,

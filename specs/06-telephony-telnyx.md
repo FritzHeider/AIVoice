@@ -439,6 +439,42 @@ Unknown `hangup_cause` values are stored verbatim and treated as "any other caus
 
 Ring-to-answer target: ≤ 800 ms from `call.initiated` receipt to `answer` request.
 
+> Decision (2026-11-02): inbound routing (P05-T12b). `va_edge.routing.InboundRouter` (wired into the carrier
+> handler; the processor runs it for an incoming `call.initiated` without a call) implements steps 1-7; the pure
+> `decide(RoutingFacts)` holds the order. (1) Order: number lookup (`to` missing or no live `active` number →
+> reject `unknown_number` through the platform account); invalid stored `inbound_config` → refuse
+> `invalid_inbound_config` (the stored `fallback_number` is still used when it is valid E.164); specs/16 §4
+> `blocked_callers` → reject `caller_blocked` (never transferred), non-empty `allowed_callers` without the caller →
+> reject `caller_not_allowed` (anonymous/unparseable callers never match a list; the caller is normalized with the
+> called number's region); org `status != 'active'` → refuse `org_<status>`; credits → refuse
+> `insufficient_credits` when balance − open holds + `credit_limit` < the plan's effective `min_attempt_micros`
+> (holds count, unlike the step 4 shorthand; specs/24's "no attempt minimum" concerns charging, not this floor);
+> `block_dnc_callers` and a DNC hit for the caller (`va_compliance.dnc.find_block`: platform, own, and inherited
+> parent rows — the platform DNC list is the "platform blacklist"; the destination fraud prefixes are not applied to
+> callers) → reject `caller_dnc`; active maintenance → transfer `maintenance` with a fallback, else answer with
+> the message (`Accept(maintenance_message=True)`, played in P05-T12c) when `maintenance.message` is set, else
+> reject `maintenance`; concurrency → a slot is taken now under a pre-allocated UUIDv7 call id
+> (`CallLimiter.acquire_inbound`: plan cap with the new-account tightening, no batch share, expiry
+> `ceil(max_duration)` + 5 min); full → refuse `concurrency_cap` with cause `USER_BUSY` when there is no fallback.
+> "Refuse" = transfer to `fallback_number` when set, else reject `CALL_REJECTED`. (2) An accepted call is handed to
+> the `InboundAcceptor` seam (P05-T12c) with the call id, number, parsed config, and normalized caller; no
+> acceptor (`accept_unavailable`) or an acceptor that raises (`accept_failed`, specs/16 §4 "pipeline failure")
+> releases the slot and refuses. (3) Commands go through the number's account (BYO number → BYO client):
+> `reject` with `command_id=reject-{call_control_id}`; `transfer` to the fallback with `from` = the called number,
+> `timeout_secs` 30, `time_limit_secs` 14 400, `command_id=fallback-{call_control_id}`, no `client_state`
+> (there is no call row; `TransferRequest.client_state`/`target_leg_client_state` are optional). Telnyx allows
+> transferring an unanswered incoming call: the original leg is answered when the target answers. A command on a leg
+> that already ended (`CallAlreadyEnded`) is logged (`telnyx.inbound_caller_gone`) and still settles. (4) After the
+> command the router raises `va_edge.processor.EventSettled(reason)`: the row stores the reason in
+> `process_error` with `process_attempts` raised to the processor's `max_attempts`
+> (`TelnyxEventRepo.mark_processed(..., settled_attempts=)`), counts as `processed`, and is never reclaimed.
+> Failures before the command (database, Redis, Telnyx) are ordinary errors and retried; the commands are
+> idempotent by `command_id`. Reasons: `unknown_number`, `invalid_inbound_config`, `caller_blocked`,
+> `caller_not_allowed`, `org_<status>`, `insufficient_credits`, `caller_dnc`, `maintenance`, `concurrency_cap`,
+> `accept_unavailable`, `accept_failed`. (5) `va_inbound_calls_total{result}` (specs/27 §3.2) counts `rejected`,
+> `fallback`, and `answered` (an accepted call handed over without error). The edge now mixes in
+> `TelnyxApiSettings` and `CryptoSettings` (`KMS_PROVIDER`/`LOCAL_MASTER_KEY` scoped to the edge too) for BYO keys.
+
 ## 8. Media WebSocket protocol models (`va_telnyx.media`)
 
 Inbound (Telnyx → us), discriminated on `event`:

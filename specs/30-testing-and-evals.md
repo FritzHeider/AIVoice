@@ -383,6 +383,12 @@ Behavioural rules:
 > before time moves; work blocked on real I/O (sockets, worker threads) leaves the loop idle and does not hold time
 > back.
 
+> Decision (2026-11-02): FakeTelnyx inbound transfer (P05-T12b). `transfer` is accepted on an answered leg and on
+> a still-ringing incoming leg (otherwise `10015`). The target leg rings as for any transfer; when it answers, the
+> ringing incoming leg is answered first (`call.answered` on it, its time limit starts) and the two legs bridge
+> (`call.bridged` on each). A busy or unanswered target leaves the incoming leg ringing; the caller hanging up
+> while the target rings cancels the target leg (`originator_cancel`).
+
 > Decision (2026-10-29): FakeTelnyx media WebSocket client (P03-T03b). (1) Library `websockets` (asyncio client,
 > no compression, no pings, 5 s open timeout, 4 MiB max message); one `MediaSession` per stream
 > (`va_sim.telnyx.media_session`), started by `CallMedia.start_stream` on the supervisor right after

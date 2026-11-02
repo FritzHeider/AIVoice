@@ -63,7 +63,7 @@ from va_telnyx.client_state import ClientState, ClientStateError, decode
 from va_telnyx.voice_events import CallInitiated, CallPayload, ConferencePayload
 from va_telnyx.webhooks import EventPayload
 
-__all__ = ["AMD_RESULTS_TOTAL", "CarrierEventHandler", "InboundRouter"]
+__all__ = ["AMD_RESULTS_TOTAL", "CarrierEventHandler", "InboundRoute"]
 
 AMD_RESULTS_TOTAL: Final = "va_amd_results_total"
 _TRANSFER_STARTED_AT: Final = "transfer_started_at"
@@ -71,7 +71,7 @@ _TRANSFER_STARTED_AT: Final = "transfer_started_at"
 _log = get_logger(__name__)
 
 
-class InboundRouter(Protocol):
+class InboundRoute(Protocol):
     """Routes an incoming ``call.initiated`` that belongs to no call yet (specs/06 §7, P05-T12)."""
 
     async def route(self, event: StoredEvent, payload: CallInitiated) -> None: ...
@@ -115,7 +115,7 @@ class CarrierEventHandler:
         *,
         clock: Clock,
         metrics: ServiceMetrics,
-        inbound: InboundRouter | None = None,
+        inbound: InboundRoute | None = None,
     ) -> None:
         self._database = database
         self._redis = redis

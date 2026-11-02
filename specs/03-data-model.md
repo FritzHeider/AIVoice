@@ -101,7 +101,9 @@ Roles (created by the migration when absent; passwords come from the deployment,
 > max_attempts=, limit=200)` claims, oldest first with `FOR UPDATE SKIP LOCKED`, the events never processed whose
 > `updated_at < now - stale_after` plus the failed events (`process_error` set) with `process_attempts <
 > max_attempts` and `updated_at < now - retry_after`; claiming sets `updated_at`, which is the lease that keeps
-> other edge processes off the row (specs/06 §4.1 Decision P05-T01).
+> other edge processes off the row (specs/06 §4.1 Decision P05-T01). `mark_processed(..., settled_attempts=n)` raises
+> `process_attempts` to at least `n` while storing `error`: a settled outcome with a recorded reason (an inbound
+> refusal) is never claimed again (specs/06 §7 Decision P05-T12b).
 
 > Decision (2026-11-01): `CallLegLookupRepo` joins the `va_system` list because a carrier event whose `client_state`
 > is missing or unusable must be attributed to its call before any org context exists (specs/06 §5 Decision P05-T02):
