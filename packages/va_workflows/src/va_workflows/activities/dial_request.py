@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Final, Literal
 from urllib.parse import urlencode
 
+from va_common.stream_tokens import media_ws_scheme as scheme_for_env
 from va_domain.calls import SendCallConfig
 from va_telnyx import AmdConfig, ClientState, CustomHeader, DialRequest, StreamParams
 from va_telnyx.client_state import encode
@@ -19,7 +20,6 @@ from va_telnyx.models import AmdMode
 
 __all__ = [
     "CALL_ID_HEADER",
-    "INSECURE_MEDIA_ENVS",
     "MAX_TIME_LIMIT_S",
     "PREMIUM_AMD_CONFIG",
     "DialSettings",
@@ -34,8 +34,6 @@ __all__ = [
 MAX_TIME_LIMIT_S: Final = 14_400
 TIME_LIMIT_GRACE_S: Final = 30
 CALL_ID_HEADER: Final = "X-VA-Call-Id"
-INSECURE_MEDIA_ENVS: Final = frozenset({"local", "test"})
-"""``VA_ENV`` values whose media worker serves plain ``ws://`` (no TLS in development)."""
 
 PREMIUM_AMD_CONFIG: Final = AmdConfig(
     total_analysis_time_millis=5000,
@@ -75,7 +73,7 @@ class DialSettings:
         return cls(
             call_control_app_id=call_control_app_id,
             media_public_host=media_public_host,
-            media_ws_scheme="ws" if va_env in INSECURE_MEDIA_ENVS else "wss",
+            media_ws_scheme=scheme_for_env(va_env),
             stream_secret=stream_secret,
             allowed_countries=allowed_countries,
         )

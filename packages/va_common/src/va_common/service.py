@@ -35,7 +35,7 @@ from starlette.applications import Starlette
 from starlette.datastructures import State
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import BaseRoute, Route
 
 from va_common import observability
 from va_common.health import CheckFn, liveness_body, run_checks
@@ -175,9 +175,13 @@ def probe_routes() -> list[Route]:
     ]
 
 
-def probe_app(lifespan: Callable[[Starlette], AbstractAsyncContextManager[None]] | None = None) -> Starlette:
-    """A Starlette app serving only the probe routes (services whose port is a metrics port)."""
-    return Starlette(routes=probe_routes(), lifespan=lifespan)
+def probe_app(
+    lifespan: Callable[[Starlette], AbstractAsyncContextManager[None]] | None = None,
+    *,
+    routes: Sequence[BaseRoute] = (),
+) -> Starlette:
+    """A Starlette app serving the probe routes plus ``routes`` (the media worker adds its WebSockets)."""
+    return Starlette(routes=[*probe_routes(), *routes], lifespan=lifespan)
 
 
 @contextlib.contextmanager

@@ -1,23 +1,41 @@
-"""Media worker test helpers."""
+"""Media worker test helpers: fake container, app builder with fresh keys, served app, signed WS connects."""
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import hashlib
 import json
-from collections.abc import Mapping
+import secrets
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+from urllib.parse import urlencode
 
 import fakeredis
+import uvicorn
+from nacl.signing import SigningKey
 from redis.asyncio import Redis
-from service_helpers import FakeContainer, ok_check, settings_of
+from service_helpers import FakeContainer, RecordingServer, ok_check, settings_of
 from starlette.applications import Starlette
+from websockets.asyncio.client import ClientConnection, connect
 
 from va_common.health import CheckFn
+from va_common.service import StopController, run_server
+from va_common.stream_tokens import mint_stream_token, stream_token_expiry
 from va_media.loop_lag import LoopLagMonitor
 from va_media.main import create_app
+from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
+from va_media.socket import SocketClosedError
+from va_media.stream import read_until_stop
+
+PUBLIC_HOST: Final = "media.test:8200"
+TELNYX_PATH: Final = "/ws/telnyx"
 
 
 def write_models_dir(
@@ -43,18 +61,201 @@ class FakeMediaContainer(FakeContainer):
     redis: Redis = field(default_factory=fakeredis.FakeAsyncRedis)
 
 
-def media_app(
+@dataclass
+class MediaKeys:
+    """A fresh Telnyx signing key and stream token secret (generated at test time)."""
+
+    signing: SigningKey = field(default_factory=SigningKey.generate)
+    secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
+
+    @property
+    def public_b64(self) -> str:
+        return base64.b64encode(bytes(self.signing.verify_key)).decode("ascii")
+
+    def token(self, call_id: uuid.UUID, now: datetime, *, max_duration_min: float = 30) -> str:
+        return mint_stream_token(call_id, stream_token_expiry(now, max_duration_min), self.secret)
+
+    def headers(self, url: str, now: datetime) -> dict[str, str]:
+        timestamp = int(now.timestamp())
+        signature = self.signing.sign(f"{timestamp}|{url}".encode()).signature
+        return {
+            "telnyx-signature-ed25519": base64.b64encode(signature).decode("ascii"),
+            "telnyx-timestamp": str(timestamp),
+        }
+
+
+def auth_values(keys: MediaKeys | None = None) -> dict[str, Any]:
+    """Settings values that make the media lifespan start: secret, public key, and :data:`PUBLIC_HOST`."""
+    used = keys if keys is not None else MediaKeys()
+    return {
+        "stream_token_secret": used.secret.hex(),
+        "telnyx_public_key": used.public_b64,
+        "media_public_host": PUBLIC_HOST,
+    }
+
+
+def media_app(  # noqa: PLR0913 - keyword-only test knobs
     models_dir: Path,
     container: FakeMediaContainer | None = None,
     *,
     monitor: LoopLagMonitor | None = None,
+    keys: MediaKeys | None = None,
+    clock: Any = None,
+    body: SessionBody = read_until_stop,
     **overrides: Any,
 ) -> Starlette:
-    """The media app with fake dependencies, no observability, and an idle lag monitor (1 h ticks)."""
+    """The media app with fake dependencies, no observability, an idle lag monitor (1 h ticks), and
+    authentication configured from ``keys`` (fresh ones by default) for :data:`PUBLIC_HOST`."""
+    values: dict[str, Any] = {"pod_id": "pod-test", **auth_values(keys), **overrides}
     return create_app(
-        settings_of(MediaSettings, pod_id="pod-test", **overrides),
+        settings_of(MediaSettings, **values),
         container_factory=container if container is not None else FakeMediaContainer(),
         init_observability=False,
         models_dir=models_dir,
         monitor=monitor if monitor is not None else LoopLagMonitor(interval_s=3600),
+        clock=clock,
+        body=body,
     )
+
+
+@asynccontextmanager
+async def served_media(app: Starlette, *, port: int = 0) -> AsyncIterator[str]:
+    """Serve ``app`` with real uvicorn on 127.0.0.1; yields the ``ws://host:port`` base URL."""
+    ready = asyncio.Event()
+    servers: list[RecordingServer] = []
+
+    def factory(config: uvicorn.Config) -> RecordingServer:
+        servers.append(RecordingServer(config, ready=ready))
+        return servers[-1]
+
+    stop = StopController()
+    task = asyncio.ensure_future(
+        run_server(app, host="127.0.0.1", port=port, stop=stop, install_signals=False, server_factory=factory)
+    )
+    try:
+        waiter = asyncio.ensure_future(ready.wait())
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if task.done():
+            waiter.cancel()
+            task.result()
+        yield servers[0].url.replace("http://", "ws://")
+    finally:
+        stop.request("served_media.exit")
+        await task
+
+
+def stream_query(call_id: uuid.UUID, token: str, *, leg: str | None = None) -> str:
+    params = {"call_id": str(call_id), "token": token}
+    if leg is not None:
+        params["leg"] = leg
+    return urlencode(params)
+
+
+@asynccontextmanager
+async def signed_connect(  # noqa: PLR0913 - keyword-only overrides of each signed part
+    base_url: str,
+    keys: MediaKeys,
+    now: datetime,
+    call_id: uuid.UUID,
+    *,
+    token: str | None = None,
+    leg: str | None = None,
+    query: str | None = None,
+    signed_host: str = PUBLIC_HOST,
+    headers: Mapping[str, str] | None = None,
+) -> AsyncIterator[ClientConnection]:
+    """Connect to ``base_url`` with Telnyx headers signed for ``ws://{signed_host}/ws/telnyx?{query}``."""
+    raw_query = (
+        query if query is not None else stream_query(call_id, token or keys.token(call_id, now), leg=leg)
+    )
+    signed = f"ws://{signed_host}{TELNYX_PATH}?{raw_query}"
+    extra = {**keys.headers(signed, now), **(headers or {})}
+    async with connect(
+        f"{base_url}{TELNYX_PATH}?{raw_query}", additional_headers=extra, open_timeout=5, ping_interval=None
+    ) as ws:
+        yield ws
+
+
+async def close_code(ws: ClientConnection) -> int | None:
+    """The server's close code once the connection is closed (bounded wait)."""
+    async with asyncio.timeout(5):
+        await ws.wait_closed()
+    return ws.close_code
+
+
+def connected_msg() -> str:
+    return json.dumps({"event": "connected", "version": "1.0.0"})
+
+
+def start_msg(call_control_id: str = "cc-1", *, encoding: str = "PCMU", rate: int = 8000) -> str:
+    return json.dumps(
+        {
+            "event": "start",
+            "sequence_number": "1",
+            "stream_id": "stream-1",
+            "start": {
+                "call_control_id": call_control_id,
+                "media_format": {"encoding": encoding, "sample_rate": rate, "channels": 1},
+            },
+        }
+    )
+
+
+def stop_msg(call_control_id: str = "cc-1") -> str:
+    return json.dumps(
+        {
+            "event": "stop",
+            "sequence_number": "9",
+            "stream_id": "stream-1",
+            "stop": {"call_control_id": call_control_id},
+        }
+    )
+
+
+class RecordingBody:
+    """A session body that records each session and reads the stream until ``stop``."""
+
+    def __init__(self) -> None:
+        self.sessions: list[CallSession] = []
+        self.ends: list[SessionEnd] = []
+        self.started = asyncio.Event()
+        self.ended = asyncio.Event()
+
+    async def __call__(self, session: CallSession) -> SessionEnd:
+        self.sessions.append(session)
+        self.started.set()
+        try:
+            end = await read_until_stop(session)
+        finally:
+            self.ended.set()
+        self.ends.append(end)
+        return end
+
+    async def wait_started(self) -> CallSession:
+        async with asyncio.timeout(5):
+            await self.started.wait()
+        return self.sessions[-1]
+
+
+class FakeSocket:
+    """An in-memory :class:`~va_media.socket.MediaSocket`: ``feed`` messages, ``hang_up`` to close."""
+
+    def __init__(self) -> None:
+        self.inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
+        self.closed_with: int | None = None
+
+    def feed(self, message: str | bytes) -> None:
+        self.inbox.put_nowait(message)
+
+    def hang_up(self) -> None:
+        self.inbox.put_nowait(None)
+
+    async def receive(self) -> str | bytes:
+        item = await self.inbox.get()
+        if item is None:
+            raise SocketClosedError(1000)
+        return item
+
+    async def close(self, code: int) -> None:
+        if self.closed_with is None:
+            self.closed_with = code

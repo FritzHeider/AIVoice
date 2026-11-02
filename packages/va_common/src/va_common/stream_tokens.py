@@ -26,9 +26,11 @@ from typing import Final, Literal
 from va_common.settings import StreamTokenSettings
 
 __all__ = [
+    "INSECURE_MEDIA_ENVS",
     "STREAM_TOKEN_GRACE_S",
     "StreamTokenClaims",
     "StreamTokenError",
+    "media_ws_scheme",
     "mint_stream_token",
     "stream_token_expiry",
     "stream_token_secrets",
@@ -36,6 +38,9 @@ __all__ = [
 ]
 
 STREAM_TOKEN_GRACE_S: Final = 600
+
+INSECURE_MEDIA_ENVS: Final = frozenset({"local", "test"})
+"""``VA_ENV`` values whose media worker serves plain ``ws://`` (no TLS in development)."""
 
 _CALL_ID_LEN: Final = 16
 _EXP_LEN: Final = 8
@@ -60,6 +65,15 @@ class StreamTokenClaims:
 
     call_id: uuid.UUID
     expires_at: datetime
+
+
+def media_ws_scheme(va_env: str) -> Literal["ws", "wss"]:
+    """The media WebSocket scheme ``VA_ENV`` implies: ``ws`` in ``local``/``test``, ``wss`` elsewhere.
+
+    The worker builds ``stream_url`` with it and the media worker rebuilds the signed URL with it, so both
+    sides always agree.
+    """
+    return "ws" if va_env in INSECURE_MEDIA_ENVS else "wss"
 
 
 def stream_token_expiry(now: datetime, max_duration_min: float) -> datetime:

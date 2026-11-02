@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "VoiceAgents media worker: real-time call pipeline host, admission, drain, probes, metrics"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "pynacl>=1.5",
     "starlette>=1.0",
     "redis>=5.1",
     "va-common",
+    "va-domain",
+    "va-telnyx",
     "va-voice",
 ]
 
@@ -19,4 +22,6 @@ module-name = "va_media"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-domain = { workspace = true }
+va-telnyx = { workspace = true }
 va-voice = { workspace = true }

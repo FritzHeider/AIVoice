@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793582579-3e67
+> P05-T07a: media WS attach = va_media.server.MediaAttach (app.state.media_attach) + auth.MediaAuth + ownership.CallOwnership + session.CallSession (SessionBody seam) + pods.PodRegistry + socket.StarletteSocket; tests media_helpers.served_media/signed_connect/close_code with ManualClock app clock; sync on registry.wait_idle after close; Starlette wraps send OSError as WebSocketDisconnect
+<!-- tags: media, websocket, testing | created: 2026-11-02 -->
+
 ### mem-1793580673-6d31
 > P05-T06d: worker container = va_worker.main.build_container (pydantic converter TemporalConnector, TelnyxKeyResolver in va_db.telnyx_keys, va_worker.activities.WorkerActivities/main_registrations); TemporalConnector connect seam takes (host, namespace, data_converter); worker e2e test runs real activities through TemporalWorkers on workflow_env with telephony_rig realtime and Rig.dialed event
 <!-- tags: workflows, worker, temporal, testing | created: 2026-11-02 -->

@@ -51,6 +51,42 @@ Readiness fails when draining, when active calls ≥ 90 % of `MEDIA_MAX_CALLS_PE
 7. Emit `call.started`; transition handled by the edge (answered) — the worker only sets `started_at` if null.
 8. Start greeting logic (§11).
 
+> Decision (2026-11-02): media WS attach (P05-T07a).
+> 1. `va_media.server` serves `/ws/telnyx`. Close codes are sent after `accept()` (a refusal before it is an HTTP
+>    403 without a code), and a refused stream is closed without reading a message. Checks in order:
+>    query (`call_id` UUID, one non-empty `token`, `leg` `primary` (default) or `warm_proxy`) → Ed25519
+>    `verify_media_ws` over `{scheme}://{MEDIA_PUBLIC_HOST}{path}?{raw query}` (scheme `ws` in `local`/`test`,
+>    `wss` elsewhere: `va_common.stream_tokens.media_ws_scheme`, the same function the dial uses) → stream token
+>    (`verify_stream_token`, current or previous secret, bound to `call_id`) → an `Authorization` header, when
+>    present, must equal `Bearer <query token>`; any failure closes 4401 (reason logged, never the token). The
+>    `calls.status` check of specs/28 §6.2 runs with the CallContext load (P05-T07b). Then: `leg != primary` →
+>    4421 (secondary legs attach to the owner session once warm transfers exist; until then every one takes the
+>    misrouted fallback); draining → 4503; the call already attached on this pod → 4409; `MEDIA_MAX_CALLS_PER_POD`
+>    reached → 4503; `SET NX PX 15000` held by any pod → 4409; Redis error → 1011. Each refusal counts
+>    `va_media_admission_rejected_total{reason}` (`auth`, `misrouted_leg`, `draining`, `duplicate`, `capacity`,
+>    `redis`, `start_timeout`).
+> 2. Step 4: after the lock the worker reads until `start` (`connected` is optional) for 5 s of the injected
+>    clock; a timeout (counted `start_timeout`), `stop`, or a malformed message closes 1008, a disconnect closes
+>    nothing; the lock is released and no session starts.
+> 3. Renewal (§19): every 5 s a Lua compare-and-`PEXPIRE 15000`. A renewal returning 0 is a loss at once; a
+>    renewal that raises is retried at the next tick and counts as a loss once no renewal succeeded for the 15 s
+>    TTL. Loss ends the session with `end_reason='worker_lost'`, `ended_by='error'` and closes the WS 1000 without
+>    releasing the key (it is not ours). Otherwise the session end releases with a Lua compare-and-`DEL`.
+> 4. Heartbeat: `SET call:{<id>}:hb <ISO-8601 UTC> EX 10` at session start, then every 3 s; Redis errors are
+>    logged and retried; the key is deleted at session end.
+> 5. `media:pods`: `HSET media:pods <POD_ID> {"active_calls","draining","updated_at"}` every 2 s from a
+>    supervised task, `HDEL` at shutdown; Redis errors are logged. `va_media_active_calls{transport="telnyx"}`
+>    follows the attached calls.
+> 6. Readiness `capacity` fails from `ceil(0.9 × MEDIA_MAX_CALLS_PER_POD)` attached calls (54 of 60, 1 of 1);
+>    admission refuses only at the maximum. The lifespan refuses to start (before opening anything) without
+>    `TELNYX_PUBLIC_KEY` (`local` falls back to `.sim/telnyx_public_key`, shared with the edge through
+>    `va_common.settings.TelnyxPublicKeySettings`) or `STREAM_TOKEN_SECRET`.
+> 7. The session (`va_media.session.CallSession`) runs a body seam next to the renewer and the heartbeat; the
+>    first to finish ends it (`SessionEnd(cause, end_reason, ended_by)`; `va_media_calls_ended_total{end_reason}`
+>    uses the end reason, else the cause). Until the transport and pipeline (P05-T08 onward) replace it, the body
+>    reads the stream and ends with `stream_closed` on Telnyx `stop` or a disconnect. A body exception closes the
+>    WS 1011 after the same cleanup.
+
 ## 4. Audio formats and framing (`va_voice.audio`)
 
 | Stream | Format | Frame |

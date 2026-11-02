@@ -247,7 +247,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | same | `minio` / `minio12345` | empty in AWS (IRSA) |
 | `PUBLIC_API_BASE_URL` | api, docs, sdk tests | `http://localhost:8000` | |
 | `EDGE_PUBLIC_HOST` | worker, edge | `localhost:8100` (tunnel host for live tests) | host Telnyx posts webhooks to |
-| `MEDIA_PUBLIC_HOST` | worker, edge | `localhost:8200` | host Telnyx opens media WS to |
+| `MEDIA_PUBLIC_HOST` | worker, edge, media | `localhost:8200` | host Telnyx opens media WS to |
 | `DASHBOARD_BASE_URL` | api | `http://localhost:3000` | CORS + email links |
 | `SECRET_KEY` | api | 64 random hex chars | session signing |
 | `STREAM_TOKEN_SECRET` | worker, edge, media | 64 random hex chars | HMAC for media WS tokens |

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from media_helpers import FakeMediaContainer, media_app
+from media_helpers import FakeMediaContainer, auth_values, media_app
 from service_helpers import UNREACHABLE, failing, json_log_stream, log_events, make_client, settings_of
 
 from va_common import observability
@@ -76,7 +76,7 @@ async def test_readyz_redis_failure(models_dir: Path) -> None:
 
 
 async def test_readyz_real_container_redis_unreachable(models_dir: Path) -> None:
-    settings = settings_of(MediaSettings, redis_url=UNREACHABLE["redis_url"])
+    settings = settings_of(MediaSettings, redis_url=UNREACHABLE["redis_url"], **auth_values())
     app = create_app(settings, init_observability=False, models_dir=models_dir)
     async with make_client(app) as client:
         response = await client.get("/readyz")
@@ -128,7 +128,9 @@ async def test_observability_initialised_as_media_worker(
 
     monkeypatch.setattr(observability, "init", fake_init)
     app = create_app(
-        settings_of(MediaSettings), container_factory=FakeMediaContainer(), models_dir=models_dir
+        settings_of(MediaSettings, **auth_values()),
+        container_factory=FakeMediaContainer(),
+        models_dir=models_dir,
     )
     async with make_client(app):
         pass

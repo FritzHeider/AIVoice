@@ -20,6 +20,7 @@ from va_common.stream_tokens import (
     STREAM_TOKEN_GRACE_S,
     StreamTokenClaims,
     StreamTokenError,
+    media_ws_scheme,
     mint_stream_token,
     stream_token_expiry,
     stream_token_secrets,
@@ -177,3 +178,10 @@ def test_secrets_are_hidden_in_the_settings_repr() -> None:
 
     assert value not in repr(settings)
     assert settings.stream_token_secret.get_secret_value() == value
+
+
+@pytest.mark.parametrize(
+    ("va_env", "scheme"), [("local", "ws"), ("test", "ws"), ("staging", "wss"), ("production", "wss")]
+)
+def test_media_ws_scheme(va_env: str, scheme: str) -> None:
+    assert media_ws_scheme(va_env) == scheme

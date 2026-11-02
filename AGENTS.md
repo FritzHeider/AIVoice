@@ -1225,3 +1225,15 @@ Grafana 3001
   `apps/worker/tests/test_worker_call_flow.py` (real activities + `telephony_rig.rig(realtime=True)` +
   `workflow_env()`; `Rig.dialed` is set by the first `POST /calls`; a default-converter client =
   `config = env.client.config(); config["data_converter"] = DataConverter.default; Client(**config)`).
+- 2026-11-02 (P05-T07a): media WS attach = `va_media.server.MediaAttach` (`/ws/telnyx`, built by the lifespan into
+  `app.state.media_attach`), `va_media.auth.MediaAuth`, `va_media.ownership.CallOwnership` (Lua renew/release),
+  `va_media.session.CallSession` (body seam `SessionBody`, `SessionEnd`, renewer + heartbeat), `va_media.pods`,
+  `va_media.socket` (`MediaSocket` protocol; `StarletteSocket` adapter). Rules: specs/07 §3 Decision P05-T07a.
+  `TELNYX_PUBLIC_KEY` loading is `va_common.settings.TelnyxPublicKeySettings` (edge + media); the ws/wss choice
+  is `va_common.stream_tokens.media_ws_scheme`. `probe_app(lifespan, routes=[...])` adds service routes. Tests:
+  `media_helpers.media_app(models_dir, keys=MediaKeys(), clock=ManualClock(), body=RecordingBody())` (fresh signing
+  key + secret, `PUBLIC_HOST`), `served_media(app)` (real uvicorn, yields `ws://...`), `signed_connect(url, keys,
+  clock.now(), call_id, leg=, token=, signed_host=)`, `close_code(ws)`, `connected_msg`/`start_msg`/`stop_msg`,
+  `FakeSocket` for session unit tests, `auth_values()` for hand-built `MediaSettings`. Sync on
+  `registry.wait_idle(5)` after a close (the registry releases after the WS closes). Starlette turns a send
+  OSError into `WebSocketDisconnect`; a refusal closed before the client sends makes a later `ws.send` raise.

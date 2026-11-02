@@ -2917,17 +2917,23 @@ name = "va-media-worker"
 version = "0.1.0"
 source = { editable = "apps/media_worker" }
 dependencies = [
+    { name = "pynacl" },
     { name = "redis" },
     { name = "starlette" },
     { name = "va-common" },
+    { name = "va-domain" },
+    { name = "va-telnyx" },
     { name = "va-voice" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "pynacl", specifier = ">=1.5" },
     { name = "redis", specifier = ">=5.1" },
     { name = "starlette", specifier = ">=1.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-telnyx", editable = "packages/va_telnyx" },
     { name = "va-voice", editable = "packages/va_voice" },
 ]
 

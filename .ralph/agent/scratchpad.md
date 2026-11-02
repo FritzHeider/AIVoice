@@ -2381,3 +2381,163 @@ Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 9012 passed 
 matches the plan and specs/01 §1 Decision P05-T06d / specs/28 §2 AAD line: settings guards name variables only,
 RuntimeError before any resource opens, activities use `database.tenant_session` (no global configure needed),
 resolver reads only `active` accounts in system scope, the e2e test waits on `Rig.dialed` (no sleeps). Approved.
+
+## Plan P05-T07a — Media WS attach: auth, admission, ownership lock, heartbeat, pod registry (Planner, 2026-11-02)
+P05-T06 parent ticked (a–d done). P05-T07 split into T07a (this) and T07b (CallContext load, control/carrier channels,
+drain notice + drain-timeout `worker_lost`) in plan/phase-05.md. T07a has NO DB access and no pipeline: the session
+body is a seam that T08 (transport) / T09-T11 fill.
+
+### Decisions (one block `> Decision (2026-11-02): media WS attach (P05-T07a).` under specs/07 §3, after step 8; one
+### line under specs/02 §6 table: MEDIA_PUBLIC_HOST "Used by" gains `media`)
+1. Close codes are sent after `accept()` (a pre-accept close is an HTTP 403 with no code): every refusal accepts and
+   immediately closes, without reading a message. Order of checks: query parse (`call_id` UUID, `token` present,
+   `leg` ∈ {primary, warm_proxy}; else 4401) → Ed25519 `verify_media_ws` over
+   `f"{scheme}://{MEDIA_PUBLIC_HOST}{path}?{raw query}"` (scheme `ws` in local/test, `wss` elsewhere) → stream token
+   `verify_stream_token(token, secrets=stream_token_secrets(settings), now=clock.now(), call_id=call_id)` → if an
+   `Authorization` header is present it must be exactly `Bearer <query token>` (all → 4401, reason logged, never the
+   token) → `leg != "primary"` → 4421 (secondary-leg attach to the owner session lands with the warm-transfer task;
+   until then every secondary leg takes the spec's misrouted fallback) → draining → 4503 → local duplicate → 4409 →
+   capacity → 4503 → Redis `SET NX PX 15000` taken by another pod → 4409; Redis error → 1011.
+   Metric `va_media_admission_rejected_total{reason}`: `auth`, `misrouted_leg`, `draining`, `duplicate`, `capacity`,
+   `redis`, `start_timeout`.
+2. Step 4: after acquiring ownership the worker reads messages until `start` (a `connected` first is optional), 5 s
+   on the injected clock (`MEDIA_START_TIMEOUT_S = 5.0`); timeout, `stop`, a protocol error or a disconnect before
+   `start` → release ownership, close 1008 (timeout/protocol) / nothing (disconnect), no session started.
+3. Ownership: Lua renew `if GET == pod then PEXPIRE 15000 return 1 else return 0` every 5 s; release Lua
+   compare-and-DEL. A renew that returns 0 = lost at once; a renew that raises RedisError/OSError is retried at the
+   next tick, and the lock counts as lost once no renew succeeded for 15 s (the TTL) since the last success.
+   Lost → session ends `SessionEnd(cause="ownership_lost", end_reason="worker_lost", ended_by="error")`, WS closed
+   1000, no release (the key is not ours), heartbeat deleted.
+4. Heartbeat `SET call:{<id>}:hb <iso8601 UTC now> EX 10` immediately on session start, then every 3 s; Redis
+   errors logged (`media.heartbeat_failed`) and retried; deleted at session end.
+5. `media:pods` (specs/03 §11): `HSET media:pods <pod_id> {"active_calls": n, "draining": bool, "updated_at": iso}`
+   every 2 s from a supervised task, `HDEL` at shutdown; Redis errors logged, loop continues.
+6. Readiness `capacity` fails at ≥ ceil(0.9 × MEDIA_MAX_CALLS_PER_POD) = `(max*9+9)//10` (54 of 60; 1 of 1);
+   admission refuses only at `max`.
+7. Session body seam: `SessionBody = Callable[[CallSession], Awaitable[SessionEnd]]`; `create_app(body=...)` defaults
+   to `va_media.stream.read_until_stop` (reads and parses messages, returns `STREAM_CLOSED` on Telnyx `stop` or a
+   disconnect; media frames are not consumed yet) — P05-T08 replaces the default with the transport + pipeline. The
+   end-of-call routine (DB write, hangup, `signal_pipeline_finished`) is P05-T11; T07a only releases pod resources.
+8. `TELNYX_PUBLIC_KEY` loading moves to a shared mixin (edge + media) with the local `.sim/telnyx_public_key`
+   fallback; the media lifespan refuses to start (RuntimeError) without a public key or `STREAM_TOKEN_SECRET`,
+   before opening anything (like the edge). `load_public_key` runs once at startup.
+
+### Files
+- `packages/va_common/src/va_common/settings.py`: NEW mixin `TelnyxPublicKeySettings(BaseServiceSettings)` with
+  `telnyx_public_key: str = ""` and `webhook_public_key(sim_key_file: Path = SIM_PUBLIC_KEY_FILE) -> str` (logic moved
+  verbatim from `va_edge.settings`); `SIM_PUBLIC_KEY_FILE` lives here. `EdgeSettings` uses the mixin; keep
+  `va_edge.settings.SIM_PUBLIC_KEY_FILE` as a re-export (edge tests import it).
+- `packages/va_common/src/va_common/stream_tokens.py`: `INSECURE_MEDIA_ENVS`, `media_ws_scheme(va_env: str) ->
+  Literal["ws","wss"]`; `va_workflows.activities.dial_request` imports both from there (drop its own constant,
+  re-export if tests import it).
+- `apps/media_worker/src/va_media/settings.py`: `MediaSettings(RedisSettings, DatabaseSettings, TemporalSettings,
+  StreamTokenSettings, TelnyxPublicKeySettings)` + `media_public_host: str = "localhost:8200"`; property
+  `media_ws_scheme`. Verify `hide_input_in_errors` survives (as worker did).
+- NEW `apps/media_worker/src/va_media/ownership.py`: `OWNER_TTL_MS = 15_000`, `RENEW_INTERVAL_S = 5.0`,
+  `class CallOwnership(redis, call_id, pod_id)`: `async acquire() -> bool`, `async renew() -> bool`,
+  `async release() -> bool` (Lua via `register_script`, keys from `va_domain.carrier.owner_key`).
+- NEW `apps/media_worker/src/va_media/session.py`: `SessionEnd` (frozen dataclass: `cause:
+  Literal["stream_closed","ownership_lost","ended"]`, `end_reason: str | None`, `ended_by: str | None`, property
+  `label` = end_reason or cause), constants `STREAM_CLOSED`, `OWNERSHIP_LOST`; `StreamStart` (stream_id,
+  call_control_id, media_format: `va_telnyx.media.MediaFormat`); `class CallSession` (keyword-only: `call_id`,
+  `websocket`, `start`, `ownership`, `redis`, `clock`, `metrics`): `async run(body) -> SessionEnd` (TaskGroup:
+  body, renewer, heartbeat; first finisher wins, others cancelled; `request_end(end_reason, ended_by)` ends with cause
+  `ended`), finally: delete heartbeat, release ownership unless lost, close WS 1000 if open, metrics
+  `va_media_calls_started_total` / `va_media_calls_ended_total{end_reason=label}`. `HEARTBEAT_INTERVAL_S = 3.0`,
+  `HEARTBEAT_TTL_S = 10`.
+- NEW `apps/media_worker/src/va_media/stream.py`: `read_until_stop(session) -> SessionEnd` and
+  `async wait_for_start(websocket, clock, timeout_s) -> StreamStart` (raises `StreamStartError(reason)`), both on
+  `va_telnyx.media.parse_media_message`.
+- NEW `apps/media_worker/src/va_media/auth.py`: `MediaAuth(settings, public_key: VerifyKey, secrets)`,
+  `verify(websocket, now) -> MediaClaims(call_id, leg)` raising `MediaAuthError(reason)`; pure helper
+  `signed_stream_url(scheme, host, path, raw_query)`.
+- NEW `apps/media_worker/src/va_media/pods.py`: `PODS_KEY = "media:pods"`, `PodRegistry(redis, pod_id, calls,
+  drain, clock, interval_s=2.0)`: `async publish()`, `async run()`, `async remove()`.
+- NEW `apps/media_worker/src/va_media/server.py`: `telnyx_media_route(...) -> WebSocketRoute("/ws/telnyx", ...)`
+  implementing the Decision order; close-code constants `CLOSE_AUTH = 4401`, `CLOSE_DUPLICATE = 4409`,
+  `CLOSE_MISROUTED = 4421`, `CLOSE_UNAVAILABLE = 4503`. Gauge `va_media_active_calls{transport="telnyx"}` follows the
+  registry. Starlette `WebSocketRoute` needs a plain `async def` endpoint (AGENTS: partial = ASGI app) — use a closure.
+- `apps/media_worker/src/va_media/calls.py`: `ready_limit`, `capacity_check` at the 90 % limit; `admit` returns a
+  reason (`AdmitResult` / Literal `"ok"|"duplicate"|"capacity"`) or keep bool + `contains(call_id)`.
+- `apps/media_worker/src/va_media/main.py`: container also exposes nothing new beyond redis; `create_app(...,
+  clock: Clock | None = None, body: SessionBody = read_until_stop)`; lifespan: settings check (RuntimeError before the
+  container opens), load key, start supervised `pods` task, `remove()` on exit; add the WS route (extend
+  `va_common.service.probe_app(lifespan, routes=())` with an optional extra-routes parameter). Docstring updated.
+- `apps/media_worker/pyproject.toml`: add `va-telnyx`, `va-domain`, `pynacl` if imported directly; `uv lock`.
+- Specs: specs/07 §3 Decision, specs/02 §6 MEDIA_PUBLIC_HOST scope (+ `.env.example` comment unchanged unless the test
+  wants it). AGENTS.md learning line.
+
+### Tests (apps/media_worker/tests; support in `tests/support/media_helpers.py`)
+- Helpers: `media_app` now fills `stream_token_secret` (random hex) and `telnyx_public_key` (fresh nacl keypair,
+  returned via a `MediaKeys` dataclass), `media_public_host="media.test:8200"`; `served_media(app)` = real uvicorn
+  `RecordingServer` on port 0; `signed_connect(server_url, keys, call_id, *, token=None, leg=None, headers=...)` builds
+  the signed URL against `media_public_host` while connecting to the real port (websockets client
+  `additional_headers`); `connected_msg()`, `start_msg(call_control_id, encoding="PCMU", rate=8000)`, `stop_msg()`.
+  App clock = `ManualClock` (renew/heartbeat sleeps) whose `now()` is real-ish (set to wall time) for signature
+  freshness.
+- `test_auth.py` (unit, no server): good URL+token passes; tampered query, wrong host, stale timestamp, missing
+  headers → each reason; token for another call (`call_mismatch`), expired, previous secret accepted;
+  `Authorization` mismatch rejected, equal accepted; non-UUID `call_id`, missing token, unknown leg rejected.
+- `test_ownership.py` (fakeredis[lua]): acquire once, second pod refused; renew extends PTTL only for the owner;
+  release deletes only own value.
+- `test_server.py` (real uvicorn + websockets): bad signature → close 4401 and the server never read a message
+  (body not called; admission metric `auth`); valid attach → owner key = pod id, heartbeat present, body receives the
+  `StreamStart` with media format; a second stream for the same call (same pod, and another pod holding the key) →
+  4409; capacity (max 1) → 4503 `capacity`; draining → 4503 `draining`; `leg=warm_proxy` → 4421; no `start` within 5 s
+  (ManualClock `wait_for_sleep(5)`/`run_for`) → 1008, ownership released; Telnyx `stop` → session ends, owner key and
+  heartbeat deleted, registry empty, `va_media_calls_ended_total{end_reason="stream_closed"}`.
+- `test_session.py` (fakeredis + ManualClock + a fake websocket object): heartbeat written at start and every 3 s with
+  EX 10; owner key changed by another pod → next renew ends with `worker_lost`, other pod's key untouched, WS closed;
+  renew raising RedisError for < 15 s keeps the session, ≥ 15 s → `worker_lost`; `request_end` ends with cause `ended`;
+  body exception propagates after cleanup (heartbeat deleted, lock released).
+- `test_pods.py`: publish writes JSON with active_calls/draining/updated_at; run loop every 2 s; Redis error logged and
+  loop continues; remove deletes the field; lifespan removes it on shutdown.
+- `test_calls.py`: readiness limit 54/60 and 1/1; admission still allowed between 54 and 59.
+- `test_settings.py`: new fields/defaults; lifespan refuses without secret / without key (local falls back to the sim
+  key file); scheme ws in local/test, wss in staging.
+- Contract `test_sim_contract.py`: FakeTelnyx (`telnyx_helpers` realtime state, `answered_call` with `stream_url`
+  pointing to the served worker on a pre-picked free port and `media_public_host` set to that `127.0.0.1:<port>`;
+  token minted with the app secret) attaches successfully (session started, StreamStart PCMU 8000); hang-up → session
+  ends `stream_closed`. Also the edge/workflow tests for the moved helpers keep passing.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B), pip-audit on `uv export`, `corepack pnpm audit`. `make e2e`: `tests_e2e/` arrives in
+P05-T17 — report it.
+
+### Risks
+- Starlette WS + real uvicorn + ManualClock: auth uses `clock.now()`; ManualClock (FrozenClock) starts 2026-01-01 —
+  construct it at wall time (`clock.set(utcnow())`) or the 300 s freshness check fails.
+- websockets client sees close codes via `ConnectionClosed.rcvd.code`; uvicorn may send 1006 on abrupt task cancel —
+  always `await websocket.close(code)` explicitly.
+- fakeredis `register_script` needs `fakeredis[lua]` (root dev dep, present).
+- `.env.example` / spec-table tests when changing a "Used by" cell; `test_metrics` counts unchanged (no new metrics).
+- Free-port pre-pick for the contract test is racy only in theory; bind 127.0.0.1:0, read port, close, then start.
+
+## Build P05-T07a (Builder, 2026-11-02)
+Implemented per plan (specs/07 §3 Decision P05-T07a; specs/02 §6 MEDIA_PUBLIC_HOST scope + media):
+- va_common: `TelnyxPublicKeySettings` + `SIM_PUBLIC_KEY_FILE` in settings (edge uses the mixin, re-exports the
+  constant); `stream_tokens.INSECURE_MEDIA_ENVS` / `media_ws_scheme` (dial_request now uses it); `probe_app(lifespan,
+  routes=...)`.
+- va_media: settings (StreamToken + public key mixins, `media_public_host`, `media_ws_scheme`), `calls` (ready_limit
+  90 %, `contains`, active-calls gauge), NEW `ownership` (Lua renew/release), `socket` (MediaSocket protocol,
+  StarletteSocket), `session` (CallSession: body seam, renewer w/ 15 s error tolerance, heartbeat 3 s/EX 10,
+  request_end, cleanup; SessionEnd/StreamStart), `stream` (wait_for_start 5 s on injected clock, read_until_stop
+  default body), `auth` (MediaAuth: query → Ed25519 → token → Authorization), `pods` (media:pods every 2 s, remove at
+  shutdown), `server` (MediaAttach /ws/telnyx: 4401/4421/4503/4409/4503/4409/1011, start timeout 1008, session failure
+  logged + 1011). main: `media_auth` refuses before opening anything; supervised `media_pods`; deps pynacl,
+  va-domain, va-telnyx (uv.lock).
+- Tests: test_auth, test_ownership, test_session, test_socket, test_pods, test_server (real uvicorn), test_sim_contract
+  (FakeTelnyx realtime dial with stream_url + stream_auth_token attaches; hangup → stream_closed), test_calls/test_settings
+  additions, va_common test_service/test_stream_tokens additions. AGENTS.md learning.
+Gates: fmt 0, lint 0, typecheck 0 (1071 files), placeholders 0, spec refs 0, make test 9074 passed / 7 skipped,
+coverage 99.14% (va_media 100%), jscpd 0 clones, radon avg A (no C+), pip-audit clean, pnpm audit 3 moderate
+(pre-existing). make e2e: tests_e2e/ not present yet (P05-T17).
+
+## Review P05-T07a (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, make test 9074 passed / 7 skipped (cov 99.14%). Diff matches specs/07 §3
+Decision P05-T07a: refusals after accept with no read, check order auth→4421→draining→local dup→capacity→NX lock
+(4409)/Redis 1011, start timeout 1008 on injected clock with lock release, renewer Lua compare-PEXPIRE with 15 s error
+tolerance, heartbeat EX 10 every 3 s deleted at end, media:pods HSET/HDEL, readiness at ceil(90 %), metrics from the
+specs/27 catalog, Redis keys per specs/03 §11, MEDIA_PUBLIC_HOST scope updated. Tests use ManualClock waits, no sleeps.
+Approved.

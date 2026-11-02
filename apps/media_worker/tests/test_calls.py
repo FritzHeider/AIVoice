@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from prometheus_client import CollectorRegistry, Gauge
 
 from va_media.calls import CallRegistry, CapacityError
 
@@ -55,3 +56,32 @@ async def test_wait_idle_times_out_while_calls_remain() -> None:
     registry = CallRegistry(1)
     registry.admit("a")
     assert not await registry.wait_idle(0.01)
+
+
+@pytest.mark.parametrize(("max_calls", "limit"), [(60, 54), (1, 1), (10, 9), (11, 10)])
+def test_ready_limit_is_90_percent_rounded_up(max_calls: int, limit: int) -> None:
+    assert CallRegistry(max_calls).ready_limit == limit
+
+
+async def test_readiness_fails_at_90_percent_while_admission_continues() -> None:
+    registry = CallRegistry(60)
+    for index in range(53):
+        assert registry.admit(f"call-{index}")
+    await registry.capacity_check()
+    assert registry.admit("call-53")
+    with pytest.raises(CapacityError, match="54 of 60"):
+        await registry.capacity_check()
+    for index in range(54, 60):
+        assert registry.admit(f"call-{index}"), "admission continues up to the hard limit"
+    assert not registry.admit("call-60")
+
+
+def test_contains_and_gauge() -> None:
+    metrics = CollectorRegistry()
+    registry = CallRegistry(2, gauge=Gauge("test_media_active_calls", "test", registry=metrics))
+    assert registry.admit("a")
+    assert registry.contains("a")
+    assert not registry.contains("b")
+    assert metrics.get_sample_value("test_media_active_calls") == 1
+    registry.release("a")
+    assert metrics.get_sample_value("test_media_active_calls") == 0

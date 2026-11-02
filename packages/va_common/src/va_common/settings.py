@@ -7,12 +7,14 @@ lower-cased environment variable names.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, ClassVar
+from pathlib import Path
+from typing import Any, ClassVar, Final
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
+    "SIM_PUBLIC_KEY_FILE",
     "BaseServiceSettings",
     "CryptoSettings",
     "DatabaseSettings",
@@ -21,9 +23,13 @@ __all__ = [
     "LogFormat",
     "RedisSettings",
     "StreamTokenSettings",
+    "TelnyxPublicKeySettings",
     "TemporalSettings",
     "WebhookSafetySettings",
 ]
+
+# Written by the simulator at startup (MASTER_PROMPT §9; `make up` also copies it into `.env`).
+SIM_PUBLIC_KEY_FILE: Final = Path(".sim/telnyx_public_key")
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
@@ -156,6 +162,22 @@ class StreamTokenSettings(BaseServiceSettings):
             msg = f"{str(info.field_name).upper()} must be 64 hex characters (32 bytes) when set"
             raise ValueError(msg)
         return value
+
+
+class TelnyxPublicKeySettings(BaseServiceSettings):
+    """``TELNYX_PUBLIC_KEY`` (edge, media): the Ed25519 key verifying Telnyx webhooks and media WebSockets."""
+
+    telnyx_public_key: str = ""
+
+    def webhook_public_key(self, sim_key_file: Path = SIM_PUBLIC_KEY_FILE) -> str:
+        """``TELNYX_PUBLIC_KEY``; in ``local`` an empty value falls back to the simulator's key file.
+
+        Returns ``""`` when neither is available (the services refuse to start then).
+        """
+        key = self.telnyx_public_key.strip()
+        if key or not self.is_local or not sim_key_file.is_file():
+            return key
+        return sim_key_file.read_text(encoding="utf-8").strip()
 
 
 class KmsProviderName(StrEnum):

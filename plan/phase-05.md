@@ -72,7 +72,7 @@
   - Deliverables: `va_api.services.call_dispatch` (steps 4–12 in one tenant transaction: inputs, resolution, webhook check, admit_call, `calls` row with pricing snapshot, `call.queued`/`call.scheduled` event + `call_events` row in the same transaction; after commit Temporal start `CallWorkflow` id `call-{id}` on the main queue; on start failure row → `failed`, hold released, counters rolled back, `503`), `va_domain.call_workflow` start contract, `routers/calls.py` legacy router with `calls:write` + `calls_send` rate limit + idempotency, container `call_starter`
   - Acceptance: API tests for success (queued/scheduled bodies), idempotency replay/mismatch, every 4xx path through the endpoint, Temporal failure path, event + row atomicity; cross-tenant/audit/openapi gates green.
 
-- [ ] P05-T06 CallWorkflow and activities (split into P05-T06a–d below; tick when all four are ticked)
+- [x] P05-T06 CallWorkflow and activities (split into P05-T06a–d below; tick when all four are ticked) — P05-T06a/b/c/d all ticked (05574f9)
   - Spec refs: specs/01-architecture.md §2, §3; specs/06-telephony-telnyx.md (dial parameters); specs/13-tools-and-dynamic-data.md (pre-call dynamic data, cache flag)
   - Depends on: P05-T05
   - Deliverables: `CallWorkflow` (scheduled wait, `prefetch_call_context`, `dial`, carrier/pipeline signals, backstop timer, heartbeat watch, hangup on failure, child `PostCallWorkflow` start), activities with retry policies, `CallContext` model stored at `call:{id}:ctx`; Telnyx hangups decided from carrier signals (`fax_detected` premium AMD; `streaming.failed` while in progress with no owner after 5 s), per specs/06 §5 Decision P05-T02 item 4
@@ -102,11 +102,23 @@
   - Deliverables: `WorkerSettings` gains Telnyx/media/stream-token/crypto/international settings; worker container builds `Database` (configured), Redis, `TelnyxRateLimiter` + `TelnyxClientFactory` (BYO key resolver decrypting `telnyx_accounts.api_key_enc` via `Envelope`), `CallLimiter`, `EventPublisher`, `CallContextStore`, `DialSettings`, clock; Temporal client with `pydantic_data_converter`; registrations built from the container (main queue: `CallWorkflow` + prefetch/dial/hangup/end_call/liveness activities)
   - Acceptance: settings tests (missing secrets refuse to start outside local/test), container tests, a worker test running the real `Worker` on a time-skipping environment that drives `CallWorkflow` through FakeTelnyx dial to `dialing` and through cancel to `canceled`.
 
-- [ ] P05-T07 Media worker server, ownership, control channel, drain
+- [ ] P05-T07 Media worker server, ownership, control channel, drain (split into P05-T07a–b below; tick when both are ticked)
   - Spec refs: specs/07-media-pipeline.md (worker WebSocket endpoints and auth, ownership lock, control channel schemas, graceful drain, admission control)
   - Depends on: P03-T09, P04-T12
   - Deliverables: `/ws/telnyx` endpoint (signature + stream token verification), ownership lock with renewal, heartbeat key, subscriptions to control/carrier channels, admission control (`MEDIA_MAX_CALLS_PER_POD`), draining state, `media:pods` registry
   - Acceptance: tests for duplicate stream attach (second rejected), lock loss abort, drain refusing new calls while finishing existing.
+
+- [x] P05-T07a Media WS attach: auth, admission, ownership lock, heartbeat, pod registry — va_media server/auth/ownership/session/pods/socket/stream; 9074 passed / 7 skipped, cov 99.14% (va_media 100%), lint/typecheck/placeholders/spec refs clean, jscpd 0
+  - Spec refs: specs/07-media-pipeline.md §1 (admission), §2, §3 steps 1-4, §19 (renewal, heartbeat); specs/06-telephony-telnyx.md §4.2; specs/28-security.md §6.2; specs/03-data-model.md §11 (`media:pods`)
+  - Depends on: P03-T09, P04-T12, P05-T06a
+  - Deliverables: `va_media.server` `/ws/telnyx` (Ed25519 + stream token + `stream_auth_token`, close 4401/4409/4421/4503), `va_media.ownership` (Lua acquire/renew/release), `va_media.session.CallSession` (renewer, heartbeat, body seam, `SessionEnd`), `va_media.pods.PodRegistry` (`media:pods` every 2 s), readiness at 90 % capacity, drain refuses new streams
+  - Acceptance: tests for bad signature/token (4401, nothing read), duplicate stream attach (second rejected 4409), admission at capacity and while draining (4503), lock loss aborts with `worker_lost`, heartbeat written every 3 s and deleted at end, `media:pods` entry published and removed.
+
+- [ ] P05-T07b Media session control/carrier channels and drain notice/timeout
+  - Spec refs: specs/07-media-pipeline.md §3 steps 3 and 6, §17, §19 (drain); specs/01-architecture.md §3
+  - Depends on: P05-T07a
+  - Deliverables: CallContext load on attach (Redis, else rebuilt from `calls.config`), control channel subscription with typed messages (`va_domain.control`), `control_ack` writes, carrier channel subscription + `carrier_state` snapshot read with dedupe, `drain_notice` to sessions, drain timeout ends remaining sessions with `worker_lost`
+  - Acceptance: tests for control dispatch + ack, carrier events before/after subscription, drain refusing new calls while finishing existing, drain timeout ending sessions.
 
 - [ ] P05-T08 Telnyx transport adapter
   - Spec refs: specs/07-media-pipeline.md (Transport protocol); specs/06-telephony-telnyx.md (media WS protocol)

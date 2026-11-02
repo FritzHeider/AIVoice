@@ -24,6 +24,9 @@ from service_helpers import (
 )
 from starlette.applications import Starlette
 from starlette.datastructures import State
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from va_common import observability, service
 from va_common.metrics import Service, build_metrics, new_registry
@@ -63,6 +66,18 @@ def app_with(probes: ProbeState, lifespan: Lifespan = no_lifespan) -> Starlette:
 
 def probes(**kwargs: Any) -> ProbeState:
     return ProbeState("9.9.9", new_registry(process_collectors=False), **kwargs)
+
+
+async def extra_route(_request: Request) -> PlainTextResponse:
+    return PlainTextResponse("extra")
+
+
+async def test_probe_app_serves_extra_routes() -> None:
+    app = probe_app(no_lifespan, routes=[Route("/extra", extra_route)])
+    app.state.probes = probes()
+    async with make_client(app) as client:
+        assert (await client.get("/extra")).text == "extra"
+        assert (await client.get("/healthz")).status_code == 200
 
 
 async def test_liveness_ok() -> None:
