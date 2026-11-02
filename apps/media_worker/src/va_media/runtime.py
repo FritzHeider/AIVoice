@@ -40,6 +40,11 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    pipeline is taken over with ``transferred`` (the end routine stops the stream, the call stays up); failed →
    the Brain learns it and the pipeline says the org's ``transfer_failed_message`` (specs/06 §10.1 Decision
    P05-T13).
+10. the outbound mix carries the call's ``background_track`` (``null`` → the ``static`` bed, ``"none"`` → no
+    bed) from the per-process :class:`~va_voice.background.BackgroundLibrary` over
+    :data:`BACKGROUND_ASSETS_DIR`; an asset that cannot be read is logged ``media.background_unavailable`` and
+    the call goes on without a bed. ``noise_cancellation`` gates the VAD path and turns Scribe's
+    ``filter_background_audio`` on (``va_media.runtime_config``; specs/07 §10 Decision P05-T15).
 """
 
 from __future__ import annotations
@@ -115,7 +120,9 @@ from va_media.voicemail_sms import VoicemailSms
 from va_media.workflow_signal import TemporalPipelineSignaller
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
+from va_voice.background import BackgroundAssetError, BackgroundLibrary
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
+from va_voice.outbound import FrameMixer
 from va_voice.phrase_cache import PhraseCacheMetrics
 from va_voice.pipeline import (
     NULL_OBSERVER,
@@ -129,6 +136,7 @@ from va_voice.vad import SileroVad, VadExecutor
 from va_voice.vad_model import SileroModel, VadModel, VadModelError
 
 __all__ = [
+    "BACKGROUND_ASSETS_DIR",
     "LLM_HTTP_TIMEOUT",
     "ORG_TIER_UNKNOWN",
     "CallRuntime",
@@ -136,12 +144,17 @@ __all__ = [
     "RuntimeDependencies",
     "RuntimeFactory",
     "RuntimeGateway",
+    "background_mixer",
     "open_persistence",
     "open_runtime",
 ]
 
 LLM_HTTP_TIMEOUT: Final = httpx.Timeout(30.0, connect=2.0)
 """Socket bound of the LLM HTTP client; the gateway's own deadlines (specs/10 §2.1) are shorter."""
+
+BACKGROUND_ASSETS_DIR: Final = Path("assets") / "audio"
+"""Background loops, relative to the working directory (``/app`` in the image, the repository root
+locally)."""
 
 ORG_TIER_UNKNOWN: Final = "unknown"
 """``org_tier`` label of the turn metrics: the call context carries no plan id yet."""
@@ -201,6 +214,7 @@ class CallRuntime:
         vad_executor: VadExecutor,
         clock: Clock,
         metrics: ServiceMetrics,
+        background: BackgroundLibrary,
         telnyx: TelnyxClientFactory | None = None,
         redis: Redis | None = None,
         persistence: CallPersistence | None = None,
@@ -209,6 +223,7 @@ class CallRuntime:
         database: Database | None = None,
     ) -> None:
         self._settings = settings
+        self._background = background
         self._database = database
         self._end_routine = end_routine
         self._persistence = persistence
@@ -293,6 +308,7 @@ class CallRuntime:
                 clock=self._clock,
                 transfer=self._cold_transfer(session, org, telnyx, watch),
             )
+            mixer = await background_mixer(self._background, context, config)
             pipeline = CallPipeline(
                 transport=transport,
                 stt=vendors.stt,
@@ -312,6 +328,7 @@ class CallRuntime:
                 ),
                 phrases=self._phrases(context, config),
                 observer=_observer(recorder, monitor),
+                mixer=mixer,
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             _bind_transfer(actions, pipeline, brain, org.transfer_failed_message)
@@ -459,6 +476,20 @@ class CallRuntime:
                 tracer_provider=self._tracer_provider,
             ),
         )
+
+
+async def background_mixer(
+    library: BackgroundLibrary, context: CallContext, config: PipelineConfig
+) -> FrameMixer:
+    """The leg's outbound mixer with the call's background loop (specs/07 §10.2); an unreadable asset is
+    logged ``media.background_unavailable`` and the mixer has no bed (the call goes on)."""
+    track = context.config.background_track
+    try:
+        loop = await library.loop(track, config.tts_format)
+    except (BackgroundAssetError, ValueError) as exc:
+        _log.warning("media.background_unavailable", track=track, detail=type(exc).__name__)
+        loop = None
+    return FrameMixer(config.tts_format, background=loop, wire_byte_order=config.wire_byte_order)
 
 
 def _start_monitor(
@@ -611,6 +642,7 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             vad_executor=executor,
             clock=clock,
             metrics=metrics,
+            background=BackgroundLibrary(BACKGROUND_ASSETS_DIR),
             telnyx=telnyx,
             redis=container.redis,
             persistence=persistence,

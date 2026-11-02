@@ -39,10 +39,12 @@ from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx import TelnyxClientFactory
 from va_telnyx.settings import telnyx_factory
+from va_voice.background import BackgroundLibrary
 from va_voice.vad import VadExecutor
 from va_voice.vad_model import SileroModel
 
 __all__ = [
+    "ASSETS_DIR",
     "MODELS_DIR",
     "WAIT_S",
     "RecordingRuntime",
@@ -53,6 +55,9 @@ __all__ = [
 
 MODELS_DIR: Final = Path(__file__).resolve().parents[4] / "models"
 """The real Silero model (``make setup``)."""
+
+ASSETS_DIR: Final = Path(__file__).resolve().parents[4] / "assets" / "audio"
+"""The background loops of the repository."""
 
 WAIT_S: Final = 20.0
 
@@ -175,6 +180,7 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
             vad_executor=executor,
             clock=clock,
             metrics=metrics,
+            background=BackgroundLibrary(ASSETS_DIR),
             telnyx=telnyx,
             redis=phrase_redis,
             persistence=persistence,

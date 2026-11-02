@@ -53,7 +53,9 @@ class PipelineConfig:
 
     ``wait_for_greeting``/``greeting_timeout_ms``: stay silent after the greeting gate until the first user
     turn or the timeout (§11 step 4). ``ivr_dead_end_s``: with ``ivr_mode``, end with ``ivr_dead_end`` after
-    this long without progress (specs/05 §9).
+    this long without progress (specs/05 §9). ``noise_cancellation``: the VAD hears the spectrally gated
+    stream (:class:`~va_voice.pipeline.gated_vad.GatedVad`, §10.1); off by default here, the media runtime
+    maps the call's value.
     """
 
     fmt: AudioFormat = ULAW_8000
@@ -75,6 +77,7 @@ class PipelineConfig:
     no_input_prompt: str = DEFAULT_NO_INPUT_PROMPT
     no_input_goodbye: str = DEFAULT_NO_INPUT_GOODBYE
     ignore_button_press: bool = False
+    noise_cancellation: bool = False
     pronunciation: tuple[PronunciationRuleLike, ...] = ()
     reorder_window: int = 5
 

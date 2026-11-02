@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793635337-c714
+> P05-T15: GatedVad (va_voice.pipeline) + PipelineConfig.noise_cancellation; CallRuntime(background=BackgroundLibrary) required; runtime sim calls play static bed by default -> FakeTelnyx AGENT_SPEECH_LEVEL raised to 1024 frame RMS (static ~330); office/cafe/restaurant beds read as agent speech; default resolved config waits 6 s for greeting (wait_for_greeting=False for immediate opener); barge-ins observable via json_log_stream pipeline_barge_in / media.transport_closed clears
+<!-- tags: media, pipeline, testing | created: 2026-11-02 -->
+
 ### mem-1793632603-0d52
 > P05-T14: va_common.storage ObjectStore (aioboto3 S3, SSE-KMS only with aws KMS) + store_recording activity on postcall queue (activities-only registration); edge signals postcall-<id> recording_saved; httpx logger default WARNING because its INFO lines leak presigned URLs; MinIO testcontainer helper packages/va_common/tests/minio_container.running_minio (HttpWaitStrategy /minio/health/ready); aioboto3 upload_file raises raw botocore ClientError (no S3UploadFailedError)
 <!-- tags: storage, workflows, testing | created: 2026-11-02 -->

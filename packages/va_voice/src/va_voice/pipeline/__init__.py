@@ -16,6 +16,7 @@ from va_voice.pipeline.dtmf import (
     DtmfSequence,
     is_dtmf_digit,
 )
+from va_voice.pipeline.gated_vad import GatedVad
 from va_voice.pipeline.inbound import InboundPath
 from va_voice.pipeline.ivr import IvrProgress
 from va_voice.pipeline.models import (
@@ -79,6 +80,7 @@ __all__ = [
     "DtmfSequence",
     "EndCall",
     "EndReason",
+    "GatedVad",
     "InboundAudio",
     "InboundDtmf",
     "InboundPath",

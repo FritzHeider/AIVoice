@@ -449,6 +449,7 @@ async def test_session_record_after_client_close() -> None:
         "keyterms": ["Acme"],
         "entity_detection": ["pii"],
         "include_timestamps": False,
+        "filter_background_audio": False,
         "started_ms": record["started_ms"],
         "previous_text": None,
         "ended_ms": record["ended_ms"],

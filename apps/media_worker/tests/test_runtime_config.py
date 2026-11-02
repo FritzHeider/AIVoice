@@ -104,6 +104,43 @@ def test_stt_config_detection_on_16k_legs() -> None:
     assert cfg.keyterms == []
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_noise_cancellation_reaches_the_vad_gate_and_scribe(enabled: bool) -> None:
+    context = _context(noise_cancellation=enabled)
+    config = pipeline_config(context, OrgSettings(), fmt=ULAW_8000, l16_byte_order="big")
+    assert config.noise_cancellation is enabled
+    assert stt_config(context, fmt=ULAW_8000).filter_background_audio is enabled
+
+
+def test_noise_cancellation_is_on_by_default() -> None:
+    context = _context()
+    assert pipeline_config(context, OrgSettings(), fmt=ULAW_8000, l16_byte_order="big").noise_cancellation
+    assert stt_config(context, fmt=ULAW_8000).filter_background_audio
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "field"),
+    [
+        ("interruptibility", 0, "interruptibility"),
+        ("interruptibility", 4, "interruptibility"),
+        ("block_interruptions", True, "block_interruptions"),
+        ("interruption_threshold_ms", 400, "interruption_threshold_ms"),
+        ("ignore_button_press", True, "ignore_button_press"),
+        ("noise_cancellation", False, "noise_cancellation"),
+    ],
+)
+def test_call_options_land_on_the_pipeline_config(option: str, value: object, field: str) -> None:
+    config = pipeline_config(_context(**{option: value}), OrgSettings(), fmt=ULAW_8000, l16_byte_order="big")
+    assert getattr(config, field) == value
+
+
+def test_voice_settings_reach_the_tts_voice() -> None:
+    settings = {"stability": 0.2, "similarity_boost": 0.9, "speed": 1.1}
+    voice = tts_voice(_context(provider_voice_id="v-1", voice_settings=settings), model_id="m")
+    assert voice.provider_voice_id == "v-1"
+    assert voice.settings.model_dump(include=set(settings)) == settings
+
+
 @pytest.mark.parametrize(
     ("fmt", "expected"), [(ULAW_8000, "ulaw_8000"), (L16_16000, "pcm_16000"), (PCM16LE_16000, "pcm_16000")]
 )

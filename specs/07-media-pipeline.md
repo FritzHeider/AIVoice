@@ -518,6 +518,26 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 > byte for byte, `pcm_16000` is converted to the `TELNYX_L16_BYTE_ORDER` wire order (§15). The background advances
 > one frame per frame sent, speech or idle, so the bed is continuous.
 
+> Decision (2026-11-02): call audio options (P05-T15). (1) `noise_cancellation` (call value, default `true`, org
+> `noise_cancellation_default`): `va_media.runtime_config.stt_config` sets Scribe `filter_background_audio`, and
+> `pipeline_config` sets `PipelineConfig.noise_cancellation`, which makes `InboundPath` wrap the leg's VAD in
+> `va_voice.pipeline.GatedVad` (one `SpectralGate` per leg; VAD `speech_start`/`speech_end` drive `set_speech`;
+> event times move back by `LATENCY_MS` = 16 ms, clamped at 0, so they stay on the raw timeline; a feed the gate
+> releases no samples for skips the VAD). `PipelineConfig` defaults to `false` (the pipeline alone runs raw VAD);
+> the runtime always maps the call's value. (2) `background_track`: one `BackgroundLibrary` per media-worker
+> process over `assets/audio` relative to the working directory (`/app` in the image, which copies `assets/`;
+> `VA_ASSETS_DIR` stays unread); `va_media.runtime.background_mixer` builds each leg's `FrameMixer` in the TTS
+> format with the call's loop. A missing or unreadable asset (or an unsupported rate) is logged
+> `media.background_unavailable` (`track`, `detail` = exception type) and the call goes on without a bed.
+> (3) Option → component: `noise_cancellation` → Scribe flag + gated VAD; `background_track` → `FrameMixer`
+> background; `interruptibility`/`block_interruptions`/`interruption_threshold_ms`/`ignore_button_press` →
+> `PipelineConfig`; `keywords` → Scribe keyterms; `language` → Scribe `language_code` (unknown/`auto` → detection),
+> TTS `language_code` and the prompt language; `voice` → TTS `provider_voice_id` + `voice_settings`; `temperature`
+> → the TaskBrain dialogue request; `precall_dtmf_sequence` → `GreetingGate`. (4) FakeTelnyx's agent-speech level
+> rises to frame RMS 1024 (-30 dBFS) so the default `static` bed (-40 dBFS, frame RMS ≤ 436) is not agent speech
+> (specs/30 §3.5 Decision P05-T15); the -22 dBFS beds overlap speech levels, so scenario tests that wait for agent
+> silence use `static` or `"none"`.
+
 ## 11. Greeting logic
 
 1. Outbound: wait for `call.answered` (from carrier state).

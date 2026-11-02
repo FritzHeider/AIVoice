@@ -4,6 +4,9 @@
 The runner listens to the agent audio the media session *plays out*: every 20 ms tick yields one 8 kHz PCM16
 frame, which counts as speech when its RMS exceeds :data:`AGENT_SPEECH_LEVEL`. :class:`SpeechDetector` turns
 those per-frame decisions into the length of the agent's current turn and the silence since it last spoke.
+The level (-30 dBFS RMS) sits above the media worker's default ``static`` background bed (-40 dBFS, frame RMS
+≤ 436), so a call with the default bed still has agent silence (specs/30 §3.5 Decision P05-T15); the -22 dBFS
+``office``/``cafe``/``restaurant`` beds overlap speech levels and are not told apart from speech.
 """
 
 from __future__ import annotations
@@ -16,8 +19,8 @@ from va_sim.telnyx.media_format import FRAME_MS
 
 __all__ = ["AGENT_SPEECH_LEVEL", "SpeechDetector", "is_speech"]
 
-# Agent audio louder than this counts as speech (frame RMS for the runner, peak sample for timeline latency).
-AGENT_SPEECH_LEVEL: Final = 256
+# A frame of agent audio whose RMS exceeds this counts as speech (runner and timeline latency); -30 dBFS.
+AGENT_SPEECH_LEVEL: Final = 1024
 
 
 def is_speech(pcm8k: bytes) -> bool:

@@ -1469,3 +1469,15 @@ Grafana 3001
   `serve_recording(r, wav)` stores a FakeTelnyx WAV, `saved_input(call, id, **payload_fields)`, `wav_bytes`).
   The `httpx` logger now defaults to WARNING (`LOG_LEVEL_HTTPX=INFO` restores request lines): its INFO lines
   carry full URLs, presigned signatures included.
+- 2026-11-02 (P05-T15): call audio options. `PipelineConfig.noise_cancellation` (default false; the media runtime
+  maps the call value, default true) wraps the leg's VAD in `va_voice.pipeline.GatedVad` (SpectralGate, events
+  shifted back 16 ms) and `stt_config` sets Scribe `filter_background_audio`. `CallRuntime(background=
+  BackgroundLibrary(...))` is required: `open_runtime` uses `BACKGROUND_ASSETS_DIR` (`assets/audio`, cwd-relative),
+  tests use `runtime_rig.ASSETS_DIR`; `va_media.runtime.background_mixer` builds the leg mixer (missing asset →
+  `media.background_unavailable`, no bed). Every runtime sim call now plays the `static` bed (continuous idle
+  frames on the agent track): assertions on agent-track digital silence need `background_track="none"`.
+  FakeTelnyx agent speech = frame RMS > 1024 (was 256; the static bed is ≈ 330); the -22 dBFS office/cafe/
+  restaurant beds read as agent speech, so `wait_agent_speech` scenarios must not use them. The default resolved
+  config waits up to 6 s for a callee greeting: pass `wait_for_greeting=False` when a test needs the opener at
+  once. Runtime sim tests read barge-ins from `json_log_stream()` (`pipeline_barge_in`, `media.transport_closed`
+  `clears`); FakeElevenLabs STT session records carry `filter_background_audio`.

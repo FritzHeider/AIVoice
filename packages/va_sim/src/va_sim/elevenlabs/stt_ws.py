@@ -165,6 +165,7 @@ class SttSocket:
             keyterms=list(params.keyterms),
             entity_detection=list(params.entity_detection),
             include_timestamps=params.include_timestamps,
+            filter_background_audio=params.filter_background_audio,
             started_ms=self._clock.virtual_ms(),
         )
         self._commits: asyncio.Queue[_Pending] = asyncio.Queue()

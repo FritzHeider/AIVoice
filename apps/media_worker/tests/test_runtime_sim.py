@@ -5,6 +5,8 @@ outbound DTMF (specs/07 §16 Decision P05-T10a, §11 Decisions P05-T10b and P05-
 from __future__ import annotations
 
 import asyncio
+import io
+import math
 import secrets
 import uuid
 from collections.abc import AsyncIterator
@@ -15,12 +17,14 @@ from typing import Any, Final
 
 import fakeredis
 import httpx
+import numpy as np
 import pytest
 from call_rows import SeededCall, load_call, seed_call
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from resolved_configs import resolved_config
 from runtime_rig import MODELS_DIR, WAIT_S, RecordingRuntime, StaticOrgSettings, sim_runtime
+from service_helpers import json_log_stream, log_events
 from sim_media import EdgeRelay, StreamedCall, realtime_telnyx, streamed_call
 from sms_rows import add_sms_number
 from sqlalchemy import select
@@ -49,6 +53,7 @@ from va_sim.server import running_sims
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx.client_state import command_id
+from va_voice.audio import rms_dbfs
 from va_voice.phrase_cache import PhraseCache
 from va_workflows.activities.prerender import OpenerPrerender
 
@@ -570,8 +575,13 @@ async def machine_call(r: Rig, call: SeededCall, voicemail: dict[str, Any]) -> A
         "expect_hangup: {}",
         answer=f"{{after_ms: 200, answered_by: machine, beep_at_ms: {BEEP_MS}}}",
     )
+    # No background bed: the tests read "nothing before the beep" from digital silence on the agent track.
     async with r.call(
-        seeded=call, amd="premium", voicemail=voicemail, request_data={"name": "Dana"}
+        seeded=call,
+        amd="premium",
+        voicemail=voicemail,
+        request_data={"name": "Dana"},
+        background_track="none",
     ) as streamed:
         assert (await r.body.end()).end_reason == "voicemail_left"
         assert await signalled(r) == [("voicemail_left", "agent")]
@@ -743,3 +753,104 @@ async def test_a_cached_maintenance_message_plays_from_the_phrase_cache() -> Non
         assert any(agent_audio)
         assert socket_texts(r.state) == []
         assert r.state.llm.requests == []
+
+
+# Call audio options (specs/07 §10 Decision P05-T15).
+
+LONG_OPENER: Final = (
+    "Hi, this is Maya from Bella Pasta, thanks for picking up today. I am calling about the reservation "
+    "request you sent us for this weekend, and I would like to confirm a few details with you before we "
+    "hold the table."
+)
+LONG_REPLY: Final = (
+    "Of course, I can help with that. Let me pull up the booking we have on file for you and walk through "
+    "the date, the time and the number of guests one by one so that nothing gets missed along the way."
+)
+
+
+def window_dbfs(agent: bytes, start_ms: int, end_ms: int) -> float:
+    """Level of the aligned 8 kHz agent track between two offsets after the answer."""
+    window = agent[start_ms * _PCM_BYTES_PER_MS : end_ms * _PCM_BYTES_PER_MS]
+    assert len(window) == (end_ms - start_ms) * _PCM_BYTES_PER_MS
+    return rms_dbfs(np.frombuffer(window, dtype="<i2"))
+
+
+def media_logs(stream: io.StringIO, event: str) -> list[dict[str, Any]]:
+    return [line for line in log_events(stream) if line.get("event") == event]
+
+
+@pytest.mark.parametrize(
+    ("track", "noise", "level"),
+    [("office", True, -22.0), (None, True, -40.0), ("none", False, None)],
+)
+async def test_the_background_bed_fills_the_agent_track_between_utterances(
+    track: str | None, noise: bool, level: float | None
+) -> None:
+    async with rig() as r:
+        r.scenario("silence: {ms: 3000}", "hangup: {}")
+        async with r.call(
+            background_track=track, noise_cancellation=noise, wait_for_greeting=False
+        ) as streamed:
+            assert await r.body.end() == STREAM_CLOSED
+            agent = bytes(streamed.sim_call().audio.agent)
+        assert spoken(r.state) == [OPENER]
+        # The opener (~1 s) is over by 2 s after the answer; the caller hangs up at 3.2 s.
+        idle = window_dbfs(agent, 2000, 2800)
+        if level is None:
+            assert idle == -math.inf
+        else:
+            assert idle == pytest.approx(level, abs=3.0)
+        [session] = r.state.elevenlabs.stt.sessions
+        assert session.filter_background_audio is noise
+
+
+async def test_barge_in_clears_playback_and_keeps_only_the_spoken_opener() -> None:
+    stream = json_log_stream()
+    async with rig() as r:
+        await add_rules(
+            r.llm,
+            "rules:\n  - id: table\n    match: {last_user_regex: 'table'}\n"
+            "    respond: {content: 'Sure, for how many people?'}\n",
+        )
+        r.scenario(
+            "say: {text: I would like to book a table please, barge_in_after_agent_ms: 1200}",
+            "wait_agent_speech: {}",
+            "hangup: {}",
+        )
+        async with r.call(first_sentence=LONG_OPENER, temperature=0.2):
+            assert await r.body.end() == STREAM_CLOSED
+        [request] = r.state.llm.requests
+    assert request.temperature == 0.2
+    [barge_in] = media_logs(stream, "pipeline_barge_in")
+    assert 0 < barge_in["played_chars"] < barge_in["total_chars"]
+    [closed] = media_logs(stream, "media.transport_closed")
+    assert closed["clears"] >= 1
+    history = [m for m in request.messages if isinstance(m, dict) and m.get("role") == "assistant"]
+    spoken_opener = str(history[0]["content"])
+    assert spoken_opener[:20] == LONG_OPENER[:20]
+    assert len(spoken_opener) < len(LONG_OPENER)
+    assert spoken(r.state)[-1] == "Sure, for how many people?"
+
+
+@pytest.mark.parametrize(("level", "barge_ins"), [(0, 0), (2, 1), (4, 2)])
+async def test_interruptibility_levels_decide_which_caller_speech_interrupts(
+    level: int, barge_ins: int
+) -> None:
+    stream = json_log_stream()
+    async with rig() as r:
+        await add_rules(
+            r.llm,
+            "rules:\n  - id: any\n    match: {last_user_regex: '.'}\n"
+            f"    respond: {{content: '{LONG_REPLY}'}}\n",
+        )
+        r.scenario(
+            "say: {text: uh huh, barge_in_after_agent_ms: 1000}",
+            "say: {text: I need to change my booking for tomorrow night, barge_in_after_agent_ms: 1000}",
+            "silence: {ms: 1500}",
+            "hangup: {}",
+        )
+        async with r.call(first_sentence=LONG_OPENER, interruptibility=level):
+            assert await r.body.end() == STREAM_CLOSED
+    assert len(media_logs(stream, "pipeline_barge_in")) == barge_ins
+    [closed] = media_logs(stream, "media.transport_closed")
+    assert (closed["clears"] > 0) is (barge_ins > 0)

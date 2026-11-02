@@ -88,6 +88,7 @@ class SttSessionRecord:
     keyterms: list[str]
     entity_detection: list[str]
     include_timestamps: bool
+    filter_background_audio: bool
     started_ms: int
     previous_text: str | None = None
     ended_ms: int | None = None

@@ -260,7 +260,7 @@
   - Deliverables: record params on dial/answer, recording saved handling activity copying to S3 (`S3_BUCKET_RECORDINGS/{org}/{yyyy}/{mm}/{call_id}.wav`), signed URL generation (7 days)
   - Acceptance: tests with FakeTelnyx recording URL served by sim; S3 via MinIO testcontainer.
 
-- [ ] P05-T15 Call audio features and options
+- [x] P05-T15 Call audio features and options — GatedVad (SpectralGate on VAD path) + Scribe filter_background_audio from noise_cancellation, runtime background bed (static default, none, missing asset logged), option table tests, runtime sim bed/barge-in/interruptibility 0/2/4 tests; make test 10420 passed / 7 skipped 99.16 %, lint/typecheck/placeholders 0, jscpd 0, radon A 2.38
   - Spec refs: specs/05-calls-api.md (precall_dtmf_sequence, ignore_button_press, keywords, language, background_track, noise_cancellation, interruptibility, block_interruptions, temperature, voice); specs/08-stt-elevenlabs.md (keyterms, language mapping)
   - Depends on: P05-T08, P05-T09
   - Deliverables: wiring of every listed option into the pipeline/STT/TTS/brain configuration

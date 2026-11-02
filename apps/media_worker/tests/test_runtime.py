@@ -15,6 +15,7 @@ import fakeredis
 import pytest
 from media_helpers import FakeContextLoader, FakeMediaContainer, FakeSocket, auth_values, call_context
 from redis.asyncio import Redis
+from runtime_rig import ASSETS_DIR
 from service_helpers import json_log_stream, log_events, make_client, settings_of
 
 from va_common.metrics import Service, ServiceMetrics, build_metrics, new_registry
@@ -33,6 +34,7 @@ from va_media.stream import read_until_stop
 from va_media.vad_model import VadStatus
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.media import MediaFormat
+from va_voice.background import BackgroundLibrary
 from va_voice.vad import VadExecutor
 from va_voice.vad_model import SileroModel
 
@@ -119,6 +121,7 @@ def _runtime(executor: VadExecutor, *, vad_model: Any = None, telnyx: Any = None
         vad_executor=executor,
         clock=SystemClock(),
         metrics=_metrics(),
+        background=BackgroundLibrary(ASSETS_DIR),
         telnyx=telnyx,
     )
 

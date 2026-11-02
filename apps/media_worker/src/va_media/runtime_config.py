@@ -3,10 +3,11 @@
 
 - :func:`pipeline_config`: the :class:`PipelineConfig` of a leg from the ``CallContext`` and the org settings
   (``max_duration_s = max_duration_min x 60``, the warning 10 s before it — less on calls shorter than 20 s —,
-  the org's ``max_duration_message``/``no_input_goodbye``, the call's interruption and no-input settings and
-  pronunciation guide).
+  the org's ``max_duration_message``/``no_input_goodbye``, the call's interruption, DTMF and no-input
+  settings, ``noise_cancellation`` (the spectral gate on the VAD path) and pronunciation guide).
 - :func:`stt_config`: the realtime STT session (``ulaw_8000`` on PCMU legs, ``pcm_16000`` on 16 kHz legs;
-  the specs/08 §5 language row fixes ``language_code`` or turns detection on; ``keywords`` become keyterms).
+  the specs/08 §5 language row fixes ``language_code`` or turns detection on; ``keywords`` become keyterms;
+  ``noise_cancellation`` sets Scribe's ``filter_background_audio``, specs/07 §10.1 Decision P05-T15).
 - :func:`tts_voice` / :func:`tts_output_format`: the TTS socket's voice and output format.
 - :func:`zero_retention`: vendor zero retention for the org (``privacy.zero_retention`` or HIPAA mode) when
   the platform account supports it.
@@ -77,6 +78,7 @@ def pipeline_config(
         max_reprompts=config.max_reprompts,
         no_input_goodbye=org.no_input_goodbye,
         ignore_button_press=config.ignore_button_press,
+        noise_cancellation=config.noise_cancellation,
         pronunciation=tuple(config.pronunciation_guide),
     )
 
@@ -98,6 +100,7 @@ def stt_config(context: CallContext, *, fmt: AudioFormat) -> SttConfig:
         language_code=language_code,
         include_language_detection=language_code is None,
         keyterms=list(keyterms.terms),
+        filter_background_audio=context.config.noise_cancellation,
     )
 
 

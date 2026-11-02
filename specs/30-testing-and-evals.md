@@ -438,7 +438,8 @@ Behavioural rules:
 > frames in swapped adjacent pairs (2, 1, 4, 3, …) with their original `chunk`, `timestamp`, and `sequence_number`.
 > (10) Timeline utterances `{utterance_id, text, start_ms, end_ms, first_agent_audio_ms, latency_ms}`: `start_ms`
 > when the frame with the utterance's first byte is sent, `end_ms` with its last byte, `first_agent_audio_ms` the
-> arrival of the first agent `media` message after `end_ms` with a sample louder than |256|, `latency_ms` their
+> arrival of the first agent `media` message after `end_ms` that is speech (frame RMS above 1024, Decision P05-T15
+> under §3.5; was a sample louder than |256|), `latency_ms` their
 > difference (null until then). (11) The summary `stream` adds `{connected, frames_sent, received: {media | mark |
 > clear | invalid: count}, marks_echoed}`; the summary adds `caller_dtmf`. The scenario step runner (greeting,
 > steps, barge-in) is P03-T03c.
@@ -601,7 +602,8 @@ Behavioural rules:
 >    disconnect"` without a frame. Each firing consumes one of `times`, across sessions. `SimState.stt_fail_after_s`
 >    above is this route with kind `transcriber_error`.
 > 8. Records at `GET /sim/elevenlabs/stt/sessions` → `{"sessions": [{id, model_id, audio_format, commit_strategy,
->    language_code, keyterms, entity_detection, include_timestamps, started_ms, previous_text, ended_ms,
+>    language_code, keyterms, entity_detection, include_timestamps, filter_background_audio (P05-T15), started_ms,
+>    previous_text, ended_ms,
 >    end_reason (null|disconnect|fault|reset), audio_ms (whole frames analysed), voiced_ms, partials, commits,
 >    transcripts: [{text, utterance_ids, language_code, committed_ms}]}]}`, recorded once authenticated; commits not
 >    yet sent when the socket closes are dropped.
@@ -1033,7 +1035,7 @@ recording deliveries with signature verification), then evaluates `assertions` p
 > the scenario file's directory (scenarios POSTed to the control API keep the path as given). A missing or invalid
 > WAV fails the greeting (`detail` says why) and the steps still run; a WAV greeting's timeline entry has
 > `utterance_id: null` and `text` = the file name. (5) Agent speech: a 20 ms frame of played-out agent audio
-> (8 kHz) is speech when its RMS exceeds 256. Per step a fresh detector tracks the current turn (speech ms; silent
+> (8 kHz) is speech when its RMS exceeds 1024 (-30 dBFS; 256 before Decision P05-T15 below). Per step a fresh detector tracks the current turn (speech ms; silent
 > gaps shorter than the gap keep the turn, speech after a longer silence starts a new turn) and the silence since
 > the last speech frame. (6) Steps record `{index, type, status, started_ms, ended_ms, detail}` (+ `utterance_id`
 > for `say`, set when queued), status `pending | running | ok | timeout | failed | cancelled`, times in sim
@@ -1053,6 +1055,13 @@ recording deliveries with signature verification), then evaluates `assertions` p
 > status `running` → `done` | `cancelled`; `/sim/reset` cancels scripts. (8) The call summary and timeline add
 > `script: null | {role, status, greeting: null | {source: "text" | "wav", status, utterance_id, started_ms,
 > ended_ms, detail}, steps: [...]}`.
+
+> Decision (2026-11-02): agent speech level (P05-T15). Every media-worker call now plays a background bed by default
+> (`static`, -40 dBFS, frame RMS up to 436, specs/07 §10 Decision P05-T15), which the former 256 level counted as
+> agent speech, so `wait_agent_speech` never saw silence. `AGENT_SPEECH_LEVEL` is 1024 (frame RMS, -30 dBFS) for
+> the runner, and the timeline's `first_agent_audio_ms` uses the same frame-RMS test instead of a peak sample (the
+> static bed peaks at ≈ 1 500). The `office`/`cafe`/`restaurant` beds (-22 dBFS, frame RMS up to ≈ 9 600) overlap
+> TTS speech levels and are not told apart. FakeElevenLabs STT session records add `filter_background_audio`.
 
 ## 4. Unit/integration requirements per package (minimum)
 

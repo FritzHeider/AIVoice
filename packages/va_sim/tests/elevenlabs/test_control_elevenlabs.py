@@ -102,11 +102,13 @@ async def test_stt_sessions_lists_records() -> None:
                 keyterms=[],
                 entity_detection=[],
                 include_timestamps=False,
+                filter_background_audio=True,
                 started_ms=0,
             )
         )
         (record,) = (await client.get("/sim/elevenlabs/stt/sessions")).json()["sessions"]
     assert (record["id"], record["end_reason"], record["transcripts"]) == ("a" * 32, None, [])
+    assert record["filter_background_audio"] is True
 
 
 async def test_stt_fault_put_get_delete() -> None:

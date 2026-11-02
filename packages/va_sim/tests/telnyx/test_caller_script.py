@@ -33,6 +33,7 @@ from telnyx_helpers import (
 
 from va_sim.audio import MAX_UTTERANCE_ID, dbfs_peak, decode_marker, goertzel_power, ulaw_encode
 from va_sim.state import SimState, Utterance
+from va_sim.telnyx.agent_speech import AGENT_SPEECH_LEVEL
 from va_sim.telnyx.calls import Call
 from va_sim.telnyx.media_format import MediaFormat
 from va_sim.wav import pcm16_wav
@@ -134,11 +135,11 @@ def tone_power(pcm: NDArray[np.int16], freq_hz: float, sample_rate: int) -> floa
 
 
 def agent_speech_frames(call: Call) -> list[int]:
-    """Indexes of the 20 ms agent track frames that are speech (RMS above 256)."""
+    """Indexes of the 20 ms agent track frames that are speech (RMS above ``AGENT_SPEECH_LEVEL``)."""
     track = np.frombuffer(bytes(call.audio.agent), dtype="<i2").astype(np.float64)
     frames = track[: track.size // 160 * 160].reshape(-1, 160)
     rms = np.sqrt(np.mean(frames * frames, axis=1))
-    return [int(index) for index in np.flatnonzero(rms > 256)]
+    return [int(index) for index in np.flatnonzero(rms > AGENT_SPEECH_LEVEL)]
 
 
 def track_ms(call: Call, frame_index: int) -> int:

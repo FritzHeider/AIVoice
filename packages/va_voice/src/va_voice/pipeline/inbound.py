@@ -4,7 +4,8 @@ Every frame goes through the :class:`~va_voice.reorder.ReorderBuffer`; each in-o
 STT (raw μ-law bytes; 16 kHz legs as little-endian PCM16, §15) and, decoded to 16 kHz PCM16 (μ-law resampled
 with soxr, 16 kHz legs as they are), to the VAD. VAD event times are stream time; :class:`InboundPath` maps
 them onto the pipeline timeline with ``origin_ms`` = arrival time of the first in-order frame minus one frame
-(frame ``k`` ends at stream time ``20 x k``).
+(frame ``k`` ends at stream time ``20 x k``). With ``noise_cancellation`` the VAD is wrapped in a
+:class:`~va_voice.pipeline.gated_vad.GatedVad` (one spectral gate per leg, §10.1).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from numpy.typing import NDArray
 
 from va_voice.audio import FRAME_MS, ULAW_8000, Resampler, l16_to_pcm, pcm_to_pcm16le, ulaw_decode
 from va_voice.pipeline.config import PipelineConfig
+from va_voice.pipeline.gated_vad import GatedVad
 from va_voice.pipeline.protocols import InboundAudio, SttStream, VoiceActivityDetector
 from va_voice.reorder import NULL_OBSERVER as NULL_REORDER_OBSERVER
 from va_voice.reorder import OrderedFrame, ReorderBuffer, ReorderObserver
@@ -42,7 +44,7 @@ class InboundPath:
         reorder_observer: ReorderObserver = NULL_REORDER_OBSERVER,
     ) -> None:
         self._stt = stt
-        self._vad = vad
+        self._vad: VoiceActivityDetector = GatedVad(vad) if config.noise_cancellation else vad
         self._now_ms = now_ms
         self._reorder = ReorderBuffer(config.fmt, window=config.reorder_window, observer=reorder_observer)
         self._decode = _decoder(config)

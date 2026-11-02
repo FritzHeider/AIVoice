@@ -2279,3 +2279,124 @@ guarded update + call.recording_ready in one transaction, carrier delete after c
 details → call.error recording_failed (none for a missing call), retryable TelnyxUnavailable/StorageUnavailable, no URL
 in logs (test asserts). Edge signals postcall-<id> recording_saved; missing workflow debug-only; T18 must read the
 stored event first (recorded in the Decision). Known minor edge: a lost race re-uploads to the same deterministic key.
+
+## Plan P05-T15 — Call audio features and options (Planner, 2026-11-02)
+Audit of the listed options (already wired, keep + prove with tests): `precall_dtmf_sequence` (GreetingGate, T10b),
+`ignore_button_press` / `interruptibility` / `block_interruptions` / `interruption_threshold_ms`
+(`runtime_config.pipeline_config`), `keywords` → keyterms and `language` → Scribe code/detection
+(`runtime_config.stt_config`), `language` → TTS `language_code` + prompt language (`tts_voice`, TaskBrain),
+`voice` (`provider_voice_id` + `voice_settings` → `tts_voice`), `temperature` (TaskBrain request). NOT wired (build):
+`noise_cancellation` (specs/07 §10.1: Scribe `filter_background_audio` + SpectralGate on the VAD path) and
+`background_track` (specs/07 §10.2: FrameMixer background loop). Resolution layers already carry both
+(`call_resolution/layers.py` org `*_default`, `SendCallConfig.noise_cancellation: bool = True`, `background_track`).
+
+### Design (decided — do not re-litigate)
+1. **va_voice noise-gated VAD** — new `packages/va_voice/src/va_voice/pipeline/gated_vad.py`:
+   `class GatedVad` (satisfies `VoiceActivityDetector`): `__init__(self, vad: VoiceActivityDetector, gate:
+   SpectralGate | None = None)`; `async feed(pcm16k)`: `gated = gate.process(pcm16k)`; `events = await
+   vad.feed(gated)` (empty `gated` → still call feed? no: return `[]` when `gated.size == 0`); for each event:
+   `speech_start` → `gate.set_speech(True)`, `speech_end` → `gate.set_speech(False)` (probability events: none);
+   return events with `at_ms = max(0.0, at_ms - LATENCY_MS)` (Decision P04-T09: gated stream is 16 ms late).
+   Export from `va_voice.pipeline`. `PipelineConfig` gains `noise_cancellation: bool = False` (pipeline default
+   off so existing harness tests keep raw VAD; the runtime maps the call value). `InboundPath.__init__` wraps
+   `vad` in `GatedVad(vad, SpectralGate())` when `config.noise_cancellation` (one gate per leg).
+2. **runtime_config**: `pipeline_config(...)` passes `noise_cancellation=config.noise_cancellation`;
+   `stt_config(...)` sets `filter_background_audio=context.config.noise_cancellation`. Update the module docstring.
+3. **Background in the runtime** (`apps/media_worker/src/va_media/runtime.py`):
+   - `BACKGROUND_ASSETS_DIR: Final = Path("assets") / "audio"` (cwd-relative like `DEFAULT_MODELS_DIR`; the image's
+     WORKDIR /app holds `assets/`). `open_runtime` builds one `BackgroundLibrary(BACKGROUND_ASSETS_DIR)` per process
+     and passes `CallRuntime(background=...)` (new required keyword `background: BackgroundLibrary`).
+   - new helper `async def _mixer(self, context, config) -> FrameMixer`: `loop = await self._background.loop(
+     context.config.background_track, config.tts_format)`; on `BackgroundAssetError` / `ValueError` log
+     `media.background_unavailable` (detail = exception type name, track) and use no loop (the call goes on);
+     return `FrameMixer(config.tts_format, background=loop, wire_byte_order=config.wire_byte_order)`.
+     Passed as `CallPipeline(mixer=...)`. (`null` → `static`, `"none"` → no loop: `resolve_background`.)
+   - `runtime_rig.sim_runtime` passes `BackgroundLibrary(<repo>/assets/audio)` (resolve from `__file__`, like
+     `MODELS_DIR`); any other `CallRuntime(...)` construction in tests too.
+   - Record `> Decision (2026-11-02): call audio options (P05-T15)` under specs/07 §10 (after §10.2 Decision):
+     GatedVad + 16 ms shift, pipeline default off / runtime maps the call value, Scribe flag, assets dir
+     `assets/audio` relative to the working directory (image `/app`), missing asset → logged, call continues
+     without a bed; the full option → component table (option: where it lands).
+4. No DB/spec-table/env changes (do NOT add a settings var for the assets dir; `VA_ASSETS_DIR` stays unread as today).
+
+### Tests (all must exist and pass)
+- `packages/va_voice/tests/test_gated_vad.py` (ScriptedVad-style fake VAD recording fed sizes + returning scripted
+  events; real `SpectralGate`): output delayed 256 samples (fed totals = input − 256 after first chunks), event
+  times shifted by `LATENCY_MS` and clamped at 0, `set_speech` follows speech_start/end (assert via
+  `gate.profile_ready` not advancing during speech: feed noise while "speech" → profile frames unchanged), empty
+  gate output skips the VAD; stationary noise at −30 dBFS + a tone burst: real `SileroVad`? no — keep unit with fake.
+- `packages/va_voice/tests/pipeline/...` (where InboundPath/pipeline config tests live): `PipelineConfig()`
+  default `noise_cancellation is False`; `InboundPath` with `noise_cancellation=True` feeds the VAD gated audio
+  (fake VAD sees 256 fewer samples after the first frames, events land 16 ms earlier on the pipeline timeline);
+  with False the VAD sees the raw decoded samples.
+- Real-model check (marked like other Silero tests, needs `models/silero_vad.onnx`): a VAD fixture WAV
+  (`tests/fixtures/vad/`) with added stationary noise → `GatedVad(SileroVad)` still reports the speech segments
+  within the existing tolerance of `test_vad` truth (`SPEECH_SEGMENTS_MS`).
+- `apps/media_worker/tests/test_runtime_config.py` (extend): table-driven per-option test — `noise_cancellation`
+  true/false → `PipelineConfig.noise_cancellation` and `SttConfig.filter_background_audio`; `keywords` →
+  keyterms; `language` fixed row → `language_code`, unknown/`auto` → detection; `voice` settings/id → `TtsVoice`;
+  `interruptibility`/`block_interruptions`/`ignore_button_press`/`interruption_threshold_ms` → config fields.
+- `apps/media_worker/tests/test_runtime_background.py` (unit on `CallRuntime._mixer` or via a tiny public helper
+  `background_mixer(library, context, config)` in runtime — prefer the module-level function for testability):
+  null → static loop (has_background, frames non-silent at ≈ −40 dBFS via `rms_dbfs`), `office` → office asset,
+  `none` → no background, 16 kHz leg reads `.pcm16k`, missing assets dir → no background + `media.background_unavailable`
+  logged (log_events), call does not fail.
+- Runtime sim (`apps/media_worker/tests/test_runtime_sim.py` or new `test_runtime_audio_options.py`, real Silero +
+  FakeTelnyx/ElevenLabs/LLM via `runtime_rig`):
+  a. background: `background_track="office"` call → agent track (`streamed.sim_call().audio.agent`) is non-silent
+     between agent utterances (RMS of an idle window ≈ −22 dBFS ± 3); `"none"` → idle window digital silence/absent.
+  b. `noise_cancellation=false` → FakeElevenLabs STT session record shows `filter_background_audio=false`; default
+     → true (read `GET /sim/elevenlabs/stt/sessions` / store records query params).
+  c. `temperature=0.2` → `state.llm.requests[*]` body temperature 0.2.
+  d. barge_in (in-process twin of the specs/30 flow; docker e2e lands in P05-T17): long `first_sentence`, caller
+     `say` with `barge_in_after_agent_ms: 1200` → transport `clear` sent (FakeTelnyx stream record), assistant turn
+     interrupted (persistence rig or `RecordingObserver` equivalent: use the turn rows when `rig(persistence=)`),
+     next LLM request history holds only spoken text (shorter than the opener).
+  e. interruptibility levels 0, 2, 4 (parametrized; one call each): caller "uh-huh" (backchannel) during agent
+     speech, then a full sentence during the next agent speech → level 0: no `clear`; 2: sentence clears,
+     uh-huh does not; 4: uh-huh clears. Existing defaults (AMD premium wait, no-input timer) per AGENTS notes.
+  Existing runtime sim tests may change now that every call plays the static bed and gates VAD by default: fix
+  them by setting `background_track="none"` / `noise_cancellation=False` in that test's `FakeContextLoader`
+  overrides ONLY where the assertion depends on agent-track silence; never weaken assertions.
+- Coverage: `gated_vad.py`, `runtime_config.py`, the runtime background helper 100 %.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in background
+(`make test > logs/make_test_p05t15.log 2>&1` + heartbeat Monitor, ~25 min); jscpd 0 clones; `uvx radon cc -s -a` on
+touched src (emit `complexity: <n>,` with a comma); `uvx pip-audit` on `uv export` + `corepack pnpm audit`.
+`make e2e`: harness lands in P05-T17 — say so; the in-process barge_in / interruptibility runtime tests stand in.
+AGENTS.md line: GatedVad + `PipelineConfig.noise_cancellation`, runtime background bed (`BACKGROUND_ASSETS_DIR`,
+`CallRuntime(background=)`), runtime sim tests now play static + gate VAD by default.
+
+### Risks
+- Static bed on every runtime sim call may disturb FakeElevenLabs batch/tone decoding or agent-silence asserts —
+  fix per test as above.
+- SpectralGate CPU per frame (FFT 512 per hop, ~6 hops/100 ms): fine, but it runs on the event loop inside
+  InboundPath; if a bench regresses, run it in the VAD executor (do not pre-optimise).
+- Gate starts gating only after 0.25 s of non-speech; synthesized caller audio must still trigger Silero (the
+  real-model test proves it).
+- Interruptibility runtime tests are wall-clock: use the existing `WAIT_S` budgets and event waits, no sleeps.
+
+## Build P05-T15 (Builder, 2026-11-02)
+Implemented per plan:
+- `va_voice.pipeline.GatedVad` (SpectralGate in front of the VAD, set_speech feedback, events −16 ms clamped at 0,
+  empty gate output skips the VAD); `PipelineConfig.noise_cancellation` (default False); `InboundPath` wraps.
+- `runtime_config`: `noise_cancellation` → PipelineConfig + Scribe `filter_background_audio`.
+- `va_media.runtime`: `BACKGROUND_ASSETS_DIR`, required `CallRuntime(background=)`, module-level
+  `background_mixer(library, context, config)` (missing asset → `media.background_unavailable`, no bed).
+Deviation (necessary, recorded specs/30 §3.5 Decision P05-T15 + specs/07 §10 Decision P05-T15): FakeTelnyx agent-speech
+level 256 → 1024 frame RMS (default static bed has frame RMS ≈ 330 and made every `wait_agent_speech` time out: 6 runtime
+sim tests failed); timeline first_agent_audio now uses the same RMS test (static peaks ≈ 1500). FakeElevenLabs STT
+session record gained `filter_background_audio` (to verify the flag end to end). Only one existing test needed
+`background_track="none"` (machine_call: "nothing before the beep" reads digital silence).
+New tests: test_gated_vad.py (unit + real Silero under −30 dBFS noise), test_runtime_background.py, runtime_config
+option table, runtime sim: bed levels office/static/none + filter flag, barge-in (clear, truncated opener in history,
+temperature 0.2), interruptibility 0/2/4 → 0/1/2 barge-ins.
+Gates: make fmt 0; make lint 0; make typecheck 0; placeholders 0 findings; spec refs 0; make test 10420 passed / 7 skipped, 99.16 % (exit 0); new src 100 % (gated_vad, inbound, runtime_config, agent_speech); jscpd 0 clones; radon avg A 2.30; pip-audit no known vulns; pnpm audit 3 moderate (< high). make e2e: harness lands in P05-T17 (in-process barge_in/interruptibility runtime sim tests stand in).
+
+## Review P05-T15 (Reviewer, 2026-11-02) — APPROVED
+Re-ran: make lint 0, make typecheck 0, placeholders 0 findings, check_spec_refs 0, make test 10420 passed / 7 skipped,
+99.16 % (exit 0), jscpd 0 clones, radon avg A 2.38 on touched src. Diff checked against specs/07 §10.1/§10.2 and the
+new Decisions (specs/07 §10, specs/30 §3.5): GatedVad shift/clamp/feedback, pipeline default off + runtime mapping,
+Scribe flag, background_mixer fallback logged, FakeTelnyx agent-speech level 1024 with static-bed test. Barge-in and
+interruptibility levels covered in-process (docker e2e in P05-T17).

@@ -19,7 +19,6 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
-import numpy as np
 import orjson
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -27,7 +26,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from va_common.logging import get_logger
 from va_sim.clock import iso_z
 from va_sim.tasks import hold_clock
-from va_sim.telnyx.agent_speech import AGENT_SPEECH_LEVEL, is_speech
+from va_sim.telnyx.agent_speech import is_speech
 from va_sim.telnyx.keys import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from va_sim.telnyx.media_format import FRAME_MS, TRACK_RATE, agent_format, stream_format
 from va_sim.telnyx.media_frames import (
@@ -320,8 +319,7 @@ class MediaSession:
         ]
         if not waiting:
             return
-        peak = int(np.max(np.abs(self.agent_fmt.to_pcm(audio).astype(np.int32))))
-        if peak <= AGENT_SPEECH_LEVEL:
+        if not is_speech(self.agent_fmt.to_pcm(audio).astype("<i2").tobytes()):
             return
         now = self._state.clock.virtual_ms()
         for entry in waiting:
