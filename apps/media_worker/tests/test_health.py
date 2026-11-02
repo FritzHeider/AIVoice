@@ -16,6 +16,7 @@ from va_media.drain import DRAINING_PODS_KEY
 from va_media.loop_lag import LoopLagMonitor
 from va_media.main import MediaState, create_app
 from va_media.settings import MediaSettings
+from va_media.stream import read_until_stop
 
 
 def media_state(app: Any) -> MediaState:
@@ -77,7 +78,7 @@ async def test_readyz_redis_failure(models_dir: Path) -> None:
 
 async def test_readyz_real_container_redis_unreachable(models_dir: Path) -> None:
     settings = settings_of(MediaSettings, redis_url=UNREACHABLE["redis_url"], **auth_values())
-    app = create_app(settings, init_observability=False, models_dir=models_dir)
+    app = create_app(settings, init_observability=False, models_dir=models_dir, body=read_until_stop)
     async with make_client(app) as client:
         response = await client.get("/readyz")
     assert response.status_code == 503
@@ -131,6 +132,7 @@ async def test_observability_initialised_as_media_worker(
         settings_of(MediaSettings, **auth_values()),
         container_factory=FakeMediaContainer(),
         models_dir=models_dir,
+        body=read_until_stop,
         context_loader=FakeContextLoader().factory,
     )
     async with make_client(app):

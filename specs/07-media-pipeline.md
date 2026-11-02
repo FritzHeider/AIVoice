@@ -625,6 +625,31 @@ class ConversationEngine(Protocol):
 > time limit for this call. Goodbye.", `no_input_goodbye`); the specs/05 `max_duration` row's wording is superseded
 > by that org setting.
 
+> Decision (2026-11-02): media call runtime (P05-T10a). The media lifespan builds the per-process collaborators
+> once in `va_media.runtime.open_runtime` (KMS envelope + `OrgProviderStore` behind one `LlmGateway` on one HTTP
+> client, prewarmed at startup with a logged-never-raised failure; `OrgSettingsReader`; the vendored token counter;
+> the Silero model, loaded only after the readiness check verified the file — a load failure fails readiness —; one
+> `VadExecutor` of `MEDIA_VAD_THREADS`) and uses the yielded `CallRuntime` as the session body of every attached
+> call (an injected body replaces it in tests). Per call `CallRuntime` (1) refuses runners other than `task` (the
+> pathway/persona/agent Brains arrive in phases 07/13), a process without a VAD model, and an org that no longer
+> exists, without opening any vendor socket; (2) wraps the socket in `TelnyxMediaTransport` and maps the context
+> with the pure `va_media.runtime_config`: `max_duration_s = max_duration_min × 60`, the warning at
+> `min(10 s, max_duration_s / 2)`, the org's `max_duration_message`/`no_input_goodbye`, the call's interruption,
+> IVR, no-input, DTMF and pronunciation settings; STT `ulaw_8000` (16 kHz legs `pcm_16000`) with the specs/08 §5
+> row's `language_code` (an unknown value falls back to detection) and `keywords` as keyterms; TTS voice
+> `provider_voice_id` + `voice_settings` + `ELEVENLABS_TTS_MODEL`, `language_code` pinned only for fixed language
+> rows; (3) opens STT and TTS concurrently, both closed on every path; an open failure (`SttError`, `TtsError`,
+> `OSError`) ends the call with `end_reason='error'` before any audio; (4) runs `CallPipeline` with a per-call
+> `SileroVad` and `TaskBrain` (no tool executor until phase 08, `sms_capable=false` until messaging is wired; the
+> default observer and action handler until P05-T11/T13). Vendor zero retention (`enable_logging=false`) applies
+> when the org sets `privacy.zero_retention` or `hipaa_mode` **and** `ELEVENLABS_ZERO_RETENTION_AVAILABLE` is true;
+> a wanted but unavailable option is logged `media.zero_retention_unavailable` and the call proceeds (the
+> platform account capability is a deployment setting). The pipeline end maps onto `SessionEnd`: `transport_closed` →
+> `stream_closed`, the pipeline's generic `agent_hangup` → `agent_end_call`, every specs/05 §9 reason → that reason
+> with its `ended_by` (`va_db.call_states.END_REASONS`), anything else → `error` (logged). Turn metrics use
+> `org_tier="unknown"` until the call context carries the plan id. Hangup, persistence and events stay with the
+> end-of-call routine of P05-T11.
+
 ## 17. Control channel messages (`call:{id}:control`)
 
 ```json

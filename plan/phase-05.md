@@ -126,7 +126,7 @@
   - Deliverables: `TelnyxMediaTransport` implementing `Transport` (inbound frames via reorder buffer, outbound media/mark/clear, DTMF events, stop handling, hd_audio L16 path)
   - Acceptance: tests against FakeTelnyx media client.
 
-- [ ] P05-T09 Task-mode Brain and system tools (split into P05-T09a–c below; tick when all three are ticked)
+- [x] P05-T09 Task-mode Brain and system tools (split into P05-T09a–c below; tick when all three are ticked) — P05-T09a, P05-T09b, P05-T09c all ticked
   - Spec refs: specs/11-pathways-engine.md (Task-mode single prompt runner); specs/10-llm-gateway.md (dialogue system prompt, tool calling); specs/13-tools-and-dynamic-data.md (built-in system tools end_call, transfer_call, press_button)
   - Depends on: P03-T13, P04-T12
   - Deliverables: `va_engine.task_runner.TaskBrain` (prompt assembly, streaming reply, system tools, temperature, request_data templating, first_sentence handling)
@@ -150,11 +150,29 @@
   - Deliverables: `va_engine.task_runner.TaskBrain` implementing `va_voice.pipeline.Brain` (`va_engine.models.results` BrainAction subclasses, templated `first_sentence` opener, streamed replies through `LlmGateway.stream_dialogue` with call temperature/max_tokens/model, up to 3 tool rounds, `end_call` → `EndCall`, `transfer_call` → `TransferRequest` BrainAction, `press_button` → `PressButton` BrainAction, invalid-argument round, barge-in truncation of history, `call.turn`-ready `EngineState`)
   - Acceptance: va_voice pipeline harness tests with a FakeLLM-backed gateway and rules covering a plain reply, end_call with and without final_message, transfer_call by label and default, press_button, invalid arguments, interruption truncation.
 
-- [ ] P05-T10 Greeting, AMD, voicemail actions, IVR mode
+- [ ] P05-T10 Greeting, AMD, voicemail actions, IVR mode (split into P05-T10a–c below; tick when all three are ticked)
   - Spec refs: specs/05-calls-api.md (wait_for_greeting, voicemail object, ivr_mode/amd, retry); specs/07-media-pipeline.md (wait_for_greeting, first_sentence pre-render); specs/06-telephony-telnyx.md (AMD config, premium results); specs/10-llm-gateway.md (voicemail/IVR classifier prompt)
   - Depends on: P05-T08, P05-T09
   - Deliverables: greeting state machine, AMD result handling, `voicemail.action` hangup/leave_message/leave_message_and_sms/ignore (beep wait via `call.machine.premium.greeting.ended`), `sensitive` LLM detection, IVR mode overrides, voicemail SMS send via va_telnyx messaging
-  - Acceptance: e2e flows voicemail_leave_message, voicemail_hangup, amd_ivr_mode pass.
+  - Acceptance: e2e flows voicemail_leave_message, voicemail_hangup, amd_ivr_mode pass (written with the e2e harness in P05-T17; the sub-tasks prove the behaviour with in-process simulator tests).
+
+- [x] P05-T10a Media call runtime: the phase-04 pipeline runs every attached call — va_media.runtime CallRuntime/open_runtime + pure runtime_config; 6 FakeTelnyx+FakeElevenLabs+FakeLLM flows; make test 9556 passed/7 skipped (99 %), lint/typecheck/placeholders/spec refs/jscpd 0 clones pass
+  - Spec refs: specs/07-media-pipeline.md §1, §16, §18 step 3; specs/08 §1 (STT session options); specs/09 §1–§4 (TTS socket, voice); specs/10 §1 (gateway, platform + org providers); specs/11 §6 (task runner)
+  - Depends on: P05-T08, P05-T09
+  - Deliverables: `va_elevenlabs.settings.ElevenLabsSettings` and `LlmSettings`/`CryptoSettings` mixed into `MediaSettings`; per-process collaborators built in the media lifespan (`LlmGateway` with platform + `OrgProviderStore`, `OrgSettingsReader`, Silero model, token counter); `va_media.runtime.CallRuntime` session body (TelnyxMediaTransport + ElevenLabs realtime STT + TTS socket + SileroVad + TaskBrain + `PipelineConfig` from the `CallContext`), `PipelineResult` → `SessionEnd` mapping, vendor sockets closed on every path; `create_app` builds it unless a test `body` is injected
+  - Acceptance: FakeTelnyx call streamed to a served media worker with FakeElevenLabs and FakeLLM on the same simulator state: the caller's utterance gets an LLM reply the simulator hears, `end_call` ends the session with `agent_end_call`/`agent`, a hang-up ends with `stream_closed`, an STT/TTS open failure and a non-task runner end with `error`; unit tests for config mapping and end mapping.
+
+- [ ] P05-T10b Greeting gate, outbound DTMF, IVR mode
+  - Spec refs: specs/07-media-pipeline.md §11 (steps 1, 3–6), §6 (ivr floor); specs/06-telephony-telnyx.md §9 (send_dtmf, precall sequence); specs/05-calls-api.md (wait_for_greeting, greeting_timeout_ms, first_sentence, ivr_mode, precall_dtmf_sequence); specs/09 §9 (phrase cache); specs/05 §9 (`ivr_dead_end`)
+  - Depends on: P05-T10a
+  - Deliverables: outbound answered wait from carrier state; `precall_dtmf_sequence` and `PressButton` actions through a media-side `TelnyxClientFactory` (`command_id`, `client_state`); `wait_for_greeting` + `greeting_timeout_ms`; `first_sentence` pre-render during prefetch and playback from the phrase cache; `ivr_mode` overrides (press_button offered, 900 ms floor, `ivr_dead_end` after 120 s without progress)
+  - Acceptance: simulator tests for each greeting path (answered wait, wait_for_greeting with speech and with timeout, cached opener), precall DTMF groups split on `w`, press_button reaching FakeTelnyx `send_dtmf`, IVR dead end.
+
+- [ ] P05-T10c AMD results and voicemail actions
+  - Spec refs: specs/07-media-pipeline.md §11 step 2, §14; specs/06-telephony-telnyx.md (AMD config, premium results, greeting ended); specs/10-llm-gateway.md §9.4 (voicemail classifier); specs/05-calls-api.md (voicemail object, retry); specs/21 §4 (voicemail SMS)
+  - Depends on: P05-T10b, P05-T11
+  - Deliverables: AMD result handling from the carrier channel (human/machine/fax, 3 s answer window, `detect_timeout_ms`), `voicemail.sensitive` LLM classification, actions `hangup`/`leave_message`/`leave_message_and_sms`/`ignore` (beep wait via `call.machine.premium.greeting.ended` or 1 200 ms silence, max 20 s), voicemail SMS via va_telnyx messaging, `call.amd`/`call.voicemail` events, `answered_by`, end reasons `voicemail_hangup`/`voicemail_left`/`fax_detected`
+  - Acceptance: simulator tests for every action and trigger (premium AMD machine, sensitive classifier, fax, timeout → human).
 
 - [ ] P05-T11 Call ending, persistence, max duration, stop API
   - Spec refs: specs/05-calls-api.md (POST /v1/calls/{id}/stop, stop all, §9 end reasons); specs/07-media-pipeline.md (max_duration timer, error phrase); specs/03-data-model.md (call_turns, call_events)
@@ -201,7 +219,7 @@
 - [ ] P05-T17 End-to-end flows and concurrency check
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list)
   - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16, P05-T18
-  - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery; a 50-concurrent-call simulator test against one media worker process
+  - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery, plus the e2e flows of tasks finished before the harness existed (voicemail_leave_message, voicemail_hangup, amd_ivr_mode from P05-T10; others named in earlier tasks' acceptance when they also predate it); a 50-concurrent-call simulator test against one media worker process
   - Acceptance: `make e2e` green; concurrency test reports no underruns and p50 platform overhead ≤ 150 ms.
 
 ## Phase exit gate

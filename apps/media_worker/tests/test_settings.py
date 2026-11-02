@@ -46,6 +46,53 @@ def test_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     ) == ("media-7f9c", 2, 30, 4)
 
 
+def test_vendor_and_llm_defaults_match_env_example() -> None:
+    settings = settings_of(MediaSettings)
+    assert (settings.elevenlabs_ws_base, settings.elevenlabs_api_key.get_secret_value()) == (
+        "ws://localhost:9200",
+        "sim-eleven-key",
+    )
+    assert (settings.elevenlabs_tts_model, settings.elevenlabs_stt_model) == (
+        "eleven_flash_v2_5",
+        "scribe_v2_realtime",
+    )
+    assert settings.elevenlabs_zero_retention_available is False
+    assert (settings.elevenlabs_stt_session_rotate_s, settings.elevenlabs_stt_keyterms_encoding) == (
+        1500,
+        "repeated",
+    )
+    assert settings.llm_default_base_url == "http://localhost:9300/v1"
+    assert settings.telnyx_l16_byte_order == "big"
+    assert settings.local_master_key.get_secret_value() == ""
+
+
+def test_vendor_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_WS_BASE", "wss://api.elevenlabs.io")
+    monkeypatch.setenv("ELEVENLABS_ZERO_RETENTION_AVAILABLE", "true")
+    monkeypatch.setenv("ELEVENLABS_STT_KEYTERMS_ENCODING", "json")
+    monkeypatch.setenv("TELNYX_L16_BYTE_ORDER", "little")
+    settings = settings_of(MediaSettings)
+    assert (
+        settings.elevenlabs_ws_base,
+        settings.elevenlabs_zero_retention_available,
+        settings.elevenlabs_stt_keyterms_encoding,
+        settings.telnyx_l16_byte_order,
+    ) == ("wss://api.elevenlabs.io", True, "json", "little")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"telnyx_l16_byte_order": "middle"},
+        {"elevenlabs_stt_keyterms_encoding": "csv"},
+        {"elevenlabs_stt_session_rotate_s": 0},
+    ],
+)
+def test_vendor_settings_are_validated(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        settings_of(MediaSettings, **overrides)
+
+
 def test_max_calls_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         settings_of(MediaSettings, media_max_calls_per_pod=0)

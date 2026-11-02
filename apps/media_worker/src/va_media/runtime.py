@@ -1,0 +1,322 @@
+"""The call runtime: the session body that runs the pipeline of every attached call
+(specs/07-media-pipeline.md §1, §16; specs/07 §16 Decision P05-T10a).
+
+:func:`open_runtime` builds the per-process collaborators once (the LLM gateway over one HTTP client with the
+org provider store behind the envelope, the org settings reader, the token counter, the Silero model and the
+VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRuntime.__call__`:
+
+1. refuses runners other than ``task`` (pathway/persona/agent Brains arrive in later phases) and calls whose
+   org is gone, without opening a vendor socket;
+2. wraps the session's socket in :class:`~va_media.transport.TelnyxMediaTransport` and maps the context onto
+   the :class:`PipelineConfig` (``va_media.runtime_config``);
+3. opens the realtime STT and TTS sockets concurrently (closed on every path, including cancellation by the
+   session race); an open failure ends the call with ``error`` before any audio;
+4. runs :class:`CallPipeline` with a per-call :class:`SileroVad` and :class:`TaskBrain` and maps its end
+   reason onto the :class:`~va_media.session.SessionEnd`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, Protocol
+
+import httpx
+from opentelemetry.sdk.trace import TracerProvider
+from redis.asyncio import Redis
+
+from va_common.crypto import Envelope, open_kms_provider
+from va_common.http import http_client
+from va_common.logging import get_logger
+from va_common.metrics import ServiceMetrics
+from va_common.time import Clock
+from va_db.org_settings import OrgSettingsReader
+from va_db.repositories import OrgDataKeyStore
+from va_db.session import Database
+from va_domain.call_context import CallContext
+from va_domain.org import OrgSettings
+from va_elevenlabs import (
+    CatalogSttMetrics,
+    CatalogTtsMetrics,
+    ElevenLabsRealtimeStt,
+    SttConnection,
+    SttError,
+    TtsConfig,
+    TtsError,
+    TtsSocket,
+)
+from va_engine.system_tools import facts_for_call
+from va_engine.task_runner import DialogueSource, TaskBrain
+from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
+from va_llm.providers import platform_provider
+from va_llm.tokens import TokenCounter, default_counter
+from va_media.runtime_config import (
+    ERROR_END,
+    pipeline_config,
+    session_end,
+    stt_config,
+    tts_output_format,
+    tts_voice,
+    zero_retention,
+)
+from va_media.session import CallSession, SessionBody, SessionEnd
+from va_media.settings import MediaSettings
+from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
+from va_media.vad_model import VadStatus
+from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
+from va_voice.pipeline import CallPipeline, PipelineConfig
+from va_voice.vad import SileroVad, VadExecutor
+from va_voice.vad_model import SileroModel, VadModel, VadModelError
+
+__all__ = [
+    "LLM_HTTP_TIMEOUT",
+    "ORG_TIER_UNKNOWN",
+    "CallRuntime",
+    "OrgSettingsSource",
+    "RuntimeDependencies",
+    "RuntimeFactory",
+    "open_runtime",
+]
+
+LLM_HTTP_TIMEOUT: Final = httpx.Timeout(30.0, connect=2.0)
+"""Socket bound of the LLM HTTP client; the gateway's own deadlines (specs/10 §2.1) are shorter."""
+
+ORG_TIER_UNKNOWN: Final = "unknown"
+"""``org_tier`` label of the turn metrics: the call context carries no plan id yet."""
+
+_log = get_logger(__name__)
+
+
+class RuntimeDependencies(Protocol):
+    """What :func:`open_runtime` needs from the media container (plus a ``database`` attribute)."""
+
+    @property
+    def redis(self) -> Redis: ...
+
+
+class RuntimeFactory(Protocol):
+    """Builds the session body for the lifespan (:func:`open_runtime`, or a test factory)."""
+
+    def __call__(  # noqa: PLR0913 - mirrors open_runtime
+        self,
+        container: RuntimeDependencies,
+        settings: MediaSettings,
+        *,
+        clock: Clock,
+        metrics: ServiceMetrics,
+        vad: VadStatus,
+        models_dir: Path,
+    ) -> AbstractAsyncContextManager[SessionBody]: ...
+
+
+class OrgSettingsSource(Protocol):
+    """Where the runtime reads org settings (:class:`va_db.org_settings.OrgSettingsReader` satisfies it)."""
+
+    async def get(self, org_id: uuid.UUID) -> OrgSettings | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _Vendors:
+    stt: ElevenLabsRealtimeStt
+    tts: TtsSocket
+
+
+class CallRuntime:
+    """The :data:`~va_media.session.SessionBody` of a media-worker process."""
+
+    def __init__(  # noqa: PLR0913 - per-process collaborators, all keyword-only
+        self,
+        *,
+        settings: MediaSettings,
+        gateway: DialogueSource,
+        counter: TokenCounter,
+        org_settings: OrgSettingsSource,
+        vad_model: VadModel | None,
+        vad_executor: VadExecutor,
+        clock: Clock,
+        metrics: ServiceMetrics,
+        tracer_provider: TracerProvider | None = None,
+    ) -> None:
+        self._settings = settings
+        self._gateway = gateway
+        self._counter = counter
+        self._org_settings = org_settings
+        self._vad_model = vad_model
+        self._vad_executor = vad_executor
+        self._clock = clock
+        self._metrics = metrics
+        self._tracer_provider = tracer_provider
+
+    @property
+    def vad_model(self) -> VadModel | None:
+        """The process's Silero model (``None``: unavailable, every call ends with ``error``)."""
+        return self._vad_model
+
+    async def __call__(self, session: CallSession) -> SessionEnd:
+        context = session.context
+        if context.config.runner_type != "task":
+            _log.error("media.runner_unsupported", runner_type=context.config.runner_type)
+            return ERROR_END
+        if self._vad_model is None:
+            _log.error("media.vad_unavailable")
+            return ERROR_END
+        org = await self._org_settings.get(context.org_id)
+        if org is None:
+            _log.error("media.org_missing")
+            return ERROR_END
+        try:
+            transport = TelnyxMediaTransport(session.socket, session.start)
+            config = pipeline_config(
+                context, org, fmt=transport.fmt, l16_byte_order=self._settings.telnyx_l16_byte_order
+            )
+        except (UnsupportedMediaFormatError, ValueError) as exc:
+            _log.error("media.pipeline_config_invalid", detail=str(exc))
+            return ERROR_END
+        try:
+            return await self._converse(context, org, transport, config, self._vad_model)
+        finally:
+            transport.log_summary()
+
+    async def _converse(
+        self,
+        context: CallContext,
+        org: OrgSettings,
+        transport: TelnyxMediaTransport,
+        config: PipelineConfig,
+        vad_model: VadModel,
+    ) -> SessionEnd:
+        async with AsyncExitStack() as stack:
+            try:
+                vendors = await self._open_vendors(stack, context, org, config)
+            except (SttError, TtsError, OSError) as exc:
+                _log.error("media.vendor_open_failed", detail=type(exc).__name__)
+                return ERROR_END
+            pipeline = CallPipeline(
+                transport=transport,
+                stt=vendors.stt,
+                tts=vendors.tts,
+                vad=SileroVad(vad_model, self._vad_executor),
+                brain=TaskBrain(
+                    context=context,
+                    settings=org,
+                    gateway=self._gateway,
+                    counter=self._counter,
+                    facts=facts_for_call(context, org, sms_capable=False),
+                    clock=self._clock,
+                ),
+                clock=self._clock,
+                config=config,
+                latency=self._latency(context),
+            )
+            transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
+            result = await pipeline.run()
+        return session_end(result)
+
+    async def _open_vendors(
+        self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, config: PipelineConfig
+    ) -> _Vendors:
+        settings = self._settings
+        no_logging = zero_retention(org, available=settings.elevenlabs_zero_retention_available)
+        api_key = settings.elevenlabs_api_key.get_secret_value()
+        stt = ElevenLabsRealtimeStt(
+            SttConnection(
+                settings.elevenlabs_ws_base,
+                api_key,
+                model_id=settings.elevenlabs_stt_model,
+                zero_retention=no_logging,
+                keyterms_encoding=settings.elevenlabs_stt_keyterms_encoding,
+                rotate_after_s=settings.elevenlabs_stt_session_rotate_s,
+            ),
+            clock=self._clock,
+            metrics=CatalogSttMetrics(self._metrics),
+            tracer_provider=self._tracer_provider,
+        )
+        stack.push_async_callback(stt.close)
+        tts = TtsSocket(
+            TtsConfig(settings.elevenlabs_ws_base, api_key, zero_retention=no_logging),
+            clock=self._clock,
+            metrics=CatalogTtsMetrics(self._metrics),
+            tracer_provider=self._tracer_provider,
+        )
+        stack.push_async_callback(tts.close)
+        outcomes = await asyncio.gather(
+            stt.open(stt_config(context, fmt=config.fmt)),
+            tts.open(
+                tts_output_format(config.fmt), tts_voice(context, model_id=settings.elevenlabs_tts_model)
+            ),
+            return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return _Vendors(stt, tts)
+
+    def _latency(self, context: CallContext) -> LatencyTracer:
+        return LatencyTracer(
+            self._clock,
+            metrics=TurnMetrics(self._metrics, org_tier=ORG_TIER_UNKNOWN),
+            tracer=TurnTracer(
+                self._clock,
+                call_id=str(context.call_id),
+                org_id=str(context.org_id),
+                tracer_provider=self._tracer_provider,
+            ),
+        )
+
+
+async def _load_model(vad: VadStatus, models_dir: Path) -> SileroModel | None:
+    if not vad.loaded:
+        return None
+    try:
+        return await asyncio.to_thread(SileroModel.load, models_dir)
+    except VadModelError as exc:
+        vad.loaded = False
+        vad.error = str(exc)
+        _log.error("media.vad_model_unavailable", detail=vad.error)
+        return None
+
+
+@asynccontextmanager
+async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword-only
+    container: RuntimeDependencies,
+    settings: MediaSettings,
+    *,
+    clock: Clock,
+    metrics: ServiceMetrics,
+    vad: VadStatus,
+    models_dir: Path,
+) -> AsyncIterator[CallRuntime]:
+    """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
+    database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
+    platform LLM connection is prewarmed (a failure is logged, never raised)."""
+    database = getattr(container, "database", None)
+    if not isinstance(database, Database):
+        msg = "the media container has no database"
+        raise TypeError(msg)
+    async with open_kms_provider(settings) as kms, AsyncExitStack() as stack:
+        envelope = Envelope(kms, OrgDataKeyStore(database))
+        http = http_client(settings, timeout=LLM_HTTP_TIMEOUT)
+        stack.push_async_callback(http.aclose)
+        gateway = LlmGateway(
+            ProviderRegistry(platform_provider(settings), OrgProviderStore(database, envelope, clock=clock)),
+            http,
+            clock=clock,
+            metrics=LlmMetrics(metrics.registry, metrics),
+            costs=CostTable(load_costs(settings.llm_model_costs_json)),
+        )
+        executor = await stack.enter_async_context(VadExecutor(settings.media_vad_threads))
+        await gateway.prewarm()
+        yield CallRuntime(
+            settings=settings,
+            gateway=gateway,
+            counter=default_counter(),
+            org_settings=OrgSettingsReader(database, container.redis),
+            vad_model=await _load_model(vad, models_dir),
+            vad_executor=executor,
+            clock=clock,
+            metrics=metrics,
+        )

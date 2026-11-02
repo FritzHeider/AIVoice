@@ -3293,3 +3293,143 @@ Approved. Re-ran lint/typecheck/placeholders (pass), make test 9513 passed / 7 s
 jscpd 0 clones, radon avg A (only pre-existing C: CallParameters). Diff matches specs/11 §6 Decision, specs/10 §7
 tool loop, specs/13 §5 caps (4 per turn, 3 parallel, 100 per call), specs/05 §9 agent_end_call. Tool pairing
 invariant holds on cut replies (finally answers `interrupted`; partial replies carry no tool_calls).
+
+## Plan P05-T10a — Media call runtime: the pipeline runs every attached call (Planner, 2026-11-02)
+Context: P05-T09 ticked (a–c done). P05-T10 split into T10a (runtime wiring, prerequisite of every call-flow task:
+the media body is still `read_until_stop`), T10b (greeting gate, outbound DTMF, IVR mode), T10c (AMD + voicemail;
+depends on T11 because it hangs up). T10's e2e flows move to the P05-T17 harness (plan file updated).
+
+### Decisions (one block `> Decision (2026-11-02): media call runtime (P05-T10a).` under specs/07 §16 after the
+### P04-T12a block; one line under specs/02 §6 table noting MediaSettings now reads the ELEVENLABS_*/LLM_*/KMS rows)
+1. Per-process collaborators are built once in the media lifespan by `va_media.runtime.open_runtime(container,
+   settings, *, clock, metrics, vad)` (async cm): one `va_common.http.http_client(settings, timeout=...)` for the
+   LLM, `LlmGateway(ProviderRegistry(platform_provider(settings), OrgProviderStore(database, envelope, clock=)),
+   http, clock=, metrics=LlmMetrics(metrics.registry, metrics), costs=CostTable(load_costs(settings.llm_model_costs_json)))`;
+   envelope = `Envelope(kms, OrgDataKeyStore(database))` inside `open_kms_provider(settings)` (as va_worker.main);
+   `OrgSettingsReader(database, redis)`; `va_llm.tokens.default_counter()`; the Silero model
+   (`SileroModel.load(models_dir)` in `asyncio.to_thread`, after `_load_vad` verified the file; kept on
+   `VadStatus.model`) + one `VadExecutor(settings.media_vad_threads)` per process. The usage recorder stays None
+   (metering arrives with PostCallWorkflow/P05-T18 — check `va_llm.metering` for an existing recorder first; if a
+   Redis/DB recorder exists, wire it).
+2. Per call, `CallRuntime.__call__(session) -> SessionEnd` (a `SessionBody`):
+   a. refuse non-task runners (`context.config.runner_type != "task"` → log `media.runner_unsupported`, return
+      `SessionEnd("ended", "error", "error")`; pathway/persona/agent Brains arrive in phases 07/13);
+   b. org settings `reader.get(org_id)` (None → error end, `media.org_missing`);
+   c. transport = `TelnyxMediaTransport(session.socket, session.start, on_rate_limited=...)` (existing ctor),
+      `fmt = leg_format(...)`;
+   d. `PipelineConfig` from `va_media.runtime_config.pipeline_config(context, settings, fmt=transport.fmt,
+      l16_byte_order=settings.telnyx_l16_byte_order)` — pure: interruptibility, block_interruptions,
+      interruption_threshold_ms, ivr_mode, max_duration_s = max_duration_min×60 (warning stays 10 s; clamp so
+      warning < max), max_duration_message/no_input_goodbye from OrgSettings (check field names in
+      `va_domain.org`), no_input_timeout_ms, max_reprompts, ignore_button_press, pronunciation = config
+      pronunciation_guide (rules satisfy `PronunciationRuleLike`; adapt if field names differ);
+   e. STT: `ElevenLabsRealtimeStt(SttConnection(ws_base, api_key, model_id=settings.elevenlabs_stt_model,
+      zero_retention=<HIPAA/zero-retention rule: settings.elevenlabs_zero_retention_available and org hipaa flag if
+      it exists, else False>, keyterms_encoding=, rotate_after_s=settings.elevenlabs_stt_session_rotate_s),
+      clock=, metrics=CatalogSttMetrics(metrics...))`, `open(stt_config(context))` where pure
+      `runtime_config.stt_config(context, fmt)` maps `lookup_language(config.language)` → `language_code` /
+      `include_language_detection` and `merge_keyterms([config.keywords]).` (realtime STT only supports
+      ulaw_8000 today; for 16 kHz legs use `pcm_16000` audio_format if `SttAudioFormat` allows, else keep the leg
+      PCMU-only and record it — hd_audio is P05-T15);
+   f. TTS: `TtsSocket(TtsConfig(ws_base, api_key, zero_retention=...), clock=, metrics=CatalogTtsMetrics(...))`,
+      `open(output_format=<"ulaw_8000" | "pcm_16000" from config.tts_format>, TtsVoice(provider_voice_id=,
+      model_id=settings.elevenlabs_tts_model, settings=config.voice_settings, language_code=mapping.tts_code))`;
+   g. VAD `SileroVad(model, executor)`; Brain `TaskBrain(context=, settings=org_settings, gateway=, counter=,
+      facts=facts_for_call(context, org_settings, sms_capable=False), clock=)` (no executor yet: tools phase 08;
+      sms_capable False until messaging wiring);
+   h. `CallPipeline(transport=, stt=, tts=, vad=, brain=, clock=, config=, latency=LatencyTracer(clock,
+      metrics=TurnMetrics(metrics, org_tier=<plan id or "default">), tracer=TurnTracer(...)))` — observer and
+      ActionHandler stay default (persistence T11, transfer T13, DTMF T10b); `result = await pipeline.run()`;
+   i. vendor sockets opened via one `AsyncExitStack` (`stt.close()`/`tts.close()` on every path, incl.
+      cancellation by the session race); any open failure (vendor error classes — check
+      `va_elevenlabs.stt_errors`/`tts_errors`) → log `media.vendor_open_failed` (vendor, detail type) and return
+      the error end (no audio is spoken: the error-phrase path needs TTS);
+   j. `transport.log_summary()` in `finally`.
+3. End mapping (pure `runtime_config.session_end(result)`): `transport_closed` → `STREAM_CLOSED`; `error` →
+   `SessionEnd("ended","error","error")`; every other reason → `SessionEnd("ended", reason,
+   va_db.call_states.ENDED_BY[reason])` (use the actual constant name at call_states.py:~60; unknown reason →
+   error end + log). `agent_hangup` is the pipeline's generic EndCall default — map to `agent_end_call`.
+4. `create_app(..., body: SessionBody | None = None, runtime: RuntimeFactory = open_runtime)`: when `body` is
+   None the lifespan enters `runtime(container, cfg, clock=, metrics=, vad=media.vad, models_dir=)` and uses the
+   yielded `CallRuntime` as the body; an injected `body` skips it entirely (all existing tests keep their bodies;
+   `media_helpers.media_app` keeps `body=read_until_stop` default; `test_health` real-container test and the
+   FakeMediaContainer observability test pass `body=read_until_stop` explicitly). `open_runtime` raises
+   `TypeError` when the container has no `database` (same rule as `db_context_loader`). `Container` gains nothing
+   new beyond what `open_runtime` builds itself (keep the container lean).
+5. Settings: NEW `packages/va_elevenlabs/src/va_elevenlabs/settings.py` `ElevenLabsSettings(BaseServiceSettings)`:
+   `elevenlabs_ws_base="ws://localhost:9200"`, `elevenlabs_api_key: SecretStr = SecretStr("sim-eleven-key")`,
+   `elevenlabs_tts_model="eleven_flash_v2_5"`, `elevenlabs_stt_model="scribe_v2_realtime"`,
+   `elevenlabs_zero_retention_available=False`, `elevenlabs_stt_session_rotate_s: float = 1500`,
+   `elevenlabs_stt_keyterms_encoding: KeytermsEncoding = "repeated"` (defaults = .env.example dev values).
+   `MediaSettings` adds `ElevenLabsSettings, LlmSettings, CryptoSettings` mixins and
+   `telnyx_l16_byte_order: Literal["big","little"] = "big"`. media-worker pyproject gains `va-elevenlabs`,
+   `va-llm`, `va-engine` (+ sources); `uv lock`. Production-settings tests may now need `kms_provider="aws",
+   aws_kms_key_id=...` (AGENTS gotcha).
+
+### Files
+- NEW `apps/media_worker/src/va_media/runtime.py` (`CallRuntime`, `RuntimeFactory`, `open_runtime`).
+- NEW `apps/media_worker/src/va_media/runtime_config.py` (pure: `pipeline_config`, `stt_config`, `tts_voice`,
+  `tts_output_format`, `session_end`).
+- `apps/media_worker/src/va_media/main.py` (body/runtime seams, VadStatus.model load), `vad_model.py`
+  (`VadStatus.model: SileroModel | None`), `settings.py`, `pyproject.toml`.
+- NEW `packages/va_elevenlabs/src/va_elevenlabs/settings.py` (+ export).
+- specs/07 §16 Decision, specs/02 §6 note; AGENTS.md line; module docstring of `va_media.main` updated.
+
+### Tests (apps/media_worker/tests)
+- `test_runtime_config.py` (pure): PipelineConfig mapping of every field incl. max_duration clamp and org
+  settings messages; stt_config language fixed (`babel-en`/`en`?) vs detection rows and keyterms; tts voice/format
+  for PCMU vs 16 kHz; session_end for transport_closed, error, agent_end_call, agent_hangup, max_duration,
+  no_input_timeout, unknown.
+- `test_runtime_sim.py` (wall clock, all sims on ONE realtime `SimState`): extend `sim_media.streamed_call` with
+  `vendors=True` → `running_sims(state, ports={"elevenlabs": 0, "llm": 0})`, media app built WITHOUT a body but
+  with a container factory that provides `redis` (fakeredis) + `database` — use a real migrated Postgres (copy the
+  module fixture pattern from `test_context_db.py`) with an org seeded so `OrgSettingsReader` finds it, OR inject
+  `runtime=` a test factory that builds `CallRuntime` with a fake `OrgSettingsSource` (`get` → `OrgSettings()`)
+  and the real sims (preferred: keep `CallRuntime` ctor keyword-only collaborators so tests build it directly;
+  `open_runtime` itself gets one DB-backed test). Flows: (1) scenario with caller `say` → FakeLLM rule reply →
+  sim records agent audio (assert the sim received agent media frames after the utterance and FakeLLM got one
+  request whose last user message is the said text); (2) FakeLLM rule returning `end_call` with final_message →
+  body returns `SessionEnd(ended, agent_end_call, agent)`; (3) FakeTelnyx hangup → `STREAM_CLOSED`; (4) armed
+  FakeElevenLabs STT fault / wrong api key on open → error end and both sockets closed; (5) non-task runner
+  context → error end without opening vendors. Use a task `CallContext` via `media_helpers.call_context(...)`
+  extended with config overrides (runner task, task text, provider_voice_id = `tts_helpers.VOICE_ID`).
+- `test_main.py`/`test_health.py`: lifespan with `runtime=` fake factory entered/exited once; injected body skips
+  it; `open_runtime` without database → TypeError; VAD model loaded onto VadStatus.
+- va_elevenlabs: `test_settings.py` defaults equal `.env.example`; env parsing.
+
+### Gates
+`make fmt lint typecheck placeholders test`, spec refs, jscpd, radon (no C+), pip-audit + pnpm audit, coverage ≥ 85 %
+(new modules ≥ 95 %). `make e2e`: not applicable (tests_e2e arrives P05-T17).
+
+### Risks
+- Wall-clock sim tests: keep conversations ≤ 2 turns; synchronise on events (sim records, FakeLLM request log),
+  never sleeps. Never mix the sim AcceleratedClock with real sockets (AGENTS P03-T03b).
+- The opener plays immediately (no greeting gate until T10b): tests should set `first_sentence` so the opener is a
+  static line and not an extra FakeLLM request, or account for it in `call_index` rules.
+- `TtsSocket.audio()`/`stt.events()` end → pipeline treats it as error; closing order in the exit stack must stop
+  the pipeline first (pipeline.run returns before sockets close).
+- OrgProviderStore needs `Envelope` → media now needs `LOCAL_MASTER_KEY` in local/test (settings_of must supply
+  it in tests that run `open_runtime`).
+- Coverage of `open_runtime`: one DB test + one fake-factory test.
+
+## Build P05-T10a (Builder, 2026-11-02)
+Implemented per plan: `va_media.runtime` (`CallRuntime` keyword-only collaborators incl. `vad_model` property,
+`RuntimeFactory`/`RuntimeDependencies`/`OrgSettingsSource` protocols, `open_runtime`: KMS envelope +
+OrgProviderStore + LlmGateway on one http client (prewarmed), OrgSettingsReader, default_counter, Silero model loaded
+only when VadStatus verified (load failure → vad.loaded False), VadExecutor) and pure `va_media.runtime_config`
+(pipeline_config, stt_config, stt_audio_format, tts_voice, tts_output_format, zero_retention, session_end,
+ERROR_END). `create_app(body=None, runtime=open_runtime)`; injected body skips the runtime. MediaSettings adds
+CryptoSettings + new `va_elevenlabs.settings.ElevenLabsSettings` + LlmSettings + `telnyx_l16_byte_order`.
+Deviations: org_tier label "unknown" (no plan id in context); zero retention = (privacy.zero_retention or
+hipaa_mode) and platform availability, unavailable → warning; no specs/02 change needed (table rows already list
+media). Tests: test_runtime_config (21), test_runtime (9), test_runtime_sim (6 flows over FakeTelnyx +
+FakeElevenLabs + FakeLLM, ~18 s wall clock), settings tests (media + va_elevenlabs). Gates: fmt/lint/typecheck/
+placeholders pass; make test 9556 passed / 7 skipped, coverage 99.16 % (runtime modules 100 %); spec refs 0;
+jscpd 0 clones; radon avg A on new modules; pip-audit clean; pnpm audit 3 moderate (< high). make e2e: n/a
+(tests_e2e arrives P05-T17).
+
+## Review P05-T10a (Reviewer, 2026-11-02)
+Approved. Re-ran lint/typecheck/placeholders (pass), make test 9556 passed / 7 skipped (99 %), spec refs 0, jscpd 0
+clones, radon no C+ in new modules. Checked: vendor open failures covered (InvalidStatus ⊂ InvalidHandshake is retried
+then wrapped as Stt/TtsUnavailableError), both sockets closed via exit stack, zero retention rule consistent with
+specs/23 (hipaa_mode cannot be enabled without availability), end mapping per specs/05 §9. Next: P05-T10b.

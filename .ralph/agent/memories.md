@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793593160-73e2
+> P05-T10a: va_media.runtime CallRuntime is the media session body (open_runtime entered by create_app only when no body= injected; tests outside media_app must pass body=read_until_stop). Runtime sim tests: one realtime_telnyx() SimState + running_sims(elevenlabs,llm) + streamed_call(state=,loader=FakeContextLoader(**cfg)); assert via state.elevenlabs.tts_requests generated_text (first record empty) and state.llm.requests since sim stream is gone after hangup
+<!-- tags: media, pipeline, testing | created: 2026-11-02 -->
+
 ### mem-1793591347-ba72
 > P05-T09c: TaskBrain = va_engine.task_runner (pure plan_round in task_tools, TransferRequest/PressButton BrainActions, ToolExecutor protocol); internal async generators typed AsyncGenerator + consumed via contextlib.aclosing so closed replies run finally promptly; tests task_helpers.served()/Sim.brain/drain; FakeLLM call_index rules separate tool rounds; harness(engine=brain, clock=RealtimeClock()); harness barge-in at balanced level needs >=900 ms speech (400 ms was flaky)
 <!-- tags: engine, pipeline, testing | created: 2026-11-02 -->

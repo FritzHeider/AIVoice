@@ -8,8 +8,10 @@ the listener stays open while calls remain (up to ``MEDIA_DRAIN_TIMEOUT_S`` of t
 sessions still running then end with ``end_reason='worker_lost'`` and the server exits after their cleanup (at
 most 10 s more). ``/ws/telnyx`` (``va_media.server``) attaches Telnyx media streams; the pod publishes its
 load to ``media:pods`` every 2 s (``va_media.pods``); one pod-wide pub/sub connection carries every call's
-control and carrier channels (``va_media.channels``). The lifespan refuses to start without
-``TELNYX_PUBLIC_KEY`` (``local`` falls back to the simulator's key file) or ``STREAM_TOKEN_SECRET``.
+control and carrier channels (``va_media.channels``); every attached call runs the pipeline of
+``va_media.runtime`` (ElevenLabs STT/TTS, Silero VAD, the LLM gateway, the task-mode Brain). The lifespan
+refuses to start without ``TELNYX_PUBLIC_KEY`` (``local`` falls back to the simulator's key file) or
+``STREAM_TOKEN_SECRET``.
 """
 
 from __future__ import annotations
@@ -53,11 +55,11 @@ from va_media.control import ControlHandler, DefaultControlHandler
 from va_media.drain import DrainState
 from va_media.loop_lag import LoopLagMonitor
 from va_media.pods import PodRegistry
+from va_media.runtime import RuntimeFactory, open_runtime
 from va_media.server import MediaAttach, telnyx_media_route
 from va_media.session import SessionBody
 from va_media.sessions import LiveSessions
 from va_media.settings import MediaSettings
-from va_media.stream import read_until_stop
 from va_media.vad_model import VadModelError, VadStatus, verify_vad_model
 from va_telnyx.signatures import load_public_key
 
@@ -157,7 +159,8 @@ def media_auth(settings: MediaSettings) -> MediaAuth:
 
 @dataclass(frozen=True, slots=True)
 class _Seams:
-    body: SessionBody
+    body: SessionBody | None
+    runtime: RuntimeFactory
     context_loader: ContextLoaderFactory
     control_handler: ControlHandler
 
@@ -170,6 +173,7 @@ def _attach(  # noqa: PLR0913 - collaborators built by the lifespan
     *,
     metrics: ServiceMetrics,
     seams: _Seams,
+    body: SessionBody,
 ) -> MediaAttach:
     return MediaAttach(
         auth=auth,
@@ -179,7 +183,7 @@ def _attach(  # noqa: PLR0913 - collaborators built by the lifespan
         pod_id=media.settings.pod_id,
         clock=media.clock,
         metrics=metrics,
-        body=seams.body,
+        body=body,
         loader=seams.context_loader(container, media.clock),
         hub=hub,
         sessions=media.sessions,
@@ -218,14 +222,17 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     monitor: LoopLagMonitor | None = None,
     stop: StopController | None = None,
     clock: Clock | None = None,
-    body: SessionBody = read_until_stop,
+    body: SessionBody | None = None,
+    runtime: RuntimeFactory = open_runtime,
     context_loader: ContextLoaderFactory = db_context_loader,
     control_handler: ControlHandler | None = None,
 ) -> Starlette:
     """Build the media worker app; a crashed background task requests ``stop`` with a failure exit.
 
-    ``body`` runs each attached call (default: read the stream until Telnyx stops it), ``context_loader``
-    builds the call context loader from the container, ``control_handler`` handles control messages.
+    ``body`` runs each attached call; without one the lifespan enters ``runtime`` (default
+    :func:`~va_media.runtime.open_runtime`: the pipeline with the vendor sockets, the LLM gateway and the
+    task-mode Brain) and uses the body it yields. ``context_loader`` builds the call context loader from the
+    container, ``control_handler`` handles control messages.
     """
     cfg = settings if settings is not None else MediaSettings()
     controller = stop if stop is not None else StopController()
@@ -245,6 +252,7 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     )
     seams = _Seams(
         body=body,
+        runtime=runtime,
         context_loader=context_loader,
         control_handler=control_handler if control_handler is not None else DefaultControlHandler(),
     )
@@ -252,12 +260,24 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         auth = media_auth(cfg)
-        async with service_scope(
-            app.state, cfg, container_factory, version=__version__, init_observability=init_observability
-        ) as container:
+        async with (
+            service_scope(
+                app.state, cfg, container_factory, version=__version__, init_observability=init_observability
+            ) as container,
+            AsyncExitStack() as stack,
+        ):
             await _load_vad(media.vad, models_dir)
+            body_of_call = seams.body
+            if body_of_call is None:
+                body_of_call = await stack.enter_async_context(
+                    seams.runtime(
+                        container, cfg, clock=app_clock, metrics=metrics, vad=media.vad, models_dir=models_dir
+                    )
+                )
             hub = ChannelHub(container.redis, app_clock)
-            app.state.media_attach = _attach(media, auth, container, hub, metrics=metrics, seams=seams)
+            app.state.media_attach = _attach(
+                media, auth, container, hub, metrics=metrics, seams=seams, body=body_of_call
+            )
             pods = PodRegistry(
                 container.redis, cfg.pod_id, calls=media.registry, drain=media.drain, clock=app_clock
             )

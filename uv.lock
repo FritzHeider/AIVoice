@@ -2996,6 +2996,9 @@ dependencies = [
     { name = "va-common" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-elevenlabs" },
+    { name = "va-engine" },
+    { name = "va-llm" },
     { name = "va-telnyx" },
     { name = "va-voice" },
 ]
@@ -3008,6 +3011,9 @@ requires-dist = [
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-elevenlabs", editable = "packages/va_elevenlabs" },
+    { name = "va-engine", editable = "packages/va_engine" },
+    { name = "va-llm", editable = "packages/va_llm" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
     { name = "va-voice", editable = "packages/va_voice" },
 ]

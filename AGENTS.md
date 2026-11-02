@@ -1285,3 +1285,14 @@ Grafana 3001
   `pipeline_harness.harness(engine=brain, clock=RealtimeClock())` runs a real Brain (then wait on
   `h.observer.user_turns`, not `h.brain`); a harness barge-in at the default level needs ≥ 900 ms of caller speech
   (or ≥ 500 ms with two content words in the partial).
+- 2026-11-02 (P05-T10a): every attached call runs `va_media.runtime.CallRuntime` (rules: specs/07 §16 Decision
+  P05-T10a); the lifespan enters `create_app(runtime=open_runtime)` only when no `body=` is injected, so any test
+  that builds the media app without `media_helpers.media_app` must pass `body=read_until_stop` (or a fake
+  `runtime=` factory) or the lifespan needs `LOCAL_MASTER_KEY` and a real `database`. Pure context → pipeline/STT/TTS
+  mapping is `va_media.runtime_config`; `MediaSettings` now mixes in `CryptoSettings`, `ElevenLabsSettings`
+  (`va_elevenlabs.settings`) and `LlmSettings`. End-to-end runtime tests (`apps/media_worker/tests/test_runtime_sim.py`):
+  one `sim_media.realtime_telnyx()` state serves FakeTelnyx (in-process) plus `running_sims(state, ports={"elevenlabs":
+  0, "llm": 0})`, `streamed_call(..., state=, loader=FakeContextLoader(**config_overrides))`, scenarios matched on
+  `to: CALLEE`; assert on `state.elevenlabs.tts_requests[*].generated_text` (the socket's own record is empty) and
+  `state.llm.requests` — the sim stream object is gone once the call hung up. Real Silero model path in tests:
+  `Path(__file__).resolve().parents[3] / "models"` (the `models_dir` fixture holds fake bytes).

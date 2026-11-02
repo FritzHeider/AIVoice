@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from media_helpers import MediaKeys, media_app, served_media, stream_query
+from media_helpers import FakeContextLoader, MediaKeys, media_app, served_media, stream_query
 from sim_helpers import LATENCIES
 from starlette.applications import Starlette
 from telnyx_helpers import VOICE_URL, RecordingTransport, create_app, dial, telnyx_client
@@ -60,15 +60,24 @@ class StreamedCall:
 
 
 @asynccontextmanager
-async def streamed_call(models_dir: Path, body: Any, **dial_overrides: Any) -> AsyncIterator[StreamedCall]:
-    """Dial a FakeTelnyx call whose media stream attaches to a media worker running ``body``."""
-    state = realtime_telnyx()
+async def streamed_call(
+    models_dir: Path,
+    body: Any,
+    *,
+    state: SimState | None = None,
+    loader: FakeContextLoader | None = None,
+    **dial_overrides: Any,
+) -> AsyncIterator[StreamedCall]:
+    """Dial a FakeTelnyx call whose media stream attaches to a media worker running ``body`` (``state``: a
+    wall-clock sim state shared with other simulators; ``loader``: the call context source)."""
+    state = state if state is not None else realtime_telnyx()
     keys = MediaKeys()  # the stream token secret; FakeTelnyx signs the handshake with its own key
     port = free_port()
     app = media_app(
         models_dir,
         keys=keys,
         body=body,
+        loader=loader,
         media_public_host=f"127.0.0.1:{port}",
         telnyx_public_key=state.signing_key.public_key_b64,
     )

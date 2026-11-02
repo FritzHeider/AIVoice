@@ -10,6 +10,9 @@ dependencies = [
     "va-common",
     "va-db",
     "va-domain",
+    "va-elevenlabs",
+    "va-engine",
+    "va-llm",
     "va-telnyx",
     "va-voice",
 ]
@@ -25,5 +28,8 @@ module-name = "va_media"
 va-common = { workspace = true }
 va-db = { workspace = true }
 va-domain = { workspace = true }
+va-elevenlabs = { workspace = true }
+va-engine = { workspace = true }
+va-llm = { workspace = true }
 va-telnyx = { workspace = true }
 va-voice = { workspace = true }
