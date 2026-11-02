@@ -22,9 +22,17 @@ from va_common.nanp import npa, same_state
 from va_db.models import NumberPoolMember, PhoneNumber
 from va_domain.call_resolution import MergedParameters
 from va_domain.org import OrgSettings
-from va_domain.phone import InvalidPhoneNumberError, normalize_e164
+from va_domain.phone import DEFAULT_REGION, InvalidPhoneNumberError, normalize_e164
 
-__all__ = ["CallerId", "Candidate", "Destination", "local_order", "parse_destination", "select_caller_id"]
+__all__ = [
+    "CallerId",
+    "Candidate",
+    "Destination",
+    "inbound_destination",
+    "local_order",
+    "parse_destination",
+    "select_caller_id",
+]
 
 _PHONE_INVALID: Final = "phone_number is not a valid, dialable phone number."
 _FROM_INVALID: Final = "`from` must be an active voice-capable number of this organization."
@@ -45,7 +53,10 @@ class Candidate:
 
 @dataclass(frozen=True, slots=True)
 class Destination:
-    """The destination in E.164 and its ISO region (`None` for non-geographic numbers)."""
+    """The destination in E.164 and its ISO region (`None` for non-geographic numbers).
+
+    An inbound caller that is not a dialable number keeps its raw value in `e164` (`inbound_destination`).
+    """
 
     e164: str
     region: str | None
@@ -63,8 +74,25 @@ def parse_destination(phone_number: str, country: str) -> Destination:
         e164 = normalize_e164(phone_number, country)
     except InvalidPhoneNumberError as exc:
         raise AppError("INVALID_PHONE_NUMBER", _PHONE_INVALID, field="phone_number") from exc
+    return Destination(e164=e164, region=_region(e164))
+
+
+def _region(e164: str) -> str | None:
     region = phonenumbers.region_code_for_number(phonenumbers.parse(e164))
-    return Destination(e164=e164, region=region if region and region != "001" else None)
+    return region if region and region != "001" else None
+
+
+def inbound_destination(caller: str, called: str) -> Destination:
+    """The inbound caller as the call's `phone_number` (specs/16 §4 Decision P05-T12a).
+
+    The caller is normalized with the called number's region; a caller that is not a dialable number
+    (`anonymous`, `restricted`, an unparseable string) is kept as Telnyx sent it, with no region.
+    """
+    try:
+        e164 = normalize_e164(caller, _region(called) or DEFAULT_REGION)
+    except InvalidPhoneNumberError:
+        return Destination(e164=caller, region=None)
+    return Destination(e164=e164, region=_region(e164))
 
 
 def local_order(candidates: Sequence[Candidate], destination: str) -> list[Candidate]:

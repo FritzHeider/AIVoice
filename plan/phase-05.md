@@ -150,7 +150,7 @@
   - Deliverables: `va_engine.task_runner.TaskBrain` implementing `va_voice.pipeline.Brain` (`va_engine.models.results` BrainAction subclasses, templated `first_sentence` opener, streamed replies through `LlmGateway.stream_dialogue` with call temperature/max_tokens/model, up to 3 tool rounds, `end_call` → `EndCall`, `transfer_call` → `TransferRequest` BrainAction, `press_button` → `PressButton` BrainAction, invalid-argument round, barge-in truncation of history, `call.turn`-ready `EngineState`)
   - Acceptance: va_voice pipeline harness tests with a FakeLLM-backed gateway and rules covering a plain reply, end_call with and without final_message, transfer_call by label and default, press_button, invalid arguments, interruption truncation.
 
-- [ ] P05-T10 Greeting, AMD, voicemail actions, IVR mode (split into P05-T10a–f below; tick when all six are ticked)
+- [x] P05-T10 Greeting, AMD, voicemail actions, IVR mode (split into P05-T10a–f below; tick when all six are ticked) — P05-T10a–f all ticked (4a60f42)
   - Spec refs: specs/05-calls-api.md (wait_for_greeting, voicemail object, ivr_mode/amd, retry); specs/07-media-pipeline.md (wait_for_greeting, first_sentence pre-render); specs/06-telephony-telnyx.md (AMD config, premium results); specs/10-llm-gateway.md (voicemail/IVR classifier prompt)
   - Depends on: P05-T08, P05-T09
   - Deliverables: greeting state machine, AMD result handling, `voicemail.action` hangup/leave_message/leave_message_and_sms/ignore (beep wait via `call.machine.premium.greeting.ended`), `sensitive` LLM detection, IVR mode overrides, voicemail SMS send via va_telnyx messaging
@@ -220,7 +220,26 @@
   - Spec refs: specs/01-architecture.md §2 (inbound); specs/06-telephony-telnyx.md (inbound routing algorithm); specs/16-phone-numbers.md §4 (InboundConfig model)
   - Depends on: P05-T02, P05-T06
   - Deliverables: number lookup (system repo), reject/transfer/maintenance logic, call row + context creation with 1.5 s inline budget, `answer` with stream params, `InboundConfig` model (full API arrives in phase 10)
+  - Split (2026-11-02, Planner): P05-T12a–c below; tick when all three are ticked.
   - Acceptance: e2e inbound_basic passes; unknown number rejected; suspended org with fallback transfers.
+
+- [x] P05-T12a InboundConfig model and inbound call resolution through the shared Send Call loader — va_domain.numbers.InboundConfig + call_resolution.inbound_request, loaders moved to va_db.call_inputs (load_inbound_inputs), OrgSettings.default_inbound_prompt; make test 10162 passed 7 skipped 99.13 %, lint/typecheck/placeholders/spec refs pass, jscpd 0, radon -n C empty
+  - Spec refs: specs/16-phone-numbers.md §4; specs/06-telephony-telnyx.md §7 steps 6, 8; specs/05-calls-api.md §4.1 steps 5-8, §4.3; specs/04 §7 (OrgSettings)
+  - Depends on: P05-T03c
+  - Deliverables: `va_domain.numbers.InboundConfig` (every §4 field, `extra="forbid"`, runner rule) + `Maintenance`/`maintenance_active`; `OrgSettings.default_inbound_prompt`; `va_domain.call_resolution.inbound.inbound_request(config, caller=, called=, org_name=)` → `SendCallRequest`; the runner/ref/caller-ID loaders moved from `va_api.services` into `va_db.call_inputs` (api behaviour unchanged) plus `load_inbound_inputs` (caller ID fixed to the called number, BYO account from the number)
+  - Acceptance: model tests (valid + invalid per field, runner conflict, maintenance windows); mapping tests (prompt → task, default prompt, routing-only fields dropped, persona+pathway); Postgres tests resolving an inbound config with task/pathway/agent runners and a BYO number into a `SendCallConfig`; existing api Send Call tests unchanged and green.
+
+- [ ] P05-T12b Edge inbound routing decisions: reject and fallback transfer
+  - Spec refs: specs/06-telephony-telnyx.md §7 steps 1-7, §5 (`call.initiated`); specs/16 §4 (`fallback_number`, `maintenance`, `allowed_callers`, `blocked_callers`); specs/05 §9 (`inbound_rejected`); specs/24 (min attempt, concurrency); specs/23 (DNC)
+  - Depends on: P05-T12a
+  - Deliverables: `va_edge.routing` `InboundRouter` implementation wired into the default edge handlers: number lookup, allowed/blocked callers, org status, credits, DNC (`block_dnc_callers`), maintenance, concurrency cap; Telnyx `reject` (cause) / `transfer` to `fallback_number` with `command_id`; `telnyx_events.process_error` for each refusal; accepted calls handed to an accept seam (P05-T12c)
+  - Acceptance: unit/Postgres tests for every branch; FakeTelnyx `/sim/telnyx/inbound` contract tests for unknown number (rejected), suspended org with and without fallback, maintenance with fallback (transferred), blocked caller.
+
+- [ ] P05-T12c Inbound accept: call row, context, CallWorkflow inbound mode, answer with stream
+  - Spec refs: specs/06-telephony-telnyx.md §7 steps 8-11; specs/01 §2.2; specs/16 §4 (`maintenance.message`); specs/07 §3 (attach)
+  - Depends on: P05-T12b
+  - Deliverables: inbound call row (`direction='inbound'`, `ringing`) + primary leg + contact upsert, call context built inline within 1.5 s, `CallWorkflow` inbound mode (no dial; answer → conversation → end as outbound), Telnyx `answer` with stream params/recording, `command_id=answer-{call_id}`, maintenance message-only (answer, play, hang up)
+  - Acceptance: FakeTelnyx inbound call through the edge to a served media worker with FakeElevenLabs + FakeLLM holds a conversation and ends `completed`; ring-to-answer measured; maintenance message-only path; Temporal test for the inbound mode.
 
 - [ ] P05-T13 Cold transfer
   - Spec refs: specs/01-architecture.md §2 (transfers); specs/06-telephony-telnyx.md (cold transfer sequence); specs/05-calls-api.md (transfer_phone_number, transfer_list)

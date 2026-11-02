@@ -40,6 +40,7 @@ __all__ = [
     "check_references",
     "check_tools",
     "load_byo_account",
+    "load_number_account",
     "load_voice",
 ]
 
@@ -213,5 +214,21 @@ async def load_byo_account(
     if account is None or account.status == "deleted":
         raise AppError("INVALID_ENCRYPTED_KEY", _INVALID_KEY_MESSAGE)
     if account.status in _UNAVAILABLE_ACCOUNTS:
+        raise AppError("CARRIER_CONNECTION_ERROR", _CARRIER_MESSAGE)
+    return account
+
+
+async def load_number_account(
+    session: AsyncSession, org_id: uuid.UUID, account_id: uuid.UUID
+) -> TelnyxAccount:
+    """The BYO Telnyx account owning an inbound number (specs/16 §4 Decision P05-T12a).
+
+    A missing, deleted, pending, or failed account is `CARRIER_CONNECTION_ERROR`: there is no request key to
+    blame, the carrier connection itself is unusable.
+    """
+    account = await session.scalar(
+        select(TelnyxAccount).where(TelnyxAccount.id == account_id, TelnyxAccount.org_id == org_id)
+    )
+    if account is None or account.status == "deleted" or account.status in _UNAVAILABLE_ACCOUNTS:
         raise AppError("CARRIER_CONNECTION_ERROR", _CARRIER_MESSAGE)
     return account

@@ -1255,3 +1255,155 @@ Re-ran: lint, typecheck, placeholders (0), spec refs (0) pass; make test 9996 pa
 (logs/make_test_review2_p05t10f.log); test_call_workflow_retry.py 5× serial all pass. Finding 1 fixed (calls_of /
 retry_calls filter by workflow id, child scripted NO_RETRY, TIMER_STARTED by type, stop only if running);
 specs/19 §2 emitter updated. make e2e harness lands in P05-T17.
+
+## Plan P05-T12a — InboundConfig model and inbound resolution via the shared loader (Planner, 2026-11-02)
+P05-T10 ticked (a–f done). P05-T12 split into T12a (config + resolution), T12b (edge reject/fallback decisions),
+T12c (accept: row, context, inbound CallWorkflow, answer, maintenance message). This plan = T12a only. No edge,
+no Telnyx commands, no OpenAPI change (the inbound API is phase 10).
+
+### Design (decided — do not re-litigate)
+1. **`packages/va_domain/src/va_domain/numbers.py`** (new):
+   - `class Maintenance(BaseModel)` (`extra="forbid"`): `enabled: bool = False`, `starts_at: AwareDatetime | None`,
+     `ends_at: AwareDatetime | None`, `message: str | None` (1–1 000 chars). Validator: `starts_at <= ends_at` when
+     both set (`INVALID_INPUT` via ValueError message).
+   - `maintenance_active(m: Maintenance | None, now: datetime) -> bool`: `enabled` and `starts_at <= now` (if set)
+     and `now <= ends_at` (if set); naive `now` → `ValueError`.
+   - `class InboundConfig(CallParameters-independent BaseModel)` with EVERY specs/16 §4 field, `extra="forbid"`,
+     `str_strip_whitespace=True`, `populate_by_name=True`. Reuse the Send Call field types wherever the name exists
+     in `SendCallRequest`/`CallParameters` (import the Annotated aliases / nested models from `va_domain.calls` and
+     `va_domain.calls.parts`/`tools`; do NOT redefine constraints that already exist — jscpd must stay 0). Inbound-
+     only fields: `prompt` (1–16 000, see Decision below), `fallback_number`/`allowed_callers`/`blocked_callers`
+     (E.164 validated with `va_domain.phone.normalize_e164(value, None)` must equal the input, i.e. stored as
+     E.164; list ≤ 1 000 entries), `maintenance: Maintenance = Maintenance()`, `block_dnc_callers: bool = False`,
+     `byo_original_connection_id: str | None` (internal). Defaults per the §4 table only where the table states a
+     non-null default AND Send Call's own default differs — otherwise `None` so the resolver's precedence applies
+     (inbound config is the request layer: an unset field must not override org defaults). Runner rule as a
+     `model_validator`: more than one of `prompt`/`pathway_id`/`agent_id` → error "At most one of prompt,
+     pathway_id, agent_id may be set." ; `persona_id` with `prompt` or `agent_id` → same message family (persona may
+     combine only with pathway_id, mirroring `SendCallRequest.check_rules` RUNNER_CONFLICT logic — call/reuse it if
+     it can be reused on the mapped request instead; pick one place, no duplicate rule code).
+   - `ROUTING_FIELDS: Final = frozenset({"fallback_number", "maintenance", "allowed_callers", "blocked_callers",
+     "block_dnc_callers", "byo_original_connection_id"})` — inbound-only, never part of the call request.
+   - `load_inbound_config(stored: Mapping[str, Any]) -> InboundConfig` (validates `phone_numbers.inbound_config`;
+     raises `InboundConfigError(ValueError)` with the pydantic field path via `va_domain.org.field_path`).
+2. **`OrgSettings.default_inbound_prompt`**: `str` 1–16 000, default
+   `"You are a helpful receptionist for {{org_name}}. Take a message."`; add the row to the specs/04 §7 table and
+   whatever per-key validation note list the §7 Decision keeps (grep for `default_voice` 1–100 there). Check
+   `test_org_settings*`/OpenAPI examples: `OrgSettings` appears in OpenAPI → run `make openapi` + both `gen:api`
+   if the schema changes (it will: new property) and commit `openapi/*.json` + `schema.d.ts`.
+3. **`packages/va_domain/src/va_domain/call_resolution/inbound.py`** (new, export from the package `__init__`):
+   `inbound_request(config: InboundConfig, *, caller: str, called: str, org: OrgSettings, org_name: str)
+   -> SendCallRequest`:
+   - body = `config.model_dump(exclude_unset=True, exclude=ROUTING_FIELDS, by_alias=True)`; `prompt` → `task`;
+   - no runner (`prompt`/`pathway_id`/`agent_id`/`persona_id` all unset) → `task = org.default_inbound_prompt`
+     with `{{org_name}}` substituted by plain `str.replace` (no va_engine import; the remaining template variables
+     render at call time as for any task);
+   - `phone_number = caller`, `from = called`; build with `SendCallRequest.model_validate(body)` and run
+     `check_rules()`; pydantic errors → `CallRequestError("INVALID_INPUT", msg, field=field_path(loc))` (same as
+     api parsing does — reuse the existing helper if one exists in va_domain.calls).
+   - `caller` that is not a dialable number (Telnyx sends `anonymous`/`restricted`/digits without `+`): keep
+     `phone_number` as given if `normalize_e164(caller, region_of(called))` fails — see loader below.
+4. **Move the loaders** (pure move + import rewrites; behaviour unchanged) from `apps/api/src/va_api/services/` to
+   a new subpackage `packages/va_db/src/va_db/call_inputs/`: `call_runners.py` → `runners.py`, `call_pathways.py`
+   → `pathways.py`, `call_refs.py` → `refs.py`, `caller_id.py` → `caller_id.py`; `ByoAccount`, `CallInputs`,
+   `resolve_inputs` and a new ctx-free `load_call_inputs(session, org_id, request, *, plan_id, org, encrypted_key,
+   models)` (steps 5-8, exactly today's body minus `check_call_permissions`) into `va_db/call_inputs/loader.py`.
+   `va_db/call_inputs/__init__.py` stays import-free (import-cycle safety, like `va_workflows.activities`).
+   va_db pyproject gains `phonenumbers` (same pin as va_domain/api). `va_api.services.call_inputs` keeps
+   `check_call_permissions`, `app_error`, and `load_call_inputs(session, ctx, request, ...)` as a thin wrapper
+   (permissions → shared loader with `ctx.org_id`/`ctx.plan_id`); `call_dispatch` and api tests import from the
+   new locations (update `apps/api/tests/test_call_inputs_unit.py`, `test_call_inputs_refs_db.py`,
+   `tests/support/call_input_rows.py`). Delete the old api modules (no re-export shims). Check
+   `test_model_imports.py`-style acyclic import tests in va_db still pass (call_inputs imports models, not the
+   other way round).
+5. **`load_inbound_inputs(session, org_id, request, *, plan_id, org, number: InboundNumber, models) -> CallInputs`**
+   in `va_db/call_inputs/loader.py`, `InboundNumber` frozen dataclass `(phone_number_id, e164, telnyx_account_id)`:
+   runner → merge → voice → tools → references → plan features (shared helper with `load_call_inputs`, no copy);
+   no `select_caller_id`: `from_number = number.e164`, `phone_number_id = number.phone_number_id`; destination =
+   caller normalized with the called number's region (`phonenumbers` region of `number.e164`), unparseable →
+   raw caller kept, `country=None`; BYO: `number.telnyx_account_id` set → load that `TelnyxAccount` (tenant
+   session, not deleted) → `ByoAccount(id, call_control_app_id)`; missing row → `AppError("NOT_FOUND")`-style error
+   already used by `load_byo_account` (reuse its message/code). Check `ResolvedRefs.phone_number` /
+   `resolve_call_config` accept a non-E.164 phone_number for inbound; if `resolve_call_config` re-validates E.164,
+   add an explicit `direction`-free escape only if needed and record it in the Decision.
+6. **Spec Decisions (same commit)**:
+   - specs/16 §4: `> Decision (2026-11-02): InboundConfig (P05-T12a).` — `va_domain.numbers.InboundConfig`;
+     `prompt` capped at 16 000 (the Send Call `task` cap, since the same resolver runs; the table's 20 000 is
+     superseded); unset fields are absent (request-layer precedence, table defaults come from the lower layers);
+     routing-only fields; `block_dnc_callers` added (bool, false; specs/06 §7 step 5); `maintenance` uses this §4
+     shape (`starts_at`/`ends_at`/`message`), superseding the `windows` form in specs/06 §7 step 6 (add a pointer
+     there too); no runner → `default_inbound_prompt` with `{{org_name}}`; anonymous callers kept raw.
+   - specs/05 §4.1 or §4.2 Decision: the loader now lives in `va_db.call_inputs` and is shared by the edge.
+   - specs/04 §7 row for `default_inbound_prompt`.
+
+### Tests (all must exist and pass)
+- `packages/va_domain/tests/test_inbound_config.py`: one valid + one invalid case per InboundConfig field
+  (parametrized table; invalid E.164 in fallback/allowed/blocked, prompt too long, unknown key forbidden,
+  interruptibility 5, max_duration 0/241, maintenance starts > ends, bad pathway_version, etc.); runner conflicts
+  (prompt+pathway, prompt+agent, pathway+agent, persona+prompt) and allowed combo persona+pathway;
+  `load_inbound_config({})` defaults; `load_inbound_config` error carries the field path; `maintenance_active` table
+  (disabled, open-ended both sides, inside, before, after, boundaries inclusive, naive now → ValueError).
+- `packages/va_domain/tests/test_inbound_request.py`: prompt → task; no runner → default prompt with org name
+  (and a custom `default_inbound_prompt` from `load_settings`); routing fields absent from the request;
+  phone_number/from set; unset fields stay unset (`explicit_fields()` excludes e.g. `voice` so org default wins
+  through `merge_layers`); persona+pathway passes `check_rules`; an invalid stored value surfaces as
+  `CallRequestError` with `field`.
+- `packages/va_db/tests/test_inbound_inputs_db.py` (Postgres; reuse the api `call_input_rows.Seed` pattern — if
+  it is api-only, add the minimal builders to `packages/va_db/tests/support/` via `tenant_rows.RowFactory`, do not
+  copy the api helper): task-runner inbound config → `resolve_inputs` gives a `SendCallConfig` with
+  `phone_number` = caller E.164, `from` = called number, `task` = prompt, org default voice; pathway runner
+  (production version) resolves `pathway_id`/version; agent runner; number with `telnyx_account_id` → `ByoAccount`
+  with the account's `call_control_app_id`; anonymous caller kept raw, `country` None; unknown voice / missing
+  tool reference raise the same `AppError` codes as Send Call.
+- Existing api tests (`test_call_inputs_unit.py`, `test_call_inputs_refs_db.py`, Send Call route tests, resolved
+  snapshots) pass with only import changes.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make openapi` +
+`corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api` (OrgSettings schema
+changes) and `make test-ts`; `make test` in the background (`make test > logs/make_test_p05t12a.log 2>&1`) with a
+heartbeat Monitor; coverage ≥ 85 % per package, new modules ~100 %; `npx --yes jscpd@4 --silent` 0 clones;
+`uvx radon cc -s -n C` on touched src prints nothing; audit (pip-audit + pnpm audit). `make e2e`: harness lands in
+P05-T17 — say so. AGENTS.md: `va_domain.numbers.InboundConfig`, `inbound_request`, `va_db.call_inputs` (loader
+location moved out of va_api), `load_inbound_inputs`.
+
+### Risks
+- The move touches api import paths used by many tests: grep `va_api.services.(call_runners|call_pathways|
+  call_refs|caller_id)` everywhere (also `mypy` files list, jscpd ignore markers, `scripts/`).
+- `OrgSettings` schema change → OpenAPI + TS drift; settings PATCH tests listing every key may need the new key.
+- `SendCallRequest` `phone_number` validation may normalize/reject `anonymous`; verify and handle in the loader
+  (pass the raw caller only after confirming the model accepts it; else use the Decision's raw-keep rule at the
+  `ResolvedRefs` level).
+- InboundConfig defaults: setting non-null defaults (e.g. `interruptibility=2`) would make them "explicitly set"
+  and override org defaults — keep them `None`/unset; tests assert `exclude_unset` behaviour.
+
+## Build P05-T12a (Builder, 2026-11-02)
+- `va_domain.numbers.InboundConfig` SUBCLASSES `CallParameters` (same precedent as `call_resolution.layers.CallDefaults`)
+  instead of re-declaring every field: zero constraint duplication. extra=forbid; `OUTBOUND_ONLY_FIELDS` (from,
+  dialing_strategy, local/geospatial_dialing, country, start_time, retry, precall_dtmf_sequence, external_id,
+  test_call, test_mode) rejected by a before-validator; runner fields + `max_duration` ge=1 + routing fields added.
+  Runner rule as model_validator (field None). `load_inbound_config` → `InboundConfigError(message, field)`.
+- `OrgSettings.default_inbound_prompt` (+ `DEFAULT_INBOUND_PROMPT`), specs/04 §7 row + value rule; OpenAPI + both
+  schema.d.ts regenerated.
+- `va_domain.call_resolution.inbound` (`inbound_request`, `default_inbound_prompt`). Note: merge_layers does not
+  apply the org default voice — the loader's `load_voice` does (test asserts `merged.voice is None`).
+- Loaders git-mv'd to `va_db.call_inputs` (runners/pathways/refs/caller_id) + `loader.py` (shared `_load_common`,
+  `load_call_inputs` ctx-free, `load_inbound_inputs`, `InboundNumber`, `resolve_inputs`, `domain_errors`). Added
+  `caller_id.inbound_destination`, `refs.load_number_account` (missing/deleted/pending/error → 502
+  CARRIER_CONNECTION_ERROR — Decision; INVALID_ENCRYPTED_KEY would blame a non-existent header). va_db gains
+  `phonenumbers>=9`. api `call_inputs` keeps `check_call_permissions` + thin wrapper.
+- Test support: generic Seed moved to `packages/va_db/tests/support/call_input_seed.py`; api `call_input_rows.Seed`
+  subclasses it (load/fails/make_ctx).
+- Decisions: specs/16 §4 (InboundConfig), specs/05 §4.2 (shared loader), specs/06 §7 step 6 pointer; caller-ID
+  Decision module path updated.
+Gates: fmt pass; lint pass; typecheck pass (mypy 1187 files + TS); placeholders 0; spec refs 0; make openapi + both
+gen:api; make test-ts pass (22/52/48); make test 10161 passed, 7 skipped, 99.13 %, exit 0
+(logs/make_test_p05t12a.log); new modules 100 % (numbers.py branch closed afterwards with one more test, 138 pass);
+jscpd 0 clones; radon -n C empty; pip-audit none; pnpm audit 3 moderate / 0 high. make e2e: harness lands in P05-T17
+(no call flow change here: config/loader only).
+
+## Review P05-T12a (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint, typecheck (py + TS), placeholders 0, spec refs 0, jscpd 0 clones, radon -n C empty; make test 10162
+passed, 7 skipped, 99.13 %, exit 0 (logs/make_test_review_p05t12a.log). Diff matches specs/16 §4 table + runner rule;
+loader move complete (no stale va_api.services imports); anonymous callers kept raw; BYO account errors 502
+CARRIER_CONNECTION_ERROR; Decisions in specs/04/05/06/16. make e2e harness lands in P05-T17.

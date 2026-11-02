@@ -33,6 +33,7 @@ from va_domain.voices import VoiceSettings
 
 __all__ = [
     "COMPLIANCE_PATHS",
+    "DEFAULT_INBOUND_PROMPT",
     "SETTINGS_GROUPS",
     "AnalysisSettings",
     "ComplianceSettings",
@@ -57,6 +58,7 @@ __all__ = [
 ]
 
 _MAX_URL_LENGTH = 2048
+DEFAULT_INBOUND_PROMPT: Final = "You are a helpful receptionist for {{org_name}}. Take a message."
 _MAX_CALLING_WINDOWS = 14
 
 
@@ -335,6 +337,10 @@ class OrgSettings(BaseModel):
     default_webhook: HttpUrl | None = Field(default=None, description="Applied when a call omits `webhook`.")
     default_webhook_events: Annotated[list[EventName], AfterValidator(unique_items)] = Field(
         default_factory=list, max_length=50, description="Default `webhook_events`."
+    )
+    default_inbound_prompt: Annotated[str, StringConstraints(min_length=1, max_length=16_000)] = Field(
+        default=DEFAULT_INBOUND_PROMPT,
+        description="Prompt of an inbound number without a runner; `{{org_name}}` is the org name.",
     )
     default_voice_id: uuid.UUID | None = Field(
         default=None, description="Default voice by id; takes precedence over `default_voice`."

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793618340-c1ba
+> P05-T12a: InboundConfig subclasses CallParameters (extra=forbid, OUTBOUND_ONLY_FIELDS rejected) like CallDefaults; Send Call loaders moved to va_db.call_inputs (loader.load_call_inputs ctx-free, load_inbound_inputs); merge_layers never applies org default voice (load_voice does); shared loader row builders packages/va_db/tests/support/call_input_seed.Seed
+<!-- tags: calls, domain, testing | created: 2026-11-02 -->
+
 ### mem-1793610108-0c52
 > P05-T10c: CallPipeline.take_over(Takeover) seam (sync, first end wins, before-run OK -> opener skipped); VoicemailMonitor must bind+start(verdict) synchronously before pipeline.run (a never-suspending before_opener otherwise lets the opener start); default resolved config is premium AMD -> media tests seed answered_by=human or relay FakeTelnyx AMD via sim_media.EdgeRelay; YAML flow scenario say texts with commas need quotes
 <!-- tags: media, pipeline, testing | created: 2026-11-02 -->

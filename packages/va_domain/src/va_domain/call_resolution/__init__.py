@@ -4,6 +4,7 @@
 loaded, `resolve_call_config` produces the `SendCallConfig` persisted in `calls.config`.
 """
 
+from va_domain.call_resolution.inbound import default_inbound_prompt, inbound_request
 from va_domain.call_resolution.inputs import (
     AgentRunner,
     CallResolution,
@@ -44,6 +45,8 @@ __all__ = [
     "RunnerInputs",
     "TaskRunner",
     "check_call_defaults",
+    "default_inbound_prompt",
+    "inbound_request",
     "merge_layers",
     "org_layer",
     "parse_layer",

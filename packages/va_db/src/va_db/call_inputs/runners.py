@@ -15,7 +15,8 @@ from typing import Any, Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.services.call_pathways import (
+from va_common.errors import AppError
+from va_db.call_inputs.pathways import (
     AGENT_PATHWAY_FIELDS,
     PERSONA_CONFIG_FIELDS,
     REQUEST_PATHWAY_FIELDS,
@@ -25,7 +26,6 @@ from va_api.services.call_pathways import (
     draft_requires_test_call,
     load_pathway,
 )
-from va_common.errors import AppError
 from va_db.models import Agent, AgentVersion, Persona, PersonaVersion
 from va_domain.call_resolution import (
     AgentRunner,

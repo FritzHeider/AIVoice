@@ -2191,6 +2191,12 @@ export interface components {
              */
             default_guard_rails?: components["schemas"]["GuardRailConfig"][];
             /**
+             * Default Inbound Prompt
+             * @description Prompt of an inbound number without a runner; `{{org_name}}` is the org name.
+             * @default You are a helpful receptionist for {{org_name}}. Take a message.
+             */
+            default_inbound_prompt: string;
+            /**
              * Default Language
              * @description Default call `language`.
              * @default en

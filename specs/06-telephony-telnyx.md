@@ -426,6 +426,8 @@ Unknown `hangup_cause` values are stored verbatim and treated as "any other caus
 5. Platform blacklist / org DNC for the caller (`inbound_config.block_dnc_callers`, default false) → reject.
 6. Maintenance: `inbound_config.maintenance = {"enabled":bool,"windows":[{"start":"HH:MM","end":"HH:MM","days":[0-6],"timezone":tz}]}`
    active → transfer to fallback.
+   > Decision (2026-11-02): the `maintenance` object is the specs/16 §4 shape (`enabled`, `starts_at`, `ends_at`,
+   > `message`; `va_domain.numbers.maintenance_active`), not `windows` (specs/16 §4 Decision P05-T12a).
 7. Concurrency cap reached → if fallback → transfer; else `reject(cause="USER_BUSY")`.
 8. Build SendCallConfig from `inbound_config` (same resolver as outbound, runner from config) with
    `phone_number = from` (the caller), `from_number = to`.

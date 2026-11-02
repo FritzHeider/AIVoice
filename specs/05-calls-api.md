@@ -290,6 +290,13 @@ Max 5 `custom` (`400 GUARD_RAIL_LIMIT`); custom requires enterprise plan (`FEATU
 > `INVALID_ENCRYPTED_KEY`; `pending`/`error` → 502 `CARRIER_CONNECTION_ERROR`. Step 8: the destination is parsed
 > with the merged `country`; an unparseable number is 400 `INVALID_PHONE_NUMBER` field `phone_number`; caller ID per
 > specs/16 §6.2 Decision P05-T03c.
+>
+> Decision (2026-11-02): shared call input loader (P05-T12a). Steps 5-8 live in `va_db.call_inputs` (`runners`,
+> `pathways`, `refs`, `caller_id`, `loader`) so the API and the telephony edge share them:
+> `loader.load_call_inputs(session, org_id, request, *, plan_id, org, encrypted_key, models)` is steps 5-8 (no
+> principal), `va_api.services.call_inputs.load_call_inputs(session, ctx, ...)` adds step 4
+> (`check_call_permissions`) in front of it, and `loader.load_inbound_inputs(..., number=InboundNumber(...))` loads an
+> inbound call (specs/16 §4 Decision P05-T12a). Behaviour and error codes of Send Call are unchanged.
 
 ### 4.3 Config precedence (lowest → highest)
 

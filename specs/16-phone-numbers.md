@@ -190,6 +190,31 @@ Runner rule: at most one of `prompt` / `pathway_id` / `agent_id`; `persona_id` m
 `pathway_id` (same precedence as Send Call). A number with no runner answers with the org's
 `settings.default_inbound_prompt` (default "You are a helpful receptionist for {{org_name}}. Take a message.").
 
+> Decision (2026-11-02): InboundConfig (P05-T12a). `va_domain.numbers.InboundConfig` subclasses the Send Call
+> parameter model (`CallParameters`, `extra="forbid"`) and adds the runner fields and the routing-only fields
+> (`ROUTING_FIELDS`: `fallback_number`, `maintenance`, `allowed_callers`, `blocked_callers`, `block_dnc_callers`,
+> `byo_original_connection_id`). Every Send Call parameter is accepted with its Send Call validation (also those the
+> table elides with "…", e.g. `voice_settings`, `max_tokens`), except `OUTBOUND_ONLY_FIELDS` (`from`,
+> `dialing_strategy`, `local_dialing`, `geospatial_dialing`, `country`, `start_time`, `retry`,
+> `precall_dtmf_sequence`, `external_id`, `test_call`, `test_mode`), which are `INVALID_INPUT` ("<name> cannot be set
+> on an inbound number."). `prompt` is capped at 16 000 characters (the Send Call `task` cap, since the same resolver
+> runs; the table's 20 000 is superseded); `max_duration` is 1–240 as in the table; `pathway_version` is an integer,
+> `production` or `staging`; `persona_version` is `production` or `draft`; caller lists hold at most 1 000 E.164
+> numbers (`fallback_number` and list entries must equal their `phonenumbers` E.164 form). The table defaults are
+> the effective defaults after resolution: only the keys that were set reach the request layer
+> (`va_domain.call_resolution.inbound_request`), so unset keys keep org and Send Call defaults (`language` therefore
+> defaults like Send Call, not to `en-US`). Runner rule messages: "At most one of prompt, pathway_id, agent_id may be
+> set." and "persona_id may only be combined with pathway_id." `inbound_request(config, caller=, called=, org=,
+> org_name=)` maps `prompt` → `task`, a config without runner → `default_inbound_prompt` with `{{org_name}}` replaced
+> (other variables render at call time), `phone_number` = the caller as Telnyx sent it, `from` = the called number.
+> `va_db.call_inputs.loader.load_inbound_inputs` runs the Send Call runner/voice/tool/reference/plan checks, takes the
+> caller ID from the number, normalizes the caller with the called number's region (a caller that is not a dialable
+> number, e.g. `anonymous`, is kept raw with no region), and loads the number's BYO account; a missing, deleted,
+> `pending` or `error` account is 502 `CARRIER_CONNECTION_ERROR`. `maintenance_active(m, now)` is true when `enabled`
+> and `starts_at <= now <= ends_at` (missing bound = open; `starts_at > ends_at` is rejected). The specs/06 §7 step 6
+> `windows` shape is superseded by this `maintenance` object; `block_dnc_callers` (bool, default false) is the
+> specs/06 §7 step 5 switch.
+
 ## 5. Inbound endpoints
 
 ### 5.1 `GET /v1/inbound`
@@ -265,7 +290,7 @@ toll-free requires verified toll-free status. Disabling: `messaging_profile_id: 
 - `{"type":"local"}` → choose from **all** org active voice numbers using `local_match`; add-on feature flag `local_presence`.
 - `{"type":"custom_pooling","pool_id":"…"}` → choose from the pool using the pool's strategy.
 
-> Decision (2026-11-01): caller-ID selection at Send Call (P05-T03c, `va_api.services.caller_id`). Candidates are the
+> Decision (2026-11-01): caller-ID selection at Send Call (P05-T03c, `va_db.call_inputs.caller_id` since P05-T12a). Candidates are the
 > org's numbers with `status='active'`, `deleted_at IS NULL` and `voice` in `capabilities`, on the platform account
 > (`telnyx_account_id IS NULL`) or, with `encrypted_key`, on that BYO account only. Order: explicit `from` (must be a
 > candidate, else 400 `INVALID_INPUT` field `from`; with `encrypted_key` `from` is required, same code and field) →

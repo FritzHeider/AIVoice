@@ -9,11 +9,11 @@ import pytest
 from call_input_rows import error_of, make_ctx, request_of
 
 from va_api.services.call_inputs import app_error, check_call_permissions
-from va_api.services.call_pathways import start_node_of
-from va_api.services.caller_id import Candidate, local_order, parse_destination
 from va_common.auth import KeyEnvironment
 from va_common.errors import AppError
 from va_common.settings import Environment
+from va_db.call_inputs.caller_id import Candidate, local_order, parse_destination
+from va_db.call_inputs.pathways import start_node_of
 from va_domain.calls import CallRequestError
 
 ORG = uuid.UUID("0192f5a1-7c3e-7d4a-9b1c-2f3e4d5c6e01")

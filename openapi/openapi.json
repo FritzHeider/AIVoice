@@ -2879,6 +2879,14 @@
             "title": "Default Guard Rails",
             "type": "array"
           },
+          "default_inbound_prompt": {
+            "default": "You are a helpful receptionist for {{org_name}}. Take a message.",
+            "description": "Prompt of an inbound number without a runner; `{{org_name}}` is the org name.",
+            "maxLength": 16000,
+            "minLength": 1,
+            "title": "Default Inbound Prompt",
+            "type": "string"
+          },
           "default_language": {
             "default": "en",
             "description": "Default call `language`.",

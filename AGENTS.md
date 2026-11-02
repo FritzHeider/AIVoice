@@ -1386,3 +1386,12 @@ Grafana 3001
   `TIMER_STARTED` duration from its history (find the event by type), then terminate it if still running. The
   child runs on the same worker and fakes: assert parent activities with `FakeCallActivities.calls_of(call_id)` /
   `retry_calls(call_id)` (filtered by workflow id) and script `retry=[plan, NO_RETRY]` so the child stops there.
+- 2026-11-02 (P05-T12a): inbound config = `va_domain.numbers` (`InboundConfig` subclasses `CallParameters`, extra
+  forbidden, `OUTBOUND_ONLY_FIELDS` rejected, `ROUTING_FIELDS`, `load_inbound_config` → `InboundConfigError(.field)`,
+  `Maintenance`/`maintenance_active`); its request layer is `va_domain.call_resolution.inbound_request(config,
+  caller=, called=, org=, org_name=)` (only set keys, `prompt` → `task`, no runner → `OrgSettings.default_inbound_prompt`).
+  The Send Call loaders moved from `va_api.services` to `va_db.call_inputs` (`runners`, `pathways`, `refs`,
+  `caller_id`, `loader`; package `__init__` import-free): `loader.load_call_inputs(session, org_id, request, plan_id=,
+  ...)` (steps 5-8), `loader.load_inbound_inputs(..., number=InboundNumber(...))`, `resolve_inputs`, `domain_errors`;
+  `va_api.services.call_inputs` only adds `check_call_permissions`. Loader row builders are
+  `packages/va_db/tests/support/call_input_seed.Seed` (the api `call_input_rows.Seed` subclasses it with `load`/`fails`).

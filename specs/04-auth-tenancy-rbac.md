@@ -755,6 +755,7 @@ defaults; `PATCH /v1/org` merges.
 | `default_webhook_events` | string[] | `[]` | |
 | `default_voice_id` | uuid \| null | null | Default voice by id (takes precedence over `default_voice` when set) |
 | `default_country` | ISO-3166 alpha-2 | `US` | Region used to parse non-E.164 numbers |
+| `default_inbound_prompt` | string 1–16 000 | `"You are a helpful receptionist for {{org_name}}. Take a message."` | Prompt of an inbound number without a runner (`16-phone-numbers.md` §4); `{{org_name}}` is replaced by the org name |
 | `call_defaults` | object (partial SendCallRequest, `05-calls-api.md`) | `{}` | Org-wide Send Call defaults applied below agent/persona defaults and above platform defaults |
 | `dial_timeout_s` | int 5–120 | 45 | Telnyx `timeout_secs` |
 | `transfer_caller_id_mode` | `agent_number` \| `original_caller` | `agent_number` | Caller ID presented to transfer targets |
@@ -843,7 +844,7 @@ override fields `base_url`, `api_key_ref`, `dialogue_model`, `router_model`, `an
 >    `GuardRailConfig` (`type` one of the five `23` §1.1 types, other keys kept as sent), at most 10, until
 >    `va_compliance.guard_rails.GuardRail` replaces it.
 > 4. Value rules: `timezone` must load with `zoneinfo.ZoneInfo` (the package ships `tzdata`); `default_language` 1–16
->    characters of letters, digits and `-`; `default_voice` 1–100 characters; `default_from_number` E.164
+>    characters of letters, digits and `-`; `default_voice` 1–100 characters; `default_inbound_prompt` 1–16 000 characters; `default_from_number` E.164
 >    `^\+[1-9][0-9]{1,14}$`; `blocked_prefixes` items `^\+[0-9]{1,15}$`, at most 200; country codes `^[A-Z]{2}$`
 >    (`allowed_countries` at most 250, unique); `default_webhook` an absolute http(s) URL of at most 2 048 characters,
 >    stored as sent (the scheme policy stays at webhook-send time, `19`); `llm.base_url` https only; `llm.api_key_ref`
