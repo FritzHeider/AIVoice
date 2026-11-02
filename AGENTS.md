@@ -1250,3 +1250,11 @@ Grafana 3001
   `context_loader=FakeContextLoader().factory` unless the container has a `database`. Drain waits on the
   injected clock (`registry.wait_idle(t, clock=)`, `LiveSessions.wait_idle`), so ManualClock drain tests
   `wait_for_sleep(MEDIA_DRAIN_TIMEOUT_S)` + `run_for`.
+- 2026-11-02 (P05-T08): the Telnyx media WS as a pipeline `Transport` = `va_media.transport.TelnyxMediaTransport(
+  session.socket, session.start, on_rate_limited=)` (`events()` once; `send_audio`/`send_mark`/`clear` serialized,
+  dropped after the stream ended; `leg_format(media_format)`; `log_summary()`); `MediaSocket.send_text` raises
+  `SocketClosedError`. Rules: specs/06 §8 Decision P05-T08. Tests: `media_helpers.FakeSocket.sent`/`send_gate`,
+  `media_msg`/`dtmf_msg`/`mark_msg`/`error_msg`; FakeTelnyx-to-media-worker calls via
+  `sim_media.streamed_call(models_dir, body, **dial_overrides)` (wall-clock sim; `StreamedCall.sim_call().stream.
+  session.received` counts what the sim got). `CallPipeline` runs over the transport with the va_voice
+  `pipeline_fakes` on an `AcceleratedClock` (`test_transport_pipeline.py`).

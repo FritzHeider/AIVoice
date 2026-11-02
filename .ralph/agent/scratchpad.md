@@ -2707,3 +2707,134 @@ awaited in cleanup, drain notice local + worker_lost on injected clock. Reviewer
 `call:{id}:control_ack:{msg_id}` row to the specs/03 §11 normative keyspace table. Non-blocking notes for later
 tasks: `stop` currently only ends the session (hangup arrives with the T11 end routine); `assert` used for type
 narrowing in `DbCallContextLoader.load`. Approved.
+
+## Plan P05-T08 — Telnyx media transport adapter (Planner, 2026-11-02)
+P05-T07 parent ticked (both subtasks done). T08 = the wire layer between the attached Telnyx media WS and the
+phase-04 `va_voice.pipeline.Transport` protocol. The pipeline already reorders (`InboundPath` owns the
+`ReorderBuffer`), decodes L16 with `PipelineConfig.l16_byte_order`, and `FrameMixer(wire_byte_order=)` encodes the
+outbound wire order, so the transport stays a codec-agnostic framing/protocol adapter.
+
+### Decisions (one block `> Decision (2026-11-02): Telnyx media transport (P05-T08).` under specs/06 §8 after the
+### error-code paragraph; one pointer line under specs/07 §15 (hd_audio) and one under specs/07 §5.1)
+1. `va_media.transport.TelnyxMediaTransport` implements `Transport` (+ `OutboundSink`) over the session's
+   `MediaSocket` after `start` was consumed by `wait_for_start`. Inbound (`events()`): `MediaFrame` →
+   `InboundAudio(chunk, payload)` unchanged (reordering happens in `InboundPath`; re-framing to 20 ms happens
+   downstream: STT batches, VAD windows, so the Telnyx chunk number stays the reorder key); `MediaDtmf` →
+   `InboundDtmf(digit)`; `MediaMark` → `MarkEcho(name)`; `MediaStop` → the iterator ends (`stop_received=True`);
+   peer close (`SocketClosedError`) → the iterator ends (`closed_by_peer=code`). `connected`, a repeated `start`,
+   and `UnknownMediaEvent` are ignored (debug log `media.event_ignored`, event name only).
+2. Frames dropped (each counted in `TransportStats`, warn-logged once per kind per call with the count at end):
+   `track` present and not `inbound` (only inbound frames on primary legs, specs/07 §5.1); empty payload; on a
+   16-bit leg (L16) an odd payload length (`invalid_media`). Malformed messages (`MediaProtocolError`) → warn
+   `media.protocol_error` (detail only, never the payload) and continue. DTMF digit values never logged.
+3. `error` frames: `100005` → `on_rate_limited()` callback (settable attribute, default no-op; the pipeline
+   wiring later points it at `OutboundAudio.rate_limited`), log warn `media.telnyx_rate_limited`; `100003`/`100004`
+   → error log `media.telnyx_error` (our bug: alert) and continue; others → warn `media.telnyx_error`, continue.
+   `stats.errors[code]` counts them.
+4. Outbound: `send_audio(frame)` → `media_message(frame)`, `send_mark(name)` → `mark_message`, `clear()` →
+   `clear_message()`; all sends serialized by one `asyncio.Lock` (the outbound clock and a barge-in clear may send
+   concurrently). After the stream ended (stop received, peer closed, or a send failed with
+   `SocketClosedError`) sends are dropped silently and counted (`stats.dropped_sends`) — the pipeline's outbound
+   clock races the end of the call; never raise into the pipeline for that. An empty frame is a `ValueError`
+   (programming error, `media_message` already raises).
+5. Format: `leg_format(media_format: MediaFormat) -> AudioFormat`: PCMU/8000/1 → `ULAW_8000`, L16/16000/1 →
+   `L16_16000`; anything else raises `UnsupportedMediaFormatError(ValueError)` (dial/answer only request these;
+   a mismatch fails the session → 1011). `transport.fmt` exposes it; `StreamStart.media_format` is the source.
+6. `MediaSocket` gains `async send_text(data: str) -> None` raising `SocketClosedError` when the socket is no
+   longer open or the peer vanished (Starlette `WebSocketDisconnect`/`RuntimeError` on a closed socket →
+   `SocketClosedError(1006)` or the recorded code). The transport decodes the builders' bytes to str once
+   (orjson output is ASCII) — Telnyx expects text frames.
+7. `va_media.stream.read_until_stop` (default session body) is re-implemented on the transport: build
+   `TelnyxMediaTransport(session.socket, session.start, ...)`, drain `events()` → `STREAM_CLOSED` (removes the
+   duplicate parse loop). The pipeline body replaces it in T09/T10.
+8. `va_telnyx.media.MediaFrame` gains `track: str | None = None` (last field, default; parsed from
+   `media.get("track")` if a str). Existing positional constructions keep working.
+9. Metrics: none new (no catalog row exists for transport counters; reorder/gap metrics stay with the pipeline).
+
+### Files
+- `packages/va_telnyx/src/va_telnyx/media.py`: `MediaFrame.track`; `_media_frame` reads it.
+  `packages/va_telnyx/tests/test_media_models.py`: track parsed / absent → None / non-str → None.
+- `apps/media_worker/src/va_media/socket.py`: `MediaSocket.send_text`; `StarletteSocket.send_text` (state check,
+  `WebSocketDisconnect`/`RuntimeError` → `SocketClosedError`).
+- NEW `apps/media_worker/src/va_media/transport.py`: `UnsupportedMediaFormatError`, `leg_format`,
+  `TransportStats` (dataclass: `frames`, `dtmf`, `marks`, `dropped_frames: dict[str,int]`, `protocol_errors`,
+  `errors: dict[int,int]`, `sent_frames`, `sent_marks`, `clears`, `dropped_sends`),
+  `class TelnyxMediaTransport` with `__init__(socket: MediaSocket, start: StreamStart, *, on_rate_limited:
+  Callable[[], None] | None = None)`, properties `fmt`, `stream_id`, `stats`, `stop_received`, `closed_by_peer`,
+  `ended`; `events() -> AsyncIterator[TransportEvent]` (single consumer; second call raises RuntimeError),
+  `send_audio`, `send_mark`, `clear`, `on_rate_limited` attribute; `close_stats_log()` at end logs
+  `media.transport_closed` with counters (no payloads). Keep functions radon ≤ B (dispatch table on message type).
+- `apps/media_worker/src/va_media/stream.py`: `read_until_stop` uses the transport; drop now-unused imports.
+- `apps/media_worker/tests/support/media_helpers.py`: `FakeSocket.send_text` records `sent: list[str]`, raises
+  `SocketClosedError` after `hang_up`/`close`; helpers `media_msg(chunk, payload, track="inbound")`,
+  `dtmf_msg(digit)`, `mark_msg(name)`, `error_msg(code)` (reuse existing `start_msg`/`stop_msg` style).
+- Specs: specs/06 §8 Decision; specs/07 §5.1 + §15 pointer lines. AGENTS.md learning line.
+
+### Tests
+- `apps/media_worker/tests/test_transport.py` (FakeSocket, no clock needed):
+  out-of-order media frames come out as `InboundAudio` in arrival order with chunk numbers (the reorder is the
+  pipeline's: assert pass-through); dtmf → `InboundDtmf`; mark → `MarkEcho`; stop ends the iterator and sets
+  `stop_received`; peer close ends it with `closed_by_peer`; connected/unknown/repeated start ignored; outbound
+  track frame / empty payload / odd L16 payload dropped + counted; malformed JSON skipped (log has no payload);
+  error 100005 calls `on_rate_limited` once per frame, 100003 logged at error level and continues; send_audio /
+  send_mark / clear produce exactly the Telnyx JSON (parse `sent` with orjson; payload base64 round-trips);
+  concurrent `send_audio` + `clear` (gather) never interleave partially (lock; assert order count); sends after
+  stop / after hang-up are dropped and counted, never raise; a second `events()` call raises; DTMF digits absent
+  from logs (`json_log_stream`).
+- `leg_format`: PCMU 8000 → ULAW_8000, L16 16000 → L16_16000, PCMU 16000 / PCMA / channels 2 → error.
+- Pipeline integration (`test_transport_pipeline.py`): `CallPipeline` from `va_voice` harness fakes
+  (`pipeline_fakes` FakeStt/FakeTts/ScriptedBrain + a VAD stub) driven by `TelnyxMediaTransport` over FakeSocket on
+  ManualClock or AcceleratedClock: caller frames in → agent opener audio goes out as `media` messages followed by
+  a `seg:0:0` mark; feeding the mark echo back finishes the utterance; feeding `stop` ends the pipeline with
+  `transport_closed`. (If wiring the va_voice harness from media tests is heavy, add `packages/va_voice/tests/support`
+  to the media pytest pythonpath/mypy_path — check for module-name clashes first.)
+- `test_transport_sim.py` (FakeTelnyx contract, real uvicorn as in `test_sim_contract.py`, realtime sim state): a
+  session body that builds the transport, sends 10 μ-law frames + a mark, then waits for the mark echo; asserts
+  FakeTelnyx `Call.audio` agent track received the bytes (or `session.stats()["received"]` counts media 10/mark 1),
+  `MarkEcho("seg:0:0")` arrives; caller DTMF `queue_dtmf("12")` arrives as two `InboundDtmf`; caller audio
+  arrives as `InboundAudio` with increasing chunks; a `clear` is counted by the sim (`received["clear"]`); hangup →
+  iterator ends with `stop_received` or peer close. A second test dials with `stream_codec="L16"`,
+  bidirectional L16 16000 and asserts `transport.fmt == L16_16000` and 640-byte frames pass both ways.
+- `test_socket.py`: `StarletteSocket.send_text` after close raises `SocketClosedError`; normal send works.
+- Existing `test_session.py`/`test_server.py`/`test_attach_channels.py` keep passing with the new default body.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B), pip-audit on `uv export`, `corepack pnpm audit`. `make e2e` (tests_e2e/ arrives in P05-T17;
+report as not present if still absent).
+
+### Risks
+- Starlette `send_text` on a socket the peer just closed may raise `WebSocketDisconnect`, `RuntimeError`
+  ("Unexpected ASGI message ... after sending 'websocket.close'") or `OSError`; map all three.
+- Two FakeTelnyx streaming blocks in one test hang (AGENTS P03-T03c): one stream per test.
+- Accelerated sim clock races socket I/O: use `RealtimeClock` sim state for socket contract tests, assert counts
+  and order, not virtual ms.
+- va_voice harness module names (`pipeline_fakes`, `pipeline_harness`) must not clash with media support modules.
+
+## Build P05-T08 (Builder, 2026-11-02)
+Implemented per plan (specs/06 §8 Decision P05-T08; specs/07 §5.1 + §15 pointer Decisions; AGENTS.md line):
+- va_telnyx `MediaFrame.track: str | None = None` (non-str → None; chunk/timestamp read first so a non-object
+  `media` still raises TypeError → MediaProtocolError).
+- va_media `socket.MediaSocket.send_text` / `StarletteSocket.send_text` (closed → SocketClosedError; WebSocketDisconnect,
+  RuntimeError, OSError mapped).
+- NEW `va_media.transport`: `leg_format`, `UnsupportedMediaFormatError`, `TransportStats` (+`log_fields`),
+  `TelnyxMediaTransport` (events() once; drops track/empty/invalid_media with one warning per kind; protocol errors
+  skipped; error 100005 → `on_rate_limited` (optional attr), 100003/100004 error level; serialized sends dropped after
+  stop/peer close/failed send; `log_summary()`).
+- `stream.read_until_stop` now drains the transport.
+- Tests: test_transport (unit, FakeSocket), test_transport_pipeline (CallPipeline over the transport with va_voice
+  pipeline_fakes on AcceleratedClock: opener media + `seg:0:0` mark, echo finishes the turn, stop → transport_closed),
+  test_transport_sim (FakeTelnyx realtime: PCMU both ways, DTMF, mark echoes, clear counted, sends after hangup
+  dropped; L16 16 kHz leg 640-byte frames both ways), test_socket send_text cases, test_media_models track cases.
+  New support `sim_media.streamed_call` (test_sim_contract refactored onto it).
+Gates: fmt 0, lint 0, typecheck 0 (1088 files), placeholders 0, spec refs 0, make test 9168 passed / 7 skipped,
+coverage 99.15% (transport/socket/stream/media.py 100%), jscpd 0 clones, radon avg A (max B), pip-audit clean,
+pnpm audit 3 moderate (pre-existing). make e2e: tests_e2e/ not present yet (P05-T17).
+
+## Review P05-T08 (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 9168 passed / 7 skipped (99.14 %), jscpd 0,
+radon no C+. Diff matches the plan and the specs/06 §8 Decision: pass-through of chunk numbers (reorder stays in
+InboundPath), track/empty/odd-L16 drops with one warning per kind, error codes per §8, sends serialized and dropped
+after stop/peer close/failed send, leg_format PCMU 8k / L16 16k only. Non-blocking note: `_send` decodes builder
+bytes as ASCII; orjson emits raw UTF-8, so a non-ASCII mark name would raise UnicodeDecodeError (mark names are
+ours, `seg:N:M`, so fine today). Approved.

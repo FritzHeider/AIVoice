@@ -102,7 +102,7 @@
   - Deliverables: `WorkerSettings` gains Telnyx/media/stream-token/crypto/international settings; worker container builds `Database` (configured), Redis, `TelnyxRateLimiter` + `TelnyxClientFactory` (BYO key resolver decrypting `telnyx_accounts.api_key_enc` via `Envelope`), `CallLimiter`, `EventPublisher`, `CallContextStore`, `DialSettings`, clock; Temporal client with `pydantic_data_converter`; registrations built from the container (main queue: `CallWorkflow` + prefetch/dial/hangup/end_call/liveness activities)
   - Acceptance: settings tests (missing secrets refuse to start outside local/test), container tests, a worker test running the real `Worker` on a time-skipping environment that drives `CallWorkflow` through FakeTelnyx dial to `dialing` and through cancel to `canceled`.
 
-- [ ] P05-T07 Media worker server, ownership, control channel, drain (split into P05-T07a–b below; tick when both are ticked)
+- [x] P05-T07 Media worker server, ownership, control channel, drain (split into P05-T07a–b below; tick when both are ticked) — P05-T07a/b both ticked (61720f4)
   - Spec refs: specs/07-media-pipeline.md (worker WebSocket endpoints and auth, ownership lock, control channel schemas, graceful drain, admission control)
   - Depends on: P03-T09, P04-T12
   - Deliverables: `/ws/telnyx` endpoint (signature + stream token verification), ownership lock with renewal, heartbeat key, subscriptions to control/carrier channels, admission control (`MEDIA_MAX_CALLS_PER_POD`), draining state, `media:pods` registry
@@ -120,7 +120,7 @@
   - Deliverables: CallContext load on attach (Redis, else rebuilt from `calls.config`), control channel subscription with typed messages (`va_domain.control`), `control_ack` writes, carrier channel subscription + `carrier_state` snapshot read with dedupe, `drain_notice` to sessions, drain timeout ends remaining sessions with `worker_lost`
   - Acceptance: tests for control dispatch + ack, carrier events before/after subscription, drain refusing new calls while finishing existing, drain timeout ending sessions.
 
-- [ ] P05-T08 Telnyx transport adapter
+- [x] P05-T08 Telnyx transport adapter — va_media.transport.TelnyxMediaTransport (inbound media/dtmf/mark/stop, track/empty/odd-L16 drops, error 100005 rate-limit hook, serialized sends dropped after stream end, leg_format), MediaSocket.send_text, MediaFrame.track; unit + CallPipeline + FakeTelnyx PCMU/L16 contract tests; make test 9168 passed / 7 skipped (99.14 %), lint/typecheck/placeholders/spec refs 0, jscpd 0, radon ≤ B
   - Spec refs: specs/07-media-pipeline.md (Transport protocol); specs/06-telephony-telnyx.md (media WS protocol)
   - Depends on: P05-T07
   - Deliverables: `TelnyxMediaTransport` implementing `Transport` (inbound frames via reorder buffer, outbound media/mark/clear, DTMF events, stop handling, hd_audio L16 path)

@@ -477,6 +477,21 @@ Parsing uses `orjson.loads` + a hand-written dispatch on `event` (faster than Py
 parsed into a lightweight `__slots__` dataclass `MediaFrame(chunk:int, timestamp:int, payload:bytes)`).
 Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 
+> Decision (2026-11-02): Telnyx media transport (P05-T08). `va_media.transport.TelnyxMediaTransport(socket, start,
+> on_rate_limited=None)` implements the pipeline `Transport` (specs/07 §16) over the session's media socket after
+> `start`. Inbound: `media` → `InboundAudio(chunk, payload)` unchanged (the pipeline's `InboundPath` reorders on the
+> Telnyx `chunk`), `dtmf` → `InboundDtmf`, `mark` → `MarkEcho`; `stop` or a peer close ends the event iterator
+> (`stop_received` / `closed_by_peer`); `connected`, a repeated `start`, and unknown events are ignored. Dropped and
+> counted (one warning per kind per call, never the payload): a frame whose `track` is present and not `inbound`, an
+> empty payload, an odd-length payload on an L16 leg (`invalid_media`). A malformed message is logged
+> (`media.protocol_error`, detail only) and skipped. `error` frames never end the stream: `100005` calls
+> `on_rate_limited` (the pipeline wires `OutboundAudio.rate_limited`), `100003`/`100004` log at error level, others at
+> warning. Outbound `media`/`mark`/`clear` messages go out as text frames serialized by one lock; after `stop`, a peer
+> close, or a send that found the socket closed, sends are dropped silently and counted (the outbound clock races the
+> call end). The leg format comes from `start.media_format`: PCMU/8000/1 → `ULAW_8000`, L16/16000/1 → `L16_16000`;
+> anything else is `UnsupportedMediaFormatError` (the session fails with 1011). `MediaFrame` gained
+> `track: str | None`. No transport metrics: reorder/gap metrics stay with the pipeline.
+
 ## 9. DTMF
 
 - Inbound: from media WS `dtmf` and webhook `call.dtmf.received` (deduplicated). Handled by the engine (`07` §13).

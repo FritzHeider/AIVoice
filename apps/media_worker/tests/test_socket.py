@@ -24,7 +24,7 @@ class Peer:
         return self.incoming.popleft()
 
     async def send(self, message: MutableMapping[str, Any]) -> None:
-        if self.fail_send and message["type"] == "websocket.close":
+        if self.fail_send and message["type"] in {"websocket.close", "websocket.send"}:
             msg = "peer vanished"
             raise OSError(msg)
         self.sent.append(message)
@@ -67,3 +67,46 @@ async def test_close_once_and_tolerates_a_vanished_peer() -> None:
     vanished.fail_send = True
     await socket.close(1000)
     assert socket.close_code == 1000
+
+
+async def test_send_text_while_open_then_closed_raises() -> None:
+    peer = Peer({"type": "websocket.disconnect", "code": 1001})
+    socket = await accepted(peer)
+    await socket.send_text('{"event":"clear"}')
+    assert peer.sent[-1] == {"type": "websocket.send", "text": '{"event":"clear"}'}
+    with pytest.raises(SocketClosedError):
+        await socket.receive()
+    with pytest.raises(SocketClosedError) as caught:
+        await socket.send_text("late")
+    assert caught.value.code == 1001
+
+    closed = await accepted(Peer())
+    await closed.close(1000)
+    with pytest.raises(SocketClosedError) as caught:
+        await closed.send_text("late")
+    assert caught.value.code == 1000
+
+
+async def test_send_text_to_a_vanished_peer_raises_socket_closed() -> None:
+    peer = Peer()
+    socket = await accepted(peer)
+    peer.fail_send = True
+    with pytest.raises(SocketClosedError) as caught:
+        await socket.send_text("x")
+    assert caught.value.code in {1006, 1000}
+
+
+@pytest.mark.parametrize("error", [RuntimeError("sent after close"), OSError("broken pipe")])
+async def test_send_text_maps_runtime_and_os_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    socket = await accepted(Peer())
+
+    async def failing(data: str) -> None:
+        del data
+        raise error
+
+    monkeypatch.setattr(socket._ws, "send_text", failing)
+    with pytest.raises(SocketClosedError) as caught:
+        await socket.send_text("x")
+    assert caught.value.code == 1006

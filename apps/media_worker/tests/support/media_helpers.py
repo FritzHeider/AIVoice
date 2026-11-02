@@ -257,6 +257,41 @@ def stop_msg(call_control_id: str = "cc-1") -> str:
     )
 
 
+def media_msg(chunk: int, payload: bytes, *, track: str | None = "inbound") -> str:
+    media: dict[str, Any] = {"chunk": str(chunk), "timestamp": str(chunk * 20), "payload": b64(payload)}
+    if track is not None:
+        media["track"] = track
+    return json.dumps(
+        {"event": "media", "sequence_number": str(chunk + 1), "stream_id": "stream-1", "media": media}
+    )
+
+
+def dtmf_msg(digit: str) -> str:
+    return json.dumps(
+        {
+            "event": "dtmf",
+            "stream_id": "stream-1",
+            "occurred_at": "2026-11-02T12:00:00.000Z",
+            "sequence_number": "5",
+            "dtmf": {"digit": digit},
+        }
+    )
+
+
+def mark_msg(name: str) -> str:
+    return json.dumps(
+        {"event": "mark", "stream_id": "stream-1", "sequence_number": "6", "mark": {"name": name}}
+    )
+
+
+def error_msg(code: int, title: str = "telnyx error") -> str:
+    return json.dumps({"event": "error", "stream_id": "stream-1", "payload": {"code": code, "title": title}})
+
+
+def b64(payload: bytes) -> str:
+    return base64.b64encode(payload).decode("ascii")
+
+
 class RecordingBody:
     """A session body that records each session and reads the stream until ``stop``."""
 
@@ -283,17 +318,29 @@ class RecordingBody:
 
 
 class FakeSocket:
-    """An in-memory :class:`~va_media.socket.MediaSocket`: ``feed`` messages, ``hang_up`` to close."""
+    """An in-memory :class:`~va_media.socket.MediaSocket`: ``feed`` messages, ``hang_up`` to close; sent text
+    messages are recorded in ``sent`` (a send after ``hang_up``/``close`` raises ``SocketClosedError``)."""
 
     def __init__(self) -> None:
         self.inbox: asyncio.Queue[str | bytes | None] = asyncio.Queue()
         self.closed_with: int | None = None
+        self.sent: list[str] = []
+        self.hung_up = False
+        self.send_gate: asyncio.Event | None = None
 
     def feed(self, message: str | bytes) -> None:
         self.inbox.put_nowait(message)
 
     def hang_up(self) -> None:
+        self.hung_up = True
         self.inbox.put_nowait(None)
+
+    async def send_text(self, data: str) -> None:
+        if self.hung_up or self.closed_with is not None:
+            raise SocketClosedError(1000)
+        if self.send_gate is not None:
+            await self.send_gate.wait()
+        self.sent.append(data)
 
     async def receive(self) -> str | bytes:
         item = await self.inbox.get()

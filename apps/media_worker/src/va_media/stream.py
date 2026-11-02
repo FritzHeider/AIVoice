@@ -3,7 +3,7 @@
 :func:`wait_for_start` reads messages until Telnyx sends ``start`` (a ``connected`` first is optional), within
 5 s of the injected clock. :func:`read_until_stop` is the default session body until the Telnyx transport and
 the pipeline replace it: it reads and parses messages and ends the session with ``stream_closed`` when Telnyx
-sends ``stop`` or closes the socket.
+sends ``stop`` or closes the socket, reading through :class:`~va_media.transport.TelnyxMediaTransport`.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from va_common.logging import get_logger
 from va_common.time import Clock
 from va_media.session import STREAM_CLOSED, SessionEnd, StreamStart
 from va_media.socket import MediaSocket, SocketClosedError
+from va_media.transport import TelnyxMediaTransport
 from va_telnyx.media import MediaProtocolError, MediaStart, MediaStop, parse_media_message
 from va_voice.pipeline.waits import within
 
@@ -73,16 +74,11 @@ async def wait_for_start(
 
 
 async def read_until_stop(session: CallSession) -> SessionEnd:
-    """Read the stream until ``stop`` or a disconnect; a malformed message is logged and skipped."""
-    while True:
-        try:
-            raw = await session.socket.receive()
-        except SocketClosedError:
-            return STREAM_CLOSED
-        try:
-            message = parse_media_message(raw)
-        except MediaProtocolError as exc:
-            _log.warning("media.protocol_error", detail=str(exc))
-            continue
-        if isinstance(message, MediaStop):
-            return STREAM_CLOSED
+    """Read the stream through the transport until ``stop`` or a disconnect (inbound events are discarded)."""
+    transport = TelnyxMediaTransport(session.socket, session.start)
+    events = 0
+    async for _event in transport.events():
+        events += 1
+    transport.log_summary()
+    _log.debug("media.stream_read", events=events)
+    return STREAM_CLOSED

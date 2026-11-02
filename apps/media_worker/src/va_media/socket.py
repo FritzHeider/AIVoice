@@ -1,4 +1,4 @@
-"""The media WebSocket as the session sees it: receive text/binary messages, close once.
+"""The media WebSocket as the session sees it: receive text/binary messages, send text, close once.
 
 :class:`MediaSocket` is the narrow surface a call session needs; :class:`StarletteSocket` adapts an accepted
 Starlette ``WebSocket`` to it (tests substitute in-memory fakes).
@@ -25,6 +25,10 @@ class SocketClosedError(Exception):
 class MediaSocket(Protocol):
     async def receive(self) -> str | bytes:
         """The next message; raises :class:`SocketClosedError` once the peer has closed."""
+        ...
+
+    async def send_text(self, data: str) -> None:
+        """Send one text message; raises :class:`SocketClosedError` once the socket is no longer open."""
         ...
 
     async def close(self, code: int) -> None:
@@ -57,6 +61,19 @@ class StarletteSocket:
         if text is not None:
             return str(text)
         return bytes(message.get("bytes") or b"")
+
+    async def send_text(self, data: str) -> None:
+        if not self.open:
+            raise SocketClosedError(self.close_code or 1006)
+        # A peer that vanished mid-send surfaces as WebSocketDisconnect (Starlette wraps the server's
+        # OSError), RuntimeError (a send after the close message), or a bare OSError.
+        try:
+            await self._ws.send_text(data)
+        except WebSocketDisconnect as exc:
+            self.close_code = self.close_code or exc.code
+            raise SocketClosedError(self.close_code) from exc
+        except (RuntimeError, OSError) as exc:
+            raise SocketClosedError(self.close_code or 1006) from exc
 
     async def close(self, code: int) -> None:
         if not self.open:

@@ -168,6 +168,9 @@ expected chunk is missing while 5 later chunks are buffered (≈ 100 ms), it ins
 continues (counts `va_audio_gap_frames_total`). Duplicates (chunk ≤ last emitted) are dropped. Only `track` inbound
 frames are processed on primary legs.
 
+> Decision (2026-11-02): the `track` filter lives in the Telnyx transport (specs/06 §8 Decision P05-T08); frames
+> without a `track` field are treated as inbound.
+
 > Decision (2026-11-01): `va_voice.reorder.ReorderBuffer(fmt=ULAW_8000, *, window=5, first_chunk=1, max_gap=50,
 > observer=...)` is transport-agnostic (callers pass `int(media.chunk)` and the payload; Telnyx chunks start at 1).
 > `push(chunk, payload)` returns the frames now ready as `OrderedFrame(chunk, payload, filled)`. Gap fill is purely
@@ -569,6 +572,10 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
 - Scribe `audio_format=pcm_16000` receives little-endian PCM (converted); TTS `output_format=pcm_16000`.
 - VAD uses the 16 kHz stream directly (no resample).
 - Live smoke test `test_hd_audio_byte_order` plays a 1 kHz tone and asserts STT/energy sanity in both directions.
+
+> Decision (2026-11-02): the transport maps an L16/16000 stream to `L16_16000` and passes the wire bytes through
+> untouched; byte-order conversion stays in the pipeline (`PipelineConfig.l16_byte_order`, `FrameMixer(wire_byte_order=)`)
+> (specs/06 §8 Decision P05-T08).
 
 ## 16. Engine interface (contract with `va_engine`)
 

@@ -141,11 +141,13 @@ class MediaMark(_Frame):
 
 @dataclass(frozen=True, slots=True)
 class MediaFrame:
-    """A caller audio chunk: RTP payload bytes (no header), Telnyx ``chunk`` number and ms ``timestamp``."""
+    """A caller audio chunk: RTP payload bytes (no header), Telnyx ``chunk`` number, ms ``timestamp``, and the
+    ``track`` (``inbound`` on primary legs; ``None`` when absent or not a string)."""
 
     chunk: int
     timestamp: int
     payload: bytes
+    track: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,10 +190,13 @@ _CONTROL_MODELS: Final[Mapping[str, _ControlModel]] = {
 
 def _media_frame(frame: dict[str, Any]) -> MediaFrame:
     media = frame["media"]
+    chunk, timestamp = int(media["chunk"]), int(media["timestamp"])  # TypeError when media is not an object
+    track = media.get("track")
     return MediaFrame(
-        chunk=int(media["chunk"]),
-        timestamp=int(media["timestamp"]),
+        chunk=chunk,
+        timestamp=timestamp,
         payload=base64.b64decode(media["payload"], validate=True),
+        track=track if isinstance(track, str) else None,
     )
 
 

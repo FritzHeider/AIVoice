@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793585754-b976
+> P05-T08: va_media.transport.TelnyxMediaTransport is the pipeline Transport over the media WS (events() once, serialized sends dropped after stream end, leg_format); media tests: FakeSocket.sent/send_gate + media_msg/dtmf_msg/mark_msg/error_msg; sim_media.streamed_call(models_dir, body, **dial) runs FakeTelnyx (wall clock) streaming to a served media worker; CallPipeline can run in media tests with va_voice pipeline_fakes
+<!-- tags: media, websocket, testing | created: 2026-11-02 -->
+
 ### mem-1793584366-6bdd
 > P05-T07b: media attach after start = DbCallContextLoader (ctx or primary-leg org, status check) -> pod-wide ChannelHub.subscribe (single pubsub reader; subscribe waits for both confirmations) -> carrier_state snapshot -> CallSession(context, feed, carrier_state, control_handler); control acks are shielded tasks awaited in cleanup so a stop that ends the session still writes its ack; media tests use media_helpers.served/FakeContextLoader/call_context; redis-py health_check_interval makes concurrent pubsub reads during an unsubscribed SUBSCRIBE unsafe, so the reader only reads while pubsub.subscribed
 <!-- tags: media, redis, testing | created: 2026-11-02 -->

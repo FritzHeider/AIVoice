@@ -100,13 +100,24 @@ def test_start_with_only_required_fields() -> None:
 
 def test_media_is_a_slots_dataclass_with_ints_and_bytes() -> None:
     parsed = parse_media_message(_raw(MEDIA))
-    assert parsed == MediaFrame(chunk=3, timestamp=40, payload=AUDIO)
+    assert parsed == MediaFrame(chunk=3, timestamp=40, payload=AUDIO, track="inbound")
     assert not hasattr(parsed, "__dict__")
 
 
 def test_media_accepts_bytes_and_ignores_extra_fields() -> None:
     frame = {**MEDIA, "extra": 1, "media": {**MEDIA["media"], "ssrc": 7}}
-    assert parse_media_message(orjson.dumps(frame)) == MediaFrame(3, 40, AUDIO)
+    assert parse_media_message(orjson.dumps(frame)) == MediaFrame(3, 40, AUDIO, "inbound")
+
+
+@pytest.mark.parametrize(
+    ("media", "track"), [({"track": "outbound"}, "outbound"), ({"track": 7}, None), ({}, None)]
+)
+def test_media_track_is_a_string_or_none(media: dict[str, Any], track: str | None) -> None:
+    fields = {key: value for key, value in MEDIA["media"].items() if key != "track"}
+    frame = {**MEDIA, "media": {**fields, **media}}
+    parsed = parse_media_message(orjson.dumps(frame))
+    assert isinstance(parsed, MediaFrame)
+    assert parsed.track == track
 
 
 def test_dtmf_stop_error_mark() -> None:
