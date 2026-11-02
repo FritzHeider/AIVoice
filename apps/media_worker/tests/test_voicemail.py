@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -95,7 +95,13 @@ class Rig:
     call_id: uuid.UUID
 
 
-def rig(*, direction: str = "outbound", answered_ago_s: float | None = None, **config: Any) -> Rig:
+def rig(
+    *,
+    direction: str = "outbound",
+    answered_ago_s: float | None = None,
+    sms: Callable[[], Awaitable[None]] | None = None,
+    **config: Any,
+) -> Rig:
     clock = ManualClock()
     context = call_context(uuid.uuid4(), **config).model_copy(
         update={"direction": direction, "variables": {"name": "Dana"}}
@@ -111,6 +117,7 @@ def rig(*, direction: str = "outbound", answered_ago_s: float | None = None, **c
         events=events,
         answered_by=answered_by,
         answered_at=answered_at,
+        sms=sms,
     )
     monitor.bind(takeovers)
     return Rig(clock, monitor, takeovers, classifier, events, answered_by, beep, context.call_id)
@@ -182,9 +189,38 @@ async def test_a_machine_verdict_leaves_the_rendered_message_after_the_beep(acti
     assert takeover.text == "Hi Dana, please call us back."
     assert takeover.beep is r.beep
     assert event_data(r) == [{"action": action, "trigger": "amd"}]
+    assert takeover.after_message is None
     events = [e["event"] for e in log_events(stream)]
-    assert ("media.voicemail_sms_pending" in events) is (action == "leave_message_and_sms")
+    assert ("media.voicemail_sms_unavailable" in events) is (action == "leave_message_and_sms")
     assert "Dana" not in stream.getvalue()
+
+
+async def test_leave_message_and_sms_hands_the_sms_hook_to_the_takeover() -> None:
+    sent: list[str] = []
+
+    async def send_sms() -> None:
+        sent.append("sms")
+
+    stream = json_log_stream()
+    r = rig(sms=send_sms, **voicemail("leave_message_and_sms"))
+    r.monitor.on_verdict("machine")
+    await r.monitor.stop()
+    (takeover,) = r.takeovers.seen
+    assert (takeover.reason, takeover.text) == ("voicemail_left", "Hi Dana, please call us back.")
+    assert takeover.after_message is send_sms
+    assert sent == []
+    assert "media.voicemail_sms_unavailable" not in [e["event"] for e in log_events(stream)]
+
+
+async def test_the_sms_hook_is_not_used_for_leave_message() -> None:
+    async def send_sms() -> None:
+        raise AssertionError
+
+    r = rig(sms=send_sms, **voicemail("leave_message"))
+    r.monitor.on_verdict("machine")
+    await r.monitor.stop()
+    (takeover,) = r.takeovers.seen
+    assert takeover.after_message is None
 
 
 @pytest.mark.parametrize("message", [None, "   "])

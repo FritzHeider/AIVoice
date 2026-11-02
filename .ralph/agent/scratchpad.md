@@ -896,3 +896,171 @@ Diff checked against specs/07 §11 step 2/§14, specs/10 §9.4 (prompt matches t
 (watch → classifier → monitor.stop → finish_call) is correct; tenant session + org filter on set_answered_by;
 no transcript/message logging. Runtime test (a) does not assert answered_by='voicemail' for AMD (the edge writes
 it; no edge in the rig) — accepted, documented in the Decision. Next: P05-T10e (voicemail SMS + retry).
+
+## Plan P05-T10e — Voicemail SMS (Planner, 2026-11-02)
+
+Split: the old P05-T10e (SMS + retry) is now P05-T10e (voicemail SMS, this plan) and P05-T10f (retry child call;
+planned next). P05-T10 now ticks when a–f are ticked.
+
+### Design (decided — do not re-litigate)
+1. **Pipeline hook** (`packages/va_voice/src/va_voice/pipeline/takeover.py` + `pipeline.py`). `Takeover` gains
+   `after_message: Callable[[], Awaitable[None]] | None = None` and `after_message_timeout_s: float =
+   DEFAULT_AFTER_MESSAGE_TIMEOUT_S` (new constant `15.0`, exported). In `_takeover_loop`, only when `text` was
+   non-blank: after `within(message, ..., speak_timeout_s)` returns (completed or timed out), if `after_message`
+   is set: `if not await within(takeover.after_message(), self._clock, takeover.after_message_timeout_s):
+   _log.warning("pipeline_takeover_after_message_timeout", timeout_s=...)`; then `raise self._ended(reason)`.
+   Contract (docstring): the hook never raises; the pipeline does not catch for it. A call that closes (caller
+   hangup/watchdog) before the message finished never runs the hook. Check how `within` takes an awaitable vs a
+   coroutine (`va_voice.pipeline.waits`) and wrap accordingly; it must cancel the hook at the timeout.
+2. **Sender** = new `apps/media_worker/src/va_media/voicemail_sms.py`:
+   - `VOICEMAIL_SMS_NAMESPACE: Final = uuid.UUID(...)` (a fixed literal uuid) and `voicemail_message_id(call_id)
+     -> uuid.UUID` = `uuid.uuid5(VOICEMAIL_SMS_NAMESPACE, str(call_id))` — the `messages.id`; the duplicate guard.
+   - Protocols: `SmsClients` = `async for_account(telnyx_account_id: uuid.UUID | None) -> SmsSender` (the
+     `TelnyxClientFactory` satisfies it), `SmsSender` = `async send_message(MessageCreate) -> va_telnyx Message`.
+     `SmsEvents` = same shape as `VoicemailEvents` (reuse it: import `VoicemailEvents` from `va_media.voicemail`).
+   - `class VoicemailSms` kw-only ctor: `database: Database`, `telnyx: SmsClients | None`, `events:
+     VoicemailEvents | None`, `platform_profile_id: str`, `edge_public_host: str`, `clock: Clock`.
+     `async send(context: CallContext) -> None` — never raises; steps:
+     a. `sms = context.config.voicemail.sms`; None → `media.voicemail_sms_skipped reason=no_sms` (unreachable
+        via dispatch rules, guard anyway). Render with `va_engine.opener.render_call_text(context, sms.message,
+        now=clock.now(), field_name="voicemail.sms.message")`; None → `reason=blank_message`.
+     b. `sender = sms.from_ or context.from_number`, `recipient = context.to_number`.
+     c. Tenant session `database.tenant_session(context.org_id)`: load the sender via new
+        `va_db.repositories.PhoneNumberRepo`?? — NO new repo: use a `select(PhoneNumber.telnyx_account_id,
+        PhoneNumber.capabilities)` filtered by `org_id`, `e164 == sender`, `status == "active"`,
+        `deleted_at IS NULL` (put this query + the conversation/message writes in a small new va_db module
+        `packages/va_db/src/va_db/voicemail_sms.py` so the SQL is testable in va_db: functions
+        `sms_sender(session, org_id, e164) -> SmsSender(telnyx_account_id, messaging_profile_id | None) | None`
+        (None when missing, inactive or without `"sms"` in capabilities; BYO rows join `telnyx_accounts` for
+        `messaging_profile_id`, platform rows return None for it), `queue_outbound_message(session, *, org_id,
+        message_id, agent_number, user_number, contact_id, body, call_id, now) -> QueuedMessage(conversation_id,
+        created: bool)`, `record_sent(session, message_id, *, telnyx_message_id, status, segments, now)`,
+        `record_failed(session, message_id, *, error: dict)`).
+        Missing sender → `media.voicemail_sms_failed reason=sms_not_enabled`; profile = BYO account's
+        `messaging_profile_id` or `platform_profile_id` when the number is platform; empty → `reason=
+        no_messaging_profile`.
+     d. `queue_outbound_message` (same transaction, commit before sending): active conversation lookup per
+        specs/21 §1 (`org_id`, `channel='sms'`, `agent_number`, `user_number`, `status IN
+        ('active','human_takeover')`, `last_message_at > now - time_out_minutes`, most recent first); else a
+        new **send-only** conversation: `channel='sms'`, `runner_type='objective'`, `objective=NULL`,
+        `contact_id=context.contact_id`, `metadata={"source": "voicemail", "call_id": str(call_id)}`,
+        `last_message_at=now`. Insert `messages(id=message_id, direction='outbound', role='assistant',
+        status='queued', body, segments=1)` with `INSERT ... ON CONFLICT (id) DO NOTHING RETURNING id`; nothing
+        returned → `created=False` → log `media.voicemail_sms_duplicate`, return without sending. Update the
+        conversation's `last_message_at`.
+     e. `client = await telnyx.for_account(sender.telnyx_account_id)` (None factory → `reason=
+        telnyx_unavailable`; `UnknownTelnyxAccount`/`CryptoError` → same reason). `MessageCreate(from_=sender,
+        to=recipient, text=message, messaging_profile_id=profile, webhook_url=webhook_urls(edge_public_host,
+        sender.telnyx_account_id).messaging, use_profile_webhooks=False)`.
+     f. Success → new tenant session `record_sent(telnyx_message_id=msg.id, status=msg.to[0].status mapped to
+        MessageStatus when valid else "queued", segments=msg.parts or 1)`; then publish `call.sms_sent`
+        (`EventType.CALL_SMS_SENT` — check the catalog member name; category sms) with `message="Voicemail SMS
+        sent"`, `data={"message_id", "conversation_id", "segments", "source": "voicemail"}` (no numbers, no text);
+        log `media.voicemail_sms_sent segments=`. `TelnyxError` → `record_failed(error={"code": exc code/
+        type, "detail": safe message})` + `media.voicemail_sms_failed reason=telnyx_error`. Catch
+        `SQLAlchemyError`, `OSError`, `EventPublishError`, `TelnyxError`, `UnknownTelnyxAccount`, `CryptoError`
+        around each step; never log numbers, the text, or the API key.
+   - `VoicemailMonitor` gains `sms: Callable[[], Awaitable[None]] | None = None` (kw); in `_takeover_for`, for
+     `leave_message_and_sms` return `Takeover("voicemail_left", text=message, beep=self._beep,
+     after_message=self._sms)` (log `media.voicemail_sms_unavailable` when `sms` is None instead of the
+     current `media.voicemail_sms_pending`, which is removed). Runtime (`CallRuntime._monitor`) passes
+     `sms=functools.partial(VoicemailSms(...).send, context)` when `self._database` is set (else None).
+     `CallRuntime` gets the factory it already holds (`self._telnyx`) and the new settings.
+3. **Settings**: `MediaSettings` gains `telnyx_messaging_profile_id: str = ""` and `edge_public_host: str =
+   "localhost:8100"` (same names/dev values as worker). Update the specs/02 §6 table service column of
+   `EDGE_PUBLIC_HOST` and `TELNYX_MESSAGING_PROFILE_ID` to include `media-worker` (`.env.example` unchanged;
+   run `scripts/tests/test_env_example.py`). `open_runtime` passes both.
+4. **Send Call check** (specs/05 `voicemail.sms.from` "must have SMS capability"): in
+   `va_api.services.call_dispatch` right after `resolve_inputs` (same tenant session), when
+   `config.voicemail.action == "leave_message_and_sms"`: sender = `config.voicemail.sms.from_` or the chosen
+   from number; reuse `va_db.voicemail_sms.sms_sender(session, org_id, sender)`; None → `AppError(
+   "SMS_NOT_ENABLED", "The voicemail SMS sender is not an active SMS number of this org.",
+   field="voicemail.sms.from")` (module-level message constant: ruff TRY003). Check that existing api tests/
+   Bland fixtures using `leave_message_and_sms` still pass: give `call_helpers.callable_org`'s number
+   `capabilities=["voice","sms"]` if needed, and add a test for the 400.
+5. **Spec**: replace item (7) of the specs/07 §14 P05-T10c Decision with a new `> Decision (2026-11-02):
+   Voicemail SMS (P05-T10e)` block: hook semantics (after the message's mark echo or playback cap, ≤ 15 s,
+   then the hangup; not sent when the call closed before), sender rules, profile choice, deterministic message
+   id (uuid5 of the call id) as the duplicate guard instead of the Temporal `send_message` activity of specs/21
+   §2 step 6 (one attempt, no retry after bytes were sent), send-only conversation (`runner_type='objective'`,
+   `objective` NULL; reply handling arrives with the SMS phase), `call.sms_sent` data, billing on
+   `message.sent` stays with the SMS phase (no usage here), Send Call `SMS_NOT_ENABLED`; retry is P05-T10f.
+
+### Tests (all must exist and pass)
+- va_voice `tests/pipeline/test_takeover.py` (extend): hook runs after the message's last frame/mark and before
+  the end (record order in `transport.calls` via the hook appending `"sms"`), end reason unchanged; hook
+  exceeding `after_message_timeout_s` is cancelled and logged, call still ends; no-text takeover never runs it;
+  caller hangup during the message → hook not run.
+- va_db `tests/test_voicemail_sms.py` (Postgres, `scratch_session`/migrated fixture as other va_db DB tests):
+  `sms_sender` (platform active sms → profile None; BYO → account profile; voice-only, released, other org →
+  None); `queue_outbound_message` creates a send-only conversation, reuses an active one, ignores a timed-out
+  one (`last_message_at` older than `time_out_minutes`) and a closed one; second call with the same id →
+  `created=False`, one row; `record_sent`/`record_failed` update the row.
+- media `tests/test_voicemail_sms.py` (unit, fakes for database seam? — the sender takes a real `Database`, so
+  run against `media_db_url` with seeded org/number rows; fake `SmsClients` recording `MessageCreate`s and
+  able to raise `TelnyxError`/`UnknownTelnyxAccount`): sent body = rendered template, `from` = sms.from or call
+  from, profile platform vs BYO, webhook URL with/without account suffix; event published once with no text/
+  numbers in data; every failure reason logged (`json_log_stream`) and no raise; duplicate → one send; event
+  publish failure still records the row as sent.
+- media `tests/test_voicemail.py` (extend): `leave_message_and_sms` takeover carries `after_message` = the
+  injected sms callable; without one it logs `media.voicemail_sms_unavailable` and still speaks.
+- media runtime sim (new `apps/media_worker/tests/test_voicemail_sms_sim.py`; if importing the `Rig`/`rig`/
+  `ending_rig` helpers from `test_runtime_sim.py` is awkward, move them into `tests/support/runtime_rig.py`
+  and import from both): provision the call's `from` number in FakeTelnyx with a messaging profile (platform
+  account; see `packages/va_telnyx/tests/support/telnyx_client_helpers.sms_number`/`provisioned`) and pass the
+  profile id as `telnyx_messaging_profile_id`; seed the `phone_numbers` row with `capabilities={voice,sms}`;
+  machine + `leave_message_and_sms` + `beep_at_ms`: FakeTelnyx `GET /sim/telnyx/messages` has one outbound
+  message with the rendered SMS text, created after the last agent audio frame of the message and before the
+  hangup (compare the message record `received_at` with the hangup command's time from the sim call timeline,
+  or the order of recorded sim requests), end `voicemail_left`/agent, `messages` row has the
+  `telnyx_message_id`, one `call.sms_sent` row; second test: sender not provisioned in FakeTelnyx (422) → still
+  `voicemail_left`, hangup sent, `messages.status='sending_failed'`, no `call.sms_sent`.
+- api: `leave_message_and_sms` with a voice-only sender → 400 `SMS_NOT_ENABLED` field `voicemail.sms.from`; with
+  an SMS-capable sender → dispatched.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t10e.log 2>&1`) with a heartbeat Monitor (~25 min); coverage ≥ 85 %
+per package, new modules ~100 %; `npx --yes jscpd@4 --silent` → 0 clones; `uvx radon cc -s -n C` on touched src
+files prints nothing; audit (`uvx pip-audit` on `uv export` + `corepack pnpm audit`). No OpenAPI change expected
+(SMS_NOT_ENABLED already in the catalog; if the calls route documents error codes, regenerate). `make e2e`
+harness lands in P05-T17 — say so. build.done payload plain text. AGENTS.md: `Takeover.after_message`,
+`va_media.voicemail_sms`, `va_db.voicemail_sms`, media settings for messaging, deterministic SMS id.
+
+### Risks
+- `within` semantics (awaitable vs factory) — read `va_voice.pipeline.waits` first.
+- FakeTelnyx `send` 422s unless the `from` number is owned by the account WITH a messaging profile; the sim
+  ids are seeded, so the profile id is deterministic only per seed — read it from the create response.
+- Accelerated vs realtime clock in the runtime rig: the rig is wall-clock FakeTelnyx; the message lifecycle
+  webhooks go to `state.webhook_defaults` — make sure nothing in the rig fails on an unexpected messaging
+  webhook (EdgeRelay may only handle voice; ignore messaging there).
+- `messages.telnyx_message_id` is UNIQUE across orgs; seeded sim ids on a shared DB → use
+  `seed=secrets.randbits(32)` style per AGENTS.md P05-T01 if the rig allows.
+
+## Build P05-T10e (Builder, 2026-11-02)
+
+Implemented per plan. Deviations / notes:
+- `va_db.voicemail_sms` functions take `org_id` explicitly (`record_sent(session, org_id, message_id, ...)`), and
+  `queue_outbound_message` first checks whether the id already exists, so it does not create a conversation for a
+  duplicate. `sms_sender` uses `capabilities @> {sms}`, because SQLAlchemy 2.1 deprecates `ARRAY.any()`.
+- The media sender logs a DB failure as `media.voicemail_sms_failed reason=database`. With no factory or an unknown
+  account the row is stored `sending_failed` with `{code: telnyx_unavailable}`. A platform number with an empty
+  platform profile is stored `{code: no_messaging_profile}`.
+- The runtime sim tests stayed in `test_runtime_sim.py` (new `rig(messaging=True)` and `machine_call` helper; the
+  old beep test now uses `machine_call` too). Shared row helpers are in `packages/va_db/tests/support/sms_rows.py`.
+- The 10DLC/toll-free gating of the Send Call check is deferred to the SMS phase (stated in the Decision).
+Gates:
+- fmt, lint, typecheck (1172 files), placeholders (0) and spec refs (0) pass.
+- env_example test: 43 passed.
+- jscpd: 0 clones. radon -n C on touched src: empty.
+- pip-audit: clean. pnpm audit: 3 moderate, 0 high.
+- make test: 9948 passed, 7 skipped, 99.12 % (exit 0).
+- make e2e: the harness lands in P05-T17.
+
+## Review P05-T10e (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint, typecheck (1172 files), placeholders (0), spec refs (0), make test 9948 passed / 7 skipped, 99.12 %.
+Checked against specs/03 messages DDL (status values, segments, telnyx_message_id), specs/19 call.sms_sent (sms/media),
+specs/31 SMS_NOT_ENABLED 400, specs/02 §6 env table (media added). Tenant sessions + org filters everywhere; no numbers/
+text logged; hook bounded 15 s; runtime sim proves SMS between message and hangup and failure still ends voicemail_left.
+Known edge: a hook cancelled at its timeout after the row committed leaves it `queued` (no retry by design).
+Next: P05-T10f (voicemail retry child call).

@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 
 from pipeline_fakes import RecordingObserver, ScriptedBrain, hanging
 from pipeline_harness import Harness, harness
+from service_helpers import json_log_stream, log_events
 
 from va_voice.latency import TurnReport
 from va_voice.pipeline import (
@@ -208,6 +209,83 @@ async def test_the_watchdog_ending_first_wins() -> None:
     assert message_contexts(h) == []
     # The takeover had already closed the call: no max-duration warning either.
     assert h.tts.sent == []
+
+
+class _Hook:
+    """An ``after_message`` hook logging ``sms`` into the transport calls; ``hang`` keeps it waiting."""
+
+    def __init__(self, h: Harness, *, hang: bool = False) -> None:
+        self._h = h
+        self._hang = hang
+        self.runs = 0
+        self.cancelled = False
+
+    async def __call__(self) -> None:
+        self.runs += 1
+        self._h.transport.calls.append(("sms", self._h.now_ms()))
+        if self._hang:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+
+async def test_after_message_runs_once_after_the_message_played_and_before_the_end() -> None:
+    async with harness(config=config(), brain=ScriptedBrain()) as h:
+        await h.until(lambda: h.now_ms() >= 200)
+        hook = _Hook(h)
+        assert h.pipeline.take_over(Takeover("voicemail_left", text=MESSAGE, after_message=hook))
+        result = await h.result()
+        ended_ms = h.now_ms()
+    assert result.end_reason == "voicemail_left"
+    assert hook.runs == 1
+    (sms_ms,) = times(h, "sms")
+    message_frames = [t for t, _ in h.transport.frames if t >= message_started_ms(h)]
+    assert message_frames
+    assert sms_ms >= max(message_frames)
+    assert h.transport.echoes
+    assert sms_ms >= max(t for t, _ in h.transport.echoes)
+    assert sms_ms <= ended_ms
+
+
+async def test_after_message_past_its_timeout_is_cancelled_and_the_call_ends() -> None:
+    stream = json_log_stream()
+    async with harness(config=config(), brain=ScriptedBrain()) as h:
+        await h.until(lambda: h.now_ms() >= 200)
+        hook = _Hook(h, hang=True)
+        takeover = Takeover("voicemail_left", text=MESSAGE, after_message=hook, after_message_timeout_s=3.0)
+        assert h.pipeline.take_over(takeover)
+        result = await h.result()
+        ended_ms = h.now_ms()
+    assert result.end_reason == "voicemail_left"
+    assert hook.cancelled
+    (sms_ms,) = times(h, "sms")
+    assert sms_ms + 3000 <= ended_ms <= sms_ms + 3000 + WINDOW_MS
+    events = [e for e in log_events(stream) if e["event"] == "pipeline_takeover_after_message_timeout"]
+    assert [e["timeout_s"] for e in events] == [3.0]
+
+
+async def test_a_takeover_without_text_never_runs_after_message() -> None:
+    async with harness(config=config(), brain=ScriptedBrain()) as h:
+        await h.until(lambda: h.now_ms() >= 200)
+        hook = _Hook(h)
+        assert h.pipeline.take_over(Takeover("voicemail_hangup", after_message=hook))
+        result = await h.result()
+    assert result.end_reason == "voicemail_hangup"
+    assert hook.runs == 0
+
+
+async def test_a_hangup_during_the_message_never_runs_after_message() -> None:
+    async with harness(config=config(), brain=ScriptedBrain(), echo_delay_ms=None) as h:
+        await h.until(lambda: h.now_ms() >= 200)
+        hook = _Hook(h)
+        assert h.pipeline.take_over(Takeover("voicemail_left", text=MESSAGE, after_message=hook))
+        await h.until(lambda: bool(message_contexts(h)) and len(h.transport.frames) > 0)
+        h.transport.close()
+        result = await h.result()
+    assert result.end_reason == "transport_closed"
+    assert hook.runs == 0
 
 
 def test_speech_cue_counts_silence_from_the_last_speech_end() -> None:

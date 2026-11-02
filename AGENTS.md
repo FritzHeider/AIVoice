@@ -1360,3 +1360,16 @@ Grafana 3001
   passed, which dials with AMD and relays FakeTelnyx's verdict/beep through `sim_media.EdgeRelay` (the edge's
   carrier-state hash + carrier channel). The runtime sim `rig(database=...)` also gives the runtime a database
   (`DbAnsweredBy`). Scenario `say` texts with commas need quoting in the YAML flow mapping.
+- 2026-11-02 (P05-T10e): voicemail SMS = `Takeover.after_message` (async hook run after the takeover message played,
+  capped by `after_message_timeout_s` = 15 s, never run without text or when the call closed first) +
+  `va_media.voicemail_sms.VoicemailSms(database=, telnyx=, events=, platform_profile_id=, edge_public_host=,
+  clock=).send(context)` (never raises; the runtime passes it to `VoicemailMonitor(sms=...)` only with a database)
+  + `va_db.voicemail_sms` (`sms_sender` = active SMS-capable org number, shared with the Send Call
+  `SMS_NOT_ENABLED` check; `queue_outbound_message` reuses the specs/21 §1 active conversation or opens a send-only
+  one; `record_sent`/`record_failed`). The message id is `voicemail_message_id(call_id)` (uuid5): the duplicate
+  guard, one Telnyx attempt. `MediaSettings` gained `edge_public_host` and `telnyx_messaging_profile_id`. Tests:
+  `packages/va_db/tests/support/sms_rows.py` (`random_e164`, `add_sms_number`, `add_telnyx_account`); runtime sim
+  `rig(messaging=True)` provisions a FakeTelnyx messaging profile + SMS number (`Rig.sms_number`, the inventory is
+  deterministic: insert it into the DB in one test only) and `machine_call(r, call, voicemail)` drives a beeping
+  machine to `voicemail_left`; outbound SMS records live in `state.telnyx.accounts[DEFAULT_API_KEY].messages`.
+  SQLAlchemy 2.1 deprecates `ARRAY.any()` (error here): use `column.contains([value])`.

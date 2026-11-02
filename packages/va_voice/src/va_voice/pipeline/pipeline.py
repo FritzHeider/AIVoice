@@ -842,6 +842,12 @@ class CallPipeline:
             message = self._speaker.speak(SpeakStatic(text, interruptible=False), None)
             if not await within(message, self._clock, takeover.speak_timeout_s):
                 _log.warning("pipeline_takeover_message_timeout", timeout_s=takeover.speak_timeout_s)
+            if takeover.after_message is not None and not await within(
+                takeover.after_message(), self._clock, takeover.after_message_timeout_s
+            ):
+                _log.warning(
+                    "pipeline_takeover_after_message_timeout", timeout_s=takeover.after_message_timeout_s
+                )
         raise self._ended(takeover.reason)
 
     async def _await_message_cue(self, takeover: Takeover) -> None:

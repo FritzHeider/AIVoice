@@ -246,7 +246,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `S3_BUCKET_VOICES` | same | `va-voice-samples` | |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | same | `minio` / `minio12345` | empty in AWS (IRSA) |
 | `PUBLIC_API_BASE_URL` | api, docs, sdk tests | `http://localhost:8000` | |
-| `EDGE_PUBLIC_HOST` | worker, edge | `localhost:8100` (tunnel host for live tests) | host Telnyx posts webhooks to |
+| `EDGE_PUBLIC_HOST` | worker, edge, media | `localhost:8100` (tunnel host for live tests) | host Telnyx posts webhooks to |
 | `MEDIA_PUBLIC_HOST` | worker, edge, media | `localhost:8200` | host Telnyx opens media WS to |
 | `DASHBOARD_BASE_URL` | api | `http://localhost:3000` | CORS + email links |
 | `SECRET_KEY` | api | 64 random hex chars | session signing |
@@ -258,7 +258,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `TELNYX_API_KEY` | same | `sim-telnyx-key` | platform master Telnyx key |
 | `TELNYX_PUBLIC_KEY` | edge, media | sim public key printed by `make up` | Ed25519 public key (base64) for webhook verification |
 | `TELNYX_CALL_CONTROL_APP_ID` | worker, edge | created by `scripts/telnyx_bootstrap.py` | platform Call Control Application id (connection_id) |
-| `TELNYX_MESSAGING_PROFILE_ID` | worker, api | created by bootstrap | platform messaging profile |
+| `TELNYX_MESSAGING_PROFILE_ID` | worker, api, media | created by bootstrap | platform messaging profile |
 | `TELNYX_OUTBOUND_VOICE_PROFILE_ID` | worker | created by bootstrap | |
 | `ELEVENLABS_API_BASE` | worker, api | `http://localhost:9200` (sim) | real: `https://api.elevenlabs.io` |
 | `ELEVENLABS_WS_BASE` | media | `ws://localhost:9200` | real: `wss://api.elevenlabs.io` (US: `wss://api.us.elevenlabs.io`) |

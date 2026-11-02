@@ -306,6 +306,38 @@ async def test_a_webhook_resolving_to_a_private_address_is_rejected(
     await assert_nothing_dispatched(container, org)
 
 
+def voicemail_sms(sms: dict[str, Any]) -> dict[str, Any]:
+    return {"action": "leave_message_and_sms", "message": "Please call us back.", "sms": sms}
+
+
+@pytest.mark.parametrize("from_sms", [False, True], ids=["call-from", "sms-from"])
+async def test_a_voicemail_sms_sender_without_sms_is_rejected(
+    client: httpx.AsyncClient, container: SessionContainer, org: CallableOrg, from_sms: bool
+) -> None:
+    sms: dict[str, Any] = {"message": "Sorry we missed you."}
+    body = task_body(org)
+    _, voice_only = await org.seed.number(capabilities=["voice"])
+    if from_sms:
+        sms["from"] = voice_only
+    else:
+        body["from"] = voice_only
+    body["voicemail"] = voicemail_sms(sms)
+    response = await send_call(client, org.key, body)
+    assert error_of(response) == (400, "SMS_NOT_ENABLED", "voicemail.sms.from")
+    await assert_nothing_dispatched(container, org)
+
+
+async def test_a_voicemail_sms_from_an_sms_number_is_dispatched(
+    client: httpx.AsyncClient, container: SessionContainer, org: CallableOrg
+) -> None:
+    _, sender = await org.seed.number()
+    body = task_body(org, voicemail=voicemail_sms({"message": "Sorry we missed you.", "from": sender}))
+    response = await send_call(client, org.key, body)
+    assert response.status_code == 200, response.text
+    [call] = await calls_of(container, org.org_id)
+    assert call.config["voicemail"]["action"] == "leave_message_and_sms"
+
+
 async def test_a_dnc_number_is_blocked(
     client: httpx.AsyncClient, container: SessionContainer, org: CallableOrg
 ) -> None:

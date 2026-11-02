@@ -6,18 +6,23 @@
 reply in progress off, and, when the takeover carries ``text``, waits for the message cue before speaking it
 once (not interruptible): the ``beep`` event, or ``silence_ms`` without caller speech (:class:`SpeechCue`),
 at most
-``max_wait_s``. Then it ends with ``reason``.
+``max_wait_s``. When the takeover also carries ``after_message`` (the voicemail SMS, specs/07 §14 Decision
+P05-T10e), that hook runs once the message was played (or its playback cap passed), for at most
+``after_message_timeout_s``; then the call ends with ``reason``. The hook must never raise; a call that closes
+before the message finished never runs it.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
 
 from va_voice.vad import VadEvent
 
 __all__ = [
+    "DEFAULT_AFTER_MESSAGE_TIMEOUT_S",
     "DEFAULT_MESSAGE_SILENCE_MS",
     "DEFAULT_MESSAGE_WAIT_S",
     "DEFAULT_SPEAK_TIMEOUT_S",
@@ -34,6 +39,9 @@ DEFAULT_MESSAGE_WAIT_S: Final = 20.0
 DEFAULT_SPEAK_TIMEOUT_S: Final = 120.0
 """Cap on the message playback (waiting for its mark echo)."""
 
+DEFAULT_AFTER_MESSAGE_TIMEOUT_S: Final = 15.0
+"""Cap on the ``after_message`` hook; it is cancelled past it and the call ends anyway."""
+
 
 @dataclass(frozen=True, slots=True)
 class Takeover:
@@ -45,6 +53,8 @@ class Takeover:
     silence_ms: int = DEFAULT_MESSAGE_SILENCE_MS
     max_wait_s: float = DEFAULT_MESSAGE_WAIT_S
     speak_timeout_s: float = DEFAULT_SPEAK_TIMEOUT_S
+    after_message: Callable[[], Awaitable[None]] | None = None
+    after_message_timeout_s: float = DEFAULT_AFTER_MESSAGE_TIMEOUT_S
 
 
 class SpeechCue:

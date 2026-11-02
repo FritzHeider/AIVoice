@@ -36,8 +36,9 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
 from __future__ import annotations
 
 import asyncio
+import functools
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +99,7 @@ from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
 from va_media.voicemail import DbAnsweredBy, LlmAnswerClassifier, StructuredSource, VoicemailMonitor
+from va_media.voicemail_sms import VoicemailSms
 from va_media.workflow_signal import TemporalPipelineSignaller
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
@@ -309,7 +311,22 @@ class CallRuntime:
             events=None if self._persistence is None else self._persistence.events,
             answered_by=None if self._database is None else DbAnsweredBy(self._database, context.org_id),
             answered_at=session.carrier_state.answered_at,
+            sms=self._voicemail_sms(context),
         )
+
+    def _voicemail_sms(self, context: CallContext) -> Callable[[], Awaitable[None]] | None:
+        """The voicemail SMS hook of the call (``None`` without a database: the SMS cannot be recorded)."""
+        if self._database is None:
+            return None
+        sender = VoicemailSms(
+            database=self._database,
+            telnyx=self._telnyx,
+            events=None if self._persistence is None else self._persistence.events,
+            platform_profile_id=self._settings.telnyx_messaging_profile_id,
+            edge_public_host=self._settings.edge_public_host,
+            clock=self._clock,
+        )
+        return functools.partial(sender.send, context)
 
     def _recorder(self, session: CallSession) -> TurnRecorder | None:
         """The call's turn recorder (``None`` without persistence: turns and events are not kept)."""

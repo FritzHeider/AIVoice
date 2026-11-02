@@ -10,7 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -23,9 +23,11 @@ from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignal
 from resolved_configs import resolved_config
 from service_helpers import settings_of
 from sim_media import EdgeRelay, StreamedCall, realtime_telnyx, streamed_call
+from sms_rows import add_sms_number
 from sqlalchemy import select
 from starlette.applications import Starlette
-from telnyx_helpers import CALLEE, register
+from telnyx_client_helpers import sms_number
+from telnyx_helpers import CALLEE, VOICE_URL, register
 from tenant_rows import open_database
 from tts_helpers import VOICE_ID
 
@@ -33,7 +35,7 @@ from va_billing.keys import concurrency_key
 from va_common.http import http_client
 from va_common.metrics import Service, build_metrics, new_registry
 from va_common.time import SystemClock, utcnow
-from va_db.models import Call, CallEvent
+from va_db.models import Call, CallEvent, Message
 from va_db.repositories import CallTurnRepo
 from va_db.session import Database
 from va_domain.carrier import carrier_state_key
@@ -51,6 +53,7 @@ from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.turns import CallPersistence
+from va_media.voicemail_sms import SMS_SENT_MESSAGE
 from va_sim.server import running_sims, simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
@@ -112,6 +115,7 @@ class Rig:
     container: FakeMediaContainer
     signaller: RecordingSignaller
     relay: EdgeRelay
+    sms_number: str | None = None
 
     @asynccontextmanager
     async def call(
@@ -175,9 +179,12 @@ async def rig(
     redis: fakeredis.FakeAsyncRedis | None = None,
     persistence: CallPersistence | None = None,
     database: Database | None = None,
+    messaging: bool = False,
 ) -> AsyncIterator[Rig]:
     """The runtime over the simulators; with ``database`` its end-of-call routine runs too (over the media
-    container's Redis, FakeTelnyx, ``persistence``'s events and a :class:`RecordingSignaller`)."""
+    container's Redis, FakeTelnyx, ``persistence``'s events and a :class:`RecordingSignaller`). ``messaging``:
+    FakeTelnyx's platform account gets a messaging profile (the runtime's ``TELNYX_MESSAGING_PROFILE_ID``)
+    and an SMS number on it (``Rig.sms_number``)."""
     relay = EdgeRelay()
     state = realtime_telnyx(relay)
     telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
@@ -212,6 +219,12 @@ async def rig(
                 resolve_key=no_byo_key,
                 clock=clock,
             )
+            sms = None
+            if messaging:
+                sms, profile_id = await sms_number(
+                    await telnyx.for_account(None), state, VOICE_URL, VOICE_URL
+                )
+                settings = settings.model_copy(update={"telnyx_messaging_profile_id": profile_id})
             container, signaller = FakeMediaContainer(), RecordingSignaller()
             end_routine = None
             if database is not None:
@@ -249,6 +262,7 @@ async def rig(
                 container,
                 signaller,
                 relay,
+                sms,
             )
 
 
@@ -496,14 +510,14 @@ async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url:
 
 @asynccontextmanager
 async def ending_rig(
-    media_db_url: str, *, status: str = "in_progress"
+    media_db_url: str, *, status: str = "in_progress", messaging: bool = False
 ) -> AsyncIterator[tuple[Rig, SeededCall]]:
     """A rig with the end-of-call routine on the media database and a seeded answered call holding a slot."""
     async with open_database(media_db_url) as database:
         call = await seed_call(database, status="in_progress", answered_at=utcnow(), config=resolved_config())
         async with (
             open_persistence(database, fakeredis.FakeAsyncRedis(), clock=SystemClock()) as persistence,
-            rig(persistence=persistence, database=database) as r,
+            rig(persistence=persistence, database=database, messaging=messaging) as r,
         ):
             await r.container.redis.zadd(concurrency_key(call.org_id), {str(call.call_id): 1})
             yield r, call
@@ -620,20 +634,10 @@ async def call_event_rows(media_db_url: str, call: SeededCall) -> list[CallEvent
 @pytest.mark.integration
 async def test_a_machine_gets_the_message_after_the_beep(media_db_url: str) -> None:
     async with ending_rig(media_db_url) as (r, call):
-        r.scenario(
-            f"say: {{text: '{GREETING}'}}",
-            "expect_hangup: {}",
-            answer=f"{{after_ms: 200, answered_by: machine, beep_at_ms: {BEEP_MS}}}",
-        )
         voicemail = {"action": "leave_message", "message": VOICEMAIL_TEMPLATE, "detect_timeout_ms": 10_000}
-        async with r.call(
-            seeded=call, amd="premium", voicemail=voicemail, request_data={"name": "Dana"}
-        ) as streamed:
-            end = await r.body.end()
-            assert await signalled(r) == [("voicemail_left", "agent")]
+        async with machine_call(r, call, voicemail) as streamed:
             agent_audio = bytes(streamed.sim_call().audio.agent)
             assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
-        assert end.end_reason == "voicemail_left"
         assert r.relay.relayed[:2] == [
             "call.machine.premium.detection.ended",
             "call.machine.premium.greeting.ended",
@@ -647,6 +651,23 @@ async def test_a_machine_gets_the_message_after_the_beep(media_db_url: str) -> N
         assert voicemail_events(await call_event_rows(media_db_url, call)) == [
             {"action": "leave_message", "trigger": "amd"}
         ]
+
+
+@asynccontextmanager
+async def machine_call(r: Rig, call: SeededCall, voicemail: dict[str, Any]) -> AsyncIterator[StreamedCall]:
+    """An AMD call answered by a machine that beeps at :data:`BEEP_MS`; yields once the call ended
+    ``voicemail_left`` and ``CallWorkflow`` was signalled (the sim call is still readable)."""
+    r.scenario(
+        f"say: {{text: '{GREETING}'}}",
+        "expect_hangup: {}",
+        answer=f"{{after_ms: 200, answered_by: machine, beep_at_ms: {BEEP_MS}}}",
+    )
+    async with r.call(
+        seeded=call, amd="premium", voicemail=voicemail, request_data={"name": "Dana"}
+    ) as streamed:
+        assert (await r.body.end()).end_reason == "voicemail_left"
+        assert await signalled(r) == [("voicemail_left", "agent")]
+        yield streamed
 
 
 async def test_a_machine_with_hangup_ends_without_a_word() -> None:
@@ -692,3 +713,81 @@ async def test_the_sensitive_classifier_detects_a_voicemail_greeting(media_db_ur
         [data] = voicemail_events(await call_event_rows(media_db_url, call))
         assert (data["action"], data["trigger"]) == ("hangup", "classifier")
         assert data["confidence"] >= 0.8
+
+
+# Voicemail SMS (specs/07 §14 Decision P05-T10e)
+
+SMS_TEMPLATE: Final = "Hi {{name}}, sorry we missed you. Reply here or call us back."
+
+
+async def org_sms_number(media_db_url: str, call: SeededCall, e164: str | None = None) -> str:
+    async with open_database(media_db_url) as database:
+        return await add_sms_number(database, call.org_id, e164)
+
+
+async def sms_rows(media_db_url: str, call: SeededCall) -> list[Message]:
+    async with open_database(media_db_url) as database, database.tenant_session(call.org_id) as session:
+        return list(await session.scalars(select(Message).where(Message.org_id == call.org_id)))
+
+
+def last_audio_ms(agent: bytes) -> float:
+    """Offset (ms after the answer) of the end of the last non-silent agent sample."""
+    for index in range(len(agent) - 2, -1, -2):
+        if agent[index : index + 2] != b"\x00\x00":
+            return (index + 2) / _PCM_BYTES_PER_MS
+    message = "the agent never spoke"
+    raise AssertionError(message)
+
+
+def voicemail_sms_call(sender: str) -> dict[str, Any]:
+    return {
+        "action": "leave_message_and_sms",
+        "message": VOICEMAIL_TEMPLATE,
+        "detect_timeout_ms": 10_000,
+        "sms": {"message": SMS_TEMPLATE, "from": sender},
+    }
+
+
+@pytest.mark.integration
+async def test_the_voicemail_sms_goes_out_between_the_message_and_the_hangup(media_db_url: str) -> None:
+    async with ending_rig(media_db_url, messaging=True) as (r, call):
+        assert r.sms_number is not None
+        await org_sms_number(media_db_url, call, r.sms_number)
+        async with machine_call(r, call, voicemail_sms_call(r.sms_number)) as streamed:
+            sim_call = streamed.sim_call()
+            agent_audio = bytes(sim_call.audio.agent)
+            answered_at = sim_call.answered_at
+            hangup_at = [c.at for c in sim_call.commands if c.name == "hangup"]
+        assert spoken(r.state) == ["Hi Dana, please call us back."]
+        [record] = r.state.telnyx.accounts[DEFAULT_API_KEY].messages.values()
+        assert record["text"] == "Hi Dana, sorry we missed you. Reply here or call us back."
+        assert record["from"]["phone_number"] == r.sms_number
+        # The SMS goes to the call context's callee number.
+        assert record["to"][0]["phone_number"] == call_context(call.call_id).to_number
+        # Sent after the last frame of the message played, before the hangup.
+        assert answered_at is not None
+        sent_at = datetime.fromisoformat(record["received_at"])
+        assert sent_at >= answered_at + timedelta(milliseconds=last_audio_ms(agent_audio) - 100)
+        [hangup] = hangup_at
+        assert sent_at <= datetime.fromisoformat(hangup)
+        [row] = await sms_rows(media_db_url, call)
+        assert (row.telnyx_message_id, row.direction, row.body) == (record["id"], "outbound", record["text"])
+        events = [e for e in await call_event_rows(media_db_url, call) if e.message == SMS_SENT_MESSAGE]
+        assert [dict(e.data)["message_id"] for e in events] == [str(row.id)]
+        ended, _ = await ended_row(media_db_url, call)
+        assert (ended.end_reason, ended.ended_by) == ("voicemail_left", "agent")
+
+
+@pytest.mark.integration
+async def test_a_rejected_voicemail_sms_still_leaves_the_message_and_hangs_up(media_db_url: str) -> None:
+    async with ending_rig(media_db_url, messaging=True) as (r, call):
+        # An SMS number of the org that FakeTelnyx's account does not own: Telnyx refuses the send.
+        sender = await org_sms_number(media_db_url, call)
+        async with machine_call(r, call, voicemail_sms_call(sender)) as streamed:
+            assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
+        assert r.state.telnyx.accounts[DEFAULT_API_KEY].messages == {}
+        [row] = await sms_rows(media_db_url, call)
+        assert row.status == "sending_failed"
+        assert row.telnyx_message_id is None
+        rows = await call_event_rows(media_db_url, call)
+        assert [e for e in rows if e.message == SMS_SENT_MESSAGE] == []

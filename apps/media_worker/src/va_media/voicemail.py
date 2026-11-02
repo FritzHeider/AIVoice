@@ -16,7 +16,9 @@
 Only the first detection acts, ``ivr_mode`` calls never act, and anything arriving after the window is logged
 ``media.voicemail_late``. A detection first hands the end of the call to the pipeline by ``voicemail.action``
 (``hangup`` → ``voicemail_hangup``; ``leave_message``/``leave_message_and_sms`` → the templated
-``voicemail.message`` after the beep or 1.2 s of silence, then ``voicemail_left``; a blank message hangs up;
+``voicemail.message`` after the beep or 1.2 s of silence, then ``voicemail_left``, with
+``leave_message_and_sms`` sending the SMS (the injected ``sms`` hook, :mod:`va_media.voicemail_sms`)
+between the message and the hangup; a blank message hangs up;
 ``ignore`` → the conversation goes on), then records it in the background: ``call.voicemail``
 (``data.action``, ``data.trigger``, ``data.confidence`` for the classifier) and, for the classifier,
 ``answered_by='voicemail'`` (the edge stores it for AMD). Recording failures are logged and never undo the
@@ -168,8 +170,10 @@ class VoicemailMonitor:
         answered_by: AnsweredByWriter | None = None,
         answered_at: datetime | None = None,
         pipeline_takeover: Callable[[Takeover], bool] | None = None,
+        sms: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._context = context
+        self._sms = sms
         self._config = context.config
         self._pipeline_takeover = pipeline_takeover
         self._beep = beep
@@ -328,9 +332,11 @@ class VoicemailMonitor:
         if message is None:
             _log.warning("media.voicemail_message_missing", action=action)
             return Takeover("voicemail_hangup")
-        if action == "leave_message_and_sms":
-            _log.info("media.voicemail_sms_pending")
-        return Takeover("voicemail_left", text=message, beep=self._beep)
+        if action != "leave_message_and_sms":
+            return Takeover("voicemail_left", text=message, beep=self._beep)
+        if self._sms is None:
+            _log.warning("media.voicemail_sms_unavailable")
+        return Takeover("voicemail_left", text=message, beep=self._beep, after_message=self._sms)
 
     async def _record(self, trigger: Trigger, action: str, confidence: float | None) -> None:
         if trigger == "classifier" and self._answered_by is not None:

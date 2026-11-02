@@ -27,6 +27,7 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import JsonValue
 from redis.exceptions import RedisError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_api.auth.context import RequestContext
 from va_api.services.call_event_rows import EVENTS_UNAVAILABLE_MESSAGE, broadcast_event, persist_event
@@ -46,6 +47,7 @@ from va_db.models import Call
 from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import CallRepo, CallTransitionError
 from va_db.session import Database
+from va_db.voicemail_sms import sms_sender
 from va_domain.call_resolution import CallResolution, PlatformModels, ResolutionWarning
 from va_domain.call_workflow import CallWorkflowInput, call_workflow_id
 from va_domain.calls import SendCallConfig, SendCallRequest
@@ -59,6 +61,7 @@ __all__ = [
     "SCHEDULED_MESSAGE",
     "START_FAILED_ERROR",
     "START_FAILED_MESSAGE",
+    "VOICEMAIL_SMS_SENDER_MESSAGE",
     "DispatchDeps",
     "DispatchedCall",
     "deps_of",
@@ -70,6 +73,7 @@ SCHEDULED_MESSAGE: Final = "Call successfully scheduled."
 START_FAILED_MESSAGE: Final = "The call could not be started. Please retry."
 START_FAILED_ERROR: Final = "Call workflow could not be started."
 ORG_NOT_FOUND_MESSAGE: Final = "Organization not found."
+VOICEMAIL_SMS_SENDER_MESSAGE: Final = "The voicemail SMS sender is not an active SMS number of this org."
 
 _log = get_logger(__name__)
 
@@ -169,6 +173,7 @@ async def _create(  # noqa: PLR0913 - the request's parts, keyword-only extras
             await check_call_webhook(
                 config.webhook, org=inputs.org, settings=deps.settings, resolver=deps.resolver
             )
+            await _check_voicemail_sms(session, ctx.org_id, config)
             billing = await load_billing_org(session, ctx.org_id)
             admitted = await admit_call(
                 session,
@@ -187,6 +192,17 @@ async def _create(  # noqa: PLR0913 - the request's parts, keyword-only extras
             await _undo_counters(admitted, deps.limiter)
         raise
     return _Created(config=config, admitted=admitted, event=event)
+
+
+async def _check_voicemail_sms(session: AsyncSession, org_id: UUID, config: SendCallConfig) -> None:
+    """``leave_message_and_sms`` needs an active SMS number of the org as sender (``voicemail.sms.from``,
+    else the call's ``from``; specs/05 §3, specs/07 §14 Decision P05-T10e)."""
+    voicemail = config.voicemail
+    if voicemail.action != "leave_message_and_sms":
+        return
+    sender = (voicemail.sms.from_ if voicemail.sms is not None else None) or config.from_number
+    if await sms_sender(session, org_id, sender) is None:
+        raise AppError("SMS_NOT_ENABLED", VOICEMAIL_SMS_SENDER_MESSAGE, field="voicemail.sms.from")
 
 
 def _utc(value: datetime | None) -> datetime | None:

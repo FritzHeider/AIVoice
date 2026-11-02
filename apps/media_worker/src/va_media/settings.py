@@ -54,6 +54,10 @@ class MediaSettings(
     media_public_host: str = "localhost:8200"
     # Byte order of L16 payloads on the Telnyx media WS (hd_audio legs, specs/07 §15).
     telnyx_l16_byte_order: L16ByteOrder = "big"
+    # The edge host Telnyx posts messaging webhooks to (the voicemail SMS ``webhook_url``, specs/07 §14).
+    edge_public_host: str = "localhost:8100"
+    # Platform messaging profile of voicemail SMS sent from platform numbers (specs/07 §14 Decision P05-T10e).
+    telnyx_messaging_profile_id: str = ""
     # Empty or unset → the hostname (the pod name under Kubernetes).
     pod_id: str = ""
 

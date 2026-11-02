@@ -665,8 +665,37 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
 > for the classifier; message `Voicemail detected`) and, for the classifier, sets `answered_by='voicemail'` on the
 > answered call (the edge sets it for AMD); failures are logged and never undo the action. (6) Both voicemail ends
 > set `disposition_tag='VOICEMAIL'` when the call has none (`va_db.call_end.record_answered_end`). (7) The
-> `_and_sms` SMS and the retry child call are P05-T10e (logged `media.voicemail_sms_pending` meanwhile).
+> `_and_sms` SMS follows the P05-T10e Decision below; the retry child call is P05-T10f.
 > Transcripts and the message text are never logged.
+
+> Decision (2026-11-02): Voicemail SMS (P05-T10e). (1) `Takeover.after_message` (an async hook, capped by
+> `after_message_timeout_s`, default 15 s, then cancelled and logged `pipeline_takeover_after_message_timeout`) runs
+> once the message's mark echo arrived or its 120 s playback cap passed, then the call ends `voicemail_left`; it is
+> never run for a takeover without text, nor when the call closed (caller hangup, watchdog) before the message
+> finished. For `leave_message_and_sms` the `VoicemailMonitor` passes `va_media.voicemail_sms.VoicemailSms.send` as
+> the hook (no database → logged `media.voicemail_sms_unavailable`, the message is still left). (2) Sender =
+> `voicemail.sms.from`, else the call's `from`; it must be an `active`, not deleted number of the org with the
+> `sms` capability (`va_db.voicemail_sms.sms_sender`). Send Call checks the same rule after resolution → 400
+> `SMS_NOT_ENABLED` (`field = voicemail.sms.from`). The 10DLC / toll-free gating of specs/21 §2 step 1 arrives with
+> the SMS phase. (3) Messaging profile: the BYO account's `messaging_profile_id` for BYO numbers, else
+> `TELNYX_MESSAGING_PROFILE_ID` (now also a media-worker variable, with `EDGE_PUBLIC_HOST` for the
+> `webhook_url = webhook_urls(EDGE_PUBLIC_HOST, account).messaging`, `use_profile_webhooks=false`); none → the
+> message is recorded `sending_failed` (`error.code = no_messaging_profile`). (4) Instead of the Temporal
+> `send_message` activity of specs/21 §2 step 6 the media worker sends directly, once: the `messages.id` is
+> `uuid5(VOICEMAIL_SMS_NAMESPACE, call_id)`, inserted `queued` (`ON CONFLICT (id) DO NOTHING`) and committed before
+> the Telnyx request, so a second attempt for the call finds the row and sends nothing; a failed send is not
+> retried (`send_message` is not idempotent) and is stored `sending_failed` with `error = {code, detail}` (first
+> Telnyx error) or `{code: <failure type>}`. Success stores `telnyx_message_id`, the recipient status when it is a
+> `messages.status` value (else `queued`) and `segments = parts` (default 1). (5) The message joins the number pair's
+> active conversation (specs/21 §1: `status IN ('active','human_takeover')`, `last_message_at + time_out_minutes >
+> now`, most recent) or a new send-only conversation (`channel='sms'`, `runner_type='objective'`, `objective` NULL,
+> `contact_id` of the call, `metadata = {source: voicemail, call_id}`); `last_message_at` moves to now. Replies are
+> handled once the SMS phase lands. (6) After a successful send `call.sms_sent` is published (message `Voicemail SMS
+> sent`, `data = {message_id, conversation_id, segments, source: "voicemail"}`; no numbers, no text). Billing on
+> `message.sent` (specs/21 §12) stays with the SMS phase; no usage is recorded here. (7) Every failure is logged
+> (`media.voicemail_sms_failed` with a `reason`: `sms_not_enabled`, `no_messaging_profile`, `telnyx_unavailable`,
+> `telnyx_error`, `database`; `media.voicemail_sms_skipped` for `no_sms`/`blank_message`;
+> `media.voicemail_sms_duplicate`) and never changes the call's end.
 
 ## 15. `hd_audio` mode
 
