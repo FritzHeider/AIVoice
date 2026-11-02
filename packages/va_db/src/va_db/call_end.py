@@ -4,7 +4,9 @@ Both the media worker's end-of-call routine and the ``end_call`` activity of ``C
 call (``in_progress``, ``transferring``, ``transferred``) to ``completed`` through
 :func:`record_answered_end`: an ``end_reason`` already stored on the row wins over the caller's reason (so a
 late writer never overwrites the first recorded end), ``ended_by`` follows the reason (specs/05 §9), and the
-connected/transfer seconds come from :func:`va_db.call_states.call_durations`.
+connected/transfer seconds come from :func:`va_db.call_states.call_durations`. A voicemail end
+(``voicemail_hangup``, ``voicemail_left``) also sets ``disposition_tag='VOICEMAIL'`` unless the call already
+has a disposition (specs/07 §14 Decision P05-T10c).
 """
 
 from __future__ import annotations
@@ -18,10 +20,23 @@ from va_db.call_states import END_REASONS, EndReason, call_durations
 from va_db.models import Call, CallStatus
 from va_db.repositories import CallRepo
 
-__all__ = ["ANSWERED_STATUSES", "ended_values", "record_answered_end", "stored_reason"]
+__all__ = [
+    "ANSWERED_STATUSES",
+    "VOICEMAIL_DISPOSITION",
+    "VOICEMAIL_REASONS",
+    "ended_values",
+    "record_answered_end",
+    "stored_reason",
+]
 
 ANSWERED_STATUSES: Final[frozenset[CallStatus]] = frozenset({"in_progress", "transferring", "transferred"})
 """The statuses an answered call that has not ended yet may be in."""
+
+VOICEMAIL_REASONS: Final[frozenset[EndReason]] = frozenset({"voicemail_hangup", "voicemail_left"})
+"""End reasons that tag the call ``VOICEMAIL`` when it has no disposition yet (specs/07 §14 Decision
+P05-T10c)."""
+
+VOICEMAIL_DISPOSITION: Final = "VOICEMAIL"
 
 
 def stored_reason(value: str | None) -> EndReason | None:
@@ -54,6 +69,8 @@ async def record_answered_end(  # noqa: PLR0913 - the call plus keyword-only end
     answered status raises :class:`va_db.repositories.CallTransitionError`."""
     recorded = stored_reason(call.end_reason) or reason
     values = ended_values(recorded, ended_at, call.error_message or error_message)
+    if recorded in VOICEMAIL_REASONS and call.disposition_tag is None:
+        values["disposition_tag"] = VOICEMAIL_DISPOSITION
     if call.answered_at is not None:
         values.update(call_durations(call.answered_at, ended_at, transfer_started_at))
     ended = await CallRepo(session, call.org_id).transition(

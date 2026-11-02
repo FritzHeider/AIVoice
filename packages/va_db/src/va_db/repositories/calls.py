@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from va_common.errors import AppError
 from va_common.ids import new_id
 from va_db.call_states import STOPPABLE_STATUSES, allowed_from, leg_allowed_from
-from va_db.models import Call, CallLeg, CallLegRole, CallLegState, CallStatus
+from va_db.models import AnsweredBy, Call, CallLeg, CallLegRole, CallLegState, CallStatus
 from va_db.repositories.base import NotFoundError, SystemRepository
 
 __all__ = ["CallLegLookupRepo", "CallLegRepo", "CallRepo", "CallTransitionError", "LegRef"]
@@ -103,6 +103,20 @@ class CallRepo:
             statement = statement.where(Call.id.in_(list(call_ids)))
         rows = await self.session.execute(statement.order_by(Call.created_at, Call.id))
         return [(call_id, status) for call_id, status in rows]
+
+    async def set_answered_by(
+        self, call_id: uuid.UUID, value: AnsweredBy, *, statuses: Collection[CallStatus]
+    ) -> bool:
+        """Set ``answered_by`` when the call is in one of ``statuses`` (the answered ones, for a late
+        classification); ``False`` when the call is absent, another org's, or in another status."""
+        statement = (
+            update(Call)
+            .where(Call.org_id == self.org_id, Call.id == call_id, Call.status.in_(sorted(statuses)))
+            .values(answered_by=value)
+            .returning(Call.id)
+            .execution_options(synchronize_session=False)
+        )
+        return await self.session.scalar(statement) is not None
 
     async def update_fields(self, call_id: uuid.UUID, **values: Any) -> Call:
         """Set ``values`` without a status change (``answered_by``, ...); :class:`NotFoundError` if absent."""

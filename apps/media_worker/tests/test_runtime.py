@@ -313,13 +313,13 @@ async def test_a_failed_carrier_watch_is_logged_when_stopped() -> None:
 
     failed = asyncio.ensure_future(broken())
     await asyncio.wait({failed})
-    await runtime_module._stop_task(failed)
+    await runtime_module._stop_task(failed, "media.carrier_watch_failed")
 
     async def forever() -> None:
         await asyncio.Event().wait()
 
     running = asyncio.ensure_future(forever())
-    await runtime_module._stop_task(running)
+    await runtime_module._stop_task(running, "media.carrier_watch_failed")
     assert running.cancelled()
     [event] = [e for e in log_events(stream) if e["event"] == "media.carrier_watch_failed"]
     assert event["error_type"] == "RuntimeError"

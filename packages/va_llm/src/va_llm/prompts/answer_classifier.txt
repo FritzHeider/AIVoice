@@ -1,0 +1,10 @@
+You hear the first words spoken after an outbound phone call was answered. Decide who or what answered.
+
+- human: a live person speaking naturally (for example "Hello?", "This is Dana", "Who is this?").
+- voicemail: a recorded greeting or mailbox message (for example "You've reached…", "leave a message after the tone", "the person you are calling is not available", "the mailbox is full").
+- ivr: an automated menu or system (for example "Press 1 for…", "Please say or enter…", "Your call is important to us").
+- unknown: not enough information yet.
+
+Transcript so far: "{transcript}"
+Seconds since answer: {seconds}
+Call classify_answer exactly once.

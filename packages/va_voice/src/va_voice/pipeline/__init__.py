@@ -40,6 +40,7 @@ from va_voice.pipeline.protocols import (
     InboundAudio,
     InboundDtmf,
     MarkEcho,
+    ObserverFanout,
     PhraseSource,
     PipelineObserver,
     SttEventLike,
@@ -53,6 +54,7 @@ from va_voice.pipeline.protocols import (
 )
 from va_voice.pipeline.silence import NoInputAction, NoInputTimer
 from va_voice.pipeline.speaker import Interruption, Speaker
+from va_voice.pipeline.takeover import SpeechCue, Takeover
 from va_voice.pipeline.waits import wait_until_set, within
 
 __all__ = [
@@ -86,6 +88,7 @@ __all__ = [
     "MarkEcho",
     "NoInputAction",
     "NoInputTimer",
+    "ObserverFanout",
     "PhraseSource",
     "PipelineConfig",
     "PipelineObserver",
@@ -94,10 +97,12 @@ __all__ = [
     "SpeakStatic",
     "SpeakText",
     "Speaker",
+    "SpeechCue",
     "StreamEndedError",
     "SttEventLike",
     "SttStream",
     "SttWordLike",
+    "Takeover",
     "Transport",
     "TransportEvent",
     "TtsChunkLike",

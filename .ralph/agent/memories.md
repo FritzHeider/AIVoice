@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793610108-0c52
+> P05-T10c: CallPipeline.take_over(Takeover) seam (sync, first end wins, before-run OK -> opener skipped); VoicemailMonitor must bind+start(verdict) synchronously before pipeline.run (a never-suspending before_opener otherwise lets the opener start); default resolved config is premium AMD -> media tests seed answered_by=human or relay FakeTelnyx AMD via sim_media.EdgeRelay; YAML flow scenario say texts with commas need quotes
+<!-- tags: media, pipeline, testing | created: 2026-11-02 -->
+
 ### mem-1793607833-39d1
 > P05-T11c: stop endpoints va_api.services.call_stop (TemporalCallCanceller via signal_workflow(*args), fallback cancel for scheduled/queued without workflow); shared Temporal signal fake packages/va_common/tests/workflow_fakes.py (SignalRecorder, connector_of); log-absence asserts must compare quoted JSON values, bare digits match timestamps
 <!-- tags: api, calls, testing | created: 2026-11-02 -->

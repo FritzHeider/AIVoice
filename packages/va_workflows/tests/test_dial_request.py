@@ -86,20 +86,13 @@ def test_hd_audio_streams_l16_at_16_khz_and_no_recording_omits_the_record_fields
 
 
 @pytest.mark.parametrize(
-    ("overrides", "expected"),
-    [
-        ({}, "premium"),
-        ({"ivr_mode": True}, "disabled"),
-        ({"answered_by_enabled": False}, "disabled"),
-        ({"voicemail": {"action": "ignore", "sensitive": False}}, "disabled"),
-        ({"voicemail": {"action": "ignore", "sensitive": True}}, "premium"),
-        ({"voicemail": {"action": "leave_message", "sensitive": False}}, "premium"),
-    ],
+    "overrides",
+    [{}, {"ivr_mode": True}, {"voicemail": {"action": "ignore", "sensitive": False}}],
 )
-def test_amd_mode(overrides: dict[str, Any], expected: str) -> None:
+def test_the_dial_requests_the_amd_mode_of_the_config(overrides: dict[str, Any]) -> None:
+    """The mode table itself is tested in va_domain (``va_domain.voicemail.amd_mode``)."""
     config = _config(**overrides)
-
-    assert amd_mode(config) == expected
+    expected = amd_mode(config)
     body = _body(config)
     assert body["answering_machine_detection"] == expected
     assert ("answering_machine_detection_config" in body) == (expected == "premium")

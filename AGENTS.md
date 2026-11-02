@@ -1346,3 +1346,17 @@ Grafana 3001
   `workflow_fakes.SignalRecorder` + `connector_of` (va_common tests) fake a Temporal client for signals;
   `session_helpers.hold(...)` returns the hold id; the cross-tenant `call_id` factory seeds an `in_progress` call.
   Resource-specific not-found codes (`CALL_NOT_FOUND`) are accepted refusals in `cross_tenant.REFUSED`.
+- 2026-11-02 (P05-T10c): AMD/voicemail. `amd_mode`/`classifier_enabled`/`amd_verdict` live in `va_domain.voicemail`
+  (`va_workflows.activities.dial_request` re-exports `amd_mode`). Pipeline seam: `CallPipeline.take_over(Takeover(
+  reason, text=, beep=))` (sync, first end wins, may be called before `run()`; a takeover before the opener skips
+  it; `pipeline.speech_cue` is the VAD state of the silence cue). `va_voice.pipeline.ObserverFanout(*observers)`
+  fans pipeline callbacks out. Media: `CarrierWatch.amd`/`verdict`/`beep`/`on_verdict`; `GreetingGate` waits
+  `AMD_WAIT_S` for the verdict when `amd_mode == "premium"`; `va_media.voicemail.VoicemailMonitor` (outbound only;
+  `bind(pipeline.take_over)` then `start(watch.verdict)` before the pipeline runs, `run()` = classifier task,
+  `stop()` awaits the background `call.voicemail`/`answered_by` recordings before the call's events flush).
+  Gotcha: the default resolved config is AMD `premium`, so every outbound media test now waits up to 3 s for a
+  verdict unless the carrier snapshot holds one: `gate_rig(answered_by=...)` (default `human`) in
+  `test_outbound_dtmf.py`, and the runtime sim `Rig.call()` seeds `answered_by=human` unless `amd="premium"` is
+  passed, which dials with AMD and relays FakeTelnyx's verdict/beep through `sim_media.EdgeRelay` (the edge's
+  carrier-state hash + carrier channel). The runtime sim `rig(database=...)` also gives the runtime a database
+  (`DbAnsweredBy`). Scenario `say` texts with commas need quoting in the YAML flow mapping.

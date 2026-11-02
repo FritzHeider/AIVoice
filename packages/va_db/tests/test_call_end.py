@@ -10,7 +10,7 @@ import pytest
 from call_rows import SeededCall, load_call, seed_call
 from tenant_rows import open_database
 
-from va_db.call_end import ended_values, record_answered_end, stored_reason
+from va_db.call_end import ANSWERED_STATUSES, ended_values, record_answered_end, stored_reason
 from va_db.call_states import EndReason
 from va_db.repositories import CallRepo, CallTransitionError
 from va_db.session import Database
@@ -96,3 +96,43 @@ def test_stored_reason_and_values() -> None:
         "ended_at": ANSWERED_AT,
     }
     assert ended_values("error", ANSWERED_AT, "boom")["error_message"] == "boom"
+
+
+@pytest.mark.parametrize("reason", ["voicemail_hangup", "voicemail_left"])
+async def test_a_voicemail_end_tags_the_call_voicemail(database: Database, reason: EndReason) -> None:
+    seeded = await seed_call(database, status="in_progress", answered_at=ANSWERED_AT)
+    assert await _end(database, seeded, reason) == reason
+    call = await load_call(database, seeded)
+    assert (call.end_reason, call.disposition_tag) == (reason, "VOICEMAIL")
+
+
+async def test_a_voicemail_end_keeps_an_existing_disposition(database: Database) -> None:
+    seeded = await seed_call(
+        database, status="in_progress", answered_at=ANSWERED_AT, disposition_tag="CALLBACK"
+    )
+    await _end(database, seeded, "voicemail_left")
+    call = await load_call(database, seeded)
+    assert call.disposition_tag == "CALLBACK"
+
+
+async def test_other_ends_leave_the_disposition_unset(database: Database) -> None:
+    seeded = await seed_call(database, status="in_progress", answered_at=ANSWERED_AT)
+    await _end(database, seeded, "max_duration")
+    call = await load_call(database, seeded)
+    assert call.disposition_tag is None
+
+
+async def test_set_answered_by_only_touches_answered_calls_of_the_org(database: Database) -> None:
+    answered = await seed_call(database, status="in_progress", answered_at=ANSWERED_AT)
+    ringing = await seed_call(database, status="ringing")
+    statuses = ANSWERED_STATUSES
+    async with database.tenant_session(answered.org_id) as session:
+        repo = CallRepo(session, answered.org_id)
+        assert await repo.set_answered_by(answered.call_id, "voicemail", statuses=statuses)
+        # Another org's call is invisible (RLS and the org filter).
+        assert not await repo.set_answered_by(ringing.call_id, "voicemail", statuses=statuses)
+    async with database.tenant_session(ringing.org_id) as session:
+        repo = CallRepo(session, ringing.org_id)
+        assert not await repo.set_answered_by(ringing.call_id, "voicemail", statuses=statuses)
+    assert (await load_call(database, answered)).answered_by == "voicemail"
+    assert (await load_call(database, ringing)).answered_by is None

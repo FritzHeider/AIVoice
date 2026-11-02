@@ -35,6 +35,7 @@ __all__ = [
     "fit_voice_system",
     "interrupted_message",
     "load_prompt",
+    "render_answer_classifier",
     "render_voice_system",
     "tool_usage_note",
 ]
@@ -161,6 +162,13 @@ def render_voice_system(inputs: VoicePromptInputs) -> str:
         "glossary_section": _glossary(inputs.glossary_terms),
     }
     return load_prompt("voice_system").format_map(values).rstrip()
+
+
+def render_answer_classifier(transcript: str, seconds: float) -> str:
+    """The rendered voicemail / IVR classifier prompt (specs/10 §9.4): the callee's words so far (quotes
+    left as they are) and the whole seconds since the answer; trailing whitespace removed."""
+    values = {"transcript": transcript.strip(), "seconds": str(max(int(seconds), 0))}
+    return load_prompt("answer_classifier").format_map(values).rstrip()
 
 
 def fit_voice_system(

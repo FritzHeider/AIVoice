@@ -26,6 +26,10 @@
 - ``ivr`` (``ivr_mode`` only): ends the pipeline with ``ivr_dead_end`` (silently: the reply in progress is
   cut off) when ``ivr_dead_end_s`` pass from the opener without progress (:class:`IvrProgress`: a delivered
   turn with new text, or a telephony action).
+- ``takeover``: waits for :meth:`CallPipeline.take_over` (specs/07 §14 Decision P05-T10c): stops accepting
+  turns, cuts the reply in progress off, speaks the takeover's message once after its cue (beep event, or
+  ``silence_ms`` without caller speech, at most ``max_wait_s``), then ends with the takeover's reason. A
+  takeover accepted before the opener skips it.
 - ``dtmf``: ends a keypad sequence ``DTMF_SEQUENCE_TIMEOUT_MS`` after its last digit (``#`` ends it at once
   in the inbound task) and routes it as the user turn ``"[DTMF: 1 2 3]"`` with ``dtmf`` set (§13), like a
   speech turn. A digit during interruptible playback (level ≥ 1) barges in first, without the false-barge-in
@@ -95,6 +99,7 @@ from va_voice.pipeline.protocols import (
 )
 from va_voice.pipeline.silence import NoInputTimer
 from va_voice.pipeline.speaker import Interruption, Speaker
+from va_voice.pipeline.takeover import SpeechCue, Takeover
 from va_voice.pipeline.waits import wait_until_set, within
 from va_voice.reorder import NULL_OBSERVER as NULL_REORDER_OBSERVER
 from va_voice.reorder import ReorderObserver
@@ -206,6 +211,10 @@ class CallPipeline:
         self._dtmf_wake = asyncio.Event()
         self._ivr = IvrProgress(self._config.ivr_dead_end_s * _MS_PER_SECOND)
         self._ivr_wake = asyncio.Event()
+        self._takeover: Takeover | None = None
+        self._takeover_wake = asyncio.Event()
+        self._cue = SpeechCue()
+        self._cue_wake = asyncio.Event()
         self._opened = False
         self._commit: asyncio.Future[SttEventLike] | None = None
         self._turn_start_ms: float | None = None
@@ -261,6 +270,10 @@ class CallPipeline:
     def ivr(self) -> IvrProgress:
         return self._ivr
 
+    @property
+    def speech_cue(self) -> SpeechCue:
+        return self._cue
+
     async def run(self) -> PipelineResult:
         """Run the leg until it ends; cancelling the caller cancels every task and re-raises."""
         if self._started:
@@ -292,6 +305,7 @@ class CallPipeline:
             ("watchdog", self._watchdog()),
             ("silence", self._silence_loop()),
             ("dtmf", self._dtmf_loop()),
+            ("takeover", self._takeover_loop()),
         ]
         if self._config.ivr_mode:
             tasks.append(("ivr", self._ivr_loop()))
@@ -333,6 +347,7 @@ class CallPipeline:
     def _on_vad(self, events: list[VadEvent]) -> None:
         edges = [event for event in events if event.kind != "probability"]
         for event in edges:
+            self._cue.on_vad(event)
             if event.kind == "speech_start":
                 self._disarm_no_input()
                 if not self._endpointer.turn_open:
@@ -341,6 +356,7 @@ class CallPipeline:
             self._monitor.on_vad(event)
         if edges:
             self._endpoint_wake.set()
+            self._cue_wake.set()
 
     async def _read_stt(self) -> None:
         async for event in self._stt.events():
@@ -626,7 +642,11 @@ class CallPipeline:
         """§11: the ``before_opener`` hook, the greeting wait (step 4), then the opener."""
         if self._before_opener is not None:
             await self._before_opener()
+        if self._opener_skipped():
+            return
         job = await self._await_greeting() if self._config.wait_for_greeting else None
+        if self._opener_skipped():
+            return
         self._opened = True
         self._ivr.start(self._now_ms())
         self._ivr_wake.set()
@@ -636,6 +656,12 @@ class CallPipeline:
             self._note_turn(job.turn)
             await self._run_reply(self._brain.start(job.turn), job.timer, job.turn)
         await self._settle_action()
+
+    def _opener_skipped(self) -> bool:
+        """The call started closing (a takeover, the watchdog) before the opener: it is never spoken."""
+        if self._closing:
+            _log.info("pipeline_opener_skipped")
+        return self._closing
 
     async def _await_greeting(self) -> _TurnJob | None:
         """The first user turn within ``greeting_timeout_ms`` (``None`` on timeout).
@@ -785,6 +811,67 @@ class CallPipeline:
         if remaining_ms > 0:
             await self._clock.sleep(remaining_ms / _MS_PER_SECOND)
         raise self._ended("max_duration")
+
+    # takeover (§14)
+
+    def take_over(self, takeover: Takeover) -> bool:
+        """Hand the end of the call to ``takeover`` (specs/07 §14 Decision P05-T10c); ``False`` when a
+        takeover was already accepted or the pipeline is already ending (the first end wins). May be called
+        before :meth:`run`: the takeover then starts with it and the opener is skipped."""
+        if self._takeover is not None or self._closing or self._end_reason is not None:
+            return False
+        self._takeover = takeover
+        self._closing = True
+        self._takeover_wake.set()
+        _log.info("pipeline_takeover", reason=takeover.reason, message=bool((takeover.text or "").strip()))
+        return True
+
+    async def _takeover_loop(self) -> None:
+        await self._takeover_wake.wait()
+        takeover = self._takeover
+        if takeover is None:  # the wake is only set together with the takeover
+            return
+        self._disarm_no_input()
+        dropped = self._dtmf.clear()
+        if dropped:
+            _log.info("pipeline_dtmf_dropped", digits=dropped)
+        await self._stop_reply()
+        text = (takeover.text or "").strip()
+        if text:
+            await self._await_message_cue(takeover)
+            message = self._speaker.speak(SpeakStatic(text, interruptible=False), None)
+            if not await within(message, self._clock, takeover.speak_timeout_s):
+                _log.warning("pipeline_takeover_message_timeout", timeout_s=takeover.speak_timeout_s)
+        raise self._ended(takeover.reason)
+
+    async def _await_message_cue(self, takeover: Takeover) -> None:
+        """The beep, ``silence_ms`` without caller speech, or ``max_wait_s``, whichever comes first."""
+        started = self._now_ms()
+        cap_ms = started + takeover.max_wait_s * _MS_PER_SECOND
+        beep = takeover.beep
+        watcher: asyncio.Task[bool] | None = None
+        if beep is not None:
+            watcher = asyncio.get_running_loop().create_task(beep.wait(), name="pipeline-beep")
+            watcher.add_done_callback(lambda _: self._cue_wake.set())
+        try:
+            trigger = await self._cue_trigger(started, cap_ms, takeover)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+        _log.info("pipeline_takeover_wait", trigger=trigger, waited_ms=round(self._now_ms() - started, 3))
+
+    async def _cue_trigger(self, started: float, cap_ms: float, takeover: Takeover) -> str:
+        while True:
+            self._cue_wake.clear()
+            if takeover.beep is not None and takeover.beep.is_set():
+                return "beep"
+            now = self._now_ms()
+            silence_at = self._cue.silence_at_ms(started, takeover.silence_ms)
+            if silence_at is not None and now >= silence_at:
+                return "silence"
+            if now >= cap_ms:
+                return "cap"
+            await self._until(self._cue_wake, cap_ms if silence_at is None else min(cap_ms, silence_at))
 
     # IVR dead end (specs/05 §9)
 

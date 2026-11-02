@@ -672,3 +672,227 @@ prints nothing. Checked: route order (/active/stop first), calls.operate + calls
 stop-all, CALL_NOT_FOUND/CALL_NOT_ACTIVE/SERVICE_UNAVAILABLE per specs/31, fallback cancel in one tenant
 transaction (disposition CANCELED, hold release, call.ended row, audit), ended_by api from END_REASONS, workflow
 sets CANCELED disposition on its own cancel path, no phone numbers logged. make e2e harness lands in P05-T17.
+
+## Plan P05-T10c — AMD results and voicemail actions (Planner, 2026-11-02)
+
+Plan housekeeping: ticked P05-T11 (a/b/c done). P05-T10c was too big (voicemail SMS needs the messaging rows,
+retry needs a child workflow), so the plan now has P05-T10c (this) + new P05-T10e (voicemail SMS + retry,
+depends on T10c); P05-T10 parent says a–e.
+
+Spec refs: specs/07 §11 step 2, §14 steps 1-4; specs/06 §5 AMD rows + Decision P05-T02 item 9, §6 step 5;
+specs/10 §9.4; specs/05 voicemail params + §9; specs/19 §2 `call.voicemail`; specs/30 flows
+voicemail_leave_message / voicemail_hangup / amd_ivr_mode (lines ~1249-1251) and the FakeTelnyx AMD knobs
+(`answered_by`, `beep_at_ms`, ~line 230/334). Write `> Decision (2026-11-02): AMD and voicemail actions (P05-T10c)`
+under specs/07 §14 with every numbered rule below (short pointer line under §11 step 2).
+
+### Design (decided — do not re-litigate)
+1. **Shared AMD mode.** Move `AmdMode` + `amd_mode(config)` from `va_workflows.activities.dial_request` to new
+   `packages/va_domain/src/va_domain/voicemail.py`; `dial_request` re-imports them (keep the names in its
+   `__all__`; existing tests stay green). Same module: `classifier_enabled(config, direction) -> bool` =
+   `direction == "outbound" and config.voicemail.sensitive and not config.ivr_mode and config.answered_by_enabled`
+   (with every other combination `amd_mode` is already `premium` whenever a voicemail action matters — record that
+   the "engine detector when AMD is disabled" case is unreachable), `AmdVerdict = Literal["human","machine","fax",
+   "unknown"]` and `amd_verdict(event_type, result) -> AmdVerdict | None`: premium detection `human_residence`/
+   `human_business` → human, `machine` → machine, `fax_detected` → fax, else unknown; standard
+   `call.machine.detection.ended` `human` → human, `machine` → machine, else unknown; other event types → None.
+2. **Pipeline takeover seam (va_voice).** New `va_voice/pipeline/takeover.py`:
+   ```python
+   @dataclass(frozen=True, slots=True)
+   class Takeover:
+       reason: str                      # end reason the pipeline ends with
+       text: str | None = None          # spoken once, not interruptible, then end
+       beep: asyncio.Event | None = None
+       silence_ms: int = 1200
+       max_wait_s: float = 20.0         # beep/silence wait cap (only when text)
+       speak_timeout_s: float = 120.0   # cap on the message playback
+   ```
+   `CallPipeline.take_over(takeover) -> bool` (sync; False if a takeover was already accepted or the pipeline
+   already ended / is closing for another reason; first wins). Adds task `takeover` to `_tasks()` (always) that
+   waits on `_takeover_wake`, then: `_closing = True`, `_disarm_no_input()`, `_dtmf.clear()`, `await
+   _stop_reply()` (preempt + cancel; a cut agent turn is reported interrupted exactly like barge-in truncation is
+   NOT required — use the existing preempt path), then if `text` (stripped, non-empty): wait until `beep.is_set()`
+   OR (no VAD speech active AND now − last speech end ≥ `silence_ms`, measured from the takeover start when no
+   speech was ever heard) OR `max_wait_s` elapsed (log `pipeline_takeover_wait` with `trigger=beep|silence|cap`);
+   then `speaker.speak(SpeakStatic(text, interruptible=False), None)` bounded by `speak_timeout_s` via `within`
+   (it waits for the mark echo like the final line); finally `raise self._ended(reason)`. Track VAD state in
+   `_on_vad`: `_speech_active` (start/end edges) and `_last_speech_end_ms`; set a `_takeover_wake`-style
+   `_vad_wake` event the wait uses with `_until(...)`. `_open_call` returns without the opener (and without the
+   greeting wait) when `_closing` is set after `before_opener` (and re-checks after the greeting wait); `_reply_loop`
+   already drops jobs while closing. Turns arriving during a takeover are dropped by the existing `_closing`
+   checks. Export `Takeover` from `va_voice.pipeline`. Watchdog/ivr/agent end racing a takeover: first `_ended`
+   wins (existing rule). Keep `pipeline.py` complexity ≤ B (helpers `_takeover_loop`, `_await_message_cue`).
+3. **CarrierWatch AMD facts.** `CarrierWatch` gains `amd: asyncio.Event`, `verdict: AmdVerdict | None`,
+   `beep: asyncio.Event`, `on_verdict: Callable[[AmdVerdict], None] | None` (settable attribute). Snapshot at
+   attach: `answered_by` (`human`/`voicemail`/`fax`/`unknown` → verdict human/machine/fax/unknown) or
+   `amd_result` via `amd_verdict`, and `beep_detected`/`greeting_ended` fields set `beep`. Channel events: the
+   first `call.machine.detection.ended` / `call.machine.premium.detection.ended` of the `primary` leg sets
+   `verdict` + `amd` and calls `on_verdict`; `call.machine.premium.greeting.ended` and
+   `call.machine.greeting.ended` set `beep`; `call.machine.premium.call_screening.detected` is logged
+   `media.call_screening` and treated as human (no action; the opener proceeds). Never log transcript text.
+4. **GreetingGate AMD wait (§11 step 2).** After the answered wait, when `amd_mode(config) == "premium"` and
+   outbound: wait up to `AMD_WAIT_S = 3.0` (injected clock, `wait_until_set(watch.amd, ...)`) for the verdict; timeout →
+   log `media.amd_pending` and go on (treated as human). If the verdict is `machine`/`fax` the monitor has already
+   requested the takeover (it fires from `on_verdict`), so the pipeline's `_open_call` skips the opener; the gate
+   also skips precall DTMF when `voicemail.action != "ignore"` and the verdict is machine, and always on fax.
+5. **`va_media.voicemail.VoicemailMonitor`** (new module), built per outbound call by `CallRuntime._converse`;
+   inbound/web calls get none. Constructor kw-only: `context`, `org` (OrgSettings, for templating timezone if
+   needed), `pipeline_takeover: Callable[[Takeover], bool]`, `watch: CarrierWatch`, `classifier:
+   AnswerClassifier | None`, `events: VoicemailEvents | None`, `answered_by: AnsweredByWriter | None`, `clock`,
+   `answered_ms: float` (pipeline-time / clock time origin). It is a `PipelineObserver` side-tap (see 7) and owns
+   one supervised task `run()` (started next to the carrier-watch task, stopped with `_stop_task`).
+   - Window: detection counts only within `config.voicemail_detect_timeout_ms` of the answer (clock time since
+     the monitor started ≈ answer; use `carrier_state.answered_at` when present to backdate). Later AMD verdicts or
+     classifier results are logged `media.voicemail_late` and ignored.
+   - Triggers: AMD verdict `machine` (trigger `amd`), classifier label `voicemail` with confidence ≥ 0.8 (trigger
+     `classifier`); fax verdict → `take_over(Takeover("fax_detected"))` silently (no event from media; edge already
+     emitted `call.amd` and set `answered_by='fax'`; workflow end_call stays idempotent). Only the first detection
+     acts (`detected` flag).
+   - Action (§14): first emit `call.voicemail` (category voicemail) `data = {action, trigger}` (+`confidence` for
+     classifier), message `"Voicemail detected"`; for trigger `classifier` write `answered_by='voicemail'`
+     (AMD trigger: the edge already set it). Then by `config.voicemail.action`:
+     `ignore` → nothing more (conversation continues, classifier stops);
+     `hangup` → `take_over(Takeover("voicemail_hangup"))`;
+     `leave_message` / `leave_message_and_sms` → `take_over(Takeover("voicemail_left", text=<rendered message>,
+     beep=watch.beep))`; the message = `voicemail.message` rendered with new
+     `va_engine.opener.render_call_text(context, template, *, now, field_name) -> str | None` (refactor
+     `render_opener` onto it; same scope/missing-variable logging; syntax error speaks raw text); blank/missing
+     message → act as `hangup` (log `media.voicemail_message_missing`). `_and_sms` only speaks for now (log
+     `media.voicemail_sms_pending`; P05-T10e sends the SMS). ivr_mode never reaches here: `amd_mode` is disabled and
+     the classifier off, but also guard: with `ivr_mode` any verdict only logs.
+   - Classifier (`classifier_enabled`): on each delivered user turn (observer `on_user_turn`, text non-empty,
+     DTMF turns ignored) inside the window and while undecided, append the text to the transcript and schedule ONE
+     in-flight classification at a time (a newer turn while one runs re-runs once after it with the full
+     transcript). `AnswerClassifier.classify(transcript, seconds) -> AnswerClass` (`label`, `confidence`).
+     Implementation `va_media.voicemail.LlmAnswerClassifier(gateway, org_id, call_id)` calls
+     `gateway.call_structured("voicemail", AnswerClass, org_id=, call_id=, messages=[ChatMessage("system",
+     render(answer_classifier))], function_name="classify_answer", description="Classify who answered the call.")`.
+     `AnswerClass` (pydantic, no docstring or instruction-style docstring): `label: Literal["human","voicemail",
+     "ivr","unknown"]`, `confidence: float = Field(ge=0, le=1)`. Acted on when confidence ≥ 0.8 and label ≠
+     unknown: `human`/`ivr` → stop classifying (log `media.answer_classified` label only); `voicemail` → detection.
+     `LlmUnavailableError` / `ValidationError` → logged `media.answer_classifier_failed`, classification goes on with
+     the next turn. Results arriving after another detection, after the window, or after the call closed are dropped.
+     The `DialogueSource` protocol the runtime gets may not expose `call_structured`: widen the runtime's gateway
+     type to a protocol with both methods (`LlmGateway` satisfies it) — check `va_engine.task_runner.DialogueSource`.
+   - Prompt: add `packages/va_llm/src/va_llm/prompts/answer_classifier.txt` = the specs/10 §9.4 block verbatim,
+     loaded with `va_llm.prompts.load_prompt("answer_classifier")`, placeholders `{transcript}` (quotes inside the
+     transcript left as is) and `{seconds}` (integer seconds since answer); drift test in va_llm against the spec
+     block like `voice_system.txt` (reuse the existing extraction helper).
+6. **Events/DB writers.** `VoicemailEvents` protocol `publish(event: DomainEvent) -> Awaitable[DomainEvent]` —
+   pass `persistence.events` (the `EventPublisher` with the call_events buffer) when persistence exists, else None
+   (logged only). Build the event with `va_events.new_event(EventType.CALL_VOICEMAIL, org_id=, clock=,
+   call_id=..., category/message/data per the catalog helper used by `TurnRecorder._publish` — copy its field
+   usage). `AnsweredByWriter` protocol `async set_voicemail(call_id) -> None`; impl `DbAnsweredBy(database,
+   org_id)` → new `va_db.repositories.CallRepo.set_answered_by(call_id, value: AnsweredBy) -> bool` (UPDATE ...
+   WHERE id AND status IN ANSWERED_STATUSES via the tenant session; returns rowcount>0). Failures
+   (`SQLAlchemyError`, `OSError`, `EventPublishError`) logged `media.voicemail_record_failed`, never block the
+   action (do the takeover FIRST, then record in a task the monitor awaits on stop).
+   `va_db.call_end.record_answered_end`: when the recorded reason is `voicemail_hangup` or `voicemail_left` and
+   `call.disposition_tag` is None, also set `disposition_tag="VOICEMAIL"` (Decision: both voicemail ends; spec §14
+   names it for hangup, Bland semantics for a left message are the same disposition).
+7. **Observer fan-out.** Add `va_voice.pipeline.protocols.ObserverFanout(*observers)` (a `PipelineObserver`
+   calling each in order; export it). Runtime passes `ObserverFanout(recorder, monitor)` (or just the monitor /
+   NULL_OBSERVER). The monitor implements all four callbacks (three no-ops with a statement body, e.g. `return`).
+8. **Runtime wiring (`CallRuntime._converse`).** Build watch → pipeline (with `before_opener=GreetingGate(...)`)
+   → `monitor = VoicemailMonitor(..., pipeline_takeover=pipeline.take_over, ...)` only for outbound; `watch.
+   on_verdict = monitor.on_verdict` must be set BEFORE the carrier-watch task starts (snapshot verdict at attach:
+   the monitor's `start()` handles `watch.verdict` already set). Construct the pipeline before starting the watcher
+   task, or create monitor with a late-bound takeover; keep order deterministic. Monitor task stopped via the
+   exit stack (cancel + log failure like `_stop_task`; refactor `_stop_task(task, event_name)`).
+   `CallRuntime.__init__` gains `database: Database | None = None` for `DbAnsweredBy` (open_runtime passes it).
+9. Never log transcripts, the voicemail message, or phone numbers. `session_end` already maps
+   `voicemail_hangup`→system, `voicemail_left`→agent, `fax_detected`→system via `END_REASONS`.
+
+### Tests (all must exist and pass)
+- va_domain `tests/test_voicemail.py`: `amd_mode` table (moved; keep the va_workflows test importing via
+  dial_request working), `classifier_enabled` table, `amd_verdict` for every premium/standard result + unknown type.
+- va_voice `tests/pipeline/test_takeover.py` (harness on AcceleratedClock): takeover during a hanging reply cuts it
+  (`tts.cancelled`, `transport.clear`), speaks the message once after the beep event (message frames start after
+  beep time), ends with the reason; silence cue (caller speaks a greeting, message starts ≥ 1 200 ms after the
+  greeting's VAD end); no speech at all → 1 200 ms after takeover; 20 s cap while the caller keeps talking; no-text
+  takeover ends at once with no audio; takeover requested inside `before_opener` → no opener, no
+  `brain.start` (ScriptedBrain records), message spoken; second `take_over` returns False; turns during takeover
+  are not delivered; watchdog ending first wins. `ObserverFanout` calls every observer in order.
+- va_llm: `answer_classifier.txt` matches the specs/10 §9.4 block; rendering fills transcript/seconds.
+- va_db: `set_answered_by` (only answered statuses, org isolation); `record_answered_end` sets VOICEMAIL for
+  both voicemail reasons, keeps an existing disposition, leaves others None.
+- media `tests/test_carrier_watch.py` (extend): snapshot answered_by/amd_result/beep fields; premium/standard
+  verdict events, `on_verdict` called once, beep events, screening logged, other-leg events ignored.
+- media `tests/test_greeting.py` (extend): AMD wait returns on verdict, times out after 3 s (ManualClock
+  `wait_for_sleep(3.0)`), skipped when `amd_mode` disabled / inbound; precall DTMF skipped on machine (action≠ignore)
+  and fax.
+- media `tests/test_voicemail.py` (ManualClock + fake takeover recorder + fake classifier/events/writer): machine
+  → hangup/leave_message (rendered `{{name}}` message, beep passed)/ignore/`_and_sms`/blank message → hangup;
+  fax → silent `fax_detected`; human/unknown → nothing; late verdict beyond window ignored; classifier voicemail ≥
+  0.8 acts (answered_by written, trigger classifier, confidence in data), 0.79 ignored, ivr/human stop further
+  calls, LLM error continues with next turn, one in flight + one re-run, results after detection dropped; writer/
+  events failures logged and the takeover still happened; event data has no transcript text.
+- media runtime sim (`test_runtime_sim.py` or new `test_voicemail_sim.py`, `streamed_call(..., answered=True)`
+  with FakeTelnyx scenario `answered_by`/`beep_at_ms`, dial AMD `premium` — check the media rig dials with
+  `answering_machine_detection`; if `streamed_call` dials without it, pass the dial override):
+  (a) machine + `voicemail: {action: leave_message, message: "Hi {{name}}, call us back"}`, `beep_at_ms: 4000`:
+  first agent audio frame after the beep, the only TTS generated text is the rendered message, session end
+  `voicemail_left`/agent, no LLM request; with persistence + Postgres (`rig(persistence=...)`, `Rig.call(seeded=...)`,
+  `ending_rig`) the row has `answered_by='voicemail'`, `disposition_tag='VOICEMAIL'`, one `call.voicemail` row
+  action `leave_message`, one FakeTelnyx hangup; (b) machine + `hangup`: no TTS, `voicemail_hangup`/system;
+  (c) `ivr_mode=true` + machine scenario: conversation proceeds (opener spoken, no voicemail event); (d) human AMD +
+  `sensitive=true`, callee utterance "Please leave a message after the tone" → classifier (FakeLLM heuristic) →
+  hangup action → `voicemail_hangup`, `answered_by='voicemail'` (if persistence in that test).
+- Existing runtime/greeting/session tests stay green (no AMD in their dials → `amd` never set, gate unchanged for
+  `amd_mode == "disabled"`; check the default config: `voicemail.action="hangup"` and `answered_by_enabled=True`
+  make `amd_mode` PREMIUM by default → existing outbound runtime tests would now wait 3 s for AMD unless the sim
+  dial requested AMD. Handle it: FakeTelnyx with premium AMD sends a verdict at +1.8 s (default scenario
+  `answered_by: human_residence`) — make sure `streamed_call`'s dial carries the same AMD mode the context implies,
+  or the gate's wait is bounded (3 s wall in realtime tests is acceptable only if unavoidable; prefer the sim verdict).
+  Builder: inspect `sim_media.streamed_call` dial body and align it with `amd_mode(context.config)`.)
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t10c.log 2>&1`) with a heartbeat Monitor (~25 min); coverage ≥ 85 % per
+package, new modules ~100 %; `npx --yes jscpd@4 --silent` → 0 clones; `uvx radon cc -s -n C` on every touched src
+file prints nothing; audit (`uvx pip-audit` on `uv export` + `corepack pnpm audit`). No OpenAPI change expected.
+`make e2e` harness lands in P05-T17 — say so. build.done payload plain text (no --json): `tests: pass, lint: pass,
+typecheck: pass, audit: pass, coverage: pass, duplication: pass, complexity: N, specs: pass`. Update AGENTS.md
+(takeover seam, ObserverFanout, VoicemailMonitor, amd_mode location, default-premium AMD gotcha for media tests).
+
+### Risks
+- Default config is AMD `premium` → every outbound media test now passes through the 3 s AMD wait. Align the sim
+  dial (verdict at +1.8 s) or tests slow/flake; never weaken asserts.
+- Takeover vs the reply loop: `_open_call` must not start `brain.start()` after a takeover inside `before_opener`;
+  closing checks must be re-read after every await in `_open_call`.
+- Beep wait: the accelerated clock jumps while idle; drive with the beep event / VAD edges, assert relative to
+  played agent frames (AGENTS.md P03-T03c), not socket arrival.
+- `DialogueSource` protocol widening must not break TaskBrain fakes (add a separate `AnswerSource` protocol
+  for `call_structured` and pass the same gateway object twice if simpler).
+- call_events partitions: Postgres runtime tests need real-time clocks (SystemClock / sim realtime).
+
+## Build P05-T10c (Builder, 2026-11-02)
+
+Implemented per plan, with these deviations (all recorded in the specs/07 §14 Decision):
+- `va_domain.voicemail.AmdMode` = `Literal["premium","disabled"]` (va_domain cannot import va_telnyx); added
+  `verdict_of_answered_by` for the snapshot. `amd_verdict(event_type, result)` as planned.
+- `VoicemailMonitor` takes `beep: asyncio.Event` (not the whole watch) and a late-bound `bind(pipeline.take_over)`
+  (the pipeline is built after it, since the monitor is a pipeline observer); `start(watch.verdict)` acts on an
+  attach-time verdict synchronously BEFORE `pipeline.run()` (otherwise a gate that never suspends would let the
+  opener start first). `run()` is the classifier loop only (returns at once when the classifier is off);
+  verdicts act synchronously in `on_verdict`; recordings are background tasks awaited by `stop()`. Exit-stack
+  order: classifier cancel → monitor.stop (recordings) → persistence.finish_call (flush).
+- `org` constructor param dropped (unused). `CallPipeline.speech_cue` property exposes the VAD cue state.
+- `CallRepo.set_answered_by(call_id, value, *, statuses)` (repositories cannot import va_db.call_end → caller
+  passes ANSWERED_STATUSES).
+- Runtime sim tests: no edge in the rig, so `sim_media.EdgeRelay` (webhook receiver) stores/publishes
+  FakeTelnyx AMD verdicts + beeps like va_edge. `Rig.call(amd="premium")` dials with AMD; without it the
+  snapshot holds `answered_by=human` (no 3 s AMD wait in existing tests). In test (a) `answered_by='voicemail'`
+  is NOT asserted (the edge writes it for AMD and there is no edge); test (d) (classifier) asserts it.
+- Sim tests (a)-(d) all pass: beep-cued message ≥ 4000 ms after answer, only the rendered message spoken, no LLM;
+  hangup silent; ivr_mode ignores; classifier → voicemail_hangup + answered_by + VOICEMAIL.
+Gates: fmt, lint, typecheck, placeholders, spec refs pass; jscpd 0 clones; radon -n C on touched files empty;
+pip-audit clean, pnpm audit 3 moderate (no high). `make e2e` harness lands in P05-T17.
+make test: 9912 passed, 7 skipped, coverage 99.13% (exit 0)
+
+## Review P05-T10c (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint, typecheck (1167 files), placeholders (0), spec refs (0), make test 9912 passed / 7 skipped, 99.13 %.
+Diff checked against specs/07 §11 step 2/§14, specs/10 §9.4 (prompt matches the block verbatim), specs/05
+`voicemail_detect_timeout_ms`, specs/19 `call.voicemail` (category voicemail, data.action). Exit-stack order
+(watch → classifier → monitor.stop → finish_call) is correct; tenant session + org filter on set_answered_by;
+no transcript/message logging. Runtime test (a) does not assert answered_by='voicemail' for AMD (the edge writes
+it; no edge in the rig) — accepted, documented in the Decision. Next: P05-T10e (voicemail SMS + retry).

@@ -22,7 +22,7 @@ from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from resolved_configs import resolved_config
 from service_helpers import settings_of
-from sim_media import StreamedCall, realtime_telnyx, streamed_call
+from sim_media import EdgeRelay, StreamedCall, realtime_telnyx, streamed_call
 from sqlalchemy import select
 from starlette.applications import Starlette
 from telnyx_helpers import CALLEE, register
@@ -111,6 +111,7 @@ class Rig:
     elevenlabs_url: str
     container: FakeMediaContainer
     signaller: RecordingSignaller
+    relay: EdgeRelay
 
     @asynccontextmanager
     async def call(
@@ -119,10 +120,14 @@ class Rig:
         answered: bool = True,
         opener_text: str | None = None,
         seeded: SeededCall | None = None,
+        amd: str | None = None,
         **config: Any,
     ) -> AsyncIterator[StreamedCall]:
         """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait);
-        ``seeded``: use that call's id and org (a call row on a real database)."""
+        ``seeded``: use that call's id and org (a call row on a real database). Without ``amd`` the carrier
+        state already holds the premium verdict ``answered_by=human`` (no AMD wait); with ``amd`` (e.g.
+        ``premium``) the dial requests it and FakeTelnyx's verdict and beep reach the worker through the
+        :class:`EdgeRelay`."""
         values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": OPENER, **config}
         loader = FakeContextLoader(**values)
         loader.opener_text = opener_text
@@ -138,11 +143,14 @@ class Rig:
             answered=answered,
             call_id=call_id,
             container=self.container,
+            carrier=None if amd is not None else {"answered_by": "human"},
+            relay=self.relay,
+            **({} if amd is None else {"answering_machine_detection": amd}),
         ) as streamed:
             yield streamed
 
-    def scenario(self, *steps: str) -> None:
-        text = f'id: rt-{secrets.token_hex(4)}\nmatch: {{to: "{CALLEE}"}}\nanswer: {{after_ms: 200}}\n'
+    def scenario(self, *steps: str, answer: str = "{after_ms: 200}") -> None:
+        text = f'id: rt-{secrets.token_hex(4)}\nmatch: {{to: "{CALLEE}"}}\nanswer: {answer}\n'
         text += "steps:\n" + "".join(f"  - {step}\n" for step in steps)
         register(self.state, text)
 
@@ -170,7 +178,8 @@ async def rig(
 ) -> AsyncIterator[Rig]:
     """The runtime over the simulators; with ``database`` its end-of-call routine runs too (over the media
     container's Redis, FakeTelnyx, ``persistence``'s events and a :class:`RecordingSignaller`)."""
-    state = realtime_telnyx()
+    relay = EdgeRelay()
+    state = realtime_telnyx(relay)
     telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
     async with running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls:
         settings = settings_of(
@@ -228,6 +237,7 @@ async def rig(
                 redis=phrase_redis,
                 persistence=persistence,
                 end_routine=end_routine,
+                database=database,
             )
             yield Rig(
                 state,
@@ -238,6 +248,7 @@ async def rig(
                 urls["elevenlabs"],
                 container,
                 signaller,
+                relay,
             )
 
 
@@ -575,3 +586,109 @@ async def test_a_stop_control_message_ends_the_call_as_api_stop(media_db_url: st
     row, ends = await ended_row(media_db_url, call)
     assert (row.status, row.end_reason, row.ended_by) == ("completed", "api_stop", "api")
     assert ends == [{"end_reason": "api_stop", "ended_by": "api"}]
+
+
+# AMD and voicemail (specs/07 §14 Decision P05-T10c)
+
+GREETING: Final = (
+    "Hi, you have reached Dana at the front desk. I cannot take your call right now, so please leave "
+    "your name, your number and a short message and I will get back to you as soon as I possibly can"
+)
+VOICEMAIL_TEMPLATE: Final = "Hi {{name}}, please call us back."
+BEEP_MS: Final = 4000
+_PCM_BYTES_PER_MS: Final = 16
+
+
+def first_audio_ms(agent: bytes) -> float:
+    """Offset (ms after the answer) of the first non-silent agent sample in the aligned 8 kHz PCM16 track."""
+    for index in range(0, len(agent) - 1, 2):
+        if agent[index : index + 2] != b"\x00\x00":
+            return index / _PCM_BYTES_PER_MS
+    message = "the agent never spoke"
+    raise AssertionError(message)
+
+
+def voicemail_events(rows: list[CallEvent]) -> list[dict[str, Any]]:
+    return [dict(row.data) for row in rows if row.message == "Voicemail detected"]
+
+
+async def call_event_rows(media_db_url: str, call: SeededCall) -> list[CallEvent]:
+    async with open_database(media_db_url) as database, database.tenant_session(call.org_id) as session:
+        return list(await session.scalars(select(CallEvent).where(CallEvent.call_id == call.call_id)))
+
+
+@pytest.mark.integration
+async def test_a_machine_gets_the_message_after_the_beep(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        r.scenario(
+            f"say: {{text: '{GREETING}'}}",
+            "expect_hangup: {}",
+            answer=f"{{after_ms: 200, answered_by: machine, beep_at_ms: {BEEP_MS}}}",
+        )
+        voicemail = {"action": "leave_message", "message": VOICEMAIL_TEMPLATE, "detect_timeout_ms": 10_000}
+        async with r.call(
+            seeded=call, amd="premium", voicemail=voicemail, request_data={"name": "Dana"}
+        ) as streamed:
+            end = await r.body.end()
+            assert await signalled(r) == [("voicemail_left", "agent")]
+            agent_audio = bytes(streamed.sim_call().audio.agent)
+            assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
+        assert end.end_reason == "voicemail_left"
+        assert r.relay.relayed[:2] == [
+            "call.machine.premium.detection.ended",
+            "call.machine.premium.greeting.ended",
+        ]
+        # Nothing was said before the beep; then only the rendered message, and no LLM was asked.
+        assert BEEP_MS <= first_audio_ms(agent_audio) <= BEEP_MS + 2000
+        assert spoken(r.state) == ["Hi Dana, please call us back."]
+        assert r.state.llm.requests == []
+        row, _ = await ended_row(media_db_url, call)
+        assert (row.end_reason, row.ended_by, row.disposition_tag) == ("voicemail_left", "agent", "VOICEMAIL")
+        assert voicemail_events(await call_event_rows(media_db_url, call)) == [
+            {"action": "leave_message", "trigger": "amd"}
+        ]
+
+
+async def test_a_machine_with_hangup_ends_without_a_word() -> None:
+    async with rig() as r:
+        r.scenario(
+            f"say: {{text: '{GREETING}'}}",
+            "expect_hangup: {}",
+            answer="{after_ms: 200, answered_by: machine}",
+        )
+        async with r.call(amd="premium", voicemail={"action": "hangup"}):
+            end = await r.body.end()
+        assert (end.end_reason, end.ended_by) == ("voicemail_hangup", "system")
+        assert spoken(r.state) == []
+        assert r.state.llm.requests == []
+
+
+async def test_ivr_mode_ignores_the_machine_verdict() -> None:
+    async with rig() as r:
+        r.scenario("wait_agent_speech: {}", "hangup: {}", answer="{after_ms: 200, answered_by: machine}")
+        async with r.call(amd="premium", ivr_mode=True, voicemail={"action": "hangup"}):
+            end = await r.body.end()
+        assert end == STREAM_CLOSED
+        assert spoken(r.state)[0] == OPENER
+
+
+@pytest.mark.integration
+async def test_the_sensitive_classifier_detects_a_voicemail_greeting(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        r.scenario(
+            "wait_agent_speech: {}",
+            "say: {text: Please leave a message after the tone}",
+            "expect_hangup: {}",
+        )
+        voicemail = {"action": "hangup", "sensitive": True, "detect_timeout_ms": 30_000}
+        async with r.call(seeded=call, amd="premium", voicemail=voicemail):
+            end = await r.body.end()
+            assert await signalled(r) == [("voicemail_hangup", "system")]
+        assert end.end_reason == "voicemail_hangup"
+        classified = [req for req in r.state.llm.requests if "classify_answer" in str(req.tool_choice)]
+        assert len(classified) == 1
+        row, _ = await ended_row(media_db_url, call)
+        assert (row.answered_by, row.disposition_tag) == ("voicemail", "VOICEMAIL")
+        [data] = voicemail_events(await call_event_rows(media_db_url, call))
+        assert (data["action"], data["trigger"]) == ("hangup", "classifier")
+        assert data["confidence"] >= 0.8

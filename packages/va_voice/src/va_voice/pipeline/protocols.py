@@ -38,6 +38,7 @@ __all__ = [
     "InboundAudio",
     "InboundDtmf",
     "MarkEcho",
+    "ObserverFanout",
     "PhraseSource",
     "PipelineObserver",
     "SttEventLike",
@@ -234,3 +235,27 @@ class _NullObserver:
 
 
 NULL_OBSERVER: Final[PipelineObserver] = _NullObserver()
+
+
+class ObserverFanout:
+    """A :class:`PipelineObserver` that hands every callback to each observer in order (e.g. the turn
+    recorder, then the voicemail monitor)."""
+
+    def __init__(self, *observers: PipelineObserver) -> None:
+        self.observers: tuple[PipelineObserver, ...] = observers
+
+    def on_user_turn(self, turn: UserTurn) -> None:
+        for observer in self.observers:
+            observer.on_user_turn(turn)
+
+    def on_agent_turn(self, turn: AgentTurn) -> None:
+        for observer in self.observers:
+            observer.on_agent_turn(turn)
+
+    def on_latency(self, report: TurnReport) -> None:
+        for observer in self.observers:
+            observer.on_latency(report)
+
+    def on_interrupt(self, record: InterruptRecord) -> None:
+        for observer in self.observers:
+            observer.on_interrupt(record)

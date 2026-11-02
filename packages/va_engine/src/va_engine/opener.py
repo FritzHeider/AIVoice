@@ -28,7 +28,7 @@ from va_voice.audio.formats import PCM16LE_16000, ULAW_8000, AudioFormat
 from va_voice.phrase_cache import PhraseVoice
 from va_voice.text.pronunciation import PronunciationApplier
 
-__all__ = ["cache_text", "parse_field", "phrase_format", "phrase_voice", "render_opener"]
+__all__ = ["cache_text", "parse_field", "phrase_format", "phrase_voice", "render_call_text", "render_opener"]
 
 _log = get_logger(__name__)
 
@@ -53,13 +53,24 @@ def render_opener(context: CallContext, *, now: datetime) -> str | None:
     """The templated, stripped ``first_sentence`` of a task-mode call at ``now``; ``None`` for other runners,
     a missing or blank ``first_sentence``, or a blank render."""
     config = context.config
-    source = config.first_sentence
-    if config.runner_type != "task" or source is None or not source.strip():
+    if config.runner_type != "task":
         return None
-    template = parse_field(source, "first_sentence")
+    return render_call_text(context, config.first_sentence, now=now, field_name="first_sentence")
+
+
+def render_call_text(
+    context: CallContext, source: str | None, *, now: datetime, field_name: str
+) -> str | None:
+    """``source`` rendered with the call's variables, ``request_data`` and built-ins at ``now``, stripped;
+    ``None`` for a missing or blank source or a blank render. A template syntax error is logged (with
+    ``field_name``) and the raw text is used; missing variables are logged and render empty."""
+    if source is None or not source.strip():
+        return None
+    template = parse_field(source, field_name)
     if isinstance(template, str):
         text = template
     else:
+        config = context.config
         scope = TemplateScope(
             variables=context.variables,
             request_data=config.request_data,

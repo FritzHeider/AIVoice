@@ -22,6 +22,7 @@ from va_llm.prompts import (
     example_messages,
     interrupted_message,
     load_prompt,
+    render_answer_classifier,
     render_voice_system,
     tool_usage_note,
 )
@@ -262,3 +263,22 @@ def test_assemble_messages_order() -> None:
         *window,
     )
     assert assemble_messages("SYSTEM", tool_note=None) == (ChatMessage(role="system", content="SYSTEM"),)
+
+
+# Voicemail / IVR classifier (specs/10 §9.4; specs/07 §14 Decision P05-T10c)
+
+
+def test_answer_classifier_file_is_the_spec_block_verbatim() -> None:
+    assert load_prompt("answer_classifier") == spec_block("### 9.4 Voicemail / IVR classifier")
+
+
+def test_answer_classifier_render_fills_transcript_and_whole_seconds() -> None:
+    rendered = render_answer_classifier('  You\'ve reached "Dana", leave a message.  ', 4.9)
+    assert 'Transcript so far: "You\'ve reached "Dana", leave a message."' in rendered
+    assert "Seconds since answer: 4\n" in rendered
+    assert rendered.endswith("Call classify_answer exactly once.")
+    assert "{" not in rendered
+
+
+def test_answer_classifier_negative_seconds_render_as_zero() -> None:
+    assert "Seconds since answer: 0\n" in render_answer_classifier("Hello?", -1.0)

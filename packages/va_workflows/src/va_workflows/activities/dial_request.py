@@ -14,9 +14,9 @@ from urllib.parse import urlencode
 
 from va_common.stream_tokens import media_ws_scheme as scheme_for_env
 from va_domain.calls import SendCallConfig
+from va_domain.voicemail import amd_mode
 from va_telnyx import AmdConfig, ClientState, CustomHeader, DialRequest, StreamParams
 from va_telnyx.client_state import encode
-from va_telnyx.models import AmdMode
 
 __all__ = [
     "CALL_ID_HEADER",
@@ -82,15 +82,6 @@ class DialSettings:
 def dial_command_id(call_id: uuid.UUID) -> str:
     """``dial-{call_id}`` (specs/06 §6 step 6): every retry of the dial is deduplicated by Telnyx."""
     return f"dial-{call_id}"
-
-
-def amd_mode(config: SendCallConfig) -> AmdMode:
-    """``premium`` unless IVR mode, ``answered_by_enabled=false``, or a non-sensitive ``ignore`` voicemail."""
-    if config.ivr_mode or not config.answered_by_enabled:
-        return "disabled"
-    if config.voicemail.action == "ignore" and not config.voicemail.sensitive:
-        return "disabled"
-    return "premium"
 
 
 def time_limit_secs(max_duration_min: float) -> int:

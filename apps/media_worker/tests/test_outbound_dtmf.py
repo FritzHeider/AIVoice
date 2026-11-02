@@ -25,7 +25,7 @@ from va_media.carrier_state import CarrierSnapshot
 from va_media.carrier_watch import CarrierWatch
 from va_media.channels import CallFeed
 from va_media.dtmf_out import DTMF_LONG_PAUSE_S, DTMF_PAUSE_S, dtmf_steps, send_dtmf_steps
-from va_media.greeting import ANSWER_WAIT_S, PRECALL_SETTLE_S, GreetingGate
+from va_media.greeting import AMD_WAIT_S, ANSWER_WAIT_S, PRECALL_SETTLE_S, GreetingGate
 from va_telnyx.client_state import command_id
 from va_telnyx.errors import TelnyxApiError, TelnyxTransportError
 
@@ -166,11 +166,18 @@ class GateRig:
         )
 
 
-def gate_rig(*, answered: bool = False, direction: str = "outbound", **config: Any) -> GateRig:
+def gate_rig(
+    *, answered: bool = False, direction: str = "outbound", answered_by: str | None = "human", **config: Any
+) -> GateRig:
+    """A gate over a fresh context; the snapshot holds ``answered`` (when set) and ``answered_by`` (the edge
+    stores it with the premium AMD verdict; ``None``: no verdict yet)."""
     clock = ManualClock()
     context = call_context(uuid.uuid4(), **config).model_copy(update={"direction": direction})
     feed = CallFeed(context.call_id)
-    watch = CarrierWatch(feed, CarrierSnapshot({"answered": "1"} if answered else {}))
+    fields = {"answered": "1"} if answered else {}
+    if answered_by is not None:
+        fields["answered_by"] = answered_by
+    watch = CarrierWatch(feed, CarrierSnapshot(fields))
     return GateRig(clock, feed, watch, RecordingSender(clock), context)
 
 
@@ -304,3 +311,173 @@ async def test_presses_without_telnyx_and_other_actions_send_nothing() -> None:
     assert "media.press_button_skipped" in [e["event"] for e in events]
     [unsupported] = [e for e in events if e["event"] == "media.action_unsupported"]
     assert unsupported["kind"] == "transfer_call"
+
+
+# AMD (specs/07 §11 step 2, §14; Decision P05-T10c)
+
+
+def fresh_watch() -> tuple[uuid.UUID, CallFeed, CarrierWatch, list[str]]:
+    """A watch over an empty snapshot whose ``on_verdict`` calls are recorded in the returned list."""
+    call_id = uuid.uuid4()
+    feed = CallFeed(call_id)
+    watch = CarrierWatch(feed, CarrierSnapshot())
+    seen: list[str] = []
+    watch.on_verdict = seen.append
+    return call_id, feed, watch, seen
+
+
+def amd_event(call_id: uuid.UUID, event_type: str, result: str | None, leg: CarrierLeg = "primary") -> str:
+    return CarrierEvent(
+        type=event_type,
+        leg=leg,
+        call_id=call_id,
+        org_id=uuid.uuid4(),
+        telnyx_event_id=secrets.token_hex(8),
+        occurred_at=utcnow(),
+        payload={} if result is None else {"result": result},
+    ).model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("fields", "verdict", "beep"),
+    [
+        ({}, None, False),
+        ({"answered_by": "human", "amd_result": "human_residence"}, "human", False),
+        ({"answered_by": "voicemail", "amd_result": "machine"}, "machine", False),
+        ({"answered_by": "fax"}, "fax", False),
+        ({"answered_by": "unknown", "amd_result": "silence"}, "unknown", False),
+        ({"amd_result": "human_residence"}, "human", False),
+        ({"amd_result": "machine", "greeting_ended": "1"}, "machine", True),
+        ({"amd_result": "unknown"}, "unknown", False),
+        ({"beep_detected": "1"}, None, True),
+    ],
+)
+def test_the_snapshot_holds_the_verdict_and_the_beep(
+    fields: dict[str, str], verdict: str | None, beep: bool
+) -> None:
+    watch = CarrierWatch(CallFeed(uuid.uuid4()), CarrierSnapshot(fields))
+    assert watch.verdict == verdict
+    assert watch.amd.is_set() is (verdict is not None)
+    assert watch.beep.is_set() is beep
+
+
+@pytest.mark.parametrize(
+    ("event_type", "result", "verdict"),
+    [
+        ("call.machine.premium.detection.ended", "machine", "machine"),
+        ("call.machine.premium.detection.ended", "human_business", "human"),
+        ("call.machine.premium.detection.ended", "fax_detected", "fax"),
+        ("call.machine.detection.ended", "machine", "machine"),
+        ("call.machine.detection.ended", "not_sure", "unknown"),
+        ("call.machine.detection.ended", None, "unknown"),
+    ],
+)
+async def test_the_first_primary_detection_sets_the_verdict_once(
+    event_type: str, result: str | None, verdict: str
+) -> None:
+    call_id, feed, watch, seen = fresh_watch()
+    async with watching(watch):
+        feed.on_carrier(amd_event(call_id, event_type, "machine", leg="transfer_target"))
+        await settle()
+        assert not watch.amd.is_set()
+        feed.on_carrier(amd_event(call_id, event_type, result))
+        feed.on_carrier(amd_event(call_id, "call.machine.premium.detection.ended", "human_residence"))
+        await settle()
+    assert (watch.verdict, seen) == (verdict, [verdict])
+    assert watch.amd.is_set()
+    assert not watch.beep.is_set()
+
+
+@pytest.mark.parametrize("event_type", ["call.machine.premium.greeting.ended", "call.machine.greeting.ended"])
+async def test_greeting_ended_events_set_the_beep(event_type: str) -> None:
+    call_id, feed, watch, seen = fresh_watch()
+    async with watching(watch):
+        feed.on_carrier(amd_event(call_id, event_type, "beep_detected", leg="warm_proxy"))
+        await settle()
+        assert not watch.beep.is_set()
+        feed.on_carrier(amd_event(call_id, event_type, "beep_detected"))
+        feed.on_carrier(amd_event(call_id, event_type, "beep_detected"))
+        await settle()
+    assert watch.beep.is_set()
+    assert (watch.verdict, seen) == (None, [])
+
+
+async def test_call_screening_is_logged_and_changes_nothing() -> None:
+    stream = json_log_stream()
+    call_id, feed, watch, seen = fresh_watch()
+    async with watching(watch):
+        feed.on_carrier(amd_event(call_id, "call.machine.premium.call_screening.detected", None))
+        await settle()
+    assert (watch.verdict, seen, watch.amd.is_set(), watch.beep.is_set()) == (None, [], False, False)
+    assert "media.call_screening" in [e["event"] for e in log_events(stream)]
+
+
+async def test_the_gate_waits_for_the_amd_verdict() -> None:
+    r = gate_rig(answered=True, answered_by=None)
+    async with watching(r.watch):
+        task = asyncio.ensure_future(r.gate()())
+        await r.clock.wait_for_sleep(AMD_WAIT_S)
+        await r.clock.run_for(1.2)
+        assert not task.done()
+        r.feed.on_carrier(
+            amd_event(r.context.call_id, "call.machine.premium.detection.ended", "human_residence")
+        )
+        await asyncio.wait_for(task, 5)
+    assert r.clock.monotonic() == pytest.approx(1.2)
+
+
+async def test_a_pending_verdict_is_treated_as_human_after_three_seconds() -> None:
+    stream = json_log_stream()
+    r = gate_rig(answered=True, answered_by=None, precall_dtmf_sequence="1")
+    task = asyncio.ensure_future(r.gate()())
+    await r.clock.wait_for_sleep(AMD_WAIT_S)
+    await r.clock.run_for(AMD_WAIT_S)
+    await r.clock.wait_for_sleep(PRECALL_SETTLE_S)
+    await r.clock.run_for(PRECALL_SETTLE_S)
+    await asyncio.wait_for(task, 5)
+    assert [s.digits for s in r.sender.sent] == ["1"]
+    assert "media.amd_pending" in [e["event"] for e in log_events(stream)]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"ivr_mode": True},
+        {"answered_by_enabled": False},
+        {"voicemail": {"action": "ignore", "sensitive": False}},
+    ],
+)
+async def test_without_amd_the_gate_does_not_wait(config: dict[str, Any]) -> None:
+    r = gate_rig(answered=True, answered_by=None, **config)
+    await r.gate()()
+    assert r.clock.monotonic() == 0.0
+
+
+async def test_inbound_calls_never_wait_for_amd() -> None:
+    r = gate_rig(direction="inbound", answered_by=None)
+    await r.gate()()
+    assert r.clock.monotonic() == 0.0
+
+
+@pytest.mark.parametrize(
+    ("answered_by", "action", "sent"),
+    [
+        ("voicemail", "hangup", False),
+        ("voicemail", "leave_message", False),
+        ("voicemail", "ignore", True),
+        ("fax", "ignore", False),
+        ("fax", "hangup", False),
+        ("human", "hangup", True),
+    ],
+)
+async def test_precall_dtmf_is_skipped_for_machines_the_voicemail_flow_handles(
+    answered_by: str, action: str, sent: bool
+) -> None:
+    voicemail = {"action": action, "sensitive": True, "message": "Hi"}
+    r = gate_rig(answered=True, answered_by=answered_by, precall_dtmf_sequence="1", voicemail=voicemail)
+    task = asyncio.ensure_future(r.gate()())
+    if sent:
+        await r.clock.wait_for_sleep(PRECALL_SETTLE_S)
+        await r.clock.run_for(PRECALL_SETTLE_S)
+    await asyncio.wait_for(task, 5)
+    assert bool(r.sender.sent) is sent

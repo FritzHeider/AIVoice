@@ -24,7 +24,11 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    :class:`~va_media.turn_writer.TurnWriter` and ``call.turn``/``call.interrupt``/``call.latency`` events
    through the per-process publisher and ``call_events`` buffer; when the pipeline ends the call's events are
    awaited and its turns and event rows flushed (specs/07 §8 Decision P05-T11a).
-6. :attr:`CallRuntime.end_routine` (a :class:`~va_media.call_end.CallEnd` built by :func:`open_runtime`) is
+6. on outbound calls a :class:`~va_media.voicemail.VoicemailMonitor` acts on the AMD verdict and (with
+   ``voicemail.sensitive``) on the ``classify_answer`` classifier: it takes the pipeline over for the
+   voicemail action (hang up, or leave the message after the beep) and records ``call.voicemail`` /
+   ``answered_by`` (specs/07 §14 Decision P05-T10c).
+7. :attr:`CallRuntime.end_routine` (a :class:`~va_media.call_end.CallEnd` built by :func:`open_runtime`) is
    the session ender the lifespan hands to every session: it records the end, hangs up, emits ``call.ended``,
    releases the concurrency slot and signals ``CallWorkflow`` (specs/07 §18 Decision P05-T11b).
 """
@@ -93,12 +97,13 @@ from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
 from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
+from va_media.voicemail import DbAnsweredBy, LlmAnswerClassifier, StructuredSource, VoicemailMonitor
 from va_media.workflow_signal import TemporalPipelineSignaller
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.phrase_cache import PhraseCacheMetrics
-from va_voice.pipeline import NULL_OBSERVER, CallPipeline, PipelineConfig
+from va_voice.pipeline import NULL_OBSERVER, CallPipeline, ObserverFanout, PipelineConfig, PipelineObserver
 from va_voice.vad import SileroVad, VadExecutor
 from va_voice.vad_model import SileroModel, VadModel, VadModelError
 
@@ -109,6 +114,7 @@ __all__ = [
     "OrgSettingsSource",
     "RuntimeDependencies",
     "RuntimeFactory",
+    "RuntimeGateway",
     "open_persistence",
     "open_runtime",
 ]
@@ -144,6 +150,10 @@ class RuntimeFactory(Protocol):
     ) -> AbstractAsyncContextManager[SessionBody]: ...
 
 
+class RuntimeGateway(DialogueSource, StructuredSource, Protocol):
+    """The LLM gateway of the runtime: dialogue streams and structured outputs (:class:`LlmGateway`)."""
+
+
 class OrgSettingsSource(Protocol):
     """Where the runtime reads org settings (:class:`va_db.org_settings.OrgSettingsReader` satisfies it)."""
 
@@ -163,7 +173,7 @@ class CallRuntime:
         self,
         *,
         settings: MediaSettings,
-        gateway: DialogueSource,
+        gateway: RuntimeGateway,
         counter: TokenCounter,
         org_settings: OrgSettingsSource,
         vad_model: VadModel | None,
@@ -175,8 +185,10 @@ class CallRuntime:
         persistence: CallPersistence | None = None,
         end_routine: CallEnd | None = None,
         tracer_provider: TracerProvider | None = None,
+        database: Database | None = None,
     ) -> None:
         self._settings = settings
+        self._database = database
         self._end_routine = end_routine
         self._persistence = persistence
         self._redis = redis
@@ -242,10 +254,9 @@ class CallRuntime:
                 return ERROR_END
             telnyx = await self._telnyx_client(context)
             watch = CarrierWatch(session.feed, session.carrier_state)
-            watcher = asyncio.create_task(watch.run(), name="carrier-watch")
-            stack.push_async_callback(_stop_task, watcher)
             call_control_id = session.start.call_control_id
             recorder = self._recorder(session)
+            monitor = self._monitor(session, watch)
             pipeline = CallPipeline(
                 transport=transport,
                 stt=vendors.stt,
@@ -273,13 +284,32 @@ class CallRuntime:
                     clock=self._clock,
                 ),
                 phrases=self._phrases(context, config),
-                observer=NULL_OBSERVER if recorder is None else recorder,
+                observer=_observer(recorder, monitor),
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             if recorder is not None and self._persistence is not None:
                 stack.push_async_callback(self._persistence.finish_call, recorder, context)
+            if monitor is not None:
+                _start_monitor(stack, monitor, watch, pipeline)
+            watcher = asyncio.create_task(watch.run(), name="carrier-watch")
+            stack.push_async_callback(_stop_task, watcher, "media.carrier_watch_failed")
             result = await pipeline.run()
         return session_end(result)
+
+    def _monitor(self, session: CallSession, watch: CarrierWatch) -> VoicemailMonitor | None:
+        """The voicemail monitor of an outbound call (``None`` for inbound and web calls)."""
+        context = session.context
+        if context.direction != "outbound":
+            return None
+        return VoicemailMonitor(
+            context=context,
+            beep=watch.beep,
+            clock=self._clock,
+            classifier=LlmAnswerClassifier(self._gateway, org_id=context.org_id, call_id=context.call_id),
+            events=None if self._persistence is None else self._persistence.events,
+            answered_by=None if self._database is None else DbAnsweredBy(self._database, context.org_id),
+            answered_at=session.carrier_state.answered_at,
+        )
 
     def _recorder(self, session: CallSession) -> TurnRecorder | None:
         """The call's turn recorder (``None`` without persistence: turns and events are not kept)."""
@@ -363,12 +393,37 @@ class CallRuntime:
         )
 
 
-async def _stop_task(task: asyncio.Task[None]) -> None:
-    """Cancel the carrier watch; a failure it ended with is logged (the call went on without it)."""
+def _start_monitor(
+    stack: AsyncExitStack, monitor: VoicemailMonitor, watch: CarrierWatch, pipeline: CallPipeline
+) -> None:
+    """Bind the monitor to the pipeline and the carrier watch before either runs (an attach-time verdict acts
+    now, so the opener is skipped); on exit the classifier stops first, then the monitor's recordings finish
+    (before the call's events are flushed)."""
+    monitor.bind(pipeline.take_over)
+    watch.on_verdict = monitor.on_verdict
+    monitor.start(watch.verdict)
+    stack.push_async_callback(monitor.stop)
+    classifier = asyncio.create_task(monitor.run(), name="voicemail-classifier")
+    stack.push_async_callback(_stop_task, classifier, "media.voicemail_classifier_failed")
+
+
+def _observer(recorder: TurnRecorder | None, monitor: VoicemailMonitor | None) -> PipelineObserver:
+    """The pipeline observer: the turn recorder and the voicemail monitor, whichever exist."""
+    observers = [observer for observer in (recorder, monitor) if observer is not None]
+    if not observers:
+        return NULL_OBSERVER
+    if len(observers) == 1:
+        return observers[0]
+    return ObserverFanout(*observers)
+
+
+async def _stop_task(task: asyncio.Task[None], failure_event: str) -> None:
+    """Cancel a per-call side task (carrier watch, voicemail classifier); a failure it ended with is logged as
+    ``failure_event`` (the call went on without it)."""
     task.cancel()
     await asyncio.wait({task})
     if not task.cancelled() and task.exception() is not None:
-        _log.error("media.carrier_watch_failed", error_type=type(task.exception()).__name__)
+        _log.error(failure_event, error_type=type(task.exception()).__name__)
 
 
 async def _load_model(vad: VadStatus, models_dir: Path) -> SileroModel | None:
@@ -474,4 +529,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             redis=container.redis,
             persistence=persistence,
             end_routine=end_routine,
+            database=database,
         )

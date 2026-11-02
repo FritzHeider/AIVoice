@@ -524,6 +524,7 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 2. If AMD enabled: wait for `call.amd` result up to 3 000 ms after answer while VAD/STT run.
    - `machine` → voicemail flow (§14). `human` → continue. Timeout → treat as human (classification continues and can
      still switch to voicemail flow until `voicemail.detect_timeout_ms`).
+   - See the §14 Decision (2026-11-02, P05-T10c) for the AMD wait, the verdict sources and precall DTMF.
 3. `precall_dtmf_sequence` → send (`06` §9), then wait 500 ms.
 4. `wait_for_greeting=true` → stay silent until first user `EndOfTurn` or `greeting_timeout_ms`, then the engine runs
    with that user turn (or an empty one on timeout).
@@ -633,6 +634,39 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
    silence after the greeting, max 20 s; speak the templated message (TTS streamed, not cached); wait for mark echo;
    for `_and_sms` send the SMS (`21` §4) with `voicemail.sms.message`; hang up, `end_reason='voicemail_left'`.
 5. If `retry` configured → `CallWorkflow` schedules the child retry call.
+
+> Decision (2026-11-02): AMD and voicemail actions (P05-T10c). (1) `va_domain.voicemail` holds `amd_mode` (moved
+> from the dial; `premium` unless `ivr_mode`, `answered_by_enabled=false`, or a non-sensitive `ignore`),
+> `classifier_enabled` (outbound, `voicemail.sensitive`, not `ivr_mode`, `answered_by_enabled`) and `amd_verdict`
+> (premium `human_residence`/`human_business` → human, `machine` → machine, `fax_detected` → fax; standard `human`
+> → human, `machine` → machine; anything else → unknown). Whenever a voicemail action matters AMD is `premium`
+> unless `ivr_mode`/`answered_by_enabled=false`, which also switch the classifier off, so the "engine detector
+> when AMD is disabled" case above is unreachable. (2) `va_media.carrier_watch.CarrierWatch` exposes `amd` +
+> `verdict` (the snapshot's `answered_by`, else `amd_result`, else the first primary-leg detection event;
+> `on_verdict` is called once), `beep` (snapshot `beep_detected`/`greeting_ended`, or a primary
+> `call.machine.premium.greeting.ended`/`call.machine.greeting.ended`); call screening is logged and treated as a
+> human. (3) §11 step 2: on outbound calls with `amd_mode == "premium"` the greeting gate waits up to 3 s after the
+> answered wait for the verdict (timeout → `media.amd_pending`, treated as human); precall DTMF is skipped on a
+> fax and on a machine unless the action is `ignore`. (4) Outbound calls get a `va_media.voicemail.VoicemailMonitor`
+> (inbound/web none): a `machine` verdict within `voicemail.detect_timeout_ms` of the answer (trigger `amd`), or a
+> `classify_answer` result (specs/10 §9.4, call type `voicemail`, prompt `answer_classifier.txt`) of label
+> `voicemail` with confidence ≥ 0.8 on the delivered user turns so far (trigger `classifier`; one request in flight,
+> turns arriving meanwhile re-run it once with the whole transcript; `human`/`ivr` ≥ 0.8 stop the classification;
+> LLM failures wait for the next turn) is a detection; only the first acts; later verdicts/results are logged
+> `media.voicemail_late`; `ivr_mode` calls never act; `fax` ends the call silently with `fax_detected` (the edge
+> already stored `answered_by='fax'` and emitted `call.amd`). (5) A detection first hands the call to the pipeline
+> through `CallPipeline.take_over(Takeover(reason, text, beep))` (first end wins; a takeover accepted before the
+> opener skips it): `hangup` → `voicemail_hangup`; `leave_message`/`leave_message_and_sms` → the templated
+> `voicemail.message` (call variables, `request_data`, built-ins; blank → `voicemail_hangup`), spoken once, not
+> interruptible, after the beep, or 1 200 ms without caller speech (VAD; counted from the takeover when nobody spoke),
+> at most 20 s, through the live TTS socket, then `voicemail_left` after its mark echo (playback capped at 120 s);
+> `ignore` → the conversation goes on. The takeover stops accepting turns (recorded, never answered) and cuts the
+> reply in progress. Then, in the background, it emits `call.voicemail` (`data = {action, trigger}` + `confidence`
+> for the classifier; message `Voicemail detected`) and, for the classifier, sets `answered_by='voicemail'` on the
+> answered call (the edge sets it for AMD); failures are logged and never undo the action. (6) Both voicemail ends
+> set `disposition_tag='VOICEMAIL'` when the call has none (`va_db.call_end.record_answered_end`). (7) The
+> `_and_sms` SMS and the retry child call are P05-T10e (logged `media.voicemail_sms_pending` meanwhile).
+> Transcripts and the message text are never logged.
 
 ## 15. `hd_audio` mode
 
