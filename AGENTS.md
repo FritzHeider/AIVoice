@@ -1481,3 +1481,14 @@ Grafana 3001
   config waits up to 6 s for a callee greeting: pass `wait_for_greeting=False` when a test needs the opener at
   once. Runtime sim tests read barge-ins from `json_log_stream()` (`pipeline_barge_in`, `media.transport_closed`
   `clears`); FakeElevenLabs STT session records carry `filter_background_audio`.
+- 2026-11-02 (P05-T16a): Call Object = `va_domain.call_object` (`CallObject` extends the list item `CallListItem`;
+  `mapping` has `bland_status`, `BLAND_STATUS_FILTER`, `CALL_ENDED_BY`, `minutes`/`dollars`, `latency_summary`) read by
+  `va_db.call_object.load_call_objects` / `load_call_list_items(session, calls, recording_urls=)` (one query per child
+  table; reuse for `call.completed`). Call reads: `va_api.services.call_read` (`get_call`, `list_calls`,
+  `recording_urls`), filters `routers/calls_read_schemas.CallListQuery` (a FastAPI query model: the cross-tenant
+  walker sees it as a required param, so `calls_list` has a `REGISTRY.register_request`). `ApiSettings` mixes in
+  `S3Settings`; the container exposes `object_store` (presign only). Tests: `SessionContainer.presigner`
+  (`call_fakes.FakePresigner`, URLs `{PRESIGN_HOST}/{bucket}/{key}?expires=<s>`, `.fail`); settings come from
+  `request.app.state.settings` (the fake container has no `settings`). `json_log_stream()` is not a context manager.
+  Spec Decisions: specs/19 §4 and specs/05 §6 (P05-T16a). T16b's literal `GET /v1/calls/active` must be declared
+  before `GET /v1/calls/{call_id}`.

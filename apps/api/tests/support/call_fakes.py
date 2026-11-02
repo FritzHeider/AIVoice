@@ -1,19 +1,33 @@
-"""Fakes of the Send Call container pieces: a recording ``CallWorkflow`` starter, a recording canceller, and
-a DNS resolver."""
+"""Fakes of the call container pieces: a recording ``CallWorkflow`` starter, a recording canceller, a DNS
+resolver, and an S3 client that presigns recording URLs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
+
+from botocore.exceptions import ClientError
 
 from va_api.services.call_starter import CallStartError
 from va_api.services.call_stop import CallCancelError
+from va_common.storage import ObjectStore
 from va_domain.call_workflow import CallWorkflowInput
 
-__all__ = ["PUBLIC_ADDRESS", "FakeCallCanceller", "FakeCallStarter", "FakeResolver"]
+if TYPE_CHECKING:
+    from types_aiobotocore_s3 import S3Client
+
+__all__ = [
+    "PRESIGN_HOST",
+    "PUBLIC_ADDRESS",
+    "FakeCallCanceller",
+    "FakeCallStarter",
+    "FakePresigner",
+    "FakeResolver",
+]
 
 PUBLIC_ADDRESS: Final = "8.8.8.8"
+PRESIGN_HOST: Final = "https://s3.test"
 
 
 @dataclass
@@ -54,3 +68,27 @@ class FakeResolver:
     async def __call__(self, host: str) -> list[str]:
         self.lookups.append(host)
         return self.answers.get(host, [PUBLIC_ADDRESS])
+
+
+@dataclass
+class FakePresigner:
+    """The presign call of the S3 client: answers ``{PRESIGN_HOST}/{bucket}/{key}?expires=<s>`` and records
+    each ``(bucket, key, expires)``; raises a ``ClientError`` while ``fail`` is set."""
+
+    presigned: list[tuple[str, str, int]] = field(default_factory=list)
+    fail: bool = False
+
+    async def generate_presigned_url(
+        self,
+        operation: str,
+        Params: dict[str, Any],  # noqa: N803 - boto3 keyword names
+        ExpiresIn: int,  # noqa: N803
+    ) -> str:
+        if self.fail:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, operation)
+        bucket, key = Params["Bucket"], Params["Key"]
+        self.presigned.append((bucket, key, ExpiresIn))
+        return f"{PRESIGN_HOST}/{bucket}/{key}?expires={ExpiresIn}"
+
+    def store(self) -> ObjectStore:
+        return ObjectStore(cast("S3Client", self))

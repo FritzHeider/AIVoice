@@ -704,6 +704,1413 @@
         "title": "AuditLogView",
         "type": "object"
       },
+      "BlandAnsweredBy": {
+        "enum": [
+          "human",
+          "voicemail",
+          "ivr",
+          "unknown",
+          "no-answer",
+          "fax"
+        ],
+        "type": "string"
+      },
+      "BlandCallEndedBy": {
+        "enum": [
+          "ASSISTANT",
+          "USER",
+          "SYSTEM",
+          "API",
+          "GUARD_RAIL",
+          "TIMEOUT",
+          "ERROR"
+        ],
+        "type": "string"
+      },
+      "BlandCallStatus": {
+        "enum": [
+          "completed",
+          "failed",
+          "no-answer",
+          "busy",
+          "canceled",
+          "in-progress",
+          "queued",
+          "scheduled"
+        ],
+        "type": "string"
+      },
+      "CallCitation": {
+        "properties": {
+          "citation_schema_id": {
+            "description": "Citation schema that requested the variable.",
+            "format": "uuid",
+            "title": "Citation Schema Id",
+            "type": "string"
+          },
+          "cited_utterances": {
+            "description": "Utterances that support the value.",
+            "items": {},
+            "title": "Cited Utterances",
+            "type": "array"
+          },
+          "conditions_met": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the schema's conditions held.",
+            "title": "Conditions Met"
+          },
+          "value": {
+            "description": "Extracted value (`null` when not found).",
+            "title": "Value"
+          },
+          "variable_name": {
+            "description": "Extracted variable.",
+            "title": "Variable Name",
+            "type": "string"
+          },
+          "variable_type": {
+            "description": "Declared variable type.",
+            "title": "Variable Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "citation_schema_id",
+          "variable_name",
+          "variable_type",
+          "value",
+          "conditions_met",
+          "cited_utterances"
+        ],
+        "title": "CallCitation",
+        "type": "object"
+      },
+      "CallLatency": {
+        "description": "Turn latency summary of the call (ours).",
+        "properties": {
+          "avg_llm_ttft_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mean time to the first LLM token.",
+            "title": "Avg Llm Ttft Ms"
+          },
+          "avg_tts_ttfa_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Mean time to the first TTS audio.",
+            "title": "Avg Tts Ttfa Ms"
+          },
+          "p50_e2e_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Median voice-to-voice latency of the agent's turns.",
+            "title": "P50 E2E Ms"
+          },
+          "p95_e2e_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "95th percentile voice-to-voice latency.",
+            "title": "P95 E2E Ms"
+          },
+          "turns": {
+            "description": "Agent turns with a measured voice-to-voice latency.",
+            "title": "Turns",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "p50_e2e_ms",
+          "p95_e2e_ms",
+          "avg_llm_ttft_ms",
+          "avg_tts_ttfa_ms",
+          "turns"
+        ],
+        "title": "CallLatency",
+        "type": "object"
+      },
+      "CallListItem": {
+        "description": "A call in `GET /v1/calls`: the Call Object without its heavy fields (use `GET /v1/calls/{call_id}`).",
+        "examples": [
+          {
+            "analysis_schema": {
+              "demo_booked": "boolean"
+            },
+            "answered_by": "human",
+            "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "call_ended_by": "ASSISTANT",
+            "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "call_length": 2.35,
+            "completed": true,
+            "corrected_duration": "141",
+            "created_at": "2026-10-24T18:20:01.000000Z",
+            "direction": "outbound",
+            "disposition_tag": "INTERESTED",
+            "end_at": "2026-10-24T18:22:30.000000Z",
+            "end_reason": "agent_end_call",
+            "from": "+14155550999",
+            "guard_rails": [],
+            "inbound": false,
+            "latency": {
+              "avg_llm_ttft_ms": 310,
+              "avg_tts_ttfa_ms": 160,
+              "p50_e2e_ms": 742,
+              "p95_e2e_ms": 1180,
+              "turns": 6
+            },
+            "local_dialing": false,
+            "max_duration": 30,
+            "metadata": {
+              "crm_id": "42"
+            },
+            "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+            "price": 0.282,
+            "queue_status": "complete",
+            "record": true,
+            "recording_expiration": "2026-10-31T18:25:00.000000Z",
+            "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+            "request_data": {
+              "first_name": "Mike"
+            },
+            "started_at": "2026-10-24T18:20:09.000000Z",
+            "status": "completed",
+            "summary": "The caller booked a demo for Tuesday.",
+            "test_call": false,
+            "to": "+14155550123",
+            "transfer_duration": 0,
+            "warm_transfer_calls": []
+          }
+        ],
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent run by the call.",
+            "title": "Agent Id"
+          },
+          "agent_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent version (semver) run by the call.",
+            "title": "Agent Version"
+          },
+          "analysis_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Requested analysis schema.",
+            "title": "Analysis Schema"
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlandAnsweredBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who answered (AMD / classifier result)."
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Batch the call belongs to.",
+            "title": "Batch Id"
+          },
+          "c_id": {
+            "description": "Alias of `call_id` (Bland legacy).",
+            "format": "uuid",
+            "title": "C Id",
+            "type": "string"
+          },
+          "call_ended_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlandCallEndedBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who ended the call; `null` while active."
+          },
+          "call_id": {
+            "description": "Call id.",
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "call_length": {
+            "description": "Connected minutes (6 decimals).",
+            "title": "Call Length",
+            "type": "number"
+          },
+          "completed": {
+            "description": "Whether post-call processing finished.",
+            "title": "Completed",
+            "type": "boolean"
+          },
+          "corrected_duration": {
+            "description": "Connected seconds as an integer string (Bland compat).",
+            "title": "Corrected Duration",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the call was created (UTC).",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "direction": {
+            "description": "Call direction (ours).",
+            "enum": [
+              "outbound",
+              "inbound",
+              "web"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "disposition_tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Disposition chosen post-call.",
+            "title": "Disposition Tag"
+          },
+          "end_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the call ended.",
+            "title": "End At"
+          },
+          "end_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the call ended (specs/05 §9); `null` while active.",
+            "title": "End Reason"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Error description of a failed call.",
+            "title": "Error Message"
+          },
+          "experiment_arm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Label of the experiment arm (ours).",
+            "title": "Experiment Arm"
+          },
+          "experiment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Experiment that picked the agent version (ours).",
+            "title": "Experiment Id"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Caller-supplied external id.",
+            "title": "External Id"
+          },
+          "from": {
+            "description": "Caller id (E.164; empty for web calls).",
+            "title": "From",
+            "type": "string"
+          },
+          "guard_rails": {
+            "description": "Guard rail evaluations.",
+            "items": {
+              "$ref": "#/components/schemas/GuardRailEntry"
+            },
+            "title": "Guard Rails",
+            "type": "array"
+          },
+          "inbound": {
+            "description": "Whether the call was inbound.",
+            "title": "Inbound",
+            "type": "boolean"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/CallLatency",
+            "description": "Turn latency summary (ours)."
+          },
+          "local_dialing": {
+            "description": "Whether local dialing picked the caller id.",
+            "title": "Local Dialing",
+            "type": "boolean"
+          },
+          "max_duration": {
+            "description": "Maximum call length in minutes.",
+            "title": "Max Duration",
+            "type": "number"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "description": "Caller metadata.",
+            "title": "Metadata",
+            "type": "object"
+          },
+          "org_id": {
+            "description": "Owning organization (ours).",
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pathway_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway run by the call.",
+            "title": "Pathway Id"
+          },
+          "pathway_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway version run by the call.",
+            "title": "Pathway Version"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persona run by the call.",
+            "title": "Persona Id"
+          },
+          "persona_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persona version run by the call.",
+            "title": "Persona Version"
+          },
+          "price": {
+            "description": "Price in dollars (6 decimals).",
+            "title": "Price",
+            "type": "number"
+          },
+          "queue_status": {
+            "description": "Queue state: `complete`, `started`, `allocated`, `queued`, `call_error`, `new`.",
+            "title": "Queue Status",
+            "type": "string"
+          },
+          "record": {
+            "description": "Whether the call is recorded.",
+            "title": "Record",
+            "type": "boolean"
+          },
+          "recording_expiration": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When `recording_url` stops working.",
+            "title": "Recording Expiration"
+          },
+          "recording_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Presigned recording URL, valid 7 days, fresh on each read.",
+            "title": "Recording Url"
+          },
+          "request_data": {
+            "additionalProperties": true,
+            "description": "Request data given to the agent.",
+            "title": "Request Data",
+            "type": "object"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the call was answered.",
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BlandCallStatus",
+            "description": "Call status (Bland hyphenated form)."
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Post-call summary.",
+            "title": "Summary"
+          },
+          "test_call": {
+            "description": "Dashboard test call (ours).",
+            "title": "Test Call",
+            "type": "boolean"
+          },
+          "to": {
+            "description": "Callee number (E.164; empty for web calls).",
+            "title": "To",
+            "type": "string"
+          },
+          "transfer_duration": {
+            "description": "Minutes spent transferred.",
+            "title": "Transfer Duration",
+            "type": "number"
+          },
+          "transferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Transfer destination.",
+            "title": "Transferred To"
+          },
+          "voicemail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoicemailSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Voicemail handling; `null` when none detected."
+          },
+          "warm_transfer_calls": {
+            "description": "Warm transfer legs.",
+            "items": {
+              "$ref": "#/components/schemas/WarmTransferCall"
+            },
+            "title": "Warm Transfer Calls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "call_id",
+          "c_id",
+          "org_id",
+          "external_id",
+          "batch_id",
+          "to",
+          "from",
+          "inbound",
+          "direction",
+          "test_call",
+          "created_at",
+          "started_at",
+          "end_at",
+          "call_length",
+          "corrected_duration",
+          "completed",
+          "status",
+          "queue_status",
+          "answered_by",
+          "call_ended_by",
+          "end_reason",
+          "max_duration",
+          "record",
+          "recording_url",
+          "recording_expiration",
+          "request_data",
+          "metadata",
+          "pathway_id",
+          "pathway_version",
+          "persona_id",
+          "persona_version",
+          "agent_id",
+          "agent_version",
+          "experiment_id",
+          "experiment_arm",
+          "summary",
+          "disposition_tag",
+          "analysis_schema",
+          "price",
+          "transferred_to",
+          "transfer_duration",
+          "local_dialing",
+          "error_message",
+          "latency",
+          "voicemail",
+          "warm_transfer_calls",
+          "guard_rails"
+        ],
+        "title": "CallListItem",
+        "type": "object"
+      },
+      "CallListResponse": {
+        "description": "One page of calls; `total_count` (all matching calls) only on the first page (no `cursor`).",
+        "examples": [
+          {
+            "calls": [
+              {
+                "analysis_schema": {
+                  "demo_booked": "boolean"
+                },
+                "answered_by": "human",
+                "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+                "call_ended_by": "ASSISTANT",
+                "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+                "call_length": 2.35,
+                "completed": true,
+                "corrected_duration": "141",
+                "created_at": "2026-10-24T18:20:01.000000Z",
+                "direction": "outbound",
+                "disposition_tag": "INTERESTED",
+                "end_at": "2026-10-24T18:22:30.000000Z",
+                "end_reason": "agent_end_call",
+                "from": "+14155550999",
+                "guard_rails": [],
+                "inbound": false,
+                "latency": {
+                  "avg_llm_ttft_ms": 310,
+                  "avg_tts_ttfa_ms": 160,
+                  "p50_e2e_ms": 742,
+                  "p95_e2e_ms": 1180,
+                  "turns": 6
+                },
+                "local_dialing": false,
+                "max_duration": 30,
+                "metadata": {
+                  "crm_id": "42"
+                },
+                "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+                "price": 0.282,
+                "queue_status": "complete",
+                "record": true,
+                "recording_expiration": "2026-10-31T18:25:00.000000Z",
+                "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+                "request_data": {
+                  "first_name": "Mike"
+                },
+                "started_at": "2026-10-24T18:20:09.000000Z",
+                "status": "completed",
+                "summary": "The caller booked a demo for Tuesday.",
+                "test_call": false,
+                "to": "+14155550123",
+                "transfer_duration": 0,
+                "warm_transfer_calls": []
+              }
+            ],
+            "count": 1,
+            "next_cursor": "MjAyNi0xMC0yNFQxODoyMDowMS4wMDAwMDArMDA6MDB8MDE5M2M1ZDItN2IxZS03YTEw",
+            "status": "success",
+            "total_count": 1532
+          }
+        ],
+        "properties": {
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/CallListItem"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Count"
+          }
+        },
+        "required": [
+          "count",
+          "next_cursor",
+          "calls"
+        ],
+        "title": "CallListResponse",
+        "type": "object"
+      },
+      "CallObject": {
+        "description": "The full Call Object (specs/19 §4): the list item plus transcripts, logs, variables, and results.",
+        "examples": [
+          {
+            "analysis": {
+              "demo_booked": true
+            },
+            "analysis_schema": {
+              "demo_booked": "boolean"
+            },
+            "answered_by": "human",
+            "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "call_ended_by": "ASSISTANT",
+            "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+            "call_length": 2.35,
+            "citations": [],
+            "completed": true,
+            "concatenated_transcript": "assistant: Hi Mike, this is Ava from Acme.\n user: Hi, yes.\n",
+            "corrected_duration": "141",
+            "created_at": "2026-10-24T18:20:01.000000Z",
+            "direction": "outbound",
+            "disposition_tag": "INTERESTED",
+            "end_at": "2026-10-24T18:22:30.000000Z",
+            "end_reason": "agent_end_call",
+            "from": "+14155550999",
+            "guard_rails": [],
+            "inbound": false,
+            "latency": {
+              "avg_llm_ttft_ms": 310,
+              "avg_tts_ttfa_ms": 160,
+              "p50_e2e_ms": 742,
+              "p95_e2e_ms": 1180,
+              "turns": 6
+            },
+            "local_dialing": false,
+            "max_duration": 30,
+            "metadata": {
+              "crm_id": "42"
+            },
+            "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+            "pathway_logs": [],
+            "price": 0.282,
+            "queue_status": "complete",
+            "record": true,
+            "recording_expiration": "2026-10-31T18:25:00.000000Z",
+            "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+            "request_data": {
+              "first_name": "Mike"
+            },
+            "started_at": "2026-10-24T18:20:09.000000Z",
+            "status": "completed",
+            "summary": "The caller booked a demo for Tuesday.",
+            "test_call": false,
+            "to": "+14155550123",
+            "transcripts": [
+              {
+                "created_at": "2026-10-24T18:22:31.412000Z",
+                "end_ms": 2310,
+                "id": 1,
+                "interrupted": false,
+                "start_ms": 420,
+                "text": "Hi Mike, this is Ava from Acme.",
+                "user": "assistant"
+              },
+              {
+                "created_at": "2026-10-24T18:22:31.412000Z",
+                "end_ms": 3550,
+                "id": 2,
+                "interrupted": false,
+                "start_ms": 2900,
+                "text": "Hi, yes.",
+                "user": "user"
+              }
+            ],
+            "transfer_duration": 0,
+            "variables": {
+              "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+              "first_name": "Mike",
+              "now_utc": "2026-10-24T18:20:09Z"
+            },
+            "warm_transfer_calls": []
+          }
+        ],
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent run by the call.",
+            "title": "Agent Id"
+          },
+          "agent_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent version (semver) run by the call.",
+            "title": "Agent Version"
+          },
+          "analysis": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Results of `analysis_schema` / the analyze endpoint.",
+            "title": "Analysis"
+          },
+          "analysis_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Requested analysis schema.",
+            "title": "Analysis Schema"
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlandAnsweredBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who answered (AMD / classifier result)."
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Batch the call belongs to.",
+            "title": "Batch Id"
+          },
+          "c_id": {
+            "description": "Alias of `call_id` (Bland legacy).",
+            "format": "uuid",
+            "title": "C Id",
+            "type": "string"
+          },
+          "call_ended_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BlandCallEndedBy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who ended the call; `null` while active."
+          },
+          "call_id": {
+            "description": "Call id.",
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "call_length": {
+            "description": "Connected minutes (6 decimals).",
+            "title": "Call Length",
+            "type": "number"
+          },
+          "citations": {
+            "description": "Extracted citation variables.",
+            "items": {
+              "$ref": "#/components/schemas/CallCitation"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "completed": {
+            "description": "Whether post-call processing finished.",
+            "title": "Completed",
+            "type": "boolean"
+          },
+          "concatenated_transcript": {
+            "description": "Whole transcript as `\"user: …\\n assistant: …\\n\"`.",
+            "title": "Concatenated Transcript",
+            "type": "string"
+          },
+          "corrected_duration": {
+            "description": "Connected seconds as an integer string (Bland compat).",
+            "title": "Corrected Duration",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the call was created (UTC).",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "direction": {
+            "description": "Call direction (ours).",
+            "enum": [
+              "outbound",
+              "inbound",
+              "web"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "disposition_tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Disposition chosen post-call.",
+            "title": "Disposition Tag"
+          },
+          "end_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the call ended.",
+            "title": "End At"
+          },
+          "end_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the call ended (specs/05 §9); `null` while active.",
+            "title": "End Reason"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Error description of a failed call.",
+            "title": "Error Message"
+          },
+          "evals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvalSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest eval run when computed."
+          },
+          "experiment_arm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Label of the experiment arm (ours).",
+            "title": "Experiment Arm"
+          },
+          "experiment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Experiment that picked the agent version (ours).",
+            "title": "Experiment Id"
+          },
+          "external_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Caller-supplied external id.",
+            "title": "External Id"
+          },
+          "from": {
+            "description": "Caller id (E.164; empty for web calls).",
+            "title": "From",
+            "type": "string"
+          },
+          "guard_rails": {
+            "description": "Guard rail evaluations.",
+            "items": {
+              "$ref": "#/components/schemas/GuardRailEntry"
+            },
+            "title": "Guard Rails",
+            "type": "array"
+          },
+          "inbound": {
+            "description": "Whether the call was inbound.",
+            "title": "Inbound",
+            "type": "boolean"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/CallLatency",
+            "description": "Turn latency summary (ours)."
+          },
+          "local_dialing": {
+            "description": "Whether local dialing picked the caller id.",
+            "title": "Local Dialing",
+            "type": "boolean"
+          },
+          "max_duration": {
+            "description": "Maximum call length in minutes.",
+            "title": "Max Duration",
+            "type": "number"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "description": "Caller metadata.",
+            "title": "Metadata",
+            "type": "object"
+          },
+          "org_id": {
+            "description": "Owning organization (ours).",
+            "format": "uuid",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "pathway_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway run by the call.",
+            "title": "Pathway Id"
+          },
+          "pathway_logs": {
+            "description": "One entry per assistant turn of a pathway call.",
+            "items": {
+              "$ref": "#/components/schemas/PathwayLog"
+            },
+            "title": "Pathway Logs",
+            "type": "array"
+          },
+          "pathway_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway version run by the call.",
+            "title": "Pathway Version"
+          },
+          "persona_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persona run by the call.",
+            "title": "Persona Id"
+          },
+          "persona_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persona version run by the call.",
+            "title": "Persona Version"
+          },
+          "price": {
+            "description": "Price in dollars (6 decimals).",
+            "title": "Price",
+            "type": "number"
+          },
+          "queue_status": {
+            "description": "Queue state: `complete`, `started`, `allocated`, `queued`, `call_error`, `new`.",
+            "title": "Queue Status",
+            "type": "string"
+          },
+          "record": {
+            "description": "Whether the call is recorded.",
+            "title": "Record",
+            "type": "boolean"
+          },
+          "recording_expiration": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When `recording_url` stops working.",
+            "title": "Recording Expiration"
+          },
+          "recording_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Presigned recording URL, valid 7 days, fresh on each read.",
+            "title": "Recording Url"
+          },
+          "request_data": {
+            "additionalProperties": true,
+            "description": "Request data given to the agent.",
+            "title": "Request Data",
+            "type": "object"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the call was answered.",
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BlandCallStatus",
+            "description": "Call status (Bland hyphenated form)."
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Post-call summary.",
+            "title": "Summary"
+          },
+          "test_call": {
+            "description": "Dashboard test call (ours).",
+            "title": "Test Call",
+            "type": "boolean"
+          },
+          "to": {
+            "description": "Callee number (E.164; empty for web calls).",
+            "title": "To",
+            "type": "string"
+          },
+          "transcripts": {
+            "description": "Transcript turns in order.",
+            "items": {
+              "$ref": "#/components/schemas/Transcript"
+            },
+            "title": "Transcripts",
+            "type": "array"
+          },
+          "transfer_duration": {
+            "description": "Minutes spent transferred.",
+            "title": "Transfer Duration",
+            "type": "number"
+          },
+          "transferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Transfer destination.",
+            "title": "Transferred To"
+          },
+          "variables": {
+            "additionalProperties": true,
+            "description": "Final variable bag including built-ins.",
+            "title": "Variables",
+            "type": "object"
+          },
+          "voicemail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoicemailSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Voicemail handling; `null` when none detected."
+          },
+          "warm_transfer_calls": {
+            "description": "Warm transfer legs.",
+            "items": {
+              "$ref": "#/components/schemas/WarmTransferCall"
+            },
+            "title": "Warm Transfer Calls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "call_id",
+          "c_id",
+          "org_id",
+          "external_id",
+          "batch_id",
+          "to",
+          "from",
+          "inbound",
+          "direction",
+          "test_call",
+          "created_at",
+          "started_at",
+          "end_at",
+          "call_length",
+          "corrected_duration",
+          "completed",
+          "status",
+          "queue_status",
+          "answered_by",
+          "call_ended_by",
+          "end_reason",
+          "max_duration",
+          "record",
+          "recording_url",
+          "recording_expiration",
+          "request_data",
+          "metadata",
+          "pathway_id",
+          "pathway_version",
+          "persona_id",
+          "persona_version",
+          "agent_id",
+          "agent_version",
+          "experiment_id",
+          "experiment_arm",
+          "summary",
+          "disposition_tag",
+          "analysis_schema",
+          "price",
+          "transferred_to",
+          "transfer_duration",
+          "local_dialing",
+          "error_message",
+          "latency",
+          "voicemail",
+          "warm_transfer_calls",
+          "guard_rails",
+          "variables",
+          "pathway_logs",
+          "transcripts",
+          "concatenated_transcript",
+          "analysis",
+          "citations",
+          "evals"
+        ],
+        "title": "CallObject",
+        "type": "object"
+      },
       "CallingWindow": {
         "additionalProperties": false,
         "description": "One daily window, local to the callee. Overnight windows are split into two windows.",
@@ -1653,6 +3060,54 @@
         "title": "ErrorLegacy",
         "type": "object"
       },
+      "EvalSummary": {
+        "properties": {
+          "eval_run_id": {
+            "description": "Latest eval run of the call.",
+            "format": "uuid",
+            "title": "Eval Run Id",
+            "type": "string"
+          },
+          "overall_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Overall score (0-100) once graded.",
+            "title": "Overall Score"
+          },
+          "passed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether the call passed the eval setup.",
+            "title": "Passed"
+          },
+          "results": {
+            "description": "Per-criterion results.",
+            "items": {},
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "eval_run_id",
+          "overall_score",
+          "passed",
+          "results"
+        ],
+        "title": "EvalSummary",
+        "type": "object"
+      },
       "ExperimentsSettings": {
         "additionalProperties": false,
         "description": "Experiment arm assignment.",
@@ -1797,6 +3252,52 @@
           "type"
         ],
         "title": "GuardRailConfig",
+        "type": "object"
+      },
+      "GuardRailEntry": {
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Action taken when it fired.",
+            "title": "Action"
+          },
+          "guard_rail": {
+            "description": "Guard rail name, e.g. `tcpa:opt_out` or `custom:<name>`.",
+            "title": "Guard Rail",
+            "type": "string"
+          },
+          "triggered": {
+            "description": "Whether the guard rail fired.",
+            "title": "Triggered",
+            "type": "boolean"
+          },
+          "turn_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Turn that was evaluated.",
+            "title": "Turn Index"
+          }
+        },
+        "required": [
+          "guard_rail",
+          "triggered",
+          "action",
+          "turn_index"
+        ],
+        "title": "GuardRailEntry",
         "type": "object"
       },
       "HealthStatus": {
@@ -3515,6 +5016,134 @@
         "title": "Pagination",
         "type": "object"
       },
+      "PathwayLog": {
+        "description": "One assistant turn of a pathway call (specs/11 §12); every key present, `null` when not applicable.",
+        "properties": {
+          "created_at": {
+            "description": "When the turn was recorded (UTC).",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Route decision, extracted variables, and tool calls of the turn (`call.route` data).",
+            "title": "Decision"
+          },
+          "node_id": {
+            "description": "Node that spoke the turn.",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "pathway_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway of the call.",
+            "title": "Pathway Id"
+          },
+          "pathway_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway version of the call.",
+            "title": "Pathway Version"
+          },
+          "role": {
+            "const": "assistant",
+            "description": "Always `assistant`.",
+            "title": "Role",
+            "type": "string"
+          },
+          "tag": {
+            "$ref": "#/components/schemas/PathwayTag",
+            "description": "Node name and route tag colour."
+          },
+          "text": {
+            "description": "What the agent said.",
+            "title": "Text",
+            "type": "string"
+          },
+          "user_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The caller turn the agent answered.",
+            "title": "User Text"
+          }
+        },
+        "required": [
+          "tag",
+          "node_id",
+          "pathway_id",
+          "pathway_version",
+          "role",
+          "text",
+          "user_text",
+          "decision",
+          "created_at"
+        ],
+        "title": "PathwayLog",
+        "type": "object"
+      },
+      "PathwayTag": {
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tag colour of the route taken into the node (`#RRGGBB`).",
+            "title": "Color"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Name of the node that produced the turn.",
+            "title": "Name"
+          }
+        },
+        "required": [
+          "name",
+          "color"
+        ],
+        "title": "PathwayTag",
+        "type": "object"
+      },
       "PollStatus": {
         "enum": [
           "pending_verification",
@@ -5082,6 +6711,65 @@
         "title": "ToolsSettings",
         "type": "object"
       },
+      "Transcript": {
+        "properties": {
+          "created_at": {
+            "description": "When the turn was recorded (UTC).",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "end_ms": {
+            "description": "End, in milliseconds after the call was answered.",
+            "title": "End Ms",
+            "type": "integer"
+          },
+          "id": {
+            "description": "1-based position of the turn in the call.",
+            "title": "Id",
+            "type": "integer"
+          },
+          "interrupted": {
+            "description": "Whether the caller interrupted the agent during this turn.",
+            "title": "Interrupted",
+            "type": "boolean"
+          },
+          "start_ms": {
+            "description": "Start, in milliseconds after the call was answered.",
+            "title": "Start Ms",
+            "type": "integer"
+          },
+          "text": {
+            "description": "Transcribed or spoken text.",
+            "title": "Text",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/TranscriptRole",
+            "description": "Speaker of the turn."
+          }
+        },
+        "required": [
+          "id",
+          "user",
+          "text",
+          "created_at",
+          "start_ms",
+          "end_ms",
+          "interrupted"
+        ],
+        "title": "Transcript",
+        "type": "object"
+      },
+      "TranscriptRole": {
+        "enum": [
+          "user",
+          "assistant",
+          "agent-action",
+          "human_agent"
+        ],
+        "type": "string"
+      },
       "TransferOwnershipRequest": {
         "additionalProperties": false,
         "description": "``POST /v1/org/transfer-ownership``: the member who becomes an owner.",
@@ -5301,6 +6989,39 @@
         "title": "VoicemailSms",
         "type": "object"
       },
+      "VoicemailSummary": {
+        "properties": {
+          "action_taken": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Voicemail action applied: `hangup`, `leave_message`, `leave_message_and_sms`, `ignore`.",
+            "title": "Action Taken"
+          },
+          "detected": {
+            "description": "A voicemail greeting was detected.",
+            "title": "Detected",
+            "type": "boolean"
+          },
+          "message_left": {
+            "description": "Whether the voicemail message was played.",
+            "title": "Message Left",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "detected",
+          "action_taken",
+          "message_left"
+        ],
+        "title": "VoicemailSummary",
+        "type": "object"
+      },
       "VoicesSettings": {
         "additionalProperties": false,
         "description": "Voice resolution rules.",
@@ -5313,6 +7034,74 @@
           }
         },
         "title": "VoicesSettings",
+        "type": "object"
+      },
+      "WarmTransferCall": {
+        "properties": {
+          "answered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the leg was answered.",
+            "title": "Answered At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the leg hung up.",
+            "title": "Ended At"
+          },
+          "hangup_cause": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Carrier hangup cause.",
+            "title": "Hangup Cause"
+          },
+          "role": {
+            "description": "Leg role (`warm_proxy`).",
+            "title": "Role",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the leg was created.",
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "description": "Last carrier state of the leg.",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "state",
+          "started_at",
+          "answered_at",
+          "ended_at",
+          "hangup_cause"
+        ],
+        "title": "WarmTransferCall",
         "type": "object"
       },
       "WarmTransferConfig": {
@@ -5993,6 +7782,489 @@
       }
     },
     "/v1/calls": {
+      "get": {
+        "description": "List the org's calls, newest first, with Bland's filters and cursor paging.",
+        "operationId": "calls_list",
+        "parameters": [
+          {
+            "description": "Exact callee number (E.164).",
+            "in": "query",
+            "name": "to_number",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exact callee number (E.164).",
+              "title": "To Number"
+            }
+          },
+          {
+            "description": "Alias of `to_number`.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Alias of `to_number`.",
+              "title": "To"
+            }
+          },
+          {
+            "description": "Exact caller id (E.164).",
+            "in": "query",
+            "name": "from_number",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exact caller id (E.164).",
+              "title": "From Number"
+            }
+          },
+          {
+            "description": "Alias of `from_number`.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Alias of `from_number`.",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "description": "Page size.",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Oldest first instead of newest first.",
+            "in": "query",
+            "name": "ascending",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Oldest first instead of newest first.",
+              "title": "Ascending",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "First creation day, in the org timezone.",
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "First creation day, in the org timezone.",
+              "title": "Start Date"
+            }
+          },
+          {
+            "description": "Last creation day (inclusive), org timezone.",
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Last creation day (inclusive), org timezone.",
+              "title": "End Date"
+            }
+          },
+          {
+            "description": "Created at or after (naive = UTC).",
+            "in": "query",
+            "name": "created_at_gte",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Created at or after (naive = UTC).",
+              "title": "Created At Gte"
+            }
+          },
+          {
+            "description": "Created at or before (naive = UTC).",
+            "in": "query",
+            "name": "created_at_lte",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Created at or before (naive = UTC).",
+              "title": "Created At Lte"
+            }
+          },
+          {
+            "description": "Batch of the call.",
+            "in": "query",
+            "name": "batch_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Batch of the call.",
+              "title": "Batch Id"
+            }
+          },
+          {
+            "description": "Alias of `batch_id`.",
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Alias of `batch_id`.",
+              "title": "Campaign Id"
+            }
+          },
+          {
+            "description": "Pathway run by the call.",
+            "in": "query",
+            "name": "pathway_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pathway run by the call.",
+              "title": "Pathway Id"
+            }
+          },
+          {
+            "description": "Persona run by the call.",
+            "in": "query",
+            "name": "persona_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Persona run by the call.",
+              "title": "Persona Id"
+            }
+          },
+          {
+            "description": "Agent run by the call.",
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Agent run by the call.",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "description": "Post-call processing finished (or not).",
+            "in": "query",
+            "name": "completed",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Post-call processing finished (or not).",
+              "title": "Completed"
+            }
+          },
+          {
+            "description": "Who answered.",
+            "in": "query",
+            "name": "answered_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "human",
+                    "voicemail",
+                    "ivr",
+                    "unknown",
+                    "no-answer",
+                    "fax"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Who answered.",
+              "title": "Answered By"
+            }
+          },
+          {
+            "description": "Inbound calls only (`true`) or all others.",
+            "in": "query",
+            "name": "inbound",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inbound calls only (`true`) or all others.",
+              "title": "Inbound"
+            }
+          },
+          {
+            "description": "Comma-separated call statuses, Bland (`no-answer`) or internal names.",
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated call statuses, Bland (`no-answer`) or internal names.",
+              "title": "Status"
+            }
+          },
+          {
+            "description": "Disposition tag.",
+            "in": "query",
+            "name": "disposition_tag",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Disposition tag.",
+              "title": "Disposition Tag"
+            }
+          },
+          {
+            "description": "Connected length above, in minutes.",
+            "in": "query",
+            "name": "duration_gt",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Connected length above, in minutes.",
+              "title": "Duration Gt"
+            }
+          },
+          {
+            "description": "Connected length below, in minutes.",
+            "in": "query",
+            "name": "duration_lt",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Connected length below, in minutes.",
+              "title": "Duration Lt"
+            }
+          },
+          {
+            "description": "External id.",
+            "in": "query",
+            "name": "external_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "External id.",
+              "title": "External Id"
+            }
+          },
+          {
+            "description": "Cursor of the next page (`total_count` omitted).",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Cursor of the next page (`total_count` omitted).",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls List",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      },
       "post": {
         "description": "Place an outbound call now, or schedule it with ``start_time``.",
         "operationId": "calls_send",
@@ -6130,6 +8402,61 @@
         "x-envelope": "legacy",
         "x-permission": "calls.operate",
         "x-scope": "calls:write"
+      }
+    },
+    "/v1/calls/{call_id}": {
+      "get": {
+        "description": "The Call Object of one call, with a fresh 7-day recording URL.",
+        "operationId": "calls_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallObject"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Get",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
       }
     },
     "/v1/calls/{call_id}/stop": {

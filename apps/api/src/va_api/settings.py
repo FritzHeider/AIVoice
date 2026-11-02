@@ -15,6 +15,7 @@ from va_common.settings import (
     TemporalSettings,
     WebhookSafetySettings,
 )
+from va_common.storage import S3Settings
 from va_compliance.international import parse_allowed_countries
 
 __all__ = ["ApiSettings"]
@@ -25,7 +26,13 @@ _FIRST_ROTATED_VERSION: Final = 2
 
 
 class ApiSettings(
-    WebhookSafetySettings, RedisSettings, DatabaseSettings, TemporalSettings, EmailSettings, CryptoSettings
+    WebhookSafetySettings,
+    RedisSettings,
+    DatabaseSettings,
+    TemporalSettings,
+    EmailSettings,
+    CryptoSettings,
+    S3Settings,
 ):
     """Settings of the public REST API; further secrets (vendors) arrive with their phases.
 

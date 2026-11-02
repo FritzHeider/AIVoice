@@ -33,6 +33,7 @@ from va_common.health import CheckFn
 from va_common.net import HostResolver, system_resolver
 from va_common.service import ReadinessSource
 from va_common.settings import Environment
+from va_common.storage import ObjectStore, open_object_store
 from va_common.time import Clock, SystemClock
 from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
@@ -76,6 +77,7 @@ class Container:
     call_starter: CallStarter
     call_canceller: CallCanceller
     host_resolver: HostResolver
+    object_store: ObjectStore
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -129,6 +131,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         org_settings = OrgSettingsReader(database, redis)
         oidc_http = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT_S, follow_redirects=False)
         stack.push_async_callback(oidc_http.aclose)
+        object_store = await stack.enter_async_context(open_object_store(settings))
         yield Container(
             settings=settings,
             engine=engine,
@@ -159,4 +162,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             call_starter=TemporalCallStarter(temporal, settings.temporal_task_queue),
             call_canceller=TemporalCallCanceller(temporal),
             host_resolver=system_resolver,
+            object_store=object_store,
         )

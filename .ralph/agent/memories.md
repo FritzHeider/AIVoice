@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793637094-860e
+> P05-T16a: Call Object = va_domain.call_object (CallObject extends CallListItem) + va_db.call_object load_call_objects/load_call_list_items (batched, reuse for call.completed); api call_read service + CallListQuery FastAPI query model (cross-tenant walker needs REGISTRY.register_request for calls_list); SessionContainer.presigner FakePresigner; fake api container has no settings -> use request.app.state.settings; type X = Literal aliases become $defs refs in JSON schema; never parametrize with new_id()
+<!-- tags: api, calls, testing | created: 2026-11-02 -->
+
 ### mem-1793635337-c714
 > P05-T15: GatedVad (va_voice.pipeline) + PipelineConfig.noise_cancellation; CallRuntime(background=BackgroundLibrary) required; runtime sim calls play static bed by default -> FakeTelnyx AGENT_SPEECH_LEVEL raised to 1024 frame RMS (static ~330); office/cafe/restaurant beds read as agent speech; default resolved config waits 6 s for greeting (wait_for_greeting=False for immediate opener); barge-ins observable via json_log_stream pipeline_barge_in / media.transport_closed clears
 <!-- tags: media, pipeline, testing | created: 2026-11-02 -->

@@ -266,11 +266,17 @@
   - Deliverables: wiring of every listed option into the pipeline/STT/TTS/brain configuration
   - Acceptance: e2e interruptibility_levels and barge_in pass; unit tests for each option's effect.
 
-- [ ] P05-T16 Call read endpoints
-  - Spec refs: specs/05-calls-api.md (GET /v1/calls, GET /v1/calls/{id}, GET /v1/calls/active, transcript, recording, events); specs/19-events-and-webhooks.md §4 (Call Object)
-  - Depends on: P05-T11
-  - Deliverables: endpoints with Bland list filters and Call Object serializer (every field)
-  - Acceptance: serializer test asserts every Call Object field from specs/19 §4 is present with correct type.
+- [x] P05-T16a Call Object, call details, and call list — va_domain.call_object + va_db.call_object batched loader, GET /v1/calls (every §6 filter, cursor, total_count) and GET /v1/calls/{call_id}; spec-table acceptance test; make test 10528 passed / 7 skipped 99.16 %, lint/typecheck/placeholders/spec refs/test-ts pass, jscpd 0
+  - Spec refs: specs/19-events-and-webhooks.md §4 (Call Object); specs/05-calls-api.md §1, §6, §7.1, §8 (Bland status mapping), §9 (call_ended_by)
+  - Depends on: P05-T11, P05-T14
+  - Deliverables: `va_domain.call_object.CallObject` (every §4 field) + `va_db.call_object` loader/serializer (batched child reads, shared with P05-T18's `call.completed`), api object store for 7-day recording URLs, `GET /v1/calls/{call_id}` (bare Call Object) and `GET /v1/calls` (every §6 filter, total_count, cursor, list item = Call Object minus heavy fields)
+  - Acceptance: serializer test asserts every Call Object field from specs/19 §4 is present with the correct type; one test per list filter; cross-tenant 404s.
+
+- [ ] P05-T16b Active calls, transcript, recording, and events endpoints
+  - Spec refs: specs/05-calls-api.md §7.4, §7.5, §7.6, §7.9
+  - Depends on: P05-T16a
+  - Deliverables: `GET /v1/calls/active` (current_node_id from carrier_state), `GET /v1/calls/{call_id}/recording` (302 / `?format=json`, `?channel=`), `GET /v1/calls/{call_id}/transcript` (json/text/srt/vtt), `GET /v1/calls/{call_id}/events` (after_seq, limit, category)
+  - Acceptance: SRT/VTT golden files; recording 404 / 302 / json; events paging by seq; cross-tenant 404s.
 
 - [ ] P05-T18 PostCallWorkflow v1: billing finalization and completion event
   - Spec refs: specs/18-post-call-analysis.md (PostCallWorkflow step list, billing finalization hook); specs/24-billing-and-limits.md (metering rules, credit holds)
@@ -280,7 +286,7 @@
 
 - [ ] P05-T17 End-to-end flows and concurrency check
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list)
-  - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16, P05-T18
+  - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16a, P05-T16b, P05-T18
   - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery, plus the e2e flows of tasks finished before the harness existed (voicemail_leave_message, voicemail_hangup, amd_ivr_mode from P05-T10; others named in earlier tasks' acceptance when they also predate it); a 50-concurrent-call simulator test against one media worker process
   - Acceptance: `make e2e` green; concurrency test reports no underruns and p50 platform overhead ≤ 150 ms.
 

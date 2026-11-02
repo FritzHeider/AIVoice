@@ -18,7 +18,7 @@ import httpx
 import pytest
 from api_helpers import make_settings
 from auth_helpers import AuthContainer
-from call_fakes import FakeCallCanceller, FakeCallStarter, FakeResolver
+from call_fakes import FakeCallCanceller, FakeCallStarter, FakePresigner, FakeResolver
 from docker_probe import docker_available
 from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
@@ -53,6 +53,7 @@ from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
 from va_common.ids import new_id
 from va_common.money import dollars_to_micros
+from va_common.storage import ObjectStore
 from va_db.models import (
     ApiKey,
     AuditLog,
@@ -138,7 +139,7 @@ class SessionContainer(AuthContainer):
     login state store, the cached org settings reader, the agent onboarding request store and limiter, the
     OIDC discovery client built from the app settings when the app opens it (intercept it with respx), and
     the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
-    ``FakeCallCanceller``, ``FakeResolver``)."""
+    ``FakeCallCanceller``, ``FakeResolver``) and an object store over ``FakePresigner``."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -160,6 +161,8 @@ class SessionContainer(AuthContainer):
     call_starter: FakeCallStarter = field(default_factory=FakeCallStarter)
     call_canceller: FakeCallCanceller = field(default_factory=FakeCallCanceller)
     host_resolver: FakeResolver = field(default_factory=FakeResolver)
+    presigner: FakePresigner = field(default_factory=FakePresigner)
+    object_store: ObjectStore = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -178,6 +181,7 @@ class SessionContainer(AuthContainer):
         self.onboarding_limiter = OnboardingLimiter(self.redis)
         self.call_limiter = CallLimiter(self.redis, clock=self.clock)
         self.event_publisher = EventPublisher(self.redis, call_events=None)
+        self.object_store = self.presigner.store()
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:

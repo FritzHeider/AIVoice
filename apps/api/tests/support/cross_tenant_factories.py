@@ -61,3 +61,6 @@ REGISTRY.register_resource_factory("invitation_id", _invitation)
 REGISTRY.register_resource_factory("key_id", _api_key)
 REGISTRY.register_resource_factory("org_id", _sub_account)
 REGISTRY.register_resource_factory("call_id", _call)
+# ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;
+# the unfiltered listing must hold none of org A's calls.
+REGISTRY.register_request("calls_list", params={"limit": "1000"})

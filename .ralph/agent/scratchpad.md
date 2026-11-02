@@ -2400,3 +2400,158 @@ Re-ran: make lint 0, make typecheck 0, placeholders 0 findings, check_spec_refs 
 new Decisions (specs/07 §10, specs/30 §3.5): GatedVad shift/clamp/feedback, pipeline default off + runtime mapping,
 Scribe flag, background_mixer fallback logged, FakeTelnyx agent-speech level 1024 with static-bed test. Barge-in and
 interruptibility levels covered in-process (docker e2e in P05-T17).
+
+## Plan P05-T16a — Call Object, call details, and call list (Planner, 2026-11-02)
+P05-T16 was split (plan file): T16a = Call Object + `GET /v1/calls/{call_id}` + `GET /v1/calls`; T16b = active,
+recording, transcript, events. P05-T18 (`call.completed`) reuses the T16a serializer, so it lives outside the api.
+
+### Design (decided — do not re-litigate)
+1. **Contract model** `packages/va_domain/src/va_domain/call_object.py`: pydantic `CallObject` with EVERY specs/19 §4
+   field, exact names (`from` via `Field(serialization_alias="from")` + `validation_alias`/populate_by_name, as in
+   va_telnyx models), types per the table (nullable where the table says `| null`; `call_ended_by`/`end_reason`
+   nullable until the call ended — Decision). Nested models: `Transcript` (`id` int = 1-based ordinal of the call's
+   turn rows ordered by `turn_index, start_ms, id`; `user` role; `text`; `created_at`; `start_ms`; `end_ms`;
+   `interrupted`), `PathwayLog` (specs/11 §12 keys in that order), `CallLatency`, `VoicemailSummary`, `GuardRailEntry`,
+   `WarmTransferCall`, `EvalSummary`. `CallListItem` = CallObject minus `transcripts`, `concatenated_transcript`,
+   `pathway_logs`, `variables`, `citations`, `evals`, `analysis` (specs/05 §6) — share fields via a base class, no
+   copy-paste (jscpd). Pure mapping helpers in the same module: `bland_status(status)` (`no_answer`→`no-answer`,
+   `in_progress`/`transferring`/`dialing`/`ringing`→`in-progress`, `transferred`→`completed`, rest identical),
+   `BLAND_STATUS_FILTER` (Bland name → internal statuses, inverse of the map), `bland_answered_by` (`no_answer` →
+   `no-answer`), `CALL_ENDED_BY` (`agent`→`ASSISTANT`, `user`→`USER`, `system`→`SYSTEM`, `api`→`API`,
+   `guard_rail`→`GUARD_RAIL`, `timeout`→`TIMEOUT`, `error`→`ERROR`), `concatenated_transcript(turns)` (Bland
+   `"user: …\n assistant: …\n"` exactly as §4 shows: each line `"{role}: {text}\n"` joined with `" "` after the
+   first), `minutes(seconds) -> float` (6 decimals), `dollars(micros) -> float` (6 decimals), `latency_summary(values)`
+   (p50/p95 nearest-rank over `e2e_ms`, avg of `llm_ttft_ms`/`tts_ttfa_ms` rounded int, `turns` = rows with a latency
+   dict that has e2e_ms; all None/0 when empty). Every field gets `description`; `CallObject` has a full `examples`
+   entry (OpenAPI contract test).
+2. **Loader** `packages/va_db/src/va_db/call_object.py` (system-free: runs in the caller's `tenant_session`):
+   `async def load_call_objects(session, calls: Sequence[Call], *, detail: bool, recording_urls: Mapping[uuid.UUID,
+   SignedUrl | None]) -> list[dict[str, Any]]` — batched queries with `call_id = ANY(:ids)` (`.in_()`), never per
+   call: `call_turns` (detail: all columns for transcripts/pathway_logs; list: only `latency` for the latency
+   summary), `guard_rail_events`, `call_legs` role `warm_proxy`, `call_events` category `voicemail` (latest per call:
+   `data.action`), detail only: latest `call_analyses` kind `analysis_schema` (`result` → `analysis`), `citations`,
+   latest `eval_runs` (`{eval_run_id, overall_score float|None, passed, results}`), `agent_versions.semver`,
+   `experiment_arms.label`. Returns `CallObject`/`CallListItem` `model_dump(mode="json", by_alias=True)`. Also
+   `async def load_call_object(session, call_id, *, recording_url) -> dict | None` convenience. Field sources:
+   `call_length = minutes(connected_seconds)`, `corrected_duration = str(round(connected_seconds))`,
+   `completed = queue_status == "complete"`, `started_at = answered_at` (§4 "answered time"; fall back `started_at`),
+   `end_at = ended_at`, `max_duration = config.max_duration_min`, `record = config.record`,
+   `analysis_schema = config.analysis_schema`, `local_dialing = config.dialing_strategy.type == "local"` (check the
+   real field name in `va_domain.calls.parts.DialingStrategy`), `persona_version = str(int)|None`,
+   `agent_version = semver`, `experiment_arm = label`, `transfer_duration = minutes(transfer_seconds)`,
+   `price = dollars(price_micros)`, `queue_status = queue_status or "new"`, `request_data`/`metadata_`/`variables`
+   as stored, `voicemail` = null unless `answered_by == "voicemail"` or end_reason in `voicemail_hangup`/
+   `voicemail_left` → `{detected: true, action_taken: <event action or derived from end_reason (hangup/
+   leave_message) or null>, message_left: end_reason == "voicemail_left"}`; `pathway_logs` = one entry per
+   ASSISTANT turn with `node_id` (task calls → `[]`): tag `{name: node_name, color: route event data.tag_color or
+   None}`, `user_text` = preceding user turn's text, `decision` = data of the `route` category event whose
+   `data.turn_index` equals that turn (else null) — record this read-time contract in the Decision so P07's engine
+   emits `turn_index`/`tag_color` in `call.route`. `warm_transfer_calls` = `[{role, state, started_at, answered_at,
+   ended_at, hangup_cause}]` of `warm_proxy` legs. Transcripts exclude role `system` (§4 role enum has no system).
+3. **API object store**: `ApiSettings` mixes in `va_common.storage.S3Settings`; `va_api` container opens
+   `open_object_store(settings)` (presign is local; no network at startup) as `object_store`; helper
+   `va_api.services.call_read.recording_urls(store, bucket, calls, now)` → `signed_url(..., ttl_s=RECORDING_URL_TTL_S)`
+   only for calls with `recording_s3_key`; a presign failure (ClientError/BotoCoreError/ValueError) logs
+   `calls.recording_url_failed` (no key/URL in logs) and yields null. Check `scripts/tests/test_compose.py` /
+   specs/29 §2: if the api compose service lists env explicitly, add the S3 vars in spec + compose together.
+   Tests: `SessionContainer.object_store` = a real `ObjectStore` over the va_workflows `recording_rig.MemoryS3`-style
+   fake (move/duplicate-free: import from an api support module or reuse via pythonpath only if already on it;
+   otherwise a tiny fake with `generate_presigned_url`).
+4. **Service** `apps/api/src/va_api/services/call_read.py`: `get_call(deps, ctx, call_id) -> dict` (`parse_call_id`
+   from call_stop → `CALL_NOT_FOUND` "Call not found." for absent/other org) and `list_calls(deps, ctx, filters:
+   CallListFilters) -> CallListResult(total_count|None, calls, next_cursor)`. `CallListFilters` (pydantic, in
+   `routers/calls_schemas.py` or a `calls_read_schemas.py`): every §6 param with aliases (`to`/`to_number`,
+   `from`/`from_number`, `campaign_id` alias of `batch_id`; both given and different → `INVALID_INPUT`), `limit`
+   1–1000 default 1000 (`INVALID_INPUT` field `limit`), `ascending`, `start_date`/`end_date` (date, org timezone from
+   `OrgSettingsReader`/`load_settings(org.settings).timezone`, inclusive: `< next local midnight`),
+   `created_at_gte/lte` (aware ISO; naive → UTC), uuid ids, `completed`, `answered_by` (Bland values, `no-answer`→
+   `no_answer`), `inbound` (true → `direction='inbound'`, false → `!= 'inbound'`), `status` comma list of Bland or
+   internal names (unknown → `INVALID_INPUT` field `status`), `disposition_tag`, `duration_gt/lt` minutes on
+   `connected_seconds` (`> m*60` / `< m*60`), `external_id`, `cursor` (`va_db.pagination.decode_cursor`; ascending
+   → `(created_at, id) > cursor`, else `<`; fetch limit+1). `total_count` = `count(*)` with the same filters, only
+   without a cursor. Order `created_at` ASC/DESC then `id`. Unknown query params ignored (Bland parity).
+5. **Routes** in `routers/calls.py` (legacy envelope, `require_scope("calls:read")`, `openapi_extra={"x-scope":
+   "calls:read"}`, GETs need no audit marker): `GET ""` `operation_id="calls_list"` → `{"status":"success",
+   "total_count"?: n, "count": m, "next_cursor": str|None, "calls":[…]}` (`total_count` omitted with a cursor:
+   `Field(exclude_if=...)` per the P05-T05b memory); `GET "/{call_id}"` `operation_id="calls_get"` → bare Call Object
+   (`response_model=CallObject`, by_alias). Register `GET /{call_id}` AFTER any literal GET paths (T16b adds
+   `/active`, `/export`: leave a comment-free ordering by declaring list first). Every response model needs an
+   `examples` entry; run `make openapi`, then both `gen:api` scripts, commit `openapi/*.json` + `schema.d.ts`.
+6. Spec Decisions (same commit): specs/19 §4 `> Decision (2026-11-02): Call Object serialization (P05-T16a)` —
+   module locations, nullable `call_ended_by`/`end_reason` while active, status/answered_by mapping incl.
+   dialing/ringing → `in-progress`, transcript `id` ordinal and system-role exclusion, `pathway_logs` read-time
+   contract (assistant turns with node_id + `call.route` data `turn_index`/`tag_color`), `voicemail`, `latency`,
+   `warm_transfer_calls` shapes, recording URL null on presign failure; specs/05 §6 Decision: filter semantics above
+   (aliases, status names, inbound false, date range in org timezone, cursor + ascending, total_count only without
+   cursor, limit bounds).
+
+### Tests (all must exist and pass)
+- `packages/va_domain/tests/test_call_object.py`: parses the specs/19 §4 table (field names + type cells) and asserts
+  `CallObject.model_json_schema(by_alias=True)` has exactly those fields with matching JSON types/nullability
+  (THE acceptance test); `CallListItem` = CallObject fields minus the 7 excluded; mapping helpers parametrized
+  (every CallStatus, every EndedBy, answered_by, minutes/dollars rounding, concatenated_transcript exact string,
+  latency_summary empty/odd/even).
+- `packages/va_db/tests/test_call_object_db.py` (migrated Postgres, `call_rows.seed_call`/`seed_leg`, `RowFactory`):
+  a fully populated call (turns incl. a system turn + interrupted turn, guard rail rows, warm_proxy leg, voicemail
+  event, analysis_schema analysis, citation, eval run, agent version + experiment arm, recording URL) → every field
+  value asserted; a bare queued call → nulls/empties/defaults; list mode omits heavy fields and issues a constant
+  number of queries for 1 vs 20 calls (count statements via SQLAlchemy `before_cursor_execute` event); another org's
+  child rows never leak (RLS).
+- `apps/api/tests/test_calls_read.py` (session/identity module DB like test_call_stop): GET detail bare body (no
+  `status:"success"` wrapper; `status` is the Bland call status), recording_url presigned with 7-day expiry and null
+  without a key / on presign failure, non-UUID / unknown / other-org → 404 `CALL_NOT_FOUND`, scope `calls:read`
+  required (403 for a key without it); list: one test per filter (to/to_number, from/from_number, batch_id +
+  campaign_id + conflict, pathway/persona/agent ids, completed, answered_by incl. `no-answer`, inbound true/false,
+  status Bland + internal + unknown → 400, disposition_tag, duration_gt/lt, external_id, start/end_date in org
+  timezone edges, created_at_gte/lte), default newest first, ascending, limit bounds (0, 1001 → 400), cursor paging
+  across 3 pages without duplicates both orders and total_count omitted with a cursor, malformed cursor → 400.
+- Cross-tenant suite picks the new routes up automatically (call_id factory exists); `calls_list` needs no
+  registration (no required params) — make sure it passes.
+- `test_openapi`/operations contract, `test_audit_markers` (GETs exempt) stay green.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make openapi` +
+`corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api`; `make test` in
+background (`make test > logs/make_test_p05t16a.log 2>&1` + heartbeat Monitor); `make test-ts` (schema drift);
+jscpd 0 clones; `uvx radon cc -s -a` on touched src (emit `complexity: <n>,`); pip-audit + pnpm audit. `make e2e`:
+harness lands in P05-T17 — say so. AGENTS.md line: Call Object modules, `load_call_objects`, api `object_store`,
+list filter semantics.
+
+### Risks
+- jscpd: CallObject/CallListItem field duplication — use inheritance (list item base + detail subclass).
+- Coverage concurrency: greenlet already configured. Query-count test must not be brittle: compare 1 vs 20 calls.
+- `from` alias with mypy (no pydantic plugin): use `Field(serialization_alias="from", validation_alias="from")`
+  and construct with `**{"from": ...}` or by field name with populate_by_name.
+- FastAPI drops None from examples; the example may omit nullable fields (known).
+- Org timezone read: use the `org_settings` reader BEFORE opening the tenant session (pool size 1 in tests).
+
+## Build P05-T16a (Builder, 2026-11-02)
+Implemented per plan:
+- `va_domain.call_object` package: `models` (CallListItem base + CallObject subclass, every specs/19 §4 field, nested
+  PathwayLog/Transcript/CallCitation/EvalSummary/CallLatency/VoicemailSummary/WarmTransferCall/GuardRailEntry,
+  examples) and `mapping` (bland_status, BLAND_STATUS_FILTER, CALL_ENDED_BY, bland_answered_by, minutes, dollars,
+  concatenated_transcript, latency_summary nearest-rank).
+- `va_db.call_object`: `load_call_objects` / `load_call_list_items(session, calls, recording_urls=)`; one query per
+  child table (turns or turn latencies, guard rails, warm_proxy legs, voicemail events, agent semver/arm label; detail
+  adds route events, analyses, citations, eval runs).
+- api: `ApiSettings` + `S3Settings`; container `object_store`; `services/call_read.py` (get_call, list_calls,
+  recording_urls with logged presign failure); `routers/calls_read_schemas.py` (`CallListQuery`, `CallListResponse`
+  with total_count excluded under a cursor); routes `calls_list`, `calls_get` (calls:read).
+- Deviation from plan: none of substance. `to`/`from` are "" for calls with no number (Decision). Cross-tenant
+  walker needed `REGISTRY.register_request("calls_list", ...)` (query model looks required).
+- Spec Decisions: specs/19 §4 (serialization), specs/05 §6 (filters). AGENTS.md line added. openapi + both schema.d.ts
+  regenerated.
+Tests: packages/va_domain/tests/test_call_object.py (spec-table parser vs JSON schema, 40), packages/va_db/tests/
+test_call_object_db.py (14: full field values, bare defaults, voicemail table, list vs detail, constant query count
+1 vs 20 calls, RLS), apps/api/tests/test_calls_read.py (54: detail/404/scope/presign, every filter, dates in org tz,
+invalid params, cursor paging both orders, total_count).
+Gates: make fmt 0; make lint 0; make typecheck 0; placeholders 0 findings; spec refs 0; make test 10528 passed / 7
+skipped, 99.16 % (exit 0); make test-ts pass (22/52/48); jscpd 0 clones; radon avg A 2.81 on touched src;
+pip-audit no known vulns; pnpm audit 3 moderate (< high). make e2e: harness lands in P05-T17 (read endpoints have no
+call-flow e2e).
+
+## Review P05-T16a (Reviewer, 2026-11-02) — APPROVED
+Re-ran: make lint 0, make typecheck 0, placeholders 0, check_spec_refs 0, make test 10528 passed / 7 skipped 99.16 %
+(exit 0), make test-ts 0, jscpd 0 clones. Diff checked against specs/05 §6 (every filter, aliases, limit bounds,
+cursor/total_count) and specs/19 §4 (spec-table parser test, serialization Decision); loader batches child reads with
+org_id scoping inside tenant_session; presign failure logged without key/URL. Next: P05-T16b.

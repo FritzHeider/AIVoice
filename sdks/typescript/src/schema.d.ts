@@ -158,7 +158,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Calls List
+         * @description List the org's calls, newest first, with Bland's filters and cursor paging.
+         */
+        get: operations["calls_list"];
         put?: never;
         /**
          * Calls Send
@@ -185,6 +189,26 @@ export interface paths {
          * @description Stop every active or scheduled call of the org, or only ``call_ids``.
          */
         post: operations["calls_stop_active"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calls/{call_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Get
+         * @description The Call Object of one call, with a fresh 7-day recording URL.
+         */
+        get: operations["calls_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -938,6 +962,790 @@ export interface components {
             /** User Agent */
             user_agent: string | null;
         };
+        /** @enum {string} */
+        BlandAnsweredBy: "human" | "voicemail" | "ivr" | "unknown" | "no-answer" | "fax";
+        /** @enum {string} */
+        BlandCallEndedBy: "ASSISTANT" | "USER" | "SYSTEM" | "API" | "GUARD_RAIL" | "TIMEOUT" | "ERROR";
+        /** @enum {string} */
+        BlandCallStatus: "completed" | "failed" | "no-answer" | "busy" | "canceled" | "in-progress" | "queued" | "scheduled";
+        /** CallCitation */
+        CallCitation: {
+            /**
+             * Citation Schema Id
+             * Format: uuid
+             * @description Citation schema that requested the variable.
+             */
+            citation_schema_id: string;
+            /**
+             * Cited Utterances
+             * @description Utterances that support the value.
+             */
+            cited_utterances: unknown[];
+            /**
+             * Conditions Met
+             * @description Whether the schema's conditions held.
+             */
+            conditions_met: boolean | null;
+            /**
+             * Value
+             * @description Extracted value (`null` when not found).
+             */
+            value: unknown;
+            /**
+             * Variable Name
+             * @description Extracted variable.
+             */
+            variable_name: string;
+            /**
+             * Variable Type
+             * @description Declared variable type.
+             */
+            variable_type: string;
+        };
+        /**
+         * CallLatency
+         * @description Turn latency summary of the call (ours).
+         */
+        CallLatency: {
+            /**
+             * Avg Llm Ttft Ms
+             * @description Mean time to the first LLM token.
+             */
+            avg_llm_ttft_ms: number | null;
+            /**
+             * Avg Tts Ttfa Ms
+             * @description Mean time to the first TTS audio.
+             */
+            avg_tts_ttfa_ms: number | null;
+            /**
+             * P50 E2E Ms
+             * @description Median voice-to-voice latency of the agent's turns.
+             */
+            p50_e2e_ms: number | null;
+            /**
+             * P95 E2E Ms
+             * @description 95th percentile voice-to-voice latency.
+             */
+            p95_e2e_ms: number | null;
+            /**
+             * Turns
+             * @description Agent turns with a measured voice-to-voice latency.
+             */
+            turns: number;
+        };
+        /**
+         * CallListItem
+         * @description A call in `GET /v1/calls`: the Call Object without its heavy fields (use `GET /v1/calls/{call_id}`).
+         * @example {
+         *       "analysis_schema": {
+         *         "demo_booked": "boolean"
+         *       },
+         *       "answered_by": "human",
+         *       "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "call_ended_by": "ASSISTANT",
+         *       "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "call_length": 2.35,
+         *       "completed": true,
+         *       "corrected_duration": "141",
+         *       "created_at": "2026-10-24T18:20:01.000000Z",
+         *       "direction": "outbound",
+         *       "disposition_tag": "INTERESTED",
+         *       "end_at": "2026-10-24T18:22:30.000000Z",
+         *       "end_reason": "agent_end_call",
+         *       "from": "+14155550999",
+         *       "guard_rails": [],
+         *       "inbound": false,
+         *       "latency": {
+         *         "avg_llm_ttft_ms": 310,
+         *         "avg_tts_ttfa_ms": 160,
+         *         "p50_e2e_ms": 742,
+         *         "p95_e2e_ms": 1180,
+         *         "turns": 6
+         *       },
+         *       "local_dialing": false,
+         *       "max_duration": 30,
+         *       "metadata": {
+         *         "crm_id": "42"
+         *       },
+         *       "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+         *       "price": 0.282,
+         *       "queue_status": "complete",
+         *       "record": true,
+         *       "recording_expiration": "2026-10-31T18:25:00.000000Z",
+         *       "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+         *       "request_data": {
+         *         "first_name": "Mike"
+         *       },
+         *       "started_at": "2026-10-24T18:20:09.000000Z",
+         *       "status": "completed",
+         *       "summary": "The caller booked a demo for Tuesday.",
+         *       "test_call": false,
+         *       "to": "+14155550123",
+         *       "transfer_duration": 0,
+         *       "warm_transfer_calls": []
+         *     }
+         */
+        CallListItem: {
+            /**
+             * Agent Id
+             * @description Agent run by the call.
+             */
+            agent_id: string | null;
+            /**
+             * Agent Version
+             * @description Agent version (semver) run by the call.
+             */
+            agent_version: string | null;
+            /**
+             * Analysis Schema
+             * @description Requested analysis schema.
+             */
+            analysis_schema: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Who answered (AMD / classifier result). */
+            answered_by: components["schemas"]["BlandAnsweredBy"] | null;
+            /**
+             * Batch Id
+             * @description Batch the call belongs to.
+             */
+            batch_id: string | null;
+            /**
+             * C Id
+             * Format: uuid
+             * @description Alias of `call_id` (Bland legacy).
+             */
+            c_id: string;
+            /** @description Who ended the call; `null` while active. */
+            call_ended_by: components["schemas"]["BlandCallEndedBy"] | null;
+            /**
+             * Call Id
+             * Format: uuid
+             * @description Call id.
+             */
+            call_id: string;
+            /**
+             * Call Length
+             * @description Connected minutes (6 decimals).
+             */
+            call_length: number;
+            /**
+             * Completed
+             * @description Whether post-call processing finished.
+             */
+            completed: boolean;
+            /**
+             * Corrected Duration
+             * @description Connected seconds as an integer string (Bland compat).
+             */
+            corrected_duration: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the call was created (UTC).
+             */
+            created_at: string;
+            /**
+             * Direction
+             * @description Call direction (ours).
+             * @enum {string}
+             */
+            direction: "outbound" | "inbound" | "web";
+            /**
+             * Disposition Tag
+             * @description Disposition chosen post-call.
+             */
+            disposition_tag: string | null;
+            /**
+             * End At
+             * @description When the call ended.
+             */
+            end_at: string | null;
+            /**
+             * End Reason
+             * @description Why the call ended (specs/05 §9); `null` while active.
+             */
+            end_reason: string | null;
+            /**
+             * Error Message
+             * @description Error description of a failed call.
+             */
+            error_message: string | null;
+            /**
+             * Experiment Arm
+             * @description Label of the experiment arm (ours).
+             */
+            experiment_arm: string | null;
+            /**
+             * Experiment Id
+             * @description Experiment that picked the agent version (ours).
+             */
+            experiment_id: string | null;
+            /**
+             * External Id
+             * @description Caller-supplied external id.
+             */
+            external_id: string | null;
+            /**
+             * From
+             * @description Caller id (E.164; empty for web calls).
+             */
+            from: string;
+            /**
+             * Guard Rails
+             * @description Guard rail evaluations.
+             */
+            guard_rails: components["schemas"]["GuardRailEntry"][];
+            /**
+             * Inbound
+             * @description Whether the call was inbound.
+             */
+            inbound: boolean;
+            /** @description Turn latency summary (ours). */
+            latency: components["schemas"]["CallLatency"];
+            /**
+             * Local Dialing
+             * @description Whether local dialing picked the caller id.
+             */
+            local_dialing: boolean;
+            /**
+             * Max Duration
+             * @description Maximum call length in minutes.
+             */
+            max_duration: number;
+            /**
+             * Metadata
+             * @description Caller metadata.
+             */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /**
+             * Org Id
+             * Format: uuid
+             * @description Owning organization (ours).
+             */
+            org_id: string;
+            /**
+             * Pathway Id
+             * @description Pathway run by the call.
+             */
+            pathway_id: string | null;
+            /**
+             * Pathway Version
+             * @description Pathway version run by the call.
+             */
+            pathway_version: number | null;
+            /**
+             * Persona Id
+             * @description Persona run by the call.
+             */
+            persona_id: string | null;
+            /**
+             * Persona Version
+             * @description Persona version run by the call.
+             */
+            persona_version: string | null;
+            /**
+             * Price
+             * @description Price in dollars (6 decimals).
+             */
+            price: number;
+            /**
+             * Queue Status
+             * @description Queue state: `complete`, `started`, `allocated`, `queued`, `call_error`, `new`.
+             */
+            queue_status: string;
+            /**
+             * Record
+             * @description Whether the call is recorded.
+             */
+            record: boolean;
+            /**
+             * Recording Expiration
+             * @description When `recording_url` stops working.
+             */
+            recording_expiration: string | null;
+            /**
+             * Recording Url
+             * @description Presigned recording URL, valid 7 days, fresh on each read.
+             */
+            recording_url: string | null;
+            /**
+             * Request Data
+             * @description Request data given to the agent.
+             */
+            request_data: {
+                [key: string]: unknown;
+            };
+            /**
+             * Started At
+             * @description When the call was answered.
+             */
+            started_at: string | null;
+            /** @description Call status (Bland hyphenated form). */
+            status: components["schemas"]["BlandCallStatus"];
+            /**
+             * Summary
+             * @description Post-call summary.
+             */
+            summary: string | null;
+            /**
+             * Test Call
+             * @description Dashboard test call (ours).
+             */
+            test_call: boolean;
+            /**
+             * To
+             * @description Callee number (E.164; empty for web calls).
+             */
+            to: string;
+            /**
+             * Transfer Duration
+             * @description Minutes spent transferred.
+             */
+            transfer_duration: number;
+            /**
+             * Transferred To
+             * @description Transfer destination.
+             */
+            transferred_to: string | null;
+            /** @description Voicemail handling; `null` when none detected. */
+            voicemail: components["schemas"]["VoicemailSummary"] | null;
+            /**
+             * Warm Transfer Calls
+             * @description Warm transfer legs.
+             */
+            warm_transfer_calls: components["schemas"]["WarmTransferCall"][];
+        };
+        /**
+         * CallListResponse
+         * @description One page of calls; `total_count` (all matching calls) only on the first page (no `cursor`).
+         * @example {
+         *       "calls": [
+         *         {
+         *           "analysis_schema": {
+         *             "demo_booked": "boolean"
+         *           },
+         *           "answered_by": "human",
+         *           "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *           "call_ended_by": "ASSISTANT",
+         *           "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *           "call_length": 2.35,
+         *           "completed": true,
+         *           "corrected_duration": "141",
+         *           "created_at": "2026-10-24T18:20:01.000000Z",
+         *           "direction": "outbound",
+         *           "disposition_tag": "INTERESTED",
+         *           "end_at": "2026-10-24T18:22:30.000000Z",
+         *           "end_reason": "agent_end_call",
+         *           "from": "+14155550999",
+         *           "guard_rails": [],
+         *           "inbound": false,
+         *           "latency": {
+         *             "avg_llm_ttft_ms": 310,
+         *             "avg_tts_ttfa_ms": 160,
+         *             "p50_e2e_ms": 742,
+         *             "p95_e2e_ms": 1180,
+         *             "turns": 6
+         *           },
+         *           "local_dialing": false,
+         *           "max_duration": 30,
+         *           "metadata": {
+         *             "crm_id": "42"
+         *           },
+         *           "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+         *           "price": 0.282,
+         *           "queue_status": "complete",
+         *           "record": true,
+         *           "recording_expiration": "2026-10-31T18:25:00.000000Z",
+         *           "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+         *           "request_data": {
+         *             "first_name": "Mike"
+         *           },
+         *           "started_at": "2026-10-24T18:20:09.000000Z",
+         *           "status": "completed",
+         *           "summary": "The caller booked a demo for Tuesday.",
+         *           "test_call": false,
+         *           "to": "+14155550123",
+         *           "transfer_duration": 0,
+         *           "warm_transfer_calls": []
+         *         }
+         *       ],
+         *       "count": 1,
+         *       "next_cursor": "MjAyNi0xMC0yNFQxODoyMDowMS4wMDAwMDArMDA6MDB8MDE5M2M1ZDItN2IxZS03YTEw",
+         *       "status": "success",
+         *       "total_count": 1532
+         *     }
+         */
+        CallListResponse: {
+            /** Calls */
+            calls: components["schemas"]["CallListItem"][];
+            /** Count */
+            count: number;
+            /** Next Cursor */
+            next_cursor: string | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Total Count */
+            total_count?: number | null;
+        };
+        /**
+         * CallObject
+         * @description The full Call Object (specs/19 §4): the list item plus transcripts, logs, variables, and results.
+         * @example {
+         *       "analysis": {
+         *         "demo_booked": true
+         *       },
+         *       "analysis_schema": {
+         *         "demo_booked": "boolean"
+         *       },
+         *       "answered_by": "human",
+         *       "c_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "call_ended_by": "ASSISTANT",
+         *       "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *       "call_length": 2.35,
+         *       "citations": [],
+         *       "completed": true,
+         *       "concatenated_transcript": "assistant: Hi Mike, this is Ava from Acme.\n user: Hi, yes.\n",
+         *       "corrected_duration": "141",
+         *       "created_at": "2026-10-24T18:20:01.000000Z",
+         *       "direction": "outbound",
+         *       "disposition_tag": "INTERESTED",
+         *       "end_at": "2026-10-24T18:22:30.000000Z",
+         *       "end_reason": "agent_end_call",
+         *       "from": "+14155550999",
+         *       "guard_rails": [],
+         *       "inbound": false,
+         *       "latency": {
+         *         "avg_llm_ttft_ms": 310,
+         *         "avg_tts_ttfa_ms": 160,
+         *         "p50_e2e_ms": 742,
+         *         "p95_e2e_ms": 1180,
+         *         "turns": 6
+         *       },
+         *       "local_dialing": false,
+         *       "max_duration": 30,
+         *       "metadata": {
+         *         "crm_id": "42"
+         *       },
+         *       "org_id": "0193c5d0-11aa-7b20-8c31-5e2f7a9b0c11",
+         *       "pathway_logs": [],
+         *       "price": 0.282,
+         *       "queue_status": "complete",
+         *       "record": true,
+         *       "recording_expiration": "2026-10-31T18:25:00.000000Z",
+         *       "recording_url": "https://va-recordings.s3.amazonaws.com/0193c5d0/2026/10/0193c5d2.wav?X-Amz-Signature=…",
+         *       "request_data": {
+         *         "first_name": "Mike"
+         *       },
+         *       "started_at": "2026-10-24T18:20:09.000000Z",
+         *       "status": "completed",
+         *       "summary": "The caller booked a demo for Tuesday.",
+         *       "test_call": false,
+         *       "to": "+14155550123",
+         *       "transcripts": [
+         *         {
+         *           "created_at": "2026-10-24T18:22:31.412000Z",
+         *           "end_ms": 2310,
+         *           "id": 1,
+         *           "interrupted": false,
+         *           "start_ms": 420,
+         *           "text": "Hi Mike, this is Ava from Acme.",
+         *           "user": "assistant"
+         *         },
+         *         {
+         *           "created_at": "2026-10-24T18:22:31.412000Z",
+         *           "end_ms": 3550,
+         *           "id": 2,
+         *           "interrupted": false,
+         *           "start_ms": 2900,
+         *           "text": "Hi, yes.",
+         *           "user": "user"
+         *         }
+         *       ],
+         *       "transfer_duration": 0,
+         *       "variables": {
+         *         "call_id": "0193c5d2-7b1e-7a10-9a52-1f3b0d4e6a77",
+         *         "first_name": "Mike",
+         *         "now_utc": "2026-10-24T18:20:09Z"
+         *       },
+         *       "warm_transfer_calls": []
+         *     }
+         */
+        CallObject: {
+            /**
+             * Agent Id
+             * @description Agent run by the call.
+             */
+            agent_id: string | null;
+            /**
+             * Agent Version
+             * @description Agent version (semver) run by the call.
+             */
+            agent_version: string | null;
+            /**
+             * Analysis
+             * @description Results of `analysis_schema` / the analyze endpoint.
+             */
+            analysis: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Analysis Schema
+             * @description Requested analysis schema.
+             */
+            analysis_schema: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Who answered (AMD / classifier result). */
+            answered_by: components["schemas"]["BlandAnsweredBy"] | null;
+            /**
+             * Batch Id
+             * @description Batch the call belongs to.
+             */
+            batch_id: string | null;
+            /**
+             * C Id
+             * Format: uuid
+             * @description Alias of `call_id` (Bland legacy).
+             */
+            c_id: string;
+            /** @description Who ended the call; `null` while active. */
+            call_ended_by: components["schemas"]["BlandCallEndedBy"] | null;
+            /**
+             * Call Id
+             * Format: uuid
+             * @description Call id.
+             */
+            call_id: string;
+            /**
+             * Call Length
+             * @description Connected minutes (6 decimals).
+             */
+            call_length: number;
+            /**
+             * Citations
+             * @description Extracted citation variables.
+             */
+            citations: components["schemas"]["CallCitation"][];
+            /**
+             * Completed
+             * @description Whether post-call processing finished.
+             */
+            completed: boolean;
+            /**
+             * Concatenated Transcript
+             * @description Whole transcript as `"user: …\n assistant: …\n"`.
+             */
+            concatenated_transcript: string;
+            /**
+             * Corrected Duration
+             * @description Connected seconds as an integer string (Bland compat).
+             */
+            corrected_duration: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the call was created (UTC).
+             */
+            created_at: string;
+            /**
+             * Direction
+             * @description Call direction (ours).
+             * @enum {string}
+             */
+            direction: "outbound" | "inbound" | "web";
+            /**
+             * Disposition Tag
+             * @description Disposition chosen post-call.
+             */
+            disposition_tag: string | null;
+            /**
+             * End At
+             * @description When the call ended.
+             */
+            end_at: string | null;
+            /**
+             * End Reason
+             * @description Why the call ended (specs/05 §9); `null` while active.
+             */
+            end_reason: string | null;
+            /**
+             * Error Message
+             * @description Error description of a failed call.
+             */
+            error_message: string | null;
+            /** @description Latest eval run when computed. */
+            evals: components["schemas"]["EvalSummary"] | null;
+            /**
+             * Experiment Arm
+             * @description Label of the experiment arm (ours).
+             */
+            experiment_arm: string | null;
+            /**
+             * Experiment Id
+             * @description Experiment that picked the agent version (ours).
+             */
+            experiment_id: string | null;
+            /**
+             * External Id
+             * @description Caller-supplied external id.
+             */
+            external_id: string | null;
+            /**
+             * From
+             * @description Caller id (E.164; empty for web calls).
+             */
+            from: string;
+            /**
+             * Guard Rails
+             * @description Guard rail evaluations.
+             */
+            guard_rails: components["schemas"]["GuardRailEntry"][];
+            /**
+             * Inbound
+             * @description Whether the call was inbound.
+             */
+            inbound: boolean;
+            /** @description Turn latency summary (ours). */
+            latency: components["schemas"]["CallLatency"];
+            /**
+             * Local Dialing
+             * @description Whether local dialing picked the caller id.
+             */
+            local_dialing: boolean;
+            /**
+             * Max Duration
+             * @description Maximum call length in minutes.
+             */
+            max_duration: number;
+            /**
+             * Metadata
+             * @description Caller metadata.
+             */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /**
+             * Org Id
+             * Format: uuid
+             * @description Owning organization (ours).
+             */
+            org_id: string;
+            /**
+             * Pathway Id
+             * @description Pathway run by the call.
+             */
+            pathway_id: string | null;
+            /**
+             * Pathway Logs
+             * @description One entry per assistant turn of a pathway call.
+             */
+            pathway_logs: components["schemas"]["PathwayLog"][];
+            /**
+             * Pathway Version
+             * @description Pathway version run by the call.
+             */
+            pathway_version: number | null;
+            /**
+             * Persona Id
+             * @description Persona run by the call.
+             */
+            persona_id: string | null;
+            /**
+             * Persona Version
+             * @description Persona version run by the call.
+             */
+            persona_version: string | null;
+            /**
+             * Price
+             * @description Price in dollars (6 decimals).
+             */
+            price: number;
+            /**
+             * Queue Status
+             * @description Queue state: `complete`, `started`, `allocated`, `queued`, `call_error`, `new`.
+             */
+            queue_status: string;
+            /**
+             * Record
+             * @description Whether the call is recorded.
+             */
+            record: boolean;
+            /**
+             * Recording Expiration
+             * @description When `recording_url` stops working.
+             */
+            recording_expiration: string | null;
+            /**
+             * Recording Url
+             * @description Presigned recording URL, valid 7 days, fresh on each read.
+             */
+            recording_url: string | null;
+            /**
+             * Request Data
+             * @description Request data given to the agent.
+             */
+            request_data: {
+                [key: string]: unknown;
+            };
+            /**
+             * Started At
+             * @description When the call was answered.
+             */
+            started_at: string | null;
+            /** @description Call status (Bland hyphenated form). */
+            status: components["schemas"]["BlandCallStatus"];
+            /**
+             * Summary
+             * @description Post-call summary.
+             */
+            summary: string | null;
+            /**
+             * Test Call
+             * @description Dashboard test call (ours).
+             */
+            test_call: boolean;
+            /**
+             * To
+             * @description Callee number (E.164; empty for web calls).
+             */
+            to: string;
+            /**
+             * Transcripts
+             * @description Transcript turns in order.
+             */
+            transcripts: components["schemas"]["Transcript"][];
+            /**
+             * Transfer Duration
+             * @description Minutes spent transferred.
+             */
+            transfer_duration: number;
+            /**
+             * Transferred To
+             * @description Transfer destination.
+             */
+            transferred_to: string | null;
+            /**
+             * Variables
+             * @description Final variable bag including built-ins.
+             */
+            variables: {
+                [key: string]: unknown;
+            };
+            /** @description Voicemail handling; `null` when none detected. */
+            voicemail: components["schemas"]["VoicemailSummary"] | null;
+            /**
+             * Warm Transfer Calls
+             * @description Warm transfer legs.
+             */
+            warm_transfer_calls: components["schemas"]["WarmTransferCall"][];
+        };
         /**
          * CallingWindow
          * @description One daily window, local to the callee. Overnight windows are split into two windows.
@@ -1568,6 +2376,30 @@ export interface components {
              */
             status: "error";
         };
+        /** EvalSummary */
+        EvalSummary: {
+            /**
+             * Eval Run Id
+             * Format: uuid
+             * @description Latest eval run of the call.
+             */
+            eval_run_id: string;
+            /**
+             * Overall Score
+             * @description Overall score (0-100) once graded.
+             */
+            overall_score: number | null;
+            /**
+             * Passed
+             * @description Whether the call passed the eval setup.
+             */
+            passed: boolean | null;
+            /**
+             * Results
+             * @description Per-criterion results.
+             */
+            results: unknown[];
+        };
         /**
          * ExperimentsSettings
          * @description Experiment arm assignment.
@@ -1622,6 +2454,29 @@ export interface components {
             type: "tcpa:ai_disclosure" | "tcpa:self_introduction" | "tcpa:recording_disclosure" | "tcpa:opt_out" | "custom";
         } & {
             [key: string]: unknown;
+        };
+        /** GuardRailEntry */
+        GuardRailEntry: {
+            /**
+             * Action
+             * @description Action taken when it fired.
+             */
+            action: string | null;
+            /**
+             * Guard Rail
+             * @description Guard rail name, e.g. `tcpa:opt_out` or `custom:<name>`.
+             */
+            guard_rail: string;
+            /**
+             * Triggered
+             * @description Whether the guard rail fired.
+             */
+            triggered: boolean;
+            /**
+             * Turn Index
+             * @description Turn that was evaluated.
+             */
+            turn_index: number | null;
         };
         /**
          * HealthStatus
@@ -2595,6 +3450,71 @@ export interface components {
              */
             next_cursor: string | null;
         };
+        /**
+         * PathwayLog
+         * @description One assistant turn of a pathway call (specs/11 §12); every key present, `null` when not applicable.
+         */
+        PathwayLog: {
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the turn was recorded (UTC).
+             */
+            created_at: string;
+            /**
+             * Decision
+             * @description Route decision, extracted variables, and tool calls of the turn (`call.route` data).
+             */
+            decision: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Node Id
+             * @description Node that spoke the turn.
+             */
+            node_id: string;
+            /**
+             * Pathway Id
+             * @description Pathway of the call.
+             */
+            pathway_id: string | null;
+            /**
+             * Pathway Version
+             * @description Pathway version of the call.
+             */
+            pathway_version: number | null;
+            /**
+             * Role
+             * @description Always `assistant`.
+             * @constant
+             */
+            role: "assistant";
+            /** @description Node name and route tag colour. */
+            tag: components["schemas"]["PathwayTag"];
+            /**
+             * Text
+             * @description What the agent said.
+             */
+            text: string;
+            /**
+             * User Text
+             * @description The caller turn the agent answered.
+             */
+            user_text: string | null;
+        };
+        /** PathwayTag */
+        PathwayTag: {
+            /**
+             * Color
+             * @description Tag colour of the route taken into the node (`#RRGGBB`).
+             */
+            color: string | null;
+            /**
+             * Name
+             * @description Name of the node that produced the turn.
+             */
+            name: string | null;
+        };
         /** @enum {string} */
         PollStatus: "pending_verification" | "approved" | "delivered" | "denied" | "expired";
         /** PostCallEvals */
@@ -3378,6 +4298,44 @@ export interface components {
              */
             allow_send_sms: boolean;
         };
+        /** Transcript */
+        Transcript: {
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the turn was recorded (UTC).
+             */
+            created_at: string;
+            /**
+             * End Ms
+             * @description End, in milliseconds after the call was answered.
+             */
+            end_ms: number;
+            /**
+             * Id
+             * @description 1-based position of the turn in the call.
+             */
+            id: number;
+            /**
+             * Interrupted
+             * @description Whether the caller interrupted the agent during this turn.
+             */
+            interrupted: boolean;
+            /**
+             * Start Ms
+             * @description Start, in milliseconds after the call was answered.
+             */
+            start_ms: number;
+            /**
+             * Text
+             * @description Transcribed or spoken text.
+             */
+            text: string;
+            /** @description Speaker of the turn. */
+            user: components["schemas"]["TranscriptRole"];
+        };
+        /** @enum {string} */
+        TranscriptRole: "user" | "assistant" | "agent-action" | "human_agent";
         /**
          * TransferOwnershipRequest
          * @description ``POST /v1/org/transfer-ownership``: the member who becomes an owner.
@@ -3470,6 +4428,24 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** VoicemailSummary */
+        VoicemailSummary: {
+            /**
+             * Action Taken
+             * @description Voicemail action applied: `hangup`, `leave_message`, `leave_message_and_sms`, `ignore`.
+             */
+            action_taken: string | null;
+            /**
+             * Detected
+             * @description A voicemail greeting was detected.
+             */
+            detected: boolean;
+            /**
+             * Message Left
+             * @description Whether the voicemail message was played.
+             */
+            message_left: boolean;
+        };
         /**
          * VoicesSettings
          * @description Voice resolution rules.
@@ -3481,6 +4457,40 @@ export interface components {
              * @default false
              */
             allow_raw_provider_ids: boolean;
+        };
+        /** WarmTransferCall */
+        WarmTransferCall: {
+            /**
+             * Answered At
+             * @description When the leg was answered.
+             */
+            answered_at: string | null;
+            /**
+             * Ended At
+             * @description When the leg hung up.
+             */
+            ended_at: string | null;
+            /**
+             * Hangup Cause
+             * @description Carrier hangup cause.
+             */
+            hangup_cause: string | null;
+            /**
+             * Role
+             * @description Leg role (`warm_proxy`).
+             */
+            role: string;
+            /**
+             * Started At
+             * Format: date-time
+             * @description When the leg was created.
+             */
+            started_at: string;
+            /**
+             * State
+             * @description Last carrier state of the leg.
+             */
+            state: string;
         };
         /** WarmTransferConfig */
         WarmTransferConfig: {
@@ -3852,6 +4862,93 @@ export interface operations {
             };
         };
     };
+    calls_list: {
+        parameters: {
+            query?: {
+                /** @description Exact callee number (E.164). */
+                to_number?: string | null;
+                /** @description Alias of `to_number`. */
+                to?: string | null;
+                /** @description Exact caller id (E.164). */
+                from_number?: string | null;
+                /** @description Alias of `from_number`. */
+                from?: string | null;
+                /** @description Page size. */
+                limit?: number;
+                /** @description Oldest first instead of newest first. */
+                ascending?: boolean;
+                /** @description First creation day, in the org timezone. */
+                start_date?: string | null;
+                /** @description Last creation day (inclusive), org timezone. */
+                end_date?: string | null;
+                /** @description Created at or after (naive = UTC). */
+                created_at_gte?: string | null;
+                /** @description Created at or before (naive = UTC). */
+                created_at_lte?: string | null;
+                /** @description Batch of the call. */
+                batch_id?: string | null;
+                /** @description Alias of `batch_id`. */
+                campaign_id?: string | null;
+                /** @description Pathway run by the call. */
+                pathway_id?: string | null;
+                /** @description Persona run by the call. */
+                persona_id?: string | null;
+                /** @description Agent run by the call. */
+                agent_id?: string | null;
+                /** @description Post-call processing finished (or not). */
+                completed?: boolean | null;
+                /** @description Who answered. */
+                answered_by?: ("human" | "voicemail" | "ivr" | "unknown" | "no-answer" | "fax") | null;
+                /** @description Inbound calls only (`true`) or all others. */
+                inbound?: boolean | null;
+                /** @description Comma-separated call statuses, Bland (`no-answer`) or internal names. */
+                status?: string | null;
+                /** @description Disposition tag. */
+                disposition_tag?: string | null;
+                /** @description Connected length above, in minutes. */
+                duration_gt?: number | null;
+                /** @description Connected length below, in minutes. */
+                duration_lt?: number | null;
+                /** @description External id. */
+                external_id?: string | null;
+                /** @description Cursor of the next page (`total_count` omitted). */
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallListResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
     calls_send: {
         parameters: {
             query?: never;
@@ -3917,6 +5014,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopActiveCallsResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallObject"];
                 };
             };
             /** @description Invalid input */

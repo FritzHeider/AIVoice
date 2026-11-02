@@ -578,6 +578,20 @@ Response `200`:
 List items are the Call Object minus `transcripts`, `concatenated_transcript`, `pathway_logs`, `variables`,
 `citations`, `evals`, `analysis` (use detail endpoint).
 
+> Decision (2026-11-02): list filter semantics (P05-T16a). `to`/`from`/`campaign_id` are aliases of
+> `to_number`/`from_number`/`batch_id`; both given with different values is `INVALID_INPUT` on the alias field.
+> `status` accepts Bland names (`no-answer`, `in-progress`; `completed` covers `transferred`, `in-progress` covers
+> `dialing`/`ringing`/`in_progress`/`transferring`) and the internal statuses, comma-separated; an unknown name is
+> `INVALID_INPUT` (field `status`). `inbound=false` lists every non-inbound call (outbound and web).
+> `completed=false` includes calls without a `queue_status`. `answered_by=no-answer` matches `no_answer`.
+> `duration_gt`/`duration_lt` compare `connected_seconds` with minutes × 60 (strict). `start_date`/`end_date` are
+> local days in the org's `timezone` setting (default `America/Los_Angeles`): `created_at >= start 00:00` and
+> `< (end + 1 day) 00:00`. A naive `created_at_gte`/`created_at_lte` is UTC. Order is `(created_at, id)`
+> descending, ascending with `ascending=true`; `cursor` is the specs/31 §2 keyset cursor applied in the chosen
+> direction, `next_cursor` is `null` on the last page, and `total_count` (the count of all matching calls) is
+> present only on requests without a cursor. `limit` outside 1–1 000 is `INVALID_INPUT` (field `limit`); unknown
+> query parameters are ignored.
+
 ## 7. Other endpoints
 
 ### 7.1 `GET /v1/calls/{call_id}`

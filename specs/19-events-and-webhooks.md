@@ -205,6 +205,34 @@ Exact field set (Bland-compatible names; additional fields are ours and document
 | `warm_transfer_calls` | array | child legs summary |
 | `guard_rails` | array | `[{guard_rail, triggered, action, turn_index}]` from `guard_rail_events` |
 
+> Decision (2026-11-02): Call Object serialization (P05-T16a). The contract models are
+> `va_domain.call_object` (`CallObject`, and `CallListItem` = the Call Object minus the specs/05 §6 heavy fields;
+> `CallObject` extends it) and the rows are read by `va_db.call_object` (`load_call_objects` /
+> `load_call_list_items`, in the caller's `tenant_session`, one query per child table for any number of calls), so
+> the `call.completed` webhook (P05-T18) reuses them. Field rules: `call_ended_by` and `end_reason` are `null` until
+> the call ended; `to`/`from` are `""` when the call has no number (web calls); `status` maps `no_answer` →
+> `no-answer`, `dialing`/`ringing`/`in_progress`/`transferring` → `in-progress`, `transferred` → `completed`;
+> `answered_by` maps `no_answer` → `no-answer`; `started_at` is `answered_at` (falls back to `calls.started_at`);
+> `completed` is `queue_status = 'complete'` and a missing `queue_status` reads `new`; `max_duration`, `record`,
+> `analysis_schema` and `local_dialing` (`dialing_strategy.type = 'local'`) come from `calls.config` (defaults 30,
+> false, null, false); `persona_version` is the version number as a string, `agent_version` the agent version's
+> semver, `experiment_arm` the arm label. `transcripts` lists every `call_turns` row except role `system`, ordered
+> by `(turn_index, start_ms, id)`, with `id` = 1-based position; `concatenated_transcript` is `"{role}: {text}\n"`
+> per transcript entry joined by one space. `pathway_logs` (specs/11 §12 keys) has one entry per assistant turn with
+> a `node_id` (empty for task calls): `tag.name` = `node_name`, `user_text` = the preceding user turn, and `decision`
+> / `tag.color` come from the `call.route` event (category `route`) whose data carries `turn_index` equal to the
+> turn's (`decision` = that data without `turn_index`/`tag_color`); the pathway engine (P07) must put `turn_index`
+> and `tag_color` into `call.route` data. `latency` = nearest-rank p50/p95 of the turns' `latency.e2e_ms`, rounded
+> means of `llm_ttft_ms`/`tts_ttfa_ms`, `turns` = turns with an `e2e_ms` (all `null`/0 without). `voicemail` is
+> `null` unless a `call.voicemail` event exists, `answered_by = 'voicemail'`, or `end_reason` is
+> `voicemail_hangup`/`voicemail_left`; then `{detected: true, action_taken: <latest event's data.action, else
+> hangup / leave_message from end_reason, else null>, message_left: end_reason = 'voicemail_left'}`.
+> `warm_transfer_calls` = `[{role, state, started_at, answered_at, ended_at, hangup_cause}]` of the `warm_proxy`
+> legs; `analysis` = the latest `analysis_schema` analysis result; `evals` = the latest eval run; `citations` =
+> `[{citation_schema_id, variable_name, variable_type, value, conditions_met, cited_utterances}]`.
+> `recording_url` is presigned per read (7 days) only for calls with `recording_s3_key`; a presign failure is
+> logged (`calls.recording_url_failed`, no key or URL) and both recording fields are `null`.
+
 ## 5. Live event webhook body (`bland-live` format)
 
 ```json

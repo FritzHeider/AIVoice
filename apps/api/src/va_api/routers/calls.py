@@ -7,6 +7,9 @@ Telnyx account is selected with the ``encrypted_key`` header. Everything else is
 :func:`va_api.services.call_dispatch.dispatch_call`.
 Call creation is recorded in ``calls`` and ``call_events``, not in the audit log.
 
+``GET /v1/calls`` (page of Call Object list items, every specs/05 §6 filter) and ``GET /v1/calls/{call_id}``
+(the bare Call Object, specs/05 §7.1) need ``calls:read``; the work is :mod:`va_api.services.call_read`.
+
 ``POST /v1/calls/{call_id}/stop`` and ``POST /v1/calls/active/stop`` need ``calls:write`` and the
 ``calls.operate`` permission (stop-all from a dashboard session also role ``owner``/``admin``); the work is
 :mod:`va_api.services.call_stop`. The literal ``/active/stop`` is registered before ``/{call_id}/stop``.
@@ -16,13 +19,14 @@ from __future__ import annotations
 
 from typing import Annotated, Final
 
-from fastapi import Depends, Header, Request
+from fastapi import Depends, Header, Query, Request
 
 from va_api.audit import audit_exempt, audited
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import rate_limit, require_scope
 from va_api.auth.permissions import require_permission
 from va_api.envelopes import legacy_router
+from va_api.routers.calls_read_schemas import CallListQuery, CallListResponse
 from va_api.routers.calls_schemas import (
     SendCallResponse,
     StopActiveCallsRequest,
@@ -30,6 +34,7 @@ from va_api.routers.calls_schemas import (
     StopCallResponse,
 )
 from va_api.services.call_dispatch import deps_of, dispatch_call
+from va_api.services.call_read import get_call, list_calls, read_deps_of
 from va_api.services.call_stop import (
     check_stop_all_role,
     parse_call_id,
@@ -38,15 +43,17 @@ from va_api.services.call_stop import (
     stop_deps_of,
 )
 from va_common.logging import get_logger
+from va_domain.call_object import CallObject
 from va_domain.calls import SendCallRequest, unknown_fields
 
-__all__ = ["calls_router", "calls_send", "calls_stop", "calls_stop_active"]
+__all__ = ["calls_get", "calls_list", "calls_router", "calls_send", "calls_stop", "calls_stop_active"]
 
 _log = get_logger(__name__)
 
 calls_router = legacy_router(prefix="/v1/calls", tags=["Calls"])
 
 WriteCalls = Annotated[RequestContext, Depends(require_scope("calls:write"))]
+ReadCalls = Annotated[RequestContext, Depends(require_scope("calls:read"))]
 _DEPENDENCIES: Final = [Depends(rate_limit("calls_send"))]
 _OPERATE: Final = [Depends(require_permission("calls.operate"))]
 _STOP_EXTRA: Final = {"x-scope": "calls:write", "x-permission": "calls.operate", **audited("call.stop")}
@@ -106,3 +113,20 @@ async def calls_stop(call_id: str, request: Request, ctx: WriteCalls) -> StopCal
     """Cancel a call that is not answered yet, or hang up a call in progress."""
     outcome = await stop_call(stop_deps_of(request), ctx, parse_call_id(call_id))
     return StopCallResponse(message=outcome.message)
+
+
+@calls_router.get("", operation_id="calls_list", openapi_extra={"x-scope": "calls:read"})
+async def calls_list(
+    request: Request, ctx: ReadCalls, query: Annotated[CallListQuery, Query()]
+) -> CallListResponse:
+    """List the org's calls, newest first, with Bland's filters and cursor paging."""
+    page = await list_calls(read_deps_of(request), ctx, query)
+    return CallListResponse(
+        total_count=page.total_count, count=len(page.calls), next_cursor=page.next_cursor, calls=page.calls
+    )
+
+
+@calls_router.get("/{call_id}", operation_id="calls_get", openapi_extra={"x-scope": "calls:read"})
+async def calls_get(call_id: str, request: Request, ctx: ReadCalls) -> CallObject:
+    """The Call Object of one call, with a fresh 7-day recording URL."""
+    return await get_call(read_deps_of(request), ctx, parse_call_id(call_id))
