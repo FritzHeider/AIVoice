@@ -18,8 +18,11 @@ from va_workflows.activities.errors import CALL_NOT_FOUND
 
 __all__ = ["RETRY_CALL_RETRY", "RETRY_CALL_TIMEOUT", "RetryPlan", "RetrySkip"]
 
-type RetrySkip = Literal["no_retry", "not_ended", "end_reason", "attempts_exhausted", "already_scheduled"]
-"""Why no new child was created: ``no_retry`` (the call has no ``retry``), ``not_ended`` (the call is not
+type RetrySkip = Literal[
+    "not_outbound", "no_retry", "not_ended", "end_reason", "attempts_exhausted", "already_scheduled"
+]
+"""Why no new child was created: ``not_outbound`` (only outbound calls are retried; an inbound call never is),
+``no_retry`` (the call has no ``retry``), ``not_ended`` (the call is not
 terminal), ``end_reason`` (it did not end on voicemail, or on no-answer/busy with ``on_no_answer``),
 ``attempts_exhausted`` (``max_attempts`` retry calls exist in the chain), ``already_scheduled`` (an earlier
 attempt created the child; its id and start time are returned so the workflow starts it idempotently)."""

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793624547-e9aa
+> P05-T12c: va_edge.accept.InboundAccept (persist->context 1.5s->start->answer within 3s; cleanup failed/error + terminate then router refuses accept_failed); carrier_handlers default acceptor needs STREAM_TOKEN_SECRET, NO_ACCEPTOR seam; EventProcessor budgets per type; shared va_common.waits, va_telnyx.streams, va_common.checks.start_workflow/terminate_workflow, va_db.call_rows.call_row(NewCall), ContactRepo.upsert_phone; tests accept_helpers.accept_rig (GatedClock, answer_failing_factory; AcceptRig.org adds default voice); sim clock dates are outside call_events partitions; processor tests offering 2 events may land on one shard -> run sequentially
+<!-- tags: edge, telnyx, testing | created: 2026-11-02 -->
+
 ### mem-1793620529-d99b
 > P05-T12b: va_edge.routing InboundRouter + pure decide; handlers that settle with a reason raise va_edge.processor.EventSettled (mark_processed settled_attempts=max); edge container needs telnyx factory + limiter + LOCAL_MASTER_KEY; routing_helpers.routing_rig assigns random DB numbers to FakeTelnyx accounts directly (sim inventory is fixed); accelerated sim clock runs bridged calls to time limit while edge awaits Postgres -> assert event history
 <!-- tags: edge, telnyx, testing | created: 2026-11-02 -->

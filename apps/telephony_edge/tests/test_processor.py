@@ -130,6 +130,41 @@ async def test_handler_over_budget_is_cancelled(database: Database) -> None:
     assert row.processed_at == clock.now()
 
 
+async def test_a_per_type_budget_overrides_the_default(database: Database) -> None:
+    finished = asyncio.Event()
+
+    async def slow(_event: StoredEvent, _payload: EventPayload) -> None:
+        await clock.sleep(3.0)
+        finished.set()
+
+    async def hanging(_event: StoredEvent, _payload: EventPayload) -> None:
+        await asyncio.Event().wait()
+
+    clock = ManualClock()
+    initiated = await stored_event(database, envelope("call.initiated"))
+    answered = await stored_event(database)
+    processor = make_processor(
+        database,
+        {"call.initiated": slow, "call.answered": hanging},
+        clock=clock,
+        budgets={"call.initiated": 5.0},
+    )
+    async with running(processor):
+        processor.offer(initiated)
+        await clock.wait_for_sleep(5.0)
+        await clock.wait_for_sleep(3.0)
+        await clock.run_for(3.0)
+        await processor.join()
+        processor.offer(answered)
+        await clock.wait_for_sleep(2.0)
+        await clock.run_for(2.0)
+        await processor.join()
+    assert finished.is_set()
+    assert (await event_row(database, initiated.id)).process_error is None
+    timed_out = (await event_row(database, answered.id)).process_error
+    assert timed_out == "HandlerTimeoutError: the handler did not finish within 2.0 s"
+
+
 async def test_full_shard_refuses_and_duplicates_are_queued_once(database: Database) -> None:
     first, second = await stored_event(database), await stored_event(database)
     processor = make_processor(database, shards=1, queue_size=1)

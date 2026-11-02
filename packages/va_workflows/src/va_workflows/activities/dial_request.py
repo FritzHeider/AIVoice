@@ -10,13 +10,14 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Final, Literal
-from urllib.parse import urlencode
 
 from va_common.stream_tokens import media_ws_scheme as scheme_for_env
 from va_domain.calls import SendCallConfig
 from va_domain.voicemail import amd_mode
 from va_telnyx import AmdConfig, ClientState, CustomHeader, DialRequest, StreamParams
 from va_telnyx.client_state import encode
+from va_telnyx.streams import RECORDING_FIELDS, media_stream_url
+from va_telnyx.streams import stream_params as shared_stream_params
 
 __all__ = [
     "CALL_ID_HEADER",
@@ -91,20 +92,12 @@ def time_limit_secs(max_duration_min: float) -> int:
 
 def stream_url(settings: DialSettings, call_id: uuid.UUID, token: str) -> str:
     """``{scheme}://{MEDIA_PUBLIC_HOST}/ws/telnyx?call_id=…&token=…``."""
-    query = urlencode({"call_id": str(call_id), "token": token})
-    return f"{settings.media_ws_scheme}://{settings.media_public_host}/ws/telnyx?{query}"
+    return media_stream_url(settings.media_ws_scheme, settings.media_public_host, call_id, token)
 
 
 def stream_params(config: SendCallConfig, url: str) -> StreamParams:
     """Bidirectional RTP on the inbound track: PCMU 8 kHz, or L16 16 kHz with ``hd_audio``."""
-    if config.hd_audio:
-        return StreamParams(
-            stream_url=url,
-            stream_codec="L16",
-            stream_bidirectional_codec="L16",
-            stream_bidirectional_sampling_rate=16000,
-        )
-    return StreamParams(stream_url=url)
+    return shared_stream_params(url, hd_audio=config.hd_audio)
 
 
 def build_dial_request(  # noqa: PLR0913 - the call, its config, keyword-only dial facts
@@ -123,12 +116,7 @@ def build_dial_request(  # noqa: PLR0913 - the call, its config, keyword-only di
     mode = amd_mode(config)
     record: dict[str, str] = {}
     if config.record:
-        record = {
-            "record": "record-from-answer",
-            "record_channels": "dual",
-            "record_format": "wav",
-            "record_track": "both",
-        }
+        record = {**RECORDING_FIELDS, "record_track": "both"}
     return DialRequest.model_validate(
         {
             "connection_id": connection_id,

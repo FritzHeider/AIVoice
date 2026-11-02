@@ -43,13 +43,14 @@ from va_common.ids import new_id
 from va_common.logging import get_logger
 from va_common.net import HostResolver
 from va_common.time import Clock
+from va_db.call_rows import NewCall, call_row
 from va_db.models import Call
 from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import CallRepo, CallTransitionError
 from va_db.session import Database
 from va_db.voicemail_sms import sms_sender
 from va_domain.call_resolution import CallResolution, PlatformModels, ResolutionWarning
-from va_domain.call_workflow import CallWorkflowInput, call_workflow_id
+from va_domain.call_workflow import CallWorkflowInput
 from va_domain.calls import SendCallConfig, SendCallRequest
 from va_domain.org import OrgSettings
 from va_events import QUEUED_MESSAGE, SCHEDULED_MESSAGE, DomainEvent, EventPublisher, EventType, new_event
@@ -225,35 +226,16 @@ def _call_row(
     call_id: UUID, org_id: UUID, request: SendCallRequest, config: SendCallConfig, admitted: Admitted
 ) -> Call:
     scheduled = config.start_time is not None
-    return Call(
-        id=call_id,
-        org_id=org_id,
+    new = NewCall(
         direction="outbound",
-        to_number=config.phone_number,
-        from_number=config.from_number,
         status="scheduled" if scheduled else "queued",
         queue_status="new" if scheduled else "queued",
-        runner_type=config.runner_type,
-        pathway_id=config.pathway_id,
-        pathway_version=config.pathway_version,
-        persona_id=config.persona_id,
-        persona_version=config.persona_version,
-        agent_id=config.agent_id,
-        agent_version_id=config.agent_version_id,
-        experiment_id=config.experiment_id,
-        experiment_arm_id=config.experiment_arm_id,
-        voice_id=config.voice_id,
-        phone_number_id=config.phone_number_id,
-        memory_id=config.memory_id,
-        external_id=config.external_id,
-        start_time=config.start_time,
+        to_number=config.phone_number,
+        from_number=config.from_number,
         test_call=request.test_call,
-        request_data=config.request_data,
-        metadata_=config.metadata,
-        config={**config.model_dump(mode="json"), "pricing": admitted.pricing.snapshot()},
         credit_hold_id=None if admitted.hold is None else admitted.hold.id,
-        workflow_id=call_workflow_id(call_id),
     )
+    return call_row(call_id, org_id, config, new, {"pricing": admitted.pricing.snapshot()})
 
 
 def _warnings(warnings: Sequence[ResolutionWarning]) -> list[JsonValue]:

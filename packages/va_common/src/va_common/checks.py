@@ -21,7 +21,9 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.converter import DataConverter
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from va_common.health import CheckFn
@@ -35,6 +37,7 @@ __all__ = [
     "Dependencies",
     "TemporalCheck",
     "TemporalConnector",
+    "WorkflowStartError",
     "clickhouse_check",
     "clickhouse_ping_url",
     "create_engine",
@@ -42,7 +45,9 @@ __all__ = [
     "postgres_check",
     "redis_check",
     "signal_workflow",
+    "start_workflow",
     "temporal_check",
+    "terminate_workflow",
 ]
 
 CHECK_TIMEOUT_S: Final = 1.0
@@ -105,6 +110,58 @@ async def signal_workflow(connector: TemporalConnector, workflow_id: str, signal
             await handle.signal(signal, args[0])
         else:
             await handle.signal(signal, args=list(args))
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return True
+
+
+class WorkflowStartError(Exception):
+    """A workflow could not be started (Temporal unreachable, refused, or too slow); the cause is chained."""
+
+
+async def start_workflow(  # noqa: PLR0913 - the workflow, its argument, keyword-only start options
+    connector: TemporalConnector,
+    name: str,
+    arg: object,
+    *,
+    workflow_id: str,
+    task_queue: str,
+    timeout_s: float,
+    rpc_timeout_s: float,
+) -> bool:
+    """Start workflow ``name`` with ``arg`` (``REJECT_DUPLICATE`` id reuse); ``False`` when a workflow with
+    that id already exists (a retried start counts as started).
+
+    The connect and the start share the ``timeout_s`` deadline; the start RPC has its own ``rpc_timeout_s``.
+    Every other failure raises :class:`WorkflowStartError`; a timed-out start may still have reached Temporal.
+    """
+    try:
+        async with asyncio.timeout(timeout_s):
+            client = await connector.client()
+            await client.start_workflow(
+                name,
+                arg,
+                id=workflow_id,
+                task_queue=task_queue,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                rpc_timeout=timedelta(seconds=rpc_timeout_s),
+            )
+    except WorkflowAlreadyStartedError:
+        return False
+    except (RPCError, TimeoutError, OSError, RuntimeError) as exc:
+        msg = f"workflow {workflow_id} could not be started"
+        raise WorkflowStartError(msg) from exc
+    return True
+
+
+async def terminate_workflow(connector: TemporalConnector, workflow_id: str, reason: str) -> bool:
+    """Terminate the running workflow ``workflow_id``; ``False`` when no such workflow runs. Connection and
+    other RPC failures propagate."""
+    client = await connector.client()
+    try:
+        await client.get_workflow_handle(workflow_id).terminate(reason=reason)
     except RPCError as exc:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise

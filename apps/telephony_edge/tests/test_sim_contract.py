@@ -10,10 +10,11 @@ the platform refuses are rejected or transferred to the fallback number in the s
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from accept_helpers import accept_rig
 from call_rows import load_call, load_leg, seed_call
 from edge_helpers import DbContainer, RecordingSignaller, edge_settings, metric
 from fakeredis import FakeAsyncRedis
@@ -35,12 +36,15 @@ from va_common.metrics import Service, build_metrics
 from va_common.time import FrozenClock, SystemClock
 from va_db.models import TelnyxEvent
 from va_db.session import Database
+from va_edge.accept import RINGING_MESSAGE
 from va_edge.carrier import CarrierEventHandler
-from va_edge.main import create_app
+from va_edge.main import AcceptorChoice, create_app
+from va_edge.processor import StoredEvent
 from va_edge.routing import InboundAcceptor
 from va_events.publisher import EventPublisher
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx.client_state import ClientState, encode
+from va_telnyx.signatures import TIMESTAMP_HEADER
 
 pytestmark = pytest.mark.integration
 
@@ -146,24 +150,44 @@ async def test_simulated_call_drives_the_call_and_leg_state(edge_db_url: str, da
 # ---- inbound routing (specs/06 §7, Decision P05-T12b) -----------------------------------------------------
 
 
+def signed_at(webhook: Received) -> datetime:
+    """When FakeTelnyx signed ``webhook`` (its accelerated clock may have moved far on since)."""
+    return datetime.fromtimestamp(int(webhook.headers[TIMESTAMP_HEADER]), UTC)
+
+
 async def route_through_edge(
-    rig: RoutingRig, edge_db_url: str, initiated: Received, acceptor: InboundAcceptor | None = None
+    rig: RoutingRig,
+    edge_db_url: str,
+    *webhooks: Received,
+    acceptor: InboundAcceptor | AcceptorChoice | None = None,
+    redeliver: str | None = None,
 ) -> None:
-    """Deliver FakeTelnyx's ``call.initiated`` to a running edge app with the production handlers, whose
-    commands go back to the same FakeTelnyx; returns once the event was processed and the sim settled."""
+    """Deliver FakeTelnyx's webhooks (in order) to a running edge app with the production handlers, whose
+    commands go back to the same FakeTelnyx; returns once every event was processed and the sim settled.
+    ``redeliver`` names a stored ``telnyx_event_id`` offered to the processor once more at the end (a
+    reclaim)."""
     container = DbContainer(edge_db_url, redis=rig.redis, telnyx=rig.factory)
     app = create_app(
         edge_settings(rig.state.signing_key.public_key_b64),
         container_factory=container,
         init_observability=False,
-        clock=SimTimeClock(rig.state.clock.now()),
+        clock=SimTimeClock(signed_at(webhooks[0])),
         acceptor=acceptor,
     )
     async with make_client(app) as client:
-        response = await client.post("/telnyx/voice", content=initiated.body, headers=dict(initiated.headers))
-        assert response.status_code == 200, response.text
-        assert response.json()["status"] == "ok"
-        await app.state.processor.join()
+        for webhook in webhooks:
+            response = await client.post("/telnyx/voice", content=webhook.body, headers=dict(webhook.headers))
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] == "ok"
+            await app.state.processor.join()
+        if redeliver is not None:
+            async with container.database.system_session() as session:
+                row = await session.scalar(
+                    select(TelnyxEvent).where(TelnyxEvent.telnyx_event_id == redeliver)
+                )
+            assert row is not None
+            assert app.state.processor.offer(StoredEvent.from_row(row))
+            await app.state.processor.join()
     await settle(rig.state)
 
 
@@ -248,8 +272,39 @@ async def test_accepted_calls_reach_the_acceptor_given_to_the_app(
         org = await rig.org()
         to = await rig.number(org, {"prompt": "Hello"})
         ccid, initiated = await rig.place(to)
-        await route_through_edge(rig, edge_db_url, initiated, acceptor)
+        await route_through_edge(rig, edge_db_url, initiated, acceptor=acceptor)
         [call] = acceptor.calls
         assert (call.payload.call_control_id, call.number.e164, call.caller) == (ccid, to, CALLER)
         assert await stored_error(database, initiated) is None
         assert (await rig.leg(ccid))["ended_at"] is None
+
+
+async def test_an_accepted_call_is_answered_and_its_answer_moves_it_in_progress(
+    edge_db_url: str, database: Database
+) -> None:
+    async with accept_rig(database) as r:
+        rig = r.rig
+        org = await r.org()
+        ccid, initiated = await rig.place(await rig.number(org, {"prompt": "Hello"}))
+        await route_through_edge(rig, edge_db_url, initiated, acceptor=r.accept)
+        [call] = await r.calls(org)
+        assert call.status == "ringing"
+        [answered] = [
+            item
+            for item in rig.transport.of_type("call.answered")
+            if item.envelope["data"]["payload"]["call_control_id"] == ccid
+        ]
+        initiated_id = initiated.envelope["data"]["id"]
+        await route_through_edge(rig, edge_db_url, answered, acceptor=r.accept, redeliver=initiated_id)
+        [call] = await r.calls(org)
+        assert call.status == "in_progress"
+        assert call.answered_at is not None
+        assert [c.action for c in rig.commands(ccid)] == ["answer"]
+        assert len(r.starter.started) == 1
+        # The edge app runs on the simulator's clock, whose dates lie outside the test database's call_events
+        # partitions, so only the accept's own event row (written on the wall clock) is asserted.
+        [ringing] = await r.events(org, call.id)
+        assert (ringing.seq, ringing.message) == (1, RINGING_MESSAGE)
+        [answer] = rig.commands(ccid)
+        assert f"/ws/telnyx?call_id={call.id}&token=" in answer.body["stream_url"]
+        assert (await rig.leg(ccid))["answered_at"] is not None

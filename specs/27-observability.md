@@ -130,6 +130,7 @@ named `LAT_MS`.
 | `va_telnyx_webhooks_total` | counter | `event_type`, `result` (processed/duplicate/invalid_signature/error/unhandled) |
 | `va_telnyx_webhook_processing_ms` | histogram | `event_type` |
 | `va_inbound_calls_total` | counter | `result` (answered/rejected/fallback) |
+| `va_inbound_answer_ms` | histogram | — (ring-to-answer: inbound routing start to the Telnyx `answer` response) |
 | `va_amd_results_total` | counter | `result` |
 | `va_sms_inbound_total` | counter | `result` |
 

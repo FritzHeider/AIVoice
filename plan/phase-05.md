@@ -220,7 +220,7 @@
   - Spec refs: specs/01-architecture.md §2 (inbound); specs/06-telephony-telnyx.md (inbound routing algorithm); specs/16-phone-numbers.md §4 (InboundConfig model)
   - Depends on: P05-T02, P05-T06
   - Deliverables: number lookup (system repo), reject/transfer/maintenance logic, call row + context creation with 1.5 s inline budget, `answer` with stream params, `InboundConfig` model (full API arrives in phase 10)
-  - Split (2026-11-02, Planner): P05-T12a–c below; tick when all three are ticked.
+  - Split (2026-11-02, Planner): P05-T12a–d below; tick when all four are ticked.
   - Acceptance: e2e inbound_basic passes; unknown number rejected; suspended org with fallback transfers.
 
 - [x] P05-T12a InboundConfig model and inbound call resolution through the shared Send Call loader — va_domain.numbers.InboundConfig + call_resolution.inbound_request, loaders moved to va_db.call_inputs (load_inbound_inputs), OrgSettings.default_inbound_prompt; make test 10162 passed 7 skipped 99.13 %, lint/typecheck/placeholders/spec refs pass, jscpd 0, radon -n C empty
@@ -235,11 +235,18 @@
   - Deliverables: `va_edge.routing` `InboundRouter` implementation wired into the default edge handlers: number lookup, allowed/blocked callers, org status, credits, DNC (`block_dnc_callers`), maintenance, concurrency cap; Telnyx `reject` (cause) / `transfer` to `fallback_number` with `command_id`; `telnyx_events.process_error` for each refusal; accepted calls handed to an accept seam (P05-T12c)
   - Acceptance: unit/Postgres tests for every branch; FakeTelnyx `/sim/telnyx/inbound` contract tests for unknown number (rejected), suspended org with and without fallback, maintenance with fallback (transferred), blocked caller.
 
-- [ ] P05-T12c Inbound accept: call row, context, CallWorkflow inbound mode, answer with stream
-  - Spec refs: specs/06-telephony-telnyx.md §7 steps 8-11; specs/01 §2.2; specs/16 §4 (`maintenance.message`); specs/07 §3 (attach)
+- [x] P05-T12c Inbound accept at the edge and CallWorkflow inbound mode — va_edge.accept InboundAccept (persist → context → start → answer, 3 s budget, cleanup + accept_failed), CallWorkflow inbound mode, shared call_row/streams/waits/start_workflow; make test 10282 passed, 7 skipped, 99.14 %; lint/typecheck/placeholders/spec refs 0; jscpd 0; e2e harness lands in P05-T17
+  - Spec refs: specs/06-telephony-telnyx.md §7 steps 8-11, §4.1 (handler budget); specs/01 §2.2; specs/07 §3 (stream token/URL); specs/19 §2 (`call.ringing`); specs/27 §3.2
   - Depends on: P05-T12b
-  - Deliverables: inbound call row (`direction='inbound'`, `ringing`) + primary leg + contact upsert, call context built inline within 1.5 s, `CallWorkflow` inbound mode (no dial; answer → conversation → end as outbound), Telnyx `answer` with stream params/recording, `command_id=answer-{call_id}`, maintenance message-only (answer, play, hang up)
-  - Acceptance: FakeTelnyx inbound call through the edge to a served media worker with FakeElevenLabs + FakeLLM holds a conversation and ends `completed`; ring-to-answer measured; maintenance message-only path; Temporal test for the inbound mode.
+  - Split (2026-11-02, Planner): the maintenance message-only path and the full edge → media conversation test moved to P05-T12d.
+  - Deliverables: `va_edge.accept.InboundAccept` (the `InboundAcceptor`): inbound call row (`direction='inbound'`, `ringing`) + primary leg + contact upsert + `call.ringing` event in one tenant transaction, call context built inline (1.5 s budget, media worker rebuilds on a miss), `CallWorkflow` started in inbound mode, Telnyx `answer` with stream params/recording/`client_state`, `command_id=answer-{call_id}`; failure cleanup (call `failed`, workflow terminated) so the router's fallback/reject applies; `CallWorkflow` inbound mode (no prefetch/dial: answer wait → conversation → end as outbound); ring-to-answer histogram; per-event-type processor budget for `call.initiated`; `CallContext.maintenance_message` carried from the accepted call (spoken in P05-T12d)
+  - Acceptance: Postgres + FakeTelnyx tests for the accept path (row/leg/contact/event/context/workflow input/answer body), each failure step (resolution error, workflow start failure, answer failure, budget timeout) refusing through the fallback/reject with the call marked failed, caller gone before answer; Temporal tests for inbound mode (answered → conversation → pipeline finished; caller hangup before answer; answer backstop); FakeTelnyx `/sim/telnyx/inbound` through the edge app shows `answer` with the stream URL and the call answered.
+
+- [ ] P05-T12d Inbound maintenance message and end-to-end inbound conversation
+  - Spec refs: specs/16 §4 (`maintenance.message`); specs/06 §7; specs/07 §3, §16; specs/30 (inbound_basic flow)
+  - Depends on: P05-T12c
+  - Deliverables: maintenance message-only path (answer, the media worker speaks `maintenance.message` through a pipeline takeover — phrase cache when present — and hangs up with `inbound_rejected`); an in-process end-to-end test: FakeTelnyx inbound call → edge app → served media worker with FakeElevenLabs + FakeLLM → conversation → caller hangup → call `completed`
+  - Acceptance: media runtime test for the maintenance takeover (message spoken, no LLM request, end `inbound_rejected`); end-to-end inbound conversation test ends `completed` with turns recorded; ring-to-answer observed ≤ 800 ms in the simulator run.
 
 - [ ] P05-T13 Cold transfer
   - Spec refs: specs/01-architecture.md §2 (transfers); specs/06-telephony-telnyx.md (cold transfer sequence); specs/05-calls-api.md (transfer_phone_number, transfer_list)

@@ -214,7 +214,8 @@ Routes: `POST /telnyx/voice`, `POST /telnyx/voice/{telnyx_account_id}`, `POST /t
 >    events are processed in arrival order. Each shard queue holds 256 events; when full the event stays
 >    unprocessed in Postgres and the reprocessor claims it (backpressure never turns into a non-2xx after an
 >    insert, which Telnyx would redeliver as a duplicate). A handler runs within the 2 s budget (then
->    `HandlerTimeoutError`). Handlers are registered per `event_type` and must be idempotent; a type without a
+>    `HandlerTimeoutError`); `call.initiated` has a 5 s budget (the inbound accept, §7 Decision P05-T12c:
+>    `EventProcessor(budgets={...})`). Handlers are registered per `event_type` and must be idempotent; a type without a
 >    handler is marked processed. Other answers: `400 {"error":"invalid_payload"}` for a verified body that is not
 >    an envelope (nothing stored), `401 {"error":"invalid_signature"}`, `503 {"error":"unavailable"}` while shutting
 >    down or when the database is unreachable before the insert (Telnyx retries).
@@ -474,6 +475,39 @@ Ring-to-answer target: ≤ 800 ms from `call.initiated` receipt to `answer` requ
 > `accept_unavailable`, `accept_failed`. (5) `va_inbound_calls_total{result}` (specs/27 §3.2) counts `rejected`,
 > `fallback`, and `answered` (an accepted call handed over without error). The edge now mixes in
 > `TelnyxApiSettings` and `CryptoSettings` (`KMS_PROVIDER`/`LOCAL_MASTER_KEY` scoped to the edge too) for BYO keys.
+
+> Decision (2026-11-02): inbound accept (P05-T12c). `va_edge.accept.InboundAccept` is the `InboundAcceptor` wired
+> by default (`va_edge.main.carrier_handlers`; tests pass `NO_ACCEPTOR` to keep `accept_unavailable`). Steps 8-11
+> run in this order within a 3 s accept budget on the edge clock: (a) one `tenant_session`: `inbound_request` →
+> `load_inbound_inputs` → `resolve_inputs` (resolution `AppError`s commit nothing and the router refuses
+> `accept_failed`), contact upsert by the caller's E.164 (`ContactRepo.upsert_phone`; anonymous or non-E.164
+> callers get none), the `calls` row (`va_db.call_rows.call_row`, shared with Send Call: `direction='inbound'`,
+> `status='ringing'`, `queue_status='started'`, `to_number` = the called number and `from_number` = the caller as
+> Bland reports them (the config keeps `phone_number` = caller, `from_number` = called), `config.pricing` = the
+> org's effective pricing snapshot, `config.maintenance_message` for a maintenance accept, no credit hold), the
+> primary leg (`CallLegRepo.record_initiated` with `call_leg_id`/`call_session_id`, the number's Telnyx account,
+> `started_at` = the payload's `start_time`), and a `call.ringing` event (`data.direction = "inbound"`) whose row
+> is written in the same transaction and broadcast after the commit; (b) the call context
+> (`build_call_context`, trace context injected) saved to Redis within 1.5 s, best effort (a timeout or Redis
+> error logs `telnyx.inbound_context_skipped`; the media worker rebuilds it from Postgres, specs/07 §3). There is
+> no dynamic-data/memory/start-node prefetch yet: those sources push `inject_context` when they land (phases 08 and
+> 12); (c) `CallWorkflow` started in inbound mode (`CallWorkflowInput(direction="inbound", max_duration_s=…)`,
+> `REJECT_DUPLICATE`, 1.0 s start deadline / 0.8 s RPC timeout); (d) `answer` through the number's account with
+> `client_state` (`primary` leg), `command_id=answer-{call_id}`, the §6 stream parameters (URL and token as
+> outbound, `va_telnyx.streams`), and `record-from-answer`/`dual`/`wav` when `record` is set. A
+> `CallAlreadyEnded` answer (the caller hung up) is not a failure: `telnyx.inbound_caller_gone_before_answer` is
+> logged and the carrier events end the call. Any other failure after (a) committed, or the budget running out
+> (`InboundAcceptTimeoutError`), moves the call `ringing → failed` with `end_reason='error'`,
+> `error_message` "The inbound call could not be answered.", `queue_status='call_error'`, plus a `call.ended`
+> event, terminates the workflow if it started (reason `inbound_accept_failed`), then re-raises: the router
+> releases the slot and refuses `accept_failed` (fallback transfer or reject). Cleanup errors are logged
+> (`telnyx.inbound_cleanup_failed`) and never mask the refusal. The `call.initiated` processor budget is 5 s (3 s
+> accept + cleanup + refusal), the default stays 2 s. A redelivered `call.initiated` after the accept resolves to
+> the primary leg through the carrier handler (no second call or answer). Ring-to-answer is measured from the
+> router's start to the `answer` response (`va_inbound_answer_ms`, specs/27 §3.2; logged as `ring_to_answer_ms`
+> in `telnyx.inbound_answered`). The edge mixes in `StreamTokenSettings` and the platform model ids
+> (`LLM_DIALOGUE_MODEL`/`LLM_ROUTER_MODEL` scoped to the edge); the lifespan refuses to start without
+> `STREAM_TOKEN_SECRET` when it builds the default acceptor.
 
 ## 8. Media WebSocket protocol models (`va_telnyx.media`)
 

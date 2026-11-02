@@ -186,6 +186,14 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    is merged when ready), starts `CallWorkflow` in inbound mode, and issues Telnyx `answer` with the same stream
    parameters as outbound dial plus `client_state`.
 4. Remaining steps are identical to outbound from step 5.
+   > Decision (2026-11-02): CallWorkflow inbound mode (P05-T12c). The edge starts `CallWorkflow` (same id and
+   > task queue) with `CallWorkflowInput(direction="inbound", max_duration_s=ceil(max_duration * 60))`; an inbound
+   > input must carry `max_duration_s` and may not be scheduled, an outbound one may not carry it. The workflow
+   > skips the schedule, `prefetch_call_context`, and `dial` (phase `starting` → `ringing`): the edge answers the
+   > leg, so it waits for the answer (or hangup/cancel) up to 30 s (`INBOUND_ANSWER_BACKSTOP`; after that
+   > `end_call(error, "The inbound call was not answered in time.")` + `hangup_call("answer_backstop")`), then
+   > steps (d)-(f) of the outbound flow apply unchanged with the input's `max_duration_s` as the backstop base.
+   > `schedule_retry_call` never retries an inbound call (skip reason `not_outbound`).
 
 ### 2.3 Transfers
 

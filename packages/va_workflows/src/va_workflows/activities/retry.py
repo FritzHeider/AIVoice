@@ -105,8 +105,12 @@ class RetryActivities:
             raise call_not_found()
         return parent
 
-    async def _decide(self, session: AsyncSession, parent: Call) -> tuple[RetryPlan, RetryConfig | None]:
+    async def _decide(  # noqa: PLR0911 - one skip reason per rule, in order
+        self, session: AsyncSession, parent: Call
+    ) -> tuple[RetryPlan, RetryConfig | None]:
         """A skip plan, or an empty plan and the ``retry`` to create the child with."""
+        if parent.direction != "outbound":
+            return RetryPlan(reason="not_outbound"), None
         if not is_terminal(parent.status):
             return RetryPlan(reason="not_ended"), None
         retry = config_of(parent).retry

@@ -15,6 +15,7 @@ from va_domain.call_workflow import (
     CallWorkflowInput,
     PipelineFinished,
     call_workflow_id,
+    max_duration_seconds,
 )
 from va_domain.post_call import (
     POSTCALL_WORKFLOW_NAME,
@@ -31,7 +32,13 @@ def test_the_input_round_trips_through_json() -> None:
     scheduled = datetime(2026, 11, 2, 15, 0, tzinfo=timezone(timedelta(hours=-5)))
     original = CallWorkflowInput(call_id=CALL, org_id=ORG, scheduled_for=scheduled)
     dumped = original.model_dump(mode="json")
-    assert dumped == {"call_id": str(CALL), "org_id": str(ORG), "scheduled_for": "2026-11-02T15:00:00-05:00"}
+    assert dumped == {
+        "call_id": str(CALL),
+        "org_id": str(ORG),
+        "scheduled_for": "2026-11-02T15:00:00-05:00",
+        "direction": "outbound",
+        "max_duration_s": None,
+    }
     restored = CallWorkflowInput.model_validate(dumped)
     assert restored == original
     assert restored.scheduled_for == scheduled.astimezone(UTC)
@@ -86,3 +93,30 @@ def test_postcall_task_queue_replaces_the_main_suffix(main: str, postcall: str) 
 def test_postcall_task_queue_needs_a_main_suffix(main: str) -> None:
     with pytest.raises(ValueError, match="must end with '-main'"):
         postcall_task_queue(main)
+
+
+def test_inbound_inputs_carry_the_max_duration() -> None:
+    start = CallWorkflowInput(call_id=CALL, org_id=ORG, direction="inbound", max_duration_s=1800)
+    assert CallWorkflowInput.model_validate(start.model_dump(mode="json")) == start
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"direction": "inbound"},
+        {"direction": "inbound", "max_duration_s": 60, "scheduled_for": datetime(2026, 11, 2, tzinfo=UTC)},
+        {"direction": "outbound", "max_duration_s": 60},
+        {"direction": "web"},
+    ],
+)
+def test_direction_rules_are_enforced(fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        CallWorkflowInput.model_validate({"call_id": str(CALL), "org_id": str(ORG), **fields})
+
+
+def test_max_duration_seconds_rounds_up() -> None:
+    assert (max_duration_seconds(5.0), max_duration_seconds(0.5), max_duration_seconds(1.001)) == (
+        300,
+        30,
+        61,
+    )

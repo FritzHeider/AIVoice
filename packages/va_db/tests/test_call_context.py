@@ -17,6 +17,7 @@ from va_db.call_context import CallContextStore, build_call_context, config_of
 from va_db.models import Call
 from va_domain.call_context import CallContext, call_context_key
 from va_domain.calls.config import SendCallConfig
+from va_domain.numbers import MAINTENANCE_MESSAGE_KEY
 
 __all__ = ["reset_logging"]
 
@@ -67,6 +68,20 @@ def test_config_of_drops_keys_that_are_not_configuration() -> None:
     config = resolved_config()
 
     assert config_of(_call({**config, "pricing": {"x": 1}})) == SendCallConfig.model_validate(config)
+
+
+def test_the_inbound_maintenance_message_is_carried_into_the_context() -> None:
+    config = resolved_config()
+    stored = {**config, MAINTENANCE_MESSAGE_KEY: "We are closed for maintenance."}
+
+    context = build_call_context(_call(stored, direction="inbound"), now=NOW)
+
+    assert context.maintenance_message == "We are closed for maintenance."
+    assert context.config == SendCallConfig.model_validate(config)
+    assert build_call_context(_call(config), now=NOW).maintenance_message is None
+    assert (
+        build_call_context(_call({**config, MAINTENANCE_MESSAGE_KEY: 3}), now=NOW).maintenance_message is None
+    )
 
 
 def test_null_row_numbers_fall_back_to_the_configuration() -> None:

@@ -1408,3 +1408,22 @@ Grafana 3001
   `rig.place`/`ring`/`route`). FakeTelnyx `transfer` works on a ringing incoming leg (answered when the target
   answers). `test_calls_recording.py::test_record_start_stop_saves_a_dual_channel_wav` flakes under `--cov` with
   `-n 8` on HEAD too (accelerated clock reaches the time limit).
+- 2026-11-02 (P05-T12c): inbound accept = `va_edge.accept.InboundAccept(database, CallContextStore, starter, telnyx,
+  *, publisher=, settings=AcceptSettings, clock=, metrics=)` (rules: specs/06 §7 Decision P05-T12c), wired by default
+  in `va_edge.main.carrier_handlers(container, clock=, metrics=, settings=, acceptor=None)`; `acceptor=NO_ACCEPTOR`
+  routes without one (`accept_unavailable`). The default needs `STREAM_TOKEN_SECRET` (`edge_helpers.edge_settings`
+  fills a random one). Processor per-type budgets: `EventProcessor(budgets={"call.initiated": 5.0})`
+  (`main.HANDLER_BUDGETS`). Shared pieces moved out: `va_common.waits` (`within`/`wait_until_set`; va_voice
+  re-exports), `va_telnyx.streams` (`media_stream_url`, `stream_params`, `RECORDING_FIELDS`), `va_common.checks.
+  start_workflow`/`terminate_workflow`/`WorkflowStartError` (the api starter uses them), `va_domain.call_workflow.
+  max_duration_seconds`, `va_db.call_rows.call_row(call_id, org_id, config, NewCall(...), extra_config)` (the api
+  dispatch uses it), `va_db.repositories.ContactRepo.upsert_phone`. `CallWorkflowInput(direction="inbound",
+  max_duration_s=)` runs CallWorkflow without prefetch/dial (30 s answer backstop). `calls.config.maintenance_message`
+  (`va_domain.numbers.MAINTENANCE_MESSAGE_KEY`) → `CallContext.maintenance_message`. Tests:
+  `apps/telephony_edge/tests/support/accept_helpers.accept_rig(database, clock=, telnyx=, contexts_redis=)`
+  (`RecordingStarter`, `GatedClock.fire(s)` for budget timeouts, `answer_failing_factory`, `broken_redis`;
+  `AcceptRig.org()` adds a voice named like the default `default_voice`, which inbound resolution needs).
+  FakeTelnyx only places calls from E.164 numbers: rewrite the stored envelope for anonymous callers. The sim's
+  accelerated clock dates lie outside the test DB's `call_events` partitions, so edge apps on `SimTimeClock` fail
+  to write their own event rows (assert the call/leg state instead); `test_sim_contract.signed_at(webhook)` gives
+  a clock that verifies a later webhook's signature.

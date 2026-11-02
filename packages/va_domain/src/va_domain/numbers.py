@@ -31,6 +31,7 @@ from va_domain.org import field_path
 from va_domain.phone import InvalidPhoneNumberError, normalize_e164
 
 __all__ = [
+    "MAINTENANCE_MESSAGE_KEY",
     "OUTBOUND_ONLY_FIELDS",
     "ROUTING_FIELDS",
     "InboundConfig",
@@ -39,6 +40,10 @@ __all__ = [
     "load_inbound_config",
     "maintenance_active",
 ]
+
+MAINTENANCE_MESSAGE_KEY: Final = "maintenance_message"
+"""The ``calls.config`` key (not a call configuration field, like ``pricing``) holding the maintenance message
+of an inbound call accepted only to play it (specs/16 §4, specs/06 §7 Decision P05-T12c)."""
 
 # Inbound-only keys: number routing (specs/06 §7), never part of the call request.
 ROUTING_FIELDS: Final = frozenset(

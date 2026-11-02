@@ -31,6 +31,7 @@ from va_common.time import SystemClock
 from va_db.models import PhoneNumber, TelnyxEvent
 from va_db.repositories import OrgRepo
 from va_db.session import Database
+from va_edge.accept import INBOUND_HANDLER_BUDGET_S
 from va_edge.processor import StoredEvent
 from va_edge.routing import InboundAcceptor, InboundCall, InboundRouter
 from va_sim.server import simulator_routes
@@ -187,15 +188,18 @@ class RoutingRig:
         ccid, initiated = await self.place(to, caller)
         return ccid, await stored_event(self.database, initiated.body)
 
-    def router_on(self, telnyx: TelnyxClientFactory) -> InboundRouter:
-        """Another router of this rig sending its commands through ``telnyx``."""
+    def router_on(
+        self, telnyx: TelnyxClientFactory, *, acceptor: InboundAcceptor | None = None
+    ) -> InboundRouter:
+        """Another router of this rig sending its commands through ``telnyx`` (accepting with ``acceptor``,
+        default the recording acceptor)."""
         return InboundRouter(
             self.database,
             self.limiter,
             telnyx,
             clock=SystemClock(),
             metrics=self.metrics,
-            acceptor=self.acceptor,
+            acceptor=acceptor if acceptor is not None else self.acceptor,
         )
 
     async def stored(self, event: StoredEvent) -> StoredEvent:
@@ -205,7 +209,11 @@ class RoutingRig:
     async def route(self, event: StoredEvent, *, router: InboundRouter | None = None) -> TelnyxEvent:
         """Process ``event`` through an :class:`EventProcessor` running the router; the stored row after."""
         handler = inbound_handler(router if router is not None else self.router)
-        processor = make_processor(self.database, {"call.initiated": handler})
+        processor = make_processor(
+            self.database,
+            {"call.initiated": handler},
+            budgets={"call.initiated": INBOUND_HANDLER_BUDGET_S},
+        )
         async with running(processor):
             assert processor.offer(event)
             await processor.join()

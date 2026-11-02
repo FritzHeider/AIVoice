@@ -24,6 +24,7 @@ from typing import Any, Final, Literal, NoReturn, Protocol
 from va_billing.dispatch import BillingOrg, load_billing_org
 from va_billing.holds import available_balance
 from va_billing.limits import CallLimiter
+from va_common.errors import AppError
 from va_common.ids import new_id
 from va_common.logging import get_logger
 from va_common.metrics import ServiceMetrics
@@ -212,7 +213,8 @@ class RoutedNumber:
 
 @dataclass(frozen=True, slots=True)
 class InboundCall:
-    """An accepted incoming call holding a concurrency slot under ``call_id`` (specs/06 §7 steps 8-11)."""
+    """An accepted incoming call holding a concurrency slot under ``call_id`` (specs/06 §7 steps 8-11);
+    ``received_monotonic`` is the router clock's ``monotonic()`` when routing started (ring-to-answer)."""
 
     call_id: uuid.UUID
     event: StoredEvent
@@ -221,6 +223,7 @@ class InboundCall:
     config: InboundConfig
     caller: str
     maintenance_message: bool
+    received_monotonic: float
 
 
 class InboundAcceptor(Protocol):
@@ -256,6 +259,7 @@ class InboundRouter:
         self._calls = metrics.counter(INBOUND_CALLS_TOTAL)
 
     async def route(self, event: StoredEvent, payload: CallInitiated) -> None:
+        received = self._clock.monotonic()
         number = await self._number(payload.to)
         if number is None:
             unknown = Reject("CALL_REJECTED", "unknown_number")
@@ -265,7 +269,13 @@ class InboundRouter:
         decision = decide(loaded.facts)
         if isinstance(decision, Accept):
             refusal = await self._accept(
-                event, payload, number=number, loaded=loaded, caller=caller, decision=decision
+                event,
+                payload,
+                number=number,
+                loaded=loaded,
+                caller=caller,
+                decision=decision,
+                received=received,
             )
             if refusal is None:
                 self._calls.labels(result="answered").inc()
@@ -328,6 +338,7 @@ class InboundRouter:
         loaded: _Loaded,
         caller: str,
         decision: Accept,
+        received: float,
     ) -> Reject | Fallback | None:
         """Take the slot and hand the call over; the refusal to apply instead, or ``None`` when accepted."""
         config = decision.config
@@ -352,6 +363,7 @@ class InboundRouter:
             config=config,
             caller=caller,
             maintenance_message=decision.maintenance_message,
+            received_monotonic=received,
         )
         try:
             await self._acceptor.accept(call)
@@ -361,6 +373,8 @@ class InboundRouter:
                 call_id=str(call_id),
                 org_id=str(number.org_id),
                 error_type=type(exc).__name__,
+                code=exc.code if isinstance(exc, AppError) else None,
+                field=exc.field if isinstance(exc, AppError) else None,
             )
             await self._limiter.release_call(number.org_id, call_id)
             return _refuse(loaded.facts, "accept_failed")

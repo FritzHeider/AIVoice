@@ -1561,3 +1561,217 @@ Re-ran: lint, typecheck (mypy 1191 files + TS), placeholders 0, spec refs 0, jsc
 src; make test 10216 passed, 7 skipped, 99.13 %, exit 0 (logs/make_test_review_p05t12b.log), routing.py 100 %.
 Diff matches specs/06 §7 steps 1-7 + specs/16 §4 caller lists/fallback; Decisions in specs/02/03/06/30. Acceptor seam
 is None in production until P05-T12c (accepted calls refuse with accept_unavailable). make e2e harness lands in P05-T17.
+
+## Plan P05-T12c — Inbound accept at the edge and CallWorkflow inbound mode (Planner, 2026-11-02)
+Split: old T12c → T12c (this: accept + workflow inbound mode) and T12d (maintenance takeover in media + full
+edge→media conversation e2e test). Plan file updated. T12b's router calls `InboundAcceptor.accept(InboundCall)`;
+production wiring passes `acceptor=None` today → every accepted call refuses `accept_unavailable`. This task
+implements the acceptor and wires it by default.
+
+### Design (decided — do not re-litigate)
+1. **Shared helpers (move, no copies)**
+   - `va_telnyx.streams` (new, pure): `media_stream_url(scheme, host, call_id, token) -> str`,
+     `stream_params(url, *, hd_audio: bool) -> StreamParams`, `RECORDING_FIELDS` (record-from-answer, dual, wav;
+     `record_track` only where the model has it). `va_workflows.activities.dial_request.stream_url/stream_params`
+     delegate (keep their signatures: `stream_params(config, url)` → `streams.stream_params(url,
+     hd_audio=config.hd_audio)`) so dial tests stay green.
+   - `max_duration_seconds` moves from `va_workflows.activities.telephony_inputs` to `va_domain.calls`
+     (re-export from telephony_inputs; workflow-safe since va_domain is pure).
+   - `va_common.checks.start_workflow(connector, name, arg, *, workflow_id, task_queue, timeout_s, rpc_timeout_s)`
+     (REJECT_DUPLICATE; `WorkflowAlreadyStartedError` → returns False; RPC/timeout/OS/Runtime → `WorkflowStartError`)
+     and `terminate_workflow(connector, workflow_id, reason) -> bool` (NOT_FOUND → False). The api
+     `TemporalCallStarter.start` delegates to `start_workflow` (same behaviour/logs; `CallStartError` from
+     `WorkflowStartError`). Tests next to `signal_workflow` tests using `workflow_fakes` (extend `SignalRecorder` /
+     `connector_of` with `start_workflow`/`terminate` recording, or a sibling fake).
+2. **Contract**: `va_domain.call_workflow.CallWorkflowInput` gains `direction: Literal["outbound","inbound"] =
+   "outbound"` and `max_duration_s: int | None = None` (inbound only; validator: inbound requires it, outbound
+   forbids it and `scheduled_for` with inbound is invalid). Api starter unchanged (defaults).
+3. **CallWorkflow inbound mode** (`va_workflows.calls.call_workflow`): `_lifecycle` → if `start.direction ==
+   "inbound"`: skip schedule/prefetch/dial; `_ring(max_duration_s, backstop=INBOUND_ANSWER_BACKSTOP)` where
+   `_ring` is the existing ring wait parameterized by `max_duration_s` and backstop (outbound passes
+   `dialed.max_duration_s or DEFAULT_MAX_DURATION_S`, `RING_BACKSTOP`). New `policies.INBOUND_ANSWER_BACKSTOP =
+   timedelta(seconds=30)`, message `ANSWER_BACKSTOP_MESSAGE = "The inbound call was not answered in time."`, hangup
+   reason `answer_backstop`. Phase query for inbound: starting → ringing → in_progress → … Post-call + retry run
+   as for outbound; `RetryActivities.schedule_retry_call` returns no plan for `direction != 'outbound'` (assert).
+4. **Context**: `va_domain.call_context.CallContext.maintenance_message: str | None = None`;
+   `va_domain.numbers.MAINTENANCE_MESSAGE_KEY = "maintenance_message"` (non-config `calls.config` key like
+   `pricing`/`retry_attempt`); `va_db.call_context.build_call_context` copies a string value of that key into the
+   context (so the media worker's DB rebuild sees it too). Check `config_of` ignores the extra key (it ignores
+   `pricing`). T12d speaks it; T12c only carries it.
+5. **`va_db.repositories.contacts.ContactRepo(session, org_id).upsert_phone(e164) -> uuid.UUID`**: `INSERT …
+   ON CONFLICT (org_id, phone_e164) WHERE phone_e164 IS NOT NULL DO UPDATE SET updated_at = now() RETURNING id`
+   (new id via `new_id()`); export from `va_db.repositories`. Anonymous/non-E.164 caller → no contact.
+6. **Acceptor** `apps/telephony_edge/src/va_edge/accept.py`:
+   - `InboundAccept(database, redis_store: CallContextStore, starter: InboundStarter, telnyx:
+     TelnyxClientFactory, publisher: EventPublisher, settings: AcceptSettings, *, clock, metrics)`; implements
+     `InboundAcceptor`. `AcceptSettings` frozen dataclass: `media_public_host`, `media_ws_scheme`,
+     `stream_secret` (repr=False), `models: PlatformModels`, `task_queue`; `AcceptSettings.from_settings(EdgeSettings)`.
+   - `InboundStarter` Protocol `start(CallWorkflowInput) -> None` / `terminate(call_id, reason) -> None`;
+     `TemporalInboundStarter(connector, task_queue)` over the va_common helpers (start timeout 1.0 s, rpc 0.8 s).
+   - `accept(call)`: the steps run under `within(steps, clock, ACCEPT_BUDGET_S=3.0)` (move
+     `va_voice.pipeline.waits.within`/`wait_until_set` to `va_common.waits`; va_voice module re-exports — no dep
+     from edge on va_voice). A `_Progress` records `committed`/`workflow_started`. Steps:
+     a. **Resolve + persist** (one `tenant_session(org_id)`): `load_settings(org row settings)` + org name via
+        `OrgRepo`, `inbound_request(config, caller=payload.from_ or "anonymous", called=number.e164, org=, org_name=)`,
+        `load_billing_org` (plan id + pricing snapshot), `load_inbound_inputs(..., number=InboundNumber(...),
+        models=settings.models)`, `resolve_inputs(inputs, request, now)`; `ContactRepo.upsert_phone(caller)` when
+        dialable; insert `Call(id=call.call_id, direction="inbound", to_number=number.e164, from_number=caller,
+        status="ringing", queue_status="started", runner fields as in api `_call_row`, phone_number_id,
+        contact_id, config={**config.model_dump(mode="json"), "pricing": org.pricing.snapshot() (check the
+        api's `admitted.pricing.snapshot()` source; use `effective_pricing`), MAINTENANCE_MESSAGE_KEY: message if
+        maintenance_message}, workflow_id=call_workflow_id(id), request_data, metadata_)`; `CallLegRepo.record_initiated(
+        call_id, "primary", ccid, call_leg_id, call_session_id, telnyx_account_id=number.telnyx_account_id,
+        started_at=payload.start_time or now)`; `call.ringing` event via `persist_event`-style
+        (`EventPublisher.sequence` + `va_events.insert_rows` + broadcast after commit, as dispatch does), data
+        `{"direction": "inbound"}`. Extract the shared `Call` row builder: move the api `_call_row` column mapping
+        into `va_db.call_rows.call_row(call_id, org_id, config, *, direction, status, queue_status, to_number,
+        from_number, test_call, extra_config, credit_hold_id=None, contact_id=None)` used by both (no copy).
+        Resolution `AppError`s (e.g. invalid runner refs, BYO account errors) → raise (router refuses
+        `accept_failed`); nothing committed.
+     b. **Context** (best effort, `within(..., clock, CONTEXT_BUDGET_S=1.5)`): `build_call_context(row, now=,
+        trace_context=propagated)` + `CallContextStore.save`; timeout or Redis error → log
+        `telnyx.inbound_context_skipped` (media rebuilds from Postgres, specs/07 §3). No dynamic-data/memory
+        prefetch exists yet: Decision note says those sources push `inject_context` later (P08/P12).
+     c. **Start** `CallWorkflowInput(call_id, org_id, direction="inbound", max_duration_s=max_duration_seconds(
+        config.max_duration_min))`.
+     d. **Answer** through `telnyx.for_account(number.telnyx_account_id)`: `AnswerRequest(client_state=encode(
+        ClientState(call_id, "primary", org_id)), command_id=f"answer-{call_id}", stream=stream_params(
+        media_stream_url(scheme, host, call_id, mint_stream_token(call_id, stream_token_expiry(now,
+        config.max_duration_min), secret)), hd_audio=config.hd_audio), **recording fields when config.record)`.
+        `CallAlreadyEnded` → log `telnyx.inbound_caller_gone_before_answer` and return normally (the workflow sees
+        the hangup). Observe `va_inbound_answer_ms` (histogram, ms from `InboundCall.received_monotonic` — new
+        field set by the router at `route()` entry via `clock.monotonic()` — to the answer response); log
+        `telnyx.inbound_answered` with `ring_to_answer_ms`.
+   - **Failure cleanup** (any exception or budget timeout after step a committed): in a new tenant session
+     transition the call `ringing → failed` (`CallRepo.transition`) with `ended_values("error", now, message)`
+     (`ACCEPT_FAILED_MESSAGE = "The inbound call could not be answered."`) + a `call.failed`/ended event like
+     `va_events.call_ended_event`; if the workflow started, `starter.terminate(call_id, "inbound_accept_failed")`
+     (log and swallow errors); then re-raise (`InboundAcceptTimeout` for the budget) so the router releases the
+     slot and refuses. The cleanup swallows its own errors (logged `telnyx.inbound_cleanup_failed`) and never
+     masks the original.
+   - Processor budget: `EventProcessor(..., budgets: Mapping[str, float] = {})` → `call.initiated` gets
+     `INBOUND_HANDLER_BUDGET_S = 5.0` from `main` (default stays 2 s): accept (≤ 3 s) + cleanup + refusal fit.
+7. **Wiring**: `EdgeSettings` + `StreamTokenSettings` + `llm_dialogue_model`/`llm_router_model` fields (specs/02 §6:
+   add `edge` to `LLM_DIALOGUE_MODEL`/`LLM_ROUTER_MODEL` scopes; `.env.example` comments in sync); container
+   refuses empty `STREAM_TOKEN_SECRET` like the worker. `carrier_handlers(container, *, clock, metrics,
+   acceptor=None, settings=)`: `acceptor=None` → build `InboundAccept` from the container (redis, temporal,
+   telnyx, publisher) and `AcceptSettings.from_settings(settings)`; a `NO_ACCEPTOR` sentinel (or explicit
+   router construction in tests) keeps T12b's `accept_unavailable` tests meaningful — adjust those tests.
+8. **Metric**: specs/27 §3.2 row `va_inbound_answer_ms | histogram | —` (ring-to-answer); update metric catalog +
+   `test_metrics` row counts.
+9. **Spec Decisions (same commit)**: specs/06 §7 `> Decision (2026-11-02): inbound accept (P05-T12c)` — order
+   (persist → context (1.5 s, best effort) → start → answer), calls.to_number = called / from_number = caller
+   (Bland `to`/`from`), contact upsert, `call.ringing` with `direction`, `client_state` + `answer-{call_id}`,
+   stream token/URL as outbound, recording fields, 3 s accept budget and 5 s `call.initiated` handler budget,
+   cleanup (failed `error` + terminate) then refusal `accept_failed`, caller gone before answer, ring-to-answer
+   measured from handler start; specs/06 §4.1 note on the per-type budget; specs/01 §2.1 Decision for the inbound
+   workflow mode (30 s answer backstop); specs/16 §4 note that `maintenance.message` is carried in
+   `calls.config.maintenance_message` (spoken in P05-T12d); specs/02 scope change; specs/27 row.
+
+### Tests (all must exist and pass)
+- `packages/va_telnyx/tests/test_streams.py`: URL encoding, PCMU vs L16 params; dial_request tests unchanged.
+- `packages/va_common/tests`: `start_workflow` (started, already started → False, RPC error/timeout →
+  `WorkflowStartError`), `terminate_workflow` (ok / NOT_FOUND → False / other error raises); `va_common.waits`
+  (moved tests; va_voice imports still work).
+- `packages/va_domain/tests`: `CallWorkflowInput` direction validation; `max_duration_seconds` moved.
+- `packages/va_db/tests`: `ContactRepo.upsert_phone` (insert, same phone → same id, other org separate, RLS);
+  `build_call_context` carries `maintenance_message`; `call_rows.call_row` columns (api dispatch tests unchanged).
+- `packages/va_workflows/tests/test_call_workflow_inbound.py` (workflow_rig, time skipping): answered →
+  `_converse` → pipeline finished → completed + post-call started, no `prefetch_call_context`/`dial` in `names()`;
+  caller hangup before answer → `not_answered` cleanup, no hangup activity; no answer within 30 s →
+  end_call(`error`) then hangup `answer_backstop`; cancel while ringing → canceled + hangup; max_duration backstop
+  uses input `max_duration_s`.
+- `packages/va_workflows/tests`: `schedule_retry_call` no plan for an inbound row.
+- `apps/telephony_edge/tests/test_accept_db.py` (edge_db_url + routing_rig FakeTelnyx + fakeredis + recording
+  starter): accepted call → row (inbound, ringing, to=called, from=caller, runner task with default inbound prompt,
+  pricing snapshot, workflow_id), primary leg with ccid, contact upserted (second call reuses it; anonymous → none),
+  `call.ringing` row in call_events + broadcast, context in Redis (`call:{id}:ctx`, direction inbound), starter got
+  inbound input with max_duration_s, FakeTelnyx saw `answer` with `command_id=answer-{id}`, client_state decoding to
+  the call, stream URL with a token that `verify_stream_token` accepts, recording fields when `record: true`, BYO
+  number answered with the BYO key; maintenance Accept stores `maintenance_message` in config + context;
+  failures: invalid runner ref (pathway id of another org) → nothing committed, router refuses `accept_failed`
+  (fallback when set); starter raises → call `failed`/`error`, slot released, reject; answer Telnyx 4xx/5xx after
+  retries → call failed, starter.terminate called, fallback transfer issued; budget timeout (starter hangs, clock
+  driven) → cleanup + refusal; Redis context save failing → call still answered (log); caller hung up before
+  answer (FakeTelnyx hangup first) → accepted, no refusal; duplicate `call.initiated` redelivery after accept →
+  carrier handler path (leg found), no second row/answer.
+- `apps/telephony_edge/tests/test_processor.py`: per-type budget (a `call.initiated` handler may take 3 s on the
+  clock, another type times out at 2 s).
+- `apps/telephony_edge/tests/test_sim_contract.py`: `/sim/telnyx/inbound` to a configured number through the edge
+  app with the default acceptor (recording starter seam via `create_app(acceptor=…)` or container temporal fake) →
+  sim call answered, stream params carry `/ws/telnyx?call_id=…`, edge then maps `call.answered` → call
+  `in_progress` (the T12b tests expecting `accept_unavailable` switch to the explicit no-acceptor seam).
+- `test_main.py`/settings: container refuses empty STREAM_TOKEN_SECRET; `carrier_handlers` builds the acceptor.
+- `apps/api/tests`: starter tests still pass after delegating to `start_workflow`.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t12c.log 2>&1`) + heartbeat Monitor; new modules ~100 %; jscpd 0;
+`uvx radon cc -s -n C` on touched src empty; pip-audit + pnpm audit. `make e2e`: harness lands in P05-T17 — say so.
+AGENTS.md line: `va_edge.accept` (InboundAccept steps/budgets/cleanup, InboundStarter, ContactRepo, va_telnyx.streams,
+va_common.waits/start_workflow/terminate_workflow, CallWorkflowInput direction, processor per-type budgets).
+
+### Risks
+- Handler budget: the 2 s default cancels a slow accept mid-way and the redelivered event then resolves to the leg
+  (no answer ever) — hence the 5 s per-type budget and the 3 s inner accept budget; tests must drive both on a clock.
+- Edge test clocks: FrozenClock fires budgets instantly — use the SimTimeClock / SystemClock patterns of T12b.
+- `call_events` partitions: DB tests need real time (SystemClock) for the `call.ringing` row.
+- Moving `within` / `max_duration_seconds` / `_call_row` must keep all importers green (grep before moving).
+- FakeTelnyx `answer` on an incoming leg must accept `stream_url` + client_state (exists for outbound answer?
+  verify `answered_call`/`inbound_call` helpers; if the sim does not stream on answer, fix the sim in this task
+  with a specs/30 Decision).
+- Temporal workflow determinism: keep the inbound branch pure; `CallWorkflowInput` changes are additive.
+
+## Build P05-T12c (Builder, 2026-11-02)
+Implemented per plan. Deviations (deliberate, small): `max_duration_seconds` lives in `va_domain.call_workflow`
+(import-free module the workflow already imports; `va_domain.calls` would drag phonenumbers etc. into the workflow
+sandbox) and is re-exported from `telephony_inputs`. `call_row` takes a `NewCall` dataclass (direction/status/
+queue_status/numbers/test_call/hold/contact) instead of a long kwarg list. STREAM_TOKEN_SECRET refusal is in
+`main.default_acceptor` (lifespan fails at startup) rather than `build_container`, so probe/handler-injected test
+apps need no secret. Acceptor keeps a separate Telnyx factory param so tests can fail only `answer`. Retry skip
+reason `not_outbound`. Router log `telnyx.inbound_accept_failed` now carries `code`/`field` of an AppError.
+Files: va_edge.accept (new), routing (received_monotonic), processor (budgets), main (default acceptor,
+NO_ACCEPTOR, HANDLER_BUDGETS), settings; va_common.waits/checks; va_telnyx.streams; va_db.call_rows/contacts/
+call_context; va_domain call_workflow/call_context/numbers; workflows call_workflow/policies/retry/dial_request;
+api starter/dispatch; specs 01/02/06/16/27; metric catalog 59 rows.
+Tests: test_accept_db (14), test_sim_contract (+answered→in_progress & redelivery), test_startup (+3),
+test_processor (+per-type budget), test_call_workflow_inbound (5), test_retry_activity (+inbound),
+va_common test_waits/test_workflow_start, va_db test_contact_repo/test_new_call_row/test_call_context,
+va_telnyx test_streams, va_domain test_call_workflow, va_voice test_waits_reexport.
+make e2e: harness lands in P05-T17 (not runnable yet).
+Gates (Builder): make fmt 0; make lint 0; make typecheck 0 (mypy 1204 files clean); placeholders 0 findings;
+check_spec_refs 0; jscpd 0 clones; radon -n C on touched src empty (accept.py avg A 2.25); pip-audit clean;
+pnpm audit --audit-level high: 3 moderate (pre-existing); make test 10282 passed, 7 skipped, 99.14 %, exit 0
+(logs/make_test_p05t12c_2.log); va_edge accept/routing/processor/main 100 %. Fixed a shard-order flake in the
+new per-type budget processor test (events run one after the other). make e2e: harness lands in P05-T17.
+
+## Review P05-T12c (Reviewer, 2026-11-02) — REJECTED (1 finding)
+Gates re-run: make lint/typecheck/placeholders 0; check_spec_refs 0; jscpd 0 clones; make test **1 failed**,
+10281 passed, 7 skipped, 99.14 % (logs/review_p05t12c.log). New modules 100 % covered. Diff review otherwise
+clean (accept steps/cleanup/budgets, CallWorkflow inbound branch, call_row/ContactRepo/streams extractions,
+spec Decisions in 01/02/06/16/27 all match the plan).
+
+1. `packages/va_workflows/tests/test_call_workflow_inbound.py:110`
+   (`test_the_max_duration_backstop_uses_the_input`) is flaky (failed in the full run and 1 of 6 isolated reruns:
+   `ended_at - watched_at` = 179.98 s < 180 s). Cause: `_converse` computes the deadline from `workflow.now()`
+   (workflow task start time, `call_workflow.py:300`), but `fakes.scheduled` records the watch activity's
+   `current_attempt_scheduled_time`, which the server stamps a few ms later when it processes the command. The
+   outbound twin measures from `dial` (scheduled earlier), so it never sees this. Fix the reference, not the
+   tolerance-by-luck: measure from a point at or before the timer's start (e.g. the history event time of the
+   `call.answered` signal / the workflow task that started `_converse`, or the `TIMER_STARTED` event's
+   `start_to_fire_timeout` == 180 s from the history), so the assert is deterministic. Verify with ≥ 20 isolated
+   reruns plus the full `make test`.
+
+## Rework P05-T12c (Builder, 2026-11-02) — after review.rejected
+Finding 1 fixed: `test_the_max_duration_backstop_uses_the_input` no longer compares activity schedule times (the
+watch's `scheduled_time` is stamped ms after `workflow.now()`). It reads the history: the first `TIMER_STARTED`
+after the watch's `ACTIVITY_TASK_SCHEDULED` (same workflow task that computes the deadline) must have
+`start_to_fire_timeout == 60 s + MAX_DURATION_GRACE` exactly. `first_event` moved from test_call_workflow_retry
+into `workflow_rig` with a new `history_events(env, start)` helper (shared, no clone). 25/25 isolated reruns pass;
+va_workflows 206 passed; lint/typecheck/placeholders/fmt 0; jscpd 0 clones.
+Full make test 10282 passed, 7 skipped, 99.14 %, exit 0 (logs/make_test_p05t12c_rework.log); pip-audit clean; pnpm audit high 0; radon avg A 2.71. make e2e: harness lands in P05-T17.
+
+## Review P05-T12c rework (Reviewer, 2026-11-02) — APPROVED
+Gates re-run: make lint/typecheck/placeholders 0; check_spec_refs 0; make test 10282 passed, 7 skipped, 99.14 %,
+exit 0 (logs/review_p05t12c_2.log). Finding 1 fixed deterministically: the max-duration test asserts the converse
+TIMER_STARTED start_to_fire_timeout from history (shared `history_events`/`first_event` in workflow_rig, no clone).

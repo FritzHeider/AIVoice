@@ -101,6 +101,8 @@ class CallContext(BaseModel):
     trace_context: dict[str, str] = Field(default_factory=dict)
     created_at: AwareDatetime
     opener_text: str | None = None
+    maintenance_message: str | None = None
+    """Set for an inbound call accepted during a maintenance window: the message to play before hanging up."""
 
     def ttl_s(self) -> int:
         """Seconds the stored context lives: see :func:`call_context_ttl_s`."""

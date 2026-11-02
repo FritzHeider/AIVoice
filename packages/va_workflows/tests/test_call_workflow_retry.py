@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
-from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
@@ -21,6 +20,7 @@ from workflow_rig import (
     call_start,
     carrier,
     dialing,
+    first_event,
     not_found,
     run_call,
     workflow_env,
@@ -78,10 +78,6 @@ async def child_workflow(
     """The retry child's handle and history events (``stop`` it afterwards)."""
     handle = env.client.get_workflow_handle(call_workflow_id(child))
     return handle, list((await handle.fetch_history()).events)
-
-
-def first_event(events: list[Any], name: str) -> Any:
-    return next(event for event in events if EventType.Name(event.event_type) == name)
 
 
 async def stop(handle: WorkflowHandle[Any, Any]) -> None:

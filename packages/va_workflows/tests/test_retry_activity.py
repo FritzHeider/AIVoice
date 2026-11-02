@@ -171,6 +171,13 @@ async def test_a_call_without_retry_is_skipped(r: Rig) -> None:
     assert await _children(r, parent) == []
 
 
+async def test_an_inbound_call_is_never_retried(r: Rig) -> None:
+    parent = await r.seed("completed", config=_config(), end_reason="voicemail_left", direction="inbound")
+
+    assert await _schedule(r, parent) == RetryPlan(reason="not_outbound")
+    assert await _children(r, parent) == []
+
+
 async def test_a_call_that_has_not_ended_is_skipped(r: Rig) -> None:
     parent = await _ended(r, None, status="in_progress")
 

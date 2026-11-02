@@ -127,6 +127,7 @@ CATALOG: Final[Mapping[Service, tuple[MetricSpec, ...]]] = {
         _c("va_telnyx_webhooks_total", "Telnyx webhooks received", "event_type", "result"),
         _h("va_telnyx_webhook_processing_ms", "Telnyx webhook processing time in ms", "event_type"),
         _c("va_inbound_calls_total", "Inbound calls by outcome", "result"),
+        _h("va_inbound_answer_ms", "Inbound ring-to-answer time in ms (routing start to the answer)"),
         _c("va_amd_results_total", "Answering machine detection results", "result"),
         _c("va_sms_inbound_total", "Inbound SMS by outcome", "result"),
     ),

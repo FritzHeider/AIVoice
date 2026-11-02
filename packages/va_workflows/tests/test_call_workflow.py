@@ -17,6 +17,8 @@ from workflow_rig import (
     call_start,
     carrier,
     dialing,
+    ends,
+    hangups,
     not_found,
     postcall_running,
     run_call,
@@ -35,9 +37,7 @@ from va_workflows.activities.liveness_inputs import CallPresence, WatchInput
 from va_workflows.activities.telephony_inputs import (
     DialInput,
     DialOutcome,
-    EndCallInput,
     EndCallResult,
-    HangupInput,
 )
 from va_workflows.calls import CallWorkflow, CallWorkflowResult
 from va_workflows.calls.call_workflow import (
@@ -65,14 +65,6 @@ async def env() -> AsyncIterator[WorkflowEnvironment]:
 
 def answered(start: CallWorkflowInput) -> Signal:
     return carrier("call.answered", start)
-
-
-def ends(fakes: FakeCallActivities) -> list[tuple[str, str | None]]:
-    return [(end.end_reason, end.error_message) for end in fakes.inputs("end_call", EndCallInput)]
-
-
-def hangups(fakes: FakeCallActivities) -> list[str]:
-    return [hangup.reason for hangup in fakes.inputs("hangup_call", HangupInput)]
 
 
 def trail(fakes: FakeCallActivities) -> tuple[list[str], list[tuple[str, str | None]], list[str]]:

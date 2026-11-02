@@ -2,18 +2,19 @@
 ``end_call``; specs/06-telephony-telnyx.md §6 Decision P05-T06b).
 
 Workflows import this module to schedule the activities, so it imports only pydantic, the Temporal
-``RetryPolicy``, and the error type names.
+``RetryPolicy``, the error type names, and the import-free start contract (``max_duration_seconds`` is
+re-exported from :mod:`va_domain.call_workflow`).
 """
 
 from __future__ import annotations
 
-import math
 from datetime import timedelta
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 from temporalio.common import RetryPolicy
 
+from va_domain.call_workflow import max_duration_seconds
 from va_workflows.activities.errors import CALL_NOT_FOUND, HANGUP_REJECTED, INVALID_END_REASON
 from va_workflows.activities.inputs import CallActivityInput
 
@@ -77,11 +78,6 @@ HANGUP_TIMEOUT: Final = timedelta(seconds=15)
 HANGUP_RETRY: Final = _policy(6, [HANGUP_REJECTED])
 END_CALL_TIMEOUT: Final = timedelta(seconds=15)
 END_CALL_RETRY: Final = _policy(6, [CALL_NOT_FOUND, INVALID_END_REASON])
-
-
-def max_duration_seconds(max_duration_min: float) -> int:
-    """``max_duration`` (minutes) in whole seconds, rounded up."""
-    return math.ceil(max_duration_min * 60)
 
 
 class _Result(BaseModel):

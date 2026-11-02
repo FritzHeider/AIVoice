@@ -7,8 +7,9 @@ one call leg are processed in arrival order while different legs proceed in para
 queue; a full queue refuses the event (backpressure), which then stays unprocessed in Postgres until the
 :class:`va_edge.reprocessor.TelnyxEventReprocessor` claims it.
 
-Processing = parse the stored envelope, run the handler registered for the ``event_type`` within the 2 s
-budget, and mark the row processed (``process_error`` on failure; a handler raising :class:`EventSettled`
+Processing = parse the stored envelope, run the handler registered for the ``event_type`` within its budget
+(2 s unless ``budgets`` names the type; ``call.initiated`` gets 5 s for the inbound accept), and mark the row
+processed (``process_error`` on failure; a handler raising :class:`EventSettled`
 records its reason there without a retry). A type without a handler is marked
 processed; a type ``va_telnyx`` does not model counts as ``unhandled``. Handlers must be idempotent: an
 event may be processed again after a crash, a lost mark, or a reclaim.
@@ -124,6 +125,7 @@ class EventProcessor:
         shards: int = DEFAULT_SHARDS,
         queue_size: int = DEFAULT_QUEUE_SIZE,
         budget_s: float = HANDLER_BUDGET_S,
+        budgets: Mapping[str, float] | None = None,
         max_attempts: int = MAX_ATTEMPTS,
     ) -> None:
         if shards < 1 or queue_size < 1:
@@ -133,6 +135,7 @@ class EventProcessor:
         self._clock = clock
         self._handlers = dict(handlers)
         self._budget_s = budget_s
+        self._budgets = dict(budgets or {})
         self._max_attempts = max_attempts
         self._queues: tuple[asyncio.Queue[StoredEvent], ...] = tuple(
             asyncio.Queue(maxsize=queue_size) for _ in range(shards)
@@ -216,7 +219,8 @@ class EventProcessor:
             payload = parse_payload(WebhookEnvelope.model_validate(event.envelope).data)
             handler = self._handlers.get(event.event_type)
             if handler is not None:
-                await self._within_budget(handler(event, payload))
+                budget = self._budgets.get(event.event_type, self._budget_s)
+                await self._within_budget(handler(event, payload), budget)
         except EventSettled as settled:
             return "processed", settled.reason[:MAX_ERROR_CHARS], True
         except Exception as exc:  # any handler failure is stored on the row and retried by the reprocessor
@@ -232,9 +236,9 @@ class EventProcessor:
             return "error", f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS], False
         return ("unhandled" if isinstance(payload, UnknownEventPayload) else "processed"), None, False
 
-    async def _within_budget(self, work: Awaitable[None]) -> None:
+    async def _within_budget(self, work: Awaitable[None], budget_s: float) -> None:
         task = asyncio.ensure_future(work)
-        timer = asyncio.ensure_future(self._clock.sleep(self._budget_s))
+        timer = asyncio.ensure_future(self._clock.sleep(budget_s))
         try:
             await asyncio.wait((task, timer), return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -244,6 +248,6 @@ class EventProcessor:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         if task.cancelled():
-            msg = f"the handler did not finish within {self._budget_s} s"
+            msg = f"the handler did not finish within {budget_s} s"
             raise HandlerTimeoutError(msg)
         task.result()

@@ -58,6 +58,8 @@ __all__ = [
     "call_start",
     "carrier",
     "dialing",
+    "ends",
+    "hangups",
     "not_found",
     "postcall_input",
     "postcall_running",
@@ -252,6 +254,16 @@ class FakeCallActivities:
             raise
 
 
+def ends(fakes: FakeCallActivities) -> list[tuple[str, str | None]]:
+    """``end_call`` reasons and messages, in order."""
+    return [(end.end_reason, end.error_message) for end in fakes.inputs("end_call", EndCallInput)]
+
+
+def hangups(fakes: FakeCallActivities) -> list[str]:
+    """``hangup_call`` reasons, in order."""
+    return [hangup.reason for hangup in fakes.inputs("hangup_call", HangupInput)]
+
+
 async def _send(handle: WorkflowHandle[Any, Any], signals: Sequence[Signal]) -> None:
     for signal, arg in signals:
         if arg is None:
@@ -311,6 +323,17 @@ async def run_call(
         if result.outcome != "not_found" and await_post_call:
             post_call = await postcall_input(env, start)
         return CallRun(result, post_call, phase, history)
+
+
+async def history_events(env: WorkflowEnvironment, start: CallWorkflowInput) -> list[Any]:
+    """Every history event of the finished call workflow (protobuf ``HistoryEvent`` objects)."""
+    handle = env.client.get_workflow_handle(start.workflow_id())
+    return list((await handle.fetch_history()).events)
+
+
+def first_event(events: list[Any], name: str) -> Any:
+    """The first event of type ``name`` (``EVENT_TYPE_...``)."""
+    return next(event for event in events if EventType.Name(event.event_type) == name)
 
 
 async def postcall_input(env: WorkflowEnvironment, start: CallWorkflowInput) -> PostCallWorkflowInput:

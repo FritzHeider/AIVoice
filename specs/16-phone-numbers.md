@@ -215,6 +215,12 @@ Runner rule: at most one of `prompt` / `pathway_id` / `agent_id`; `persona_id` m
 > `windows` shape is superseded by this `maintenance` object; `block_dnc_callers` (bool, default false) is the
 > specs/06 §7 step 5 switch.
 
+> Decision (2026-11-02): a maintenance accept (active window, `message` set, no `fallback_number`) creates an
+> ordinary inbound call (specs/06 §7 Decision P05-T12c) whose `calls.config.maintenance_message` (the
+> `va_domain.numbers.MAINTENANCE_MESSAGE_KEY`, not a call configuration field, like `pricing`) holds the message;
+> `build_call_context` copies it into `CallContext.maintenance_message`, so a context rebuilt by the media worker
+> carries it too. The media worker plays it and hangs up (P05-T12d).
+
 ## 5. Inbound endpoints
 
 ### 5.1 `GET /v1/inbound`

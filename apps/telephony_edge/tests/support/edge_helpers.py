@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
@@ -121,6 +122,8 @@ def event_id_of(body: bytes) -> str:
 
 
 def edge_settings(public_key: str, **values: Any) -> EdgeSettings:
+    """Edge settings trusting ``public_key``, with a fresh ``STREAM_TOKEN_SECRET`` unless one is given."""
+    values.setdefault("stream_token_secret", secrets.token_hex(32))
     return settings_of(EdgeSettings, telnyx_public_key=public_key, **values)
 
 
@@ -277,7 +280,7 @@ def make_processor(
     handlers: Mapping[str, EventHandler] | None = None,
     *,
     clock: Clock | None = None,
-    **knobs: int,
+    **knobs: Any,
 ) -> EventProcessor:
     """An :class:`EventProcessor` with a fresh metrics registry (wall clock unless ``clock`` is given)."""
     return EventProcessor(

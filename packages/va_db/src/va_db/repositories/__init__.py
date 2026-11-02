@@ -6,7 +6,8 @@ enrolment on ``users``; specs/04 §4.5), :class:`SsoConnectionRepo` (an org's OI
 sub-account credit moves; specs/04 §8.4) and :func:`grant_credits` (manual grants), the envelope's
 :class:`OrgDataKeyStore` (specs/28 §3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1),
 the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), the
-tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), and the system-scope ones.
+tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), the tenant :class:`ContactRepo` (inbound
+caller contacts; specs/06 §7), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -35,6 +36,7 @@ from va_db.repositories.calls import (
     CallTransitionError,
     LegRef,
 )
+from va_db.repositories.contacts import ContactRepo
 from va_db.repositories.credits import (
     DUPLICATE_TRANSFER_MESSAGE,
     INSUFFICIENT_TRANSFER_MESSAGE,
@@ -129,6 +131,7 @@ __all__ = [
     "CallTransitionError",
     "CallTurnRepo",
     "ClaimOutcome",
+    "ContactRepo",
     "CreditTransfer",
     "CreditTransferRepo",
     "IdempotencyClaim",

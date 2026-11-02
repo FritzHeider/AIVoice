@@ -1,7 +1,9 @@
-"""A stand-in Temporal client for code that signals workflows through ``va_common.checks.signal_workflow``."""
+"""A stand-in Temporal client for code that signals, starts, or terminates workflows through
+``va_common.checks`` (``signal_workflow``, ``start_workflow``, ``terminate_workflow``)."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any, Final, cast
 
@@ -20,13 +22,32 @@ class SignalRecorder:
     """Records ``(workflow id, signal, args)`` for every signal and raises ``error`` after recording it.
 
     ``args`` is the tuple of arguments sent: ``(arg,)`` for a positional argument, the ``args=`` list
-    otherwise (empty for a signal without an argument).
+    otherwise (empty for a signal without an argument). Starts are recorded in ``started`` as ``(name,
+    arg, options)`` (then ``start_error`` is raised, or the start hangs while ``start_hang`` is set);
+    terminations in ``terminated`` as ``(workflow id, reason)`` (then ``terminate_error`` is raised).
     """
 
     def __init__(self, error: BaseException | None = None) -> None:
         self.error = error
         self.sent: list[tuple[str, str, tuple[Any, ...]]] = []
+        self.started: list[tuple[str, Any, dict[str, Any]]] = []
+        self.start_error: BaseException | None = None
+        self.start_hang = False
+        self.terminated: list[tuple[str, str]] = []
+        self.terminate_error: BaseException | None = None
         self._workflow_id = ""
+
+    async def start_workflow(self, name: str, arg: Any, **options: Any) -> None:
+        self.started.append((name, arg, options))
+        if self.start_hang:
+            await asyncio.Event().wait()
+        if self.start_error is not None:
+            raise self.start_error
+
+    async def terminate(self, *, reason: str) -> None:
+        self.terminated.append((self._workflow_id, reason))
+        if self.terminate_error is not None:
+            raise self.terminate_error
 
     def get_workflow_handle(self, workflow_id: str) -> SignalRecorder:
         self._workflow_id = workflow_id

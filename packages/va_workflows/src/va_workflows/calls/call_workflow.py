@@ -9,6 +9,10 @@ Finally it starts the ``PostCallWorkflow`` child (abandoned on close) for every 
 ``schedule_retry_call`` for a voicemail retry: a created child call gets its own ``CallWorkflow`` as an
 abandoned child workflow that sleeps until the child's scheduled start (specs/07 §14 Decision P05-T10f).
 
+An inbound call (``direction="inbound"``, started by the edge after it created the call, specs/01 §2.1
+Decision P05-T12c) skips the schedule, the prefetch, and the dial: the edge answers the ringing leg, so the
+workflow waits up to 30 s for the answer and then guards the conversation with the input's ``max_duration_s``.
+
 Workflow code is deterministic: signals only record state, time comes from ``workflow.now()``, and activities
 are scheduled by name with inputs from import-free modules.
 """
@@ -71,6 +75,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from va_workflows.calls.policies import (
         DEFAULT_MAX_DURATION_S,
+        INBOUND_ANSWER_BACKSTOP,
         MAX_DURATION_GRACE,
         PIPELINE_GRACE,
         REQUEUE_BUDGET,
@@ -82,6 +87,7 @@ with workflow.unsafe.imports_passed_through():
     from va_workflows.calls.state import CallSignals
 
 __all__ = [
+    "ANSWER_BACKSTOP_MESSAGE",
     "DIAL_FAILED_MESSAGE",
     "NOT_ANSWERED_MESSAGE",
     "PIPELINE_UNRECORDED_MESSAGE",
@@ -92,6 +98,7 @@ __all__ = [
 
 DIAL_FAILED_MESSAGE: Final = "The call could not be dialed."
 RING_BACKSTOP_MESSAGE: Final = "No answer or hangup from the carrier in time."
+ANSWER_BACKSTOP_MESSAGE: Final = "The inbound call was not answered in time."
 NOT_ANSWERED_MESSAGE: Final = "Carrier hung up before answer."
 PIPELINE_UNRECORDED_MESSAGE: Final = "Pipeline finished without recording the end."
 STREAM_FAILED_MESSAGE: Final = "Media stream failed."
@@ -162,7 +169,8 @@ class CallWorkflow:
     @workflow.query(name="phase")
     def phase(self) -> str:
         """``starting`` → (``scheduled``) → ``prefetch`` → ``dialing`` (⇄ ``requeued``) → ``ringing`` →
-        ``in_progress`` (→ ``hung_up``) → ``ending`` → ``post_call`` → ``retry`` → ``ended``."""
+        ``in_progress`` (→ ``hung_up``) → ``ending`` → ``post_call`` → ``retry`` → ``ended``; an inbound call
+        goes from ``starting`` straight to ``ringing``."""
         return self._phase
 
     @workflow.run
@@ -184,6 +192,12 @@ class CallWorkflow:
         return result.model_copy(update={"retry_call_id": retry_call_id})
 
     async def _lifecycle(self, start: CallWorkflowInput) -> CallWorkflowResult:
+        if start.direction == "inbound":
+            return await self._ring(
+                start.max_duration_s or DEFAULT_MAX_DURATION_S,
+                INBOUND_ANSWER_BACKSTOP,
+                ("answer_backstop", ANSWER_BACKSTOP_MESSAGE),
+            )
         if await self._wait_until_scheduled(start.scheduled_for):
             return await self._cleanup("canceled", "canceled")
         prefetch = await self._prefetch()
@@ -194,7 +208,11 @@ class CallWorkflow:
         dialed = await self._dial()
         if isinstance(dialed, CallWorkflowResult):
             return dialed
-        return await self._ring(dialed)
+        return await self._ring(
+            dialed.max_duration_s or DEFAULT_MAX_DURATION_S,
+            RING_BACKSTOP,
+            ("ring_backstop", RING_BACKSTOP_MESSAGE),
+        )
 
     async def _wait_until_scheduled(self, scheduled_for: datetime | None) -> bool:
         """Sleep until a scheduled start; ``True`` when a cancel arrived meanwhile."""
@@ -259,15 +277,19 @@ class CallWorkflow:
         )
         return dialed
 
-    async def _ring(self, dialed: DialOutcome) -> CallWorkflowResult:
+    async def _ring(
+        self, max_duration_s: int, backstop: timedelta, backstop_end: tuple[str, str]
+    ) -> CallWorkflowResult:
+        """Wait for the answer (or a hangup/cancel) up to ``backstop``; ``backstop_end`` = (hangup reason,
+        error message) when it fires."""
         self._phase = "ringing"
         signals = self._signals
         if not await self._wait_for(
-            lambda: signals.answered or signals.hung_up or signals.cancel_requested, RING_BACKSTOP
+            lambda: signals.answered or signals.hung_up or signals.cancel_requested, backstop
         ):
-            return await self._end_and_hangup("error", "error", "ring_backstop", RING_BACKSTOP_MESSAGE)
+            return await self._end_and_hangup("error", "error", *backstop_end)
         if signals.answered:
-            return await self._converse(dialed.max_duration_s or DEFAULT_MAX_DURATION_S)
+            return await self._converse(max_duration_s)
         if signals.cancel_requested:
             return await self._end_and_hangup("canceled", "canceled", "canceled")
         return await self._cleanup("not_answered", "carrier_error", NOT_ANSWERED_MESSAGE)
