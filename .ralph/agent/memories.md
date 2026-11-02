@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793631037-dbe7
+> P05-T13: cold transfer = va_media.transfer.ColdTransfer via MediaActions(transfer=).bind(on_transferred=take_over(Takeover('transferred')), on_transfer_failed=brain.on_transfer_failed+CallPipeline.say); end routine transferred -> streaming_stop only; CallWorkflow phase transferred waits primary hangup. Temporal time-skipping server wedges (ACTIVITY_UNKNOWN) when the workflow cancels a dispatched watch that is failing/completing: send decisive signals from the dial activity so the watch is never dispatched. call_events rows have no type column (assert category/data). Flow tests: EdgeForwarder.wait_for + edge_app.state.processor.join()
+<!-- tags: media, workflows, testing | created: 2026-11-02 -->
+
 ### mem-1793624547-e9aa
 > P05-T12c: va_edge.accept.InboundAccept (persist->context 1.5s->start->answer within 3s; cleanup failed/error + terminate then router refuses accept_failed); carrier_handlers default acceptor needs STREAM_TOKEN_SECRET, NO_ACCEPTOR seam; EventProcessor budgets per type; shared va_common.waits, va_telnyx.streams, va_common.checks.start_workflow/terminate_workflow, va_db.call_rows.call_row(NewCall), ContactRepo.upsert_phone; tests accept_helpers.accept_rig (GatedClock, answer_failing_factory; AcceptRig.org adds default voice); sim clock dates are outside call_events partitions; processor tests offering 2 events may land on one shard -> run sequentially
 <!-- tags: edge, telnyx, testing | created: 2026-11-02 -->

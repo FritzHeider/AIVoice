@@ -248,7 +248,7 @@
   - Deliverables: maintenance message-only path (answer, the media worker speaks `maintenance.message` through a pipeline takeover — phrase cache when present — and hangs up with `inbound_rejected`); an in-process end-to-end test: FakeTelnyx inbound call → edge app → served media worker with FakeElevenLabs + FakeLLM → conversation → caller hangup → call `completed`
   - Acceptance: media runtime test for the maintenance takeover (message spoken, no LLM request, end `inbound_rejected`); end-to-end inbound conversation test ends `completed` with turns recorded; ring-to-answer observed ≤ 800 ms in the simulator run.
 
-- [ ] P05-T13 Cold transfer
+- [x] P05-T13 Cold transfer — va_media.transfer.ColdTransfer (status transferring/revert, call.transfer_started, Telnyx transfer with transfer_target client_state, 40 s outcome wait), MediaActions bind + CallPipeline.say, end routine streaming_stop, CallWorkflow transferred phase; in-process flow test_transfer_flow.py (bridged with transfer_seconds > 0, failed resumes); make test 10336 passed, coverage 99.15%, transfer.py 100%; docker e2e cold_transfer lands with P05-T17
   - Spec refs: specs/01-architecture.md §2 (transfers); specs/06-telephony-telnyx.md (cold transfer sequence); specs/05-calls-api.md (transfer_phone_number, transfer_list)
   - Depends on: P05-T09, P05-T11
   - Deliverables: transfer tool/command flow (final line → mark echo → Telnyx transfer), `transfer_list` selection, bridged handling, transfer_seconds accounting, AI pipeline shutdown

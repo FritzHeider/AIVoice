@@ -1441,3 +1441,15 @@ Grafana 3001
   `answer`), `flow.ring(to, scenario)`. Shared edge helpers: `routing_helpers.own_number`,
   `accept_helpers.add_default_voice`. The sim drops a call's stream object after hangup and `CommandEntry` has no
   body: assert command names, not stream URLs.
+- 2026-11-02 (P05-T13): cold transfer = `va_media.transfer.ColdTransfer` (status `transferring` via `DbTransferStatus`,
+  `call.transfer_started`, Telnyx `transfer` with `target_leg_client_state` leg `transfer_target`, outcome from
+  `CarrierWatch.transfer_events`; rules: specs/06 §10.1 Decision P05-T13) run by `MediaActions(transfer=)`; the runtime
+  binds `MediaActions.bind(on_transferred=take_over(Takeover("transferred")), on_transfer_failed=brain note +
+  CallPipeline.say(msg))`. `CallPipeline.say(text)` queues a static line after the current reply/action. The end
+  routine's `transferred` end sends `streaming_stop` (no record/hangup/slot release); `CallWorkflow` waits in phase
+  `transferred` for the primary hangup. `in_progress` is enterable from `transferring` now: carrier `call.answered`
+  passes `from_=RINGING_PHASE`. Tests: `test_transfer.py` (fakes), `test_transfer_flow.py` (`inbound_flow` +
+  `flow.caller(..., transfer_target="{answer_after_ms: 500}")`, `flow.forwarder.wait_for(predicate)` +
+  `edge_app.state.processor.join()` to settle edge processing, `RecordingRuntime.end(timeout_s)` for long calls).
+  Time-skipping gotcha: cancelling a dispatched watch that is failing (`watch="fail"`) or completing wedges the test
+  server (`ACTIVITY_UNKNOWN`); deliver the decisive signals from the `dial` activity so the watch is never dispatched.

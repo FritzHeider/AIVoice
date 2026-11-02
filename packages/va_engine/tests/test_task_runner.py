@@ -223,6 +223,35 @@ async def test_transfer_to_the_default_number(sim: Sim) -> None:
     assert TransferRequest(target="x").kind == "transfer_call"
 
 
+async def test_a_failed_transfer_is_an_assistant_message_of_the_next_request(sim: Sim) -> None:
+    await sim.rules(
+        _rule(
+            "t", regex="human", respond="{tool_calls: [{name: transfer_call, arguments: {}}]}", call_index=0
+        )
+    )
+    brain = sim.brain(task_context(transfer_phone_number="+14155550133"))
+    await drain(brain.start())
+    await drain(brain.on_user_turn(user_turn(1, "a human please")))
+    brain.on_transfer_failed("   ")
+    brain.on_transfer_failed(" Sorry, nobody answered. ")
+    await drain(brain.on_user_turn(user_turn(2, "okay then")))
+    _, second = await sim.requests()
+    tail = [(m["role"], m.get("content")) for m in second["messages"][-3:]]
+    assert tail == [
+        ("tool", '{"status":"transferring"}'),
+        ("assistant", "Sorry, nobody answered."),
+        ("user", "okay then"),
+    ]
+
+
+async def test_a_failed_transfer_message_cut_by_a_barge_in_keeps_what_was_heard(sim: Sim) -> None:
+    brain = sim.brain(task_context(transfer_phone_number="+14155550133"))
+    await drain(brain.start())
+    brain.on_transfer_failed("Sorry, nobody answered. Anything else?")
+    await brain.on_interrupted("Sorry, nobody—")
+    assert (brain.messages[-1].role, brain.messages[-1].content) == ("assistant", "Sorry, nobody—")
+
+
 async def test_an_unresolvable_transfer_label_is_answered_and_the_model_retries(sim: Sim) -> None:
     await sim.rules(
         _rule(

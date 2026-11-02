@@ -1,5 +1,5 @@
 """The end-of-call routine of the media worker (specs/07-media-pipeline.md §18, §19; specs/05 §8, §9; specs/07
-§18 Decision P05-T11b).
+§18 Decisions P05-T11b and P05-T13).
 
 :class:`CallEnd` runs once per session, after the session race ended and before the session's cleanup
 releases the ownership lock and deletes the heartbeat (so the edge still sees an owner and leaves the call row
@@ -9,15 +9,20 @@ alone, specs/06 §5 Decision P05-T02 item 7). Steps, in order:
    timeout (``worker_lost``) neither records nor hangs up (``CallWorkflow`` does both); a closed media stream
    waits up to 3 s for the carrier's hangup (the carrier state hash first, then the call's carrier channel):
    hung up → ``max_duration`` (``hangup_cause`` ``time_limit``), ``transferred`` (call status
-   ``transferred``) or ``user_hangup``, without a hangup; not hung up → ``error`` and a hangup. Any other end
+   ``transferred``) or ``user_hangup``, without a hangup; not hung up → ``error`` and a hangup. A bridged
+   cold transfer (``transferred``) stops the media stream instead: the caller and the target are still
+   talking, so it neither records, hangs up, emits ``call.ended`` nor releases the slot (the edge records
+   ``completed``/``transferred`` on the primary hangup, ``CallWorkflow`` releases the slot). Any other end
    keeps its reason and hangs up.
 2. **Record** the end on the ``calls`` row in one tenant transaction (answered calls only, through
    :func:`va_db.call_end.record_answered_end`: a stored reason wins). A terminal call is left alone; an
    unanswered one is left to the workflow's cleanup.
 3. **Hang up** the primary leg (after the record, so the edge's hangup webhook finds ``end_reason`` set) with
    the workflow's ``command_id``, so Telnyx dedupes a second hangup.
+   After a bridged transfer ``streaming_stop`` (``command_id("streaming_stop", call_id, "primary")``) goes
+   out instead.
 4. **Events**: ``call.ended`` when this routine recorded the end, then the call's event rows are flushed.
-5. **Slot**: the org's concurrency slot is released (``ZREM``, idempotent).
+5. **Slot**: the org's concurrency slot is released (``ZREM``, idempotent), except after a transfer.
 6. **Signal** ``CallWorkflow.signal_pipeline_finished`` with the end reason.
 
 Every step logs its failure (error types only, never transcript text or numbers) and the next step still runs.
@@ -44,6 +49,7 @@ from va_db.call_states import END_REASONS, EndReason
 from va_db.models import Call
 from va_db.repositories import CallLegRepo, CallRepo, CallTransitionError
 from va_db.session import Database
+from va_domain.call_context import CallContext
 from va_domain.call_workflow import PipelineFinished
 from va_events import EventPublishError, call_ended_event
 from va_media.carrier_state import CarrierSnapshot, read_carrier_state
@@ -51,7 +57,7 @@ from va_media.channels import CallFeed
 from va_media.session import CallSession, SessionEnd
 from va_media.turns import CallFlusher, EventSink
 from va_media.workflow_signal import PipelineSignaller
-from va_telnyx import TelnyxClientFactory, UnknownTelnyxAccount
+from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.client_state import ClientState, command_id, encode
 from va_telnyx.errors import TelnyxError
 from va_voice.pipeline.waits import within
@@ -85,10 +91,15 @@ class ResolvedEnd:
     record: bool
     error_message: str | None = None
     carrier: bool = False
+    stop_stream: bool = False
+    release_slot: bool = True
 
 
 _WORKER_LOST: Final = ResolvedEnd("worker_lost", hang_up=False, record=False)
 _BODY_FAILED: Final = ResolvedEnd("error", hang_up=True, record=True, error_message=PIPELINE_FAILED_MESSAGE)
+_TRANSFERRED: Final = ResolvedEnd(
+    "transferred", hang_up=False, record=False, stop_stream=True, release_slot=False
+)
 _STREAM_LOST: Final = ResolvedEnd("error", hang_up=True, record=True, error_message=STREAM_LOST_MESSAGE)
 
 
@@ -115,6 +126,13 @@ async def _primary_hangup(feed: CallFeed) -> str:
         if event.type == HANGUP_EVENT and event.leg == "primary":
             cause = event.payload.get("hangup_cause")
             return cause if isinstance(cause, str) else ""
+
+
+_TELNYX_FAILURES: Final = (TelnyxError, UnknownTelnyxAccount, CryptoError, SQLAlchemyError, OSError)
+
+
+def _primary_state(context: CallContext) -> str:
+    return encode(ClientState(call_id=context.call_id, leg="primary", org_id=context.org_id))
 
 
 class CallEnd:
@@ -149,11 +167,14 @@ class CallEnd:
             recorded = await self._record(session, resolved, state)
         if resolved.hang_up:
             await self._hang_up(session)
+        if resolved.stop_stream:
+            await self._stop_stream(session)
         if recorded is not None:
             reason = recorded
             await self._publish_ended(session, recorded)
         await self._flush(session.call_id)
-        await self._release_slot(session)
+        if resolved.release_slot:
+            await self._release_slot(session)
         _log.info(
             "media.call_end", end_reason=reason, recorded=recorded is not None, hung_up=resolved.hang_up
         )
@@ -169,6 +190,8 @@ class CallEnd:
             return _BODY_FAILED
         if end.end_reason == "worker_lost":
             return _WORKER_LOST
+        if end.end_reason == "transferred":
+            return _TRANSFERRED
         if end.cause == "stream_closed":
             return await self._after_stream_closed(session.feed, state)
         return ResolvedEnd(_known_reason(end.end_reason), hang_up=True, record=True)
@@ -236,22 +259,49 @@ class CallEnd:
 
     async def _hang_up(self, session: CallSession) -> None:
         """Step 3; ``False`` from Telnyx (already ended) is fine."""
-        if self._telnyx is None:
-            _log.warning("media.hangup_unavailable")
+        client = await self._client(session, "media.hangup")
+        if client is None:
             return
         context = session.context
-        state = encode(ClientState(call_id=context.call_id, leg="primary", org_id=context.org_id))
         try:
-            client = await self._telnyx.for_account(context.config.telnyx_account_id)
             sent = await client.hangup(
                 session.start.call_control_id,
                 command_id=command_id("hangup", context.call_id, "primary"),
-                client_state=state,
+                client_state=_primary_state(context),
             )
-        except (TelnyxError, UnknownTelnyxAccount, CryptoError, SQLAlchemyError, OSError) as exc:
+        except _TELNYX_FAILURES as exc:
             _log.warning("media.hangup_failed", error_type=type(exc).__name__)
             return
         _log.info("media.hangup_sent", result="sent" if sent else "already_ended")
+
+    async def _stop_stream(self, session: CallSession) -> None:
+        """Step 3 after a bridged transfer: stop the primary leg's media stream (the call stays up)."""
+        client = await self._client(session, "media.streaming_stop")
+        if client is None:
+            return
+        context = session.context
+        try:
+            await client.streaming_stop(
+                session.start.call_control_id,
+                command_id=command_id("streaming_stop", context.call_id, "primary"),
+                client_state=_primary_state(context),
+            )
+        except _TELNYX_FAILURES as exc:
+            _log.warning("media.streaming_stop_failed", error_type=type(exc).__name__)
+            return
+        _log.info("media.streaming_stop_sent")
+
+    async def _client(self, session: CallSession, event_prefix: str) -> TelnyxClient | None:
+        """The call's Telnyx client; ``None`` (logged ``<prefix>_unavailable`` / ``<prefix>_failed``) without
+        a factory or when the account cannot be resolved."""
+        if self._telnyx is None:
+            _log.warning(f"{event_prefix}_unavailable")
+            return None
+        try:
+            return await self._telnyx.for_account(session.context.config.telnyx_account_id)
+        except _TELNYX_FAILURES as exc:
+            _log.warning(f"{event_prefix}_failed", error_type=type(exc).__name__)
+            return None
 
     async def _publish_ended(self, session: CallSession, reason: EndReason) -> None:
         if self._events is None:

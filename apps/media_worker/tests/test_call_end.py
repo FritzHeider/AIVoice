@@ -32,7 +32,7 @@ from va_media.channels import CallFeed
 from va_media.ownership import CallOwnership
 from va_media.session import OWNERSHIP_LOST, STREAM_CLOSED, CallSession, SessionEnd, StreamStart
 from va_telnyx import TelnyxClientFactory, UnknownTelnyxAccount
-from va_telnyx.client_state import command_id
+from va_telnyx.client_state import command_id, decode
 from va_telnyx.errors import TelnyxTransportError
 from va_telnyx.media import MediaFormat
 
@@ -52,11 +52,15 @@ class FakeTelnyx:
 
     fail: Exception | None = None
     already_ended: bool = False
+    account_failure: Exception | None = None
     hangups: list[tuple[str, str]] = field(default_factory=list)
+    stream_stops: list[tuple[str, str]] = field(default_factory=list)
     accounts: list[uuid.UUID | None] = field(default_factory=list)
 
     async def for_account(self, account_id: uuid.UUID | None) -> FakeTelnyx:
         self.accounts.append(account_id)
+        if self.account_failure is not None:
+            raise self.account_failure
         return self
 
     async def hangup(self, call_control_id: str, *, command_id: str, client_state: str | None = None) -> bool:
@@ -65,6 +69,13 @@ class FakeTelnyx:
             raise self.fail
         self.hangups.append((call_control_id, command_id))
         return not self.already_ended
+
+    async def streaming_stop(self, call_control_id: str, *, command_id: str, client_state: str) -> object:
+        assert decode(client_state).leg == "primary"
+        if self.fail is not None:
+            raise self.fail
+        self.stream_stops.append((call_control_id, command_id))
+        return None
 
 
 @dataclass
@@ -239,6 +250,46 @@ async def test_a_carrier_hangup_of_a_transferred_call_records_transferred(databa
         assert (call.status, call.end_reason) == ("completed", "transferred")
         assert call.transfer_seconds is not None
         assert r.telnyx.hangups == []
+
+
+async def test_a_bridged_transfer_stops_the_stream_and_leaves_the_call_up(database: Database) -> None:
+    async with rig(database, status="transferred") as r:
+        await r.finish(ended("transferred", "system"))
+        call = await load_call(database, r.call)
+        assert (call.status, call.end_reason) == ("transferred", None)
+        assert r.telnyx.stream_stops == [
+            (CONTROL_ID, command_id("streaming_stop", r.call.call_id, "primary"))
+        ]
+        assert r.telnyx.hangups == []
+        assert r.ended_events() == []
+        assert r.events.flushed == [r.call.call_id]
+        assert await r.slot_held()
+        assert r.signalled() == [("transferred", "system")]
+
+
+@pytest.mark.parametrize("no_telnyx", [False, True], ids=["fails", "no_factory"])
+async def test_a_failed_streaming_stop_is_logged_and_still_signalled(
+    database: Database, no_telnyx: bool
+) -> None:
+    stream = json_log_stream()
+    telnyx = FakeTelnyx(fail=TelnyxTransportError("streaming_stop", OSError("down")))
+    async with rig(database, status="transferred", telnyx=telnyx, no_telnyx=no_telnyx) as r:
+        await r.finish(ended("transferred", "system"))
+        assert r.signalled() == [("transferred", "system")]
+        assert r.telnyx.stream_stops == []
+    events = {e["event"] for e in log_events(stream)}
+    expected = "media.streaming_stop_unavailable" if no_telnyx else "media.streaming_stop_failed"
+    assert expected in events
+
+
+async def test_an_unresolvable_account_skips_the_streaming_stop(database: Database) -> None:
+    stream = json_log_stream()
+    telnyx = FakeTelnyx(account_failure=UnknownTelnyxAccount(uuid.UUID(int=9)))
+    async with rig(database, status="transferred", telnyx=telnyx) as r:
+        await r.finish(ended("transferred", "system"))
+        assert r.signalled() == [("transferred", "system")]
+    [failed] = [e for e in log_events(stream) if e["event"] == "media.streaming_stop_failed"]
+    assert failed["error_type"] == "UnknownTelnyxAccount"
 
 
 def hangup_event(r: Rig, *, leg: str = "primary", cause: str = "time_limit", event_id: str = "e-1") -> bytes:

@@ -51,9 +51,12 @@ type WorkflowEndReason = Literal[
     "worker_lost",
     "fax_detected",
     "max_duration",
+    "transferred",
 ]
 """The ``end_reason`` values ``CallWorkflow`` itself records (specs/05 §9); ``worker_lost`` after the media
-worker lost the call (ownership loss or drain timeout) without recording or hanging up."""
+worker lost the call (ownership loss or drain timeout) without recording or hanging up; ``transferred`` when
+the caller of a bridged cold transfer hung up and the edge has not recorded the end (specs/01 §2.1 Decision
+P05-T13)."""
 
 PRE_ANSWER_ONLY_REASONS: Final[frozenset[WorkflowEndReason]] = frozenset(
     {"canceled", "dispatch_blocked", "carrier_error"}

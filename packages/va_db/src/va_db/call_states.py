@@ -21,6 +21,7 @@ __all__ = [
     "DURATION_PRECISION",
     "END_REASONS",
     "LEG_TRANSITIONS",
+    "RINGING_PHASE",
     "STOPPABLE_STATUSES",
     "TERMINAL_STATUSES",
     "EndReason",
@@ -91,7 +92,9 @@ END_REASONS: Final[Mapping[EndReason, EndedBy]] = MappingProxyType(
 )
 """``end_reason`` → ``ended_by`` (specs/05 §9, in table order)."""
 
-_RINGING_PHASE: Final[frozenset[CallStatus]] = frozenset({"dialing", "ringing"})
+RINGING_PHASE: Final[frozenset[CallStatus]] = frozenset({"dialing", "ringing"})
+"""The statuses before the answer; the carrier's primary ``call.answered`` moves a call to ``in_progress``
+only from these."""
 
 CALL_TRANSITIONS: Final[Mapping[CallStatus, frozenset[CallStatus]]] = MappingProxyType(
     {
@@ -100,14 +103,15 @@ CALL_TRANSITIONS: Final[Mapping[CallStatus, frozenset[CallStatus]]] = MappingPro
         "dialing": frozenset({"queued"}),
         "ringing": frozenset({"dialing"}),
         # ``dialing`` too: Telnyx may deliver ``call.answered`` before ``call.initiated``.
-        "in_progress": _RINGING_PHASE,
+        # ``transferring`` too: a failed cold transfer resumes the call (specs/05 §8 Decision P05-T13).
+        "in_progress": RINGING_PHASE | {"transferring"},
         "transferring": frozenset({"in_progress"}),
         "transferred": frozenset({"transferring"}),
         "completed": frozenset({"in_progress", "transferring", "transferred"}),
         # ``scheduled`` too: its workflow could not be started (specs/05 §5 Decision P05-T05b).
         "failed": frozenset({"scheduled", "queued", "dialing", "ringing"}),
-        "no_answer": _RINGING_PHASE,
-        "busy": _RINGING_PHASE,
+        "no_answer": RINGING_PHASE,
+        "busy": RINGING_PHASE,
         "canceled": frozenset({"scheduled", "queued", "dialing", "ringing"}),
     }
 )

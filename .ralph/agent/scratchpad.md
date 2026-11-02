@@ -1910,3 +1910,195 @@ Gates re-run: make lint/typecheck/placeholders 0; check_spec_refs 0; jscpd 0 clo
 7 skipped, 99 %, exit 0 (logs/review_p05t12d.log); maintenance.py 100 %. Diff matches plan; the 800 ms → 3 s
 answer-metric deviation is recorded in specs/30 Decision (harness in P05-T17 measures the real target). Ticked
 P05-T12d and parent P05-T12.
+
+## Plan P05-T13 — Cold transfer (Planner, 2026-11-02)
+Spec refs: specs/06 §10.1 (sequence), §5/§5.1 (edge mapping of transfer_target legs, already done in P05-T02),
+specs/01 §2.3, specs/05 (transfer_phone_number/transfer_list, §8 status machine, §9 `transferred`), specs/07 §16/§17/§18,
+specs/27 (span `call.transfer`, attr `va.transfer.type`), org settings `transfer_caller_id_mode`/`transfer_failed_message`
+(`va_domain.org`). Already in place: TaskBrain yields `SpeakText(message, interruptible=False)` then
+`TransferRequest(target, label, message)` (va_engine.task_runner `_finish`); `Speaker.speak` returns only after playback
+(mark echo) so §10.1 step 1 is satisfied by the reply order; edge maps target-leg `call.bridged` → call `transferred`,
+`transferred_to`, `call.transferred` event, carrier_state `transfer_started_at`, and target `call.hangup` →
+carrier_state `transfer_target_hangup` (both published on the carrier channel with `leg="transfer_target"`); edge
+primary hangup on a `transferred` call with no owner records `completed`/`transferred` + connected/transfer seconds;
+FakeTelnyx `transfer` dials a leg with `target_leg_client_state` driven by scenario `transfer_target`.
+
+### Design (decided — do not re-litigate)
+1. **Stream kept while the target rings (spec deviation, Decision).** §10.1 step 4 stops the stream before the bridge and
+   restarts it on failure; a restarted stream is a NEW media WebSocket attach (4421 owner conflict, audible gap). We keep
+   the primary stream during the ring (the pipeline is blocked in the shielded action: no replies, no-input timer
+   disarmed via `_action`), and stop it only after `call.bridged` (step 5) from the end routine. On failure nothing
+   restarts. `stream_post_transfer_transcript=true` behaves like false until P12-T08 (listen stream) — log
+   `media.post_transfer_transcript_deferred` once. `call.transferred` is emitted by the edge only (§19 table says edge;
+   the media worker does not duplicate it). Control messages `transfer`/`takeover` stay unacknowledged (they need the
+   control endpoint; `ColdTransfer.run` is the reusable entry point) — say so in the Decision.
+2. **`va_db.call_states`**: `"in_progress": _RINGING_PHASE | {"transferring"}` (§10.1 step 6 failure revert); export
+   `RINGING_PHASE` (rename `_RINGING_PHASE`, keep usages). Edge `va_edge/carrier.py::_apply_call`: when
+   `change.to == "in_progress"` pass `from_=RINGING_PHASE` so a late/duplicate primary `call.answered` can never revert
+   a `transferring` call. specs/05 §8 Decision line: `transferring → in_progress` on a failed transfer.
+3. **New module `apps/media_worker/src/va_media/transfer.py`**:
+   - `TRANSFER_TIMEOUT_S: Final = 30` (Telnyx `timeout_secs`), `TRANSFER_OUTCOME_GRACE_S: Final = 10.0`,
+     `MIN_TIME_LIMIT_S: Final = 30`, `DEFAULT_TRANSFER_FAILED_MESSAGE` comes from `OrgSettings` default (do not copy).
+   - `def transfer_caller_id(context: CallContext, mode: Literal["agent_number","original_caller"]) -> str`:
+     agent_number → outbound `from_number`, inbound/web `to_number`; original_caller → outbound `to_number`, inbound/web
+     `from_number` (the party being transferred). Decision text.
+   - `def time_limit_s(deadline: datetime, now: datetime) -> int`: `max(MIN_TIME_LIMIT_S, ceil((deadline-now).s))`, capped
+     14 400.
+   - `type TransferOutcome = Literal["bridged", "target_hangup", "timeout", "command_failed", "not_active"]`.
+   - `class TransferStatusWriter(Protocol)`: `async def start(call_id) -> bool` (in_progress → transferring; False when
+     the call is not `in_progress`) and `async def revert(call_id) -> None` (transferring → in_progress; a
+     `CallTransitionError` is logged `media.transfer_revert_skipped`). `DbTransferStatus(database, org_id)` implements it
+     with `CallRepo.transition(..., from_={"in_progress"})` / `from_={"transferring"}` in `tenant_session(org_id)`.
+   - `class ColdTransfer` (keyword-only): `context`, `call_control_id`, `telnyx: TransferClient | None` (Protocol with
+     `transfer(ccid, TransferRequest) -> CommandResult`), `watch: CarrierWatch`, `status: TransferStatusWriter | None`,
+     `events: VoicemailEvents-like EventSink | None` (reuse `va_media.voicemail.VoicemailEvents` protocol or move it to a
+     shared `va_media.events_sink` protocol if the name reads wrong — no clone), `caller_id_mode`, `deadline: datetime`,
+     `clock`, `tracer_provider: TracerProvider | None = None`.
+     `async def run(self, target: str) -> TransferOutcome` (n = per-call counter):
+       a. telnyx None → `command_failed` (log `media.transfer_skipped detail=telnyx_unavailable`), no status change;
+       b. `status.start` False → `not_active` (log), nothing sent;
+       c. publish `call.transfer_started` (`data={"type":"cold","target":target}`, message e.g. "Transfer started.";
+          publish failure logged, never raised);
+       d. drain stale events from `watch.transfer_events` (get_nowait loop), then
+          `telnyx.transfer(ccid, TransferRequest(to=target, from_=transfer_caller_id(...), timeout_secs=30,
+          time_limit_secs=time_limit_s(deadline, clock.now()), target_leg_client_state=encode(ClientState(call_id,
+          "transfer_target", org_id)), client_state=encode(ClientState(call_id, "primary", org_id)),
+          command_id=command_id("transfer", call_id, "primary", n)))`; `TelnyxError` → revert, `command_failed`;
+       e. wait (bounded by `within(..., clock, TRANSFER_TIMEOUT_S + TRANSFER_OUTCOME_GRACE_S)`) on
+          `watch.transfer_events`: `call.bridged` → `bridged`; `call.hangup` → revert, `target_hangup`; other types
+          ignored; timeout → revert, `timeout`.
+       Span `call.transfer` (`va.transfer.type="cold"`, `va.transfer.outcome`). Never log the target number or caller id
+       (log `outcome`, `attempt`). Counter `transfers` property.
+4. **`CarrierWatch`** (`va_media/carrier_watch.py`): add `self.transfer_events: asyncio.Queue[CarrierEvent]`; in `run`,
+   events with `leg == "transfer_target"` are `put_nowait` there (primary handling unchanged). Docstring update.
+5. **`MediaActions`** (`va_media/actions.py`): new keyword `transfer: ColdTransfer | None = None`,
+   `on_transferred: Callable[[], None] | None`, `on_transfer_failed: Callable[[], None] | None`. `handle(TransferRequest)`:
+   transfer None → log `media.transfer_unavailable` and call `on_transfer_failed`; else `outcome = await
+   transfer.run(action.target)`; `bridged` → `on_transferred()`; `not_active` → nothing; anything else →
+   `on_transfer_failed()`. Update the module docstring (no more "until P05-T13").
+6. **Pipeline seam `CallPipeline.say(text: str) -> bool`** (`packages/va_voice/src/va_voice/pipeline/pipeline.py`): sync;
+   False when closing or blank; else queues `_SayJob(text)` (new dataclass next to `_ResumeJob`, added to `_Job`);
+   `_run_job` → `_run_reply(_single(SpeakStatic(text, interruptible=True)), None, None)`. Document in the specs/07 §16
+   Decision (also the future control `say`). Harness test.
+7. **`TaskBrain.on_transfer_failed(spoken: str) -> None`** (va_engine/task_runner.py): appends
+   `ChatMessage(role="assistant", content=spoken)` to the history (via `_append`) so the next LLM request knows the
+   transfer failed; the earlier tool result stays `transferring`.
+8. **Runtime wiring** (`va_media/runtime.py::_converse`): build `brain` as a local, `ColdTransfer(context=,
+   call_control_id=, telnyx=telnyx, watch=watch, status=DbTransferStatus(...) if database else None, events=persistence
+   events or None, caller_id_mode=org.transfer_caller_id_mode, deadline=(session.carrier_state.answered_at or
+   clock.now()) + timedelta(minutes=context.config.max_duration_min), clock=...)`; `on_transferred = lambda:
+   pipeline.take_over(Takeover(reason="transferred"))` (no text: the takeover loop ends at once; log when it returns
+   False); `on_transfer_failed`: `brain.on_transfer_failed(msg); pipeline.say(msg)` with `msg = org.transfer_failed_message`
+   (render nothing; static). The callbacks need `pipeline`, so create MediaActions first and bind the callbacks after
+   the pipeline exists (e.g. `actions.bind(on_transferred=..., on_transfer_failed=...)`, mirroring
+   `VoicemailMonitor.bind`). Runtime docstring step 9.
+9. **End routine** (`va_media/call_end.py`): `ResolvedEnd` gains `stop_stream: bool = False`, `release_slot: bool = True`;
+   `resolve`: `end.end_reason == "transferred"` → `_TRANSFERRED = ResolvedEnd("transferred", hang_up=False,
+   record=False, stop_stream=True, release_slot=False)` (the call is still up between caller and target; the edge records
+   `completed`/`transferred` on the primary hangup, the workflow releases the slot). New step `_stop_stream(session)`:
+   `client.streaming_stop(ccid, command_id=command_id("streaming_stop", call_id, "primary"), client_state=primary
+   state)`, failures logged `media.streaming_stop_failed` (same exception tuple as hangup). No `call.ended`. Signal
+   `pipeline_finished(transferred, system)`. Update the module docstring + specs/07 §18 Decision line. `session_end`
+   already maps `transferred` (in END_REASONS) → `SessionEnd("ended","transferred","system")` — verify.
+10. **CallWorkflow** (`va_workflows/calls/call_workflow.py`): `WorkflowEndReason` gains `"transferred"`
+    (telephony_inputs.py; check `end_call` accepts it for answered calls). `_converse` passes `deadline` to
+    `_after_pipeline(deadline)`; for `end_reason == "transferred"`: `self._phase = "transferred"`, wait
+    `self._wait_for(lambda: signals.hung_up, deadline - workflow.now())` (only primary-leg hangups count already);
+    hung up → `_cleanup("completed", "transferred")` (no-op on a call the edge already completed, releases the slot);
+    deadline passed → `_end_and_hangup("completed", "max_duration", "max_duration")`. Update specs/01 §2.1 Decision
+    (transferred phase) and the module docstring.
+11. **Spec Decisions (same commit)**: specs/06 §10.1 `> Decision (2026-11-02): cold transfer (P05-T13)` covering items
+    1, 3 (caller id modes, time limit floor 30 s, command ids, 40 s outcome wait, outcomes), 5, 8, 9, 10;
+    specs/05 §8 (failure revert); specs/07 §16 (say seam, action callbacks) / §18 (transferred end); specs/01 §2.1.
+
+### Tests (all must exist and pass)
+- `packages/va_db/tests/test_call_states.py` (extend): `transferring → in_progress` allowed; `RINGING_PHASE` exported.
+- `apps/telephony_edge/tests/...` (extend the carrier/mapping DB test that applies `call.answered`): a primary
+  `call.answered` on a `transferring` call leaves it `transferring` (transition skipped).
+- `apps/media_worker/tests/test_transfer.py` (unit, fakes; ManualClock or FrozenClock + `wait_for_sleep`):
+  `transfer_caller_id` 4 combos (+web); `time_limit_s` floor 30, ceil, cap; `ColdTransfer.run`: bridged (status start
+  called, event `call.transfer_started` data `{"type":"cold","target":...}`, TransferRequest fields: to, from per mode,
+  timeout 30, time_limit, target_leg_client_state decodes to leg `transfer_target`, command_id
+  `transfer-<call>-primary-0`, second run uses `-1`); target hangup → revert + `target_hangup`; timeout (no event) →
+  revert + `timeout` after 40 s; TelnyxError → revert + `command_failed`; status start False → `not_active`, nothing
+  sent; telnyx None → `command_failed`, no status call; stale queue events drained before sending; span
+  `call.transfer` with outcome attribute; logs never contain the target number.
+- `apps/media_worker/tests/test_carrier_watch*` (extend existing carrier watch tests, wherever they live): a
+  `transfer_target` event lands in `transfer_events` and does not set `answered`.
+- `apps/media_worker/tests/test_actions*` / `test_outbound_dtmf.py` area: `MediaActions` routes `TransferRequest` →
+  `on_transferred` on bridged, `on_transfer_failed` on failure / no transfer configured, nothing on `not_active`.
+- `apps/media_worker/tests/test_call_end.py` (extend): a `transferred` session end → `streaming_stop` sent with
+  `command_id streaming_stop-<call>-primary`, no hangup, no record (row stays `transferred`), slot NOT released, no
+  `call.ended`, signaller got `transferred`; streaming_stop failure logged and the signal still sent.
+- `packages/va_voice/tests/...pipeline` (harness): `pipeline.say(text)` speaks the text as an agent turn after the
+  current reply; returns False after a takeover/closing and for blank text.
+- `packages/va_engine/tests/test_task_runner*.py`: after `on_transfer_failed("…")` the next LLM request's messages end
+  with that assistant message before the new user turn.
+- `packages/va_workflows/tests/test_call_workflow*.py` (new `test_call_workflow_transfer.py` with the workflow rig):
+  pipeline_finished(transferred) then a primary `call.hangup` signal → `end_call("transferred")`, NO `hangup_call`,
+  outcome completed; pipeline_finished(transferred) and no hangup until the deadline → end_call `max_duration` +
+  `hangup_call` (assert TIMER/history, not wall time — see the P05-T12c flake lesson); a `transfer_target` hangup signal
+  does not count as hung up.
+- `apps/media_worker/tests/test_transfer_flow.py` (in-process, `inbound_flow(media_db_url)`; extend
+  `support/inbound_flow.InboundFlow.caller(*steps, transfer_target: str | None = None)` to append a YAML
+  `transfer_target:` block): number `inbound_config` with `transfer_phone_number` = a random +1 E.164 and a FakeLLM rule
+  replying with a `transfer_call` tool call (`{"message": "Connecting you now."}`) on the caller's line
+  (`call_index` 0), plain text reply on later requests.
+  a. `test_a_cold_transfer_bridges_and_bills_transfer_seconds`: target answers (`answer_after_ms: 500`, steps that
+     say a line, wait, `hangup`; verify how FakeTelnyx propagates a bridged leg's hangup to the primary — if it does
+     not, end the call via the sim's hangup of the primary leg). Assert: FakeTelnyx saw `transfer` (command names) and
+     later `streaming_stop`, no media `hangup` command; the transfer leg's `to` = the configured number
+     (`sim_call.transfers` / `TransferEntry`); "Connecting you now." in TTS generated_text; call row ends
+     `completed`, `end_reason == "transferred"`, `ended_by == "system"`, `transferred_to` set, `transfer_seconds > 0`,
+     `connected_seconds > 0`; `call.transfer_started` row/event exists; signaller got `pipeline_finished` with
+     `transferred`.
+  b. `test_a_failed_cold_transfer_resumes_the_conversation`: `transfer_target: {result: busy}` → call back to
+     `in_progress`, the org's `transfer_failed_message` default is spoken (TTS generated_text), FakeLLM's next request
+     contains it as an assistant message after the caller's next line, the caller hangs up → `completed`/`user_hangup`,
+     `transfer_seconds` null/0.
+  Bounded waits only (`asyncio.timeout` on events), no sleeps; one call per test.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in background
+(`make test > logs/make_test_p05t13.log 2>&1`) + heartbeat Monitor; `va_media/transfer.py` 100 %; jscpd 0 clones
+(`npx --yes jscpd@4 --silent`); `uvx radon cc -s -n C` on touched src empty; `uvx pip-audit` + `corepack pnpm audit`.
+`make e2e`: docker harness lands in P05-T17 (the e2e `cold_transfer` flow is listed for it) — say so; the in-process
+`test_transfer_flow.py` is the evidence. AGENTS.md line: cold transfer pieces + flow test helpers.
+
+### Risks
+- Edge transfer-leg attribution relies on `target_leg_client_state` (client_state leg `transfer_target`); verify the edge
+  resolves the target leg's `call.initiated`/`call.bridged` from it (leg row recorded by `record_initiated`).
+- Takeover with no text inside the shielded action: `take_over` cancels the reply; the action must return right after
+  `on_transferred()` (the pipeline end cancels a still-running action).
+- Caller script on the primary stops when the stream stops (`streaming_stop`): end the bridged call from the target
+  script or the sim's hangup control; keep everything on wall clocks (call_events partitions).
+- `in_progress` gaining `transferring` as a source must not let the edge revert a transfer (item 2 + test).
+- Workflow deadline wait: assert from history (TIMER_STARTED) to avoid the P05-T12c schedule-time flake.
+
+## Build P05-T13 (Builder, 2026-11-02)
+Implemented the plan. Deviations from the plan text, all deliberate:
+- `ColdTransfer` takes `transfer_events: asyncio.Queue[CarrierEvent]` (the watch's queue) instead of the whole
+  `CarrierWatch`; `TransferStatusWriter.start` returns `StatusStart` = `started | not_active | unavailable`
+  (a DB failure → `command_failed`, so the failed message is spoken instead of silence). Events use the existing
+  `va_media.turns.EventSink` protocol (no new protocol, no clone).
+- `CallEnd` now shares `_client(session, prefix)` for hangup + streaming_stop (log names unchanged:
+  `media.hangup_unavailable`/`media.hangup_failed`; new `media.streaming_stop_*`).
+- Workflow backstop test delivers TRANSFERRED from the `dial` activity: cancelling a dispatched failing/completing
+  watch wedges the time-skipping server (`ACTIVITY_UNKNOWN`) — recorded in AGENTS.md.
+- Flow tests end the bridged call with a FakeTelnyx `hangup` command on the primary leg (no target steps: the target
+  script would run on the primary stream, which `streaming_stop` ends). Edge settling: `EdgeForwarder.wait_for` +
+  `processor.join()`. `RecordingRuntime.end(timeout_s)` (the failed-transfer call talks ~25 s).
+- `call_events` rows have no type column: flow tests assert `transfer` category rows `[{"type":"cold","target"},{}]`.
+Gates: fmt/lint/typecheck/placeholders pass; spec refs 0; jscpd 0 clones; radon -n C empty (transfer.py avg A 2.33);
+pip-audit no known vulns; pnpm audit 3 moderate (< high). `make e2e`: no `tests_e2e/` until P05-T17 (cold_transfer
+flow listed there); evidence = `apps/media_worker/tests/test_transfer_flow.py` (2 passed).
+`make test`: 10332 passed, 7 skipped, coverage 99.12% (exit 0). After it: added `test_transfer_status_db.py`
+(DbTransferStatus on Postgres + broken DB) and a streaming_stop account-failure test → `va_media/transfer.py` 100%;
+re-ran lint/typecheck/placeholders (pass) and `apps/media_worker/tests` (437 passed).
+
+## Review P05-T13 (Reviewer, 2026-11-02) — APPROVED
+Re-ran: lint/typecheck/placeholders pass, spec refs 0, make test 10336 passed / 7 skipped, coverage 99.15%
+(va_media/transfer.py 100%). Diff checked against specs/06 §10.1, §05 §8, §07 §16/§18, §01 §2.1 Decisions: guarded
+transitions (edge in_progress only from RINGING_PHASE), command_id/client_state on transfer + streaming_stop, target
+never logged, no slot release/hangup after a bridge, workflow waits for primary hangup with max_duration backstop.
+post_transfer_transcript deferred to P12-T08 (documented). Docker e2e cold_transfer belongs to P05-T17.

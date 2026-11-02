@@ -1,5 +1,5 @@
 """Carrier facts of an attached call for the pipeline (specs/07-media-pipeline.md §11 steps 1-2, §14;
-Decisions P05-T10b and P05-T10c).
+Decisions P05-T10b, P05-T10c and specs/06 §10.1 Decision P05-T13).
 
 :class:`CarrierWatch` combines the carrier state snapshot read at attach with the carrier events published to
 the call's channel afterwards (only events of the ``primary`` leg count):
@@ -11,7 +11,9 @@ the call's channel afterwards (only events of the ``primary`` leg count):
   ``call.machine.premium.detection.ended`` event; :attr:`CarrierWatch.on_verdict` is called once with it;
 - :attr:`CarrierWatch.beep` is set by the snapshot's ``beep_detected`` / ``greeting_ended`` fields or a
   ``call.machine.premium.greeting.ended`` / ``call.machine.greeting.ended`` event (the voicemail message cue);
-- ``call.machine.premium.call_screening.detected`` is logged and treated as a human (the opener proceeds).
+- ``call.machine.premium.call_screening.detected`` is logged and treated as a human (the opener proceeds);
+- events of the ``transfer_target`` leg go to :attr:`CarrierWatch.transfer_events`, where a running
+  :class:`~va_media.transfer.ColdTransfer` waits for the bridge or the target's hangup (Decision P05-T13).
 
 :meth:`CarrierWatch.run` is the only reader of the feed's carrier queue (run it as a task next to the
 pipeline); other event types are counted and left for later handlers.
@@ -60,6 +62,7 @@ class CarrierWatch:
         self.verdict: AmdVerdict | None = None
         self.on_verdict: Callable[[AmdVerdict], None] | None = None
         self.events_seen = 0
+        self.transfer_events: asyncio.Queue[CarrierEvent] = asyncio.Queue()
         if snapshot.answered:
             self.answered.set()
         fields = snapshot.fields
@@ -77,6 +80,8 @@ class CarrierWatch:
             self.events_seen += 1
             if event.leg == "primary":
                 self._on_primary(event)
+            elif event.leg == "transfer_target":
+                self.transfer_events.put_nowait(event)
 
     def _on_primary(self, event: CarrierEvent) -> None:
         if event.type == ANSWERED_EVENT:

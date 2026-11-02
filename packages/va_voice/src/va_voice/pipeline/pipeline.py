@@ -136,6 +136,13 @@ class _ResumeJob:
 
 
 @dataclass(frozen=True, slots=True)
+class _SayJob:
+    """Speak a static line the call's runtime asked for (:meth:`CallPipeline.say`)."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class _NoInputJob:
     """Speak a reprompt (§12)."""
 
@@ -145,7 +152,7 @@ class _GoodbyeJob:
     """Say ``no_input_goodbye`` and end with ``no_input_timeout`` (§12)."""
 
 
-type _Job = _TurnJob | _ResumeJob | _NoInputJob | _GoodbyeJob
+type _Job = _TurnJob | _ResumeJob | _SayJob | _NoInputJob | _GoodbyeJob
 
 
 def default_context_id(index: int) -> str:
@@ -687,6 +694,8 @@ class CallPipeline:
             await self._run_reply(self._brain.on_user_turn(job.turn), job.timer, job.turn)
         elif isinstance(job, _ResumeJob):
             await self._run_reply(_single(SpeakStatic(job.text, interruptible=True)), None, None, resume=True)
+        elif isinstance(job, _SayJob):
+            await self._run_reply(_single(SpeakStatic(job.text, interruptible=True)), None, None)
         elif isinstance(job, _NoInputJob):
             await self._run_reply(self._no_input_outputs(), None, None)
         else:
@@ -811,6 +820,17 @@ class CallPipeline:
         if remaining_ms > 0:
             await self._clock.sleep(remaining_ms / _MS_PER_SECOND)
         raise self._ended("max_duration")
+
+    # runtime lines (§16)
+
+    def say(self, text: str) -> bool:
+        """Queue ``text`` as an interruptible agent line after the current reply (and action) finished
+        (specs/07 §16 Decision P05-T13: the transfer-failed message); ``False`` when ``text`` is blank or the
+        pipeline is ending. Sync, so an action handler may call it while its action still runs."""
+        if not text.strip() or self._closing or self._end_reason is not None:
+            return False
+        self._jobs.put_nowait(_SayJob(text.strip()))
+        return True
 
     # takeover (§14)
 

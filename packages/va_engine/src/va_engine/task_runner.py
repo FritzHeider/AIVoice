@@ -250,6 +250,14 @@ class TaskBrain:
         self._spoken = None
         self._spoken_record = None
 
+    def on_transfer_failed(self, spoken: str) -> None:
+        """The transfer the last reply asked for failed and the media worker says ``spoken`` instead: keep it
+        as an assistant message (the earlier tool result stays ``transferring``), so the next request knows
+        (specs/06 §10.1 Decision P05-T13). A barge-in on it trims it like any spoken line."""
+        text = spoken.strip()
+        if text:
+            self._mark_spoken(self._append(ChatMessage(role="assistant", content=text)))
+
     def timing(self) -> BrainTiming:
         return BrainTiming()
 

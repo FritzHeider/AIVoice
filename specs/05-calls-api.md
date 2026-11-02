@@ -750,6 +750,12 @@ retries are therefore no-ops). Bland status mapping in the Call Object: `no_answ
 > records workflow-decided ends (`canceled`, `dispatch_blocked`, `carrier_error`, `error`, `worker_crash`,
 > `fax_detected`, `max_duration`). Rules: specs/06 §6 Decision P05-T06b.
 
+> Decision (2026-11-02): `transferring` → `in_progress` (P05-T13): a failed cold transfer (target hangup, timeout,
+> refused command) moves the call back to `in_progress` and the conversation resumes (specs/06 §10.1 Decision
+> P05-T13). The carrier's primary `call.answered` enters `in_progress` only from `dialing`/`ringing`
+> (`va_db.call_states.RINGING_PHASE`), so it never reverts a transfer. `end_call` may also record `transferred`
+> (the caller of a bridged transfer hung up and the edge had not recorded the end).
+
 ## 9. `end_reason` enumeration (normative; referenced by other specs)
 
 | `end_reason` | `ended_by` | Bland `call_ended_by` | Meaning |

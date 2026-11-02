@@ -11,14 +11,16 @@ recorded. The media worker signals ``CallWorkflow`` through a :class:`media_help
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
+import orjson
 from accept_helpers import add_default_voice
 from billing_rows import new_billing_org
 from edge_helpers import DbContainer, edge_settings
@@ -60,6 +62,17 @@ class EdgeForwarder(RecordingTransport):
         super().__init__()
         self.edge: httpx.AsyncClient | None = None
         self.statuses: list[int] = []
+        self._forwarded = asyncio.Condition()
+        self._documents: list[dict[str, Any]] = []
+
+    async def wait_for(self, predicate: Callable[[list[dict[str, Any]]], bool]) -> None:
+        """Until ``predicate`` holds for the ``data`` documents of the webhooks the edge answered (woken by
+        every forwarded webhook, no polling)."""
+        async with self._forwarded:
+            await self._forwarded.wait_for(lambda: predicate(self.forwarded()))
+
+    def forwarded(self) -> list[dict[str, Any]]:
+        return list(self._documents)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         recorded = await super().handle_async_request(request)
@@ -69,6 +82,9 @@ class EdgeForwarder(RecordingTransport):
         path = "/telnyx/messaging" if "/messaging" in item.url else "/telnyx/voice"
         forwarded = await self.edge.post(path, content=item.body, headers=dict(item.headers))
         self.statuses.append(forwarded.status_code)
+        self._documents.append(orjson.loads(item.body)["data"])
+        async with self._forwarded:
+            self._forwarded.notify_all()
         return httpx.Response(forwarded.status_code)
 
 
@@ -101,10 +117,13 @@ class InboundFlow:
     async def number(self, org_id: uuid.UUID, inbound_config: dict[str, Any]) -> str:
         return await own_number(self.database, self.state, org_id, inbound_config, connection_id=self.app_id)
 
-    def caller(self, *steps: str) -> str:
-        """An inbound caller scenario (bound to :data:`CALLER`); its id."""
+    def caller(self, *steps: str, transfer_target: str | None = None) -> str:
+        """An inbound caller scenario (bound to :data:`CALLER`; ``transfer_target``: a YAML flow mapping for
+        the legs the call is transferred to); its id."""
         text = f'id: in-{secrets.token_hex(4)}\nmatch: {{inbound_from: "{CALLER}"}}\nsteps:\n'
         text += "".join(f"  - {step}\n" for step in steps)
+        if transfer_target is not None:
+            text += f"transfer_target: {transfer_target}\n"
         return register(self.state, text)
 
     async def ring(self, to: str, scenario_id: str) -> str:

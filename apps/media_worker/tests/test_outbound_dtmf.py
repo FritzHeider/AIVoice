@@ -19,7 +19,7 @@ from service_helpers import json_log_stream, log_events
 from va_common.time import utcnow
 from va_domain.call_context import CallContext
 from va_domain.carrier import CarrierEvent, CarrierLeg
-from va_engine.models.results import PressButton, TransferRequest
+from va_engine.models.results import PressButton
 from va_media.actions import MediaActions
 from va_media.carrier_state import CarrierSnapshot
 from va_media.carrier_watch import CarrierWatch
@@ -28,6 +28,7 @@ from va_media.dtmf_out import DTMF_LONG_PAUSE_S, DTMF_PAUSE_S, dtmf_steps, send_
 from va_media.greeting import AMD_WAIT_S, ANSWER_WAIT_S, PRECALL_SETTLE_S, GreetingGate
 from va_telnyx.client_state import command_id
 from va_telnyx.errors import TelnyxApiError, TelnyxTransportError
+from va_voice.pipeline import BrainAction
 
 CCID = "v3:call-control-id"
 
@@ -305,12 +306,12 @@ async def test_presses_without_telnyx_and_other_actions_send_nothing() -> None:
     stream = json_log_stream()
     actions, sender, _, _ = actions_rig(telnyx=False)
     await actions.handle(PressButton(digits="1"))
-    await actions.handle(TransferRequest(target="+14155550123"))
+    await actions.handle(BrainAction("hold"))
     assert sender.sent == []
     events = log_events(stream)
     assert "media.press_button_skipped" in [e["event"] for e in events]
     [unsupported] = [e for e in events if e["event"] == "media.action_unsupported"]
-    assert unsupported["kind"] == "transfer_call"
+    assert unsupported["kind"] == "hold"
 
 
 # AMD (specs/07 §11 step 2, §14; Decision P05-T10c)

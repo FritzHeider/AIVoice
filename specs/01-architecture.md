@@ -194,6 +194,12 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    > `end_call(error, "The inbound call was not answered in time.")` + `hangup_call("answer_backstop")`), then
    > steps (d)-(f) of the outbound flow apply unchanged with the input's `max_duration_s` as the backstop base.
    > `schedule_retry_call` never retries an inbound call (skip reason `not_outbound`).
+   > Decision (2026-11-02): CallWorkflow after a cold transfer (P05-T13). `pipeline_finished` with
+   > `end_reason='transferred'` means the call is still up between the caller and the target: the workflow
+   > enters phase `transferred` and waits for the primary leg's `call.hangup` signal (other legs never count)
+   > until the same `max_duration + 120 s` backstop; the hangup → `end_call(transferred)` (a no-op apart from the
+   > slot release when the edge already recorded `completed`/`transferred`), no `hangup_call`; the backstop →
+   > `end_call(max_duration)` + `hangup_call("max_duration")`.
 
 ### 2.3 Transfers
 

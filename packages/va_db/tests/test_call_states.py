@@ -15,6 +15,7 @@ from va_db.call_states import (
     CALL_TRANSITIONS,
     END_REASONS,
     LEG_TRANSITIONS,
+    RINGING_PHASE,
     STOPPABLE_STATUSES,
     TERMINAL_STATUSES,
     EndReason,
@@ -60,6 +61,9 @@ REORDER_EDGES: frozenset[tuple[CallStatus, CallStatus]] = frozenset(
 )
 """The carrier-reorder tolerance added by the §8 Decision P05-T02."""
 
+TRANSFER_EDGES: frozenset[tuple[CallStatus, CallStatus]] = frozenset({("transferring", "in_progress")})
+"""A failed cold transfer resumes the conversation (specs/05 §8 Decision P05-T13)."""
+
 DISPATCH_EDGES: frozenset[tuple[CallStatus, CallStatus]] = frozenset({("scheduled", "failed")})
 """A scheduled call whose workflow could not be started (specs/05 §5 Decision P05-T05b)."""
 
@@ -79,8 +83,13 @@ def test_end_reasons_equal_the_spec_table_in_order() -> None:
 
 @pytest.mark.parametrize(("source", "target"), list(itertools.product(get_args(CallStatus), repeat=2)))
 def test_call_transition_matrix(source: CallStatus, target: CallStatus) -> None:
-    allowed = (source, target) in DIAGRAM_EDGES | REORDER_EDGES | DISPATCH_EDGES
+    allowed = (source, target) in DIAGRAM_EDGES | REORDER_EDGES | DISPATCH_EDGES | TRANSFER_EDGES
     assert (source in allowed_from(target)) is allowed
+
+
+def test_the_ringing_phase_is_every_pre_answer_source_of_in_progress() -> None:
+    assert frozenset({"dialing", "ringing"}) == RINGING_PHASE
+    assert allowed_from("in_progress") - RINGING_PHASE == {"transferring"}
 
 
 def test_terminal_statuses_have_no_outgoing_transition() -> None:

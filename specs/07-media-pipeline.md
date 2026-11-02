@@ -812,6 +812,15 @@ class ConversationEngine(Protocol):
 > `org_tier="unknown"` until the call context carries the plan id. Hangup, persistence and events stay with the
 > end-of-call routine of P05-T11.
 
+> Decision (2026-11-02): runtime lines and transfer callbacks (P05-T13). `CallPipeline.say(text) -> bool` is a
+> sync seam that queues `text` as an interruptible static agent line after the current reply and its action
+> finished (`False` for blank text or a closing pipeline); the future control `say` message reuses it.
+> `MediaActions(transfer=ColdTransfer)` runs `transfer_call`; the runtime binds its outcome callbacks once the
+> pipeline exists (`MediaActions.bind`): `bridged` → `pipeline.take_over(Takeover("transferred"))` (no message;
+> the action returns right after and the pipeline end cancels nothing else), a failure →
+> `TaskBrain.on_transfer_failed(msg)` + `pipeline.say(msg)` with the org's `transfer_failed_message`,
+> `not_active` → nothing. Rules: specs/06 §10.1 Decision P05-T13.
+
 ## 17. Control channel messages (`call:{id}:control`)
 
 ```json
@@ -879,6 +888,13 @@ ends with `end_reason='max_duration'`.
 >    missing workflow is logged `media.workflow_missing`, any other failure `media.signal_failed`, never raised.
 > Each step logs its own failure and the next step still runs. This order (record, hang up, `call.ended`, slot,
 > signal) replaces the list above for steps 2-6; sockets are closed by the runtime before the routine runs.
+
+> Decision (2026-11-02): a bridged cold transfer ends the session with `transferred` (P05-T13). Step 1 resolves it
+> to: no record, no hangup, no `call.ended`, no slot release (caller and target are still talking; the edge
+> records `completed`/`transferred` on the primary hangup and `CallWorkflow` releases the slot). Step 3 sends
+> `streaming_stop` on the primary leg instead (`command_id("streaming_stop", call_id, "primary")`, our
+> `client_state`; failures logged `media.streaming_stop_failed`); the event rows are flushed and
+> `signal_pipeline_finished(transferred, system)` is sent as usual.
 
 ## 19. Ownership, heartbeat, drain, failures
 

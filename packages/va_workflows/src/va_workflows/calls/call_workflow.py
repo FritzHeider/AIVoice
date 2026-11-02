@@ -9,6 +9,10 @@ Finally it starts the ``PostCallWorkflow`` child (abandoned on close) for every 
 ``schedule_retry_call`` for a voicemail retry: a created child call gets its own ``CallWorkflow`` as an
 abandoned child workflow that sleeps until the child's scheduled start (specs/07 §14 Decision P05-T10f).
 
+After a bridged cold transfer (``pipeline_finished`` with ``transferred``) the call stays up between the
+caller and the target: the workflow waits in the ``transferred`` phase for the primary leg's hangup (then
+cleans up with ``transferred``) or ends the call at the same backstop (specs/01 §2.1 Decision P05-T13).
+
 An inbound call (``direction="inbound"``, started by the edge after it created the call, specs/01 §2.1
 Decision P05-T12c) skips the schedule, the prefetch, and the dial: the edge answers the ringing leg, so the
 workflow waits up to 30 s for the answer and then guards the conversation with the input's ``max_duration_s``.
@@ -314,7 +318,7 @@ class CallWorkflow:
         finally:
             await self._stop_watch()
         if step == "pipeline_finished":
-            return await self._after_pipeline()
+            return await self._after_pipeline(deadline)
         if step == "hung_up":
             return await self._after_carrier_hangup()
         return await self._end_and_hangup(*_HANGUP_ENDS[step])
@@ -399,13 +403,26 @@ class CallWorkflow:
             return False
         return not presence.owner
 
-    async def _after_pipeline(self) -> CallWorkflowResult:
+    async def _after_pipeline(self, deadline: datetime) -> CallWorkflowResult:
         """The media worker finished: it recorded the end and hung up, unless it lost the call
-        (``worker_lost``: no record, no hangup), which the workflow then does itself."""
+        (``worker_lost``: no record, no hangup), which the workflow then does itself, or bridged a cold
+        transfer (``transferred``: the call is still up, :meth:`_transferred`)."""
         finished = self._signals.pipeline_finished
         if finished is not None and finished.end_reason == "worker_lost":
             return await self._end_and_hangup("worker_lost", "worker_lost", "worker_lost")
+        if finished is not None and finished.end_reason == "transferred":
+            return await self._transferred(deadline)
         return await self._cleanup("completed", "error", PIPELINE_UNRECORDED_MESSAGE)
+
+    async def _transferred(self, deadline: datetime) -> CallWorkflowResult:
+        """Caller and target talk without the AI: wait for the primary leg's hangup (the edge records
+        ``completed``/``transferred``; the cleanup releases the slot), or end the call at the duration
+        backstop."""
+        self._phase = "transferred"
+        signals = self._signals
+        if await self._wait_for(lambda: signals.hung_up, deadline - workflow.now()):
+            return await self._cleanup("completed", "transferred")
+        return await self._end_and_hangup("max_duration", "max_duration", "max_duration")
 
     async def _after_carrier_hangup(self) -> CallWorkflowResult:
         """The caller (or carrier) hung up: give the media worker time to record the end, then clean up."""

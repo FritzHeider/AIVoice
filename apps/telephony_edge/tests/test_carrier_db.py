@@ -279,6 +279,13 @@ async def test_answer_before_initiated_keeps_the_later_status(database: Database
     assert [name for name, _ in await rig.bus(call)] == ["call.answered"]
 
 
+async def test_a_late_primary_answer_never_reverts_a_transfer(database: Database, rig: Rig) -> None:
+    call = await seed_call(database, status="transferring", answered_at=datetime.now(UTC))
+    await rig.process(body("call.answered", ccid(), call=call), attributed=call)
+    assert (await load_call(database, call)).status == "transferring"
+    assert await rig.bus(call) == []
+
+
 async def test_reprocessing_an_applied_event_emits_nothing_new(database: Database, rig: Rig) -> None:
     call = await seed_call(database, status="ringing")
     stored = await stored_event(

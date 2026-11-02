@@ -87,8 +87,8 @@ class RecordingRuntime:
         self.ends.put_nowait(end)
         return end
 
-    async def end(self) -> SessionEnd:
-        async with asyncio.timeout(WAIT_S):
+    async def end(self, timeout_s: float = WAIT_S) -> SessionEnd:
+        async with asyncio.timeout(timeout_s):
             return await self.ends.get()
 
 

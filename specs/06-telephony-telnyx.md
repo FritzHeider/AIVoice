@@ -595,6 +595,44 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
    `orgs.settings.transfer_failed_message` (default "I'm sorry, I wasn't able to connect you. Is there anything else I can help with?")
    and resumes the node configured as `transfer_failed_node_id` (pathways) or continues the task.
 
+> Decision (2026-11-02): cold transfer (P05-T13). The media worker runs a `transfer_call` action through
+> `va_media.transfer.ColdTransfer` (reached via `va_media.actions.MediaActions`); the Brain yields the transfer line
+> (`SpeakStatic`, not interruptible) before the action, and the pipeline hands an action over only after the
+> line's playback completed (mark echo), which satisfies step 1.
+> 1. **Status and event:** `in_progress` → `transferring` first (`DbTransferStatus`, guarded transition); a call in
+>    another status is `not_active` and nothing is sent; a row that cannot be written fails the transfer. Then
+>    `call.transfer_started` (`data = {"type": "cold", "target": <E.164>}`, message "Transfer started."). The
+>    target is never logged.
+> 2. **Command:** `transfer(primary_ccid)` with `to` = target, `from` = the org's `transfer_caller_id_mode`:
+>    `agent_number` = our number (outbound `from_number`, inbound/web `to_number`), `original_caller` = the party
+>    being transferred (outbound `to_number`, inbound/web `from_number`); `timeout_secs = 30`; `time_limit_secs`
+>    = the seconds left until answer (or now) + `max_duration`, rounded up, floored at 30 and capped at 14 400;
+>    `target_leg_client_state` = our `client_state` with `leg = "transfer_target"` (the edge attributes the target's
+>    webhooks with it); `client_state` = the primary leg's; `command_id = command_id("transfer", call_id,
+>    "primary", n)` with `n` = the call's 0-based transfer count (a retried command dedupes, the next transfer
+>    does not).
+> 3. **Outcome:** the carrier watch queues every `transfer_target` carrier event; the transfer waits up to 30 s +
+>    10 s for the first `call.bridged` (`bridged`) or `call.hangup` (`target_hangup`) of that leg; events of an
+>    earlier attempt are drained before sending. Nothing in time → `timeout`; a Telnyx error → `command_failed`.
+>    Every failure moves the call back to `in_progress` (specs/05 §8 Decision P05-T13); the pipeline then says
+>    the org's `transfer_failed_message` (the `CallPipeline.say` seam, interruptible) and the Brain gets it as an
+>    assistant message (`TaskBrain.on_transfer_failed`), so the conversation continues.
+> 4. **Stream (deviation from steps 4 and 6):** the primary stream stays up while the target rings (the pipeline
+>    waits inside the action: no replies, no no-input timer). Stopping it before the bridge and restarting it on
+>    failure would be a new media WebSocket attach (owner conflict, audible gap). After `bridged` the pipeline is
+>    taken over with `transferred` (no message) and the end-of-call routine sends `streaming_stop`
+>    (`command_id("streaming_stop", call_id, "primary")`) instead of a hangup (specs/07 §18 Decision P05-T13). On
+>    failure nothing has to restart. `stream_post_transfer_transcript=true` behaves like `false` until the listen
+>    stream exists (P12-T08); it is logged `media.post_transfer_transcript_deferred`.
+> 5. **Events and billing:** `call.transferred` is emitted by the edge on the target's `call.bridged` (specs/19 §2
+>    table; the media worker does not repeat it), which also records `transferred`, `transferred_to` and the
+>    carrier state's `transfer_started_at`. The edge records `completed`/`transferred` with connected and transfer
+>    seconds on the primary leg's hangup; `CallWorkflow` waits for that hangup (specs/01 §2.1 Decision P05-T13).
+>    A late or duplicate primary `call.answered` can never move a `transferring` call back to `in_progress` (the
+>    edge enters `in_progress` only from `dialing`/`ringing`).
+> 6. The `transfer` and `takeover` control messages (specs/07 §17) stay unacknowledged until the control endpoint
+>    exists; `ColdTransfer.run(target)` is the entry point they will reuse.
+
 ### 10.2 Warm transfer
 
 1. Agent says the hold line ("Let me connect you with someone, one moment."). If `hold_audio="music"` →

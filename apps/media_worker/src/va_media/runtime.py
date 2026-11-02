@@ -35,6 +35,11 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    over before the pipeline runs (:func:`~va_media.maintenance.maintenance_takeover`): the opener is skipped,
    the message is spoken (from the phrase cache when present, else the TTS socket) and the call ends
    ``inbound_rejected`` without an LLM request (specs/16 §4 Decision P05-T12d).
+9. a ``transfer_call`` action runs the call's :class:`~va_media.transfer.ColdTransfer` (status
+   ``transferring``, ``call.transfer_started``, Telnyx ``transfer``, the target leg's outcome): bridged → the
+   pipeline is taken over with ``transferred`` (the end routine stops the stream, the call stays up); failed →
+   the Brain learns it and the pipeline says the org's ``transfer_failed_message`` (specs/06 §10.1 Decision
+   P05-T13).
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -99,6 +105,7 @@ from va_media.runtime_config import (
 )
 from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
+from va_media.transfer import ColdTransfer, DbTransferStatus
 from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
 from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
@@ -110,7 +117,14 @@ from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.phrase_cache import PhraseCacheMetrics
-from va_voice.pipeline import NULL_OBSERVER, CallPipeline, ObserverFanout, PipelineConfig, PipelineObserver
+from va_voice.pipeline import (
+    NULL_OBSERVER,
+    CallPipeline,
+    ObserverFanout,
+    PipelineConfig,
+    PipelineObserver,
+    Takeover,
+)
 from va_voice.vad import SileroVad, VadExecutor
 from va_voice.vad_model import SileroModel, VadModel, VadModelError
 
@@ -264,25 +278,31 @@ class CallRuntime:
             call_control_id = session.start.call_control_id
             recorder = self._recorder(session)
             monitor = self._monitor(session, watch)
+            brain = TaskBrain(
+                context=context,
+                settings=org,
+                gateway=self._gateway,
+                counter=self._counter,
+                facts=facts_for_call(context, org, sms_capable=False),
+                clock=self._clock,
+            )
+            actions = MediaActions(
+                call_id=context.call_id,
+                call_control_id=call_control_id,
+                telnyx=telnyx,
+                clock=self._clock,
+                transfer=self._cold_transfer(session, org, telnyx, watch),
+            )
             pipeline = CallPipeline(
                 transport=transport,
                 stt=vendors.stt,
                 tts=vendors.tts,
                 vad=SileroVad(vad_model, self._vad_executor),
-                brain=TaskBrain(
-                    context=context,
-                    settings=org,
-                    gateway=self._gateway,
-                    counter=self._counter,
-                    facts=facts_for_call(context, org, sms_capable=False),
-                    clock=self._clock,
-                ),
+                brain=brain,
                 clock=self._clock,
                 config=config,
                 latency=self._latency(context),
-                actions=MediaActions(
-                    call_id=context.call_id, call_control_id=call_control_id, telnyx=telnyx, clock=self._clock
-                ),
+                actions=actions,
                 before_opener=GreetingGate(
                     context=context,
                     call_control_id=call_control_id,
@@ -294,6 +314,7 @@ class CallRuntime:
                 observer=_observer(recorder, monitor),
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
+            _bind_transfer(actions, pipeline, brain, org.transfer_failed_message)
             maintenance = maintenance_takeover(context)
             if maintenance is not None:
                 pipeline.take_over(maintenance)
@@ -305,6 +326,28 @@ class CallRuntime:
             stack.push_async_callback(_stop_task, watcher, "media.carrier_watch_failed")
             result = await pipeline.run()
         return session_end(result)
+
+    def _cold_transfer(
+        self, session: CallSession, org: OrgSettings, telnyx: TelnyxClient | None, watch: CarrierWatch
+    ) -> ColdTransfer:
+        """The call's cold transfer (specs/06 §10.1 Decision P05-T13): status writes need the database,
+        ``time_limit_secs`` counts from the answer (or now) to ``max_duration``."""
+        context = session.context
+        if context.config.stream_post_transfer_transcript:
+            _log.info("media.post_transfer_transcript_deferred")
+        started = session.carrier_state.answered_at or self._clock.now()
+        return ColdTransfer(
+            context=context,
+            call_control_id=session.start.call_control_id,
+            telnyx=telnyx,
+            transfer_events=watch.transfer_events,
+            status=None if self._database is None else DbTransferStatus(self._database, context.org_id),
+            events=None if self._persistence is None else self._persistence.events,
+            caller_id_mode=org.transfer_caller_id_mode,
+            deadline=started + timedelta(minutes=context.config.max_duration_min),
+            clock=self._clock,
+            tracer_provider=self._tracer_provider,
+        )
 
     def _monitor(self, session: CallSession, watch: CarrierWatch) -> VoicemailMonitor | None:
         """The voicemail monitor of an outbound call (``None`` for inbound and web calls)."""
@@ -430,6 +473,24 @@ def _start_monitor(
     stack.push_async_callback(monitor.stop)
     classifier = asyncio.create_task(monitor.run(), name="voicemail-classifier")
     stack.push_async_callback(_stop_task, classifier, "media.voicemail_classifier_failed")
+
+
+def _bind_transfer(
+    actions: MediaActions, pipeline: CallPipeline, brain: TaskBrain, failed_message: str
+) -> None:
+    """A bridged transfer ends the AI's part of the call (takeover ``transferred``, no message); a failed one
+    tells the Brain and speaks the org's ``transfer_failed_message``, then the conversation goes on."""
+
+    def transferred() -> None:
+        if not pipeline.take_over(Takeover(reason="transferred")):
+            _log.info("media.transfer_takeover_refused")
+
+    def transfer_failed() -> None:
+        brain.on_transfer_failed(failed_message)
+        if not pipeline.say(failed_message):
+            _log.info("media.transfer_failed_message_dropped")
+
+    actions.bind(on_transferred=transferred, on_transfer_failed=transfer_failed)
 
 
 def _observer(recorder: TurnRecorder | None, monitor: VoicemailMonitor | None) -> PipelineObserver:

@@ -32,6 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from va_common.logging import get_logger
 from va_common.metrics import ServiceMetrics
 from va_common.time import Clock
+from va_db.call_states import RINGING_PHASE
+from va_db.models import CallStatus
 from va_db.repositories import (
     CallLegLookupRepo,
     CallLegRepo,
@@ -97,6 +99,13 @@ def _client_state(value: str | None) -> ClientState | None:
         return decode(value)
     except ClientStateError:
         return None
+
+
+def _sources(to: CallStatus) -> frozenset[CallStatus] | None:
+    """The statuses a carrier event may move a call to ``to`` from: a primary ``call.answered`` enters
+    ``in_progress`` only from the ringing phase, never back from ``transferring`` (a failed cold transfer is
+    the media worker's revert, specs/05 §8 Decision P05-T13); ``None`` = every allowed source."""
+    return RINGING_PHASE if to == "in_progress" else None
 
 
 def _text(value: bytes | str | None) -> str | None:
@@ -246,7 +255,7 @@ class CarrierEventHandler:
             await calls.update_fields(target.call_id, **change.values)
             return True
         try:
-            await calls.transition(target.call_id, change.to, **change.values)
+            await calls.transition(target.call_id, change.to, from_=_sources(change.to), **change.values)
         except CallTransitionError as conflict:
             _log.debug(
                 "telnyx.transition_skipped",
