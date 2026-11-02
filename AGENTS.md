@@ -1546,3 +1546,11 @@ Grafana 3001
   unit-tested in `tests_e2e/unit/` (in `testpaths`, so `make test` runs them; `tests_e2e/test_*.py` only run via
   `make e2e`). The first call after a stack (re)build is ~250 ms slower (cold path); outbound_basic measures p95
   ≈ 1 030 ms and overhead ≈ 130 ms on a warm stack.
+- 2026-11-02 (P05-T17c): e2e voicemail/IVR/transfer flows (specs/30 §5 Decision P05-T17c). FakeTelnyx timeline
+  `first_agent_speech_ms` = first played-out agent frame above the agent-speech level (evidence for "agent spoke
+  after the beep"). Harness: `remote_hangup(ccid)` (far end hangs up, needed after a cold transfer: target legs run
+  no steps and the primary's script stops with the stream), `iso_ms(at)` for summary command/event/DTMF deltas
+  (wall-clock ms under the realtime e2e sim). `ivr_mode=true` disables AMD, so machine answers yield no
+  `call.machine.*` events. `EVENT_MESSAGES` now knows `call.voicemail`/`call.transfer_started` (fixed messages
+  imported from `va_media`); `call.amd` shares the `voicemail` category, so select voicemail rows by message;
+  `call.transferred` has no fixed message, check its `transfer` row directly.

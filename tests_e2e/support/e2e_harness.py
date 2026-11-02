@@ -21,6 +21,7 @@ import time
 import wave
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit, urlunsplit
@@ -44,6 +45,7 @@ __all__ = [
     "RegisteredScenario",
     "StackUrls",
     "WaitTimeoutError",
+    "iso_ms",
     "prepare_rules",
     "prepare_scenario",
     "random_e164",
@@ -103,6 +105,15 @@ def prepare_scenario(text: str, *, name: str, run: str, number: str) -> Scenario
 def prepare_rules(text: str, *, run: str, marker: str) -> str:
     """A FakeLLM rule file with ``{{run}}`` → ``run`` and ``{{marker}}`` → ``marker``."""
     return text.replace(_RUN_FIELD, run).replace(_MARKER_FIELD, marker)
+
+
+def iso_ms(at: str) -> int:
+    """A simulator ISO-8601 timestamp (``Z`` or an offset) as epoch milliseconds."""
+    moment = datetime.fromisoformat(at)
+    if moment.tzinfo is None:
+        message = f"timestamp {at!r} has no time zone"
+        raise ValueError(message)
+    return round(moment.timestamp() * 1000)
 
 
 def wav_channels(wav: bytes) -> tuple[int, int]:
@@ -332,6 +343,14 @@ class Harness:
             ccid = (await self.sim_call(number))["call_control_id"]
         return FinishedCall(call_id, call, events, await self.timeline(ccid))
 
+    async def finished_leg(
+        self, org: E2eOrg, call_id: str, number: str
+    ) -> tuple[FinishedCall, dict[str, Any]]:
+        """:meth:`finished` for the newest simulator call of ``number``, plus that leg's call summary."""
+        ccid = (await self.sim_call(number))["call_control_id"]
+        finished = await self.finished(org, call_id, ccid=ccid)
+        return finished, await self.sim_summary(ccid)
+
     async def call_object(self, org: E2eOrg, call_id: str) -> dict[str, Any]:
         response = await self.http.get(f"{self.urls.api}/v1/calls/{call_id}", headers=org.headers)
         body: dict[str, Any] = _ok(response).json()
@@ -418,6 +437,11 @@ class Harness:
             await self.http.get(f"{self.urls.telnyx}/sim/telnyx/calls/{ccid}")
         ).json()
         return summary
+
+    async def remote_hangup(self, ccid: str) -> None:
+        """The far end of the FakeTelnyx leg ``ccid`` hangs up (``POST /sim/telnyx/calls/{ccid}/hangup``)."""
+        response = await self.http.post(f"{self.urls.telnyx}/sim/telnyx/calls/{ccid}/hangup", json={})
+        _ok(response, 202)
 
     async def wait_sim(
         self,

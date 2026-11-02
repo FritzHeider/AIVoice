@@ -22,6 +22,7 @@ from e2e_harness import (
     SCENARIOS_DIR,
     RegisteredScenario,
     StackUrls,
+    iso_ms,
     prepare_rules,
     prepare_scenario,
     random_e164,
@@ -29,6 +30,8 @@ from e2e_harness import (
     wav_channels,
 )
 
+from va_media.transfer import TRANSFER_STARTED_MESSAGE
+from va_media.voicemail import VOICEMAIL_MESSAGE
 from va_sim.llm.rules import load_rules
 from va_sim.scenario import Assertions, ScenarioError
 
@@ -84,6 +87,13 @@ def test_event_presence_by_message_or_unique_category() -> None:
     assert event_present("call.latency", events) is True
     assert event_present("call.interrupt", events) is False
     assert event_present("call.completed", events[1:]) is False
+    assert event_present("call.voicemail", [event("voicemail", VOICEMAIL_MESSAGE)]) is True
+    assert event_present("call.voicemail", [event("voicemail", "AMD result")]) is False
+    started = event("transfer", TRANSFER_STARTED_MESSAGE, {"type": "cold"})
+    assert event_present("call.transfer_started", [started]) is True
+    assert event_present("call.transfer_started", [event("transfer", "Transferred.")]) is False
+    # `call.transferred` shares the `transfer` category and has no fixed message.
+    assert event_present("call.transferred", [started]) is None
     # `call.answered` shares the `call` category with other types and has no fixed message.
     assert event_present("call.answered", events) is None
     assert event_present("call.nonexistent", events) is None
@@ -214,3 +224,10 @@ def test_stack_urls_come_from_the_environment() -> None:
         {"E2E_API_URL": "http://api.test:8000/", "E2E_SIM_URL": "http://sim.test:9100"}
     )
     assert (custom.api, custom.telnyx) == ("http://api.test:8000", "http://sim.test:9100")
+
+
+def test_iso_ms_parses_simulator_timestamps() -> None:
+    assert iso_ms("2026-01-01T00:00:01.250Z") - iso_ms("2026-01-01T00:00:00Z") == 1250
+    assert iso_ms("2026-01-01T00:00:00.500000+00:00") == iso_ms("2026-01-01T00:00:00.5Z")
+    with pytest.raises(ValueError, match="time zone"):
+        iso_ms("2026-01-01T00:00:00")

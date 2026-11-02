@@ -382,7 +382,8 @@ Behavioural rules:
 > to, state, is_alive, scenario_id, client_state, created_at, answered_at, ended_at, hangup_cause, hangup_source,
 > commands: [{name, command_id, at, duplicate}], events: [{event_type, event_id, at}], dtmf_sent, transfers:
 > [{call_control_id, to, from, at}], recordings, stream, conference_id}`; `GET .../timeline` → `{call_control_id,
-> initiated_ms, answered_ms, ended_ms, utterances}` (sim `virtual_ms`; utterances come with the media client).
+> initiated_ms, answered_ms, ended_ms, first_agent_speech_ms, utterances}` (sim `virtual_ms`; utterances come with
+> the media client; `first_agent_speech_ms` since P05-T17c, see the §5 Decision).
 > Payload `state`: `bridging` (outgoing initiated), `parked` (incoming initiated, or after unbridge), `answered`,
 > `bridged`, `hangup`; `is_alive` is true only between answer and hang-up. `GET /sim/state` `telnyx` adds `calls`
 > and `conferences` counts; `/sim/reset` drops calls and conferences and cancels pending progress. (15) Accelerated
@@ -1342,6 +1343,33 @@ delays is covered by Temporal time-skipping integration tests.)
 > simulator ids (Telnyx webhook event ids are the edge's dedup key), so a restarted simulator replaying the ids of
 > its previous run had its `call.initiated` dropped as a duplicate. `/sim/reset` still accepts a `seed`, and
 > in-process tests build their state with an explicit seed.
+
+> Decision (2026-11-02): voicemail, IVR, and transfer flows (P05-T17c). (1) The FakeTelnyx timeline adds
+> `first_agent_speech_ms`: the sim `virtual_ms` of the first agent frame *played out* to the far end whose frame RMS
+> exceeds the agent-speech level (`va_sim.telnyx.agent_speech`, 1 024; the `static` bed stays below it), `null` until
+> then. `voicemail_leave_message` asserts `first_agent_speech_ms − answered_ms ≥ 4 000` as the "agent audio after the
+> beep" evidence (both flows send `background_track: none` as well); the TTS log since the scenario was loaded must
+> equal the message alone (no opener, no dialogue, no LLM request carries the call id). (2) `voicemail_hangup`
+> measures from the FakeTelnyx `call.machine.premium.detection.ended` event `at` to the first `hangup` command `at`
+> (summary ISO timestamps, wall clock under the realtime e2e sim): ≤ 2 000 ms, no TTS text, no LLM request. (3)
+> `amd_ivr_mode`: `ivr_mode=true` disables AMD (`va_domain.voicemail.amd_mode`), so the scenario's machine answer
+> produces no `call.machine.*` event and no voicemail action even with `voicemail.action=hangup`; the DTMF evidence
+> is the summary `dtmf_sent` (`1` then `2`, ISO `at` gap ≥ 500 ms, after the answer). The far-end hang-up ends it
+> `user_hangup`. (4) `cold_transfer` runs on an outbound task call through the `transfer_call` system tool (a FakeLLM
+> rule answers the caller's "human" with the tool call) to `transfer_phone_number`; the pathway Transfer Call node
+> arrives in phase 07. A transfer-target leg runs no scenario steps and the primary's caller script stops with the
+> media stream, so the harness hangs the bridged caller up itself (`POST /sim/telnyx/calls/{ccid}/hangup`, the remote
+> side) 3 s of sim time after `streaming_stop`. Assertions: transfer to the configured number, no `hangup` before
+> `transfer`, `streaming_stop` after it, the final line in the TTS log, `call.transfer_started {type: cold, target}`
+> followed by `call.transferred` (category `transfer`, empty data), Call Object `transferred_to`, `transfer_duration
+> > 0`, `call_ended_by = SYSTEM`, and a price between the metered amount (connected minutes × connected rate +
+> transfer minutes × transfer rate of the seed `build` plan) and that amount plus the minimum attempt top-up. The
+> mark-echo ordering of the final line before `transfer` is covered in process by `apps/media_worker/tests/
+> test_transfer.py` and `test_transfer_flow.py`. (5) `call.voicemail` and `call.transfer_started` rows carry fixed
+> messages (`va_media.voicemail.VOICEMAIL_MESSAGE`, `va_media.transfer.TRANSFER_STARTED_MESSAGE`), so the evaluator
+> recognises them in `webhook_events` (`call.amd` shares the `voicemail` category, so flows select the `call.voicemail` row by
+> its message); `call.transferred` shares its category and has no fixed message, so flows check
+> its row directly.
 
 ## 6. Load testing (`scripts/load/`)
 

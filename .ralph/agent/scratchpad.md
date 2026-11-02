@@ -670,3 +670,195 @@ Re-ran: lint/typecheck/placeholders 0, spec refs 0, gitleaks pass, jscpd 0 clone
 (cov 99.16 %), make e2e 4 passed in 109 s. Diff checked: seed route gated on VA_ENV, x-public + audit_exempt, no
 nested sessions; pipeline/speaker latency changes covered by tests and the specs/07 §20 Decision; sim random seed
 covered. Stack left running in PROFILE=e2e.
+
+## Plan P05-T17c — E2E voicemail_leave_message, voicemail_hangup, amd_ivr_mode, cold_transfer
+
+Builds on the P05-T17b harness (`tests_e2e/support/e2e_harness.py`, `e2e_assertions.py`). Four new flows plus one
+small simulator addition. Spec rows: specs/30 §5 lines ~1272-1277.
+
+### 0. Facts checked while planning (do not re-derive)
+- `va_domain.voicemail.amd_mode`: `ivr_mode=true` → AMD **disabled** (no premium AMD on dial). So in amd_ivr_mode the
+  scenario's `answered_by: machine` produces no machine verdict at all; "no voicemail action despite machine AMD"
+  is met by AMD never running. Record that in the Decision.
+- Default resolved config = premium AMD, so the voicemail flows need no extra AMD parameter. Send Call
+  `voicemail: {message, action}` (`VoicemailRequest`, actions hangup|leave_message|...).
+- The task-mode transfer tool is `transfer_call` (args `message`), enabled by the call param
+  `transfer_phone_number` (`va_engine.system_tools`). The in-process reference is
+  `apps/media_worker/tests/test_transfer_flow.py` (expected primary commands `answer, transfer, streaming_stop,
+  hangup` inbound; outbound starts with `dial`), events `call.transfer_started {type: cold, target}` then
+  `call.transferred {}` (both category `transfer`).
+- Outbound DTMF pauses: `va_media.dtmf_out.DTMF_PAUSE_S = 0.5` for `w`. FakeTelnyx `dtmf_sent` entries have
+  `digits`, `duration_millis`, and an ISO `at`. Commands/events in the sim summary also have ISO `at` (the e2e sim
+  runs on the realtime clock, so ISO deltas are real ms).
+- FakeTelnyx Answer `beep_at_ms` → `LegOutcome.beep_s`. Check in `call_engine` whether it counts from the answer
+  (expected). The in-process reference for both voicemail flows is `machine_call` / `test_a_machine_with_hangup...`
+  in `apps/media_worker/tests/test_runtime_sim.py`. End reasons there: leave_message → `voicemail_left`/`agent`;
+  hangup → `voicemail_hangup`/`system`.
+- `e2e_assertions.event_present` can identify a type only by a fixed message (`EVENT_MESSAGES`) or a category
+  used by exactly one type. `transfer` is shared, so `call.transferred` cannot be recognized by category.
+- A caller script stops (`media_stopped`) when the stream stops, so after a transfer the primary leg's steps no
+  longer run. A transfer-target leg has no stream, so its `steps` never run either. The harness must hang up the
+  bridged primary itself.
+
+### 1. Simulator: first agent speech on the timeline
+The spec asks for "agent audio starts after beep (≥ 4000 ms after answer)". Nothing in the summary or timeline
+exposes when agent speech started, and the summary's `stream` is None after hangup.
+- `packages/va_sim/src/va_sim/telnyx/calls.py`: add `Call.first_agent_speech_ms: int | None = None` and expose it
+  in `timeline()` as `"first_agent_speech_ms"`.
+- `media_session.py`: on each agent media frame received (where the playout/agent track is fed, near the
+  `first_agent_audio_ms` code ~L300-330), if the call's value is None and `agent_speech.is_speech(pcm)` holds, set
+  it to `self._state.clock.virtual_ms()` (or the session's existing now helper). The check must stay O(1) per
+  frame and do nothing once set. Static-bed frames (RMS ≈ 330 < 1024) are not speech.
+- Test, in `packages/va_sim/tests/telnyx/` next to the existing timeline/media-session tests: a media_agent that
+  sends silence frames, then loud frames → timeline value = the virtual ms of the first loud frame (assert ordering
+  relative to `answered_ms`, not exact socket ms, per the AGENTS accelerated-clock note); with no speech the value
+  stays None.
+- Add the field to the specs/30 §3.2 timeline description if one is documented there (grep `first_agent_audio_ms`
+  in specs/30), as part of the §5 Decision.
+
+### 2. Harness additions (`tests_e2e/support/e2e_harness.py`)
+- `async sim_hangup(ccid)`: `POST {telnyx}/v2/calls/{ccid}/actions/hangup` with `_telnyx()` headers and
+  `{"command_id": f"e2e-hangup-{secrets.token_hex(4)}"}`; `_ok(...)`.
+- `def iso_ms(at: str) -> int` (module helper; parse ISO Z with `datetime.fromisoformat`), used for
+  command/event/dtmf deltas. Unit-test it in `tests_e2e/unit/`.
+- `async events_of(...)` is not needed; tests use `finished.events` and `sim_summary(ccid)` (read before the
+  harness ends; the summary is kept after hangup, only `stream` goes away).
+- `e2e_assertions.EVENT_MESSAGES`: add `call.voicemail` / `call.transferred` **only if** their producers write a
+  fixed message constant (grep `va_media.voicemail`, the edge carrier handler for `call.transferred`). Import the
+  constant; never copy the string. Otherwise the tests check `category`/`data` directly and the scenario
+  `webhook_events` lists only `call.completed`. Extend the evaluator unit tests for any new entry.
+
+### 3. Scenarios, rules, tests (`tests_e2e/scenarios/*.yaml`, `rules/*.yaml`, `tests_e2e/test_<flow>.py`)
+All four use `pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]` and `harness.create_org()`, and send
+outbound task calls through `send_task_call`. Pass `background_track: "none"` in the voicemail flows so no bed can
+reach agent-speech level (belt and braces).
+
+**voicemail_leave_message**
+- Scenario: `answer: {after_ms: 1000, answered_by: machine, beep_at_ms: 4000}`; steps
+  `say: {text: "Hi, you've reached Dana. Please leave a message after the tone."}` (quoted), then
+  `expect_hangup: {by: agent, timeout_ms: 30000}`. Assertions: `call_status: completed`, `answered_by: machine`,
+  `end_reason: voicemail_left`, `webhook_events: [call.completed]`. No LLM rules.
+- Call: `voicemail: {message: "Hi, call us back", action: leave_message}`.
+- Asserts:
+  - failures empty;
+  - timeline `first_agent_speech_ms - answered_ms >= 4000`;
+  - `tts_texts() == ["Hi, call us back"]`, so no opener and no dialogue;
+  - the hangup came from the platform: the sim summary `hangup_source` is the platform side (`caller` for an
+    outgoing leg);
+  - an event row with category `voicemail` (check the actual category in `DEFAULT_CATEGORY[CALL_VOICEMAIL]`)
+    whose `data.action == "leave_message"`;
+  - Call Object `call_ended_by == "ASSISTANT"`;
+  - `llm_requests(call_id) == []`.
+
+**voicemail_hangup**
+- Scenario: machine answer (no beep needed, or `beep_at_ms` 4000; it doesn't matter); steps `say` greeting, then
+  `expect_hangup: {by: agent, timeout_ms: 15000}`. Assertions: completed, machine, `end_reason: voicemail_hangup`.
+- Call: `voicemail: {action: hangup}`.
+- Asserts:
+  - failures empty;
+  - in the sim summary, the AMD result event (`call.machine.premium.detection.ended`, or whatever FakeTelnyx emits
+    first with the machine result; take it from `events`) → the first `hangup` command `at` delta ≤ 2000 ms;
+  - `tts_texts() == []`;
+  - `llm_requests(call_id) == []`;
+  - Call Object `call_ended_by == "SYSTEM"`.
+
+**amd_ivr_mode**
+- Scenario: `answer: {after_ms: 1000, answered_by: machine}`; steps `say: {text: "Thank you for calling. Press 1
+  for sales."}`, `silence: {ms: 3000}`, `hangup: {}`. Assertions: `call_status: completed`,
+  `end_reason: user_hangup` (verify the stored reason for a far-end hangup during IVR; adjust to the real value
+  only if it is the documented specs/05 §9 one).
+- Call: `ivr_mode: true`, `precall_dtmf_sequence: "1w2"`, `voicemail: {action: hangup}` (proves the action is
+  ignored).
+- Asserts:
+  - failures empty;
+  - sim summary `dtmf_sent` digits `["1", "2"]` and `iso_ms(at[1]) - iso_ms(at[0]) >= 500`;
+  - the first DTMF follows the answer;
+  - no `amd`/`answering_machine_detection` on the dial command. The summary `commands` have no body, so instead
+    assert no `call.machine.*` event in the sim summary `events`;
+  - no event row of the voicemail category;
+  - Call Object `answered_by != "voicemail"` and `end_reason` not starting with `voicemail`.
+- Optional LLM rule (marker-scoped) giving a short reply so any IVR reply is deterministic. Only add it if the
+  default FakeLLM reply makes the test flaky.
+
+**cold_transfer**
+- Scenario: `answer: {after_ms: 1000, answered_by: human_residence}`; steps `wait_agent_speech: {min_ms: 300,
+  then_silence_ms: 700, timeout_ms: 8000}`, `say: {text: "Can I talk to a human please?"}`, `expect_hangup:
+  {timeout_ms: 60000}`; `transfer_target: {answer_after_ms: 500}`. Assertions: `call_status: completed`,
+  `end_reason: transferred`, `webhook_events: [call.completed]`.
+- Rules `rules/cold_transfer.yaml`: marker + `last_user_regex: "(?i)human"` → `tool_calls: [{name: transfer_call,
+  arguments: {message: "Connecting you now."}}]`.
+- Call: `first_sentence`, `transfer_phone_number: target` (`random_e164(CALLER_ID_NPA)` or another valid NANP
+  number; it must pass Send Call validation and the DNC/fraud checks).
+- Flow:
+  1. `sim_call(scenario.number)`;
+  2. `wait_sim(ccid, lambda s: s["transfers"] and any(c["name"] == "streaming_stop" for c in s["commands"]))`;
+  3. `wait_until_sim_ms(sim_clock_ms() + 3000)` so bridged time accrues;
+  4. `sim_hangup(ccid)`;
+  5. `finished(org, call_id, ccid=ccid)`.
+- Asserts:
+  - failures empty;
+  - `transfers[0]["to"] == target`;
+  - non-duplicate command names after `dial`/answer form the subsequence `transfer` → `streaming_stop` → `hangup`,
+    with nothing named `hangup` before `transfer`;
+  - "AI stream stopped after the final line": `"Connecting you now." in tts_texts()`, and the transfer command
+    `at` ≥ the end of the caller's `say` step (`script.steps[1].ended_ms` is virtual ms; compare against
+    `iso_ms` only if both are on the same clock, else drop the check). Mark-echo ordering stays covered
+    in-process by `test_transfer.py`/`test_transfer_flow.py` (say so in the Decision);
+  - event rows with category `transfer`: data `{type: cold, target}` then `{}`;
+  - Call Object `transferred_to == target`, `transfer_duration > 0`, `call_ended_by == "SYSTEM"`;
+  - "billed at the transfer rate": price ≥ `transfer_duration` × the org plan's transfer per-minute rate. Read
+    the rate from the effective plan pricing (`va_billing.plans` seed values for the plan the seed route uses).
+    If price rounding makes this fragile, assert instead that the call's usage includes a transfer component,
+    via whatever read path exists (no new public API in this task).
+
+### 4. Specs/docs
+- specs/30 §5: `> Decision (2026-11-02): voicemail, IVR, and transfer flows (P05-T17c)` covering:
+  - cold_transfer runs through the task-mode `transfer_call` tool (pathway Transfer node in phase 07) on an
+    outbound call; the harness hangs up the bridged caller; mark-echo ordering is covered in-process;
+  - amd_ivr_mode: ivr_mode disables AMD, so the "machine" answer yields no verdict and no voicemail action;
+  - the timeline's `first_agent_speech_ms` (FakeTelnyx agent-speech threshold) is the "agent audio after beep"
+    evidence;
+  - the hangup-within-2-s measurement (sim AMD event `at` → hangup command `at`).
+- AGENTS.md: one `Learned during the build` bullet (P05-T17c): `sim_hangup`, `iso_ms`, `first_agent_speech_ms`,
+  ivr_mode disables AMD, transfer-target legs run no steps.
+
+### Gates
+- `make fmt lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`.
+- Iterate with `uv run pytest packages/va_sim -q -k "timeline or media_session"` and `uv run pytest tests_e2e/unit -q`.
+- The sim image changes, so `make e2e` rebuilds it (background + Monitor heartbeat). It must show all 8 flows
+  green; report per-flow durations.
+- Full `make test` in the background with a heartbeat; jscpd, radon, pip-audit/pnpm audit as usual.
+
+### Risks
+- The machine greeting `say` overlapping the beep: the beep only gates when the agent starts.
+- Premium AMD verdict timing in FakeTelnyx under realtime: the 2 s window is measured from the AMD event, not from
+  the answer.
+- `expect_hangup` in cold_transfer ends as `media_stopped`/interrupted. That is fine: the evaluator ignores step
+  statuses.
+- If the edge's outbound transfer path differs from the inbound flow (e.g. `answer` absent), adjust the expected
+  subsequence. Never weaken the transfer/streaming_stop order.
+- Pre-existing flake `fix:bed-window-flake` may hit `make test`; rerun the single test to show it is unrelated.
+
+## Build P05-T17c (2026-11-02)
+
+Delivered:
+- Sim: `Call.first_agent_speech_ms` (set in `MediaSession._tick` from the played-out agent frame's speech test, O(1),
+  first only) exposed in `timeline()`; test `test_timeline_reports_when_agent_speech_first_played`; call-control
+  timeline equality updated. specs/30 §3.2 (14) timeline field list updated.
+- Harness: `remote_hangup(ccid)` (sim `POST /sim/telnyx/calls/{ccid}/hangup`, far end; used instead of a Call
+  Control hangup so the bridged caller hangs up as the remote side), `finished_leg(org, call_id, number)` →
+  (FinishedCall, summary), module `iso_ms(at)` (unit-tested). `EVENT_MESSAGES` += call.voicemail (VOICEMAIL_MESSAGE),
+  call.transfer_started (TRANSFER_STARTED_MESSAGE), imported from va_media; unit tests extended.
+- Flows: voicemail_leave_message, voicemail_hangup, amd_ivr_mode, cold_transfer (+ rules/cold_transfer.yaml).
+  Found: `call.amd` shares the `voicemail` category -> select voicemail rows by message.
+- Decision `voicemail, IVR, and transfer flows (P05-T17c)` under specs/30 §5; AGENTS bullet.
+- First targeted run (rebuilt stack): 4 passed in 31.8 s (cold_transfer 13.7 s, amd_ivr_mode 7.7 s,
+  voicemail_leave_message 6.8 s, voicemail_hangup 3.3 s).
+- Gates: make test 10757 passed / 7 skipped, cov 99.16 %; lint/typecheck/placeholders/spec refs clean; jscpd 0
+  clones (after finished_leg refactor); radon avg A 2.86; pip-audit no known vulns; pnpm audit 3 moderate (no high).
+- make e2e (full, rebuilt): 8 passed in 141.3 s, exit 0. Stack left running in PROFILE=e2e.
+
+## Review P05-T17c (2026-11-02): approved
+Re-ran: lint/typecheck/placeholders/spec refs 0, jscpd 0 clones, make test 10757 passed 7 skipped (99.16 %),
+make e2e 8 passed in 140.6 s. Diff matches specs/30 §5 rows (answered_by voicemail via scenario mapping, AMD→hangup
+≤ 2 s, DTMF gap ≥ 500 ms, transfer ordering + transfer-rate price bound against seed build plan $0.10/$0.04/$0.015).

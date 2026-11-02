@@ -1,0 +1,20 @@
+id: cold_transfer
+description: A human asks for a person; the agent's transfer_call tool cold-transfers to the configured number.
+match:
+  to: "+14155550108"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/cold_transfer.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Can I talk to a human please?"}
+  - expect_hangup: {timeout_ms: 60000}
+transfer_target:
+  answer_after_ms: 500
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: transferred
+  webhook_events: ["call.transfer_started", "call.completed"]

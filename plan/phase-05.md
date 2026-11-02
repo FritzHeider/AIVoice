@@ -312,7 +312,7 @@
   - Deliverables: `POST /internal/test/orgs` (only `VA_ENV` local/test; org + funded balance + live key + voice + number), `tests_e2e/` (conftest checking the stack, `harness.py` scenario/rules registration via sim control APIs, call triggering, completion wait on `GET /v1/calls/{id}` `queue_status=complete` until the phase-06 dispatcher delivers webhooks, assertion evaluator for the §3.5 `assertions` block, scenarios + LLM rules), flows `outbound_basic`, `inbound_basic` (task runner until phase 07 pathways), `stop_via_api`, `max_duration`; `make e2e` brings the stack up if needed
   - Acceptance: `make e2e` runs these four flows green against the compose e2e stack.
 
-- [ ] P05-T17c E2E voicemail, IVR, and cold transfer flows
+- [x] P05-T17c E2E voicemail, IVR, and cold transfer flows — voicemail_leave_message, voicemail_hangup, amd_ivr_mode, cold_transfer scenarios/rules/tests + FakeTelnyx timeline first_agent_speech_ms + harness remote_hangup/finished_leg/iso_ms, specs/30 §5 Decision P05-T17c; make e2e 8 passed (141 s); make test 10757 passed, 7 skipped, 99.16 %; lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
   - Spec refs: specs/30-testing-and-evals.md §5 (`voicemail_leave_message`, `voicemail_hangup`, `amd_ivr_mode`, `cold_transfer`)
   - Depends on: P05-T17b
   - Deliverables: scenarios, rules, and tests for the four flows (cold transfer through the task-mode `transfer_phone_number` tool until phase 07 Transfer nodes, recorded as a Decision)

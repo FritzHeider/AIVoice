@@ -1,0 +1,16 @@
+id: amd_ivr_mode
+description: A phone menu (a machine to AMD) answers an ivr_mode call; precall DTMF goes out, no voicemail action.
+match:
+  to: "+14155550107"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: machine
+steps:
+  - say: {text: "Thank you for calling. Press 1 for sales."}
+  - silence: {ms: 3000}
+  - hangup: {}
+assertions:
+  call_status: completed
+  end_reason: user_hangup
+  webhook_events: ["call.completed"]

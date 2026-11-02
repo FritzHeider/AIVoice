@@ -459,6 +459,28 @@ async def test_timeline_reports_utterances_and_first_agent_audio(media_agent: Me
         assert entry["latency_ms"] == entry["first_agent_audio_ms"] - entry["end_ms"]
 
 
+async def test_timeline_reports_when_agent_speech_first_played(media_agent: MediaAgent) -> None:
+    state = telnyx_state(RecordingTransport())
+    async with telnyx_client(state) as client:
+        ccid = await streaming(client, state, media_agent)
+        await media_agent.send(agent_media(b"\xff" * 480))
+        await media_agent.send({"event": "mark", "mark": {"name": "quiet"}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 1)
+        timeline = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()
+        assert timeline["first_agent_speech_ms"] is None
+        await media_agent.send(agent_media(ulaw_encode(tone(40))))
+        await media_agent.send({"event": "mark", "mark": {"name": "loud"}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 2)
+        first = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()["first_agent_speech_ms"]
+        assert first is not None
+        assert first > timeline["answered_ms"]
+        await media_agent.send(agent_media(ulaw_encode(tone(40))))
+        await media_agent.send({"event": "mark", "mark": {"name": "again"}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 3)
+        later = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()
+        assert later["first_agent_speech_ms"] == first
+
+
 async def test_media_control_errors(media_agent: MediaAgent) -> None:
     state = telnyx_state(RecordingTransport())
     async with telnyx_client(state) as client:

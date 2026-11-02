@@ -1,0 +1,16 @@
+id: voicemail_hangup
+description: An answering machine greets; the call's voicemail action hangs up without speaking.
+match:
+  to: "+14155550106"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: machine
+steps:
+  - say: {text: "Hi, you've reached Dana. Please leave a message after the tone."}
+  - expect_hangup: {by: agent, timeout_ms: 15000}
+assertions:
+  call_status: completed
+  answered_by: machine
+  end_reason: voicemail_hangup
+  webhook_events: ["call.voicemail", "call.completed"]

@@ -19,6 +19,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
 from va_events import DEFAULT_CATEGORY, ENDED_MESSAGE, EventType
+from va_media.transfer import TRANSFER_STARTED_MESSAGE
+from va_media.voicemail import VOICEMAIL_MESSAGE
 from va_sim.scenario import Assertions
 from va_workflows.activities.post_call import COMPLETED_MESSAGE
 
@@ -40,6 +42,8 @@ ANSWERED_BY: Final[Mapping[str, str]] = {"human": "human", "machine": "voicemail
 EVENT_MESSAGES: Final[Mapping[str, str]] = {
     EventType.CALL_COMPLETED.value: COMPLETED_MESSAGE,
     EventType.CALL_ENDED.value: ENDED_MESSAGE,
+    EventType.CALL_VOICEMAIL.value: VOICEMAIL_MESSAGE,
+    EventType.CALL_TRANSFER_STARTED.value: TRANSFER_STARTED_MESSAGE,
 }
 _LATENCY_CATEGORY: Final = "latency"
 _SUMMARY_PREFIX: Final = "E2E:"

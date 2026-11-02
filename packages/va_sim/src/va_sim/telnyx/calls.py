@@ -193,6 +193,8 @@ class Call:
     waiting_legs: list[Call] = field(default_factory=list)
     answered_at: datetime | None = None
     answered_ms: int | None = None
+    # First agent speech frame played to the far end (sim ``virtual_ms``; agent-speech threshold).
+    first_agent_speech_ms: int | None = None
     ended_at: datetime | None = None
     ended_ms: int | None = None
     hangup_cause: str | None = None
@@ -318,6 +320,7 @@ class Call:
             "initiated_ms": self.created_ms,
             "answered_ms": self.answered_ms,
             "ended_ms": self.ended_ms,
+            "first_agent_speech_ms": self.first_agent_speech_ms,
             "utterances": list(self.timeline_utterances),
             "script": self.script_summary(),
         }

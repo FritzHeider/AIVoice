@@ -358,6 +358,8 @@ class MediaSession:
             self._call.caller_dtmf.append({"digit": digit, "at": occurred_at})
         frames.extend(self._caller_frames())
         tick = AgentTick(self._state.clock.virtual_ms(), is_speech(agent_pcm))
+        if tick.speech and self._call.first_agent_speech_ms is None:
+            self._call.first_agent_speech_ms = tick.at_ms
         for listener in tuple(self._listeners):
             listener.on_tick(tick)
         return frames

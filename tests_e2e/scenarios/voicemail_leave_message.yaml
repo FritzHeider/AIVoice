@@ -1,0 +1,17 @@
+id: voicemail_leave_message
+description: An answering machine greets, beeps 4 s after the answer, and the agent leaves the voicemail message.
+match:
+  to: "+14155550105"
+answer:
+  after_ms: 1000
+  result: answered
+  answered_by: machine
+  beep_at_ms: 4000
+steps:
+  - say: {text: "Hi, you've reached Dana. Please leave a message after the tone."}
+  - expect_hangup: {by: agent, timeout_ms: 30000}
+assertions:
+  call_status: completed
+  answered_by: machine
+  end_reason: voicemail_left
+  webhook_events: ["call.voicemail", "call.completed"]

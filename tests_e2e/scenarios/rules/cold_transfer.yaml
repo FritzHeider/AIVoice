@@ -1,0 +1,11 @@
+rules:
+  - id: cold-transfer-{{run}}
+    priority: 10
+    match:
+      system_contains: ["{{marker}}"]
+      last_user_regex: "(?i)\\bhuman\\b"
+    respond:
+      tool_calls:
+        - name: transfer_call
+          arguments:
+            message: "Connecting you now."
