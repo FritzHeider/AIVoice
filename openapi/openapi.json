@@ -1,6 +1,178 @@
 {
   "components": {
     "schemas": {
+      "ActiveCallItem": {
+        "description": "A call that is dialing, ringing, in progress, or being transferred.",
+        "examples": [
+          {
+            "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+            "current_node_id": "qualify",
+            "direction": "outbound",
+            "duration_seconds": 42,
+            "from": "+14155550199",
+            "pathway_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c02",
+            "runner_type": "pathway",
+            "started_at": "2026-10-24T18:20:09.000000Z",
+            "status": "in_progress",
+            "to": "+14155550100"
+          }
+        ],
+        "properties": {
+          "call_id": {
+            "description": "Call id.",
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "current_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway node the call is on (pathway calls).",
+            "title": "Current Node Id"
+          },
+          "direction": {
+            "description": "Call direction.",
+            "enum": [
+              "outbound",
+              "inbound",
+              "web"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "duration_seconds": {
+            "description": "Whole seconds since the answer (0 before it).",
+            "title": "Duration Seconds",
+            "type": "integer"
+          },
+          "from": {
+            "description": "Caller id (E.164).",
+            "title": "From",
+            "type": "string"
+          },
+          "pathway_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway run by the call.",
+            "title": "Pathway Id"
+          },
+          "runner_type": {
+            "description": "What runs the call.",
+            "enum": [
+              "task",
+              "pathway",
+              "persona",
+              "agent"
+            ],
+            "title": "Runner Type",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Answer time, else dial start (UTC).",
+            "title": "Started At"
+          },
+          "status": {
+            "description": "Internal call status.",
+            "enum": [
+              "dialing",
+              "ringing",
+              "in_progress",
+              "transferring"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "to": {
+            "description": "Callee number (E.164; empty for web calls).",
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "call_id",
+          "to",
+          "from",
+          "status",
+          "started_at",
+          "direction",
+          "runner_type",
+          "pathway_id",
+          "current_node_id",
+          "duration_seconds"
+        ],
+        "title": "ActiveCallItem",
+        "type": "object"
+      },
+      "ActiveCallsResponse": {
+        "description": "The org's active calls, oldest first.",
+        "examples": [
+          {
+            "calls": [
+              {
+                "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+                "current_node_id": "qualify",
+                "direction": "outbound",
+                "duration_seconds": 42,
+                "from": "+14155550199",
+                "pathway_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c02",
+                "runner_type": "pathway",
+                "started_at": "2026-10-24T18:20:09.000000Z",
+                "status": "in_progress",
+                "to": "+14155550100"
+              }
+            ],
+            "count": 1,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "calls": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveCallItem"
+            },
+            "title": "Calls",
+            "type": "array"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "count",
+          "calls"
+        ],
+        "title": "ActiveCallsResponse",
+        "type": "object"
+      },
       "AgentKeyPoll": {
         "description": "The state of a request; ``key`` is set in exactly one ``approved`` response, then the status reads\n``delivered``.",
         "examples": [
@@ -790,6 +962,123 @@
           "cited_utterances"
         ],
         "title": "CallCitation",
+        "type": "object"
+      },
+      "CallEventItem": {
+        "description": "One entry of the call's event log.",
+        "examples": [
+          {
+            "category": "call",
+            "created_at": "2026-10-24T18:20:09.000000Z",
+            "data": {
+              "answered_by": "human"
+            },
+            "level": "info",
+            "message": "answered",
+            "seq": 3
+          }
+        ],
+        "properties": {
+          "category": {
+            "description": "Event category.",
+            "title": "Category",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the event happened (UTC).",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data": {
+            "additionalProperties": true,
+            "description": "Event details.",
+            "title": "Data",
+            "type": "object"
+          },
+          "level": {
+            "description": "Severity.",
+            "enum": [
+              "debug",
+              "info",
+              "warning",
+              "error"
+            ],
+            "title": "Level",
+            "type": "string"
+          },
+          "message": {
+            "description": "Short event name.",
+            "title": "Message",
+            "type": "string"
+          },
+          "seq": {
+            "description": "Per-call sequence number.",
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "category",
+          "level",
+          "message",
+          "data",
+          "created_at"
+        ],
+        "title": "CallEventItem",
+        "type": "object"
+      },
+      "CallEventsResponse": {
+        "description": "A page of events ordered by ``seq``; ``next_after_seq`` is ``null`` on the last page.",
+        "examples": [
+          {
+            "events": [
+              {
+                "category": "call",
+                "created_at": "2026-10-24T18:20:09.000000Z",
+                "data": {
+                  "answered_by": "human"
+                },
+                "level": "info",
+                "message": "answered",
+                "seq": 3
+              }
+            ],
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/CallEventItem"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "next_after_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next After Seq"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "next_after_seq"
+        ],
+        "title": "CallEventsResponse",
         "type": "object"
       },
       "CallLatency": {
@@ -5247,6 +5536,73 @@
         "title": "PronunciationRule",
         "type": "object"
       },
+      "RecordingResponse": {
+        "description": "A 15-minute presigned link to the recording.",
+        "examples": [
+          {
+            "channels": 2,
+            "duration_ms": 143200,
+            "expires_at": "2026-10-24T18:35:09.000000Z",
+            "format": "wav",
+            "status": "success",
+            "url": "https://recordings.s3.amazonaws.com/org/2026/10/call.wav?X-Amz-Signature=…"
+          }
+        ],
+        "properties": {
+          "channels": {
+            "description": "2 for the dual-channel original, 1 for a variant.",
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Channels",
+            "type": "integer"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Recording length, when known.",
+            "title": "Duration Ms"
+          },
+          "expires_at": {
+            "description": "When the URL stops working (UTC).",
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "format": {
+            "const": "wav",
+            "default": "wav",
+            "title": "Format",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "url": {
+            "description": "Presigned GET URL.",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "expires_at",
+          "duration_ms",
+          "channels"
+        ],
+        "title": "RecordingResponse",
+        "type": "object"
+      },
       "RedactionSettings": {
         "additionalProperties": false,
         "description": "Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).",
@@ -6759,6 +7115,67 @@
           "interrupted"
         ],
         "title": "Transcript",
+        "type": "object"
+      },
+      "TranscriptFormat": {
+        "enum": [
+          "json",
+          "text",
+          "srt",
+          "vtt"
+        ],
+        "type": "string"
+      },
+      "TranscriptResponse": {
+        "description": "The call's transcript, as in the Call Object.",
+        "examples": [
+          {
+            "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+            "concatenated_transcript": "assistant: Hi, this is Ava from Acme Dental.\n",
+            "status": "success",
+            "transcripts": [
+              {
+                "created_at": "2026-10-24T18:20:09.000000Z",
+                "end_ms": 3450,
+                "id": 1,
+                "interrupted": false,
+                "start_ms": 1100,
+                "text": "Hi, this is Ava from Acme Dental.",
+                "user": "assistant"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "call_id": {
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "concatenated_transcript": {
+            "title": "Concatenated Transcript",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "transcripts": {
+            "items": {
+              "$ref": "#/components/schemas/Transcript"
+            },
+            "title": "Transcripts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "call_id",
+          "transcripts",
+          "concatenated_transcript"
+        ],
+        "title": "TranscriptResponse",
         "type": "object"
       },
       "TranscriptRole": {
@@ -8339,6 +8756,40 @@
         "x-scope": "calls:write"
       }
     },
+    "/v1/calls/active": {
+      "get": {
+        "description": "The org's dialing, ringing, in-progress, and transferring calls, oldest first.",
+        "operationId": "calls_active",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveCallsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Active",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      }
+    },
     "/v1/calls/active/stop": {
       "post": {
         "description": "Stop every active or scheduled call of the org, or only ``call_ids``.",
@@ -8459,6 +8910,208 @@
         "x-scope": "calls:read"
       }
     },
+    "/v1/calls/{call_id}/events": {
+      "get": {
+        "description": "A page of the call's event log ordered by `seq`; pass `next_after_seq` as `after_seq` for the next.",
+        "operationId": "calls_events",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Return events after this sequence number.",
+            "in": "query",
+            "name": "after_seq",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Return events after this sequence number.",
+              "minimum": 0,
+              "title": "After Seq",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Page size.",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Comma-separated event categories.",
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated event categories.",
+              "title": "Category"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallEventsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Events",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      }
+    },
+    "/v1/calls/{call_id}/recording": {
+      "get": {
+        "description": "Redirect to the call's recording (15-minute link), or answer the link as JSON with `format=json`.",
+        "operationId": "calls_recording",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`json` for a JSON body, else 302.",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "json",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`json` for a JSON body, else 302.",
+              "title": "Format"
+            }
+          },
+          {
+            "description": "Audio channel(s).",
+            "in": "query",
+            "name": "channel",
+            "required": false,
+            "schema": {
+              "default": "mixed",
+              "description": "Audio channel(s).",
+              "enum": [
+                "mixed",
+                "caller",
+                "agent"
+              ],
+              "title": "Channel",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordingResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "302": {
+            "description": "Redirect to a 15-minute presigned recording URL (without `format=json`).",
+            "headers": {
+              "Location": {
+                "description": "Presigned URL.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Recording",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      }
+    },
     "/v1/calls/{call_id}/stop": {
       "post": {
         "description": "Cancel a call that is not answered yet, or hang up a call in progress.",
@@ -8516,6 +9169,75 @@
         "x-envelope": "legacy",
         "x-permission": "calls.operate",
         "x-scope": "calls:write"
+      }
+    },
+    "/v1/calls/{call_id}/transcript": {
+      "get": {
+        "description": "The call's transcript as JSON, plain text, SubRip, or WebVTT.",
+        "operationId": "calls_transcript",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`json`, `text`, `srt`, or `vtt`.",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TranscriptFormat",
+              "default": "json",
+              "description": "`json`, `text`, `srt`, or `vtt`."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptResponse"
+                }
+              },
+              "application/x-subrip": {},
+              "text/plain": {},
+              "text/vtt": {}
+            },
+            "description": "The transcript; `text`, `srt`, and `vtt` answer plain text in that format."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Transcript",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
       }
     },
     "/v1/health": {

@@ -272,7 +272,7 @@
   - Deliverables: `va_domain.call_object.CallObject` (every §4 field) + `va_db.call_object` loader/serializer (batched child reads, shared with P05-T18's `call.completed`), api object store for 7-day recording URLs, `GET /v1/calls/{call_id}` (bare Call Object) and `GET /v1/calls` (every §6 filter, total_count, cursor, list item = Call Object minus heavy fields)
   - Acceptance: serializer test asserts every Call Object field from specs/19 §4 is present with the correct type; one test per list filter; cross-tenant 404s.
 
-- [ ] P05-T16b Active calls, transcript, recording, and events endpoints
+- [x] P05-T16b Active calls, transcript, recording, and events endpoints — GET /v1/calls/active (Redis node ids, fail-open), /{id}/recording (302/json, mixed→raw, 15-min TTL, 503 on storage), /{id}/transcript (json/text/srt/vtt golden files), /{id}/events (seq paging); lint/typecheck/placeholders/spec refs pass; make test 10589 passed, 1 unrelated wall-clock flake in va_workflows end_call (passes on rerun, fix task opened), 99% coverage; test-ts 22/52/48; jscpd 0; radon A 2.23
   - Spec refs: specs/05-calls-api.md §7.4, §7.5, §7.6, §7.9
   - Depends on: P05-T16a
   - Deliverables: `GET /v1/calls/active` (current_node_id from carrier_state), `GET /v1/calls/{call_id}/recording` (302 / `?format=json`, `?channel=`), `GET /v1/calls/{call_id}/transcript` (json/text/srt/vtt), `GET /v1/calls/{call_id}/events` (after_seq, limit, category)

@@ -1492,3 +1492,13 @@ Grafana 3001
   `request.app.state.settings` (the fake container has no `settings`). `json_log_stream()` is not a context manager.
   Spec Decisions: specs/19 §4 and specs/05 §6 (P05-T16a). T16b's literal `GET /v1/calls/active` must be declared
   before `GET /v1/calls/{call_id}`.
+- 2026-11-02 (P05-T16b): call artifact routes on `calls_router` (`GET /v1/calls/active` declared before
+  `/{call_id}`, `/{call_id}/recording|transcript|events`), work in `va_api.services.call_artifacts` (shares
+  `call_read.ReadDeps` — now with `redis` — and `call_read.owned_call`), schemas in
+  `routers/calls_detail_schemas.py`. `va_db.call_states.ACTIVE_STATUSES`; `va_db.call_events_read.load_call_events`
+  (seq paging); `va_db.call_object.load_transcripts`. Transcript downloads are `va_domain.call_object.to_srt`/
+  `to_vtt` (golden files `packages/va_domain/tests/fixtures/transcripts/*.srt|vtt`, compared byte for byte;
+  edit them with `printf`, never let an editor add CRLF). Recording `channel=mixed` = `mixed` variant if
+  `ObjectStore.exists`, else the raw dual-channel key; `call_fakes.FakePresigner` answers `head_object` from
+  `existing` (`fail_head` → 500). Routes with a FastAPI query model need `REGISTRY.register_request` in
+  `cross_tenant_factories.py`; shared call-read seeding is `tests/support/call_read_helpers.an_org`.

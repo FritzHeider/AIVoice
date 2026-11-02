@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Request
+from redis.asyncio import Redis
 from sqlalchemy import ColumnElement, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +43,7 @@ __all__ = [
     "ReadDeps",
     "get_call",
     "list_calls",
+    "owned_call",
     "read_deps_of",
     "recording_urls",
 ]
@@ -67,6 +69,7 @@ class ReadDeps:
     bucket: str
     org_settings: OrgSettingsReader
     clock: Clock
+    redis: Redis
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +90,7 @@ def read_deps_of(request: Request) -> ReadDeps:
         bucket=request.app.state.settings.s3_bucket_recordings,
         org_settings=container.org_settings,
         clock=container.clock,
+        redis=container.redis,
     )
 
 
@@ -108,12 +112,18 @@ async def recording_urls(
     return urls
 
 
+async def owned_call(session: AsyncSession, ctx: RequestContext, call_id: uuid.UUID) -> Call:
+    """The call ``call_id`` of ``ctx.org_id``; ``CALL_NOT_FOUND`` when absent (or another org's)."""
+    call = await session.scalar(select(Call).where(Call.org_id == ctx.org_id, Call.id == call_id))
+    if call is None:
+        raise AppError("CALL_NOT_FOUND", CALL_NOT_FOUND_MESSAGE)
+    return call
+
+
 async def get_call(deps: ReadDeps, ctx: RequestContext, call_id: uuid.UUID) -> CallObject:
     """The Call Object of one call of ``ctx.org_id``; ``CALL_NOT_FOUND`` when absent (or another org's)."""
     async with deps.database.tenant_session(ctx.org_id) as session:
-        call = await session.scalar(select(Call).where(Call.org_id == ctx.org_id, Call.id == call_id))
-        if call is None:
-            raise AppError("CALL_NOT_FOUND", CALL_NOT_FOUND_MESSAGE)
+        call = await owned_call(session, ctx, call_id)
         urls = await recording_urls(deps.object_store, deps.bucket, [call], deps.clock.now())
         (found,) = await load_call_objects(session, [call], recording_urls=urls)
     return found

@@ -175,6 +175,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Active
+         * @description The org's dialing, ringing, in-progress, and transferring calls, oldest first.
+         */
+        get: operations["calls_active"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/calls/active/stop": {
         parameters: {
             query?: never;
@@ -215,6 +235,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls/{call_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Events
+         * @description A page of the call's event log ordered by `seq`; pass `next_after_seq` as `after_seq` for the next.
+         */
+        get: operations["calls_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calls/{call_id}/recording": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Recording
+         * @description Redirect to the call's recording (15-minute link), or answer the link as JSON with `format=json`.
+         */
+        get: operations["calls_recording"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/calls/{call_id}/stop": {
         parameters: {
             query?: never;
@@ -229,6 +289,26 @@ export interface paths {
          * @description Cancel a call that is not answered yet, or hang up a call in progress.
          */
         post: operations["calls_stop"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calls/{call_id}/transcript": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Transcript
+         * @description The call's transcript as JSON, plain text, SubRip, or WebVTT.
+         */
+        get: operations["calls_transcript"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -569,6 +649,112 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ActiveCallItem
+         * @description A call that is dialing, ringing, in progress, or being transferred.
+         * @example {
+         *       "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+         *       "current_node_id": "qualify",
+         *       "direction": "outbound",
+         *       "duration_seconds": 42,
+         *       "from": "+14155550199",
+         *       "pathway_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c02",
+         *       "runner_type": "pathway",
+         *       "started_at": "2026-10-24T18:20:09.000000Z",
+         *       "status": "in_progress",
+         *       "to": "+14155550100"
+         *     }
+         */
+        ActiveCallItem: {
+            /**
+             * Call Id
+             * Format: uuid
+             * @description Call id.
+             */
+            call_id: string;
+            /**
+             * Current Node Id
+             * @description Pathway node the call is on (pathway calls).
+             */
+            current_node_id: string | null;
+            /**
+             * Direction
+             * @description Call direction.
+             * @enum {string}
+             */
+            direction: "outbound" | "inbound" | "web";
+            /**
+             * Duration Seconds
+             * @description Whole seconds since the answer (0 before it).
+             */
+            duration_seconds: number;
+            /**
+             * From
+             * @description Caller id (E.164).
+             */
+            from: string;
+            /**
+             * Pathway Id
+             * @description Pathway run by the call.
+             */
+            pathway_id: string | null;
+            /**
+             * Runner Type
+             * @description What runs the call.
+             * @enum {string}
+             */
+            runner_type: "task" | "pathway" | "persona" | "agent";
+            /**
+             * Started At
+             * @description Answer time, else dial start (UTC).
+             */
+            started_at: string | null;
+            /**
+             * Status
+             * @description Internal call status.
+             * @enum {string}
+             */
+            status: "dialing" | "ringing" | "in_progress" | "transferring";
+            /**
+             * To
+             * @description Callee number (E.164; empty for web calls).
+             */
+            to: string;
+        };
+        /**
+         * ActiveCallsResponse
+         * @description The org's active calls, oldest first.
+         * @example {
+         *       "calls": [
+         *         {
+         *           "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+         *           "current_node_id": "qualify",
+         *           "direction": "outbound",
+         *           "duration_seconds": 42,
+         *           "from": "+14155550199",
+         *           "pathway_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c02",
+         *           "runner_type": "pathway",
+         *           "started_at": "2026-10-24T18:20:09.000000Z",
+         *           "status": "in_progress",
+         *           "to": "+14155550100"
+         *         }
+         *       ],
+         *       "count": 1,
+         *       "status": "success"
+         *     }
+         */
+        ActiveCallsResponse: {
+            /** Calls */
+            calls: components["schemas"]["ActiveCallItem"][];
+            /** Count */
+            count: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
         /**
          * AgentKeyPoll
          * @description The state of a request; ``key`` is set in exactly one ``approved`` response, then the status reads
@@ -1001,6 +1187,87 @@ export interface components {
              * @description Declared variable type.
              */
             variable_type: string;
+        };
+        /**
+         * CallEventItem
+         * @description One entry of the call's event log.
+         * @example {
+         *       "category": "call",
+         *       "created_at": "2026-10-24T18:20:09.000000Z",
+         *       "data": {
+         *         "answered_by": "human"
+         *       },
+         *       "level": "info",
+         *       "message": "answered",
+         *       "seq": 3
+         *     }
+         */
+        CallEventItem: {
+            /**
+             * Category
+             * @description Event category.
+             */
+            category: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the event happened (UTC).
+             */
+            created_at: string;
+            /**
+             * Data
+             * @description Event details.
+             */
+            data: {
+                [key: string]: unknown;
+            };
+            /**
+             * Level
+             * @description Severity.
+             * @enum {string}
+             */
+            level: "debug" | "info" | "warning" | "error";
+            /**
+             * Message
+             * @description Short event name.
+             */
+            message: string;
+            /**
+             * Seq
+             * @description Per-call sequence number.
+             */
+            seq: number;
+        };
+        /**
+         * CallEventsResponse
+         * @description A page of events ordered by ``seq``; ``next_after_seq`` is ``null`` on the last page.
+         * @example {
+         *       "events": [
+         *         {
+         *           "category": "call",
+         *           "created_at": "2026-10-24T18:20:09.000000Z",
+         *           "data": {
+         *             "answered_by": "human"
+         *           },
+         *           "level": "info",
+         *           "message": "answered",
+         *           "seq": 3
+         *         }
+         *       ],
+         *       "status": "success"
+         *     }
+         */
+        CallEventsResponse: {
+            /** Events */
+            events: components["schemas"]["CallEventItem"][];
+            /** Next After Seq */
+            next_after_seq: number | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
         };
         /**
          * CallLatency
@@ -3562,6 +3829,54 @@ export interface components {
             word: string;
         };
         /**
+         * RecordingResponse
+         * @description A 15-minute presigned link to the recording.
+         * @example {
+         *       "channels": 2,
+         *       "duration_ms": 143200,
+         *       "expires_at": "2026-10-24T18:35:09.000000Z",
+         *       "format": "wav",
+         *       "status": "success",
+         *       "url": "https://recordings.s3.amazonaws.com/org/2026/10/call.wav?X-Amz-Signature=…"
+         *     }
+         */
+        RecordingResponse: {
+            /**
+             * Channels
+             * @description 2 for the dual-channel original, 1 for a variant.
+             * @enum {integer}
+             */
+            channels: 1 | 2;
+            /**
+             * Duration Ms
+             * @description Recording length, when known.
+             */
+            duration_ms: number | null;
+            /**
+             * Expires At
+             * Format: date-time
+             * @description When the URL stops working (UTC).
+             */
+            expires_at: string;
+            /**
+             * Format
+             * @default wav
+             * @constant
+             */
+            format: "wav";
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /**
+             * Url
+             * @description Presigned GET URL.
+             */
+            url: string;
+        };
+        /**
          * RedactionSettings
          * @description Real-time PII/PCI redaction (specs/23-guardrails-and-compliance.md §6).
          */
@@ -4335,6 +4650,45 @@ export interface components {
             user: components["schemas"]["TranscriptRole"];
         };
         /** @enum {string} */
+        TranscriptFormat: "json" | "text" | "srt" | "vtt";
+        /**
+         * TranscriptResponse
+         * @description The call's transcript, as in the Call Object.
+         * @example {
+         *       "call_id": "0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01",
+         *       "concatenated_transcript": "assistant: Hi, this is Ava from Acme Dental.\n",
+         *       "status": "success",
+         *       "transcripts": [
+         *         {
+         *           "created_at": "2026-10-24T18:20:09.000000Z",
+         *           "end_ms": 3450,
+         *           "id": 1,
+         *           "interrupted": false,
+         *           "start_ms": 1100,
+         *           "text": "Hi, this is Ava from Acme Dental.",
+         *           "user": "assistant"
+         *         }
+         *       ]
+         *     }
+         */
+        TranscriptResponse: {
+            /**
+             * Call Id
+             * Format: uuid
+             */
+            call_id: string;
+            /** Concatenated Transcript */
+            concatenated_transcript: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Transcripts */
+            transcripts: components["schemas"]["Transcript"][];
+        };
+        /** @enum {string} */
         TranscriptRole: "user" | "assistant" | "agent-action" | "human_agent";
         /**
          * TransferOwnershipRequest
@@ -4994,6 +5348,35 @@ export interface operations {
             };
         };
     };
+    calls_active: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveCallsResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
     calls_stop_active: {
         parameters: {
             query?: never;
@@ -5076,6 +5459,107 @@ export interface operations {
             };
         };
     };
+    calls_events: {
+        parameters: {
+            query?: {
+                /** @description Return events after this sequence number. */
+                after_seq?: number;
+                /** @description Page size. */
+                limit?: number;
+                /** @description Comma-separated event categories. */
+                category?: string | null;
+            };
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CallEventsResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_recording: {
+        parameters: {
+            query?: {
+                /** @description `json` for a JSON body, else 302. */
+                format?: "json" | null;
+                /** @description Audio channel(s). */
+                channel?: "mixed" | "caller" | "agent";
+            };
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecordingResponse"];
+                };
+            };
+            /** @description Redirect to a 15-minute presigned recording URL (without `format=json`). */
+            302: {
+                headers: {
+                    /** @description Presigned URL. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
     calls_stop: {
         parameters: {
             query?: never;
@@ -5094,6 +5578,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopCallResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_transcript: {
+        parameters: {
+            query?: {
+                /** @description `json`, `text`, `srt`, or `vtt`. */
+                format?: components["schemas"]["TranscriptFormat"];
+            };
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The transcript; `text`, `srt`, and `vtt` answer plain text in that format. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptResponse"];
+                    "application/x-subrip": unknown;
+                    "text/plain": unknown;
+                    "text/vtt": unknown;
                 };
             };
             /** @description Invalid input */

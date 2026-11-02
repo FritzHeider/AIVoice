@@ -1,5 +1,5 @@
 """Fakes of the call container pieces: a recording ``CallWorkflow`` starter, a recording canceller, a DNS
-resolver, and an S3 client that presigns recording URLs."""
+resolver, and an S3 client that presigns recording URLs and answers ``head_object``."""
 
 from __future__ import annotations
 
@@ -72,11 +72,24 @@ class FakeResolver:
 
 @dataclass
 class FakePresigner:
-    """The presign call of the S3 client: answers ``{PRESIGN_HOST}/{bucket}/{key}?expires=<s>`` and records
-    each ``(bucket, key, expires)``; raises a ``ClientError`` while ``fail`` is set."""
+    """The presign and head calls of the S3 client: answers ``{PRESIGN_HOST}/{bucket}/{key}?expires=<s>`` and
+    records each ``(bucket, key, expires)``; raises a ``ClientError`` while ``fail`` is set. ``head_object``
+    finds the keys in ``existing`` (a 404 ``ClientError`` otherwise) and raises a 500 one while ``fail_head``
+    is set."""
 
     presigned: list[tuple[str, str, int]] = field(default_factory=list)
     fail: bool = False
+    existing: set[str] = field(default_factory=set)
+    fail_head: bool = False
+    heads: list[str] = field(default_factory=list)
+
+    async def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803 - boto3 names
+        self.heads.append(Key)
+        if self.fail_head:
+            raise ClientError({"Error": {"Code": "500", "Message": "boom"}}, "HeadObject")
+        if Key not in self.existing:
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
+        return {"Bucket": Bucket, "ContentLength": 1}
 
     async def generate_presigned_url(
         self,

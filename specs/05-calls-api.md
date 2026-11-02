@@ -657,6 +657,15 @@ for session auth.
 Response `{"status":"success","count":3,"calls":[{"call_id","to","from","status","started_at","direction","runner_type","pathway_id","current_node_id","duration_seconds"}]}`.
 `current_node_id` read from Redis hash `call:{id}:carrier_state` field `node_id` (updated by the media worker on route).
 
+> Decision (2026-11-02): active calls (P05-T16b). Listed statuses are `dialing`, `ringing`, `in_progress`,
+> `transferring` (`va_db.call_states.ACTIVE_STATUSES`); `status` is the internal status name (more precise than
+> Bland's `in-progress`). Calls come oldest first (`created_at`, `id`) without paging (bounded by the
+> concurrency limits). `started_at` = answer time, else `started_at`, else dial start (nullable);
+> `duration_seconds` = whole seconds since the answer (0 before it, never negative); `to`/`from` are `""` for
+> web calls. `current_node_id` is read for every call in one Redis pipeline from the carrier-state hash field
+> `node_id`, which the pathway route step writes from phase 07 (absent/empty → `null`); a Redis failure is
+> logged (`calls.active_node_ids_unavailable`) and every `current_node_id` is `null`, the list still answers 200.
+
 ### 7.5 `GET /v1/calls/{call_id}/recording`
 
 `404 NOT_FOUND` if no recording (or retention purged). Default `302` to presigned URL (TTL 15 min); `?format=json` →
@@ -665,10 +674,28 @@ Response `{"status":"success","count":3,"calls":[{"call_id","to","from","status"
 (`18-post-call-analysis.md` §2) and stored as `{org}/{yyyy}/{mm}/{call}/{mixed|caller|agent}.wav` (specs/06 §11
 Decision P05-T14).
 
+> Decision (2026-11-02): recording links (P05-T16b). Only `format=json` changes the answer (other values →
+> `400 INVALID_INPUT`); without it the answer is `302` with `Location` and `Cache-Control: no-store` (the JSON
+> answer carries `no-store` too). A call without `recording_s3_key` (never recorded or purged) is
+> `404 NOT_FOUND` "Recording not found.". `channel=mixed` links the `mixed` variant when it exists
+> (`channels` 1), else the stored dual-channel recording (`channels` 2); `caller`/`agent` need their variant
+> (`channels` 1), else `404 NOT_FOUND`. The URL is presigned for 15 minutes (`PLAYBACK_URL_TTL_S`);
+> `duration_ms` is `calls.recording_duration_ms` (nullable). A storage failure (head or presign) is logged
+> (`calls.recording_link_failed`, never the key or URL) and answers `503 SERVICE_UNAVAILABLE`.
+
 ### 7.6 `GET /v1/calls/{call_id}/transcript`
 
 `?format=json|text|srt|vtt`. JSON: `{"status":"success","call_id":"…","transcripts":[…same as Call Object…],"concatenated_transcript":"…"}`.
 Text = `concatenated_transcript`. SRT/VTT built from `start_ms`/`end_ms` with speaker prefixes `User:`/`Agent:`.
+
+> Decision (2026-11-02): transcript downloads (P05-T16b). Any call status is accepted (live calls return the
+> turns so far). `text` is exactly the Call Object's `concatenated_transcript` (`text/plain; charset=utf-8`).
+> SRT (`application/x-subrip; charset=utf-8`) and WebVTT (`text/vtt; charset=utf-8`) carry one cue per spoken
+> turn: `user` → `User:`, `assistant`/`agent-action`/`human_agent` → `Agent:`; turns with blank text are
+> skipped; whitespace runs containing a line break collapse to one space; negative times clamp to 0 and an end
+> before the start becomes the start; hours are not capped. SRT numbers cues from 1 with `HH:MM:SS,mmm`, cues
+> separated by a blank line, a trailing newline, and `""` when empty. WebVTT starts with `WEBVTT` and a blank
+> line, has no cue numbers, uses `HH:MM:SS.mmm`, escapes `&`, `<`, `>` in cue text, and is `WEBVTT\n` when empty.
 
 ### 7.7 `POST /v1/calls/{call_id}/correct-transcript`
 
@@ -699,6 +726,12 @@ anything else → string; unknowable → `null`.
 
 Query `after_seq` (default 0), `limit` ≤ 1 000, `category` (comma list). Response
 `{"status":"success","events":[{seq, category, level, message, data, created_at}], "next_after_seq": n | null}`.
+
+> Decision (2026-11-02): event pages (P05-T16b). `after_seq` ≥ 0 (default 0); `limit` 1-1 000, default 100;
+> `category` is a comma list of specs/03 `call_events.category` values (blanks ignored, duplicates collapsed,
+> an unknown name → `400 INVALID_INPUT` field `category`). Events come ordered by `seq`; `next_after_seq` is
+> the last returned `seq` when more events exist, else `null`. The call's ownership is checked first
+> (`404 CALL_NOT_FOUND`).
 
 ### 7.10 `POST /v1/calls/{call_id}/control`
 

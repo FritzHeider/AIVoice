@@ -2,7 +2,8 @@
 Decision P05-T16a).
 
 :mod:`.models` holds the contract models (:class:`CallObject`, the list item :class:`CallListItem`,
-nested entries); :mod:`.mapping` the pure conversions from stored values to their Bland-compatible forms.
+nested entries); :mod:`.mapping` the pure conversions from stored values to their Bland-compatible forms;
+:mod:`.transcript_formats` the text/SRT/WebVTT transcript downloads.
 The rows are read by ``va_db.call_object``.
 """
 
@@ -34,6 +35,7 @@ from va_domain.call_object.models import (
     VoicemailSummary,
     WarmTransferCall,
 )
+from va_domain.call_object.transcript_formats import speaker_label, to_srt, to_vtt, transcript_text
 
 __all__ = [
     "BLAND_STATUS_FILTER",
@@ -60,4 +62,8 @@ __all__ = [
     "dollars",
     "latency_summary",
     "minutes",
+    "speaker_label",
+    "to_srt",
+    "to_vtt",
+    "transcript_text",
 ]

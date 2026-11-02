@@ -12,7 +12,7 @@ import httpx
 import pytest
 from call_fakes import PRESIGN_HOST
 from call_helpers import bearer
-from call_rows import seed_call
+from call_read_helpers import BASE, SeededOrg, an_org
 from service_helpers import json_log_stream, log_events
 from session_helpers import SessionContainer, error_of, store_api_key
 from sqlalchemy import update
@@ -26,33 +26,10 @@ from va_db.models import Agent, Batch, Call, Org, Pathway, Persona
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
 
 LIST: Final = "/v1/calls"
-BASE: Final = datetime(2026, 10, 20, 12, tzinfo=UTC)
 NUMBER_A: Final = "+14155550101"
 NUMBER_B: Final = "+14155550102"
 ABSENT_ID: Final = "0193c5d2-0000-7000-8000-000000000001"
 OTHER_ID: Final = "0193c5d2-0000-7000-8000-000000000002"
-
-
-class SeededOrg:
-    """An org with a ``*`` key and the calls seeded into it (in seeding order)."""
-
-    def __init__(self, org_id: uuid.UUID, key: str) -> None:
-        self.org_id = org_id
-        self.key = key
-        self.calls: list[uuid.UUID] = []
-
-
-async def an_org(container: SessionContainer, *calls: dict[str, Any]) -> SeededOrg:
-    """A fresh org holding one call per ``calls`` entry; call ``i`` is created at ``BASE + i minutes`` unless
-    the entry sets ``created_at``."""
-    first = await seed_call(container.database, status="completed", created_at=BASE - timedelta(days=30))
-    key, _ = await store_api_key(container, first.org_id)
-    org = SeededOrg(first.org_id, key)
-    for index, values in enumerate(calls):
-        merged = {"status": "completed", "created_at": BASE + timedelta(minutes=index), **values}
-        seeded = await seed_call(container.database, org_id=org.org_id, **merged)
-        org.calls.append(seeded.call_id)
-    return org
 
 
 async def listed(client: httpx.AsyncClient, org: SeededOrg, **params: Any) -> list[uuid.UUID]:

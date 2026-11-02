@@ -5,6 +5,7 @@ Runs in the caller's ``tenant_session``. Child rows of all requested calls are r
 
 - :func:`load_call_objects` → full :class:`~va_domain.call_object.CallObject` values (detail endpoint,
   ``call.completed`` webhook).
+- :func:`load_transcripts` → the ``transcripts`` of one call (transcript endpoint).
 - :func:`load_call_list_items` → :class:`~va_domain.call_object.CallListItem` values (``GET /v1/calls``); only
   turn latencies, guard rails, warm-transfer legs, and voicemail events are read.
 
@@ -55,7 +56,7 @@ from va_domain.call_object import (
     minutes,
 )
 
-__all__ = ["load_call_list_items", "load_call_objects"]
+__all__ = ["load_call_list_items", "load_call_objects", "load_transcripts"]
 
 DEFAULT_MAX_DURATION_MIN: Final = 30
 """``SendCallConfig.max_duration_min`` default, for calls whose stored config omits it."""
@@ -147,15 +148,20 @@ async def _children(session: AsyncSession, calls: Sequence[Call], *, all_turns: 
     return found
 
 
-async def _details(session: AsyncSession, calls: Sequence[Call]) -> _Details:
+async def _turns(session: AsyncSession, calls: Sequence[Call]) -> Sequence[CallTurn]:
     ids, orgs = _scope(calls)
-    found = _Details()
-    turns = await session.scalars(
+    rows = await session.scalars(
         select(CallTurn)
         .where(CallTurn.org_id.in_(orgs), CallTurn.call_id.in_(ids))
         .order_by(CallTurn.call_id, CallTurn.turn_index, CallTurn.start_ms, CallTurn.id)
     )
-    for turn in turns:
+    return rows.all()
+
+
+async def _details(session: AsyncSession, calls: Sequence[Call]) -> _Details:
+    ids, orgs = _scope(calls)
+    found = _Details()
+    for turn in await _turns(session, calls):
         found.turns[turn.call_id].append(turn)
     routes = await session.execute(
         select(CallEvent.call_id, CallEvent.data)
@@ -355,6 +361,11 @@ def _pathway_logs(call: Call, turns: Sequence[CallTurn], details: _Details) -> l
             )
         )
     return logs
+
+
+async def load_transcripts(session: AsyncSession, call: Call) -> list[Transcript]:
+    """The ``transcripts`` of ``call``'s Call Object (``GET /v1/calls/{call_id}/transcript``)."""
+    return _transcripts(await _turns(session, [call]))
 
 
 async def load_call_list_items(

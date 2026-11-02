@@ -1,0 +1,15 @@
+1
+00:00:01,000 --> 00:00:02,000
+Agent: First line. Second line. Third.
+
+2
+00:00:05,000 --> 00:00:05,000
+User: Backwards
+
+3
+01:02:03,004 --> 01:02:05,999
+Agent: Late <b> & --> done
+
+4
+00:00:00,000 --> 00:00:00,000
+User: Negative

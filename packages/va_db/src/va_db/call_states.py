@@ -17,6 +17,7 @@ from typing import Final, Literal
 from va_db.models import CallLegState, CallStatus, EndedBy
 
 __all__ = [
+    "ACTIVE_STATUSES",
     "CALL_TRANSITIONS",
     "DURATION_PRECISION",
     "END_REASONS",
@@ -120,6 +121,12 @@ CALL_TRANSITIONS: Final[Mapping[CallStatus, frozenset[CallStatus]]] = MappingPro
 TERMINAL_STATUSES: Final[frozenset[CallStatus]] = frozenset(
     {"completed", "failed", "canceled", "no_answer", "busy"}
 )
+
+ACTIVE_STATUSES: Final[frozenset[CallStatus]] = frozenset(
+    {"dialing", "ringing", "in_progress", "transferring"}
+)
+"""The statuses ``GET /v1/calls/active`` lists (specs/05 §7.4 Decision P05-T16b): the carrier leg exists and
+the AI still owns the call."""
 
 STOPPABLE_STATUSES: Final[frozenset[CallStatus]] = frozenset(
     {"scheduled", "queued", "dialing", "ringing", "in_progress", "transferring"}

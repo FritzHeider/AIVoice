@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793639516-44e5
+> P05-T16b: call artifacts service va_api.services.call_artifacts (active/recording/transcript/events) reuses call_read.ReadDeps(+redis)/owned_call; transcript SRT/VTT in va_domain.call_object.transcript_formats with golden files; FastAPI query-model routes need cross_tenant REGISTRY.register_request; route returning RedirectResponse or model: set response_model= explicitly, annotate -> Model | Response
+<!-- tags: api, calls, testing | created: 2026-11-02 -->
+
 ### mem-1793637094-860e
 > P05-T16a: Call Object = va_domain.call_object (CallObject extends CallListItem) + va_db.call_object load_call_objects/load_call_list_items (batched, reuse for call.completed); api call_read service + CallListQuery FastAPI query model (cross-tenant walker needs REGISTRY.register_request for calls_list); SessionContainer.presigner FakePresigner; fake api container has no settings -> use request.app.state.settings; type X = Literal aliases become $defs refs in JSON schema; never parametrize with new_id()
 <!-- tags: api, calls, testing | created: 2026-11-02 -->
@@ -421,6 +425,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793640192-b97e
+> failure: make test (review P05-T16b) exit=2, packages/va_workflows/tests/test_end_call_activity.py::test_a_transferred_call_splits_connected_and_transfer_seconds connected_seconds 61.072 vs 60 (+-1 s wall-clock tolerance) under xdist load; passes alone 3/3; next=derive expected durations from the rig clock instead of wall time
+<!-- tags: workflows, testing | created: 2026-11-02 -->
 
 ### mem-1793633185-349b
 > build.done backpressure: 'complexity: 2.45.' (trailing period) is not parsed -> rejected; write 'complexity: 2.45,' and keep it < 10

@@ -2555,3 +2555,179 @@ Re-ran: make lint 0, make typecheck 0, placeholders 0, check_spec_refs 0, make t
 (exit 0), make test-ts 0, jscpd 0 clones. Diff checked against specs/05 §6 (every filter, aliases, limit bounds,
 cursor/total_count) and specs/19 §4 (spec-table parser test, serialization Decision); loader batches child reads with
 org_id scoping inside tenant_session; presign failure logged without key/URL. Next: P05-T16b.
+
+## Plan P05-T16b — Active calls, recording, transcript, and events endpoints (Planner, 2026-11-02)
+Spec refs: specs/05 §1 (inventory), §7.4, §7.5, §7.6, §7.9; specs/06 §11 Decision P05-T14 (variant keys);
+specs/19 §4 (Transcript shape, Decision P05-T16a). All four routes go on `calls_router` (legacy envelope),
+`require_scope("calls:read")` (`ReadCalls`), `openapi_extra={"x-scope": "calls:read"}`, GET → no audit marker.
+`call_id` path values that are not UUIDs / absent / other org → `404 CALL_NOT_FOUND` (reuse `parse_call_id`,
+`CALL_NOT_FOUND_MESSAGE`). Declare `GET /active` BEFORE `GET /{call_id}` (literal first; fix the ordering in
+`routers/calls.py` and update its module docstring).
+
+### Design (decided — do not re-litigate)
+1. **Pure transcript formats** `packages/va_domain/src/va_domain/call_object/transcript_formats.py` (re-export from
+   `va_domain.call_object`): `speaker_label(role) -> "User" | "Agent"` (`user` → User; `assistant`, `agent-action`,
+   `human_agent` → Agent), `transcript_text(turns) = concatenated_transcript(turns)` (no new logic: text format IS
+   `concatenated_transcript`), `to_srt(turns: Sequence[Transcript]) -> str`, `to_vtt(...) -> str`.
+   Cue rules (both): skip turns whose text is blank after strip; cue text = `"{label}: {text}"` with every run of
+   whitespace containing a newline collapsed to one space (no blank lines inside a cue); `end_ms < start_ms` →
+   end = start; negative values clamp to 0. SRT: cues numbered from 1, `HH:MM:SS,mmm --> HH:MM:SS,mmm`, cues
+   separated by one blank line, file ends with `"\n"`; empty transcript → `""`. VTT: header `"WEBVTT\n\n"`, no cue
+   numbers, `HH:MM:SS.mmm`, text escapes `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;` (this also neutralises `-->`), empty
+   transcript → `"WEBVTT\n"`. Hours are not capped at 99 (format `{h:02d}`).
+2. **Loaders** in `packages/va_db/src/va_db/call_object.py` (caller's `tenant_session`, org-scoped):
+   - `async def load_transcripts(session, call: Call) -> list[Transcript]` — reuses the existing turn query +
+     `_transcripts` (same ordering/system-role exclusion as the Call Object; refactor `_children` only if needed,
+     no copy-paste).
+   - New module `packages/va_db/src/va_db/call_events_read.py`: `async def load_call_events(session, org_id,
+     call_id, *, after_seq: int, limit: int, categories: Sequence[str] | None) -> tuple[list[CallEvent], int|None]`
+     — `WHERE org_id=:org AND call_id=:id AND seq > :after [AND category = ANY]` `ORDER BY seq LIMIT limit+1`
+     (uses `call_events_call_idx`); returns the page and `next_after_seq` = seq of the page's last row when more
+     rows exist, else `None`.
+3. **Service** `apps/api/src/va_api/services/call_read.py` grows (keep it < ~400 lines; if it gets long, put the
+   new functions in `services/call_artifacts.py` reusing `ReadDeps`/`read_deps_of`; ReadDeps gains `redis`
+   (`session_auth.redis_of(request)` / `container.redis`)). A shared `_owned_call(session, ctx, call_id) -> Call`
+   raising `CALL_NOT_FOUND` (refactor `get_call` to use it).
+   - `active_calls(deps, ctx) -> list[ActiveCall]`: org calls with status in `ACTIVE_STATUSES` =
+     `("dialing","ringing","in_progress","transferring")` (add `va_db.call_states.ACTIVE_STATUSES` frozenset and
+     use it), ordered `created_at, id` ascending, no paging (bounded by concurrency limits). Item fields:
+     `call_id`, `to` (`to_number or ""`), `from` (`from_number or ""`, `serialization_alias="from"` like the Call
+     Object), `status` = INTERNAL status (`dialing`/`ringing`/`in_progress`/`transferring`, more precise than
+     Bland's `in-progress`; Decision), `started_at` = `answered_at or started_at or dial_started_at` (nullable),
+     `direction`, `runner_type`, `pathway_id`, `current_node_id`, `duration_seconds` = int seconds since
+     `answered_at` (clock `deps.clock.now()`, floor, ≥ 0; `0` before the answer). `current_node_id`: ONE Redis
+     pipeline (`transaction=False`) of `HGET carrier_state_key(id) node_id` for every call (decode bytes/str;
+     empty/absent → null). Redis error (`RedisError`, `OSError`, `TimeoutError`) → log
+     `calls.active_node_ids_unavailable` (count only) and every `current_node_id` null (fail open). Nothing writes
+     `node_id` yet (pathway engine, P07): record in the Decision that the media worker must `HSET` it on route.
+   - `recording(deps, ctx, call_id, channel) -> RecordingLink(url, expires_at, duration_ms, channels, format="wav")`:
+     call has no `recording_s3_key` → `404 NOT_FOUND` "Recording not found." (also covers retention purge).
+     `channel="mixed"` (default): variant key `recording_variant_key(org, call, created_at, "mixed")` if
+     `object_store.exists` → that (channels 1), else the stored dual-channel recording `recording_s3_key`
+     (channels 2; post-call variants arrive in P09/specs/18 §2). `caller`/`agent`: variant must exist (channels 1)
+     else `404 NOT_FOUND`. URL = `signed_url(..., ttl_s=PLAYBACK_URL_TTL_S)` (15 min). `exists`/presign failures
+     (`ClientError`, `BotoCoreError`, `ValueError`) → log `calls.recording_link_failed` (call_id, error_type; never
+     the key or URL) and `503 SERVICE_UNAVAILABLE` "The recording is temporarily unavailable; retry.".
+     `duration_ms` = `calls.recording_duration_ms` (nullable).
+   - `transcript(deps, ctx, call_id) -> list[Transcript]` (any status; live calls return turns so far).
+   - `call_events(deps, ctx, call_id, query) -> (events, next_after_seq)`: call ownership checked first in the
+     same tenant session (404 for other org / unknown).
+4. **Schemas** `apps/api/src/va_api/routers/calls_read_schemas.py` (or a new `calls_detail_schemas.py` if the
+   file passes ~250 lines), each response model with an `examples` entry:
+   - `ActiveCallItem`, `ActiveCallsResponse{status:"success", count, calls}`.
+   - `RecordingQuery` (FastAPI query model, `extra="ignore"`): `format: Literal["json"] | None = None`
+     (anything else, incl. absent → redirect; Decision: only `json` changes the answer, unknown values →
+     `INVALID_INPUT` via the Literal), `channel: Literal["mixed","caller","agent"] = "mixed"`.
+     `RecordingResponse{status:"success", url, expires_at, duration_ms|None, channels, format:"wav"}`.
+   - `TranscriptQuery`: `format: Literal["json","text","srt","vtt"] = "json"`.
+     `TranscriptResponse{status:"success", call_id, transcripts: list[Transcript], concatenated_transcript}`.
+   - `CallEventsQuery`: `after_seq: int = Field(0, ge=0)`, `limit: int = Field(100, ge=1, le=1000)` (default 100,
+     Decision), `category: str | None` comma list validated against `get_args(CallEventCategory)` in the service
+     (unknown → `INVALID_INPUT` field `category`; blanks ignored; duplicates collapsed).
+     `CallEventItem{seq, category, level, message, data, created_at}`,
+     `CallEventsResponse{status:"success", events, next_after_seq: int | None}`.
+   A pydantic validation error on these query models must render as `400 INVALID_INPUT` with the field (check what
+   the existing `CallListQuery` does for `limit=0` and follow it).
+5. **Routes** (`routers/calls.py`):
+   - `GET /active` `operation_id="calls_active"` → `ActiveCallsResponse`.
+   - `GET /{call_id}/recording` `operation_id="calls_recording"`: `format=json` → `RecordingResponse` (200);
+     otherwise `RedirectResponse(url, status_code=302)` with `Cache-Control: no-store`. OpenAPI:
+     `response_model=RecordingResponse` + `responses={302: {"description": ..., "headers": {"Location": ...}}}`
+     (no content on 302, so `test_openapi.checked_operations` stays green without changes). Return type
+     `Response` with `response_model=` set explicitly.
+   - `GET /{call_id}/transcript` `operation_id="calls_transcript"`: json → `TranscriptResponse`; `text` →
+     `PlainTextResponse` (`text/plain; charset=utf-8`); `srt` → `Response(media_type="application/x-subrip")`
+     (charset utf-8); `vtt` → `Response(media_type="text/vtt")`. Document the three extra media types under
+     `responses={200: {"content": {"text/plain": {}, "application/x-subrip": {}, "text/vtt": {}}}}` (the
+     `application/json` schema keeps its example).
+   - `GET /{call_id}/events` `operation_id="calls_events"` → `CallEventsResponse`.
+   Then `make openapi`, both `gen:api` scripts; commit `openapi/*.json` and both `schema.d.ts`.
+6. **Spec Decisions** (same commit): specs/05 §7.4 `> Decision (2026-11-02): active calls (P05-T16b)` — statuses,
+   internal status names, `started_at` fallback, `duration_seconds` from the answer, order, no paging, node id from
+   the carrier-state hash field `node_id` (written by the route step from P07), Redis failure → nulls. §7.5 Decision
+   — `format=json` only, channel resolution (mixed variant else stored dual-channel recording; caller/agent need
+   their variant), 15-min TTL, `Cache-Control: no-store`, 404 `NOT_FOUND` "Recording not found.", 503 on storage
+   failure, `channels` 2 for the raw file and 1 for variants, `duration_ms` from `calls.recording_duration_ms`.
+   §7.6 Decision — `text` = `concatenated_transcript`, speaker labels, cue rules above (blank turns skipped,
+   newline collapse, clamps, VTT escaping, empty outputs), content types, any status. §7.9 Decision — default
+   limit 100 (1–1 000), `after_seq` ≥ 0, category validation, `next_after_seq` = last seq when more rows exist
+   else null, ordered by seq.
+
+### Tests (all must exist and pass)
+- `packages/va_domain/tests/test_transcript_formats.py`: golden files
+  `packages/va_domain/tests/fixtures/transcripts/{basic.srt,basic.vtt,edge.srt,edge.vtt}` built from fixed
+  `Transcript` lists (basic: 4 turns user/assistant/agent-action/user; edge: blank turn skipped, multi-line text,
+  end < start, hour-plus timestamps, `<b> & -->` text) compared byte for byte (read with `newline=""`); speaker
+  labels per role (parametrized over `TranscriptRole`); empty transcript outputs; text format equals
+  `concatenated_transcript`. Add the fixture dir to `.prettierignore`/jscpd only if a gate complains.
+- `packages/va_db/tests/test_call_events_read.py` (migrated Postgres; `SystemClock`-dated rows inside the
+  migration partitions; seed via `call_rows.seed_call` + `va_events.insert_rows`/`row_for` or RowFactory):
+  ordering by seq, `after_seq` paging across 3 pages without duplicates, `next_after_seq` null on last page and
+  exact-multiple page edge, category filter (one and several), another org's events of a same-id lookup never
+  returned (RLS + org filter). `load_transcripts` matches the Call Object `transcripts` for the same call.
+- `apps/api/tests/test_calls_artifacts.py` (module DB like `test_calls_read.py`; reuse its seeding helpers by
+  moving shared ones to `apps/api/tests/support/` if needed — no copy-paste):
+  - active: only the 4 active statuses listed (seed every status), internal status names, oldest first,
+    `duration_seconds` from the frozen clock, `current_node_id` from a carrier-state hash set in the container's
+    fakeredis, null when absent, all null + 200 when Redis is broken (`broken_redis` style fake), other org's
+    active calls absent, `/active` not swallowed by `/{call_id}` (returns the list, not `CALL_NOT_FOUND`).
+  - recording: no key → 404 `NOT_FOUND`; default → 302 `Location` = presigned raw key with `expires=900`,
+    `Cache-Control: no-store`; `format=json` body (url, expires_at = now + 900 s, duration_ms, channels 2,
+    format wav); mixed variant present (FakePresigner gains `existing: set[str]` + `head_object` raising a
+    404 `ClientError` for absent keys, and `fail_head`) → variant key, channels 1; caller/agent present → their
+    key; absent → 404; head failure / presign failure → 503 and log without key; `channel=bogus`/`format=xml` →
+    400 `INVALID_INPUT`.
+  - transcript: json body equals the Call Object's `transcripts`/`concatenated_transcript`; text/srt/vtt bodies
+    and content types (compare with `to_srt`/`to_vtt` of the same turns); live (in_progress) call works; empty
+    transcript; bad format → 400.
+  - events: seq paging with `after_seq`/`limit`, `next_after_seq`, category filter, unknown category → 400
+    field `category`, limit 0/1001 → 400, other org / unknown / non-UUID → 404 `CALL_NOT_FOUND`.
+  - every route needs `calls:read` (403 for a key without it).
+  Dispatch-free seeding still needs the container clock inside the `call_events` partitions:
+  `FrozenClock(call_helpers.business_hours_today())` for events tests.
+- Cross-tenant suite (`test_cross_tenant_routes.py`) covers the 4 routes automatically: the `call_id` factory seeds
+  an `in_progress` call without a recording, so the owner control of `calls_recording` is 404 — declare it with
+  `REGISTRY.register_owner_status("calls_recording", 404)` (the refusal for other orgs is `CALL_NOT_FOUND`;
+  confirm the suite distinguishes them, else make the factory's call carry a `recording_s3_key` via a registered
+  factory override). Query models that look required to the walker get `REGISTRY.register_request(...)`.
+- `test_openapi`, operations contract, `test_audit_markers`, `make test-ts` schema drift stay green.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make openapi` +
+`corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api`; `make test` in the
+background (`make test > logs/make_test_p05t16b.log 2>&1` + heartbeat Monitor every ~2 min, Ralph's 300 s
+inactivity kill); `make test-ts`; `npx --yes jscpd@4 --silent` 0 clones; `uvx radon cc -s -a` on touched src
+(emit `complexity: <n>,`); `uvx pip-audit` on `uv export` + `corepack pnpm audit`. `make e2e`: harness lands in
+P05-T17 (read endpoints have no call-flow e2e) — say so. AGENTS.md line: new routes/modules, ACTIVE_STATUSES,
+transcript formats + golden files, FakePresigner head support, recording channel resolution.
+
+### Risks
+- Route order: `/active` must precede `/{call_id}`; `/{call_id}/recording` etc. are distinct paths (fine).
+- RedirectResponse with `response_model` set: FastAPI returns a `Response` subclass untouched; keep
+  `response_model=RecordingResponse` on the decorator so OpenAPI has the 200 schema.
+- Golden files must not be rewritten by prettier/ruff (they are .srt/.vtt — not formatted) and must keep CRLF-free
+  `\n` endings; `.gitattributes` not needed unless git rewrites them.
+- jscpd: the four query/response models resemble the list ones — share field helpers rather than copying.
+- `call_events` partitions: rows dated by FrozenClock 2026-01-01 fail to insert — use real-time-dated rows.
+
+## Build P05-T16b (Builder, 2026-11-02)
+Implemented per plan: `va_domain.call_object.transcript_formats` (speaker_label/transcript_text/to_srt/to_vtt +
+golden files basic/edge .srt/.vtt), `va_db.call_events_read.load_call_events`, `va_db.call_object.load_transcripts`
+(shared `_turns` query), `va_db.call_states.ACTIVE_STATUSES`, `va_api.services.call_artifacts` (active_calls with
+one Redis pipeline HGET node_id + fail-open, recording_link mixed-variant→raw / caller|agent variant, 15-min TTL,
+503 on storage errors, transcript, call_events with category validation), `call_read.owned_call` + ReadDeps.redis,
+`routers/calls_detail_schemas.py`, routes calls_active (before /{call_id}) / calls_recording (302 + no-store,
+format=json) / calls_transcript (json/text/srt/vtt content types) / calls_events. Spec Decisions in specs/05
+§7.4/§7.5/§7.6/§7.9. Shared test seeding moved to `tests/support/call_read_helpers.py`; FakePresigner gained
+head_object/existing/fail_head; cross-tenant registrations for the 3 query-model routes + owner status 404 for
+calls_recording. openapi + both schema.d.ts regenerated. AGENTS.md line added.
+Tests: test_transcript_formats (14), test_call_events_read (8), test_calls_artifacts (~40).
+Gates: make fmt 0; lint 0; typecheck 0; placeholders 0; spec refs 0; make test 10590 passed / 7 skipped, 99% (exit 0; new modules 100%); make test-ts 22/52/48 pass; jscpd 0 clones; radon avg A 2.78; pip-audit no known vulns; pnpm audit 3 moderate. make e2e: harness lands in P05-T17 (read endpoints, no call-flow e2e).
+
+## Review P05-T16b (Reviewer, 2026-11-02) — APPROVED
+Re-ran lint, typecheck, placeholders, and spec refs: all 0 exit. test-ts passed (22/52/48), jscpd found 0 clones, radon average A 2.23.
+make test: 10589 passed, 7 skipped, 1 failed, 99% coverage. The failure was
+`va_workflows/tests/test_end_call_activity.py::test_a_transferred_call_splits_connected_and_transfer_seconds`.
+It is a wall-clock tolerance flake (61.072 vs 60 ±1 s) in a P05-T06b test this diff doesn't touch, and it passed 3/3 on rerun.
+Opened task fix:end-call-duration-flake. The diff matches the specs/05 §7.4/7.5/7.6/7.9 text and its Decisions,
+the error codes exist, queries are org-scoped in tenant_session, logs carry no keys or URLs, and cross-tenant registrations are in place.

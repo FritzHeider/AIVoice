@@ -64,3 +64,9 @@ REGISTRY.register_resource_factory("call_id", _call)
 # ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;
 # the unfiltered listing must hold none of org A's calls.
 REGISTRY.register_request("calls_list", params={"limit": "1000"})
+# The call artifact routes take one query model each (seen as required); the owner's seeded call has no
+# recording, so its recording control is ``404 NOT_FOUND`` while org B gets ``CALL_NOT_FOUND``.
+REGISTRY.register_request("calls_recording", params={"format": "json"})
+REGISTRY.register_request("calls_transcript", params={"format": "json"})
+REGISTRY.register_request("calls_events", params={"limit": "1000"})
+REGISTRY.register_owner_status("calls_recording", 404)
