@@ -216,7 +216,7 @@
   - Deliverables: stop service (pre-answer → `signal_cancel`; in progress → `stop` control message; terminal/transferred → 409), stop-all with optional `call_ids`, `calls.operate` permission, OpenAPI + cross-tenant registrations
   - Acceptance: API tests per status, stop-all counts and filter, 404 for another org's call, control message published; media runtime test where a published stop ends the call with `api_stop`/`api` and no goodbye line.
 
-- [ ] P05-T12 Inbound call routing
+- [x] P05-T12 Inbound call routing — all four subtasks (P05-T12a–d) ticked; inbound_basic covered in process by apps/media_worker/tests/test_inbound_flow.py until the P05-T17 docker harness
   - Spec refs: specs/01-architecture.md §2 (inbound); specs/06-telephony-telnyx.md (inbound routing algorithm); specs/16-phone-numbers.md §4 (InboundConfig model)
   - Depends on: P05-T02, P05-T06
   - Deliverables: number lookup (system repo), reject/transfer/maintenance logic, call row + context creation with 1.5 s inline budget, `answer` with stream params, `InboundConfig` model (full API arrives in phase 10)
@@ -242,7 +242,7 @@
   - Deliverables: `va_edge.accept.InboundAccept` (the `InboundAcceptor`): inbound call row (`direction='inbound'`, `ringing`) + primary leg + contact upsert + `call.ringing` event in one tenant transaction, call context built inline (1.5 s budget, media worker rebuilds on a miss), `CallWorkflow` started in inbound mode, Telnyx `answer` with stream params/recording/`client_state`, `command_id=answer-{call_id}`; failure cleanup (call `failed`, workflow terminated) so the router's fallback/reject applies; `CallWorkflow` inbound mode (no prefetch/dial: answer wait → conversation → end as outbound); ring-to-answer histogram; per-event-type processor budget for `call.initiated`; `CallContext.maintenance_message` carried from the accepted call (spoken in P05-T12d)
   - Acceptance: Postgres + FakeTelnyx tests for the accept path (row/leg/contact/event/context/workflow input/answer body), each failure step (resolution error, workflow start failure, answer failure, budget timeout) refusing through the fallback/reject with the call marked failed, caller gone before answer; Temporal tests for inbound mode (answered → conversation → pipeline finished; caller hangup before answer; answer backstop); FakeTelnyx `/sim/telnyx/inbound` through the edge app shows `answer` with the stream URL and the call answered.
 
-- [ ] P05-T12d Inbound maintenance message and end-to-end inbound conversation
+- [x] P05-T12d Inbound maintenance message and end-to-end inbound conversation — va_media.maintenance takeover before run (no LLM, inbound_rejected/system, phrase cache when present), in-process edge→media→sims inbound flow test (completed/user_hangup, 3 turns; maintenance answer+hangup); make test 10290 passed, 7 skipped, 99 %, maintenance.py 100 %; lint/typecheck/placeholders/spec refs 0; jscpd 0; ring-to-answer asserted ≤ 3 s accept budget (specs/30 Decision), e2e harness lands in P05-T17
   - Spec refs: specs/16 §4 (`maintenance.message`); specs/06 §7; specs/07 §3, §16; specs/30 (inbound_basic flow)
   - Depends on: P05-T12c
   - Deliverables: maintenance message-only path (answer, the media worker speaks `maintenance.message` through a pipeline takeover — phrase cache when present — and hangs up with `inbound_rejected`); an in-process end-to-end test: FakeTelnyx inbound call → edge app → served media worker with FakeElevenLabs + FakeLLM → conversation → caller hangup → call `completed`

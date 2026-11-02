@@ -221,6 +221,19 @@ Runner rule: at most one of `prompt` / `pathway_id` / `agent_id`; `persona_id` m
 > `build_call_context` copies it into `CallContext.maintenance_message`, so a context rebuilt by the media worker
 > carries it too. The media worker plays it and hangs up (P05-T12d).
 
+> Decision (2026-11-02): maintenance message playback (P05-T12d). The media worker
+> (`va_media.maintenance.maintenance_takeover`) takes the call's pipeline over before it runs whenever
+> `CallContext.maintenance_message` is not blank: the opener is skipped, no turn is accepted and the Brain is never
+> asked (no LLM request). The message is spoken at once (no beep or silence cue: `silence_ms = 0`,
+> `max_wait_s = 0`), verbatim (no templating: it is the number's static text) and not interruptible. The Speaker
+> plays it from the phrase cache when an entry exists for the call's voice and the pronounced text
+> (`va_engine.opener.phrase_voice`/`cache_text`), else over the live TTS socket. Nothing pre-renders it yet:
+> inbound calls have no prefetch and the edge's 3 s accept budget leaves no room, so a pre-render on inbound
+> configuration save (`PhraseCache.prefetch`) arrives with the number API (phase 10). The call then ends
+> `inbound_rejected` (`ended_by` `system`): the end-of-call routine records it on the answered call (status
+> `completed`), hangs up with the workflow's `command_id` and signals `CallWorkflow`. Only the message length is
+> logged (`media.maintenance_takeover`, `chars`).
+
 ## 5. Inbound endpoints
 
 ### 5.1 `GET /v1/inbound`

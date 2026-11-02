@@ -51,6 +51,7 @@ __all__ = [
     "RoutingRig",
     "failing_telnyx",
     "inbound_handler",
+    "own_number",
     "random_number",
     "routing_rig",
 ]
@@ -64,6 +65,43 @@ SIM_HEADERS: Final = {"authorization": f"Bearer {DEFAULT_API_KEY}"}
 def random_number() -> str:
     """A fresh 628 number (San Francisco; distinct from the other edge tests' numbers)."""
     return f"+1628{secrets.randbelow(10**7):07d}"
+
+
+async def own_number(  # noqa: PLR0913 - keyword-only account parts
+    database: Database,
+    state: SimState,
+    org_id: uuid.UUID,
+    inbound_config: dict[str, Any] | None,
+    *,
+    connection_id: str,
+    account: tuple[uuid.UUID | None, str] = (None, DEFAULT_API_KEY),
+) -> str:
+    """A fresh active number of the org with ``inbound_config`` (``account``: its Telnyx account id, ``None``
+    for the platform, and FakeTelnyx API key), owned in FakeTelnyx on the Call Control App
+    ``connection_id``."""
+    e164 = random_number()
+    account_id, key = account
+    async with database.tenant_session(org_id) as session:
+        session.add(
+            PhoneNumber(
+                id=new_id(),
+                org_id=org_id,
+                e164=e164,
+                country_code="US",
+                status="active",
+                telnyx_account_id=account_id,
+                inbound_config=inbound_config or {},
+            )
+        )
+    record_id = state.ids.uuid()
+    state.telnyx.accounts[key].numbers[record_id] = {
+        "id": record_id,
+        "record_type": "phone_number",
+        "phone_number": e164,
+        "connection_id": connection_id,
+        "messaging_profile_id": None,
+    }
+    return e164
 
 
 @dataclass
@@ -146,29 +184,15 @@ class RoutingRig:
         account: tuple[uuid.UUID, str] | None = None,
     ) -> str:
         """An active number of the org with ``inbound_config``, also owned in FakeTelnyx (platform or BYO)."""
-        e164 = random_number()
         account_id, key = account if account is not None else (None, DEFAULT_API_KEY)
-        async with self.database.tenant_session(org_id) as session:
-            session.add(
-                PhoneNumber(
-                    id=new_id(),
-                    org_id=org_id,
-                    e164=e164,
-                    country_code="US",
-                    status="active",
-                    telnyx_account_id=account_id,
-                    inbound_config=inbound_config or {},
-                )
-            )
-        record_id = self.state.ids.uuid()
-        self.state.telnyx.accounts[key].numbers[record_id] = {
-            "id": record_id,
-            "record_type": "phone_number",
-            "phone_number": e164,
-            "connection_id": self.app_ids[key],
-            "messaging_profile_id": None,
-        }
-        return e164
+        return await own_number(
+            self.database,
+            self.state,
+            org_id,
+            inbound_config,
+            connection_id=self.app_ids[key],
+            account=(account_id, key),
+        )
 
     async def place(self, to: str, caller: str = CALLER) -> tuple[str, Received]:
         """An incoming call to ``to``: its call_control_id and FakeTelnyx's ``call.initiated`` webhook."""

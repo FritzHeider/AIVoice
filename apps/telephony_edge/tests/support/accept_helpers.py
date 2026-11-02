@@ -41,6 +41,7 @@ __all__ = [
     "GatedClock",
     "RecordingStarter",
     "accept_rig",
+    "add_default_voice",
     "answer_failing_factory",
     "broken_redis",
 ]
@@ -114,6 +115,20 @@ def answer_failing_factory(rig: RoutingRig, *, status: int = 500, code: str = "9
     return sim_factory(http, rig.redis, resolve_key)
 
 
+async def add_default_voice(
+    database: Database, org_id: uuid.UUID, provider_voice_id: str | None = None
+) -> None:
+    """An org voice named like the default ``default_voice`` (inbound resolution needs it);
+    ``provider_voice_id`` defaults to a random one."""
+    voice_id = provider_voice_id if provider_voice_id is not None else secrets.token_hex(10)
+    async with database.tenant_session(org_id) as session:
+        session.add(
+            Voice(
+                id=uuid.uuid4(), org_id=org_id, name=OrgSettings().default_voice, provider_voice_id=voice_id
+            )
+        )
+
+
 @dataclass
 class AcceptRig:
     rig: RoutingRig
@@ -130,15 +145,7 @@ class AcceptRig:
     async def org(self, **values: Any) -> uuid.UUID:
         """A funded org (the routing rig's) owning a voice named like the default ``default_voice``."""
         org_id = await self.rig.org(**values)
-        async with self.database.tenant_session(org_id) as session:
-            session.add(
-                Voice(
-                    id=uuid.uuid4(),
-                    org_id=org_id,
-                    name=OrgSettings().default_voice,
-                    provider_voice_id=secrets.token_hex(10),
-                )
-            )
+        await add_default_voice(self.database, org_id)
         return org_id
 
     async def route(self, event: StoredEvent) -> TelnyxEvent:

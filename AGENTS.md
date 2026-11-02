@@ -1427,3 +1427,17 @@ Grafana 3001
   accelerated clock dates lie outside the test DB's `call_events` partitions, so edge apps on `SimTimeClock` fail
   to write their own event rows (assert the call/leg state instead); `test_sim_contract.signed_at(webhook)` gives
   a clock that verifies a later webhook's signature.
+- 2026-11-02 (P05-T12d): inbound maintenance message = `va_media.maintenance.maintenance_takeover(context)` (a
+  `Takeover("inbound_rejected", text, silence_ms=0, max_wait_s=0)` applied by `CallRuntime._converse` before
+  `pipeline.run()`; specs/16 §4 Decision P05-T12d). The runtime sim builder moved to
+  `apps/media_worker/tests/support/runtime_rig.py` (`sim_runtime(state, urls, org_settings=, phrase_redis=,
+  persistence=, database=, end_redis=, messaging=)`, `RecordingRuntime`, `StaticOrgSettings`, `MODELS_DIR`, `WAIT_S`);
+  `media_helpers.call_context`/`FakeContextLoader` take `maintenance_message` and `direction`, and
+  `test_runtime_sim.Rig.call(maintenance_message=)` makes an inbound maintenance call. Edge + media + sims in one
+  process: `support/inbound_flow.inbound_flow(media_db_url)` (FakeTelnyx webhooks → `EdgeForwarder` → running edge
+  app with its default acceptor; Temporal = `workflow_fakes.SignalRecorder`; served media worker with the production
+  `db_context_loader` over `MediaDbContainer`; ONE shared fakeredis), `flow.org()` (voice = FakeElevenLabs'
+  seeded `VOICE_ID`), `flow.number(org, config)`, `flow.caller(*steps)` (inbound scenario bound to `CALLER`, no
+  `answer`), `flow.ring(to, scenario)`. Shared edge helpers: `routing_helpers.own_number`,
+  `accept_helpers.add_default_voice`. The sim drops a call's stream object after hangup and `CommandEntry` has no
+  body: assert command names, not stream URLs.

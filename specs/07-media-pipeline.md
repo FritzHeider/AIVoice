@@ -722,6 +722,10 @@ user text within `detect_timeout_ms`, or by the engine's voicemail detector when
 > (warm transfers may use `parent_call_id` too); a found child is returned as `already_scheduled` with its id and
 > start time, so an activity retry after a lost commit, or a replay, never creates a second child.
 
+> Decision (2026-11-02): the takeover seam also serves the inbound maintenance message: a call whose context carries
+> `maintenance_message` is taken over before the pipeline runs and ends `inbound_rejected` (specs/16 §4 Decision
+> P05-T12d).
+
 ## 15. `hd_audio` mode
 
 - Dial/answer with `stream_codec="L16"`, `stream_bidirectional_codec="L16"`, `stream_bidirectional_sampling_rate=16000`.

@@ -1775,3 +1775,138 @@ Full make test 10282 passed, 7 skipped, 99.14 %, exit 0 (logs/make_test_p05t12c_
 Gates re-run: make lint/typecheck/placeholders 0; check_spec_refs 0; make test 10282 passed, 7 skipped, 99.14 %,
 exit 0 (logs/review_p05t12c_2.log). Finding 1 fixed deterministically: the max-duration test asserts the converse
 TIMER_STARTED start_to_fire_timeout from history (shared `history_events`/`first_event` in workflow_rig, no clone).
+
+## Plan P05-T12d — Inbound maintenance message and end-to-end inbound conversation (Planner, 2026-11-02)
+Spec refs: specs/16 §4 (`maintenance.message`, Decision P05-T12a/P05-T12c), specs/06 §7 Decision P05-T12c,
+specs/07 §3/§14/§16, specs/05 §9 (`inbound_rejected`, ended_by system), specs/30 (inbound_basic flow).
+After this task tick P05-T12d AND the parent P05-T12 (all four subtasks done).
+
+### Design (decided — do not re-litigate)
+1. **Maintenance takeover (media)**: new module `apps/media_worker/src/va_media/maintenance.py`:
+   - `MAINTENANCE_END: Final = "inbound_rejected"`;
+   - `def maintenance_takeover(context: CallContext) -> Takeover | None`: `None` when
+     `(context.maintenance_message or "").strip()` is empty; else `Takeover(reason="inbound_rejected",
+     text=context.maintenance_message, silence_ms=0, max_wait_s=0.0)` (speak at once: no beep wait, no silence
+     wait — `SpeechCue.silence_at_ms(started, 0)` is `started` while nobody speaks). The text is spoken verbatim
+     (no templating: the number's static message, specs/16 §4). Never log the message (log `media.maintenance_takeover`
+     with `chars=len(...)` only).
+   - Not gated on direction (only the edge's maintenance accept sets the field; it is inbound).
+2. **Runtime wiring** (`va_media/runtime.py` `_converse`): right after building `pipeline` (before
+   `_start_monitor`/`pipeline.run()`), `takeover = maintenance_takeover(context)`; if not None:
+   `pipeline.take_over(takeover)` (sync, before run → opener skipped, turns refused, the Brain never asked, so no
+   LLM request). Keep the normal vendor open (TTS needed; STT harmless) and the GreetingGate. The phrase cache is
+   used automatically: the Speaker looks every `SpeakStatic` up in `CallPhrases` (pronounced text via
+   `cache_text`), so a cached maintenance message plays from Redis, else the live TTS socket. No pre-render
+   exists for inbound (no prefetch in CallWorkflow inbound mode; the edge's 3 s budget): record that in the
+   Decision — a pre-render on inbound config save arrives with the phase-10 number API (`PhraseCache.prefetch`
+   keyed with `va_engine.opener.phrase_voice`/`cache_text`). Update the runtime module docstring (new step).
+   `session_end` already maps `inbound_rejected` → `SessionEnd("ended", inbound_rejected, system)`; `CallEnd`
+   records it with `record_answered_end` (status `completed`, `end_reason='inbound_rejected'`,
+   `ended_by='system'`) and hangs up with the workflow's `command_id` — verify, no code change expected there.
+3. **Spec Decisions (same commit)**: specs/16 §4 `> Decision (2026-11-02): maintenance message playback (P05-T12d)`
+   — media worker takes the pipeline over before the opener with the message (spoken at once, verbatim, not
+   interruptible), phrase cache when present else live TTS, then ends `inbound_rejected` (call `completed`,
+   ended_by `system`, media hangs up), no LLM request, no pre-render yet (phase 10). One-line pointer under
+   specs/07 §14 (takeover users now include maintenance). specs/30: if an `inbound_basic` flow definition exists,
+   note the in-process test name that covers it until the P05-T17 harness (check text; add a Decision only if
+   needed).
+
+### Tests (all must exist and pass)
+- `apps/media_worker/tests/test_maintenance.py` (unit): `maintenance_takeover` → None for None/""/"   ";
+  Takeover with reason `inbound_rejected`, text verbatim, `silence_ms == 0`, `max_wait_s == 0`.
+- `apps/media_worker/tests/test_runtime_sim.py` (sim runtime, extend `Rig.call` with a `maintenance_message: str |
+  None = None` kwarg that sets the field on the `FakeContextLoader`-built context — add a loader attribute like
+  `opener_text`, or pass through `call_context(..., maintenance_message=)`):
+  a. `test_a_maintenance_message_is_spoken_and_the_call_ends_inbound_rejected`: `spoken(state)` == [message] (the
+     opener `OPENER` never generated), `state.llm.requests == []`, session end `inbound_rejected`/`system`; with
+     `ending_rig(media_db_url)` + seeded call: row `completed`, `end_reason == "inbound_rejected"`,
+     `ended_by == "system"`, one media hangup (`hangups(streamed)`), signaller got `inbound_rejected`.
+  b. `test_a_cached_maintenance_message_plays_from_the_phrase_cache`: pre-render the message into the rig's Redis
+     with `PhraseCache(...).get_or_render(phrase_voice(ctx, ...), cache_text(...), ...)` the way `prerender()`
+     does for the opener → no TTS socket context opened for it (`socket_texts(state)` lacks it) and the agent
+     track has audio; still no LLM request.
+- `apps/media_worker/tests/test_inbound_flow.py` (new, in-process end-to-end, `media_db_url`; support module
+  `apps/media_worker/tests/support/inbound_flow.py`):
+  Rig `inbound_flow(media_db_url)` (asynccontextmanager):
+  - one realtime FakeTelnyx `SimState` (`RealtimeClock`) + `running_sims(state, ports={"elevenlabs": 0, "llm": 0})`;
+    its `webhook_transport` is an `EdgeForwarder(RecordingTransport)` that records and also POSTs every
+    `/telnyx/voice` webhook to the edge app (httpx client over `ASGITransport` of the edge app, lifespan entered
+    with `asgi_lifespan.LifespanManager` / the edge `make_client` helper), asserting 200;
+  - ONE shared `FakeAsyncRedis` (carrier state, carrier channels, call contexts, concurrency slots) used by the edge
+    `DbContainer(media_db_url, redis=shared, telnyx=factory)` and `FakeMediaContainer(redis=shared)` (+ a
+    `database` attribute if the media container needs it for `db_context_loader`, else pass
+    `context_loader=` a factory returning `DbCallContextLoader(database, CallContextStore(shared), clock)`);
+  - edge app: `create_app(edge_settings(state.signing_key.public_key_b64), container_factory=..., clock=SystemClock(),
+    init_observability=False, acceptor=InboundAccept(database, CallContextStore(shared), RecordingStarter(),
+    factory, publisher=EventPublisher(shared, call_events=None), settings=AcceptSettings(media_public_host=
+    f"127.0.0.1:{port}", media_ws_scheme="ws", stream_secret=keys.secret, models=PlatformModels(...),
+    task_queue="va-main"), clock=SystemClock(), metrics=metrics))` — reuse `accept_helpers` pieces (extract a
+    shared builder there if it avoids copying; jscpd must stay 0);
+  - media app: `create_app(...)` via `media_helpers.media_app(MODELS_DIR, container, keys=keys, body=RecordingRuntime(
+    CallRuntime(... database=, persistence=open_persistence(database, shared, clock=), end_routine=CallEnd(...,
+    signaller=RecordingSignaller())...)), media_public_host=..., telnyx_public_key=state.signing_key.public_key_b64)`
+    served with `served_media(app, port=port)`; reuse/extract the runtime builder from `test_runtime_sim.rig` into
+    a support function (do not copy it);
+  - org + number: `routing_helpers`/`accept_helpers` style (funded org with a voice named like the default voice,
+    number in DB + assigned in FakeTelnyx, `inbound_config` with `prompt`/`first_sentence`), FakeLLM rule reply.
+  Tests:
+  a. `test_an_inbound_call_converses_and_ends_completed`: scenario matched on `to: <number>`: caller waits for the
+     agent, says one line, waits for the reply, hangs up. Assert: call row `completed`, `direction='inbound'`,
+     `end_reason == "user_hangup"`, `answered_at` set; ≥ 2 `call_turns` rows (user + agent, ordered); FakeLLM got
+     the caller's text; FakeTelnyx saw `answer` (stream URL with `/ws/telnyx?call_id=`); RecordingStarter got one
+     inbound `CallWorkflowInput`; signaller got `pipeline_finished`; `va_inbound_answer_ms` observed once with
+     sum ≤ 800 (ring-to-answer in the simulator run; read the edge metrics registry).
+  b. `test_an_inbound_maintenance_call_hears_the_message_and_ends_inbound_rejected`: number with
+     `maintenance={"enabled": true, "message": "..."}` and no fallback → the message is the only TTS text, no LLM
+     request, call `completed`/`inbound_rejected`/`system`, media hangup sent.
+  Every wait is bounded (`asyncio.timeout`) on events (RecordingRuntime.end(), signaller.signalled), no sleeps.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t12d.log 2>&1`) + heartbeat Monitor; `va_media/maintenance.py` 100 %;
+jscpd 0 clones (`npx --yes jscpd@4 --silent`); `uvx radon cc -s -n C` on touched src empty; pip-audit + pnpm audit.
+`make e2e`: the docker harness lands in P05-T17 — say so (the in-process flow test is the evidence here).
+AGENTS.md line: maintenance takeover + `tests/support/inbound_flow.py` (edge + media + sims in one process, shared
+fakeredis, EdgeForwarder).
+
+### Risks
+- Edge/media wiring: stream token secret, media host and Telnyx public key must match across both apps; carrier
+  state written by the edge must land in the SAME Redis the media worker reads (else the GreetingGate waits 2 s and
+  CallEnd waits 3 s for the hangup and records `error`).
+- The edge processes events asynchronously after its 200; ordering of `call.answered` vs the media attach is
+  racy by design (media waits on the carrier state) — assert end states, not intermediate ones.
+- `call_events` partitions: all clocks must be wall clocks (RealtimeClock sim, SystemClock edge/media).
+- Turn rows are write-behind: assert after the runtime end + CallEnd finished (the persistence flush runs in
+  `finish_call`); close `open_persistence` before reading rows if needed.
+- FakeTelnyx inbound needs the number assigned to an account with a Call Control App whose webhook URL is the
+  edge's `/telnyx/voice` (as `routing_rig` does with `first_command_timeout=False`).
+- Two FakeTelnyx-streaming blocks in one test hang (AGENTS gotcha) — one call per test.
+
+## Build P05-T12d (Builder, 2026-11-02)
+Implemented per plan. `va_media/maintenance.py` (`maintenance_takeover`, `MAINTENANCE_END`), wired in
+`CallRuntime._converse` right after the pipeline is built (takeover before run → opener skipped, no LLM). Runtime
+docstring step 8. Spec Decisions: specs/16 §4 (P05-T12d playback), specs/07 §14 pointer, specs/30 §5 (in-process
+`inbound_basic` coverage until P05-T17).
+Tests: `test_maintenance.py` (4); `test_runtime_sim.py` +2 (maintenance on Postgres with end routine: completed/
+inbound_rejected/system, one media hangup, only the message spoken, no LLM; cached message plays from the phrase cache,
+no socket text); `test_inbound_flow.py` (2: inbound conversation completed/user_hangup with 3 ordered turns, workflow
+start recorded, answer metric once; maintenance call answer+hangup, message only, no LLM).
+Refactors (no clones): runtime builder → `tests/support/runtime_rig.py` (`sim_runtime`), `routing_helpers.own_number`,
+`accept_helpers.add_default_voice`; `call_context`/`FakeContextLoader` gained `maintenance_message`/`direction`.
+Deviations: the edge in the flow test uses its own default acceptor (TemporalInboundStarter over
+`workflow_fakes.SignalRecorder`) instead of a hand-built InboundAccept + RecordingStarter (more production-like);
+the answer histogram is asserted ≤ ACCEPT_BUDGET_S (3 s), not 800 ms (flaky under xdist; recorded in specs/30
+Decision); the stream URL is not asserted (sim drops the stream object after hangup and CommandEntry has no body) —
+the media worker running this call's turns proves the attach.
+Gates (Builder): make fmt 0; make lint 0; make typecheck 0 (1211 files); placeholders 0 findings; check_spec_refs 0;
+jscpd 0 clones; radon -n C on touched src empty (maintenance.py avg A 3.0); pip-audit clean; pnpm audit high 0
+(3 moderate, pre-existing); make test 10290 passed, 7 skipped, 99.15 %, exit 0 (logs/make_test_p05t12d_2.log; the
+first run was discarded because a `git stash` round-trip overlapped its collection); va_media/maintenance.py 100 %.
+Flow + runtime sim tests 3/3 repeated `-n 8` runs green. make e2e: docker harness lands in P05-T17 (in-process
+test_inbound_flow is the evidence).
+
+## Review P05-T12d (Reviewer, 2026-11-02) — APPROVED
+Gates re-run: make lint/typecheck/placeholders 0; check_spec_refs 0; jscpd 0 clones; make test 10290 passed,
+7 skipped, 99 %, exit 0 (logs/review_p05t12d.log); maintenance.py 100 %. Diff matches plan; the 800 ms → 3 s
+answer-metric deviation is recorded in specs/30 Decision (harness in P05-T17 measures the real target). Ticked
+P05-T12d and parent P05-T12.

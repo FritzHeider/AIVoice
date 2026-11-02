@@ -1281,6 +1281,13 @@ seed helper `POST /internal/test/orgs` available only when `VA_ENV in (local,tes
 (For `scheduled_call` the harness uses `start_time = now + 20 s` against real Temporal; durable-timer logic for long
 delays is covered by Temporal time-skipping integration tests.)
 
+> Decision (2026-11-02): until the docker harness of `tests_e2e/` exists (P05-T17), `inbound_basic` (task runner)
+> is covered in process by `apps/media_worker/tests/test_inbound_flow.py`: FakeTelnyx delivers its webhooks to a
+> running edge app, whose accept answers with the media stream; a served media worker runs `CallRuntime` over
+> FakeElevenLabs and FakeLLM and the end-of-call routine on Postgres (edge and media share one Redis). It also covers
+> the maintenance message (specs/16 §4 Decision P05-T12d). The ring-to-answer histogram is asserted against the
+> edge's 3 s accept budget there (the 1 s target belongs to the harness, which measures it without xdist load).
+
 ## 6. Load testing (`scripts/load/`)
 
 - **API load (k6)** `scripts/load/api.js`: stages ramp 0→200 VUs over 2 min, hold 5 min; mix: 40 % `GET /v1/calls`,

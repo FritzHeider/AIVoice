@@ -11,7 +11,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Final
 
 import fakeredis
@@ -21,19 +20,15 @@ from call_rows import SeededCall, load_call, seed_call
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from resolved_configs import resolved_config
-from service_helpers import settings_of
+from runtime_rig import MODELS_DIR, WAIT_S, RecordingRuntime, StaticOrgSettings, sim_runtime
 from sim_media import EdgeRelay, StreamedCall, realtime_telnyx, streamed_call
 from sms_rows import add_sms_number
 from sqlalchemy import select
-from starlette.applications import Starlette
-from telnyx_client_helpers import sms_number
-from telnyx_helpers import CALLEE, VOICE_URL, register
+from telnyx_helpers import CALLEE, register
 from tenant_rows import open_database
 from tts_helpers import VOICE_ID
 
 from va_billing.keys import concurrency_key
-from va_common.http import http_client
-from va_common.metrics import Service, build_metrics, new_registry
 from va_common.time import SystemClock, utcnow
 from va_db.models import Call, CallEvent, Message
 from va_db.repositories import CallTurnRepo
@@ -43,65 +38,21 @@ from va_domain.control import StopControl, control_channel
 from va_domain.org import OrgSettings
 from va_elevenlabs import ElevenLabsRest
 from va_elevenlabs.tts_models import DEFAULT_TTS_MODEL
+from va_engine.opener import cache_text, phrase_format, phrase_voice
 from va_events import ENDED_MESSAGE
-from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
-from va_llm.providers import platform_provider
-from va_llm.tokens import default_counter
-from va_media.call_end import CallEnd
-from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, open_persistence
+from va_media.runtime import open_persistence
 from va_media.runtime_config import ERROR_END
-from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
-from va_media.settings import MediaSettings
+from va_media.session import STREAM_CLOSED, SessionEnd
 from va_media.turns import CallPersistence
 from va_media.voicemail_sms import SMS_SENT_MESSAGE
-from va_sim.server import running_sims, simulator_routes
+from va_sim.server import running_sims
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx.client_state import command_id
-from va_telnyx.settings import telnyx_factory
 from va_voice.phrase_cache import PhraseCache
-from va_voice.vad import VadExecutor
-from va_voice.vad_model import SileroModel
 from va_workflows.activities.prerender import OpenerPrerender
 
-MODELS_DIR: Final = Path(__file__).resolve().parents[3] / "models"
-WAIT_S: Final = 20.0
 OPENER: Final = "Hi, this is Maya."
-
-
-class StaticOrgSettings:
-    """An org settings source answering ``settings`` (``None``: the org is gone)."""
-
-    def __init__(self, settings: OrgSettings | None = None) -> None:
-        self.settings = settings
-        self.reads: list[uuid.UUID] = []
-
-    async def get(self, org_id: uuid.UUID) -> OrgSettings | None:
-        self.reads.append(org_id)
-        return self.settings
-
-
-class RecordingRuntime:
-    """The session body: :class:`CallRuntime`, with every session end recorded (its end routine too)."""
-
-    def __init__(self, runtime: CallRuntime) -> None:
-        self.runtime = runtime
-        self.ends: asyncio.Queue[SessionEnd] = asyncio.Queue()
-        self.started = asyncio.Event()
-
-    @property
-    def end_routine(self) -> CallEnd | None:
-        return self.runtime.end_routine
-
-    async def __call__(self, session: CallSession) -> SessionEnd:
-        self.started.set()
-        end = await self.runtime(session)
-        self.ends.put_nowait(end)
-        return end
-
-    async def end(self) -> SessionEnd:
-        async with asyncio.timeout(WAIT_S):
-            return await self.ends.get()
 
 
 @dataclass
@@ -125,20 +76,31 @@ class Rig:
         opener_text: str | None = None,
         seeded: SeededCall | None = None,
         amd: str | None = None,
+        maintenance_message: str | None = None,
         **config: Any,
     ) -> AsyncIterator[StreamedCall]:
         """A streamed call; the carrier state says ``answered`` unless ``answered=False`` (no 2 s wait);
         ``seeded``: use that call's id and org (a call row on a real database). Without ``amd`` the carrier
         state already holds the premium verdict ``answered_by=human`` (no AMD wait); with ``amd`` (e.g.
         ``premium``) the dial requests it and FakeTelnyx's verdict and beep reach the worker through the
-        :class:`EdgeRelay`."""
+        :class:`EdgeRelay`. ``maintenance_message``: an inbound call to a number in maintenance (the context
+        carries the message the edge stored)."""
         values: dict[str, Any] = {"provider_voice_id": VOICE_ID, "first_sentence": OPENER, **config}
         loader = FakeContextLoader(**values)
         loader.opener_text = opener_text
+        if maintenance_message is not None:
+            loader.maintenance_message = maintenance_message
+            loader.direction = "inbound"
         call_id = None
         if seeded is not None:
             call_id = seeded.call_id
-            loader.contexts[call_id] = call_context(call_id, org_id=seeded.org_id, **values)
+            loader.contexts[call_id] = call_context(
+                call_id,
+                org_id=seeded.org_id,
+                maintenance_message=loader.maintenance_message,
+                direction=loader.direction,
+                **values,
+            )
         async with streamed_call(
             MODELS_DIR,
             self.body,
@@ -168,10 +130,6 @@ class Rig:
         return found
 
 
-async def no_byo_key(_account_id: uuid.UUID) -> str | None:
-    return None
-
-
 @asynccontextmanager
 async def rig(
     org: OrgSettings | None = None,
@@ -181,88 +139,38 @@ async def rig(
     database: Database | None = None,
     messaging: bool = False,
 ) -> AsyncIterator[Rig]:
-    """The runtime over the simulators; with ``database`` its end-of-call routine runs too (over the media
-    container's Redis, FakeTelnyx, ``persistence``'s events and a :class:`RecordingSignaller`). ``messaging``:
-    FakeTelnyx's platform account gets a messaging profile (the runtime's ``TELNYX_MESSAGING_PROFILE_ID``)
-    and an SMS number on it (``Rig.sms_number``)."""
+    """The runtime over the simulators (:func:`runtime_rig.sim_runtime`); with ``database`` its end-of-call
+    routine runs too, over the media container's Redis. ``messaging``: see :func:`sim_runtime`."""
     relay = EdgeRelay()
     state = realtime_telnyx(relay)
-    telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
     async with running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls:
-        settings = settings_of(
-            MediaSettings,
-            elevenlabs_ws_base=urls["elevenlabs"].replace("http://", "ws://"),
-            llm_default_base_url=f"{urls['llm']}/v1",
-            telnyx_api_base="http://sim/v2",
-            telnyx_api_key=DEFAULT_API_KEY,
-        )
-        metrics = build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
-        clock = SystemClock()
         org_settings = StaticOrgSettings(org if org is not None else OrgSettings())
         phrase_redis = redis if redis is not None else fakeredis.FakeAsyncRedis()
+        container = FakeMediaContainer()
         async with (
-            http_client(settings, timeout=LLM_HTTP_TIMEOUT) as http,
-            VadExecutor(1) as executor,
             httpx.AsyncClient(base_url=urls["llm"]) as llm,
-            httpx.AsyncClient(transport=httpx.ASGITransport(app=telnyx_app)) as telnyx_http,
-        ):
-            gateway = LlmGateway(
-                ProviderRegistry(platform_provider(settings)),
-                http,
-                clock=clock,
-                metrics=LlmMetrics(metrics.registry, metrics),
-            )
-            telnyx = telnyx_factory(
-                settings,
-                http=telnyx_http,
-                redis=fakeredis.FakeAsyncRedis(),
-                resolve_key=no_byo_key,
-                clock=clock,
-            )
-            sms = None
-            if messaging:
-                sms, profile_id = await sms_number(
-                    await telnyx.for_account(None), state, VOICE_URL, VOICE_URL
-                )
-                settings = settings.model_copy(update={"telnyx_messaging_profile_id": profile_id})
-            container, signaller = FakeMediaContainer(), RecordingSignaller()
-            end_routine = None
-            if database is not None:
-                end_routine = CallEnd(
-                    database=database,
-                    redis=container.redis,
-                    signaller=signaller,
-                    clock=clock,
-                    telnyx=telnyx,
-                    events=None if persistence is None else persistence.events,
-                    event_rows=None if persistence is None else persistence.event_rows,
-                )
-            runtime = CallRuntime(
-                settings=settings,
-                gateway=gateway,
-                counter=default_counter(),
+            sim_runtime(
+                state,
+                urls,
                 org_settings=org_settings,
-                vad_model=SileroModel.load(MODELS_DIR),
-                vad_executor=executor,
-                clock=clock,
-                metrics=metrics,
-                telnyx=telnyx,
-                redis=phrase_redis,
+                phrase_redis=phrase_redis,
                 persistence=persistence,
-                end_routine=end_routine,
                 database=database,
-            )
+                end_redis=container.redis,
+                messaging=messaging,
+            ) as parts,
+        ):
             yield Rig(
                 state,
                 llm,
-                RecordingRuntime(runtime),
+                parts.body,
                 org_settings,
                 phrase_redis,
                 urls["elevenlabs"],
                 container,
-                signaller,
+                parts.signaller,
                 relay,
-                sms,
+                parts.sms_number,
             )
 
 
@@ -791,3 +699,47 @@ async def test_a_rejected_voicemail_sms_still_leaves_the_message_and_hangs_up(me
         assert row.telnyx_message_id is None
         rows = await call_event_rows(media_db_url, call)
         assert [e for e in rows if e.message == SMS_SENT_MESSAGE] == []
+
+
+# Maintenance message (specs/16 §4 Decision P05-T12d)
+
+MAINTENANCE: Final = "We are closed for maintenance today. Please call back tomorrow."
+
+
+@pytest.mark.integration
+async def test_a_maintenance_message_is_spoken_and_the_call_ends_inbound_rejected(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        r.scenario("expect_hangup: {}")
+        async with r.call(seeded=call, maintenance_message=MAINTENANCE) as streamed:
+            assert await r.body.end() == SessionEnd("ended", "inbound_rejected", "system")
+            assert await signalled(r) == [("inbound_rejected", "system")]
+            assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
+        # Only the message was spoken (no opener) and the Brain was never asked.
+        assert spoken(r.state) == [MAINTENANCE]
+        assert r.state.llm.requests == []
+    row, ends = await ended_row(media_db_url, call)
+    assert (row.status, row.end_reason, row.ended_by) == ("completed", "inbound_rejected", "system")
+    assert ends == [{"end_reason": "inbound_rejected", "ended_by": "system"}]
+
+
+async def test_a_cached_maintenance_message_plays_from_the_phrase_cache() -> None:
+    async with rig() as r:
+        context = call_context(uuid.uuid4(), provider_voice_id=VOICE_ID)
+        async with httpx.AsyncClient() as http:
+            rest = ElevenLabsRest("sim-eleven-key", r.elevenlabs_url, http, clock=SystemClock())
+            cache = PhraseCache(rest, r.redis)
+            await cache.get_or_render(
+                phrase_voice(context, model_id=DEFAULT_TTS_MODEL),
+                cache_text(context, MAINTENANCE),
+                phrase_format(context),
+            )
+            await cache.aclose()
+        r.scenario("expect_hangup: {}")
+        async with r.call(maintenance_message=MAINTENANCE) as streamed:
+            end = await r.body.end()
+            agent_audio = bytes(streamed.sim_call().audio.agent)
+        assert end == SessionEnd("ended", "inbound_rejected", "system")
+        assert len(agent_audio) > 16_000
+        assert any(agent_audio)
+        assert socket_texts(r.state) == []
+        assert r.state.llm.requests == []

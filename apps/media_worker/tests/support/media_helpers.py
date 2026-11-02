@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 from urllib.parse import urlencode
 
 import fakeredis
@@ -49,28 +49,38 @@ CONTEXT_CREATED_AT: Final = datetime.fromisoformat("2026-11-02T12:00:00+00:00")
 
 
 def call_context(
-    call_id: uuid.UUID, *, org_id: uuid.UUID | None = None, opener_text: str | None = None, **config: Any
+    call_id: uuid.UUID,
+    *,
+    org_id: uuid.UUID | None = None,
+    opener_text: str | None = None,
+    maintenance_message: str | None = None,
+    direction: Literal["outbound", "inbound", "web"] = "outbound",
+    **config: Any,
 ) -> CallContext:
     """A valid context for ``call_id`` built from the basic task-call snapshot (``config`` overrides)."""
     return CallContext(
         call_id=call_id,
         org_id=org_id if org_id is not None else uuid.uuid4(),
-        direction="outbound",
+        direction=direction,
         to_number="+14155550100",
         from_number="+14155550199",
         config=SendCallConfig.model_validate({**resolved_config(), **config}),
         created_at=CONTEXT_CREATED_AT,
         opener_text=opener_text,
+        maintenance_message=maintenance_message,
     )
 
 
 class FakeContextLoader:
     """A context for any call (``contexts`` overrides; ``config`` overrides the snapshot of the others, which
-    carry ``opener_text``), or :class:`ContextRefusedError` for ``refusals``."""
+    carry ``opener_text``, ``maintenance_message`` and ``direction``), or :class:`ContextRefusedError` for
+    ``refusals``."""
 
     def __init__(self, **config: Any) -> None:
         self.config = config
         self.opener_text: str | None = None
+        self.maintenance_message: str | None = None
+        self.direction: Literal["outbound", "inbound", "web"] = "outbound"
         self.contexts: dict[uuid.UUID, CallContext] = {}
         self.refusals: dict[uuid.UUID, ContextRefusedError] = {}
         self.loads: list[tuple[uuid.UUID, str]] = []
@@ -80,7 +90,14 @@ class FakeContextLoader:
         if call_id in self.refusals:
             raise self.refusals[call_id]
         return self.contexts.setdefault(
-            call_id, call_context(call_id, opener_text=self.opener_text, **self.config)
+            call_id,
+            call_context(
+                call_id,
+                opener_text=self.opener_text,
+                maintenance_message=self.maintenance_message,
+                direction=self.direction,
+                **self.config,
+            ),
         )
 
     def factory(self, _container: MediaDependencies, _clock: Clock) -> CallContextLoader:

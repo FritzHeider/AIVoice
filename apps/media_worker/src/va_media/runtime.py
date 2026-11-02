@@ -31,6 +31,10 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
 7. :attr:`CallRuntime.end_routine` (a :class:`~va_media.call_end.CallEnd` built by :func:`open_runtime`) is
    the session ender the lifespan hands to every session: it records the end, hangs up, emits ``call.ended``,
    releases the concurrency slot and signals ``CallWorkflow`` (specs/07 §18 Decision P05-T11b).
+8. a call carrying a maintenance message (an inbound number in maintenance, accepted by the edge) is taken
+   over before the pipeline runs (:func:`~va_media.maintenance.maintenance_takeover`): the opener is skipped,
+   the message is spoken (from the phrase cache when present, else the TTS socket) and the call ends
+   ``inbound_rejected`` without an LLM request (specs/16 §4 Decision P05-T12d).
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
+from va_media.maintenance import maintenance_takeover
 from va_media.phrases import CallPhrases
 from va_media.runtime_config import (
     ERROR_END,
@@ -289,6 +294,9 @@ class CallRuntime:
                 observer=_observer(recorder, monitor),
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
+            maintenance = maintenance_takeover(context)
+            if maintenance is not None:
+                pipeline.take_over(maintenance)
             if recorder is not None and self._persistence is not None:
                 stack.push_async_callback(self._persistence.finish_call, recorder, context)
             if monitor is not None:
