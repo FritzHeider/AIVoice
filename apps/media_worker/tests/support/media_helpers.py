@@ -31,6 +31,7 @@ from va_common.service import StopController, run_server
 from va_common.stream_tokens import mint_stream_token, stream_token_expiry
 from va_common.time import Clock
 from va_domain.call_context import CallContext
+from va_domain.call_workflow import PipelineFinished
 from va_domain.calls.config import SendCallConfig
 from va_media.context import CallContextLoader, ContextRefusedError
 from va_media.control import ControlHandler
@@ -99,6 +100,18 @@ def write_models_dir(
     }
     (root / "MANIFEST.json").write_text(json.dumps({"version": 1, "models": [entry]}), encoding="utf-8")
     return root
+
+
+@dataclass
+class RecordingSignaller:
+    """A :class:`~va_media.workflow_signal.PipelineSignaller` that records ``(call id, summary)``."""
+
+    signals: list[tuple[uuid.UUID, PipelineFinished]] = field(default_factory=list)
+    signalled: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def pipeline_finished(self, call_id: uuid.UUID, finished: PipelineFinished) -> None:
+        self.signals.append((call_id, finished))
+        self.signalled.set()
 
 
 @dataclass

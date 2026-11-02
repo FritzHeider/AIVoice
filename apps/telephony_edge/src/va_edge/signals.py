@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from temporalio.service import RPCError, RPCStatusCode
-
-from va_common.checks import TemporalConnector
+from va_common.checks import TemporalConnector, signal_workflow
 from va_common.logging import get_logger
 from va_domain.carrier import CARRIER_SIGNAL, CarrierEvent, call_workflow_id
 
@@ -34,13 +32,10 @@ class TemporalCarrierSignaller:
         self._connector = connector
 
     async def signal(self, event: CarrierEvent) -> None:
-        client = await self._connector.client()
-        handle = client.get_workflow_handle(call_workflow_id(event.call_id))
-        try:
-            await handle.signal(CARRIER_SIGNAL, event.model_dump(mode="json"))
-        except RPCError as exc:
-            if exc.status != RPCStatusCode.NOT_FOUND:
-                raise
+        workflow_id = call_workflow_id(event.call_id)
+        if not await signal_workflow(
+            self._connector, workflow_id, CARRIER_SIGNAL, event.model_dump(mode="json")
+        ):
             _log.debug(
                 "telnyx.workflow_missing",
                 event_type=event.type,

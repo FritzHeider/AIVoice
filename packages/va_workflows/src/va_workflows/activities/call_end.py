@@ -26,7 +26,8 @@ from va_billing import holds
 from va_billing.limits import CallLimiter
 from va_common.logging import bound_context, get_logger
 from va_common.time import Clock
-from va_db.call_states import END_REASONS, EndReason, call_durations, is_terminal
+from va_db.call_end import ended_values, record_answered_end
+from va_db.call_states import EndReason, is_terminal
 from va_db.models import Call, CallStatus
 from va_db.repositories import CallLegRepo, CallRepo, CallTransitionError
 from va_db.session import Database
@@ -45,19 +46,10 @@ DISPATCH_BLOCKED_MESSAGE: Final = "The call was blocked at dispatch."
 ANSWERED_REASON_MESSAGE: Final = "This end reason cannot end an answered call."
 STATE_UNAVAILABLE_MESSAGE: Final = "The call carrier state is unavailable."
 _UNANSWERED: Final[frozenset[CallStatus]] = frozenset({"scheduled", "queued", "dialing", "ringing"})
-_ANSWERED: Final[frozenset[CallStatus]] = frozenset({"in_progress", "transferring", "transferred"})
 _NOT_DIALED: Final[frozenset[CallStatus]] = frozenset({"scheduled", "queued"})
 _TRANSFER_STARTED_AT: Final = "transfer_started_at"
 
 _log = get_logger(__name__)
-
-
-def _stored_reason(value: str | None) -> EndReason | None:
-    """``calls.end_reason`` as an :data:`EndReason` (``None`` when unset or not a known reason)."""
-    for reason in END_REASONS:
-        if reason == value:
-            return reason
-    return None
 
 
 class CallEndActivities:
@@ -130,7 +122,7 @@ class CallEndActivities:
 
     async def _end_unanswered(self, session: AsyncSession, call: Call, request: EndCallInput) -> Call:
         reason = request.end_reason
-        values: dict[str, Any] = self._ended_values(reason, request.error_message)
+        values: dict[str, Any] = ended_values(reason, self._clock.now(), request.error_message)
         target: CallStatus = "failed"
         if reason == "canceled":
             target = "canceled"
@@ -150,24 +142,14 @@ class CallEndActivities:
     async def _end_answered(
         self, session: AsyncSession, call: Call, request: EndCallInput, transfer_started_at: datetime | None
     ) -> tuple[Call, EndReason]:
-        reason = _stored_reason(call.end_reason) or request.end_reason
-        values = self._ended_values(reason, call.error_message or request.error_message)
-        if call.answered_at is not None:
-            values.update(call_durations(call.answered_at, values["ended_at"], transfer_started_at))
-        ended = await CallRepo(session, call.org_id).transition(
-            call.id, "completed", from_=_ANSWERED, **values
+        return await record_answered_end(
+            session,
+            call,
+            request.end_reason,
+            ended_at=self._clock.now(),
+            transfer_started_at=transfer_started_at,
+            error_message=request.error_message,
         )
-        return ended, reason
-
-    def _ended_values(self, reason: EndReason, error_message: str | None) -> dict[str, Any]:
-        values: dict[str, Any] = {
-            "end_reason": reason,
-            "ended_by": END_REASONS[reason],
-            "ended_at": self._clock.now(),
-        }
-        if error_message is not None:
-            values["error_message"] = error_message
-        return values
 
     def _events(self, call: Call, request: EndCallInput, reason: EndReason) -> list[DomainEvent]:
         events: list[DomainEvent] = []

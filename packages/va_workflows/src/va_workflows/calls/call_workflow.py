@@ -283,7 +283,7 @@ class CallWorkflow:
         finally:
             await self._stop_watch()
         if step == "pipeline_finished":
-            return await self._cleanup("completed", "error", PIPELINE_UNRECORDED_MESSAGE)
+            return await self._after_pipeline()
         if step == "hung_up":
             return await self._after_carrier_hangup()
         return await self._end_and_hangup(*_HANGUP_ENDS[step])
@@ -367,6 +367,14 @@ class CallWorkflow:
             workflow.logger.warning("calls.presence_failed error=%s", _cause_type(exc))
             return False
         return not presence.owner
+
+    async def _after_pipeline(self) -> CallWorkflowResult:
+        """The media worker finished: it recorded the end and hung up, unless it lost the call
+        (``worker_lost``: no record, no hangup), which the workflow then does itself."""
+        finished = self._signals.pipeline_finished
+        if finished is not None and finished.end_reason == "worker_lost":
+            return await self._end_and_hangup("worker_lost", "worker_lost", "worker_lost")
+        return await self._cleanup("completed", "error", PIPELINE_UNRECORDED_MESSAGE)
 
     async def _after_carrier_hangup(self) -> CallWorkflowResult:
         """The caller (or carrier) hung up: give the media worker time to record the end, then clean up."""

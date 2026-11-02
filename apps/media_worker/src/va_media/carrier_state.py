@@ -2,9 +2,10 @@
 
 The telephony edge keeps the latest carrier facts of a call in the hash ``call:{<id>}:carrier_state`` (field
 names written by ``va_edge.mapping``: ``answered``, ``answered_at``, ``amd_result``, ``answered_by``,
-``hangup_cause``, ...). The session reads it once, right after its carrier channel subscription is confirmed,
-so an event stored before the subscription is in the snapshot and one published after it arrives on the
-channel.
+``hangup_cause``, ``primary_hangup``, ``transfer_started_at``, ...). The session reads it once, right after
+its carrier channel subscription is confirmed, so an event stored before the subscription is in the snapshot
+and one published after it arrives on the channel. The end-of-call routine reads it again
+(:func:`read_carrier_state`) to learn whether the carrier already hung up.
 """
 
 from __future__ import annotations
@@ -37,7 +38,20 @@ class CarrierSnapshot:
 
     @property
     def answered_at(self) -> datetime | None:
-        raw = self.fields.get("answered_at")
+        return self._timestamp("answered_at")
+
+    @property
+    def transfer_started_at(self) -> datetime | None:
+        """When the transfer target joined (``bridged``), for the transfer seconds."""
+        return self._timestamp("transfer_started_at")
+
+    @property
+    def primary_hung_up(self) -> bool:
+        """Whether the edge stored a ``call.hangup`` of the primary leg."""
+        return self.fields.get("primary_hangup") == "1"
+
+    def _timestamp(self, name: str) -> datetime | None:
+        raw = self.fields.get(name)
         if not raw:
             return None
         try:

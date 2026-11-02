@@ -372,6 +372,10 @@
 
 ## Decisions
 
+### mem-1793604160-bb3f
+> P05-T11b plan: media end routine runs in CallSession between _race and _cleanup (lock still held); stream_closed re-reads carrier_state primary_hangup then waits 3 s on feed.next_carrier; worker_lost → no hangup/no row, CallWorkflow hangs up; shared va_db.call_end.record_answered_end with end_call activity
+<!-- tags: media, calls, workflows | created: 2026-11-02 -->
+
 ### mem-1793562105-042f
 > P05-T04 split: T04a va_compliance (fraud prefixes, DNC with parent inheritance via use_org, international policy reconciling specs/24§6.7+28§9.1, callee_timezones/in_window, state_rules.json, check_call_compliance order prefix>DNC>intl>hours); T04b va_billing limits/holds/dispatch.admit_call + move org_schemas.effective_limits to va_billing.plans
 <!-- tags: calls, compliance, billing | created: 2026-11-01 -->

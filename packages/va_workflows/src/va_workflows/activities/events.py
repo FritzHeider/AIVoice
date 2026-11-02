@@ -16,13 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.logging import get_logger
 from va_common.time import Clock
-from va_db.call_states import END_REASONS, EndReason
 from va_db.models import CallEventLevel
 from va_events import (
+    ENDED_MESSAGE,
     DomainEvent,
     EventPublisher,
     EventPublishError,
     EventType,
+    call_ended_event,
     insert_rows,
     new_event,
     row_for,
@@ -31,7 +32,6 @@ from va_workflows.activities.errors import EVENTS_UNAVAILABLE, retryable
 
 __all__ = ["ENDED_MESSAGE", "broadcast_events", "call_event", "ended_event", "persist_events"]
 
-ENDED_MESSAGE = "Call ended."
 EVENTS_UNAVAILABLE_MESSAGE = "Call events are temporarily unavailable."
 
 _log = get_logger(__name__)
@@ -77,13 +77,5 @@ def call_event(  # noqa: PLR0913 - the event's identity and keyword-only content
     )
 
 
-def ended_event(clock: Clock, org_id: uuid.UUID, call_id: uuid.UUID, reason: EndReason) -> DomainEvent:
-    """``call.ended`` with ``{end_reason, ended_by}`` (the edge's shape)."""
-    return call_event(
-        clock,
-        org_id,
-        call_id,
-        EventType.CALL_ENDED,
-        message=ENDED_MESSAGE,
-        data={"end_reason": reason, "ended_by": END_REASONS[reason]},
-    )
+ended_event = call_ended_event
+"""``call.ended`` with ``{end_reason, ended_by}`` (the edge's shape; shared with the media worker)."""

@@ -7,6 +7,7 @@ dependencies = [
     "pynacl>=1.5",
     "starlette>=1.0",
     "redis>=5.1",
+    "va-billing",
     "va-common",
     "va-db",
     "va-domain",
@@ -26,7 +27,9 @@ build-backend = "uv_build"
 module-name = "va_media"
 
 [tool.uv.sources]
+va-billing = { workspace = true }
 va-common = { workspace = true }
+va-events = { workspace = true }
 va-db = { workspace = true }
 va-domain = { workspace = true }
 va-elevenlabs = { workspace = true }

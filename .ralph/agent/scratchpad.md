@@ -382,3 +382,149 @@ src prints nothing. Diff checked against specs/03 call_turns DDL (UNIQUE (call_i
 ON CONFLICT), specs/19 §2 call.turn/interrupt/latency data, specs/07 §8 Decision P05-T11a; pipeline timeline is
 clock.monotonic()*1000, matching the recorder origin. No text in logs, tenant sessions only, publish failures
 logged. make e2e harness does not exist until P05-T17.
+
+## Plan P05-T11b — Media end-of-call routine (Planner, 2026-11-02)
+
+Spec refs: specs/07 §18, §19; specs/05 §8, §9; specs/06 §5 Decision P05-T02 items 7-8; specs/01 §2.1 steps 7-8 +
+Decision P05-T06c. Write `> Decision (2026-11-02): media end-of-call routine (P05-T11b)` under specs/07 §18 with
+every numbered rule below, and append a sentence to the specs/01 §2.1 Decision about the `worker_lost` hangup.
+
+### Design (decided — do not re-litigate)
+1. **Where it runs.** `CallSession` gets kw-only `ender: SessionEnder | None = None` (Protocol
+   `async def finish(self, session: CallSession, end: SessionEnd | None) -> None`). `CallSession.run` calls it
+   after `_race` (also when the body raised: `end=None`) and before `_cleanup` (so the ownership lock and the
+   heartbeat are still held while it runs). An ender exception is logged `media.end_routine_failed` (type only)
+   and never skips `_cleanup`. `MediaAttach` takes `ender=` and passes it to every session. `CallRuntime`
+   exposes `end_routine: CallEnd | None` (built by `open_runtime`; `None` when constructed without one);
+   the media lifespan wires `ender=runtime.end_routine` only when it built the runtime (injected test `body=`
+   keeps `ender=None`, so every existing test is unchanged).
+2. **`va_media.call_end.CallEnd`** (new module), kw-only ctor `(database, redis, telnyx: TelnyxClientFactory |
+   None, events: EventSink | None, event_rows: CallEventBuffer | None, signaller: PipelineSignaller, clock)`.
+   `finish(session, end)` steps, in order:
+   a. **Resolve** (`resolve_end` pure-ish helper returning `ResolvedEnd(reason: EndReason, hang_up: bool,
+      record: bool, ended_at: datetime | None, error_message: str | None)`):
+      - `end is None` (body raised) → `error`, hang up, record.
+      - `end.end_reason == "worker_lost"` (ownership lost, or the drain timeout) → no Telnyx hangup, no call
+        row write (the workflow records and hangs up, rule 6); only steps d-f.
+      - `end.cause == "stream_closed"` → `await self._carrier_hangup(session)` (3 s on the injected clock,
+        constant `STREAM_CLOSED_WAIT_S = 3.0`): re-read `read_carrier_state` (the edge HSETs before it PUBLISHes,
+        so an event the `CarrierWatch` already consumed is in the hash: field `primary_hangup == "1"`); if absent,
+        read `session.feed.next_carrier()` until a `call.hangup` of leg `primary` arrives or the wait ends
+        (other events dropped; the watch task has stopped, so this is the only reader). Hung up → reason
+        `max_duration` when `hangup_cause == "time_limit"`, `transferred` when the call status is `transferred`,
+        else `user_hangup`; no Telnyx hangup; `ended_at` = primary leg `ended_at` (`CallLegRepo.primary`; the edge
+        commits the leg before HSET/PUBLISH), else `clock.now()`. Not hung up → `error`, `error_message =
+        STREAM_LOST_MESSAGE = "The media stream closed while the call was up."`, hang up.
+      - any other `end.end_reason` (agent_end_call, no_input_timeout, max_duration, ivr_dead_end, error, api_stop,
+        insufficient_credits) → that reason, `ended_at = clock.now()`, hang up.
+   b. **Record** (when `record`): one `database.tenant_session(org_id)`: load the call (`CallRepo.get`); terminal
+      → nothing (changed False); unanswered status (`scheduled/queued/dialing/ringing`) → nothing (the workflow's
+      `pipeline_finished` cleanup records it); answered → shared `va_db.call_end.record_answered_end(session, call,
+      reason, ended_at=, transfer_started_at=, error_message=)` (rule 3). `transfer_started_at` from the carrier
+      state field `transfer_started_at`. A `CallTransitionError` (race) → logged `media.end_unrecorded`.
+      DB errors (`SQLAlchemyError`, `OSError`) → logged `media.end_record_failed` (the workflow then records
+      `error` with `PIPELINE_UNRECORDED_MESSAGE`).
+   c. **Hang up** (when `hang_up`; after the record, like `CallWorkflow._end_and_hangup`, so the edge's hangup
+      webhook finds `end_reason` set): `client.hangup(session.start.call_control_id, command_id=command_id(
+      "hangup", call_id, "primary"))` over `telnyx.for_account(context.config.telnyx_account_id)` (same id the
+      workflow uses: Telnyx dedupes); `False` (already ended) is fine; `TelnyxError`/resolution errors logged
+      `media.hangup_failed` (type only). No factory → logged `media.hangup_unavailable`.
+   d. **Events**: when the row was recorded, publish `call.ended` (`{end_reason, ended_by}` with the stored-wins
+      reason) through `events` (the per-process publisher with the `call_events` buffer); `EventPublishError`
+      logged. Then `await event_rows.flush_call(call_id)` (turn rows were already flushed by
+      `CallPersistence.finish_call` in the body; keep that).
+   e. **Slot**: `CallLimiter(redis, clock=clock).release_call(org_id, call_id)` (va-media-worker gains the
+      `va-billing` dependency; uv.lock); Redis errors logged `media.slot_release_failed`.
+   f. **Signal**: `signaller.pipeline_finished(call_id, PipelineFinished(end_reason=, ended_by=))` with the
+      resolved reason (`worker_lost`/`error` for rule a's worker_lost).
+3. **Shared end recording.** New `va_db.call_end.record_answered_end(...) -> tuple[Call, EndReason]` (stored
+   `calls.end_reason` wins; `end_reason`/`ended_by`/`ended_at`/`error_message`; `call_durations(answered_at,
+   ended_at, transfer_started_at)`; `CallRepo.transition(call.id, "completed", from_={in_progress, transferring,
+   transferred})`) plus `stored_reason(value)`. `CallEndActivities._end_answered`/`_stored_reason` delegate to it
+   (behaviour unchanged; existing activity tests stay green). Move `ENDED_MESSAGE` + `ended_event` into
+   `va_events` (`va_events.call_ended_event(clock, org_id, call_id, reason)`); `va_workflows.activities.events`
+   re-exports (`ended_event = call_ended_event`) so imports stay valid. jscpd must stay 0.
+4. **Signaller.** `va_media.workflow_signal.TemporalPipelineSignaller(connector: TemporalConnector)`:
+   `get_workflow_handle(call_workflow_id(call_id)).signal(PIPELINE_FINISHED_SIGNAL, finished.model_dump(
+   mode="json"))`; `RPCError NOT_FOUND` → debug `media.workflow_missing`; any other error (RPCError, OSError,
+   RuntimeError from connect) → warning `media.signal_failed` (never raised: the heartbeat watch and the hangup
+   grace are the backstops). If the edge's `TemporalCarrierSignaller` would clone, factor a small shared
+   `va_common.checks.signal_workflow(connector, workflow_id, name, arg) -> bool` (False = not found) used by both.
+   The media container builds `TemporalConnector(settings.temporal_host, settings.temporal_namespace)` directly
+   (NOT `deps.temporal`: specs/07 §2 readiness is drain/capacity/Redis only).
+5. **No hangup** after a carrier hangup or an ownership loss/drain worker_lost; exactly one media hangup otherwise.
+6. **CallWorkflow `worker_lost`.** In `_converse` when the step is `pipeline_finished` and
+   `signals.pipeline_finished.end_reason == "worker_lost"` → `_end_and_hangup("worker_lost", "worker_lost",
+   "worker_lost")`. Add `"worker_lost"` to `WorkflowEndReason` and `CallOutcome` (docstrings too). `end_call`
+   records `completed/worker_lost` for an answered call (the media worker did not). `_after_carrier_hangup` is
+   unchanged (the call is already down).
+7. Never log turn text, digits, or phone numbers. Bound log context already has org_id/call_id.
+
+### Tests (all must exist and pass)
+- `packages/va_db/tests/test_call_end.py` (Postgres, existing module DB support + `call_rows.seed_call`):
+  answered call → completed with durations; stored reason wins; transfer seconds; non-answered status raises
+  `CallTransitionError`.
+- `packages/va_events` unit test for `call_ended_event` data/message.
+- `apps/media_worker/tests/test_call_end.py` (`media_db_url` + fakeredis + recording fake Telnyx client/factory
+  + `RecordingSignaller` + ManualClock): one test per path — agent_end_call, no_input_timeout, max_duration,
+  ivr_dead_end, error, api_stop, insufficient_credits (row status/end_reason/ended_by/connected_seconds, one
+  hangup with the shared command_id, slot ZREM, call.ended published, signal sent); stream_closed with
+  `primary_hangup` already in the state (no hangup, `user_hangup`, ended_at from the leg), with a `call.hangup`
+  event arriving within 3 s (`time_limit` → `max_duration`), and with nothing in 3 s (`error` + hangup);
+  ownership lost / drain worker_lost (no hangup, row untouched, signal worker_lost); already-terminal call
+  (no row change, no call.ended, slot released, signal); unanswered call (no write, hangup, signal); body raised
+  (`error`); Telnyx failure / DB failure / signal failure / no factory each logged and the rest still runs.
+- `apps/media_worker/tests/test_session.py` (extend): ender runs before the lock release and the heartbeat
+  delete (order recorded), gets `None` when the body raised, its exception is logged and cleanup still runs.
+- `apps/media_worker/tests/test_workflow_signal.py`: signal payload/name/workflow id, NOT_FOUND tolerated,
+  other errors logged not raised.
+- `apps/media_worker/tests/test_runtime_sim.py` (extend, real Postgres via `rig(persistence=...)` +
+  `Rig.call(seeded=seed_call(...))`, rig gains the ender): `end_call` conversation → `completed/agent_end_call/
+  agent`, connected_seconds > 0, exactly one FakeTelnyx hangup, slot released, signal sent; FakeTelnyx caller
+  hangup with the carrier state/channel fed by the test (HSET `primary_hangup` + publish `call.hangup`) →
+  `user_hangup`, no media hangup; a published `stop` control message → `api_stop/api`.
+- `packages/va_workflows/tests` (workflow_rig): pipeline_finished `worker_lost` → `end_call(worker_lost)` then
+  `hangup_call`, outcome `worker_lost`; existing pipeline_finished tests unchanged.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in the
+background (`make test > logs/make_test_p05t11b.log 2>&1`) with a heartbeat Monitor (inactivity timeout 300 s);
+coverage ≥ 85 %/package, new modules ~100 %; `npx --yes jscpd@4 --silent` → 0 clones; `uvx radon cc -s -n C` on
+every touched src dir prints nothing (payload `complexity: <max CC ≤ 10>`); audit (`uvx pip-audit` on `uv export`
++ `corepack pnpm audit`). `make e2e` harness does not exist until P05-T17 — say so. build.done payload as plain
+text (no --json) with `tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, duplication: pass,
+complexity: N, specs: pass`.
+
+### Risks
+- The `CarrierWatch` task is cancelled when the body exits; the end routine must be the only carrier-queue reader
+  afterwards, and must re-read the state hash first (events already consumed).
+- ManualClock: the 3 s wait must race `feed.next_carrier()` against `clock.sleep` (tests `wait_for_sleep(3.0)`).
+- Ender exceptions must never skip lock release/socket close (filterwarnings=error: no leaked tasks).
+- `call_events` partitions: Postgres rows need real-time `created_at` → tests use `SystemClock` (or a clock near
+  now) for the end routine's events, ManualClock only where no row is written.
+- Existing session/server/runtime tests construct without an ender — defaults keep them valid.
+
+## Build P05-T11b (Builder, 2026-11-02)
+
+Implemented per plan. New: `va_media.call_end.CallEnd` (resolve/record/hangup/call.ended/flush/slot/signal),
+`va_media.workflow_signal.TemporalPipelineSignaller`, `va_db.call_end` (record_answered_end, stored_reason,
+ended_values; `end_call` activity delegates), `va_events.call_ended` (call_ended_event, ENDED_MESSAGE;
+`va_workflows.activities.events.ended_event` aliases it), `va_common.checks.signal_workflow` (edge signaller uses
+it). `CallSession(ender=)` + `SessionEnder` protocol (runs before cleanup; failures logged
+`media.end_routine_failed`); `MediaAttach.ender`; lifespan takes the ender from a body exposing `end_routine`
+(CallRuntime; open_runtime builds CallEnd with a lazy TemporalConnector). `CarrierSnapshot.primary_hung_up` /
+`transfer_started_at`. CallWorkflow: pipeline_finished `worker_lost` → end_call(worker_lost) + hangup_call,
+outcome `worker_lost` (WorkflowEndReason/CallOutcome extended). va-media-worker depends on va-billing (uv.lock).
+Deviation: `media.workflow_missing` logs at info (not debug) so it is observable in tests.
+Specs: specs/07 §18 Decision P05-T11b, specs/01 §2.1 worker_lost Decision. AGENTS.md updated.
+Tests: va_db test_call_end, va_events test_call_ended, media test_call_end (25), test_session (+3),
+test_workflow_signal (5), test_runtime_sim (+3 on Postgres), test_call_workflow (+1 worker_lost).
+
+## Review P05-T11b (Reviewer, 2026-11-02) — APPROVED
+
+Re-ran: make lint 0, make typecheck 0, placeholders 0, check_spec_refs 0, make test 9755 passed / 7 skipped,
+99.17 % (call_end 99 %, workflow_signal / va_db.call_end / call_ended 100 %), jscpd 0 clones, radon -n C on
+touched src prints nothing. Checked: edge mapping writes `primary_hangup`/`hangup_cause`/`transfer_started_at`
+the routine reads; `worker_lost` is a specs/05 §9 reason (ended_by error); ender runs before `_cleanup` and its
+failure is logged; hangup uses the workflow command_id; tenant session only; no text/numbers logged.
+make e2e harness does not exist until P05-T17.

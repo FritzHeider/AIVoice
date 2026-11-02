@@ -33,7 +33,7 @@ from va_media.context import CallContextLoader, ContextRefusedError
 from va_media.control import ControlHandler
 from va_media.drain import DrainState
 from va_media.ownership import CallOwnership
-from va_media.session import CallSession, SessionBody, StreamStart
+from va_media.session import CallSession, SessionBody, SessionEnder, StreamStart
 from va_media.sessions import LiveSessions
 from va_media.socket import StarletteSocket
 from va_media.stream import StreamStartError, wait_for_start
@@ -77,6 +77,7 @@ class MediaAttach:
     hub: ChannelHub
     sessions: LiveSessions
     control_handler: ControlHandler
+    ender: SessionEnder | None = None
 
     async def _refuse(self, socket: StarletteSocket, code: int, reason: str, *, detail: str = "") -> None:
         self.metrics.counter("va_media_admission_rejected_total").labels(reason=reason).inc()
@@ -185,6 +186,7 @@ class MediaAttach:
             feed=feed,
             carrier_state=carrier_state,
             control_handler=self.control_handler,
+            ender=self.ender,
         )
         self.sessions.add(session)
         try:

@@ -23,13 +23,15 @@ type CallOutcome = Literal[
     "fax_detected",
     "stream_failed",
     "worker_crash",
+    "worker_lost",
     "max_duration",
 ]
 """How the workflow saw the call end: ``completed`` (the conversation ran and ended), ``canceled``
 (stopped before the answer), ``not_found`` (no such call), ``skipped`` (already terminal before the dial),
 ``blocked`` / ``failed`` (dispatch re-check / Telnyx rejected the dial), ``error`` (dial or ring backstop
 failure), ``not_answered`` (the carrier hung up before the answer), and the in-call backstops
-``fax_detected``, ``stream_failed``, ``worker_crash``, ``max_duration``."""
+``fax_detected``, ``stream_failed``, ``worker_crash``, ``max_duration``, and ``worker_lost`` (the media worker
+lost the call and asked the workflow to record the end and hang up)."""
 
 
 class CallWorkflowResult(BaseModel):

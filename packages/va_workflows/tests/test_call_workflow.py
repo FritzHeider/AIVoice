@@ -119,6 +119,25 @@ async def test_an_unrecorded_pipeline_end_is_recorded_by_the_cleanup(env: Workfl
     assert hangups(fakes) == []
 
 
+async def test_a_lost_media_worker_has_the_workflow_record_and_hang_up(env: WorkflowEnvironment) -> None:
+    start = call_start()
+    lost: Signal = (PIPELINE_FINISHED_SIGNAL, PipelineFinished(end_reason="worker_lost", ended_by="error"))
+    fakes = FakeCallActivities(
+        send={"dial": [answered(start)], WATCH: [lost]},
+        end_results=[EndCallResult(changed=True, status="completed")],
+    )
+
+    run = await run_call(env, fakes, start)
+
+    assert trail(fakes) == (
+        [PREFETCH, "dial", WATCH, "end_call", "hangup_call"],
+        [("worker_lost", None)],
+        ["worker_lost"],
+    )
+    assert run.result == CallWorkflowResult(outcome="worker_lost", end_reason="worker_lost")
+    assert run.post_call == PostCallWorkflowInput(call_id=start.call_id, org_id=start.org_id)
+
+
 async def test_a_scheduled_call_is_dialled_at_its_start_time(env: WorkflowEnvironment) -> None:
     scheduled_for = await env.get_current_time() + timedelta(hours=2)
     start = call_start(scheduled_for=scheduled_for)

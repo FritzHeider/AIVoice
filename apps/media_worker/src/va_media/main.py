@@ -9,7 +9,8 @@ sessions still running then end with ``end_reason='worker_lost'`` and the server
 most 10 s more). ``/ws/telnyx`` (``va_media.server``) attaches Telnyx media streams; the pod publishes its
 load to ``media:pods`` every 2 s (``va_media.pods``); one pod-wide pub/sub connection carries every call's
 control and carrier channels (``va_media.channels``); every attached call runs the pipeline of
-``va_media.runtime`` (ElevenLabs STT/TTS, Silero VAD, the LLM gateway, the task-mode Brain). The lifespan
+``va_media.runtime`` (ElevenLabs STT/TTS, Silero VAD, the LLM gateway, the task-mode Brain) and, when the
+lifespan built that runtime, its end-of-call routine (``va_media.call_end``). The lifespan
 refuses to start without ``TELNYX_PUBLIC_KEY`` (``local`` falls back to the simulator's key file) or
 ``STREAM_TOKEN_SECRET``.
 """
@@ -21,7 +22,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 from redis.asyncio import Redis
 from starlette.applications import Starlette
@@ -57,7 +58,7 @@ from va_media.loop_lag import LoopLagMonitor
 from va_media.pods import PodRegistry
 from va_media.runtime import RuntimeFactory, open_runtime
 from va_media.server import MediaAttach, telnyx_media_route
-from va_media.session import SessionBody
+from va_media.session import SessionBody, SessionEnder
 from va_media.sessions import LiveSessions
 from va_media.settings import MediaSettings
 from va_media.vad_model import VadModelError, VadStatus, verify_vad_model
@@ -157,6 +158,14 @@ def media_auth(settings: MediaSettings) -> MediaAuth:
     )
 
 
+@runtime_checkable
+class _EndingBody(Protocol):
+    """A session body with an end-of-call routine (:class:`~va_media.runtime.CallRuntime`)."""
+
+    @property
+    def end_routine(self) -> SessionEnder | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _Seams:
     body: SessionBody | None
@@ -175,6 +184,7 @@ def _attach(  # noqa: PLR0913 - collaborators built by the lifespan
     seams: _Seams,
     body: SessionBody,
 ) -> MediaAttach:
+    ender = body.end_routine if isinstance(body, _EndingBody) else None
     return MediaAttach(
         auth=auth,
         registry=media.registry,
@@ -188,6 +198,7 @@ def _attach(  # noqa: PLR0913 - collaborators built by the lifespan
         hub=hub,
         sessions=media.sessions,
         control_handler=seams.control_handler,
+        ender=ender,
     )
 
 
@@ -231,7 +242,8 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
 
     ``body`` runs each attached call; without one the lifespan enters ``runtime`` (default
     :func:`~va_media.runtime.open_runtime`: the pipeline with the vendor sockets, the LLM gateway and the
-    task-mode Brain) and uses the body it yields. ``context_loader`` builds the call context loader from the
+    task-mode Brain) and uses the body it yields. A body with an ``end_routine`` (the runtime) gives every
+    session that end-of-call routine. ``context_loader`` builds the call context loader from the
     container, ``control_handler`` handles control messages.
     """
     cfg = settings if settings is not None else MediaSettings()

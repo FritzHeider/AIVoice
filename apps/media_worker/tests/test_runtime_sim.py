@@ -17,9 +17,9 @@ from typing import Any, Final
 import fakeredis
 import httpx
 import pytest
-from call_rows import SeededCall, seed_call
+from call_rows import SeededCall, load_call, seed_call
 from llm_helpers import add_rules
-from media_helpers import FakeContextLoader, call_context
+from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from resolved_configs import resolved_config
 from service_helpers import settings_of
 from sim_media import StreamedCall, realtime_telnyx, streamed_call
@@ -29,17 +29,23 @@ from telnyx_helpers import CALLEE, register
 from tenant_rows import open_database
 from tts_helpers import VOICE_ID
 
+from va_billing.keys import concurrency_key
 from va_common.http import http_client
 from va_common.metrics import Service, build_metrics, new_registry
 from va_common.time import SystemClock, utcnow
-from va_db.models import CallEvent
+from va_db.models import Call, CallEvent
 from va_db.repositories import CallTurnRepo
+from va_db.session import Database
+from va_domain.carrier import carrier_state_key
+from va_domain.control import StopControl, control_channel
 from va_domain.org import OrgSettings
 from va_elevenlabs import ElevenLabsRest
 from va_elevenlabs.tts_models import DEFAULT_TTS_MODEL
+from va_events import ENDED_MESSAGE
 from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
 from va_llm.providers import platform_provider
 from va_llm.tokens import default_counter
+from va_media.call_end import CallEnd
 from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, open_persistence
 from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, CallSession, SessionEnd
@@ -48,6 +54,7 @@ from va_media.turns import CallPersistence
 from va_sim.server import running_sims, simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
+from va_telnyx.client_state import command_id
 from va_telnyx.settings import telnyx_factory
 from va_voice.phrase_cache import PhraseCache
 from va_voice.vad import VadExecutor
@@ -72,13 +79,19 @@ class StaticOrgSettings:
 
 
 class RecordingRuntime:
-    """The session body: :class:`CallRuntime`, with every session end recorded."""
+    """The session body: :class:`CallRuntime`, with every session end recorded (its end routine too)."""
 
     def __init__(self, runtime: CallRuntime) -> None:
         self.runtime = runtime
         self.ends: asyncio.Queue[SessionEnd] = asyncio.Queue()
+        self.started = asyncio.Event()
+
+    @property
+    def end_routine(self) -> CallEnd | None:
+        return self.runtime.end_routine
 
     async def __call__(self, session: CallSession) -> SessionEnd:
+        self.started.set()
         end = await self.runtime(session)
         self.ends.put_nowait(end)
         return end
@@ -96,6 +109,8 @@ class Rig:
     org_settings: StaticOrgSettings
     redis: fakeredis.FakeAsyncRedis
     elevenlabs_url: str
+    container: FakeMediaContainer
+    signaller: RecordingSignaller
 
     @asynccontextmanager
     async def call(
@@ -116,7 +131,13 @@ class Rig:
             call_id = seeded.call_id
             loader.contexts[call_id] = call_context(call_id, org_id=seeded.org_id, **values)
         async with streamed_call(
-            MODELS_DIR, self.body, state=self.state, loader=loader, answered=answered, call_id=call_id
+            MODELS_DIR,
+            self.body,
+            state=self.state,
+            loader=loader,
+            answered=answered,
+            call_id=call_id,
+            container=self.container,
         ) as streamed:
             yield streamed
 
@@ -145,7 +166,10 @@ async def rig(
     *,
     redis: fakeredis.FakeAsyncRedis | None = None,
     persistence: CallPersistence | None = None,
+    database: Database | None = None,
 ) -> AsyncIterator[Rig]:
+    """The runtime over the simulators; with ``database`` its end-of-call routine runs too (over the media
+    container's Redis, FakeTelnyx, ``persistence``'s events and a :class:`RecordingSignaller`)."""
     state = realtime_telnyx()
     telnyx_app = Starlette(routes=simulator_routes("telnyx", state))
     async with running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls:
@@ -172,6 +196,25 @@ async def rig(
                 clock=clock,
                 metrics=LlmMetrics(metrics.registry, metrics),
             )
+            telnyx = telnyx_factory(
+                settings,
+                http=telnyx_http,
+                redis=fakeredis.FakeAsyncRedis(),
+                resolve_key=no_byo_key,
+                clock=clock,
+            )
+            container, signaller = FakeMediaContainer(), RecordingSignaller()
+            end_routine = None
+            if database is not None:
+                end_routine = CallEnd(
+                    database=database,
+                    redis=container.redis,
+                    signaller=signaller,
+                    clock=clock,
+                    telnyx=telnyx,
+                    events=None if persistence is None else persistence.events,
+                    event_rows=None if persistence is None else persistence.event_rows,
+                )
             runtime = CallRuntime(
                 settings=settings,
                 gateway=gateway,
@@ -181,17 +224,21 @@ async def rig(
                 vad_executor=executor,
                 clock=clock,
                 metrics=metrics,
-                telnyx=telnyx_factory(
-                    settings,
-                    http=telnyx_http,
-                    redis=fakeredis.FakeAsyncRedis(),
-                    resolve_key=no_byo_key,
-                    clock=clock,
-                ),
+                telnyx=telnyx,
                 redis=phrase_redis,
                 persistence=persistence,
+                end_routine=end_routine,
             )
-            yield Rig(state, llm, RecordingRuntime(runtime), org_settings, phrase_redis, urls["elevenlabs"])
+            yield Rig(
+                state,
+                llm,
+                RecordingRuntime(runtime),
+                org_settings,
+                phrase_redis,
+                urls["elevenlabs"],
+                container,
+                signaller,
+            )
 
 
 def spoken(state: SimState) -> list[str]:
@@ -434,3 +481,94 @@ async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url:
     latency = [e for e in events if e.category == "latency"]
     assert latency
     assert {e.data["turn_index"] for e in latency} == {1}
+
+
+@asynccontextmanager
+async def ending_rig(
+    media_db_url: str, *, status: str = "in_progress"
+) -> AsyncIterator[tuple[Rig, SeededCall]]:
+    """A rig with the end-of-call routine on the media database and a seeded answered call holding a slot."""
+    async with open_database(media_db_url) as database:
+        call = await seed_call(database, status="in_progress", answered_at=utcnow(), config=resolved_config())
+        async with (
+            open_persistence(database, fakeredis.FakeAsyncRedis(), clock=SystemClock()) as persistence,
+            rig(persistence=persistence, database=database) as r,
+        ):
+            await r.container.redis.zadd(concurrency_key(call.org_id), {str(call.call_id): 1})
+            yield r, call
+
+
+async def signalled(r: Rig) -> list[tuple[str, str]]:
+    async with asyncio.timeout(WAIT_S):
+        await r.signaller.signalled.wait()
+    return [(f.end_reason, f.ended_by) for _, f in r.signaller.signals]
+
+
+def hangups(streamed: StreamedCall) -> list[str | None]:
+    return [c.command_id for c in streamed.sim_call().commands if c.name == "hangup"]
+
+
+async def ended_row(media_db_url: str, call: SeededCall) -> tuple[Call, list[dict[str, Any]]]:
+    async with open_database(media_db_url) as database:
+        row = await load_call(database, call)
+        async with database.tenant_session(call.org_id) as session:
+            ends = [
+                dict(e.data)
+                for e in await session.scalars(select(CallEvent).where(CallEvent.call_id == call.call_id))
+                if e.message == ENDED_MESSAGE
+            ]
+    return row, ends
+
+
+@pytest.mark.integration
+async def test_an_agent_end_call_is_recorded_hung_up_and_signalled(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        await add_rules(
+            r.llm,
+            "rules:\n  - id: bye\n    match: {last_user_regex: 'bye'}\n"
+            "    respond: {tool_calls: [{name: end_call,\n"
+            "      arguments: {reason: done, final_message: 'Goodbye now.'}}]}\n",
+        )
+        r.scenario("wait_agent_speech: {}", "say: {text: that is all thanks bye}", "expect_hangup: {}")
+        async with r.call(seeded=call) as streamed:
+            assert await r.body.end() == SessionEnd("ended", "agent_end_call", "agent")
+            assert await signalled(r) == [("agent_end_call", "agent")]
+            assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
+        assert await r.container.redis.zscore(concurrency_key(call.org_id), str(call.call_id)) is None
+    row, ends = await ended_row(media_db_url, call)
+    assert (row.status, row.end_reason, row.ended_by) == ("completed", "agent_end_call", "agent")
+    assert row.connected_seconds is not None
+    assert row.connected_seconds > 0
+    assert ends == [{"end_reason": "agent_end_call", "ended_by": "agent"}]
+
+
+@pytest.mark.integration
+async def test_a_caller_hangup_is_recorded_without_a_media_hangup(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        # What the edge stores for the carrier's call.hangup (before it publishes it).
+        await r.container.redis.hset(carrier_state_key(call.call_id), mapping={"primary_hangup": "1"})
+        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        async with r.call(seeded=call) as streamed:
+            assert await r.body.end() == STREAM_CLOSED
+            assert await signalled(r) == [("user_hangup", "user")]
+            assert hangups(streamed) == []
+    row, ends = await ended_row(media_db_url, call)
+    assert (row.status, row.end_reason, row.ended_by) == ("completed", "user_hangup", "user")
+    assert ends == [{"end_reason": "user_hangup", "ended_by": "user"}]
+
+
+@pytest.mark.integration
+async def test_a_stop_control_message_ends_the_call_as_api_stop(media_db_url: str) -> None:
+    async with ending_rig(media_db_url) as (r, call):
+        r.scenario(
+            "wait_agent_speech: {}", "say: {text: tell me more about the menu please}", "expect_hangup: {}"
+        )
+        async with r.call(seeded=call) as streamed:
+            async with asyncio.timeout(WAIT_S):
+                await r.body.started.wait()
+            stop = StopControl(id=uuid.uuid4())
+            await r.container.redis.publish(control_channel(call.call_id), stop.model_dump_json())
+            assert await signalled(r) == [("api_stop", "api")]
+            assert hangups(streamed) == [command_id("hangup", call.call_id, "primary")]
+    row, _ = await ended_row(media_db_url, call)
+    assert (row.status, row.end_reason, row.ended_by) == ("completed", "api_stop", "api")

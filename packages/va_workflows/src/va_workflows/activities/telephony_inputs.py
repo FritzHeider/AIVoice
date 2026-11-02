@@ -42,9 +42,17 @@ call was stopped meanwhile; ``requeue``: the concurrency cap is full, try again 
 re-check failed (the call is ``failed``/``dispatch_blocked``); ``failed``: Telnyx rejected the dial."""
 
 type WorkflowEndReason = Literal[
-    "canceled", "dispatch_blocked", "carrier_error", "error", "worker_crash", "fax_detected", "max_duration"
+    "canceled",
+    "dispatch_blocked",
+    "carrier_error",
+    "error",
+    "worker_crash",
+    "worker_lost",
+    "fax_detected",
+    "max_duration",
 ]
-"""The ``end_reason`` values ``CallWorkflow`` itself records (specs/05 §9)."""
+"""The ``end_reason`` values ``CallWorkflow`` itself records (specs/05 §9); ``worker_lost`` after the media
+worker lost the call (ownership loss or drain timeout) without recording or hanging up."""
 
 PRE_ANSWER_ONLY_REASONS: Final[frozenset[WorkflowEndReason]] = frozenset(
     {"canceled", "dispatch_blocked", "carrier_error"}

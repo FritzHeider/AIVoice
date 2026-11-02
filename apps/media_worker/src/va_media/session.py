@@ -15,6 +15,10 @@ The control listener hands each message of the call's :class:`~va_media.channels
 ``SET call:{<id>}:control_ack:<message id> 1 EX 30`` (the write survives the session ending meanwhile: cleanup
 waits for it). A body or handler exception fails the session.
 
+After the race, an optional :class:`SessionEnder` (the end-of-call routine, ``va_media.call_end``) runs with
+the end (``None`` when the body raised) while the lock and the heartbeat are still held; its exception is
+logged ``media.end_routine_failed`` and never skips the cleanup.
+
 Cleanup always deletes the heartbeat, releases the lock unless it was lost, and closes the WebSocket (1000,
 or 1011 when the body raised).
 """
@@ -25,7 +29,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -51,6 +55,7 @@ __all__ = [
     "CallSession",
     "SessionBody",
     "SessionEnd",
+    "SessionEnder",
     "StreamStart",
 ]
 
@@ -93,6 +98,12 @@ class StreamStart:
 type SessionBody = Callable[["CallSession"], Awaitable[SessionEnd]]
 
 
+class SessionEnder(Protocol):
+    """Runs once when a session ended, before its cleanup (``end`` is ``None`` when the body raised)."""
+
+    async def finish(self, session: CallSession, end: SessionEnd | None) -> None: ...
+
+
 class CallSession:
     """The tasks of one attached call; :meth:`run` returns how it ended."""
 
@@ -109,6 +120,7 @@ class CallSession:
         feed: CallFeed | None = None,
         carrier_state: CarrierSnapshot | None = None,
         control_handler: ControlHandler | None = None,
+        ender: SessionEnder | None = None,
     ) -> None:
         self.call_id: uuid.UUID = context.call_id
         self.context = context
@@ -119,6 +131,7 @@ class CallSession:
         self._control_handler: ControlHandler = (
             control_handler if control_handler is not None else DefaultControlHandler()
         )
+        self._ender = ender
         self._acks: set[asyncio.Task[None]] = set()
         self._ownership = ownership
         self._redis = redis
@@ -152,8 +165,18 @@ class CallSession:
             try:
                 end = await self._race(body)
             finally:
+                await self._finish(end)
                 await self._cleanup(end)
             return end
+
+    async def _finish(self, end: SessionEnd | None) -> None:
+        """Run the ender; its failure is logged (the cleanup must still run)."""
+        if self._ender is None:
+            return
+        try:
+            await self._ender.finish(self, end)
+        except Exception as exc:  # any ender failure: the lock, heartbeat and socket must still be released
+            _log.error("media.end_routine_failed", error_type=type(exc).__name__)
 
     async def _race(self, body: SessionBody) -> SessionEnd:
         tasks = [

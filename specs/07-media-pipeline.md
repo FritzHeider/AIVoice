@@ -756,6 +756,38 @@ class ConversationEngine(Protocol):
 `duration_watchdog`: at `max_duration − 10 s` speaks `max_duration_message` (interruptibility 0); at `max_duration`
 ends with `end_reason='max_duration'`.
 
+> Decision (2026-11-02): media end-of-call routine (P05-T11b). `va_media.call_end.CallEnd` is the `SessionEnder`
+> of every `CallSession` whose body is the call runtime (`CallRuntime.end_routine`, built by `open_runtime`; a
+> test body without `end_routine` runs no routine). It runs once after the session race and before the session
+> cleanup, so the ownership lock and the heartbeat are still held (the edge sees an owner and leaves the call row
+> to the worker); `end` is `None` when the body raised; an exception of the routine is logged
+> `media.end_routine_failed` and never skips the cleanup (heartbeat delete, lock release, socket close). Steps:
+> 1. Resolve: a raised body → `error` ("The call pipeline failed."), record + hang up. `worker_lost` (ownership
+>    loss, drain timeout) → no record, no hangup (the workflow does both, specs/01 §2.1 Decision). A closed media
+>    stream (`stream_closed`) re-reads `call:{<id>}:carrier_state` (the edge `HSET`s before it `PUBLISH`es, so a
+>    hangup the carrier watch already consumed is in the hash as `primary_hangup=1`), else reads the carrier feed
+>    (now its only reader) for the primary leg's `call.hangup` for up to 3 s of the injected clock: hung up →
+>    `max_duration` when `hangup_cause='time_limit'`, `transferred` when the row is `transferred`, else
+>    `user_hangup`; no hangup; `ended_at` = the primary leg's `ended_at` (else now). Nothing in 3 s → `error`
+>    ("The media stream closed while the call was up.") and a hangup. Every other end keeps its reason (an
+>    unknown one is `error`), `ended_at` = now, and hangs up.
+> 2. Record (one tenant transaction): only an answered call (`in_progress`/`transferring`/`transferred`) is moved
+>    to `completed` through the shared `va_db.call_end.record_answered_end` (also used by the `end_call`
+>    activity): a stored `end_reason`/`error_message` wins, `ended_by` from specs/05 §9, connected/transfer
+>    seconds from `call_durations` with the carrier state's `transfer_started_at`. A terminal call is left
+>    alone; an unanswered one is left to the workflow's cleanup. A lost race (`CallTransitionError`) is logged
+>    `media.end_unrecorded`; database errors `media.end_record_failed`.
+> 3. Hang up the primary leg after the record (the hangup webhook then finds `end_reason` set) with
+>    `command_id("hangup", call_id, "primary")` (the workflow's id: Telnyx dedupes) and our `client_state`;
+>    already ended is fine; Telnyx/account failures are logged `media.hangup_failed`.
+> 4. `call.ended` (`{end_reason, ended_by}`, `va_events.call_ended_event`) only when step 2 wrote the row, then
+>    the call's `call_events` rows are flushed. 5. The concurrency slot is released (`ZREM`). 6.
+>    `signal_pipeline_finished(PipelineFinished(end_reason, ended_by))` (the recorded reason, else the resolved
+>    one) through `TemporalPipelineSignaller` (a lazily connected client, not a readiness check: specs/07 §2); a
+>    missing workflow is logged `media.workflow_missing`, any other failure `media.signal_failed`, never raised.
+> Each step logs its own failure and the next step still runs. This order (record, hang up, `call.ended`, slot,
+> signal) replaces the list above for steps 2-6; sockets are closed by the runtime before the routine runs.
+
 ## 19. Ownership, heartbeat, drain, failures
 
 - Renewal every 5 s via Lua `if GET == POD_ID then PEXPIRE 15000`. Failure to renew (key lost) → end immediately with

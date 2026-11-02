@@ -24,6 +24,9 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
    :class:`~va_media.turn_writer.TurnWriter` and ``call.turn``/``call.interrupt``/``call.latency`` events
    through the per-process publisher and ``call_events`` buffer; when the pipeline ends the call's events are
    awaited and its turns and event rows flushed (specs/07 §8 Decision P05-T11a).
+6. :attr:`CallRuntime.end_routine` (a :class:`~va_media.call_end.CallEnd` built by :func:`open_runtime`) is
+   the session ender the lifespan hands to every session: it records the end, hangs up, emits ``call.ended``,
+   releases the concurrency slot and signals ``CallWorkflow`` (specs/07 §18 Decision P05-T11b).
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from redis.asyncio import Redis
 from sqlalchemy.exc import SQLAlchemyError
 
+from va_common.checks import TemporalConnector
 from va_common.crypto import CryptoError, Envelope, open_kms_provider
 from va_common.http import http_client
 from va_common.logging import get_logger
@@ -70,6 +74,7 @@ from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, Provider
 from va_llm.providers import platform_provider
 from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
+from va_media.call_end import CallEnd
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
 from va_media.phrases import CallPhrases
@@ -88,6 +93,7 @@ from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
 from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
+from va_media.workflow_signal import TemporalPipelineSignaller
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
@@ -167,9 +173,11 @@ class CallRuntime:
         telnyx: TelnyxClientFactory | None = None,
         redis: Redis | None = None,
         persistence: CallPersistence | None = None,
+        end_routine: CallEnd | None = None,
         tracer_provider: TracerProvider | None = None,
     ) -> None:
         self._settings = settings
+        self._end_routine = end_routine
         self._persistence = persistence
         self._redis = redis
         self._telnyx = telnyx
@@ -181,6 +189,11 @@ class CallRuntime:
         self._clock = clock
         self._metrics = metrics
         self._tracer_provider = tracer_provider
+
+    @property
+    def end_routine(self) -> CallEnd | None:
+        """The session ender of this process (``None``: sessions end without the end-of-call routine)."""
+        return self._end_routine
 
     @property
     def vad_model(self) -> VadModel | None:
@@ -405,7 +418,9 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
     """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
     database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
     platform LLM connection is prewarmed (a failure is logged, never raised). The Telnyx pool and client
-    factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound DTMF."""
+    factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound DTMF and the end-of-call hangup; the
+    end routine signals ``CallWorkflow`` through a lazily connected Temporal client (not a readiness check,
+    specs/07 §2)."""
     database = getattr(container, "database", None)
     if not isinstance(database, Database):
         msg = "the media container has no database"
@@ -435,6 +450,17 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             open_persistence(database, container.redis, clock=clock)
         )
         await gateway.prewarm()
+        end_routine = CallEnd(
+            database=database,
+            redis=container.redis,
+            signaller=TemporalPipelineSignaller(
+                TemporalConnector(settings.temporal_host, settings.temporal_namespace)
+            ),
+            clock=clock,
+            telnyx=telnyx,
+            events=persistence.events,
+            event_rows=persistence.event_rows,
+        )
         yield CallRuntime(
             settings=settings,
             gateway=gateway,
@@ -447,4 +473,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             telnyx=telnyx,
             redis=container.redis,
             persistence=persistence,
+            end_routine=end_routine,
         )

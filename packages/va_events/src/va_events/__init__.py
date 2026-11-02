@@ -4,6 +4,7 @@ analytics schema (specs/03-data-model.md §12)."""
 from importlib.metadata import version
 
 from va_events.buffer import CallEventBuffer
+from va_events.call_ended import ENDED_MESSAGE, call_ended_event
 from va_events.call_events import (
     CallEventRow,
     CallEventSink,
@@ -21,6 +22,7 @@ from va_events.publisher import EventPublisher, EventPublishError, WebhookRouter
 
 __all__ = [
     "DEFAULT_CATEGORY",
+    "ENDED_MESSAGE",
     "STREAMS",
     "CallEventBuffer",
     "CallEventRow",
@@ -39,6 +41,7 @@ __all__ = [
     "StreamEntry",
     "WebhookRouter",
     "__version__",
+    "call_ended_event",
     "decode",
     "encode",
     "event_uuid",

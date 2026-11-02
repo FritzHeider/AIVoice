@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from temporalio.client import Client
 from temporalio.converter import DataConverter
+from temporalio.service import RPCError, RPCStatusCode
 
 from va_common.health import CheckFn
 from va_common.http import http_client
@@ -40,6 +41,7 @@ __all__ = [
     "open_dependencies",
     "postgres_check",
     "redis_check",
+    "signal_workflow",
     "temporal_check",
 ]
 
@@ -90,6 +92,20 @@ class TemporalConnector:
         if not await client.service_client.check_health(timeout=timedelta(seconds=timeout_s)):
             msg = "temporal workflow service is not serving"
             raise ConnectionError(msg)
+
+
+async def signal_workflow(connector: TemporalConnector, workflow_id: str, signal: str, arg: object) -> bool:
+    """Signal ``signal`` with ``arg`` on the running workflow ``workflow_id``; ``False`` when no such workflow
+    runs (not started yet, or already closed). Connection and other RPC failures propagate."""
+    client = await connector.client()
+    handle = client.get_workflow_handle(workflow_id)
+    try:
+        await handle.signal(signal, arg)
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return False
+    return True
 
 
 class TemporalCheck(Protocol):

@@ -66,8 +66,27 @@ async def forever(session: CallSession) -> SessionEnd:
     return STREAM_CLOSED
 
 
+class RecordingEnder:
+    """Records what it saw when the session ended (lock and heartbeat still present?)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.redis: fakeredis.FakeAsyncRedis | None = None
+        self.seen: list[tuple[SessionEnd | None, bool, bool, int | None]] = []
+
+    async def finish(self, session: CallSession, end: SessionEnd | None) -> None:
+        assert self.redis is not None
+        assert isinstance(session.socket, FakeSocket)
+        locked = await self.redis.exists(owner_key(session.call_id)) == 1
+        beating = await self.redis.exists(heartbeat_key(session.call_id)) == 1
+        self.seen.append((end, locked, beating, session.socket.closed_with))
+        if self.fail:
+            msg = "ender failed"
+            raise RuntimeError(msg)
+
+
 @asynccontextmanager
-async def rig(*, flaky: bool = False) -> AsyncIterator[Rig]:
+async def rig(*, flaky: bool = False, ender: RecordingEnder | None = None) -> AsyncIterator[Rig]:
     server = fakeredis.FakeServer()
     redis = fakeredis.FakeAsyncRedis(server=server)
     call_id = uuid.uuid4()
@@ -77,6 +96,8 @@ async def rig(*, flaky: bool = False) -> AsyncIterator[Rig]:
     clock = ManualClock()
     socket = FakeSocket()
     metrics = build_metrics(Service.MEDIA_WORKER, new_registry(process_collectors=False))
+    if ender is not None:
+        ender.redis = redis
     session = CallSession(
         context=call_context(call_id),
         socket=socket,
@@ -85,6 +106,7 @@ async def rig(*, flaky: bool = False) -> AsyncIterator[Rig]:
         redis=redis,
         clock=clock,
         metrics=metrics,
+        ender=ender,
     )
     yield Rig(server, redis, clock, socket, session, ownership, metrics)
 
@@ -213,3 +235,44 @@ async def test_redis_errors_during_heartbeat_and_cleanup_are_logged() -> None:
         "media.heartbeat_delete_failed",
         "media.ownership_release_failed",
     } <= events
+
+
+async def test_the_ender_runs_before_the_lock_release_and_the_heartbeat_delete() -> None:
+    ender = RecordingEnder()
+    async with rig(ender=ender) as r:
+        running = asyncio.ensure_future(r.session.run(read_until_stop))
+        await r.clock.wait_for_sleep(3.0)
+        r.socket.feed(stop_msg())
+        assert await running == STREAM_CLOSED
+        assert ender.seen == [(STREAM_CLOSED, True, True, None)]
+        assert await r.redis.exists(owner_key(r.session.call_id)) == 0
+        assert await r.redis.exists(heartbeat_key(r.session.call_id)) == 0
+        assert r.socket.closed_with == 1000
+
+
+async def test_the_ender_gets_none_when_the_body_raised() -> None:
+    async def broken(session: CallSession) -> SessionEnd:
+        msg = "pipeline failed"
+        raise RuntimeError(msg)
+
+    ender = RecordingEnder()
+    async with rig(ender=ender) as r:
+        with pytest.raises(RuntimeError, match="pipeline failed"):
+            await r.session.run(broken)
+        assert [seen[0] for seen in ender.seen] == [None]
+        assert r.socket.closed_with == 1011
+
+
+async def test_a_failing_ender_is_logged_and_the_cleanup_still_runs() -> None:
+    stream = json_log_stream()
+    ender = RecordingEnder(fail=True)
+    async with rig(ender=ender) as r:
+        r.session.request_end("api_stop", "api")
+        end = await r.session.run(forever)
+        assert end == SessionEnd("ended", end_reason="api_stop", ended_by="api")
+        assert len(ender.seen) == 1
+        assert await r.redis.exists(owner_key(r.session.call_id)) == 0
+        assert await r.redis.exists(heartbeat_key(r.session.call_id)) == 0
+        assert r.socket.closed_with == 1000
+    failed = [e for e in log_events(stream) if e["event"] == "media.end_routine_failed"]
+    assert [e["error_type"] for e in failed] == ["RuntimeError"]

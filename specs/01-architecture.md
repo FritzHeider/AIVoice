@@ -169,6 +169,11 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    > Redis error counts as seen. `call_presence` reads the owner and heartbeat keys (5 s, 3 attempts,
    > `StateUnavailable` on Redis errors). Activities are scheduled by name; their inputs live in import-free
    > modules (`activities.context_inputs`, `liveness_inputs`, `telephony_inputs`).
+   > Decision (2026-11-02): `signal_pipeline_finished` with `end_reason='worker_lost'` (the media worker lost
+   > ownership or hit the drain timeout and neither recorded the end nor hung up, specs/07 §18 Decision P05-T11b)
+   > makes the workflow record the end itself and hang up: `end_call(worker_lost)` (an answered call becomes
+   > `completed/worker_lost`) then `hangup_call("worker_lost")`, outcome `worker_lost`. Any other summary keeps
+   > the cleanup-only path.
 
 ### 2.2 Inbound call
 

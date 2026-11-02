@@ -1329,3 +1329,12 @@ Grafana 3001
   user turn the latency belongs to. Shared trigger wait of write-behind loops: `va_events.batching.wait_for_trigger`.
   Media Postgres tests use the session fixture `media_db_url` (conftest); runtime sim tests write to it with
   `rig(persistence=...)` + `Rig.call(seeded=seed_call(...))` (`streamed_call(call_id=)` fixes the call id).
+- 2026-11-02 (P05-T11b): media end-of-call routine = `va_media.call_end.CallEnd` (a `va_media.session.SessionEnder`
+  run by `CallSession` before its cleanup; rules: specs/07 §18 Decision P05-T11b). The lifespan wires it only from a
+  body exposing `end_routine` (`CallRuntime`; test bodies without it run no routine). Shared pieces:
+  `va_db.call_end.record_answered_end`/`stored_reason`/`ended_values` (also the `end_call` activity),
+  `va_events.call_ended_event`/`ENDED_MESSAGE`, `va_common.checks.signal_workflow` (False = no such workflow; edge
+  and media), `va_media.workflow_signal.TemporalPipelineSignaller`. `CallWorkflow` hangs up on a `worker_lost`
+  pipeline summary. Tests: `media_helpers.RecordingSignaller` (`signalled` event), `apps/media_worker/tests/
+  test_call_end.py` (`BrokenDatabase`, fake Telnyx factory), runtime sim `ending_rig(media_db_url)` +
+  `streamed_call(container=)` to share the media container's Redis with the routine.
