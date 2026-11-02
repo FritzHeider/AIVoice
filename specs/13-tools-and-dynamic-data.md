@@ -124,6 +124,10 @@ tool calls per call: 100.
 | `lookup_knowledge` | `{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}` | KB ids in tools or nodes | Returns top-5 chunks formatted per 14 §7 |
 | `list_slots`, `book_slot` | defined in 11 §3.2.7 | Scheduling node only | Scheduling webhooks |
 
+> Decision (2026-11-02): the wire schemas and availability of these tools follow the specs/10 §7 Decision P05-T09b
+> (`end_call` adds `final_message`, `transfer_call` uses `label`, `schedule_callback` uses `datetime_iso`); the
+> `press_button` pattern and `lookup_knowledge` schema above are kept. Implemented in `va_engine.system_tools`.
+
 `end_call` and `transfer_call` final-line semantics: tool parameters additionally accept (via call config
 `end_call_speech` / node `endCall`) `speech` (static), `speech_mode: "static"|"prompt"`, `speech_prompt`. Static:
 speak `speech` verbatim. Prompt: dialogue LLM generates a one-sentence closing using `speech_prompt` as instruction

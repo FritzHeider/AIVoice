@@ -138,7 +138,7 @@
   - Deliverables: new workspace package `packages/va_engine` (dist `va-engine`); `va_engine.templating` (tokenizer, resolver, filters, type-preserving JSON rendering, percent-encoded URL rendering, missing-variable reporting, limits); `va_engine.models.state` (`NodeFrame`, `TurnRecord`, `EngineState` with 200-turn cap and schema check); `va_engine.builtins.call_builtins` (§8 built-in variables from a `CallContext`)
   - Acceptance: unit + hypothesis tests for every grammar rule, filter, escape, limit, resolution order, missing-var reporting once per variable; EngineState round-trip and unknown schema_version rejection; built-ins for outbound and inbound contexts.
 
-- [ ] P05-T09b Voice system prompt, conversation window, built-in tool definitions
+- [x] P05-T09b Voice system prompt, conversation window, built-in tool definitions — va_llm.prompts (voice_system.txt drift-checked vs specs/10 §5), va_llm.tokens (vendored sha256-pinned cl100k), va_llm.window, va_engine.system_tools; make test 9366 passed / 7 skipped (99.16 %), lint/typecheck/placeholders/spec refs 0, jscpd 0, no C+ complexity
   - Spec refs: specs/10-llm-gateway.md §4, §5, §6, §7; specs/13-tools-and-dynamic-data.md §4, §6
   - Depends on: P05-T09a, P03-T13b
   - Deliverables: `va_llm.prompts` (`prompts/voice_system.txt` verbatim + `render_voice_system`, tool usage note); `va_llm.window` (`ConversationWindow` budget trimming); `va_engine.system_tools` (built-in tool definitions, availability rules, argument validation, reserved names)

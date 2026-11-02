@@ -285,6 +285,20 @@ Placeholder rendering rules (all produced by `va_llm.prompts.render_voice_system
   + chunks `[{i}] {content}` (top-k from `14` §6).
 - `glossary_section`: `\nImportant names and terms: {comma-separated terms}` (`08` §6).
 
+> Decision (2026-11-02): voice prompt rendering (P05-T09b). `va_llm.prompts.render_voice_system(VoicePromptInputs)`
+> takes plain values (va_llm does not know `CallContext`; the engine maps it): `now_local` (aware, already in the
+> call zone) renders `YYYY-MM-DD HH:MM` (24 h) and `weekday` is the English day name from a fixed table (never the
+> process locale); `counterpart` is the outbound `to_display` or the inbound company/number, chosen by the caller.
+> Blank `agent_name` → `the assistant`; blank `company` → no clause. Every optional section is
+> `\n{header}\n{body}\n`, so sections are separated by one blank line; the whole result has trailing whitespace
+> stripped. Known information keeps variable insertion order; non-strings are compact JSON. Blank memory is
+> omitted; knowledge chunks are numbered from 1, one per line; glossary terms are trimmed and de-duplicated
+> case-insensitively (first spelling kept). Values are substituted with `str.format_map`, so braces in
+> instructions or variables render literally. §4 helpers in the same module: `tool_usage_note(speech)` (the
+> caller passes the first available custom tool's `speech`, else `DEFAULT_TOOL_SPEECH` = `One moment.`, the first
+> filler phrase of `13` §5), `dtmf_message`, `context_update`, `interrupted_message` (`text_spoken.rstrip() + "—"`),
+> `example_messages`, `assemble_messages(system, tool_note=, examples=, window=)` in §4 order.
+
 ## 6. Conversation window (`window.py`)
 
 - Token counting: `tiktoken.get_encoding("cl100k_base")` as an approximation for all models (+ 4 tokens per message).
@@ -299,6 +313,20 @@ Placeholder rendering rules (all produced by `va_llm.prompts.render_voice_system
   budget; always keep the opener assistant message; insert `system` `"(Earlier parts of the conversation are omitted.)"`
   at the cut.
 - Interrupted assistant messages contain only `text_spoken` + `"—"`.
+
+> Decision (2026-11-02): conversation window (P05-T09b). tiktoken fetches encodings from the internet on first
+> use, which pods and tests must not do: `va_llm.tokens` vendors `cl100k_base` as
+> `va_llm/data/cl100k_base.tiktoken.gz` (gzip, mtime 0), verifies the decompressed file against the sha256 tiktoken
+> pins, and builds `tiktoken.Encoding` with tiktoken's own pattern and special tokens (`load_cl100k`, cached;
+> `default_counter()`; load it through `asyncio.to_thread` at startup). A message counts 4 + content + tool call
+> names and arguments + `tool_call_id`. `va_llm.window.ConversationWindow(budget, counter).fit(history)`: the opener
+> is `history[0]` when it is an assistant message without tool calls; the rest is grouped into turns starting at
+> every `user` message (messages before the first user message form a leading group), so tool calls, tool results
+> and context updates leave with their turn. Oldest turns are dropped until opener + note + rest ≤ budget; the
+> current (last) turn is never dropped (`over_budget=True` when it still does not fit). The omission note goes
+> right after the opener (first when there is none) and its tokens count. `fit_voice_system(inputs, counter=,
+> max_context=128_000, extra_tokens=)` applies the 60 % rule: drop the last knowledge chunk while over, then cut
+> the memory context to 800 tokens; instructions are never cut.
 
 ## 7. In-call tool definitions
 
@@ -319,6 +347,22 @@ Custom tool function definition: `name` = tool `name`, `description` = tool `des
 Tool loop: max 3 tool rounds per user turn; each round's results appended as `tool` messages; the final round
 streams speech. Unknown tool name or invalid arguments → `tool` message `{"error":"invalid_arguments","detail":…}` and
 the model gets one more round.
+
+> Decision (2026-11-02): built-in tool definitions (P05-T09b). `va_engine.system_tools` reconciles this table with
+> `13` §6: `end_call` `{reason (required), final_message}`; `transfer_call` with a transfer list →
+> `{label: enum[sorted list keys + "default" when transfer_phone_number is also set], message}` required `label`,
+> with only `transfer_phone_number` → `{message}`; `press_button` uses the `13` §6 pattern `^[0-9*#ABCDwW]{1,32}$`
+> (Telnyx DTMF accepts A–D and w/W pauses); `send_sms` `{message ≤ 1600}`; `schedule_callback`
+> `{datetime_iso (required), note}`; `lookup_knowledge` `{query}`. Availability: `end_call` task runner always,
+> pathways when `allow_end_call_tool`; `transfer_call` task runner on the voice channel with a transfer target;
+> `press_button` voice channel; `send_sms` when the agent number is SMS-capable (the caller folds capability and
+> 10DLC/toll-free readiness) and `tools.allow_send_sms`; `schedule_callback` when `tools.allow_schedule_callback`
+> or `engine.allow_callbacks`; `lookup_knowledge` when the call has knowledge bases. Order: end_call,
+> transfer_call, press_button, send_sms, schedule_callback, lookup_knowledge. Arguments are validated with
+> Draft 2020-12 against the exact schema offered (empty arguments = `{}`); errors answer
+> `{"error":"invalid_arguments","detail":[{"path","message"}…]}` sorted by path, and a reserved name the turn did
+> not offer answers `"detail":"unknown_tool"`. A transfer label found in the list wins (even a key named
+> `default`); `default` or no label resolves to `transfer_phone_number`.
 
 ## 8. Speculative generation contract
 

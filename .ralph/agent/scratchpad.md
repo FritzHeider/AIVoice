@@ -2952,3 +2952,169 @@ Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 9267 passed 
 radon no C+ in va_engine. Diff matches specs/11 §8 grammar/filters/resolution order/escape/limits and §9 models
 (extra=forbid, schema_version Literal[1], 200-turn fold). Spot-checked render/render_json/render_url/phone_spoken/
 date-in-tz by hand. Non-blocking: stringify of NaN floats renders `null` (orjson); harmless. Approved.
+
+## Plan P05-T09b — Voice system prompt, conversation window, built-in tool definitions (Planner, 2026-11-02)
+Pure code, no I/O except reading packaged data files. Two packages: `va_llm` (prompt + window + tokens) and
+`va_engine` (system tools; va_engine gains a `va-llm` dependency because T09c needs `LlmGateway` anyway, and tool
+definitions are `va_llm.models.ToolDef`).
+
+### Decisions (write as `> Decision (2026-11-02): ... (P05-T09b).` blocks: specs/10 §5 after the placeholder rules,
+### §6 after the existing decision, §7 after the tool-loop paragraph; one pointer block under specs/13 §6 table)
+1. §5 rendering (`va_llm.prompts.render_voice_system(VoicePromptInputs) -> str`), inputs are plain values (va_llm
+   must not know `CallContext`; T09c maps it): `agent_name: str | None`, `company: str | None`, `now_local: datetime`
+   (aware, already in the call zone), `timezone: str`, `direction: Literal["outbound","inbound","web"]`,
+   `counterpart: str` (outbound: `to_display`; inbound: company else agent number — T09c chooses), `language_name`,
+   `instructions`, `variables: Mapping[str, JsonValue]`, `memory_context: str | None`, `knowledge_chunks:
+   Sequence[str]` (ranked best first), `glossary_terms: Sequence[str]`. Formats: `now_local` = `YYYY-MM-DD HH:MM`
+   (24 h), `weekday` = English full name (`calendar.day_name`, never locale-dependent `%A`). Blank/whitespace
+   agent_name → `the assistant`; blank company → no clause. `instructions` trimmed. Known information: keys in
+   insertion order, skip `_`-prefixed, `call_id`, `voice_id`; strings as-is, others `orjson` compact; section
+   omitted when nothing remains. Memory section omitted when None/blank; knowledge section omitted when no chunks,
+   chunks numbered from 1 (`[1] text`), one per line; glossary omitted when empty, terms de-duplicated
+   case-insensitively keeping first spelling, joined `", "`. Output = template `str.format_map` (values may contain
+   braces safely) with trailing whitespace stripped from the whole result (spec block's last line is all optional
+   sections).
+2. §4 helpers in `va_llm.prompts`: `tool_usage_note(speech: str) -> str` (verbatim §4 sentence); the caller passes the
+   first available custom tool's `speech`, else `"One moment."` (first filler phrase of specs/13 §5) — default const
+   `DEFAULT_TOOL_SPEECH`. `dtmf_message(digits) -> ChatMessage` (`[Caller pressed: 1 2 3]`, digits space-joined),
+   `context_update(text) -> ChatMessage` (system `[Context update] {text}`), `interrupted_message(text_spoken)`
+   (assistant, `text_spoken.rstrip() + "—"`), `example_messages(pairs: Sequence[tuple[str, str]])` (system
+   `Examples of how to respond at this step:` + user/assistant pairs; empty pairs → `()`), `assemble_messages(system,
+   *, tool_note: str | None, examples, window) -> tuple[ChatMessage, ...]` in §4 order (system, note, examples,
+   window).
+3. §6 tokens: `va_llm.tokens` vendors `cl100k_base` (tiktoken downloads it from the internet at first use, which
+   tests and pods must not do): `packages/va_llm/src/va_llm/data/cl100k_base.tiktoken.gz` (gzip, `mtime=0`,
+   deterministic), `CL100K_SHA256` = sha256 of the decompressed file (the same hash tiktoken pins in
+   `tiktoken_ext/openai_public.py` — copy it from there and verify the download against it). `load_cl100k() ->
+   tiktoken.Encoding` builds `tiktoken.Encoding(name="cl100k_base", pat_str=<cl100k pattern from
+   tiktoken_ext.openai_public>, mergeable_ranks=<parsed base64 rank lines>, special_tokens=<same as tiktoken's>)`,
+   verifies the hash (`TokenizerDataError` on mismatch), `functools.cache`d. `TokenCounter(encoding)`:
+   `text(s) -> int` (`encode_ordinary`), `message(m: ChatMessage) -> int` = 4 + tokens(content) + Σ tool calls
+   (tokens(name) + tokens(arguments_json)) + tokens(tool_call_id) — memoised in a bounded dict (4 096 entries,
+   cleared when full; ChatMessage is frozen/hashable), `messages(seq)`, `truncate(s, max_tokens) -> str`
+   (decode of the first n tokens). `default_counter()` cached. Loading costs ~0.2 s: T09c calls it via
+   `asyncio.to_thread` at startup — note that in the docstring.
+4. §6 window: `va_llm.window.ConversationWindow(budget_tokens: int, counter: TokenCounter)`;
+   `fit(history: Sequence[ChatMessage]) -> WindowFit(messages: tuple[ChatMessage, ...], dropped: int, tokens: int,
+   over_budget: bool)`. Grouping: the opener = `history[0]` when it is an `assistant` message without tool calls
+   (always kept); the rest splits into groups, a new group starting at every `user` message (messages before the
+   first user message form a leading group). Drop oldest groups (whole, so assistant tool_calls + their `tool`
+   messages + context updates leave together) until opener + note + remaining ≤ budget; the last group (current
+   turn) is never dropped (`over_budget=True` if it alone does not fit). When ≥ 1 group was dropped insert system
+   `OMITTED_NOTE` = `"(Earlier parts of the conversation are omitted.)"` right after the opener (or first when there
+   is no opener); the note's tokens count. Budget from the org setting is the caller's job
+   (`OrgSettings.llm.context_budget_tokens`).
+5. §6 system share: `va_llm.prompts.fit_voice_system(inputs, *, counter, max_context=128_000, extra_tokens=0) ->
+   VoicePromptInputs`: while `counter.text(render(inputs)) + extra_tokens > 0.6 * max_context` drop the last
+   (lowest-ranked) knowledge chunk; if still over, truncate `memory_context` to 800 tokens (`counter.truncate`);
+   returns the adjusted inputs (no further trimming; instructions are never cut). `DEFAULT_MAX_CONTEXT = 128_000`.
+6. §7 vs specs/13 §6 reconciliation (13 §6 gets a pointer): the wire schemas are specs/10 §7 with these choices —
+   `end_call` `{reason (required), final_message}`; `transfer_call`: with a `transfer_list` →
+   `{label: enum[sorted list keys + "default" when transfer_phone_number], message}` required `["label"]`; with only
+   `transfer_phone_number` → `{message}` no required; `press_button` uses specs/13's superset pattern
+   `^[0-9*#ABCDwW]{1,32}$` (Telnyx send_dtmf accepts A–D and w/W pauses); `send_sms` `{message ≤ 1600}`;
+   `schedule_callback` `{datetime_iso (required), note}`; `lookup_knowledge` `{query}` (13 §6). Availability:
+   end_call — task runner always, pathway only when `allow_end_call_tool`; transfer_call — task runner with a
+   transfer target (never pathway); press_button — voice channel; send_sms — `sms_capable` (caller folds number
+   capability + 10DLC/toll-free readiness) and `tools.allow_send_sms`; schedule_callback — `tools.
+   allow_schedule_callback` or `engine.allow_callbacks`; lookup_knowledge — KB ids present. `list_slots`/
+   `book_slot` are only reserved names here (scheduling node, phase 07). Invalid/unknown tool call → tool message
+   `{"error":"invalid_arguments","detail":...}` (10 §7 form; custom tools keep 13 §5 `details`), unknown names use
+   detail `"unknown_tool"`.
+
+### Files
+- `packages/va_llm/pyproject.toml`: add `tiktoken>=0.12` (check latest; it ships wheels for 3.12; check `py.typed`,
+  else a commented mypy override like soxr). Root `uv lock`.
+- NEW `packages/va_llm/src/va_llm/prompts/__init__.py` (`VoicePromptInputs` frozen dataclass, `render_voice_system`,
+  `fit_voice_system`, `tool_usage_note`, `DEFAULT_TOOL_SPEECH`, `dtmf_message`, `context_update`,
+  `interrupted_message`, `example_messages`, `assemble_messages`, `load_prompt(name) -> str` via
+  `importlib.resources`), NEW `packages/va_llm/src/va_llm/prompts/voice_system.txt` (verbatim §5 block, ends with
+  one newline). uv_build ships non-.py files under the module dir (AGENTS P02-T04a).
+- NEW `packages/va_llm/src/va_llm/tokens.py`, NEW `packages/va_llm/src/va_llm/data/cl100k_base.tiktoken.gz`
+  (+ `data/__init__.py` not needed if read via `importlib.resources.files("va_llm") / "data" / ...`).
+- NEW `packages/va_llm/src/va_llm/window.py`.
+- `packages/va_engine/pyproject.toml`: add `va-llm`, `jsonschema>=4.26`; `[tool.uv.sources] va-llm`.
+- NEW `packages/va_engine/src/va_engine/system_tools.py`: `RESERVED_TOOL_NAMES` (the 8 names of 13 §4),
+  `is_reserved(name)`, `SystemToolFacts` (frozen dataclass: `runner: Literal["task","pathway"]`, `channel:
+  Literal["voice","sms","web_chat","web_voice"]` (reuse an existing channel Literal if va_domain has one),
+  `transfer_phone_number: str | None`, `transfer_list: Mapping[str,str]`, `sms_capable: bool`, `allow_send_sms`,
+  `allow_schedule_callback`, `has_knowledge_bases`, `allow_end_call_tool: bool = True`), `facts_for_call(context:
+  CallContext, settings: OrgSettings, *, sms_capable: bool, channel="voice") -> SystemToolFacts` (task runner),
+  `system_tools(facts) -> tuple[ToolDef, ...]` (fixed order end_call, transfer_call, press_button, send_sms,
+  schedule_callback, lookup_knowledge; descriptions written as instructions to the model), arg models (frozen
+  dataclasses) `EndCallArgs(reason, final_message|None)`, `TransferCallArgs(label|None, message|None)`,
+  `PressButtonArgs(digits)`, `SendSmsArgs(message)`, `ScheduleCallbackArgs(datetime_iso, note|None)`,
+  `LookupKnowledgeArgs(query)`, `InvalidToolCall(name, detail: JsonValue)` with `.tool_message(tool_call_id) ->
+  ChatMessage` (role tool, content orjson `{"error":"invalid_arguments","detail":...}`), `parse_system_call(call:
+  ToolCall, facts) -> <union> | None` (None = not a system tool name offered → caller tries custom tools; a
+  reserved-but-unavailable name or bad JSON/schema → `InvalidToolCall`; jsonschema `Draft202012Validator` against
+  the exact offered schema, details = list of `{"path": "a.b", "message": ...}` sorted by path), `resolve_transfer(
+  args, facts) -> str | None` (label in list → number; `"default"`/absent → transfer_phone_number; else None).
+- Root pyproject: nothing new beyond lock (va_engine already registered).
+- specs/10 §5/§6/§7 + specs/13 §6 Decisions; AGENTS.md line.
+
+### Tests
+- `packages/va_llm/tests/test_voice_prompt.py`: drift — `voice_system.txt` equals the specs/10 §5 fenced block
+  (parse the spec: first ``` block after the `## 5.` heading); full-text snapshots: (a) minimal outbound (no name,
+  no company, no optional sections: first line `You are the assistant, speaking with a person on a live phone
+  call.`, no trailing blank lines), (b) full inbound with every section; parametrized checks for each direction
+  line, company clause, each optional section present/absent; variable rules (`_x`, `call_id`, `voice_id` excluded;
+  dict/int/bool JSON-encoded; insertion order); glossary de-dup; braces in instructions/variables render literally;
+  weekday independent of locale; instructions trimmed. `tool_usage_note`, `dtmf_message("123")`,
+  `context_update`, `interrupted_message("Hello there ")`→`"Hello there—"`, `example_messages`, `assemble_messages`
+  order.
+- `test_fit_voice_system.py`: with a small `max_context` (e.g. 400) chunks drop last-first until fits; memory then
+  truncated to ≤ 800 tokens (use max_context so that only truncation fits); under budget → inputs unchanged
+  (identity/equality); `extra_tokens` counted.
+- `test_tokens.py`: decompressed data sha256 == `CL100K_SHA256`; known counts (`"hello world"` → 2, `"tiktoken is
+  great!"` → 6 with cl100k); if tiktoken's own cached encoding is NOT required (never call `tiktoken.get_encoding`
+  in tests — network); message count = 4 + content tokens, tool-call message counts name + args; memo hit returns
+  same value; cache cleared past the bound (patch the bound small); `truncate` keeps ≤ n tokens and is a prefix;
+  hash mismatch → `TokenizerDataError` (monkeypatch the data reader).
+- `test_window.py`: under budget → unchanged, dropped 0, no note; over budget → oldest groups dropped, opener kept,
+  note right after opener, tool_calls + tool messages leave with their turn (never orphaned `tool` message —
+  assert every `tool` message's `tool_call_id` matches an assistant tool call earlier in the result); no opener
+  (history starts with user) → note first; current turn alone over budget → kept, `over_budget=True`; leading
+  context-update group droppable; `tokens` equals `counter.messages(result)`; interrupted message formatting.
+  Hypothesis: for random histories the result is opener? + note? + a suffix of the groups and ≤ budget unless
+  over_budget.
+- `packages/va_engine/tests/test_system_tools.py`: availability matrix (task/pathway × transfer targets × channel ×
+  sms flags × callbacks × KBs × allow_end_call_tool) by tool names; exact schemas (end_call, transfer with list +
+  default, list only, number only, press_button pattern); every schema is a valid Draft 2020-12 schema
+  (`Draft202012Validator.check_schema`); `facts_for_call` from `resolved_configs.resolved_config(...)` CallContext
+  (va_domain tests/support — already on pythonpath per P05-T09a) + `OrgSettings()`; parse: valid args → typed
+  dataclass; bad JSON / schema violation (digits `"12x"`, missing reason, label not in enum) → `InvalidToolCall`
+  with sorted details and the exact tool message JSON; reserved but unavailable (`transfer_call` with no targets,
+  `book_slot`) → `InvalidToolCall`; non-system name → None; `resolve_transfer` label/default/absent/unknown;
+  `RESERVED_TOOL_NAMES` equals the specs/13 §4 list (parse the sentence) and `is_reserved`.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B), pip-audit on `uv export` (tiktoken is new), `corepack pnpm audit`, gitleaks via
+`uv run pre-commit run gitleaks --all-files` (new binary file). Coverage va_llm/va_engine ≥ 85 % (aim 100 % on new
+modules). `make e2e`: not applicable (pure library; tests_e2e/ arrives in P05-T17).
+
+### Risks
+- tiktoken network fetch: never call `tiktoken.get_encoding` anywhere; build the Encoding from the vendored file.
+  Download the source file once at build time (network may be needed for that one step; if unavailable, check
+  `~/.cache`/`/tmp/data-gym-cache` or the uv cache, else `build.blocked`).
+- The base64 rank file might trip gitleaks/placeholders if committed uncompressed: commit only the `.gz`.
+- mypy: tiktoken ships type hints (`py.typed`) in recent versions; confirm.
+- `str.format_map` with the template: the §5 block must not contain other `{`/`}` (it does not).
+- jscpd: schemas as dict literals may look repetitive — build them with small helpers.
+
+## Build P05-T09b (Builder, 2026-11-02)
+Implemented per plan. va_llm: `prompts/` (voice_system.txt verbatim from §5, render/fit, §4 helpers, load_prompt),
+`tokens.py` (vendored cl100k gzip mtime 0, sha256 pinned = tiktoken's, Encoding built locally; TokenCounter memo
+4096), `window.py` (split_turns + ConversationWindow.fit). tiktoken 0.14.0 added (py.typed); `tiktoken_ext` mypy
+override (test-only import for a drift check of pattern/hash/special tokens). va_engine: `system_tools.py`
+(availability table, schemas, parse_system_call, InvalidToolCall, resolve_transfer, facts_for_call); deps va-llm,
+jsonschema. Deviations from plan: weekday uses a fixed English table (calendar.day_name follows locale);
+transfer_call also requires the voice channel; sections are `\n{header}\n{body}\n` (blank-line separation).
+Specs: 10 §5/§6/§7 Decisions, 13 §6 pointer. AGENTS.md line.
+
+## Review P05-T09b (Reviewer, 2026-11-02)
+Re-ran: lint/typecheck/placeholders/spec refs 0, make test 9366 passed / 7 skipped (99.16 %), jscpd 0, radon no C+.
+Vendored cl100k gzip sha256 matches tiktoken's pin. Template verbatim; window keeps opener + current turn, no orphan
+tool messages (hypothesis-tested); system tool schemas/availability match the 10 §7 Decision (press_button follows
+13 §6 "always on voice", recorded). Approved.

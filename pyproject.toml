@@ -167,6 +167,11 @@ exclude = ['(^|/)node_modules/', '(^|/)\.venv/', '(^|/)scripts/ralph/']
 module = ["authlib", "authlib.*"]
 ignore_missing_imports = true
 
+# tiktoken_ext (the encoding registry installed with tiktoken) has no py.typed; only va_llm's drift test reads it.
+[[tool.mypy.overrides]]
+module = ["tiktoken_ext", "tiktoken_ext.*"]
+ignore_missing_imports = true
+
 # soxr ships no type information (no py.typed); va_voice.audio.resample wraps the two calls it makes.
 [[tool.mypy.overrides]]
 module = ["soxr", "soxr.*"]

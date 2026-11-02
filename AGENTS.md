@@ -1264,3 +1264,12 @@ Grafana 3001
   builtins=call_builtins(ctx, now=), node_vars=, input=, timezone=, missing=MissingVariables(sink)))`; scope values are
   plain mappings. `EngineState.add_turn` enforces the 200-turn cap; read stored state with `load_engine_state`.
   va_engine tests use `resolved_configs.resolved_config()` (va_domain tests/support) to build a `CallContext`.
+- 2026-11-02 (P05-T09b): voice prompts = `va_llm.prompts` (`VoicePromptInputs` plain values, `render_voice_system`,
+  `fit_voice_system`, `tool_usage_note`, `dtmf_message`/`context_update`/`interrupted_message`/`example_messages`,
+  `assemble_messages`, `load_prompt(name)` for packaged `prompts/<name>.txt`; `voice_system.txt` is drift-checked
+  against the specs/10 §5 block). Tokens: `va_llm.tokens.default_counter()` over the vendored
+  `data/cl100k_base.tiktoken.gz` (sha256-pinned; never call `tiktoken.get_encoding`, it downloads). Window:
+  `va_llm.window.ConversationWindow(budget, counter).fit(history)`. System tools: `va_engine.system_tools`
+  (`system_tools(facts)`, `facts_for_call(context, settings, sms_capable=)`, `parse_system_call` → typed args |
+  `InvalidToolCall(.tool_message(id))` | `None` for custom names, `resolve_transfer`). Rules: specs/10 §5/§6/§7
+  Decisions P05-T09b. va_engine depends on va-llm. `calendar.day_name` follows the process locale: use a fixed table.

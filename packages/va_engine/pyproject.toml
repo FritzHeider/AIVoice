@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "VoiceAgents conversation engine: templating, engine state, task and pathway runners"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "jsonschema>=4.26",
     "orjson>=3.13.0",
     "phonenumbers>=9",
     "pydantic>=2.9",
     "tzdata>=2025.2",
     "va-domain",
+    "va-llm",
 ]
 
 [build-system]
@@ -17,3 +19,4 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 va-domain = { workspace = true }
+va-llm = { workspace = true }

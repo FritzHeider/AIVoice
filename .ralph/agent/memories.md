@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793588946-2976
+> P05-T09b: va_llm.tokens vendors cl100k_base gzip (never tiktoken.get_encoding: network); va_llm.prompts render_voice_system/fit_voice_system; va_llm.window ConversationWindow; va_engine.system_tools availability table + parse_system_call; calendar.day_name is locale-dependent - use fixed English table
+<!-- tags: engine, llm, testing | created: 2026-11-02 -->
+
 ### mem-1793587466-6df6
 > P05-T09a: packages/va_engine exists (templating parse_template/render/render_url/render_json + TemplateScope layers + MissingVariables; builtins.call_builtins; models.state EngineState.add_turn 200 cap). ruff TRY003 flags string literals passed to exceptions even through helper functions returning the exception: use module-level message constants
 <!-- tags: engine, templating, testing | created: 2026-11-02 -->

@@ -12,6 +12,7 @@ dependencies = [
     "orjson>=3.13.0",
     "redis>=5.1",
     "jsonschema>=4.26",
+    "tiktoken>=0.12",
     "opentelemetry-api>=1.45.1",
     "prometheus-client>=0.26.0",
     "va-common",
