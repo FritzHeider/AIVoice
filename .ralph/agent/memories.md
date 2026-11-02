@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793580673-6d31
+> P05-T06d: worker container = va_worker.main.build_container (pydantic converter TemporalConnector, TelnyxKeyResolver in va_db.telnyx_keys, va_worker.activities.WorkerActivities/main_registrations); TemporalConnector connect seam takes (host, namespace, data_converter); worker e2e test runs real activities through TemporalWorkers on workflow_env with telephony_rig realtime and Rig.dialed event
+<!-- tags: workflows, worker, temporal, testing | created: 2026-11-02 -->
+
 ### mem-1793579146-289e
 > P05-T06c: CallWorkflow tests on Temporal time-skipping server: a running activity blocks time skipping AND env.sleep (use watch mode fail when timers must elapse); querying a running workflow while env.sleep wedged the test server; signals sent from inside fake activities (FakeCallActivities.send) are deterministic; Worker default/max_heartbeat_throttle_interval=100ms makes activity cancels arrive fast; execute_activity by name returns Any to mypy
 <!-- tags: workflows, temporal, testing | created: 2026-11-02 -->

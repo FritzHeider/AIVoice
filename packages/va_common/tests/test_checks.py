@@ -13,6 +13,8 @@ from redis.asyncio import Redis
 from service_helpers import ok_check, settings_of, track_closes
 from sqlalchemy.ext.asyncio import create_async_engine
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.converter import DataConverter
 
 from va_common.checks import (
     Dependencies,
@@ -51,11 +53,13 @@ class FakeClient:
 class CountingConnect:
     def __init__(self, *, fail_first: int = 0, healthy: bool = True) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.converters: list[DataConverter | None] = []
         self.fail_first = fail_first
         self.healthy = healthy
 
-    async def __call__(self, host: str, namespace: str) -> Client:
+    async def __call__(self, host: str, namespace: str, data_converter: DataConverter | None) -> Client:
         self.calls.append((host, namespace))
+        self.converters.append(data_converter)
         if len(self.calls) <= self.fail_first:
             msg = "connect refused"
             raise RuntimeError(msg)
@@ -94,6 +98,14 @@ async def test_temporal_connector_caches_client() -> None:
     first = await connector.client()
     assert await connector.client() is first
     assert connect.calls == [("temporal:7233", "ns")]
+    assert connect.converters == [None]
+
+
+async def test_temporal_connector_passes_its_data_converter() -> None:
+    connect = CountingConnect()
+    connector = TemporalConnector("t:1", "default", data_converter=pydantic_data_converter, connect=connect)
+    await connector.client()
+    assert connect.converters == [pydantic_data_converter]
 
 
 async def test_temporal_connector_retries_after_failed_connect() -> None:
@@ -188,8 +200,15 @@ async def test_dependencies_register_checks_in_call_order_and_close_in_reverse(
         deps.add_check("extra", ok_check)
         assert list(deps.readiness_checks()) == ["redis", "postgres", "temporal", "clickhouse", "extra"]
         assert (connector.host, connector.namespace) == ("localhost:7233", "default")
+        assert connector.data_converter is None
         assert closed == []
     assert closed == ["http", "engine", "redis"]
+
+
+async def test_dependencies_temporal_carries_the_data_converter() -> None:
+    async with open_dependencies() as deps:
+        connector = deps.temporal(settings_of(TemporalSettings), data_converter=pydantic_data_converter)
+        assert connector.data_converter is pydantic_data_converter
 
 
 async def test_dependencies_reject_duplicate_check() -> None:

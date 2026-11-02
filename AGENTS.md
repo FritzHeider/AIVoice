@@ -1217,3 +1217,11 @@ Grafana 3001
   activity blocks skipping and `env.sleep` alike), so conversations that must wait on a timer use watch mode
   `fail`; querying a running workflow while awaiting `env.sleep` wedged the test server — query only after the
   result. A watch started and cancelled in the same workflow task is never dispatched (absent from `names()`).
+- 2026-11-02 (P05-T06d): worker = `va_worker.main.build_container` (pydantic-converter Temporal client, Telnyx factory
+  with `va_db.telnyx_keys.TelnyxKeyResolver`, `va_worker.activities.WorkerActivities` + `main_registrations`);
+  `TemporalWorkers().run(source, registrations)` takes the registrations from the container. The container needs
+  `STREAM_TOKEN_SECRET`, `TELNYX_CALL_CONTROL_APP_ID`, and `LOCAL_MASTER_KEY` (tests: `worker_helpers.dialing_settings`).
+  `TemporalConnector`'s `connect=` seam now takes `(host, namespace, data_converter)`. Worker end-to-end test:
+  `apps/worker/tests/test_worker_call_flow.py` (real activities + `telephony_rig.rig(realtime=True)` +
+  `workflow_env()`; `Rig.dialed` is set by the first `POST /calls`; a default-converter client =
+  `config = env.client.config(); config["data_converter"] = DataConverter.default; Client(**config)`).

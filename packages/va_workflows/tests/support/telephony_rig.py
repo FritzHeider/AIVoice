@@ -6,6 +6,7 @@ activities send is recorded (``Rig.dials``) so tests compare the exact body.
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -79,6 +80,8 @@ class Rig:
     app_id: str
     sent: list[httpx.Request] = field(default_factory=list)
     byo_keys: dict[uuid.UUID, str] = field(default_factory=dict)
+    dialed: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set when the first ``POST /calls`` goes out."""
 
     def telephony(
         self,
@@ -270,9 +273,12 @@ async def rig(
     redis = FakeAsyncRedis()
     sent: list[httpx.Request] = []
     byo_keys: dict[uuid.UUID, str] = {}
+    dialed = asyncio.Event()
 
     async def record(request: httpx.Request) -> None:
         sent.append(request)
+        if request.method == "POST" and request.url.path == "/v2/calls":
+            dialed.set()
 
     async def resolve_key(account_id: uuid.UUID) -> str | None:
         return byo_keys.get(account_id)
@@ -312,6 +318,7 @@ async def rig(
                 app_id=app_id,
                 sent=sent,
                 byo_keys=byo_keys,
+                dialed=dialed,
             )
     finally:
         await state.aclose()

@@ -12,6 +12,7 @@ import pytest
 from structlog.testing import capture_logs
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.converter import DataConverter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -43,7 +44,7 @@ class FakeClient:
 def starter(
     client: FakeClient, *, connect_error: Exception | None = None, timeout_s: float = 10.0
 ) -> TemporalCallStarter:
-    async def connect(_host: str, _namespace: str) -> Client:
+    async def connect(_host: str, _namespace: str, _converter: DataConverter | None) -> Client:
         if connect_error is not None:
             raise connect_error
         return cast("Client", client)

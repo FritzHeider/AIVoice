@@ -62,6 +62,8 @@
   `org_secrets.value_enc` (new table from `04` §7). Recording objects in S3 use SSE-KMS (bucket key), and in
   `hipaa_mode` additionally client-side encryption with the org data key (stream-chunked AES-GCM, 64 KiB chunks,
   per-chunk nonce = base nonce XOR chunk index) with metadata `x-amz-meta-va-enc=v1`.
+  > Decision (2026-11-02): `telnyx_accounts.api_key_enc` is sealed with the owning org's data key under AAD
+  > `column_aad("telnyx_accounts", "api_key_enc", <row id>)` (`va_db.telnyx_keys.seal_api_key` / `api_key_aad`).
 - Rotation: `POST /internal/admin/orgs/{id}/rotate-data-key` creates a new active data key; a
   `ReencryptWorkflow` re-encrypts all encrypted columns for the org in batches of 500 rows; old key `retired` after
   completion. KEK rotation in AWS uses automatic KMS key rotation (no re-encryption needed).

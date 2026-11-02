@@ -21,6 +21,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from temporalio.client import Client
+from temporalio.converter import DataConverter
 
 from va_common.health import CheckFn
 from va_common.http import http_client
@@ -46,19 +47,33 @@ CHECK_TIMEOUT_S: Final = 1.0
 CLICKHOUSE_PING_BODY: Final = "Ok."
 _HTTP_SCHEMES: Final = frozenset({"http", "https"})
 
-type Connect = Callable[[str, str], Awaitable[Client]]
+type Connect = Callable[[str, str, DataConverter | None], Awaitable[Client]]
 
 
-async def _connect(host: str, namespace: str) -> Client:
-    return await Client.connect(host, namespace=namespace)
+async def _connect(host: str, namespace: str, data_converter: DataConverter | None) -> Client:
+    if data_converter is None:
+        return await Client.connect(host, namespace=namespace)
+    return await Client.connect(host, namespace=namespace, data_converter=data_converter)
 
 
 class TemporalConnector:
-    """Lazily connected, cached Temporal client; a failed connect is retried on the next use."""
+    """Lazily connected, cached Temporal client; a failed connect is retried on the next use.
 
-    def __init__(self, host: str, namespace: str, *, connect: Connect = _connect) -> None:
+    ``data_converter`` replaces Temporal's default converter (the worker uses the pydantic one); ``None``
+    keeps the default.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        namespace: str,
+        *,
+        data_converter: DataConverter | None = None,
+        connect: Connect = _connect,
+    ) -> None:
         self.host = host
         self.namespace = namespace
+        self.data_converter = data_converter
         self._connect = connect
         self._client: Client | None = None
         self._lock = asyncio.Lock()
@@ -66,7 +81,7 @@ class TemporalConnector:
     async def client(self) -> Client:
         async with self._lock:
             if self._client is None:
-                self._client = await self._connect(self.host, self.namespace)
+                self._client = await self._connect(self.host, self.namespace, self.data_converter)
             return self._client
 
     async def check(self, timeout_s: float) -> None:
@@ -153,8 +168,12 @@ class Dependencies:
         self.add_check("redis", partial(redis_check, client))
         return client
 
-    def temporal(self, settings: TemporalSettings) -> TemporalConnector:
-        connector = TemporalConnector(settings.temporal_host, settings.temporal_namespace)
+    def temporal(
+        self, settings: TemporalSettings, *, data_converter: DataConverter | None = None
+    ) -> TemporalConnector:
+        connector = TemporalConnector(
+            settings.temporal_host, settings.temporal_namespace, data_converter=data_converter
+        )
         self.add_check("temporal", partial(temporal_check, connector))
         return connector
 

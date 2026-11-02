@@ -16,12 +16,12 @@ from service_helpers import (
     readiness_of,
     settings_of,
 )
-from worker_helpers import Factory, FakeClientSource, FakeWorker
+from worker_helpers import Factory, FakeClientSource, FakeWorker, dialing_settings
 
 from va_common.service import Bind
 from va_worker import __version__
 from va_worker import main as worker_main
-from va_worker.main import build_container, create_app
+from va_worker.main import create_app
 from va_worker.settings import WorkerSettings
 from va_worker.task_queues import TaskQueueRegistration
 
@@ -32,6 +32,7 @@ ALL_OK = {"postgres": ok_check, "redis": ok_check, "temporal": ok_check}
 class FakeWorkerContainer(FakeContainer):
     checks: Any = field(default_factory=lambda: dict(ALL_OK))
     temporal: FakeClientSource = field(default_factory=FakeClientSource)
+    registrations: list[TaskQueueRegistration] = field(default_factory=list)
 
 
 def worker_app(container: FakeWorkerContainer | None = None, **kwargs: Any) -> Any:
@@ -53,24 +54,21 @@ async def test_probes_without_task_queues() -> None:
 
 
 async def test_readyz_real_container_reports_unreachable_dependencies() -> None:
-    status, body = await readiness_of(
-        create_app(settings_of(WorkerSettings, **UNREACHABLE), init_observability=False)
-    )
+    status, body = await readiness_of(create_app(dialing_settings(**UNREACHABLE), init_observability=False))
     assert (status, body["failing"]) == (503, ["postgres", "redis", "temporal"])
 
 
-async def test_build_container_exposes_temporal_connector() -> None:
-    async with build_container(settings_of(WorkerSettings, temporal_host="temporal:7233")) as container:
-        assert container.temporal.host == "temporal:7233"
-        assert list(container.readiness_checks()) == ["postgres", "redis", "temporal"]
+def main_queue_app(worker: FakeWorker) -> Any:
+    """The app whose container registers ``va-main``, polled by ``worker``."""
+    container = FakeWorkerContainer(
+        registrations=[TaskQueueRegistration("va-main", workflows=[], activities=[])]
+    )
+    return worker_app(container, worker_factory=Factory(worker))
 
 
 async def test_registered_workers_run_and_shut_down_with_the_app() -> None:
     worker = FakeWorker()
-    app = worker_app(
-        registrations=[TaskQueueRegistration("va-main", workflows=[], activities=[])],
-        worker_factory=Factory(worker),
-    )
+    app = main_queue_app(worker)
     async with make_client(app) as client:
         await asyncio.wait_for(worker.started.wait(), timeout=5)
         assert (await client.get("/healthz")).status_code == 200
@@ -80,10 +78,7 @@ async def test_registered_workers_run_and_shut_down_with_the_app() -> None:
 
 async def test_crashed_worker_fails_liveness_and_requests_stop() -> None:
     worker = FakeWorker(RuntimeError("poller died"))
-    app = worker_app(
-        registrations=[TaskQueueRegistration("va-main", workflows=[], activities=[])],
-        worker_factory=Factory(worker),
-    )
+    app = main_queue_app(worker)
     async with make_client(app) as client:
         await asyncio.wait_for(app.state.stop.wait(), timeout=5)
         response = await client.get("/healthz")

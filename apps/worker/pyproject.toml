@@ -1,12 +1,20 @@
 [project]
 name = "va-worker"
 version = "0.1.0"
-description = "VoiceAgents Temporal worker host: task queues, probes, metrics"
+description = "VoiceAgents Temporal worker host: task queues, call activities, probes, metrics"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "httpx[http2]>=0.28.1",
+    "pydantic>=2.9",
+    "redis>=5.1",
     "starlette>=1.0",
-    "temporalio>=1.8",
+    "temporalio>=1.34",
+    "va-billing",
     "va-common",
+    "va-compliance",
+    "va-db",
+    "va-events",
+    "va-telnyx",
     "va-workflows",
 ]
 
@@ -18,5 +26,10 @@ build-backend = "uv_build"
 module-name = "va_worker"
 
 [tool.uv.sources]
+va-billing = { workspace = true }
 va-common = { workspace = true }
+va-compliance = { workspace = true }
+va-db = { workspace = true }
+va-events = { workspace = true }
+va-telnyx = { workspace = true }
 va-workflows = { workspace = true }

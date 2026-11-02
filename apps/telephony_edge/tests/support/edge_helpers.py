@@ -19,6 +19,7 @@ from fakeredis import FakeAsyncRedis
 from nacl.signing import SigningKey
 from service_helpers import UNREACHABLE, FakeContainer, make_client, settings_of
 from temporalio.client import Client
+from temporalio.converter import DataConverter
 
 from va_common.checks import TemporalConnector
 from va_common.health import CheckFn
@@ -119,7 +120,7 @@ def edge_settings(public_key: str, **values: Any) -> EdgeSettings:
     return settings_of(EdgeSettings, telnyx_public_key=public_key, **values)
 
 
-async def _no_temporal(host: str, _namespace: str) -> Client:
+async def _no_temporal(host: str, _namespace: str, _converter: DataConverter | None) -> Client:
     msg = f"tests never connect to Temporal ({host})"
     raise ConnectionError(msg)
 

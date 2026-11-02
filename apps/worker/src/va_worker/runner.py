@@ -54,24 +54,18 @@ def temporal_worker(client: Client, registration: TaskQueueRegistration) -> Work
 class TemporalWorkers:
     """Runs a worker per registration until shutdown; liveness fails when a started worker stopped."""
 
-    def __init__(
-        self,
-        registrations: Sequence[TaskQueueRegistration],
-        *,
-        worker_factory: WorkerFactory = temporal_worker,
-    ) -> None:
-        self._registrations = tuple(registrations)
+    def __init__(self, *, worker_factory: WorkerFactory = temporal_worker) -> None:
         self._factory = worker_factory
         self._workers: list[WorkerLike] = []
 
-    async def run(self, source: ClientSource) -> None:
+    async def run(self, source: ClientSource, registrations: Sequence[TaskQueueRegistration]) -> None:
         """Connect, then poll every registered queue; returns at once when nothing is registered."""
-        if not self._registrations:
+        if not registrations:
             _log.info("worker.no_task_queues")
             return
         client = await source.client()
-        self._workers = [self._factory(client, registration) for registration in self._registrations]
-        _log.info("worker.polling", task_queues=[r.task_queue for r in self._registrations])
+        self._workers = [self._factory(client, registration) for registration in registrations]
+        _log.info("worker.polling", task_queues=[r.task_queue for r in registrations])
         async with asyncio.TaskGroup() as group:
             for worker in self._workers:
                 group.create_task(worker.run())

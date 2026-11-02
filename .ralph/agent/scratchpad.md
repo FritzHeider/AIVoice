@@ -2218,3 +2218,166 @@ Decision P05-T06c; deterministic workflow (workflow.now, signals record only, ac
 hangup, child ABANDON on derived post-call queue. Observation (not blocking): the pipeline-finished cleanup records
 `error` instead of the worker's `PipelineFinished.end_reason`; only matters when the worker's own write failed.
 Approved. Next: P05-T06d worker wiring.
+
+## Plan P05-T06d — Worker activity wiring and main-queue registration (Planner, 2026-11-02)
+
+### Decisions (one block `> Decision (2026-11-02): worker wiring (P05-T06d).` under specs/01 §1 after the process table;
+### one line under specs/28 §2 next to the `telnyx_accounts.api_key_enc` mention: AAD = `column_aad("telnyx_accounts", "api_key_enc", <row id>)`)
+1. `WorkerSettings(RedisSettings, DatabaseSettings, TemporalSettings, EmailSettings, CryptoSettings, StreamTokenSettings)`
+   gains (specs/02 §6 worker rows, defaults = dev values): `telnyx_api_base = "http://localhost:9100/v2"`,
+   `telnyx_api_key: SecretStr = SecretStr("sim-telnyx-key")`, `telnyx_call_control_app_id: str = ""`,
+   `media_public_host = "localhost:8200"`, `international_allowed_countries` (same default string as ApiSettings).
+   Methods: `allowed_destination_countries()` (`va_compliance.parse_allowed_countries`), `dial_settings() ->
+   DialSettings` (`DialSettings.for_env(va_env, ...)`, stream secret = `bytes.fromhex(stream_token_secret)`);
+   raises `RuntimeError("STREAM_TOKEN_SECRET is not configured")` / `RuntimeError("TELNYX_CALL_CONTROL_APP_ID is not
+   configured")` when empty (every env: dialing cannot work without them).
+   `model_validator(mode="after")` outside `local`/`test` (staging/production) raises `ValueError` when
+   `STREAM_TOKEN_SECRET` is empty, `TELNYX_CALL_CONTROL_APP_ID` is empty, or `TELNYX_API_KEY` is empty or the sim key
+   `sim-telnyx-key` (messages name the variable, never the value; `hide_input_in_errors` already on via
+   StreamTokenSettings model_config — verify it survives the MRO merge, else set it on WorkerSettings).
+   CryptoSettings already refuses local KMS in production. Do NOT add `WebhookSafetySettings`/S3/ElevenLabs/LLM yet
+   (post-call phases).
+2. BYO key resolver: NEW `packages/va_db/src/va_db/telnyx_keys.py`: `api_key_aad(account_id) -> str`
+   (`column_aad("telnyx_accounts", "api_key_enc", account_id)`), `async seal_api_key(envelope, org_id, account_id,
+   api_key) -> bytes` (used by tests now, by the BYO account API later), `class TelnyxKeyResolver(database, envelope)`
+   with `async __call__(account_id: uuid.UUID) -> str | None`: system lookup
+   `TelnyxAccountLookupRepo.api_key(account_id) -> TelnyxApiKeyRow(org_id, api_key_enc) | None` (NEW method on the
+   existing system repo, status `active` only — pending/error/deleted accounts cannot place calls; repo count unchanged),
+   then `envelope.decrypt_str(org_id, enc, api_key_aad(account_id))`. Decrypt failures propagate (the dial activity
+   retries / fails the call); a missing row → `None` (factory raises `UnknownTelnyxAccount`). Matches
+   `va_llm.org_providers` style.
+3. Temporal client with `pydantic_data_converter`: `TemporalConnector(host, namespace, *, data_converter:
+   DataConverter | None = None, connect=...)` and `Dependencies.temporal(settings, *, data_converter=None)`; `_connect`
+   passes `data_converter` to `Client.connect` only when given (default converter otherwise, so api/edge unchanged).
+   `Connect` type becomes `Callable[[str, str, DataConverter | None], Awaitable[Client]]` — update existing
+   va_common tests that inject `connect=`. API sends `CallWorkflowInput.model_dump(mode="json")` with the default
+   converter; the pydantic converter decodes that JSON into the model (assert in the worker e2e test by starting with
+   a JSON dict via a default-converter client — see Tests).
+4. Worker composition: NEW `apps/worker/src/va_worker/activities.py`:
+   `@dataclass(frozen=True, slots=True) class WorkerActivities: context: CallContextActivities; telephony:
+   TelephonyActivities; call_end: CallEndActivities; liveness: CallLivenessActivities` with
+   `@classmethod build(cls, *, database, redis, telnyx: TelnyxClientFactory, dial: DialSettings, clock) ->
+   WorkerActivities` (one `CallLimiter(redis, clock=)`, one `EventPublisher(redis, call_events=None)` — rows are
+   written in the activities' own transactions — one `CallContextStore(redis)` shared) and `main_queue(self) ->
+   tuple[Callable[..., Any], ...]` = `(context.prefetch_call_context, telephony.dial, telephony.hangup_call,
+   call_end.end_call, liveness.watch_call_heartbeat, liveness.call_presence)`.
+   `def telnyx_factory(settings, *, http, redis, resolve_key, clock) -> TelnyxClientFactory` (platform key from
+   `settings.telnyx_api_key`, `TelnyxRateLimiter(redis, clock=clock)`, `metrics=None` — the Telnyx metrics are not in
+   the worker catalog; record in the Decision that they join when the worker exports per-activity metrics).
+5. `va_worker.task_queues`: drop `REGISTRATIONS`; add `def main_registrations(settings: TemporalSettings,
+   activities: WorkerActivities) -> tuple[TaskQueueRegistration, ...]` returning ONE registration
+   `(settings.temporal_task_queue, CALL_WORKFLOWS, activities.main_queue())`. The post-call queue stays unpolled until
+   `PostCallWorkflow` exists (a pending child just waits; Decision note). Put `main_registrations` in
+   `activities.py` instead if task_queues importing va_workflows causes a cycle (it should not).
+6. `Container` (main.py): fields `temporal`, `dependencies`, `database`, `redis`, `activities`, `registrations:
+   tuple[TaskQueueRegistration, ...]`; `readiness_checks()` unchanged. `WorkerDependencies` protocol gains
+   `@property registrations -> Sequence[TaskQueueRegistration]`. `build_container(settings)`: compute
+   `dial = settings.dial_settings()` FIRST (RuntimeError before anything opens), then `async with
+   open_kms_provider(settings) as kms, open_dependencies() as deps, AsyncExitStack() as stack`: `deps.postgres`,
+   `redis = deps.redis(settings)`, `temporal = deps.temporal(settings, data_converter=pydantic_data_converter)`,
+   `database = Database.from_settings(settings)`; `configure_database(database)` (check what api/edge do and mirror);
+   `stack.push_async_callback(database.dispose)`; `http = http_client(settings, timeout=TELNYX_HTTP_TIMEOUT_S)` (use
+   the constant va_telnyx/api already uses for Telnyx if one exists, else 10 s) closed via the stack; `envelope =
+   Envelope(kms, OrgDataKeyStore(database))`; `clock = SystemClock()`; resolver, factory, activities, registrations.
+   No network I/O during build.
+7. `create_app`: remove the `registrations=` parameter; `TemporalWorkers()` gets registrations at run time:
+   `TemporalWorkers.run(source: ClientSource, registrations: Sequence[TaskQueueRegistration])`; lifespan passes
+   `container.temporal, container.registrations`. `temporal_worker(client, registration)` unchanged (real `Worker`).
+   Keep `worker.no_task_queues` log when empty.
+8. `apps/worker/pyproject.toml`: add `va-db`, `va-telnyx`, `va-billing`, `va-events`, `va-compliance`, `va-domain`,
+   `httpx` (whatever is imported directly) + `[tool.uv.sources]` entries; `uv lock`.
+
+### Files
+- `apps/worker/src/va_worker/settings.py`, `main.py`, `runner.py`, `task_queues.py`, NEW `activities.py`,
+  `apps/worker/pyproject.toml`, `uv.lock`.
+- `packages/va_common/src/va_common/checks.py` (data_converter seam) + its tests.
+- `packages/va_db/src/va_db/repositories/telnyx_accounts.py` (`api_key`, `TelnyxApiKeyRow`), NEW
+  `packages/va_db/src/va_db/telnyx_keys.py`.
+- `packages/va_workflows/src/va_workflows/registration.py` docstring (now built by `va_worker.activities`).
+- Specs: specs/01 §1 Decision, specs/28 AAD line. AGENTS.md learning line.
+- `.env.example`: no new variables (all exist; worker already in "Used by"). If a scope-check test complains, fix
+  the spec row and the example together.
+
+### Tests
+- `apps/worker/tests/test_settings.py`: defaults (telnyx base/key/app id/media host/countries); staging/production
+  with missing `STREAM_TOKEN_SECRET`, missing `TELNYX_CALL_CONTROL_APP_ID`, empty or `sim-telnyx-key` `TELNYX_API_KEY`
+  → `ValidationError` naming the variable and not echoing values (production also needs `kms_provider="aws",
+  aws_kms_key_id=...`); local/test with nothing set constructs; `dial_settings()` → scheme `ws` in local/test,
+  `wss` in staging, secret bytes, countries; RuntimeError for missing secret / app id; malformed stream secret
+  rejected without echo. Replace `test_no_registrations_before_workflows_exist`.
+- `apps/worker/tests/test_container.py`: `build_container` raises RuntimeError before opening anything (no
+  STREAM_TOKEN_SECRET; no app id; local KMS without LOCAL_MASTER_KEY — assert via monkeypatched `open_dependencies`
+  or `Database.from_settings` never called); with full settings and `UNREACHABLE` URLs it builds without I/O:
+  `registrations` = one registration on `va-main` (and on `staging-va-main` when the queue setting changes) whose
+  workflows are `CALL_WORKFLOWS` and whose activity names (`activity._Definition.from_callable(fn).name` or
+  `fn.__temporal_activity_definition.name`) are exactly `{prefetch_call_context, dial, hangup_call, end_call,
+  watch_call_heartbeat, call_presence}`; readiness check names `postgres, redis, temporal`; the Temporal connector
+  carries the pydantic converter; resources closed on exit (`track_closes`).
+- `apps/worker/tests/test_app.py`/`test_runner.py`: update for `TemporalWorkers.run(source, registrations)` and fake
+  containers exposing `registrations`.
+- `packages/va_db/tests/test_telnyx_keys.py` (DB, va_db conftest `migrated_url` / `pg_url` style + crypto_fakes
+  local provider): sealed key round trips through `TelnyxKeyResolver`; unknown id / `pending` / `deleted` / `error`
+  account → `None`; a key sealed for another row id fails to decrypt (AAD binding); resolver works without any tenant
+  context (system lookup) and returns the right org's key across two orgs.
+- `packages/va_common/tests`: TemporalConnector passes `data_converter` to connect; default None.
+- `apps/worker/tests/test_worker_call_flow.py` (acceptance; real `Worker` from `va_worker.runner.temporal_worker` on
+  `workflow_env()` from `workflow_rig`, DB = a session fixture `worker_db_url` via `migration_helpers.migrated_postgres`
+  in the worker conftest, FakeTelnyx via `telephony_rig.rig(database, realtime=True)`): build
+  `WorkerActivities.build(database=rig.database, redis=rig.redis, telnyx=rig.factory, dial=rig.settings,
+  clock=rig.clock)`, `main_registrations(...)` with task queue `va-test-main`; seed a queued call
+  (`rig.seed("queued")` / `seed_call` with resolved config); start `CallWorkflow` with a JSON-dict input from a
+  default-converter client (`Client(**{**env.client.config(), "data_converter": DataConverter.default})`) to prove
+  API compatibility; wait until FakeTelnyx shows the dial (`rig.dials()` non-empty) and the DB row is `dialing`
+  (bounded loop awaiting `asyncio.sleep(0.05)` is NOT allowed — instead wrap the rig's factory http event hook or poll
+  `handle.query("phase")` until `ringing` via `env.sleep`? Prefer: send the cancel signal from a request event hook
+  after the `POST /v2/calls` response — or simplest: signal cancel right after start; the workflow ignores-until-dial?
+  NO: cancel before dial ends with `canceled` without dialing. So: use an `asyncio.Event` set by the rig's
+  `sent` recording (add `Rig.dialed: asyncio.Event` set in `record` when `POST /v2/calls`), await it with
+  `asyncio.wait_for`-free `async with asyncio.timeout(30)`, then verify DB status `dialing`/`ringing`, send
+  `CANCEL_SIGNAL`, await result → `outcome == "canceled"`; DB row `canceled` with end reason per end_call, a
+  FakeTelnyx `hangup` command sent (`rig.commands("hangup")`), slot released (`CallLimiter.active_calls == 0`), the
+  `postcall-<id>` child started (describe it: status RUNNING on `va-test-postcall`, no worker).
+  Second test: prefetch stored the CallContext in Redis (`call:{<id>}:ctx`) during the same run.
+
+### Gates
+`make fmt lint typecheck placeholders test`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (≤ B), `uvx pip-audit` on `uv export --no-emit-workspace`, `corepack pnpm audit`. `make e2e`:
+`tests_e2e/` does not exist until P05-T17 — report that.
+
+### Risks
+- Time skipping + real activities hitting Postgres: activities run on wall time; time does not skip while one runs —
+  fine. The ring backstop (300 s) never fires because the cancel arrives first.
+- FakeTelnyx `{result: no_answer}` answer scenario hangs up after its ring time: with `realtime=True` that is
+  seconds of wall time; send the cancel immediately after the dial event. If the carrier hangup races, the workflow
+  may record `not_answered` — make the far-end answer scenario ring long (`answer: "{after: 60, result:
+  no_answer}"` or whatever the scenario syntax supports) to remove the race.
+- `pydantic_data_converter` decoding a JSON dict start arg into `CallWorkflowInput`: the run signature type hint drives
+  it — verify; if it fails, document and have the API also use the pydantic converter (do NOT change the API in
+  this task unless needed).
+- Any test enumerating `WorkerSettings` fields vs specs/02 scopes; `hide_input_in_errors` model_config merge.
+- `make test` worker test DB: one more migrated Postgres per xdist worker (Docker load); reuse a session fixture.
+
+## Build P05-T06d (Builder, 2026-11-02)
+Implemented per plan:
+- va_common.checks: `TemporalConnector(data_converter=)`, `Dependencies.temporal(settings, data_converter=)`; `Connect`
+  seam now `(host, namespace, converter)` (api/edge test fakes updated).
+- va_db: `TelnyxAccountLookupRepo.api_key` (active only, `TelnyxApiKeyRow`, `DIALING_ACCOUNT_STATUS`), NEW
+  `va_db.telnyx_keys` (`api_key_aad`, `seal_api_key`, `TelnyxKeyResolver`). Tests `packages/va_db/tests/test_telnyx_keys.py`.
+- Worker: settings (Telnyx/media/countries/stream secret/KMS, deployed-env validator, `dial_settings()`), NEW
+  `va_worker.activities` (`telnyx_http` with specs/06 §2 timeouts/limits/HTTP2, `telnyx_factory`, `WorkerActivities`,
+  `main_registrations`), `task_queues.REGISTRATIONS` removed, `TemporalWorkers.run(source, registrations)`, container
+  composes everything (RuntimeError before opening for missing secret/app id/master key). pyproject deps + uv.lock.
+- Tests: test_settings, NEW test_container, test_app/test_runner updated, NEW test_worker_call_flow (real Worker via
+  TemporalWorkers on time-skipping env, JSON-dict start via default-converter client, FakeTelnyx realtime, cancel while
+  ringing → canceled/api, hangup sent, slot released, CallContext stored, post-call child RUNNING on va-test-postcall).
+  `telephony_rig.Rig.dialed` event added.
+- Specs: specs/01 §1 Decision P05-T06d, specs/28 §2 AAD line. AGENTS.md learning.
+Gates: fmt 0, lint 0, typecheck 0 (1057 files), placeholders 0, spec refs 0, make test 9012 passed / 7 skipped,
+coverage 99.13% (new/changed modules 100%), jscpd 0 clones, radon A avg (no C+), pip-audit clean, pnpm audit 3
+moderate (pre-existing). make e2e: tests_e2e/ not present yet (P05-T17).
+
+## Review P05-T06d (Reviewer, 2026-11-02)
+Re-ran: lint 0, typecheck 0, placeholders 0, spec refs 0, make test 9012 passed / 7 skipped (cov 99.13%). Diff
+matches the plan and specs/01 §1 Decision P05-T06d / specs/28 §2 AAD line: settings guards name variables only,
+RuntimeError before any resource opens, activities use `database.tenant_session` (no global configure needed),
+resolver reads only `active` accounts in system scope, the e2e test waits on `Rig.dialed` (no sleeps). Approved.

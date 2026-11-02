@@ -1,8 +1,9 @@
 """Temporal task queues hosted by the worker (specs/01-architecture.md §1).
 
 ``TEMPORAL_TASK_QUEUE`` names the main queue (``va-main``); the post-call, ingest, and system queues are
-derived by replacing its ``-main`` suffix. Workflow packages append their
-:class:`TaskQueueRegistration` entries to :data:`REGISTRATIONS`; a queue without registrations is not polled.
+derived by replacing its ``-main`` suffix. The container builds the :class:`TaskQueueRegistration` entries
+from the activity instances it constructs (``va_worker.activities.main_registrations``); a queue without
+registrations is not polled.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-__all__ = ["MAIN_SUFFIX", "QUEUE_SUFFIXES", "REGISTRATIONS", "TaskQueueRegistration", "task_queue_names"]
+__all__ = ["MAIN_SUFFIX", "QUEUE_SUFFIXES", "TaskQueueRegistration", "task_queue_names"]
 
 MAIN_SUFFIX: Final = "-main"
 QUEUE_SUFFIXES: Final = ("-main", "-postcall", "-ingest", "-system")
@@ -33,7 +34,3 @@ class TaskQueueRegistration:
     task_queue: str
     workflows: Sequence[type]
     activities: Sequence[Callable[..., Any]]
-
-
-# No workflow exists before the workflow phases; `va_workflows` registers its queues here.
-REGISTRATIONS: Final[tuple[TaskQueueRegistration, ...]] = ()

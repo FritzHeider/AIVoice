@@ -17,8 +17,8 @@ REGISTRATION = TaskQueueRegistration("va-main", workflows=[], activities=[])
 async def test_no_registrations_returns_without_connecting() -> None:
     stream = json_log_stream()
     source = FakeClientSource()
-    workers = TemporalWorkers(())
-    await workers.run(source)
+    workers = TemporalWorkers()
+    await workers.run(source, ())
     await workers.shutdown()
     assert source.connects == 0
     assert workers.liveness() is None
@@ -28,8 +28,8 @@ async def test_no_registrations_returns_without_connecting() -> None:
 async def test_workers_run_until_shutdown_then_liveness_reports_stopped() -> None:
     worker = FakeWorker()
     factory = Factory(worker)
-    workers = TemporalWorkers([REGISTRATION], worker_factory=factory)
-    running = asyncio.ensure_future(workers.run(FakeClientSource()))
+    workers = TemporalWorkers(worker_factory=factory)
+    running = asyncio.ensure_future(workers.run(FakeClientSource(), [REGISTRATION]))
     await asyncio.wait_for(worker.started.wait(), timeout=5)
     assert [queue for _, queue in factory.built] == ["va-main"]
     assert workers.liveness() is None
@@ -42,8 +42,8 @@ async def test_workers_run_until_shutdown_then_liveness_reports_stopped() -> Non
 async def test_one_worker_per_registration_and_failure_propagates() -> None:
     healthy, broken = FakeWorker(), FakeWorker(RuntimeError("poller died"))
     registrations = [REGISTRATION, TaskQueueRegistration("va-postcall", workflows=[], activities=[])]
-    workers = TemporalWorkers(registrations, worker_factory=Factory(healthy, broken))
+    workers = TemporalWorkers(worker_factory=Factory(healthy, broken))
     with pytest.raises(ExceptionGroup) as caught:
-        await workers.run(FakeClientSource())
+        await workers.run(FakeClientSource(), registrations)
     assert caught.group_contains(RuntimeError, match="poller died")
     assert workers.liveness() == STOPPED_REASON

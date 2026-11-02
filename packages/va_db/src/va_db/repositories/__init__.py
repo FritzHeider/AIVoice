@@ -87,8 +87,10 @@ from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
 from va_db.repositories.sso import SsoConnectionLookupRepo, SsoConnectionRepo, SsoDomainClaim
 from va_db.repositories.telnyx_accounts import (
+    DIALING_ACCOUNT_STATUS,
     WEBHOOK_ACCOUNT_STATUSES,
     TelnyxAccountLookupRepo,
+    TelnyxApiKeyRow,
     TelnyxWebhookKey,
 )
 from va_db.repositories.telnyx_events import RETRY_CLAIM_LIMIT, NewTelnyxEvent, TelnyxEventRepo
@@ -96,6 +98,7 @@ from va_db.repositories.telnyx_events import RETRY_CLAIM_LIMIT, NewTelnyxEvent, 
 __all__ = [
     "CLAIM_LIMIT",
     "DEFAULT_LEASE",
+    "DIALING_ACCOUNT_STATUS",
     "DUPLICATE_TRANSFER_MESSAGE",
     "EMAIL_VERIFY_TTL",
     "IMMUTABLE_COLUMNS",
@@ -161,6 +164,7 @@ __all__ = [
     "SystemRepository",
     "Takeover",
     "TelnyxAccountLookupRepo",
+    "TelnyxApiKeyRow",
     "TelnyxEventRepo",
     "TelnyxWebhookKey",
     "TenantRepository",

@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from structlog.testing import capture_logs
 from temporalio.client import Client
+from temporalio.converter import DataConverter
 from temporalio.service import RPCError, RPCStatusCode
 
 from va_common.checks import TemporalConnector
@@ -48,7 +49,7 @@ class FakeClient:
 
 
 def signaller(client: FakeClient) -> TemporalCarrierSignaller:
-    async def connect(_host: str, _namespace: str) -> Client:
+    async def connect(_host: str, _namespace: str, _converter: DataConverter | None) -> Client:
         return cast("Client", client)
 
     return TemporalCarrierSignaller(TemporalConnector("temporal.test:7233", "default", connect=connect))

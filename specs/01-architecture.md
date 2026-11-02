@@ -57,6 +57,24 @@
 > 9300 and the dispatcher's 9400 collide with the fake LLM and fake Stripe; run the sim with `--port 19100` when the
 > worker or dispatcher runs on the host.
 
+> Decision (2026-11-02): worker wiring (P05-T06d). `va_worker.main.build_container` composes the worker: the Temporal
+> client uses `temporalio.contrib.pydantic.pydantic_data_converter` (`Dependencies.temporal(settings,
+> data_converter=...)`; the api and edge keep the default converter, and the pydantic converter decodes their
+> `model_dump(mode="json")` arguments), one `Database`, the `Envelope`, one shared Telnyx HTTP/2 pool with the specs/06 §2
+> timeouts and limits, a `TelnyxClientFactory` on `TELNYX_API_KEY` whose BYO keys come from
+> `va_db.telnyx_keys.TelnyxKeyResolver` (system-scope read of an `active` account's `api_key_enc`, decrypted with
+> its org's data key; pending/error/deleted accounts cannot dial), and `va_worker.activities.WorkerActivities` (one
+> instance of each activity class sharing one `CallLimiter`, one sink-less `EventPublisher`, one `CallContextStore`).
+> The only registration is `TEMPORAL_TASK_QUEUE` with `CallWorkflow` and `prefetch_call_context`, `dial`,
+> `hangup_call`, `end_call`, `watch_call_heartbeat`, `call_presence`; the post-call queue stays unpolled until
+> `PostCallWorkflow` exists (the abandoned child waits there). `WorkerSettings` adds `TELNYX_API_BASE`,
+> `TELNYX_API_KEY`, `TELNYX_CALL_CONTROL_APP_ID`, `MEDIA_PUBLIC_HOST`, `INTERNATIONAL_ALLOWED_COUNTRIES`,
+> `STREAM_TOKEN_SECRET(_PREVIOUS)`, and the KMS settings. The container raises `RuntimeError` before opening anything
+> when `STREAM_TOKEN_SECRET` or `TELNYX_CALL_CONTROL_APP_ID` is empty or the local KMS has no `LOCAL_MASTER_KEY`;
+> staging and production refuse at settings construction an empty secret, an empty app id, and an empty or simulator
+> (`sim-telnyx-key`) `TELNYX_API_KEY` (messages name the variable, never the value). The Telnyx client metrics are not
+> recorded by the worker until it exports per-activity metrics (they are not in the worker catalog).
+
 Infrastructure dependencies: PostgreSQL 16 with `pgvector` ≥ 0.7 and `pg_trgm`; Redis 7.2; ClickHouse 24.x;
 Temporal Server 1.24+ (dev: `temporalio/auto-setup`); S3-compatible object storage (dev: MinIO); Deno 2.x
 binary available to the media worker and worker (custom code nodes, `13-tools-and-dynamic-data.md` §8).
