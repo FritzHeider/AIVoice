@@ -42,6 +42,10 @@ Package: `va_common.logging`, `va_common.tracing`, `va_common.metrics`. Every se
 > service (default `unknown`); `pod` is `POD_ID` or the hostname. In console format `format_exc_info` is omitted
 > (the console renderer formats exceptions itself).
 
+> Decision (2026-11-02, P05-T14): the `httpx` logger defaults to `WARNING` (`LOG_LEVEL_HTTPX=INFO` restores the
+> request lines). httpx logs every request URL at INFO with its query string, which would put presigned recording
+> URLs (specs/06 §11) and webhook tokens into the logs.
+
 ## 2. Tracing (OpenTelemetry)
 
 - SDK: `TracerProvider` with `Resource(service.name, service.version, deployment.environment, k8s.pod.name)`,

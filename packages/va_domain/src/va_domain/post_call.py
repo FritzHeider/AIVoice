@@ -15,12 +15,16 @@ from pydantic import BaseModel, ConfigDict
 
 __all__ = [
     "POSTCALL_WORKFLOW_NAME",
+    "RECORDING_SAVED_SIGNAL",
     "PostCallWorkflowInput",
     "postcall_task_queue",
     "postcall_workflow_id",
 ]
 
 POSTCALL_WORKFLOW_NAME: Final = "PostCallWorkflow"
+RECORDING_SAVED_SIGNAL: Final = "recording_saved"
+"""Signal the edge sends ``postcall-<id>`` for ``call.recording.saved`` (the JSON ``CarrierEvent``;
+specs/18 §1 step 2, specs/06 §11 Decision P05-T14)."""
 _MAIN_SUFFIX: Final = "-main"
 _POSTCALL_SUFFIX: Final = "-postcall"
 

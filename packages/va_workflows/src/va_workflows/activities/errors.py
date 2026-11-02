@@ -16,6 +16,7 @@ __all__ = [
     "HANGUP_REJECTED",
     "INVALID_END_REASON",
     "STATE_UNAVAILABLE",
+    "STORAGE_UNAVAILABLE",
     "TELNYX_UNAVAILABLE",
     "call_not_found",
     "retryable",
@@ -33,6 +34,8 @@ INVALID_END_REASON: Final = "InvalidEndReason"
 """The workflow asked for an end reason that cannot apply to the call's phase (never retried)."""
 STATE_UNAVAILABLE: Final = "StateUnavailable"
 """The call's Redis carrier state could not be read (retried)."""
+STORAGE_UNAVAILABLE: Final = "StorageUnavailable"
+"""The object store (S3/MinIO) refused or failed an upload (retried)."""
 TELNYX_UNAVAILABLE: Final = "TelnyxUnavailable"
 """The Telnyx request hit the client rate limit or got no usable response (retried; same ``command_id``)."""
 

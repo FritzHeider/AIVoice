@@ -15,6 +15,7 @@ from va_common.settings import (
     StreamTokenSettings,
     TemporalSettings,
 )
+from va_common.storage import S3Settings
 from va_compliance.international import parse_allowed_countries
 from va_elevenlabs.settings import ElevenLabsRestSettings
 from va_telnyx.settings import SIM_TELNYX_API_KEY, TelnyxApiSettings
@@ -34,6 +35,7 @@ class WorkerSettings(
     StreamTokenSettings,
     TelnyxApiSettings,
     ElevenLabsRestSettings,
+    S3Settings,
 ):
     """Settings of the Temporal worker host: the call activities dial through Telnyx (platform key, Call
     Control App, media host, stream token secret) and decrypt BYO Telnyx keys (envelope encryption).
@@ -43,7 +45,7 @@ class WorkerSettings(
     production refuse an empty secret, an empty app id, and an empty or simulator Telnyx key at
     construction (the platform key check lives in :class:`~va_telnyx.settings.TelnyxApiSettings`). Errors
     name the variable, never its value. The ElevenLabs REST settings serve the opener pre-render (specs/07
-    §11 Decision P05-T10d).
+    §11 Decision P05-T10d); the ``S3_*`` settings the recording copy (specs/06 §11 Decision P05-T14).
     """
 
     service_name: ClassVar[str] = "worker"

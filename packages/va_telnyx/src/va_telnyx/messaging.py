@@ -1,8 +1,9 @@
-"""Telnyx messaging and recording download (specs/06-telephony-telnyx.md §2.1, §11; specs/21-messaging-sms.md
-§2 step 6).
+"""Telnyx messaging, recording download, and recording delete (specs/06-telephony-telnyx.md §2.1, §11;
+specs/21-messaging-sms.md §2 step 6).
 
 ``send_message`` is not idempotent (Telnyx has no idempotency key): it is retried only before bytes were sent,
 and the ``send_message`` activity records ``telnyx_message_id`` so a retried activity never sends twice.
+``delete_recording`` is idempotent: a recording Telnyx no longer has (``404``) reports ``False``.
 """
 
 from __future__ import annotations
@@ -10,8 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
+from va_telnyx.errors import TelnyxApiError
 from va_telnyx.message_models import Message, MessageCreate
-from va_telnyx.transport import Operation, TelnyxTransport, parse_data
+from va_telnyx.transport import Operation, TelnyxTransport, parse_data, segment
 
 __all__ = ["MAX_DOWNLOAD_BYTES", "MessagingCommands"]
 
@@ -19,10 +21,12 @@ MAX_DOWNLOAD_BYTES: Final = 2 * 1024**3
 
 _SEND: Final = Operation("send_message", "POST", "messaging", idempotent=False)
 _DOWNLOAD: Final = Operation("download", "GET", None, idempotent=True)
+_DELETE_RECORDING: Final = Operation("delete_recording", "DELETE", None, idempotent=True)
+_HTTP_NOT_FOUND: Final = 404
 
 
 class MessagingCommands:
-    """Outbound messages and presigned-URL downloads."""
+    """Outbound messages, presigned-URL downloads, and recording deletes."""
 
     _transport: TelnyxTransport
 
@@ -35,3 +39,13 @@ class MessagingCommands:
         written. Raises :class:`va_telnyx.TelnyxDownloadTooLarge` past ``max_bytes`` (2 GiB by default)
         and removes ``destination`` whenever the download fails."""
         return await self._transport.download(_DOWNLOAD, url, destination, max_bytes=max_bytes)
+
+    async def delete_recording(self, recording_id: str) -> bool:
+        """``DELETE /recordings/{id}``: ``True`` when Telnyx deleted it, ``False`` when it is already gone."""
+        try:
+            await self._transport.request(_DELETE_RECORDING, f"/recordings/{segment(recording_id)}")
+        except TelnyxApiError as exc:
+            if exc.status == _HTTP_NOT_FOUND:
+                return False
+            raise
+        return True

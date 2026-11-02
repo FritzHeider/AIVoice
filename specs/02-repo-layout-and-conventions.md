@@ -118,7 +118,7 @@ Core Python dependencies (declared in the package that uses them): `fastapi`, `u
 `openai>=1.50` (OpenAI-compatible client), `tiktoken`, `pypdf`, `python-docx`, `selectolax` (HTML parsing),
 `trafilatura` (main-content extraction), `phonenumbers`, `python-dateutil`, `tzdata`, `croniter`, `stripe`,
 `mcp>=1.2`, `typer`, `rich`, `authlib` (OIDC SSO), `pyotp` (TOTP MFA), `segno` (MFA QR code SVG), `email-validator`, `sentry-sdk`, `aiosmtplib`
-(transactional email), `mutagen` (voice sample duration), `soundfile` (recording duration/analysis), `reportlab`
+(transactional email), `mutagen` (voice sample duration), `soundfile` (recording analysis; the recording copy reads its duration with the stdlib `wave`, specs/06 §11 Decision P05-T14), `reportlab`
 (invoice PDFs), `aiohttp` is not used (httpx + websockets only).
 
 Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `pytest-asyncio`, `pytest-cov`,

@@ -22,7 +22,7 @@ dev = [
   "asgi-lifespan>=2.1",
   "syrupy>=6.1",
   "va-common",
-  "types-aioboto3[kms]>=15.5.0",
+  "types-aioboto3[kms,s3]>=15.5.0",
   "fakeredis[lua]>=2.40.0",
   "pyyaml>=6.0.3",
   "types-pyyaml>=6.0.12.20260906",

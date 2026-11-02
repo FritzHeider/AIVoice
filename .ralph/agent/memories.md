@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793632603-0d52
+> P05-T14: va_common.storage ObjectStore (aioboto3 S3, SSE-KMS only with aws KMS) + store_recording activity on postcall queue (activities-only registration); edge signals postcall-<id> recording_saved; httpx logger default WARNING because its INFO lines leak presigned URLs; MinIO testcontainer helper packages/va_common/tests/minio_container.running_minio (HttpWaitStrategy /minio/health/ready); aioboto3 upload_file raises raw botocore ClientError (no S3UploadFailedError)
+<!-- tags: storage, workflows, testing | created: 2026-11-02 -->
+
 ### mem-1793631037-dbe7
 > P05-T13: cold transfer = va_media.transfer.ColdTransfer via MediaActions(transfer=).bind(on_transferred=take_over(Takeover('transferred')), on_transfer_failed=brain.on_transfer_failed+CallPipeline.say); end routine transferred -> streaming_stop only; CallWorkflow phase transferred waits primary hangup. Temporal time-skipping server wedges (ACTIVITY_UNKNOWN) when the workflow cancels a dispatched watch that is failing/completing: send decisive signals from the dial activity so the watch is never dispatched. call_events rows have no type column (assert category/data). Flow tests: EdgeForwarder.wait_for + edge_app.state.processor.join()
 <!-- tags: media, workflows, testing | created: 2026-11-02 -->
@@ -409,6 +413,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793633185-349b
+> build.done backpressure: 'complexity: 2.45.' (trailing period) is not parsed -> rejected; write 'complexity: 2.45,' and keep it < 10
+<!-- tags: tooling, ralph | created: 2026-11-02 -->
 
 ### mem-1793615226-47e9
 > P05-T10f: Temporal time-skipping test server does not skip time for an abandoned child workflow awaited from the client (result()/env.sleep stall ~20s, 'No completion event found'); assert child start input + TIMER_STARTED duration from history and terminate it. Voicemail retry = va_domain.call_retry + schedule_retry_call activity (child = scheduled call admitted at dial)

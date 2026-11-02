@@ -390,6 +390,15 @@ def test_reconfigure_resets_component_levels() -> None:
     assert logging.getLogger("va_media").level == logging.NOTSET
 
 
+def test_httpx_request_lines_are_off_unless_asked_for() -> None:
+    out = Capture(make_settings(log_level="INFO"), environ={})
+    assert logging.getLogger("httpx").level == logging.WARNING
+    logging.getLogger("httpx").info("HTTP Request: GET https://x.test/a?X-Amz-Signature=s")
+    assert out.lines() == []
+    Capture(make_settings(log_level="INFO"), environ={"LOG_LEVEL_HTTPX": "INFO"})
+    assert logging.getLogger("httpx").level == logging.INFO
+
+
 def test_root_level_filters() -> None:
     out = capture(log_level="WARNING")
     log = get_logger("va_api")

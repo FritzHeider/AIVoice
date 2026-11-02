@@ -263,7 +263,7 @@ produce a higher-accuracy transcript aligned to the recording for citations, eva
 - Timeout 300 s; retry twice on 5xx/429 with 5 s/20 s backoff.
 - Response words (sorted, `channel_index` 0 → `user`, 1 → `assistant`) are grouped into utterances (split on speaker
   change or gap > 700 ms) and stored as a transcript artifact
-  `s3://{S3_BUCKET_RECORDINGS}/recordings/{org_id}/{call_id}/transcript_retranscribed.json` and referenced by `call_events` (category `call`,
+  `s3://{S3_BUCKET_RECORDINGS}/{org_id}/{yyyy}/{mm}/{call_id}/transcript_retranscribed.json` (specs/06 §11 Decision P05-T14) and referenced by `call_events` (category `call`,
   message `retranscription_ready`). The realtime `call_turns` remain the canonical conversation log; citations and
   evals prefer the retranscribed utterances when present because their timestamps align with the recording.
 

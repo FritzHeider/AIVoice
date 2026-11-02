@@ -2472,6 +2472,9 @@ wheels = [
 kms = [
     { name = "types-aiobotocore-kms" },
 ]
+s3 = [
+    { name = "types-aiobotocore-s3" },
+]
 
 [[package]]
 name = "types-aiobotocore"
@@ -2492,6 +2495,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/96/1f/221ffca4f5ed6d620d57dbe3a3f01094ccc5a3ac8be62b843e99da2c6b69/types_aiobotocore_kms-2.25.2.tar.gz", hash = "sha256:e3e65153eac318b81ed8e2c9aa90fae51e27478969e11a8342c309d76bd7d002", size = 30537, upload-time = "2025-11-12T01:48:06.031Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/31/c85a07afd218261c9976b5004eb900c147075a8ace4c3b83b67bade2cdcf/types_aiobotocore_kms-2.25.2-py3-none-any.whl", hash = "sha256:b3bdb7b0b6dad066002f45544d26ad1c43acd5c46c550774ae758d19e33dac41", size = 38639, upload-time = "2025-11-12T01:48:04.799Z" },
+]
+
+[[package]]
+name = "types-aiobotocore-s3"
+version = "2.25.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/c6/9bb91a44eed1114690edb15d8251f32392e355dfa0a5b8e1c190b4cf89a4/types_aiobotocore_s3-2.25.2.tar.gz", hash = "sha256:678aa425491af19bd6d011d59ecdbbb7ae7e95800efddcf4fd559ab72c94e194", size = 75955, upload-time = "2025-11-12T01:52:06.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/0a/d0d9faefd7caa8536eb97647c38c711e73ab83341a65119d08c2cb20957d/types_aiobotocore_s3-2.25.2-py3-none-any.whl", hash = "sha256:151301e84bb2f1cbf30f0d1ef791bb75c141cfbfe47b93fd317b7f1ba3eb35e4", size = 83626, upload-time = "2025-11-12T01:52:04.763Z" },
 ]
 
 [[package]]
@@ -3315,7 +3327,7 @@ dev = [
     { name = "stripe" },
     { name = "syrupy" },
     { name = "testcontainers", extra = ["clickhouse", "minio", "redis"] },
-    { name = "types-aioboto3", extra = ["kms"] },
+    { name = "types-aioboto3", extra = ["kms", "s3"] },
     { name = "types-jsonschema" },
     { name = "types-python-dateutil" },
     { name = "types-pyyaml" },
@@ -3369,7 +3381,7 @@ dev = [
     { name = "stripe", specifier = ">=16.1,<17" },
     { name = "syrupy", specifier = ">=6.1" },
     { name = "testcontainers", extras = ["postgres", "redis", "clickhouse", "minio"], specifier = ">=4.15" },
-    { name = "types-aioboto3", extras = ["kms"], specifier = ">=15.5.0" },
+    { name = "types-aioboto3", extras = ["kms", "s3"], specifier = ">=15.5.0" },
     { name = "types-jsonschema", specifier = ">=4.26.0.20261006" },
     { name = "types-python-dateutil", specifier = ">=2.9.0.20261021" },
     { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },

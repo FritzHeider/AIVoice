@@ -75,3 +75,29 @@ async def test_other_rpc_errors_propagate() -> None:
     client = FakeClient(RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b""))
     with pytest.raises(RPCError):
         await signaller(client).signal(EVENT)
+
+
+SAVED = EVENT.model_copy(update={"type": "call.recording.saved", "telnyx_event_id": "evt-saved"})
+
+
+async def test_recording_saved_also_signals_the_post_call_workflow() -> None:
+    client = FakeClient()
+    await signaller(client).signal(SAVED)
+    body = SAVED.model_dump(mode="json")
+    call_id = "0190f5c2-0000-7000-8000-00000000000a"
+    assert client.handles[f"call-{call_id}"].signals == [("signal_carrier_event", body)]
+    assert client.handles[f"postcall-{call_id}"].signals == [("recording_saved", body)]
+
+
+async def test_other_events_never_reach_the_post_call_workflow() -> None:
+    client = FakeClient()
+    await signaller(client).signal(EVENT)
+    assert list(client.handles) == ["call-0190f5c2-0000-7000-8000-00000000000a"]
+
+
+async def test_missing_post_call_workflow_is_tolerated() -> None:
+    client = FakeClient(RPCError("workflow not found", RPCStatusCode.NOT_FOUND, b""))
+    with capture_logs() as logs:
+        await signaller(client).signal(SAVED)
+    assert [entry["event"] for entry in logs] == ["telnyx.workflow_missing", "telnyx.postcall_missing"]
+    assert logs[1]["telnyx_event_id"] == "evt-saved"

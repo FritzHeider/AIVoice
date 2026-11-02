@@ -200,6 +200,7 @@ REST endpoints (base `/v2`), response bodies follow Telnyx shapes `{"data": {...
 | `POST /v2/messages` | `{from,to,text,media_urls,messaging_profile_id,webhook_url}` → message `{"data":{"id","record_type":"message","direction":"outbound","to":[{"phone_number","status":"queued"}],"parts":1,…}}`; emits `message.sent` (+200 ms) and `message.finalized` with `delivered` (+600 ms) unless scenario says fail |
 | `POST /v2/10dlc/brand`, `GET /v2/10dlc/brand/{id}`, `POST /v2/10dlc/campaignBuilder`, `GET /v2/10dlc/campaign/{id}`, `POST /v2/10dlc/phone_number_campaigns` | 10DLC flows with configurable approval delay; emits status webhooks |
 | `GET /sim/recordings/{id}.wav` | 2-channel 8 kHz PCM16 WAV of the captured call |
+| `DELETE /v2/recordings/{id}` | removes the stored WAV (any authenticated key; recordings are process-wide), then the WAV URL answers 404; unknown id → Telnyx 404 (specs/06 §11 Decision P05-T14) |
 | `GET /v2/ai/openai/*` | not served here (FakeLLM is separate) |
 
 Behavioural rules:

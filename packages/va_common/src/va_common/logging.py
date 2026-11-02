@@ -27,6 +27,7 @@ from va_common.settings import BaseServiceSettings, LogFormat
 from va_common.tracing import resolve_pod
 
 __all__ = [
+    "DEFAULT_COMPONENT_LEVELS",
     "RAW_MEDIA_KEYS",
     "TRANSCRIPT_KEYS",
     "RedactProcessor",
@@ -56,6 +57,9 @@ _LEVELS: Final = {
     "CRITICAL": logging.CRITICAL,
 }
 _ACCESS_LOGGER: Final = "uvicorn.access"
+DEFAULT_COMPONENT_LEVELS: Final = {"httpx": logging.WARNING}
+"""Component levels applied unless a ``LOG_LEVEL_<COMPONENT>`` variable overrides them: httpx logs every
+request URL at INFO, query string included, which would leak presigned URLs and webhook tokens."""
 
 # Component loggers whose level a previous configure_logging call set; reset on reconfiguration.
 _configured_components: set[str] = set()
@@ -272,7 +276,7 @@ def configure_logging(
         )
     )
     _install_root_handler(handler, settings.log_level)
-    _apply_component_levels(component_levels(env))
+    _apply_component_levels({**DEFAULT_COMPONENT_LEVELS, **component_levels(env)})
     # Access lines come from the API middleware (specs/27-observability.md §1), not uvicorn.
     logging.getLogger(_ACCESS_LOGGER).disabled = True
 

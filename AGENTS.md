@@ -82,6 +82,8 @@ Grafana 3001
   (`specs: pass` optional). It substring-matches a plain string: emit without `--json` (JSON keys never match). Get them
   for real: audit = `uvx pip-audit` on `uv export` + `corepack pnpm audit`; complexity = `uvx radon cc -s -a`;
   duplication = `npx --yes jscpd@4`.
+  Write `complexity: 2.45,` (comma or space after the number): `complexity: 2.45.` at the end of a sentence is not
+  parsed and the event is rejected; complexity must also stay below 10.
 - 2026-10-25 (P00-T02): `.env.example` mirrors the specs/02 §6 table one-to-one in table order (107 keys since P04-T03);
   `scripts/tests/test_env_example.py` fails when a variable exists on only one side, when a literal dev value differs,
   or when an assignment loses its trailing comment. Add new variables to the spec table and `.env.example` in the same
@@ -1453,3 +1455,17 @@ Grafana 3001
   `edge_app.state.processor.join()` to settle edge processing, `RecordingRuntime.end(timeout_s)` for long calls).
   Time-skipping gotcha: cancelling a dispatched watch that is failing (`watch="fail"`) or completing wedges the test
   server (`ACTIVITY_UNKNOWN`); deliver the decisive signals from the `dial` activity so the watch is never dispatched.
+- 2026-11-02 (P05-T14): object storage = `va_common.storage` (`S3Settings` mixed into worker settings,
+  `open_object_store(settings)` → `ObjectStore.upload_file/exists/delete/presign_get`, `sse_for(crypto)` = SSE-KMS
+  only with `KMS_PROVIDER=aws`, `recording_key`/`recording_variant_key` = `{org}/{yyyy}/{mm}/{call}[...]`,
+  `signed_url(..., now=, ttl_s=)`, `RECORDING_URL_TTL_S` 7 d / `PLAYBACK_URL_TTL_S` 15 min; rules: specs/06 §11
+  Decision P05-T14). Recording copy = activity `store_recording` (`va_workflows.activities.recording.
+  RecordingActivities`, inputs in `recording_inputs`), polled on the post-call queue by an activities-only
+  registration (`WorkerActivities.recording`, `postcall_queue()`). The edge also signals `postcall-<id>`
+  `recording_saved` for `call.recording.saved`; `TelnyxClient.delete_recording(id)` (404 → False; FakeTelnyx
+  `DELETE /v2/recordings/{id}`). Tests: `packages/va_common/tests/minio_container.running_minio()` (bitnamilegacy
+  MinIO, random creds, `Minio.settings()`, `make_bucket`; one container per module) and
+  `packages/va_workflows/tests/support/recording_rig.py` (`MemoryS3` fake client behind a real `ObjectStore`,
+  `serve_recording(r, wav)` stores a FakeTelnyx WAV, `saved_input(call, id, **payload_fields)`, `wav_bytes`).
+  The `httpx` logger now defaults to WARNING (`LOG_LEVEL_HTTPX=INFO` restores request lines): its INFO lines
+  carry full URLs, presigned signatures included.

@@ -60,12 +60,26 @@ async def test_missing_configuration_fails_before_anything_opens(
 async def test_the_main_queue_runs_call_workflow_with_its_activities(queue: str) -> None:
     settings = dialing_settings(**UNREACHABLE, temporal_task_queue=queue)
     async with build_container(settings) as container:
-        [registration] = container.registrations
+        registration, postcall = container.registrations
         names = {activity._Definition.must_from_callable(fn).name for fn in registration.activities}
         assert registration.task_queue == queue
         assert tuple(registration.workflows) == CALL_WORKFLOWS
         assert names == MAIN_ACTIVITIES
         assert len(registration.activities) == len(MAIN_ACTIVITIES)
+        assert postcall.task_queue == queue.removesuffix("-main") + "-postcall"
+        assert tuple(postcall.workflows) == ()
+        assert [activity._Definition.must_from_callable(fn).name for fn in postcall.activities] == [
+            "store_recording"
+        ]
+
+
+async def test_recordings_go_to_the_configured_bucket_with_sse_per_kms_provider() -> None:
+    settings = dialing_settings(**UNREACHABLE, s3_bucket_recordings="rec-bucket")
+    async with build_container(settings) as container:
+        recording = container.activities.recording
+        assert recording is not None
+        assert recording._bucket == "rec-bucket"
+        assert recording._sse is None
 
 
 async def test_container_wires_the_pydantic_client_and_readiness_checks() -> None:

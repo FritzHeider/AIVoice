@@ -648,7 +648,8 @@ Response `{"status":"success","count":3,"calls":[{"call_id","to","from","status"
 `404 NOT_FOUND` if no recording (or retention purged). Default `302` to presigned URL (TTL 15 min); `?format=json` →
 `{"status":"success","url":"…","expires_at":"…","duration_ms":143200,"channels":2,"format":"wav"}`.
 `?channel=caller|agent|mixed` (default `mixed`): mixed/split variants are produced in post-call
-(`18-post-call-analysis.md` §2) and stored as `recordings/{org}/{call}/{mixed|caller|agent}.wav`.
+(`18-post-call-analysis.md` §2) and stored as `{org}/{yyyy}/{mm}/{call}/{mixed|caller|agent}.wav` (specs/06 §11
+Decision P05-T14).
 
 ### 7.6 `GET /v1/calls/{call_id}/transcript`
 

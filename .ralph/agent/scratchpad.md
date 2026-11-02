@@ -2102,3 +2102,180 @@ Re-ran: lint/typecheck/placeholders pass, spec refs 0, make test 10336 passed / 
 transitions (edge in_progress only from RINGING_PHASE), command_id/client_state on transfer + streaming_stop, target
 never logged, no slot release/hangup after a bridge, workflow waits for primary hangup with max_duration backstop.
 post_transfer_transcript deferred to P12-T08 (documented). Docker e2e cold_transfer belongs to P05-T17.
+
+## Plan P05-T14 — Recording copy to S3 and signed URLs (Planner, 2026-11-02)
+Scope: record params already ship (dial `RECORDING_FIELDS`+`record_track=both` in `dial_request.py`, inbound answer in
+`va_edge/accept.py`): verify tests cover record=true/false on both and add any missing assertion. New work = object
+storage, the `store_recording` activity, carrier deletion, edge delivery of `call.recording.saved` to the post-call
+workflow, presigned URLs. Wiring into `PostCallWorkflow` (await_recording 10 min + store step) is P05-T18; the GET
+recording endpoint and Call Object `recording_url` are P05-T16 (they call the helpers built here).
+
+### Design (decided — do not re-litigate)
+1. **Key conflict** (specs/06 §11 says `recordings/{org}/{call}/raw.wav`, specs/18 §1 step 3 + plan say
+   `{org}/{yyyy}/{mm}/{call_id}.wav`, specs/05 §7.5 variants `recordings/{org}/{call}/{x}.wav`): decide raw =
+   `{org_id}/{yyyy}/{mm}/{call_id}.wav` (yyyy/mm = UTC of `calls.created_at`), post-call variants =
+   `{org_id}/{yyyy}/{mm}/{call_id}/{mixed|caller|agent}.wav`. Write `> Decision (2026-11-02): recording storage
+   (P05-T14)` under specs/06 §11 and fix the §11 step 3 text + specs/05 §7.5 variant path to point at it.
+2. **Storage** `packages/va_common/src/va_common/storage.py` (va_common already depends on aioboto3; add
+   `types-aioboto3[kms,s3]` in root dev deps, `uv lock`):
+   - `class S3Settings(BaseServiceSettings)`: `s3_endpoint_url: str = ""`, `s3_region: str = "us-east-1"`,
+     `s3_bucket_recordings: str = "va-recordings"`, `s3_bucket_kb`, `s3_bucket_voices` (defaults per specs/02 §6),
+     `s3_access_key_id: str = ""`, `s3_secret_access_key: SecretStr = SecretStr("")` (hidden in validation errors like
+     StreamTokenSettings). Mixed into `WorkerSettings` (api in P05-T16).
+   - `class ObjectStore` over an aioboto3 S3 client (`open_object_store(settings) -> AsyncIterator[ObjectStore]`
+     async CM; endpoint/creds only when non-empty; `AioConfig(connect_timeout=5, read_timeout=60, retries
+     {"max_attempts": 3, "mode": "standard"})`): `async upload_file(bucket, key, path, *, content_type,
+     metadata: Mapping[str,str], sse: ServerSideEncryption | None)`, `async exists(bucket, key) -> bool`,
+     `async delete(bucket, key)`, `async presign_get(bucket, key, *, expires_s: int) -> str` (rejects
+     expires_s outside 1..604 800 with ValueError — SigV4 cap).
+   - `ServerSideEncryption(kind: Literal["aws:kms","AES256"], kms_key_id: str | None)`;
+     `sse_for(crypto: CryptoSettings) -> ServerSideEncryption | None`: `kms_provider aws` → aws:kms with
+     `aws_kms_key_id`; local → None (MinIO dev/test has no KMS, so no SSE header; documented in the Decision; prod
+     always AWS).
+   - `RECORDING_URL_TTL_S = 7*86400` (Call Object `recording_url`), `PLAYBACK_URL_TTL_S = 900` (specs/05 §7.5),
+     `recording_key(org_id, call_id, created_at) -> str`, `recording_variant_key(..., variant)`, 
+     `async signed_url(store, bucket, key, *, now, ttl_s) -> SignedUrl(url, expires_at)`.
+3. **Telnyx** `delete_recording(recording_id) -> bool` in `va_telnyx` (new Operation `delete_recording` DELETE
+   `/recordings/{segment(id)}` category None/"call_command"? — use category None like download, idempotent=True; 404
+   → False, 2xx → True). Add the row to the specs/06 §2.1 client table. FakeTelnyx: `DELETE /v2/recordings/{id}`
+   (Bearer auth, per account recordings → 200 `{"data":{"id":..,"record_type":"recording","status":"deleted"}}`,
+   removes the stored WAV so `/sim/recordings/{id}.wav` then 404s; unknown id → 404 Telnyx error body); record it in
+   specs/30 §3 FakeTelnyx Decision list. Contract test va_telnyx client ↔ sim.
+4. **Edge delivery**: `va_domain.post_call` gains `RECORDING_SAVED_SIGNAL: Final = "recording_saved"`.
+   `va_edge.signals.TemporalCarrierSignaller.signal`: for `event.type == "call.recording.saved"` ALSO signals
+   `postcall_workflow_id(call_id)` with `RECORDING_SAVED_SIGNAL` and the same `model_dump(mode="json")` (CallWorkflow
+   signal unchanged). Missing post-call workflow → debug log `telnyx.postcall_missing` (not an error; P05-T18's
+   await_recording first reads the stored event — note it in the Decision so T18 implements that fallback).
+5. **Activity** `packages/va_workflows/src/va_workflows/activities/recording.py` + workflow-safe
+   `recording_inputs.py`:
+   - `StoreRecordingInput(call_id, org_id, event: dict[str, JsonValue])` (the CarrierEvent JSON from the signal);
+     `StoreRecordingResult(status: Literal["stored","already_stored","failed"], s3_key: str|None,
+     duration_ms: int|None, recording_offset_ms: int|None, detail: str|None)`; `STORE_RECORDING_TIMEOUT =
+     timedelta(minutes=5)`, `STORE_RECORDING_RETRY = RetryPolicy(maximum_attempts=5, initial 2 s, backoff 2,
+     non_retryable_error_types=[...])` (specs/18 table 5 min / 5).
+   - `class RecordingActivities(*, database, telnyx: TelnyxClientFactory, store: ObjectStore, bucket: str,
+     sse: ServerSideEncryption | None, publisher: EventPublisher, org_settings: OrgSettingsReader, clock,
+     tmp_dir: Path | None = None)`; `@activity.defn(name="store_recording") async def store_recording(inp)`:
+     a. parse `CarrierEvent.model_validate(inp.event)` then `va_telnyx.webhooks.parse_payload`/`RecordingSaved`
+        (tolerant, extra ignored); call row via `tenant_session(org_id)`; missing call → `failed detail=call_not_found`.
+     b. `calls.recording_s3_key` already set → `already_stored` (no event, no upload).
+     c. URL: `recording_urls.wav` → `public_recording_urls.wav`; none → `failed detail=no_wav_url` (mp3 is never
+        copied: we always request `record_format=wav`; Decision text).
+     d. download with `(await telnyx.for_call(call)).download(url, tmp/…wav)` inside `tempfile.TemporaryDirectory`
+        (2 GiB cap). `TelnyxDownloadTooLarge` → failed `too_large`; other `TelnyxError`/httpx errors → raise
+        (activity retry; presigned URL expiry eventually exhausts retries).
+     e. duration via stdlib `wave` (`asyncio.to_thread`; frames/rate → ms; `wave.Error`/EOFError → failed
+        `invalid_wav`). Decision: stdlib `wave` replaces `soundfile.info` (Telnyx WAV is PCM; no new native dep);
+        also update specs/02 dependency mention if it names soundfile for this.
+     f. upload key `recording_key(org, call, call.created_at)`, `content_type audio/wav`, metadata
+        `{"call_id","org_id"}`, sse.
+     g. one tenant transaction: guarded `UPDATE calls SET recording_s3_key, recording_duration_ms WHERE id AND
+        recording_s3_key IS NULL` (rowcount 0 → `already_stored`, no event) + `call.recording_ready` event
+        (`data={"duration_ms","channels","recording_offset_ms"}`; offset = recording_started_at − answered_at in ms,
+        None when either missing) via `activities.events.persist_events`, then `broadcast_events`.
+     h. after commit: org `delete_carrier_recordings` (via reader) and `recording_id` present →
+        `client.delete_recording(id)`; any failure logged `recording.carrier_delete_failed` (never raised).
+     i. every `failed` outcome writes `call.error` `{"code":"recording_failed","detail":<detail>}` level warning
+        (persist + broadcast), returns, never raises (non-retryable). Logs never contain the URL.
+     Span `recording.store` optional; log `recording.stored call_id duration_ms bytes`.
+6. **Worker**: `build_container` opens `open_object_store(settings)` in its exit stack; `WorkerActivities` gains
+   `recording: RecordingActivities` and `postcall_queue()` = `(self.recording.store_recording,)`;
+   `main_registrations` adds `TaskQueueRegistration(postcall_task_queue(settings.temporal_task_queue), (),
+   activities.postcall_queue())` if `TemporalWorkers` accepts an activities-only registration (verify: temporalio
+   Worker needs ≥1 workflow OR activity — fine); update its docstring. Worker settings tests/`dialing_settings`
+   updated for the S3 mixin. `.env.example` already has S3 keys (no change).
+
+### Tests (all must exist and pass)
+- `packages/va_common/tests/test_storage.py` (unit, fake client object): key builders (UTC month of created_at,
+  non-UTC input converted), `sse_for` aws/local, presign TTL bounds (0 and 604 801 → ValueError), `signed_url`
+  expires_at = now + ttl, upload passes `ServerSideEncryption`/`SSEKMSKeyId` only when sse set, settings secret hidden.
+- `packages/va_common/tests/test_storage_minio.py` (`@pytest.mark.integration`, skip without Docker): support
+  `packages/va_common/tests/minio_container.py` `running_minio()` (DockerContainer `bitnamilegacy/minio:2024.10.13`,
+  env MINIO_ROOT_USER/PASSWORD random, port 9000, `wait_for_logs`, yields endpoint+creds; `make_bucket` helper):
+  upload → exists → presigned GET via httpx returns the bytes + metadata header; delete → exists False.
+  One test module = one container (xdist note in AGENTS).
+- `packages/va_telnyx/tests/...`: `delete_recording` respx body/path, 404 → False; contract vs FakeTelnyx.
+- `packages/va_sim/tests/telnyx/...`: DELETE recording 200 then WAV 404; unknown 404; wrong key 401.
+- `apps/telephony_edge/tests/test_signals*.py` (or where TemporalCarrierSignaller is tested; use
+  `workflow_fakes.SignalRecorder`): recording.saved → both `call-<id>` carrier signal and `postcall-<id>`
+  `recording_saved`; missing postcall → no raise; other types → no postcall signal.
+- `packages/va_workflows/tests/test_recording_activity.py` (Postgres `migrated` DB like other activity tests +
+  FakeTelnyx via `telephony_rig` realtime + a fake in-memory `ObjectStore` recorder): real FakeTelnyx call with
+  `record_start`/hangup producing `call.recording.saved` (or `state.store_recording` + hand-built payload) →
+  stored: key format, row columns, duration matches WAV, `call.recording_ready` row data, carrier recording deleted
+  (sim 404 afterwards) when org setting default true, NOT deleted when `delete_carrier_recordings=false`;
+  second run → `already_stored`, one upload, one event; no wav URL / mp3-only → failed + `call.error recording_failed`;
+  oversized (`max_bytes` seam or monkeypatched cap) → failed `too_large`; corrupt WAV → `invalid_wav`; download 5xx →
+  raises (retryable); carrier delete failure → still `stored` + log; extra unknown payload fields tolerated; missing
+  `recording_started_at` → offset None; log output never contains the recording URL.
+- `packages/va_workflows/tests/test_recording_activity_minio.py` (integration): the activity end to end with a real
+  MinIO store (testcontainer) and FakeTelnyx URL: object exists with metadata and its bytes equal the sim WAV.
+- `apps/worker/tests`: container builds the object store; postcall registration lists `store_recording`.
+- Coverage: `va_workflows/activities/recording.py` and `va_common/storage.py` 100 %.
+
+### Gates
+`make fmt`; `make lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`; `make test` in background
+(`make test > logs/make_test_p05t14.log 2>&1` + heartbeat Monitor); jscpd 0 clones; `uvx radon cc -s -n C` on touched
+src empty; `uvx pip-audit` on `uv export` + `corepack pnpm audit`. `make e2e`: harness lands in P05-T17 — say so.
+AGENTS.md line: storage module, MinIO testcontainer helper, recording activity + edge postcall signal.
+
+### Risks
+- aioboto3 S3 client typing: needs `types-aiobotocore-s3` via `types-aioboto3[s3]`; presign is async in aiobotocore
+  (`await client.generate_presigned_url(...)`).
+- MinIO testcontainer: image must be `bitnamilegacy/minio:2024.10.13` (minio/minio gone); data dir
+  `/bitnami/minio/data`; integration tests skip when Docker is unreachable (`docker_probe`).
+- The DB clock vs `call_events` partitions: use `SystemClock` in activity DB tests (AGENTS P05-T06b).
+- FakeTelnyx accelerated clock + Postgres waits: use `telephony_rig(realtime=True)` for live-call recordings.
+
+## Build P05-T14 (Builder, 2026-11-02)
+Implemented the plan. Deviations, all deliberate and recorded in specs/06 §11 Decision P05-T14:
+- `StoreRecordingInput.event` is the typed `CarrierEvent` (import-free) rather than a raw dict.
+- A missing call returns `failed`/`call_not_found` WITHOUT a `call.error` row (an event for a call that does not
+  exist makes no sense); other failures write `call.error recording_failed`. Added failure `invalid_payload`
+  (RecordingSaved validation) and `download_failed` (a 4xx other than 429 on the presigned URL, e.g. expired).
+- Org `delete_carrier_recordings` is read BEFORE the download (a reader failure retries before anything is stored, so
+  the deletion is never lost by an `already_stored` retry); an `already_stored` run never deletes (could be a second
+  recording). Carrier delete uses `for_call(call)`; download uses the platform client (absolute URL, no auth).
+- Object-store errors → retryable `StorageUnavailable` (new error type). aioboto3 raises raw botocore errors.
+- `RecordingActivities(max_download_bytes=)` seam for the too_large test.
+- FakeTelnyx recordings are process-wide (`state.recordings`), so DELETE accepts any authenticated key.
+- Found: httpx logs every request URL at INFO (presigned signature leak). `va_common.logging` now defaults the
+  `httpx` logger to WARNING (`DEFAULT_COMPONENT_LEVELS`, `LOG_LEVEL_HTTPX` overrides); specs/27 §1 Decision.
+- Worker: `WorkerActivities(recording=)`, `RecordingStorage`, `postcall_queue()`; `main_registrations` adds an
+  activities-only post-call registration (no workflow tasks polled there until P05-T18).
+- Record params on dial/answer were already covered (test_dial_request, test_accept_db): no change needed.
+Gates: make fmt 0; make lint 0; make typecheck 0 (mypy 1229 files); make placeholders 0; spec refs 0 problems;
+make test 10386 passed / 7 skipped, coverage 99.16% (exit 0); then added an AWS-endpoint storage test → storage.py,
+recording.py, recording_inputs.py, sim recordings.py, signals.py, worker activities/main 100%. jscpd 0 clones; radon
+-n C empty (recording.py avg A 2.45); pip-audit no known vulns; pnpm audit 3 moderate (< high). MinIO integration
+tests ran (Docker present): test_storage_minio (2), test_recording_activity_minio (1). make e2e: tests_e2e harness lands
+in P05-T17 (recording_and_post_call flow needs PostCallWorkflow, P05-T18).
+
+## Plan P05-T14 — blocker resolution (Planner, 2026-11-02, after build.blocked)
+Not a code problem. Diagnostics: `build.done rejected: backpressure checks failed tests=true lint=true typecheck=true
+audit=true coverage=true duplication=true specs=true` — `complexity` was not parsed because the payload ended
+`complexity: 2.45.` (number immediately followed by a period). Earlier rejection (07:01) had complexity=11.0 (too high).
+The implementation in the working tree is complete per "Build P05-T14" above; do NOT redo it.
+### Builder steps (only these)
+1. Sanity re-run on the touched areas: `make lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`,
+   `uv run pytest packages/va_common/tests/test_storage.py packages/va_workflows/tests/test_recording_activity.py
+   apps/telephony_edge/tests/test_signals.py apps/worker/tests packages/va_sim/tests/telnyx/test_recordings.py
+   packages/va_telnyx/tests/test_delete_recording.py -q`, `uvx radon cc -s -a` on the new src files (avg must be < 10).
+   The full `make test` result from the build (10386 passed, 99.16 %) stands unless a file changed since.
+2. Emit build.done WITHOUT `--json`, with `complexity: <number>,` followed by a comma/space, never a trailing period,
+   e.g. `P05-T14 tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, duplication: pass,
+   complexity: 2.45, specs: pass, placeholders: pass`.
+
+## Build P05-T14 re-verify (Builder, 2026-11-02)
+Re-ran after the backpressure parse failure: make lint/typecheck/placeholders exit 0 (0 findings); spec refs 0
+problems; touched tests 134 passed; radon avg A 2.17 on the new/changed src. Full make test from the build stands
+(10386 passed, 99.16 %). Re-emitting build.done with `complexity: 2.17,`.
+
+## Review P05-T14 (Reviewer, 2026-11-02) — APPROVED
+Re-ran: make lint 0, make typecheck 0, make placeholders 0 findings, check_spec_refs 0, make test 10387 passed /
+7 skipped, 99.16 % (exit 0), jscpd 0 clones, radon -n C empty on touched src. Diff checked against specs/06 §11
+Decision P05-T14, specs/02 §6 S3_* defaults, specs/18 §1 step 3 key layout, specs/30 FakeTelnyx table: keys, SSE rule,
+guarded update + call.recording_ready in one transaction, carrier delete after commit (log-only failure), failure
+details → call.error recording_failed (none for a missing call), retryable TelnyxUnavailable/StorageUnavailable, no URL
+in logs (test asserts). Edge signals postcall-<id> recording_saved; missing workflow debug-only; T18 must read the
+stored event first (recorded in the Decision). Known minor edge: a lost race re-uploads to the same deterministic key.

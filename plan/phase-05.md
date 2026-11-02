@@ -254,7 +254,7 @@
   - Deliverables: transfer tool/command flow (final line → mark echo → Telnyx transfer), `transfer_list` selection, bridged handling, transfer_seconds accounting, AI pipeline shutdown
   - Acceptance: e2e cold_transfer passes with correct billing fields.
 
-- [ ] P05-T14 Recording
+- [x] P05-T14 Recording — va_common.storage ObjectStore (SSE-KMS with aws KMS, presign TTL bounds, recording keys) + store_recording activity on the post-call queue (guarded key update + call.recording_ready, carrier delete per org setting, failures → call.error recording_failed) + edge postcall recording_saved signal + Telnyx delete_recording (client + FakeTelnyx) + httpx logger WARNING default; MinIO integration tests; make test 10387 passed / 7 skipped, 99.16 % coverage; lint/typecheck/placeholders/spec refs 0; jscpd 0 clones; radon -n C empty; make e2e harness lands in P05-T17
   - Spec refs: specs/05-calls-api.md (record, GET recording); specs/06-telephony-telnyx.md (recording copy flow, call.recording.saved)
   - Depends on: P05-T06
   - Deliverables: record params on dial/answer, recording saved handling activity copying to S3 (`S3_BUCKET_RECORDINGS/{org}/{yyyy}/{mm}/{call_id}.wav`), signed URL generation (7 days)

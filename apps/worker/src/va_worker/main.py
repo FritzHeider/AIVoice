@@ -34,6 +34,7 @@ from va_common.service import (
     serve,
     service_scope,
 )
+from va_common.storage import open_object_store, sse_for
 from va_common.time import SystemClock
 from va_db.org_settings import OrgSettingsReader
 from va_db.session import Database
@@ -42,7 +43,7 @@ from va_elevenlabs import ElevenLabsRest
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_voice.phrase_cache import PhraseCache
 from va_worker import __version__
-from va_worker.activities import WorkerActivities, main_registrations
+from va_worker.activities import RecordingStorage, WorkerActivities, main_registrations
 from va_worker.runner import ClientSource, TemporalWorkers, WorkerFactory, temporal_worker
 from va_worker.settings import WorkerSettings
 from va_worker.task_queues import TaskQueueRegistration
@@ -85,7 +86,7 @@ class Container:
 async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
     """Postgres engine, Redis client, Temporal connector (pydantic converter), the database, the envelope,
     the Telnyx client factory (BYO keys through :class:`TelnyxKeyResolver`), the opener pre-render (ElevenLabs
-    REST + phrase cache + org settings reader), and the activity instances.
+    REST + phrase cache + org settings reader), the object store (recordings), and the activity instances.
 
     No network I/O until used. ``RuntimeError`` before anything is opened when ``STREAM_TOKEN_SECRET`` or
     ``TELNYX_CALL_CONTROL_APP_ID`` is empty, or (local KMS provider) ``LOCAL_MASTER_KEY`` is not configured.
@@ -106,6 +107,7 @@ async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
         clock = SystemClock()
         resolver = TelnyxKeyResolver.for_provider(database, kms_provider)
         factory = telnyx_factory(settings, http=http, redis=redis, resolve_key=resolver, clock=clock)
+        store = await stack.enter_async_context(open_object_store(settings))
         activities = WorkerActivities.build(
             database=database,
             redis=redis,
@@ -113,6 +115,7 @@ async def build_container(settings: WorkerSettings) -> AsyncIterator[Container]:
             dial=dial,
             clock=clock,
             prerender=await stack.enter_async_context(_opener_prerender(settings, database, redis, clock)),
+            storage=RecordingStorage(store, settings.s3_bucket_recordings, sse_for(settings)),
         )
         yield Container(
             temporal=temporal,

@@ -68,6 +68,7 @@ class TelnyxClient:
 | `delete_phone_number(id)` | DELETE | `/phone_numbers/{id}` | — |
 | `send_message(...)` | POST | `/messages` | see `21-messaging-sms.md` §4 |
 | `download(url)` | GET | absolute presigned URL (no auth header) | recording download |
+| `delete_recording(recording_id)` | DELETE | `/recordings/{recording_id}` | — (`404` → `False`: already gone; §11 Decision P05-T14) |
 
 Telephony credentials (WebRTC) are **not** used; web voice uses our own WebSocket audio transport (`22`).
 
@@ -260,7 +261,7 @@ state goes to the inbound router (§7).
 | `call.machine.premium.greeting.ended` | — | — | `call.amd` (data.beep_detected=true) | worker starts voicemail message immediately after beep |
 | `call.machine.premium.call_screening.detected` | — | — | `call.amd` (data.screening=true) | worker treats as human-like screening: speaks `first_sentence` stating name and reason |
 | `call.dtmf.received` | — | — | `call.turn` (role `user`, text `"[DTMF 5]"`) unless `ignore_button_press` | forwarded to worker (worker also receives `dtmf` on media WS; dedupe by digit + occurred_at within 300 ms) |
-| `call.recording.saved` | — | — | `call.recording_ready` after S3 copy | start `CopyRecording` activity (§11) |
+| `call.recording.saved` | — | — | `call.recording_ready` after S3 copy | signal `PostCallWorkflow` `recording_saved`; its `store_recording` activity copies it (§11) |
 | `call.recording.error` | — | — | `call.error` (code `recording_failed`) | `calls.recording_s3_key` stays null |
 | `call.playback.started` / `call.playback.ended` | — | — | none (debug log) | warm-transfer hold music tracking |
 | `streaming.started` | — | — | none | carrier_state `streaming=1` |
@@ -654,18 +655,50 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 6. Billing: proxy leg minutes billed at connected rate; after conference join, merged minutes at transfer rate.
    `end_reason='warm_transferred'`.
 
-## 11. Recording copy flow (activity `copy_recording`)
+## 11. Recording copy flow (activity `store_recording`)
 
 1. `call.recording.saved` payload is parsed tolerant of unknown fields: `recording_urls.wav` (preferred) or
    `recording_urls.mp3`, `public_recording_urls.*`, `channels` (`single`/`dual`), `recording_started_at`,
    `recording_ended_at`, `recording_id` (optional). Missing URLs → `call.error` `recording_failed`.
 2. Download immediately (URLs are short-lived presigned links) with streaming to a temp file (max 2 GB).
-3. Upload to `s3://{S3_BUCKET_RECORDINGS}/recordings/{org_id}/{call_id}/raw.wav` with SSE-KMS (AWS) or SSE-S3 (MinIO),
-   metadata `call_id`, `org_id`.
-4. Compute duration via `soundfile.info`; set `calls.recording_s3_key`, `recording_duration_ms`; emit
+3. Upload to `s3://{S3_BUCKET_RECORDINGS}/{org_id}/{yyyy}/{mm}/{call_id}.wav` with SSE-KMS (AWS; see the Decision below
+   for MinIO), metadata `call_id`, `org_id`.
+4. Compute duration from the WAV header (stdlib `wave`); set `calls.recording_s3_key`, `recording_duration_ms`; emit
    `call.recording_ready`.
 5. Post-call creates `mixed.wav`, `caller.wav`, `agent.wav` (left = caller/inbound, right = agent/outbound — verified
    by live smoke test `test_recording_channel_order`).
+
+> Decision (2026-11-02, P05-T14): recording storage.
+> 1. Keys. The raw copy is `{org_id}/{yyyy}/{mm}/{call_id}.wav` in `S3_BUCKET_RECORDINGS` (specs/18 §1 step 3; `yyyy/mm` =
+>    UTC month of `calls.created_at`); every other per-call artifact lives under `{org_id}/{yyyy}/{mm}/{call_id}/`
+>    (`mixed.wav`, `caller.wav`, `agent.wav`, `transcript_retranscribed.json`). Builders: `va_common.storage.recording_key`
+>    and `recording_variant_key`. This replaces the earlier `recordings/{org_id}/{call_id}/raw.wav` text.
+> 2. Storage client. `va_common.storage.open_object_store(S3Settings)` (aiobotocore S3, timeouts 5 s connect / 60 s
+>    read, 3 standard retries, SigV4, path-style when `S3_ENDPOINT_URL` is set) yields an `ObjectStore` (`upload_file`
+>    multipart, `exists`, `delete`, `presign_get`). SSE: `KMS_PROVIDER=aws` → `aws:kms` with `AWS_KMS_KEY_ID`; the
+>    local provider (MinIO in development and tests) sends no SSE header because the development MinIO has no KMS.
+>    Presigned URLs live at most 7 days (SigV4); `RECORDING_URL_TTL_S` = 7 days (Call Object `recording_url`),
+>    `PLAYBACK_URL_TTL_S` = 15 min (specs/05 §7.5); `signed_url(store, bucket, key, now=, ttl_s=)` returns the URL with
+>    its `expires_at`.
+> 3. Delivery. The edge signals `call.recording.saved` to `CallWorkflow` (unchanged) **and** to `postcall-<id>`
+>    (signal `recording_saved`, the JSON `CarrierEvent`); a missing post-call workflow is logged at debug only, because
+>    the recording usually arrives before `CallWorkflow` starts the child. `PostCallWorkflow` (P05-T18) must therefore
+>    look for an already stored `call.recording.saved` (`telnyx_events`) when it starts, before it waits for the signal.
+> 4. Activity `store_recording(StoreRecordingInput(call_id, org_id, event))` (post-call task queue; 5 min, 5 attempts,
+>    2 s doubling to 30 s): a call whose `recording_s3_key` is set returns `already_stored` (nothing uploaded or
+>    emitted); the URL is `recording_urls.wav`, else `public_recording_urls.wav` (an MP3 is never copied: the platform
+>    always records WAV); the download streams to a private scratch directory (2 GiB cap) that is always removed;
+>    the guarded `UPDATE … WHERE recording_s3_key IS NULL` and `call.recording_ready` (`data: duration_ms, channels,
+>    recording_offset_ms` = recording start − `answered_at`, `null` when either is unknown) commit together. Failures:
+>    `invalid_payload`, `no_wav_url`, `download_failed` (a 4xx other than 429), `too_large`, `invalid_wav` return
+>    `failed` with `call.error` `{code: recording_failed, detail}` (level `warning`) and are not retried; a missing call
+>    returns `failed`/`call_not_found` without an event; 429/5xx/transport download failures (`TelnyxUnavailable`) and
+>    object-store failures (`StorageUnavailable`) raise retryable errors.
+> 5. Carrier copy. After the commit, when the org's `delete_carrier_recordings` (default true) holds and the event
+>    carries `recording_id`, the activity calls `DELETE /v2/recordings/{id}` with the call's account; a failure is logged
+>    (`recording.carrier_delete_failed`) and never fails the copy. An `already_stored` run deletes nothing (it may be a
+>    second recording of the call). FakeTelnyx serves `DELETE /v2/recordings/{id}` (specs/30 §3.2).
+> 6. Logs never contain the presigned URL (the `httpx` logger defaults to WARNING, specs/27 §1 Decision 2026-11-02).
 
 ## 12. Bootstrap (`scripts/telnyx_bootstrap.py` and activity `BootstrapTelnyxAccount`)
 
