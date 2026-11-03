@@ -9,15 +9,17 @@ from __future__ import annotations
 
 from typing import Any
 
+import orjson
 from call_rows import seed_call
 from cross_tenant import REGISTRY, FactoryContext
 from identity_db import unique_email
 from session_helpers import add_member, store_api_key, sub_account
 
+from va_api.services.pathway_chat import DEFAULT_SIMULATE_FROM, DEFAULT_SIMULATE_TO, ChatSession, ChatStore
 from va_common.ids import new_id
 from va_db.models import WebhookDelivery, WebhookEndpoint
 from va_db.repositories import InvitationRepo, PathwayFolderRepo, PathwayGraphJson, PathwayRepo
-from va_engine.models import graph_hash
+from va_engine.models import EngineState, dump_engine_state, graph_hash
 
 __all__ = ["REGISTRY"]
 
@@ -119,6 +121,34 @@ async def _folder(context: FactoryContext) -> str:
         return str(folder.id)
 
 
+async def _chat(context: FactoryContext) -> str:
+    """An ended pathway test chat of the tenant's org (written straight to Redis: no model needed)."""
+    chat_id, pathway_id = new_id(), new_id()
+    state = EngineState(
+        runner="pathway",
+        pathway_id=pathway_id,
+        pathway_version=1,
+        current_node_id="start",
+        visit_counts={"start": 1},
+        ended=True,
+    )
+    document = orjson.loads(dump_engine_state(state))
+    session = ChatSession(
+        org_id=context.tenant.org_id,
+        pathway_id=pathway_id,
+        version=1,
+        graph={"nodes": [], "edges": [], "global_config": {}},
+        request_data={},
+        simulate_from=DEFAULT_SIMULATE_FROM,
+        simulate_to=DEFAULT_SIMULATE_TO,
+        created_at=context.container.clock.now(),
+        state=document,
+        snapshots={"0": document},
+    )
+    await ChatStore(context.container.redis).save(chat_id, session)
+    return str(chat_id)
+
+
 async def _first_version(context: FactoryContext) -> str:
     """Version 1, which every pathway has."""
     del context
@@ -138,6 +168,11 @@ REGISTRY.register_resource_factory("version_number", _first_version, path_prefix
 # gets ``NOT_FOUND`` (Decision P07-T09b).
 REGISTRY.register_owner_status("pathways_promote", 409)
 REGISTRY.register_resource_factory("folder_id", _folder)
+REGISTRY.register_resource_factory("chat_id", _chat)
+# The factory chat has ended, so the owner's send control is ``409 CONFLICT`` (no model call) while org B gets
+# ``NOT_FOUND``.
+REGISTRY.register_request("pathways_chat_send", json={"message": "Hi"})
+REGISTRY.register_owner_status("pathways_chat_send", 409)
 # The move example names a pathway id that exists nowhere; an empty move is the owner's no-op control.
 REGISTRY.register_request("pathways_folders_move", json={"pathway_ids": []})
 # The duplicate example copies the production pin, which the factory pathway does not have.

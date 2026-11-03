@@ -8,6 +8,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontext
 from dataclasses import dataclass
 
 import httpx
+from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -24,6 +25,7 @@ from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.services.call_starter import CallStarter, TemporalCallStarter
 from va_api.services.call_stop import CallCanceller, TemporalCallCanceller
+from va_api.services.pathway_chat import CHAT_LLM_TIMEOUT
 from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
@@ -32,6 +34,7 @@ from va_common.checks import Dependencies, TemporalConnector, open_dependencies
 from va_common.crypto import Envelope, open_kms_provider
 from va_common.email import EmailSender, InMemoryEmailSender, SmtpEmailSender
 from va_common.health import CheckFn
+from va_common.http import http_client
 from va_common.net import HostResolver, system_resolver
 from va_common.safe_http import safe_client
 from va_common.service import ReadinessSource
@@ -45,6 +48,9 @@ from va_db.session import Database
 from va_events import DbWebhookRouter, EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
+from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
+from va_llm.providers import platform_provider
+from va_tools.http import tools_client
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
 
@@ -86,6 +92,8 @@ class Container:
     webhook_deliverer: Deliverer
     live_hub: LiveHub
     stream_tail: StreamTailHub
+    llm_gateway: LlmGateway
+    tools_http: httpx.AsyncClient
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -109,8 +117,10 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     state store, the cached org settings reader, the agent onboarding request store and limiter, and the
     Send Call pieces: the dispatch limiter, the event publisher (``call_events`` rows are written by the
     caller's transaction, so it has no sink), the ``CallWorkflow`` starter, and the system DNS resolver for
-    webhook checks, the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt), and
-    the live event hub (one pub/sub connection for every SSE client).
+    webhook checks, the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt), the
+    live event hub (one pub/sub connection for every SSE client), and the pathway test chat's LLM gateway
+    (platform provider plus org overrides; its metrics stay on a private registry: the api exports no LLM
+    catalog) and the guarded HTTP client its webhook nodes run on (``va_tools.http.tools_client``).
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -155,6 +165,17 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         stack.push_async_callback(live_hub.aclose)
         stream_tail = StreamTailHub(redis)
         stack.push_async_callback(stream_tail.aclose)
+        llm_http = http_client(settings, timeout=CHAT_LLM_TIMEOUT)
+        stack.push_async_callback(llm_http.aclose)
+        llm_gateway = LlmGateway(
+            ProviderRegistry(platform_provider(settings), OrgProviderStore(database, envelope, clock=clock)),
+            llm_http,
+            clock=clock,
+            metrics=LlmMetrics(CollectorRegistry()),
+            costs=CostTable(load_costs(settings.llm_model_costs_json)),
+        )
+        tools_http = tools_client(settings, resolver=system_resolver)
+        stack.push_async_callback(tools_http.aclose)
         webhook_timeouts = Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S)
         yield Container(
             settings=settings,
@@ -190,4 +211,6 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             webhook_deliverer=Deliverer(webhook_http, clock=clock, timeouts=webhook_timeouts),
             live_hub=live_hub,
             stream_tail=stream_tail,
+            llm_gateway=llm_gateway,
+            tools_http=tools_http,
         )

@@ -1829,3 +1829,20 @@ Grafana 3001
   helper `va_db.repositories.FolderTree` (`depth`/`height`/`is_within`). `dict(await session.execute(...))` fails
   (`ChunkedIteratorResult` is not a mapping source): build dicts from `.all()`. Test helpers: `pathway_helpers.Api`
   gained `export`/`import_`/`duplicate`/`folders`/`folder_created`/`patch_folder`/`delete_folder`/`move`.
+- 2026-11-03 (P07-T10): pathway test chat = `routers/pathway_chat.py` (prefix `/v1/pathway/chat`, listed in
+  `main.ROUTERS` before `pathways_router`) over `va_api.services.pathway_chat` (`ChatStore` Redis
+  `pathway_chat:{id}` + `:lock`, `create_chat`/`send_message`/`delete_chat`, `_Conversation` = one
+  `PathwayEngine` per request) and `pathway_chat_run.ChatRecorder` (EngineEvents sink + HttpPort wrapper + simulated
+  SmsPort; `log_item`/`action_item`/`excerpt`/`masked_headers`); other pathways load through
+  `services.pathway_loader.DbPathwayLoader`. `ApiSettings` now mixes in `LlmSettings`; the api container has
+  `llm_gateway` (private metrics registry) and `tools_http` (`va_tools.http.tools_client`, shared by executors).
+  Built-ins of non-call conversations: `va_engine.builtins.builtin_values(...)`. Tests:
+  `apps/api/tests/support/chat_helpers.chat_stack(container)` (FakeLLM on a socket + the app with
+  `llm_default_base_url`; FakeLLM routes by edge label words), `Chats`, `restaurant(hook_port)`; the container must
+  run on `SystemClock()` (a `FrozenClock` gateway/turn cap times out at once); point `hooks.test` at the receiver via
+  `container.host_resolver.answers`. The cross-tenant `chat_id` factory writes an ended chat straight to Redis.
+- 2026-11-03 (P07-T10): an xdist `worker 'gwN' crashed ... node down: Not properly terminated` in `make test` is a
+  kernel OOM kill of a big worker (check with `docker run --rm --privileged --net=none redis:7-alpine dmesg | grep -i
+  'killed process'`). A FakeTelnyx leg that records on the accelerated clock runs to its 4 h time limit whenever the
+  loop waits on Postgres and then encodes a WAV of the whole virtual duration (~460 MB dual-channel): give recorded
+  test legs a short limit (edge `RoutingRig.place/ring(..., time_limit_s=30)`).

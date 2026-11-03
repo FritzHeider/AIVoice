@@ -2450,6 +2450,338 @@
         "title": "CallingWindow",
         "type": "object"
       },
+      "ChatCreate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/pathway/chat/create``: the version to simulate and the simulated call.",
+        "examples": [
+          {
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "request_data": {
+              "first_name": "Mike"
+            },
+            "simulate_from": "+14155550123",
+            "simulate_to": "+14155550100",
+            "version": "draft"
+          }
+        ],
+        "properties": {
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "request_data": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "`{{request_data.*}}` values (at most 64 KiB of JSON).",
+            "title": "Request Data",
+            "type": "object"
+          },
+          "simulate_from": {
+            "default": "+14155550123",
+            "description": "The simulated caller (E.164).",
+            "title": "Simulate From",
+            "type": "string"
+          },
+          "simulate_to": {
+            "default": "+14155550100",
+            "description": "The simulated agent number (E.164).",
+            "title": "Simulate To",
+            "type": "string"
+          },
+          "start_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Start here instead of the start node.",
+            "title": "Start Node Id"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "draft",
+                  "production",
+                  "staging"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "draft",
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "title": "Version"
+          }
+        },
+        "required": [
+          "pathway_id"
+        ],
+        "title": "ChatCreate",
+        "type": "object"
+      },
+      "ChatCreated": {
+        "description": "The new chat and its opening (empty messages when the start node waits for the caller).",
+        "examples": [
+          {
+            "actions": [],
+            "assistant_messages": [
+              "Hi! Thanks for calling Bella Pasta. How can I help?"
+            ],
+            "chat_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4e01",
+            "current_node_id": "start",
+            "ended": false,
+            "logs": [],
+            "status": "success",
+            "variables": {}
+          }
+        ],
+        "properties": {
+          "actions": {
+            "description": "Simulated side effects: transfer, end_call, press_button, sms, wait, human_takeover.",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "assistant_messages": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assistant Messages",
+            "type": "array"
+          },
+          "chat_id": {
+            "format": "uuid",
+            "title": "Chat Id",
+            "type": "string"
+          },
+          "current_node_id": {
+            "title": "Current Node Id",
+            "type": "string"
+          },
+          "ended": {
+            "title": "Ended",
+            "type": "boolean"
+          },
+          "logs": {
+            "description": "route, extraction, loop_condition, webhook, sms and tool entries in order.",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Logs",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "variables": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "chat_id",
+          "assistant_messages",
+          "current_node_id",
+          "variables",
+          "actions",
+          "ended",
+          "logs"
+        ],
+        "title": "ChatCreated",
+        "type": "object"
+      },
+      "ChatDeleted": {
+        "description": "``DELETE /v1/pathway/chat/{chat_id}`` result.",
+        "examples": [
+          {
+            "message": "Chat deleted.",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ChatDeleted",
+        "type": "object"
+      },
+      "ChatMessage": {
+        "additionalProperties": false,
+        "description": "``POST /v1/pathway/chat/{chat_id}``: the caller's message, optionally on a fork of an earlier turn.",
+        "examples": [
+          {
+            "message": "I'd like to order a pizza"
+          }
+        ],
+        "properties": {
+          "branch_from_turn": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fork the chat as it was after this turn (0 = the opening) into a new chat.",
+            "title": "Branch From Turn"
+          },
+          "message": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ChatMessage",
+        "type": "object"
+      },
+      "ChatReply": {
+        "description": "The answer to a message; ``chat_id`` is the new chat after branching.",
+        "examples": [
+          {
+            "actions": [],
+            "assistant_messages": [
+              "Great! What size?"
+            ],
+            "chat_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4e01",
+            "current_node_id": "node_order",
+            "ended": false,
+            "logs": [
+              {
+                "alternatives": [
+                  {
+                    "label": "Hours",
+                    "score": 1
+                  }
+                ],
+                "from": "start",
+                "global": false,
+                "label": "Wants to order",
+                "to": "node_order",
+                "type": "route"
+              },
+              {
+                "node_id": "start",
+                "type": "extraction",
+                "variables": {
+                  "first_name": "Mike"
+                }
+              }
+            ],
+            "status": "success",
+            "variables": {
+              "first_name": "Mike"
+            }
+          }
+        ],
+        "properties": {
+          "actions": {
+            "description": "Simulated side effects: transfer, end_call, press_button, sms, wait, human_takeover.",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "assistant_messages": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assistant Messages",
+            "type": "array"
+          },
+          "chat_id": {
+            "format": "uuid",
+            "title": "Chat Id",
+            "type": "string"
+          },
+          "current_node_id": {
+            "title": "Current Node Id",
+            "type": "string"
+          },
+          "ended": {
+            "title": "Ended",
+            "type": "boolean"
+          },
+          "logs": {
+            "description": "route, extraction, loop_condition, webhook, sms and tool entries in order.",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Logs",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "variables": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "chat_id",
+          "assistant_messages",
+          "current_node_id",
+          "variables",
+          "actions",
+          "ended",
+          "logs"
+        ],
+        "title": "ChatReply",
+        "type": "object"
+      },
       "ComplianceSettings": {
         "additionalProperties": false,
         "description": "Calling hours, DNC inheritance, and disclosure policies (specs/23-guardrails-and-compliance.md §2).",
@@ -13241,6 +13573,183 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/chat/create": {
+      "post": {
+        "description": "Start a text simulation of a pathway version; the start node's opening comes back at once.",
+        "operationId": "pathways_chat_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Chat Create",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "ephemeral test chat; nothing persists beyond Redis",
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/chat/{chat_id}": {
+      "delete": {
+        "description": "Delete the chat (reset: start a new one with ``/create``).",
+        "operationId": "pathways_chat_reset",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Chat Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Chat Reset",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "ephemeral test chat; nothing persists beyond Redis",
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      },
+      "post": {
+        "description": "Send the caller's message; with ``branch_from_turn`` the chat forks into a new ``chat_id``.",
+        "operationId": "pathways_chat_send",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "chat_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Chat Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatReply"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Chat Send",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "ephemeral test chat; nothing persists beyond Redis",
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
       }
     },
     "/v1/pathway/create": {

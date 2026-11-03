@@ -729,6 +729,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/chat/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Chat Create
+         * @description Start a text simulation of a pathway version; the start node's opening comes back at once.
+         */
+        post: operations["pathways_chat_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/chat/{chat_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Chat Send
+         * @description Send the caller's message; with ``branch_from_turn`` the chat forks into a new ``chat_id``.
+         */
+        post: operations["pathways_chat_send"];
+        /**
+         * Pathways Chat Reset
+         * @description Delete the chat (reset: start a new one with ``/create``).
+         */
+        delete: operations["pathways_chat_reset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/create": {
         parameters: {
             query?: never;
@@ -2592,6 +2636,219 @@ export interface components {
              * @description Opening time, "HH:MM" 24 h.
              */
             start: string;
+        };
+        /**
+         * ChatCreate
+         * @description ``POST /v1/pathway/chat/create``: the version to simulate and the simulated call.
+         * @example {
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "request_data": {
+         *         "first_name": "Mike"
+         *       },
+         *       "simulate_from": "+14155550123",
+         *       "simulate_to": "+14155550100",
+         *       "version": "draft"
+         *     }
+         */
+        ChatCreate: {
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /**
+             * Request Data
+             * @description `{{request_data.*}}` values (at most 64 KiB of JSON).
+             */
+            request_data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Simulate From
+             * @description The simulated caller (E.164).
+             * @default +14155550123
+             */
+            simulate_from: string;
+            /**
+             * Simulate To
+             * @description The simulated agent number (E.164).
+             * @default +14155550100
+             */
+            simulate_to: string;
+            /**
+             * Start Node Id
+             * @description Start here instead of the start node.
+             */
+            start_node_id?: string | null;
+            /**
+             * Version
+             * @description Version number, `draft` (default), `production`, or `staging`.
+             * @default draft
+             */
+            version: number | ("draft" | "production" | "staging");
+        };
+        /**
+         * ChatCreated
+         * @description The new chat and its opening (empty messages when the start node waits for the caller).
+         * @example {
+         *       "actions": [],
+         *       "assistant_messages": [
+         *         "Hi! Thanks for calling Bella Pasta. How can I help?"
+         *       ],
+         *       "chat_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4e01",
+         *       "current_node_id": "start",
+         *       "ended": false,
+         *       "logs": [],
+         *       "status": "success",
+         *       "variables": {}
+         *     }
+         */
+        ChatCreated: {
+            /**
+             * Actions
+             * @description Simulated side effects: transfer, end_call, press_button, sms, wait, human_takeover.
+             */
+            actions: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /** Assistant Messages */
+            assistant_messages: string[];
+            /**
+             * Chat Id
+             * Format: uuid
+             */
+            chat_id: string;
+            /** Current Node Id */
+            current_node_id: string;
+            /** Ended */
+            ended: boolean;
+            /**
+             * Logs
+             * @description route, extraction, loop_condition, webhook, sms and tool entries in order.
+             */
+            logs: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Variables */
+            variables: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
+        /**
+         * ChatDeleted
+         * @description ``DELETE /v1/pathway/chat/{chat_id}`` result.
+         * @example {
+         *       "message": "Chat deleted.",
+         *       "status": "success"
+         *     }
+         */
+        ChatDeleted: {
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * ChatMessage
+         * @description ``POST /v1/pathway/chat/{chat_id}``: the caller's message, optionally on a fork of an earlier turn.
+         * @example {
+         *       "message": "I'd like to order a pizza"
+         *     }
+         */
+        ChatMessage: {
+            /**
+             * Branch From Turn
+             * @description Fork the chat as it was after this turn (0 = the opening) into a new chat.
+             */
+            branch_from_turn?: number | null;
+            /** Message */
+            message: string;
+        };
+        /**
+         * ChatReply
+         * @description The answer to a message; ``chat_id`` is the new chat after branching.
+         * @example {
+         *       "actions": [],
+         *       "assistant_messages": [
+         *         "Great! What size?"
+         *       ],
+         *       "chat_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4e01",
+         *       "current_node_id": "node_order",
+         *       "ended": false,
+         *       "logs": [
+         *         {
+         *           "alternatives": [
+         *             {
+         *               "label": "Hours",
+         *               "score": 1
+         *             }
+         *           ],
+         *           "from": "start",
+         *           "global": false,
+         *           "label": "Wants to order",
+         *           "to": "node_order",
+         *           "type": "route"
+         *         },
+         *         {
+         *           "node_id": "start",
+         *           "type": "extraction",
+         *           "variables": {
+         *             "first_name": "Mike"
+         *           }
+         *         }
+         *       ],
+         *       "status": "success",
+         *       "variables": {
+         *         "first_name": "Mike"
+         *       }
+         *     }
+         */
+        ChatReply: {
+            /**
+             * Actions
+             * @description Simulated side effects: transfer, end_call, press_button, sms, wait, human_takeover.
+             */
+            actions: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /** Assistant Messages */
+            assistant_messages: string[];
+            /**
+             * Chat Id
+             * Format: uuid
+             */
+            chat_id: string;
+            /** Current Node Id */
+            current_node_id: string;
+            /** Ended */
+            ended: boolean;
+            /**
+             * Logs
+             * @description route, extraction, loop_condition, webhook, sms and tool entries in order.
+             */
+            logs: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Variables */
+            variables: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
         };
         /**
          * ComplianceSettings
@@ -8662,6 +8919,132 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PathwayList"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_chat_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatCreated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_chat_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chat_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChatMessage"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatReply"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_chat_reset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chat_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChatDeleted"];
                 };
             };
             /** @description Invalid input */

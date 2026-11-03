@@ -301,6 +301,57 @@ into a new chat id (returned as `chat_id` in response) — the "conversation bra
 Voice test calls from the dashboard use the widget voice transport (`22-web-widget.md`) with an internal
 widget-less session (`POST /internal/pathway/{id}/voice_test` returns a WS token) — no PSTN cost.
 
+> Decision (2026-11-03): pathway test chat (P07-T10).
+> 1. Routes live on their own router (prefix `/v1/pathway/chat`, legacy bodies, tag Pathways) listed before the
+>    pathways router: `POST /create` (`pathways_chat_create`), `POST /{chat_id}` (`pathways_chat_send`), and
+>    `DELETE /{chat_id}` (`pathways_chat_reset`: deletes the chat, answers `{status, message: "Chat deleted."}`;
+>    a new chat is the reset). All three need `pathways:write` plus an editing role for session principals
+>    (analysts and viewers get 403) and are audit-exempt: nothing persists beyond Redis.
+> 2. Create body: `pathway_id` (required), `version` (number, `draft` default, `production`, `staging`; errors as
+>    `GET /v1/pathway/{id}`), `request_data` (object, at most 64 KiB of JSON), `start_node_id` (must be a node of
+>    the graph, else 400 `INVALID_INPUT` field `start_node_id`; the chat starts there with one visit counted),
+>    `simulate_from`/`simulate_to` (any parseable number, stored as E.164; defaults `+14155550123` and
+>    `+14155550100`; invalid → 400 `INVALID_INPUT` naming the field). An absent or other-org pathway is 404
+>    `NOT_FOUND`. The chat freezes the graph of the resolved version; later draft edits do not change it.
+> 3. Session = Redis string `pathway_chat:{chat_id}` (specs/03): `{org_id, pathway_id, version, graph, request_data,
+>    simulate_from, simulate_to, created_at, state, snapshots}` with TTL 24 h refreshed on every write.
+>    `snapshots` maps a turn index to the engine state after that turn (0 = after the opening); only the newest 50
+>    are kept. A chat of another org, an expired one, or an unknown id is 404 `NOT_FOUND` "Chat not found.".
+>    Each send holds `pathway_chat:{chat_id}:lock` (`SET NX EX 120`, released by compare-and-delete); while it is
+>    held another send is 409 `CONFLICT` "This chat is answering another message.". Redis failures are 503
+>    `SERVICE_UNAVAILABLE`.
+> 4. Send body `{message: 1..4000 chars, stripped, non-blank; branch_from_turn: int ≥ 0 | null}`. A chat whose state
+>    has ended is 409 `CONFLICT` "This chat has ended.". Branching copies the snapshot of that turn (absent → 400
+>    `INVALID_INPUT` field `branch_from_turn`) and the snapshots up to it into a new chat id with a fresh TTL; the
+>    message runs there, the response's `chat_id` is the new id, and the original chat is unchanged. Without
+>    branching `chat_id` is the chat's own id. The user turn's index is the state's `turn_index + 1`, its time the
+>    milliseconds since the chat was created.
+> 5. Every request builds a `PathwayEngine` on the stored state on channel `voice` (the chat simulates a call, so
+>    transfers and press button are surfaced instead of the text-channel degradations) and runs it to the end,
+>    capped at 60 s; over the cap the response carries what was produced, `ended` false, the state as the engine
+>    left it, and the api logs `pathway_chat.turn_timeout`. Speech (`Say`, the full text of a `SayStream`) becomes
+>    `assistant_messages`; other actions become `actions`: `wait {seconds}`, `transfer {mode, target,
+>    caller_id_mode}`, `end_call {reason, ended_by}`, `human_takeover`, `press_button {digits, duration_ms}`,
+>    `switch_pathway {pathway_id, version, node_id}`, and `sms {node_id, to, from, body, message_id}` from the
+>    simulated SMS port (never sent; `message_id` `sim-<n>`, reported as sent). Transfer, end call and human
+>    takeover end the chat.
+> 6. Both responses are `{status, chat_id, assistant_messages, current_node_id, variables, actions, ended, logs}`
+>    (`variables` = the engine state's variables). `logs` are the turn's events in emission order: `route {from,
+>    to, label, alternatives, global}`, `extraction {node_id, variables}`, `loop_condition {node_id, score, met}`,
+>    `webhook {node_id, node_name, method, url, status, ms, outcome}` (URL without credentials or query), `sms
+>    {node_id, sent}`, and one `tool {method, url, request_headers, request_body, status, response_body, ms,
+>    outcome}` per HTTP request, before the event of the node that made it; secret-named headers
+>    (`va_common.masking.is_secret_key`: `Authorization`, `*-Key`, `Cookie`, …) read `***`, bodies are JSON
+>    excerpts of at most 2 000 characters (`…` marks a cut). Other event types are not shown.
+> 7. Webhook and scheduling nodes call the customer's endpoint for real through `va_tools.http.HttpExecutor` over
+>    the api's guarded tools client (`X-VA-Call-Id` = the chat id; `http`/private URLs only in `local`/`test`).
+>    Forwarding and Transfer Pathway nodes load other pathways of the org (`production`/`staging` pins or a
+>    number). Decisions, replies and final lines use the api's LLM gateway (platform provider `LLM_*` plus org
+>    provider overrides) with the org's `llm.context_budget_tokens` and `engine.speculative`; built-in variables
+>    are those of an inbound call from `simulate_from` to `simulate_to` in UTC (`call_id` = the chat id, language
+>    `en-US`, no voice). Test-chat LLM usage is not metered (a builder tool, like validation), and its gateway
+>    metrics are not exported by the api.
+
 ## 8. Unit tests
 
 Model `pathway_unit_tests` (03). Create body:

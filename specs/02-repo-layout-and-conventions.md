@@ -271,7 +271,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `LLM_DEFAULT_API_KEY` | same | `sim-llm-key` | real: Telnyx API key |
 | `LLM_DIALOGUE_MODEL` | media, worker, api, edge, sim | `zai-org/GLM-5.3-Flash` | |
 | `LLM_ROUTER_MODEL` | same | `zai-org/GLM-5.3-Flash` | classification/routing/extraction |
-| `LLM_ANALYSIS_MODEL` | worker, sim | `zai-org/GLM-5.3` | post-call analysis (quality over speed) |
+| `LLM_ANALYSIS_MODEL` | worker, api, sim | `zai-org/GLM-5.3` | post-call analysis (quality over speed) |
 | `LLM_FALLBACK_MODEL` | same | `moonshotai/Kimi-K2.6` | |
 | `EMBEDDINGS_MODEL` | worker, media, api, sim | `Qwen/Qwen3-Embedding-8B` | |
 | `EMBEDDINGS_DIMENSIONS` | same | `1024` | must match `vector(1024)` columns |
@@ -298,7 +298,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `WEBHOOK_ALLOW_PRIVATE` | dispatcher, api, worker | `true` (forced `false` in staging/production) | allow private-IP webhook/tool targets in local/test |
 | `ELEVENLABS_ZERO_RETENTION_AVAILABLE` | api, media, worker | `false` | platform ElevenLabs account supports `enable_logging=false` (required for HIPAA mode) |
 | `LLM_DEFAULT_BAA_COVERED` | api, worker | `false` | default Telnyx Inference provider is covered by a BAA |
-| `LLM_MODEL_COSTS_JSON` | media, worker | `{}` | per-model COGS overrides `{"model":{"in_per_1k_micros":n,"out_per_1k_micros":n}}` merged over built-in defaults |
+| `LLM_MODEL_COSTS_JSON` | media, worker, api | `{}` | per-model COGS overrides `{"model":{"in_per_1k_micros":n,"out_per_1k_micros":n}}` merged over built-in defaults |
 | `COGS_TELNYX_OUTBOUND_PER_MIN_MICROS` | worker | `7000` | COGS estimate overrides; full list of `COGS_*` variables and defaults in `24-billing-and-limits.md` (cost-of-goods estimates) |
 | `TELNYX_L16_BYTE_ORDER` | media | `big` | byte order of L16 payloads on the Telnyx media WS (`hd_audio`), verified by live smoke test |
 | `ELEVENLABS_STT_SESSION_ROTATE_S` | media | `1500` | proactively rotate the Scribe session before vendor session limits |

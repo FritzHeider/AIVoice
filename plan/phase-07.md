@@ -66,7 +66,7 @@
   - Deliverables: `va_engine.logs` (per assistant turn entry, `call.route` summary data with `turn_index`/`tag_color`), Call Object `decision` projection aligned with §12
   - Acceptance: syrupy snapshot of the restaurant fixture conversation; byte-stable across runs.
 
-- [ ] P07-T09 Pathways API: CRUD, versions, publish, promote, folders, import/export (split into P07-T09a–c below; tick when all three are ticked)
+- [x] P07-T09 Pathways API: CRUD, versions, publish, promote, folders, import/export (split into P07-T09a–c below; all three ticked: ac367d2)
   - Spec refs: specs/12-pathways-api.md (all endpoints)
   - Depends on: P07-T01, P02-T11
   - Deliverables: routers with legacy envelope, draft editing, version creation, publish/promote with validation, folders, duplicate, import/export, audit entries, cross-tenant factories
@@ -90,7 +90,7 @@
   - Deliverables: folder CRUD + move (depth ≤ 5, delete moves pathways to parent), duplicate, export (`voiceagents.pathway.v1`), import (Bland aliases, missing tool/KB warnings), audit entries
   - Acceptance: Bland fixture import with aliases; export → import round trip keeps the graph hash; folder depth/delete/move tests; cross-tenant factories.
 
-- [ ] P07-T10 Test chat (text mode)
+- [x] P07-T10 Test chat (text mode) — create/send/branch/reset over Redis pathway_chat:{id} + lock, real webhook nodes via guarded tools client, simulated SMS/transfer/end call, route/extraction/tool logs with masked headers, 60 s turn cap; api LLM gateway; specs/12 §7 Decision; make test 12284 passed 99 %, lint/typecheck/placeholders/spec refs/test-ts pass
   - Spec refs: specs/12-pathways-api.md (test chat); specs/11-pathways-engine.md (text-mode degradations)
   - Depends on: P07-T08, P07-T09
   - Deliverables: chat session create/send/reset, expanded per-turn logs in responses

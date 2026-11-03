@@ -194,11 +194,21 @@ class RoutingRig:
             account=(account_id, key),
         )
 
-    async def place(self, to: str, caller: str = CALLER) -> tuple[str, Received]:
-        """An incoming call to ``to``: its call_control_id and FakeTelnyx's ``call.initiated`` webhook."""
+    async def place(
+        self, to: str, caller: str = CALLER, *, time_limit_s: float | None = None
+    ) -> tuple[str, Received]:
+        """An incoming call to ``to``: its call_control_id and FakeTelnyx's ``call.initiated`` webhook.
+
+        ``time_limit_s`` shortens the sim leg's time limit (default 4 h). The accelerated clock jumps to that
+        limit whenever the loop waits on Postgres, and a recorded leg then encodes a WAV of the whole virtual
+        duration (~460 MB for 4 h dual-channel), enough to get an xdist worker OOM-killed."""
         response = await self.raw.post("/sim/telnyx/inbound", json={"to": to, "from": caller})
         assert response.status_code == 202, response.text
         ccid: str = response.json()["call_control_id"]
+        if time_limit_s is not None:
+            accounts = self.state.telnyx.accounts.values()
+            [leg] = [account.calls[ccid] for account in accounts if ccid in account.calls]
+            leg.time_limit_s = time_limit_s
         await settle(self.state)
         [initiated] = [
             item
@@ -207,9 +217,11 @@ class RoutingRig:
         ]
         return ccid, initiated
 
-    async def ring(self, to: str, caller: str = CALLER) -> tuple[str, StoredEvent]:
+    async def ring(
+        self, to: str, caller: str = CALLER, *, time_limit_s: float | None = None
+    ) -> tuple[str, StoredEvent]:
         """:meth:`place`, with the webhook stored as a ``telnyx_events`` row."""
-        ccid, initiated = await self.place(to, caller)
+        ccid, initiated = await self.place(to, caller, time_limit_s=time_limit_s)
         return ccid, await stored_event(self.database, initiated.body)
 
     def router_on(

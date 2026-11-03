@@ -22,6 +22,8 @@ dependencies = [
     "va-domain",
     "va-engine",
     "va-events",
+    "va-llm",
+    "va-tools",
 ]
 
 [build-system]
@@ -36,3 +38,5 @@ va-db = { workspace = true }
 va-domain = { workspace = true }
 va-engine = { workspace = true }
 va-events = { workspace = true }
+va-llm = { workspace = true }
+va-tools = { workspace = true }

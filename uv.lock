@@ -2697,6 +2697,8 @@ dependencies = [
     { name = "va-domain" },
     { name = "va-engine" },
     { name = "va-events" },
+    { name = "va-llm" },
+    { name = "va-tools" },
 ]
 
 [package.metadata]
@@ -2719,6 +2721,8 @@ requires-dist = [
     { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
+    { name = "va-llm", editable = "packages/va_llm" },
+    { name = "va-tools", editable = "packages/va_tools" },
 ]
 
 [[package]]

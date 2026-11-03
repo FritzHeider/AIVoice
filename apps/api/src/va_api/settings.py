@@ -17,6 +17,7 @@ from va_common.settings import (
 )
 from va_common.storage import S3Settings
 from va_compliance.international import parse_allowed_countries
+from va_llm.settings import LlmSettings
 
 __all__ = ["ApiSettings"]
 
@@ -33,8 +34,11 @@ class ApiSettings(
     EmailSettings,
     CryptoSettings,
     S3Settings,
+    LlmSettings,
 ):
-    """Settings of the public REST API; further secrets (vendors) arrive with their phases.
+    """Settings of the public REST API; further secrets (vendors) arrive with their phases. The ``LLM_*``
+    platform provider (:class:`~va_llm.settings.LlmSettings`) serves the pathway test chat (specs/12 §7) and
+    names the platform models recorded in every resolved call config (specs/05 §4.4).
 
     ``API_KEY_PEPPER`` and ``LOCAL_MASTER_KEY`` may be empty at construction so importing ``va_api.main``
     needs no environment; the container refuses to start without them (:meth:`api_key_hasher`,
@@ -53,9 +57,6 @@ class ApiSettings(
     api_key_pepper_version: int = Field(default=1, ge=1)
     # Enterprise OIDC SSO; the /v1/org/sso routes refuse to work while false (specs/04 §5).
     oidc_enabled: bool = False
-    # Platform model ids recorded in every resolved call config (specs/05 §4.4).
-    llm_dialogue_model: str = "zai-org/GLM-5.3-Flash"
-    llm_router_model: str = "zai-org/GLM-5.3-Flash"
     # Destinations ever dialable; everything else is INTERNATIONAL_NOT_ENABLED (specs/24 §6 item 7).
     international_allowed_countries: str = "US,CA,GB,AU,IE,NZ,DE,FR,ES,IT,NL,BE,SE,NO,DK,FI,MX,BR,IN,PH,SG"
 

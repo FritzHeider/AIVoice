@@ -1888,3 +1888,188 @@ Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift
 12255 passed, 7 skipped, 99.08 %. Diff matches specs/12 §4/§5/§6 and Decision P07-T09c (route order, locked folder
 tree, depth/cycle errors, delete re-parenting, move 404 field paths, import format/alias/warnings, export round trip,
 duplicate selector + copy name, audit actions in specs/04 §13 + AUDIT_ACTIONS).
+
+## Plan P07-T10 — Pathway test chat (text simulation; specs/12 §7, §10; specs/03 Redis `pathway_chat:{chat_id}`)
+
+Planner note: ticked the P07-T09 parent (a–c all ticked, ac367d2).
+
+### Facts that shape the design
+- The api has no LLM gateway, no HTTP executor, no PathwayLoader. The media runtime builds its gateway in
+  `va_media.runtime.open_runtime` (LlmGateway(ProviderRegistry(platform_provider(settings), OrgProviderStore(database,
+  envelope, clock=)), http_client(settings, timeout=LLM_HTTP_TIMEOUT), clock=, metrics=LlmMetrics(registry, catalog),
+  costs=CostTable(load_costs(...)))`). `LlmMetrics(registry, None)` works without the media catalog counters.
+- `/v1/pathway/chat/create` and `/v1/pathway/chat/{chat_id}` would be captured by the uuid-typed `POST
+  /v1/pathway/{pathway_id}` → new router listed in `main.ROUTERS` BEFORE `pathways_router` (like folders/io).
+- Engine channels: `widget_chat` turns transfers into `HumanTakeover` and ignores press button, which would hide what
+  §7 says must be shown ("transfer, end call, press button simulated, recorded as actions"). The chat therefore runs
+  the engine on channel `voice` (it simulates the call); every non-speech action is recorded, never executed.
+
+### Spec decision — append `> Decision (2026-11-03): pathway test chat (P07-T10).` at the end of specs/12 §7
+1. Routes on `routers/pathway_chat.py` `pathway_chat_router` (prefix `/v1/pathway/chat`, legacy envelope, tag
+   Pathways, before `pathways_router` in ROUTERS): `POST /create` (op `pathways_chat_create`), `POST /{chat_id}`
+   (op `pathways_chat_send`, chat_id = uuid path param), `DELETE /{chat_id}` (op `pathways_chat_reset`; the "reset"
+   deliverable: deletes the session → `{status, message: "Chat deleted."}`; unknown → 404). All three
+   `require_scope("pathways:write")` + `require_pathway_editor` (analysts 403); `audit_exempt("ephemeral test chat;
+   nothing persists beyond Redis")`.
+2. Create body: `pathway_id` (uuid, required), `version` (selector as GET: int ≥1 | draft | production | staging,
+   default `draft`; errors as `load_version`), `request_data` (object ≤ 64 KiB JSON, default {}), `start_node_id`
+   (str|null; must be a node of the graph else 400 INVALID_INPUT field `start_node_id`; the state starts there
+   instead of the start node), `simulate_from`/`simulate_to` (E.164 via `va_domain.phone.normalize_e164`, default
+   `+15555550100`/`+15555550199`; invalid → 400 field name). Unknown/deleted/other-org pathway → 404 like GET.
+   The chat runs the graph of the resolved version (frozen into the session: later draft edits do not change a
+   running chat). Engine facts: org, `call_id` = chat id, channel `voice`, request_data, builtins below, timezone
+   UTC, empty transfer_list. Builtins = the CallContext-free subset of `va_engine.builtins` computed for an inbound
+   call from `simulate_from` to `simulate_to`: `now_utc`, `now_local`, `today`, `from`, `to`, `call_id`,
+   `timezone`, `language` (`en-US`), `agent_number` = to, `user_number` = from, `batch_id` null, `metadata` {}.
+   Refactor `call_builtins` so both go through one pure `builtin_values(...)` (no duplication).
+3. Session = one Redis string `pathway_chat:{chat_id}` (specs/03), JSON `{org_id, pathway_id, version, graph
+   (dumped), request_data, simulate_from, simulate_to, created_at, state (dump_engine_state), snapshots: {"<turn
+   index>": state}}` with TTL 24 h refreshed on every write. A snapshot is stored after create (turn 0) and after
+   every message (key = `state.turn_index` after the turn); only the newest 50 are kept. A chat of another org reads
+   as absent → 404 `NOT_FOUND` "Chat not found." (no field). Concurrent sends to one chat: a lock
+   `pathway_chat:{chat_id}:lock` `SET NX EX 120`; held → 409 `CONFLICT` "This chat is answering another message.";
+   released in `finally`. Redis unavailable → 503 `SERVICE_UNAVAILABLE`.
+4. Send body `{message: str 1..4000 (stripped, non-blank), branch_from_turn: int ≥0 | null}`. Ended chat (state
+   `ended`) → 409 `CONFLICT` "This chat has ended." unless branching. Branching: the snapshot of that turn (absent →
+   400 INVALID_INPUT field `branch_from_turn` "That turn is not available to branch from.") becomes the state of a
+   NEW chat id (fresh 24 h key, snapshots copied up to and including that turn); the message runs there; the
+   response carries the new `chat_id`; the original chat is untouched. Without branching the response's `chat_id`
+   is the same id (always present). The user turn = `UserTurn(index=state.turn_index+1, text, start_ms=end_ms=ms
+   since created_at)`.
+5. Running a turn: build `PathwayEngine(state, ActiveGraph, ports, facts, clock)` per request; run `start()` (create)
+   or `handle_user_turn()`; consume every action in order: `Say.text` / the full `SayStream` text (stripped,
+   non-blank) → one `assistant_messages` item each; other actions → `actions` items: `{"type":"wait","seconds"}`,
+   `{"type":"transfer","mode","target","caller_id_mode"}`, `{"type":"end_call","reason","ended_by"}`,
+   `{"type":"human_takeover"}`, `{"type":"press_button","digits","duration_ms"}`, `{"type":"sms","to","from","body",
+   "node_id"}` (from the simulated SmsPort, which returns `sent=True, message_id="sim-<n>"`). Transfer/end call/
+   takeover end the chat (the engine sets `ended`). Then `settle_background()`, `aclose()`, persist. A turn is
+   capped at 60 s (`va_common.waits.within` on the clock); over → return what was produced with `ended=false` and log
+   `pathway_chat.turn_timeout` (state persisted as the engine left it).
+6. Responses: create `{status, chat_id, assistant_messages, current_node_id, variables, actions, ended, logs}`
+   (superset of the spec example); send `{status, chat_id, assistant_messages, current_node_id, variables, actions,
+   ended, logs}`. `variables` = `state.variables`. `logs` = the turn's engine events in emission order mapped:
+   `call.route` → `{type:"route", from, to, label, alternatives, global}`; `call.extraction` →
+   `{type:"extraction", node_id, variables}`; `call.loop_condition` → `{type:"loop_condition", node_id, score, met}`;
+   `call.webhook_node` → `{type:"webhook", node_id, node_name, method, url (redacted), status, ms, outcome}`;
+   `call.sms_sent` → `{type:"sms", node_id, sent}`; every request through the chat's HttpPort adds `{type:"tool",
+   method, url (redacted_url), request_headers (secret names → "***" via `va_common.masking.is_secret_key`),
+   request_body (JSON excerpt ≤ 2 000 chars), status, response_body (excerpt ≤ 2 000 chars), ms, outcome}` right
+   before the event of the node that made it; other event types are skipped.
+7. Webhook/tool nodes execute for real through `va_tools.http.HttpExecutor` (the container's `http_executor`, SSRF
+   guard + `allow_http` = `insecure_urls_allowed(va_env)`); Transfer Pathway / forwarding load other pathways of
+   the org through `va_api.services.pathway_loader.DbPathwayLoader(database, org_id)` (production/staging pins or a number;
+   missing → `PathwayUnavailableError`). LLM: dialogue/decisions/final lines over the container's `llm_gateway`
+   with `DialogueSettings(org_id, direction="inbound", call_id=chat id, counterpart=simulate_from,
+   context_budget_tokens=org.llm.context_budget_tokens, speculative=org.engine.speculative)` (org from
+   `org_settings` reader). Test-chat LLM usage is not metered (no recorder): it is a builder tool like validate.
+
+### Files
+- `apps/api/src/va_api/services/pathway_loader.py` (new; va_db does not depend on va_engine — checked):
+  `DbPathwayLoader(database, org_id)` implementing `va_engine.navigation.PathwayLoader` (tenant_session;
+  `PathwayRepo.get` + pin/number → `ActiveGraph(uuid, number, load_graph(...))`; NotFound/absent pin/bad uuid →
+  `PathwayUnavailableError(reason)`). P07-T12 may move it to a shared package.
+- `packages/va_engine/src/va_engine/builtins.py`: `builtin_values(*, now, zone, from_number, to_number, call_id,
+  voice_id, timezone, language, inbound, batch_id, metadata)` shared by `call_builtins` and the chat.
+- `apps/api/src/va_api/settings.py`: mix in `va_llm.settings.LlmSettings` (drop the duplicated
+  `llm_dialogue_model`/`llm_router_model` fields); specs/02 §6 scope of `LLM_MODEL_COSTS_JSON` gains `api`.
+- `apps/api/src/va_api/container.py`: `llm_gateway: LlmGateway` (platform + OrgProviderStore over the container's
+  envelope; http_client timeout = va_media's LLM_HTTP_TIMEOUT value, closed on shutdown; LlmMetrics on the probe
+  registry when available else a private `CollectorRegistry`), `http_executor: HttpExecutor` (enter
+  `open_http_executor(settings, clock=, allow_http=insecure_urls_allowed(va_env), resolver=host_resolver)` on the
+  container's exit stack), `token_counter` = `va_llm.tokens.default_counter()`. Do NOT prewarm (not a readiness
+  check). apps/api pyproject gains va-llm, va-tools.
+- `apps/api/src/va_api/services/pathway_chat.py` (new): `ChatDeps(redis, database, gateway, http, org_settings,
+  clock, counter)`, `ChatSession` model (pydantic, the Redis document), `ChatStore` (`load(org_id, chat_id)`,
+  `save`, `lock(chat_id)` async CM, keys `chat_key`/`lock_key`), `create_chat(deps, ctx, body, allow_http)` →
+  `ChatTurn`, `send_message(deps, ctx, chat_id, body)` → `ChatTurn`, `delete_chat(...)`.
+- `apps/api/src/va_api/services/pathway_chat_run.py` (new, pure-ish): `ChatRecorder` (EngineEvents sink + HttpPort
+  wrapper + simulated SmsPort collecting `logs`/`actions`), `run_actions(agen, recorder) -> list[str]` (assistant
+  messages), `log_item(event_type, data)`, `excerpt(value, limit=2000)`, `masked_headers(headers)`,
+  `chat_builtins(...)`.
+- `apps/api/src/va_api/routers/pathway_chat.py` + `pathway_chat_schemas.py` (reuse `parse_version_selector`,
+  `ReadPathways/WritePathways/EDITOR/WRITE_SCOPE` from `routers/pathways.py`; every model has an `examples` entry).
+- `apps/api/src/va_api/main.py`: router before `pathways_router`.
+- specs/12 §7 Decision, specs/02 §6 scope tweak, AGENTS.md bullet, `make openapi` + both `gen:api`.
+- Cross-tenant (`cross_tenant_factories.py`): `chat_id` factory = a chat created through `ChatStore.save` for the
+  owner org (no LLM needed: the factory writes the document directly); `register_request("pathways_chat_create",
+  json={"pathway_id": <owner pathway>})` needs the owner's pathway → if the registry cannot express that, mark the
+  owner control with `register_owner_status(op, 404)`? No — use the existing `pathway_id` factory mechanism
+  (check how `pathways_duplicate` gets its id) and send `pathway_id` in the body; for the send op register json
+  `{"message": "hi"}` and an owner status that does not need the LLM: the factory chat is `ended` → owner control
+  409 (`register_owner_status("pathways_chat_send", 409)`); reset → 200.
+
+### Tests (apps/api/tests/)
+- `support/chat_helpers.py`: `chat_container(identity)` → `SessionContainer` whose `llm_gateway` is a real
+  LlmGateway over FakeLLM on a socket (`running_sims(state, ports={"llm": 0})`, SystemClock, platform provider =
+  sim URL/key, models = sim defaults) and `http_executor` over `host_resolver`; `rules(state, yaml)` loads FakeLLM
+  rules (route_decision / extraction / dialogue replies) — reuse `packages/va_engine/tests/support/task_helpers`
+  style; restaurant fixture via `graph_helpers.fixture("restaurant")` (check name) seeded with `pathway_helpers`.
+- `test_pathway_chat_api.py`:
+  - create on the restaurant fixture: opener in `assistant_messages`, `current_node_id` = start, `logs` [], key
+    `pathway_chat:{id}` exists with TTL ≤ 86 400.
+  - multi-turn: scripted FakeLLM route decisions reproduce the expected route sequence (`logs` route items
+    from/to/label match), extraction variables appear in `variables` and an `extraction` log item.
+  - webhook node executes for real against `webhook_receiver.served_receiver` (request received, `tool` log item
+    with masked `Authorization` header, status, response excerpt) and its `webhook` log item.
+  - transfer node → `actions` [{type: transfer …}], `ended` true, a further send → 409 "This chat has ended.".
+  - end call → `end_call` action; SMS node → `sms` action, no Telnyx request (simulated).
+  - branching: three turns, `branch_from_turn: 1` → new chat_id, its state history = snapshot 1 + the new message;
+    original chat unchanged (next send continues from its own turn 3); unknown turn → 400 field.
+  - start_node_id override; bad start node → 400 field; invalid simulate_from → 400 field; version production
+    without pin → 404 PATHWAY_VERSION_NOT_FOUND; other-org pathway → 404; other-org chat → 404; delete → 404 after.
+  - concurrent send while the lock is held (pre-set the lock key) → 409.
+  - route-order test: `POST /v1/pathway/chat/create` is not answered by `/{pathway_id}`.
+- `test_pathway_chat_run.py` (unit): log_item mapping for every event type, excerpt truncation, header masking,
+  action mapping, simulated SMS ids, snapshot pruning to 50.
+- `test_pathways_permissions.py`: chat create/send/delete → owner/admin/developer ok, analyst/viewer/billing 403;
+  key with only `pathways:read` → 403.
+- api loader test (`test_pathway_loader.py`, DB): production/staging/number/missing/other-org.
+- va_engine `test_builtins.py` unchanged results for `call_builtins` after the refactor.
+- api container test (`test_container.py`): gateway + executor clients closed on shutdown (it asserts close order
+  of every httpx client — update it).
+- Cross-tenant, audit-marker, openapi contract suites pass.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; targeted pytest; `make openapi`
++ `corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api` + `make test-ts`;
+`uv run python scripts/check_spec_refs.py`; `make test` in background (truncate `logs/make_test.log` first, Monitor
+heartbeat); `uvx radon cc -s -a`; `npx --yes jscpd@4 --silent` 0 clones; pip-audit + pnpm audit; env-example test
+(settings mixin adds `LLM_*` to api: keep `.env.example`/specs/02 §6 in step). No e2e (no call flow).
+
+### Risks
+- FakeLLM scripting of concurrent decision calls: route via rules matched on function name (`route_decision`) and
+  `call_index`; keep the dialogue replies deterministic with `respond: {content: ...}`.
+- Speculation consumes a dialogue reply whenever it starts: disable via org setting `engine.speculative=false` in
+  tests that count dialogue requests, or script enough replies.
+- `test_container` asserts every httpx client's close order — update for the gateway and executor clients.
+- Redis document size: snapshots capped at 50; history itself capped by the engine.
+- Settings mixin may change field order/env-example drift tests: run `scripts/tests/test_env_example.py`.
+
+## Build P07-T10 (in progress → done when make test passes)
+- New: services/pathway_chat.py (ChatStore, create/send/delete, _Conversation), services/pathway_chat_run.py
+  (ChatRecorder, log_item/action_item/excerpt/masked_headers), services/pathway_loader.py (DbPathwayLoader),
+  routers/pathway_chat.py + pathway_chat_schemas.py (router before pathways_router).
+- Changed: ApiSettings mixes LlmSettings (dup llm_* fields dropped); container llm_gateway + tools_http;
+  va_tools.http.tools_client (shared by open_http_executor); va_engine.builtins.builtin_values (call_builtins delegates).
+- Default simulate numbers = spec example +14155550123/+14155550100 (555 area code is not a valid number).
+- Analysts refused per specs/12 §10 (chat is in the editor row).
+- Tests: test_pathway_chat_api (12, FakeLLM real gateway, webhook receiver, timeout cap via monkeypatched
+  TURN_TIMEOUT_S), test_pathway_chat_run (9 unit), test_pathway_loader, chat role matrix + read-only key in
+  test_pathways_permissions, cross-tenant chat_id factory (ended chat, owner send 409), test_container close order.
+  chat_helpers.WallClock (FrozenClock type over SystemClock: SessionContainer.clock is typed FrozenClock).
+- Spec: specs/12 §7 Decision P07-T10; specs/02 LLM_MODEL_COSTS_JSON scope + api. openapi + both schema.d.ts.
+- Gates: lint/typecheck/placeholders pass, spec refs 0, jscpd 0, radon avg A 2.92, test-ts 22/52/48, pip-audit
+  clean, pnpm audit 3 moderate (pre-existing); targeted pytest 178 passed.
+- Rework after empty review.rejected (inactivity timeout of the previous builder, not a finding): previous full
+  run had 1 xdist worker crash in unrelated `test_accept_db.py::test_recording_and_hd_audio_reach_the_answer`
+  (passes alone, 20 passed); re-ran gates: lint/typecheck/placeholders/specs pass, radon A 2.92, jscpd 0,
+  pip-audit clean, pnpm 3 moderate; full make test re-run in background.
+- The repeated crash was an OOM kill (dmesg via privileged container): `test_recording_and_hd_audio_reach_the_answer`
+  grew a worker by ~440 MB+ (FakeTelnyx 4 h virtual recording). Fixed in the edge routing rig
+  (`ring(..., time_limit_s=30)`); file RSS delta gone. AGENTS.md bullet added.
+- Final make test: 12284 passed, 7 skipped, coverage 99.08%, exit 0.
+
+## Review P07-T10 (approved)
+- Re-ran: lint/typecheck/placeholders exit 0, make test 12284 passed 7 skipped (99 %), test-ts 22/52/48, spec refs 0.
+- Diff matches specs/12 §7 + Decision; reviewer fixed specs/02 §6 scope of LLM_ANALYSIS_MODEL/LLM_FALLBACK_MODEL
+  (api now reads them through LlmSettings).

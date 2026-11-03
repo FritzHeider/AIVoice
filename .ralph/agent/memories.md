@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793741280-f92b
+> P07-T10: pathway test chat = services/pathway_chat (ChatStore Redis pathway_chat:{id}+:lock, one PathwayEngine per request) + pathway_chat_run.ChatRecorder (events sink, HttpPort wrapper, simulated SmsPort); api container llm_gateway + tools_http; SessionContainer.clock is typed FrozenClock so chat tests use chat_helpers.WallClock (FrozenClock subclass over SystemClock) else gateway deadlines fire at once; +1555... numbers fail normalize_e164 (use +1415555xxxx)
+<!-- tags: api, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793739301-6682
 > P07-T09c: pathway folders/io routers must precede pathways_router in main.ROUTERS (literal /folders,/import vs uuid /{pathway_id}); PathwayFolderRepo.lock_tree locks all folder rows FOR UPDATE then re-reads (READ COMMITTED sees rows committed while waiting); create_checked(action=,audit_extra=) shared by create/import/duplicate; dict(await session.execute()) fails -> build from .all()
 <!-- tags: api, pathways, testing | created: 2026-11-03 -->
@@ -493,6 +497,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793747646-e8bf
+> fix: xdist 'worker crashed ... Not properly terminated' in make test = kernel OOM kill (read via: docker run --rm --privileged --net=none redis:7-alpine dmesg | grep -i 'killed process'). Cause: FakeTelnyx recorded leg on accelerated clock jumps to 4 h time limit and encodes ~460 MB WAV (test_accept_db recording test). Fix: routing rig ring/place(time_limit_s=30). Find RSS hogs with a -p plugin logging /proc/self/statm per test
+<!-- tags: testing, sim, edge | created: 2026-11-03 -->
 
 ### mem-1793715612-b9ec
 > Python int(str) raises ValueError beyond 4300 digits: any never-raise coercion of model/caller text (int(digits)) must cap length or catch ValueError

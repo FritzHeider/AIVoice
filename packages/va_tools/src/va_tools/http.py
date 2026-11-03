@@ -49,6 +49,7 @@ __all__ = [
     "HttpExecutor",
     "Signer",
     "open_http_executor",
+    "tools_client",
 ]
 
 MAX_RESPONSE_BYTES: Final = 1_048_576
@@ -228,6 +229,19 @@ class HttpExecutor:
         )
 
 
+def tools_client(
+    settings: WebhookSafetySettings, *, resolver: HostResolver = system_resolver
+) -> httpx.AsyncClient:
+    """The guarded client of :class:`HttpExecutor` instances (connect-time SSRF vetting per
+    ``WEBHOOK_ALLOW_PRIVATE``); a process may share one between many executors and must close it."""
+    return safe_client(
+        settings,
+        timeout=httpx.Timeout(DEFAULT_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
+        allow_private=settings.webhook_allow_private,
+        resolver=resolver,
+    )
+
+
 @asynccontextmanager
 async def open_http_executor(  # noqa: PLR0913 - one keyword per executor knob keeps call sites explicit
     settings: WebhookSafetySettings,
@@ -238,13 +252,8 @@ async def open_http_executor(  # noqa: PLR0913 - one keyword per executor knob k
     call_id: str | None = None,
     signer: Signer | None = None,
 ) -> AsyncIterator[HttpExecutor]:
-    """An executor over a guarded :func:`~va_common.safe_http.safe_client` (closed on exit)."""
-    client = safe_client(
-        settings,
-        timeout=httpx.Timeout(DEFAULT_TIMEOUT_S, connect=CONNECT_TIMEOUT_S),
-        allow_private=settings.webhook_allow_private,
-        resolver=resolver,
-    )
+    """An executor over a guarded :func:`tools_client` (closed on exit)."""
+    client = tools_client(settings, resolver=resolver)
     try:
         yield HttpExecutor(client, clock=clock, allow_http=allow_http, call_id=call_id, signer=signer)
     finally:

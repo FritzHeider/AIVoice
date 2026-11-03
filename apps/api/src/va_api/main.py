@@ -47,6 +47,7 @@ from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
 from va_api.routers.org_sso import org_router
 from va_api.routers.orgs import orgs_router
+from va_api.routers.pathway_chat import pathway_chat_router
 from va_api.routers.pathway_folders import pathway_folders_router
 from va_api.routers.pathway_io import pathway_io_router
 from va_api.routers.pathways import pathways_router
@@ -82,6 +83,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     org_router,
     orgs_router,
     calls_router,
+    pathway_chat_router,  # before pathways_router: /chat must not match /{pathway_id}
     pathway_folders_router,  # before pathways_router: /folders must not match /{pathway_id}
     pathway_io_router,  # before pathways_router: /import must not match /{pathway_id}
     pathways_router,

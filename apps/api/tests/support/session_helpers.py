@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
 from migration_helpers import fresh_database, upgrade
 from pg_container import running_postgres
+from prometheus_client import CollectorRegistry
 from service_helpers import make_client
 from sqlalchemy import select, update
 from starlette.types import ASGIApp
@@ -39,6 +40,7 @@ from va_api.auth.sessions import SessionManager
 from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
+from va_api.services.pathway_chat import CHAT_LLM_TIMEOUT
 from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
@@ -75,6 +77,9 @@ from va_db.session import Database
 from va_events import DbWebhookRouter, EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
+from va_llm import LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry
+from va_llm.providers import platform_provider
+from va_tools.http import tools_client
 
 __all__ = [
     "ACCEPT_INVITATION",
@@ -146,7 +151,9 @@ class SessionContainer(AuthContainer):
     the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
     ``FakeCallCanceller``, ``FakeResolver``) and an object store over ``FakePresigner``, and the webhook
     test-send deliverer (a real pinning client over ``host_resolver``) once the app opens it, and a live event
-    hub over the fake Redis (closed and replaced when the app closes)."""
+    hub over the fake Redis (closed and replaced when the app closes), and the pathway test chat's LLM gateway
+    (``LLM_DEFAULT_BASE_URL`` of the app settings, on the container clock: chat tests pass ``SystemClock()``)
+    and guarded tools client over ``host_resolver`` once the app opens them."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -173,6 +180,8 @@ class SessionContainer(AuthContainer):
     webhook_deliverer: Deliverer = field(init=False)
     live_hub: LiveHub = field(init=False)
     stream_tail: StreamTailHub = field(init=False)
+    llm_gateway: LlmGateway = field(init=False)
+    tools_http: httpx.AsyncClient = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -207,8 +216,25 @@ class SessionContainer(AuthContainer):
             allow_private=settings.webhook_allow_private,
             resolver=self.host_resolver,
         )
-        async with super().__call__(settings) as opened, httpx.AsyncClient() as http, webhook_http:
+        tools_http = tools_client(settings, resolver=self.host_resolver)
+        async with (
+            super().__call__(settings) as opened,
+            httpx.AsyncClient() as http,
+            webhook_http,
+            tools_http,
+            httpx.AsyncClient(timeout=CHAT_LLM_TIMEOUT) as llm_http,
+        ):
             self.oidc_discovery = discovery_for(settings, http)
+            self.tools_http = tools_http
+            self.llm_gateway = LlmGateway(
+                ProviderRegistry(
+                    platform_provider(settings),
+                    OrgProviderStore(self.database, self.envelope, clock=self.clock),
+                ),
+                llm_http,
+                clock=self.clock,
+                metrics=LlmMetrics(CollectorRegistry()),
+            )
             self.webhook_deliverer = Deliverer(
                 webhook_http,
                 clock=self.clock,

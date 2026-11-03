@@ -192,7 +192,7 @@ async def test_recording_and_hd_audio_reach_the_answer(database: Database) -> No
     async with accept_rig(database) as r:
         org = await r.org()
         to = await r.rig.number(org, {"prompt": PROMPT, "record": True, "hd_audio": True})
-        ccid, event = await r.rig.ring(to)
+        ccid, event = await r.rig.ring(to, time_limit_s=30)
         await r.route(event)
         body = answer_body(r, ccid)
         assert (body["record"], body["record_channels"], body["record_format"]) == (

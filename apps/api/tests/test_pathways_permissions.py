@@ -224,3 +224,42 @@ async def test_io_and_folder_role_matrix(
         for response in writes:
             assert error_of(response)[:2] == (403, "FORBIDDEN")
             assert response.json()["errors"][0]["message"] == NOT_EDITOR_MESSAGE
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_chat_role_matrix(
+    role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    """The test chat needs an editing role (specs/12 §10; Decision P07-T10); the seeded start node speaks a
+    static line, so creating a chat needs no model."""
+    member = await signed_in(client, identity, container, role)
+    pathway = await seed_pathway(identity, member.org.id)
+    headers = write_headers(client)
+    created = await client.post(f"{BASE}/chat/create", json={"pathway_id": str(pathway.id)}, headers=headers)
+    if role in EDITORS:
+        assert created.status_code == 200, created.text
+        assert created.json()["assistant_messages"] == ["Hi"]
+        deleted = await client.delete(f"{BASE}/chat/{created.json()['chat_id']}", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+        return
+    chat_id = new_id()
+    refused = [
+        created,
+        await client.post(f"{BASE}/chat/{chat_id}", json={"message": "Hi"}, headers=headers),
+        await client.delete(f"{BASE}/chat/{chat_id}", headers=headers),
+    ]
+    for response in refused:
+        assert error_of(response)[:2] == (403, "FORBIDDEN")
+        assert response.json()["errors"][0]["message"] == NOT_EDITOR_MESSAGE
+
+
+async def test_chat_needs_pathways_write(
+    client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    member = await make_member(identity, container.password_hasher)
+    key, _ = await store_api_key(container, member.org.id, scopes=("pathways:read",))
+    pathway = await seed_pathway(identity, member.org.id)
+    response = await client.post(
+        f"{BASE}/chat/create", json={"pathway_id": str(pathway.id)}, headers={"Authorization": key}
+    )
+    assert error_of(response)[:2] == (403, "FORBIDDEN")

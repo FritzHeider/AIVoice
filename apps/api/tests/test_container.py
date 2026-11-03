@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from api_helpers import make_settings
 from service_helpers import readiness_of, track_closes
@@ -23,6 +24,7 @@ from va_common.time import SystemClock
 from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_events.webhook_delivery import Deliverer
+from va_llm import LlmGateway
 
 UNREACHABLE_PG = "postgresql+asyncpg://va:va@127.0.0.1:1/va"
 UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"
@@ -59,10 +61,12 @@ async def test_build_container_opens_and_closes(monkeypatch: pytest.MonkeyPatch)
         assert container.oidc_discovery.allow_insecure  # VA_ENV=local
         assert isinstance(container.org_settings, OrgSettingsReader)
         assert isinstance(container.webhook_deliverer, Deliverer)
+        assert isinstance(container.llm_gateway, LlmGateway)
+        assert isinstance(container.tools_http, httpx.AsyncClient)
         assert closed == []
-    # The webhook test-send client, the OIDC discovery client, the va_app and va_system engines, then the
-    # dependency stack in reverse order.
-    assert closed == ["http", "http", "engine", "engine", "redis", "engine"]
+    # The tools client, the test-chat LLM client, the webhook test-send client, the OIDC discovery client,
+    # the va_app and va_system engines, then the dependency stack in reverse order.
+    assert closed == ["http", "http", "http", "http", "engine", "engine", "redis", "engine"]
 
 
 def test_email_sender_is_in_memory_only_under_test() -> None:
