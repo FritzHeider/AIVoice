@@ -693,3 +693,116 @@ AGENTS.md: one dated bullet (navigation module, NodeFrame.kind v3, loader port, 
 - Re-ran: make lint/typecheck/placeholders pass, check_spec_refs 0, make test exit 0 (11712 passed, 7 skipped, 99.06 %,
   navigation.py 100 %). Diff checked against specs/11 §3.1/§4/§5.2/§9 and the P07-T05 Decision: frame push/pop, forward
   frame discard, transfer_pathway frames never auto-popped, visit counting, v2→v3 upgrader (no input mutation).
+
+## Plan P07-T06 — Node handlers: Default, Wait for Response, End Call, Transfer Call (cold), Global (specs/11 §4, §7)
+
+Scope: pure handlers producing engine actions; no routing/orchestration (T08), no prompt assembly (T08 implements the
+`DialoguePort` with §5.7 + speculation). Global = Default handler (navigator already pushes the frame, P07-T05).
+
+### Spec decision — append `> Decision (2026-11-03): node handlers (P07-T06).` under the P07-T05 Decision in specs/11 §4
+1. Handlers implement `on_enter(ctx)`, `respond(ctx)` → `HandlerResult(actions: tuple[Action, ...], problem: str|None)`
+   (not a bare list: the problem string reports a broken config without raising) and `waits_for_user(node)`.
+   `HandlerResult.terminal` = any `TransferAction`/`EndCallAction`/`HumanTakeover`.
+2. Speech: static `text` → `Say(rendered)`; otherwise prompt → `SayStream(ctx.dialogue.stream(ctx))` (the turn
+   orchestration's dialogue generator, §5.7/§5.8). Templates with a syntax error are spoken raw (`engine.template_invalid`).
+   `modelOptions.block_interruptions` → `interruptible=False`, else `None` (call level).
+3. Final lines (End Call, Transfer): config `speechMode: "prompt"` with a non-blank `speechPrompt` composes one line through
+   `LinePort.compose` (dialogue call type); failure/blank → the rendered `speech` (`engine.final_line_fallback`, reason).
+   `static` → rendered `speech`. No config speech → node `text`, else node `prompt` composed (failure → no line). No line
+   → the terminal action is due at once (`after_mark=None`). Final lines are not interruptible.
+4. End Call: `Say(line)` + `EndCallAction(reason="agent_end_call", ended_by="agent", after_mark=line mark)`; sets
+   `state.ended`/`end_reason`. Text channels identical (the line is the last message, the action closes the conversation).
+5. Transfer Call (voice): target = rendered `effective_transfer_number`; a key of the call `transfer_list` resolves to
+   its number; must be E.164 (`^\+[1-9]\d{6,14}$`) or a `sip:`/`sips:` URI. Valid → `Say(line)` + `TransferAction(mode,
+   target, caller_id_mode, warm, after_mark)` (warm config passed through; phase 12 executes warm). Invalid/missing →
+   `Say(errorPhrase)`, problem `transfer_target_invalid`, no terminal action (logged without the number). `sms` channel:
+   `Say(data.transfer.textModeMessage or "A team member will reach out shortly.")` + `HumanTakeover`; widget channels:
+   `HumanTakeover` only.
+6. Wait for Response (`waitForResponse` absent = defaults): `on_enter` resets `wait_reprompts`, sets `wait_armed_at_ms`
+   and returns `Wait(seconds)`; text channels arm `waitSeconds*10` only for `onTimeout="end_call"` (else nothing armed).
+   `respond` speaks text/prompt when present, else nothing. `timeout(ctx)` → `WaitTimeout(result, move_to)`: voice
+   with `repromptText` and reprompts < `maxReprompts` → `Say(reprompt)` + re-armed `Wait`; then `onTimeout`:
+   `end_call` → `EndCallAction("no_input_timeout", ended_by="system")`; `move_to_node` → `move_to=timeoutNodeId`
+   (missing/unknown id → end_call, `engine.wait_timeout_target_missing`); `repeat` → reprompts reset, `respond` again +
+   `Wait`. Text channels: timeout → end_call only. `disarm(state)` clears the timer when the user speaks.
+7. Waits for user: Default/Global unless `skipUserResponse`; Wait for Response always; End Call/Transfer never.
+
+### Files
+- `packages/va_engine/src/va_engine/models/results.py`: add frozen dataclasses (kw_only, slots) `Say(text, mark,
+  interruptible: bool|None=None)`, `SayStream(tokens: AsyncIterator[str], mark, interruptible=None)`, `Wait(seconds:
+  float)`, `TransferAction(mode, target, caller_id_mode, warm: WarmTransfer|None, after_mark: str|None)`,
+  `EndCallAction(reason, ended_by="agent", after_mark=None)`, `HumanTakeover(after_mark=None)`; `type Action = Say |
+  SayStream | Wait | TransferAction | EndCallAction | HumanTakeover` (T07 extends); `TERMINAL_ACTIONS`. Keep existing
+  TransferRequest/PressButton. Export from `va_engine.models`.
+- `packages/va_engine/src/va_engine/handlers/__init__.py` (re-exports), `base.py` (`Channel` Literal voice|sms|widget_chat|
+  widget_voice + `is_text(channel)`; `DialoguePort` Protocol `stream(ctx) -> AsyncIterator[str]`; `LinePort` Protocol
+  `async compose(ctx, instruction: str) -> str` raising `LineUnavailableError`; `MarkSequence` (`next()` →
+  `f"t{turn_index}.{n}"`); `TurnContext` dataclass (state, graph, node, channel, scope_factory/`render(text)`,
+  dialogue, lines, transfer_list, now_ms callable, marks, logger fields); `HandlerResult`; `NodeHandler` Protocol;
+  helpers `render_text`, `speak_node(ctx)` (rule 2), `final_line(ctx, speech, mode, prompt)` (rule 3)),
+  `default.py` (`DefaultHandler`), `wait_for_response.py` (`WaitForResponseHandler`, `WaitTimeout`, `disarm`),
+  `end_call.py`, `transfer_call.py` (`resolve_transfer_target(ctx) -> str|None`, `DEFAULT_TEXT_MODE_MESSAGE`),
+  `registry.py` (`handler_for(node) -> NodeHandler`, raises `UnsupportedNodeError(node_type)` for types without a
+  handler yet; `HANDLERS` mapping by NodeType).
+- `packages/va_engine/src/va_engine/final_lines.py`: `GatewayLinePort(gateway: CompletionPort, *, org_id, call_id,
+  model=None, temperature=0.7, history_turns=10)`; `CompletionPort` Protocol mirroring `LlmGateway.complete`. Messages:
+  system = rendered global prompt (if any) + `"\n\n## Your next line\nWrite only the line you say now: one or two short
+  sentences, no markdown. Instruction: {instruction}"`; then last 10 user/assistant history turns; `max_tokens=120`.
+  `LlmUnavailableError` or blank `content` → `LineUnavailableError(reason)`. Temperature: node modelOptions → global
+  defaultTemperature → 0.7.
+- specs/11 §4 Decision as above. AGENTS.md: one dated bullet (handlers package, ports, HandlerResult, final lines).
+
+### Tests (packages/va_engine/tests/)
+- `support/handler_helpers.py`: `FakeDialogue(tokens=("Hi ", "there"))` (records ctx node ids), `FakeLines(reply=str|
+  Exception)` (records instructions), `handler_ctx(node_dict, channel="voice", variables=, transfer_list=, graph=,
+  global_config=, now_ms=1000)` built on `graph_helpers`, `drain(stream)`.
+- `test_handler_default.py`: static text rendered (`{{first_name}}`), template syntax error spoken raw, prompt → SayStream
+  whose tokens come from the dialogue port, block_interruptions → interruptible False, waits_for_user vs
+  skipUserResponse, on_enter empty, Global node (`type: "Global"` raw) uses the same handler and behaves identically;
+  parametrize voice/sms/widget_chat (§4 text mode = same).
+- `test_handler_end_call.py`: static speech; speechMode prompt → composed line + instruction rendered; prompt fallback to
+  speech on `LineUnavailableError` and on blank compose; no endCall config → node text, then node prompt composed;
+  nothing → EndCallAction with after_mark None; mark linkage; state.ended/end_reason; Say not interruptible; text
+  channels same actions.
+- `test_handler_transfer.py`: E.164 number, legacy `transferNumber`, `{{var}}` number, transfer_list key, SIP URI,
+  invalid/missing → errorPhrase + problem and no terminal; speech prompt mode + fallback; caller_id_mode + warm pass
+  through; sms → textModeMessage default/custom + HumanTakeover; widget_chat/widget_voice → HumanTakeover only;
+  logs never contain the number (json_log_stream).
+- `test_handler_wait.py`: on_enter arms (Wait seconds, wait_armed_at_ms, reprompts reset); text-channel arming rules;
+  respond with text/prompt/none; timeout reprompt sequence up to maxReprompts then each onTimeout (end_call reason
+  no_input_timeout/system, move_to_node, missing target → end_call, repeat resets); no repromptText → straight to
+  onTimeout; text timeout end_call; disarm.
+- `test_handler_registry.py`: each T06 type maps to its handler; unsupported types raise UnsupportedNodeError.
+- `test_final_lines.py`: GatewayLinePort with a recording fake gateway (system text, history window, temperature
+  precedence, max_tokens, blank/unavailable → LineUnavailableError) + one FakeLLM contract via `task_helpers.served()`.
+- Coverage: every new module ≥ 95 % (handlers ≥ 90 % branch, spec §15).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_engine -q`, `uv run python scripts/check_spec_refs.py`,
+`make test` in background (PATH=/home/ralph/.local/bin:$PATH; truncate logs/make_test.log; Monitor heartbeat), radon avg
+< 10, jscpd 0, pip-audit. No e2e (handlers not wired into calls yet).
+
+### Risks
+- `TransferRequest`/`PressButton` (pipeline BrainActions) vs new engine actions: keep both; T12 maps engine actions.
+- AsyncIterator inside a frozen dataclass: fine (no hashing); don't make Say/SayStream comparable by tokens in tests.
+- `TransferConfig` has no `textModeMessage` field: read it from `model_extra` (extra=allow), don't add a field (keeps
+  Bland round trip exact) — or add an optional field with alias if validation/dump tests stay green; prefer model_extra.
+- Don't log transfer targets or conversation text.
+
+## Build P07-T06 (done when make test passes)
+- New `va_engine.handlers` (base: TurnContext/HandlerResult/ports/MarkSequence/final_line/speak_node; default,
+  end_call, transfer_call, wait_for_response, registry), `va_engine.final_lines.GatewayLinePort`, §7 actions in
+  `models/results.py` (exported from `va_engine.models`). Spec: specs/11 §4 Decision P07-T06 (7 rules). AGENTS.md bullet.
+- Deviations from plan: E.164 targets starting with `+` have separators removed; blank rendered instruction also
+  falls back (reason `blank_instruction`); line port model precedence node → dialogueModel → constructor model.
+- Tests: test_handler_{default,end_call,transfer,wait,registry}.py, test_final_lines.py (incl. FakeLLM contract);
+  all new modules 100 % (branch). va_engine 757 passed. radon avg A 2.64, jscpd 0, pip-audit clean, pnpm 3 moderate.
+- make test exit 0 (11821 passed, 7 skipped, 99 % total). No e2e (handlers not wired into calls yet).
+
+## Review P07-T06 (approved)
+- Re-ran: lint/typecheck/placeholders pass, check_spec_refs 0, make test exit 0 (11821 passed, 7 skipped, 99.07 %;
+  handlers/* and final_lines.py 100 %). Checked against specs/11 §3.2.2/§3.2.3/§3.2.9, §4 rows, §7 and the
+  P07-T06 Decision; end reasons `agent_end_call`/`no_input_timeout` match specs/05 §9.
+- Non-blocking notes for T08: the §4 `NodeHandler` protocol lists `node_type`; handlers are keyed by the registry
+  instead. `HandlerResult.terminal` counts a warm `TransferAction` as terminal (§4 says warm may return): revisit in
+  phase 12.

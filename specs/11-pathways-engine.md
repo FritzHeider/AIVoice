@@ -325,6 +325,46 @@ After a global node finishes its response: if `enableForwarding` → jump to `fo
 >    `pathway_id` (both may be null), else `"transfer_pathway"`; a v2 frame that already carries `kind` is rejected
 >    (`EngineStateError` `newer_field`). Frozen fixture `packages/va_engine/tests/fixtures/engine_state/v3.json`.
 
+> Decision (2026-11-03): node handlers (P07-T06). `va_engine.handlers` holds the Default (also Global), Wait for
+> Response, End Call and Transfer Call handlers; `handler_for(node)` picks one (`UnsupportedNodeError` for types
+> whose handler comes later).
+> 1. `on_enter(ctx)` / `respond(ctx)` return a `HandlerResult(actions, problem)` instead of a bare `list[Action]`:
+>    `problem` reports a broken config (`transfer_target_invalid`) without raising; `terminal` = it holds a
+>    `TransferAction`, `EndCallAction` or `HumanTakeover`. `TurnContext` carries the state, graph, node, channel,
+>    the `DialoguePort` (streams the §5.7 dialogue reply), the `LinePort` (composes final lines), `request_data`,
+>    built-ins, timezone, the call's `transfer_list`, a clock (`now_ms`) and the turn's `MarkSequence` (marks
+>    `t{turn_index}.{n}`, unique within a turn). The §7 actions are `va_engine.models.results` dataclasses; a
+>    terminal action carries `after_mark` (the mark of the line it waits for, `None` = at once).
+> 2. Speech: a non-blank `text` → `Say(render(text))`; otherwise `SayStream` over the `DialoguePort` (Default
+>    always, Wait for Response only with a non-blank `prompt`). A template with a syntax error is spoken raw
+>    (`engine.template_invalid`). `modelOptions.block_interruptions` → `interruptible=False`, else `None`.
+> 3. Final lines (End Call, Transfer Call): `speechMode: "prompt"` with a non-blank `speechPrompt` composes one line
+>    through the `LinePort` with the rendered prompt as instruction (`va_engine.final_lines.GatewayLinePort`: a
+>    `dialogue` completion, system = rendered global prompt + the instruction, the last 10 caller/agent messages,
+>    `max_tokens` 120, temperature node → `defaultTemperature`, model node → `dialogueModel` → call); an
+>    unavailable LLM, a blank answer or a blank instruction falls back to the rendered `speech`
+>    (`engine.final_line_fallback` with the reason). Without a config line the node's `text` is rendered, else its
+>    `prompt` composed. Final lines are not interruptible; without a line the terminal action is due at once.
+> 4. End Call: line + `EndCallAction(reason="agent_end_call", ended_by="agent")`, `state.ended`/`end_reason` set.
+>    Text channels are identical (the line is the last message; the action closes the conversation).
+> 5. Transfer Call, voice: target = rendered `transfer.number` (else `transferNumber`); a value equal to a key of
+>    the call's `transfer_list` becomes that number. Accepted: E.164 (spaces, `-`, `.`, parentheses removed from
+>    a value starting with `+`) or a `sip:`/`sips:` URI. Valid → line + `TransferAction(mode, target,
+>    caller_id_mode, warm)` (`warm` only for `mode: "warm"`; phase 12 executes it). Missing/invalid → `Say`
+>    `errorPhrase` and problem `transfer_target_invalid` without a transfer (logged without the number).
+>    `sms`: `Say(transfer.textModeMessage` (an extra key) or "A team member will reach out shortly.") +
+>    `HumanTakeover` after it; `widget_chat`/`widget_voice`: `HumanTakeover` only.
+> 6. Wait for Response (absent config = defaults): `on_enter` resets `wait_reprompts`, sets `wait_armed_at_ms` and
+>    returns `Wait(waitSeconds)`; text channels (`sms`, `widget_chat`) arm `waitSeconds × 10` only for
+>    `onTimeout: "end_call"` and arm nothing otherwise. `timeout(ctx)` → `WaitTimeout(result, move_to)`: voice with
+>    a non-blank `repromptText` and fewer than `maxReprompts` reprompts → `Say(reprompt)` + `Wait`; then
+>    `onTimeout`: `end_call` → `EndCallAction("no_input_timeout", ended_by="system")` (state ended); `move_to_node`
+>    → `move_to = timeoutNodeId` (missing/unknown → end call, `engine.wait_timeout_target_missing`); `repeat` →
+>    reprompts reset, the node's reply again + `Wait`. A text-channel timeout ends the conversation. `disarm(state)`
+>    clears the timer when the user speaks.
+> 7. Waits for the user: Default/Global unless `skipUserResponse`; Wait for Response always; End Call and
+>    Transfer Call never.
+
 ## 5. Per-turn algorithm (pathway mode)
 
 Triggered by `engine.on_user_turn(UserTurn(text, words, started_ms, ended_ms, language))` after EOT

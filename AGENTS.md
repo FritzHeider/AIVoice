@@ -1746,3 +1746,11 @@ Grafana 3001
   (`global_graph()`, `other_graph()`, `MemoryLoader.with_other()`, `nav_state`, `active`, `route`); multi-turn
   router + navigator scenarios in `tests/test_global_scenarios.py`. `service_helpers.json_log_stream()` returns a
   stream (not a context manager); filter `log_events(stream)` by `event`.
+- 2026-11-03 (P07-T06): node handlers = `va_engine.handlers` (`handler_for(node)`; Default/Global, Wait for Response,
+  End Call, Transfer Call; rules: specs/11 §4 Decision P07-T06). Handlers return `HandlerResult(actions, problem)`
+  of the `va_engine.models.results` actions (`Say`, `SayStream`, `Wait`, `TransferAction`, `EndCallAction`,
+  `HumanTakeover`; terminal ones carry `after_mark`) and read a `TurnContext` (ports `DialoguePort.stream(ctx)`,
+  `LinePort.compose(ctx, instruction)`; share one `MarkSequence` per turn). Composed final lines over the gateway:
+  `va_engine.final_lines.GatewayLinePort`. Tests: `packages/va_engine/tests/support/handler_helpers.py`
+  (`handler_ctx(raw_node, channel=, variables=, ...)`, `FakeDialogue`, `FakeLines(reply=str|exception)`,
+  `spoken(actions)` → tuples). FakeLLM rule replies use `respond: {content: ...}` (not `text`).

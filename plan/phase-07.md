@@ -30,7 +30,7 @@
   - Deliverables: global check precedence, return-to-previous behaviour, forwarding to node or pathway
   - Acceptance: scenario tests with nested global triggers.
 
-- [ ] P07-T06 Node handlers: Default, Wait for Response, End Call, Transfer Call (cold), Global
+- [x] P07-T06 Node handlers: Default, Wait for Response, End Call, Transfer Call (cold), Global — va_engine.handlers + final_lines.GatewayLinePort, specs/11 §4 Decision P07-T06; make test 11821 passed, 99.07 %, new modules 100 %
   - Spec refs: specs/11-pathways-engine.md (node types: Default, Wait for Response, End Call, Transfer Call, Global)
   - Depends on: P07-T05
   - Deliverables: handlers with static text vs prompt, skipUserResponse, end-call speech modes, cold transfer action emission
