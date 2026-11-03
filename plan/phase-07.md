@@ -6,7 +6,7 @@
   - Deliverables: pydantic discriminated union of node types with every field, edge model, `validate_graph(nodes, edges) -> list[GraphIssue]` with exact messages, canonical JSON + `graph_hash`
   - Acceptance: tests per rule; round-trip of Bland-style exported JSON fixtures.
 
-- [ ] P07-T02 Templating engine
+- [x] P07-T02 Templating engine — never-raise rendering (big ints, non-str keys, NaN, date overflow), render/render_url accept text via cached_template LRU, 33 golden cases incl. spec §8 examples with drift checks, grammar fuzz + hostile values; make test 11442 passed, templating 100% cov
   - Spec refs: specs/11-pathways-engine.md (templating engine, built-ins, filters)
   - Depends on: P00-T05
   - Deliverables: `va_engine.templating.render(template, scope)` with dot paths, `{{input.x}}`, `default` filter, missing-variable policy, escaping rules

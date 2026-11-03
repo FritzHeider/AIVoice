@@ -10,10 +10,15 @@ number of times against a :class:`TemplateScope`:
 - A missing variable without ``default`` renders as ``""`` and is reported once per path through
   :class:`MissingVariables` (the runner turns the report into the ``TEMPLATE_VAR_MISSING`` warning event).
 - ``\\{{`` renders a literal ``{{``; a ``}}`` outside an expression and any other backslash are literal text.
+- :func:`render` and :func:`render_url` also accept template text, parsed through the LRU cache
+  :func:`cached_template`. Only parsing raises (:class:`TemplateSyntaxError`); rendering never raises for any
+  scope value (Decision P07-T02).
 """
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -37,6 +42,7 @@ __all__ = [
     "TemplateScope",
     "TemplateSyntaxError",
     "TextSegment",
+    "cached_template",
     "parse_template",
     "render",
     "render_json",
@@ -329,8 +335,50 @@ def parse_template(text: str) -> Template:
     return _Parser(text).parse()
 
 
+@lru_cache(maxsize=1024)
+def cached_template(text: str) -> Template:
+    """:func:`parse_template` through a 1 024-entry LRU cache (templates are immutable: sharing is safe)."""
+    return parse_template(text)
+
+
+def _template_of(template: Template | str) -> Template:
+    return cached_template(template) if isinstance(template, str) else template
+
+
 # ------------------------------------------------------------------------------------------------
 # Values
+
+
+def _json_key(key: object) -> str:
+    """A mapping key as orjson's ``OPT_NON_STR_KEYS`` writes it."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool):
+        return "true" if key else "false"
+    if key is None:
+        return "null"
+    return str(key)
+
+
+def _jsonable(value: object) -> object:
+    """A copy of ``value`` the stdlib encoder accepts (fallback when orjson refuses, e.g. huge integers)."""
+    if isinstance(value, str | bool | int) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {_json_key(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    return str(value)
+
+
+def _json_text(value: object) -> str:
+    """Compact JSON for any value; never raises."""
+    try:
+        return orjson.dumps(value, default=str, option=orjson.OPT_NON_STR_KEYS).decode()
+    except (orjson.JSONEncodeError, TypeError):
+        return json.dumps(_jsonable(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
 def stringify(value: object) -> str:
@@ -339,7 +387,7 @@ def stringify(value: object) -> str:
         return value
     if value is None:
         return ""
-    return orjson.dumps(value, default=str).decode()
+    return _json_text(value)
 
 
 def _lookup(scope: TemplateScope, path: tuple[str | int, ...]) -> object:
@@ -407,11 +455,11 @@ def _format_date(value: object, fmt: str, timezone: str) -> str:
     moment = _parse_moment(value)
     if moment is None:
         return stringify(value)
-    if isinstance(moment, datetime) and moment.tzinfo is not None:
-        moment = moment.astimezone(zone_named(timezone))
     try:
+        if isinstance(moment, datetime) and moment.tzinfo is not None:
+            moment = moment.astimezone(zone_named(timezone))
         return moment.strftime(fmt)
-    except ValueError:
+    except (ValueError, OverflowError):
         return stringify(value)
 
 
@@ -435,7 +483,7 @@ def _apply(expression: Expression, scope: TemplateScope) -> tuple[object, bool]:
         elif missing:
             continue
         elif step.name == "json":
-            value = orjson.dumps(value, default=str).decode()
+            value = _json_text(value)
         elif step.name == "date":
             value = _format_date(value, step.arg or "", scope.timezone)
         else:
@@ -474,19 +522,19 @@ def _percent(text: str) -> str:
     return quote(text, safe="")
 
 
-def render(template: Template, scope: TemplateScope) -> str:
-    """Render ``template`` as text."""
-    return _render(template, scope, _as_is)
+def render(template: Template | str, scope: TemplateScope) -> str:
+    """Render ``template`` (parsed, or text parsed through :func:`cached_template`) as text."""
+    return _render(_template_of(template), scope, _as_is)
 
 
-def render_url(template: Template, scope: TemplateScope) -> str:
+def render_url(template: Template | str, scope: TemplateScope) -> str:
     """Render ``template`` as a URL: every expression value is percent-encoded, literal text is kept."""
-    return _render(template, scope, _percent)
+    return _render(_template_of(template), scope, _percent)
 
 
 def render_text(text: str, scope: TemplateScope) -> str:
     """Parse and render ``text`` (raises :class:`TemplateSyntaxError` for invalid templates)."""
-    return render(parse_template(text), scope)
+    return render(text, scope)
 
 
 def render_json(value: object, scope: TemplateScope) -> object:
@@ -495,7 +543,7 @@ def render_json(value: object, scope: TemplateScope) -> object:
     Mapping keys are not templated. A missing single expression renders as ``""``.
     """
     if isinstance(value, str):
-        template = parse_template(value)
+        template = cached_template(value)
         single = template.single_expression
         if single is None:
             return render(template, scope)

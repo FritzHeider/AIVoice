@@ -1714,3 +1714,9 @@ Grafana 3001
   Fixtures `packages/va_engine/tests/fixtures/bland/*.json`, builders `tests/support/graph_helpers.py` (`node`,
   `edge`, `start`, `graph`, `fixture`, `FIXTURE_REFS`). Never run `ruff check --select RUF100 --fix`: it stripped the
   `# noqa: PLR0913` of untouched files (task_runner.py) again.
+- 2026-11-03 (P07-T02): templating rendering never raises for any scope value (huge ints, non-str keys, NaN, date
+  overflow; specs/11 §8 Decision P07-T02); only parsing raises `TemplateSyntaxError`. `render`/`render_url` take a
+  `Template` or text (text goes through `va_engine.templating.cached_template`, a 1 024-entry LRU; call
+  `cached_template.cache_clear()` before asserting `cache_info()`). Golden cases (incl. every §8 example; spec phone
+  examples are drift-checked) live in `packages/va_engine/tests/fixtures/templating/golden.json`; the grammar fuzz
+  strategies are in `tests/test_templating_props.py`.

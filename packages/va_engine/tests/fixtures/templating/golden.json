@@ -1,0 +1,402 @@
+[
+  {
+    "name": "spec_json_single_expression_keeps_type",
+    "mode": "json",
+    "template": "{{qty}}",
+    "scope": {
+      "variables": {
+        "qty": 3
+      }
+    },
+    "expected": 3
+  },
+  {
+    "name": "spec_json_embedded_expression_is_text",
+    "mode": "json",
+    "template": {
+      "body": "qty={{qty}}",
+      "n": "{{qty}}"
+    },
+    "scope": {
+      "variables": {
+        "qty": 3
+      }
+    },
+    "expected": {
+      "body": "qty=3",
+      "n": 3
+    }
+  },
+  {
+    "name": "spec_phone_spoken_us",
+    "mode": "text",
+    "template": "{{p|phone_spoken}}",
+    "scope": {
+      "variables": {
+        "p": "+14155550100"
+      }
+    },
+    "expected": "4 1 5, 5 5 5, 0 1 0 0"
+  },
+  {
+    "name": "spec_phone_spoken_uk",
+    "mode": "text",
+    "template": "{{p|phone_spoken}}",
+    "scope": {
+      "variables": {
+        "p": "+442071838750"
+      }
+    },
+    "expected": "0 2 0, 7 1 8 3, 8 7 5 0"
+  },
+  {
+    "name": "spec_date_in_call_timezone",
+    "mode": "text",
+    "template": "{{when|date:\"%B %d\"}}",
+    "scope": {
+      "variables": {
+        "when": "2026-11-03T05:00:00+00:00"
+      },
+      "timezone": "America/Los_Angeles"
+    },
+    "expected": "November 02"
+  },
+  {
+    "name": "spec_escaped_braces",
+    "mode": "text",
+    "template": "\\{{name}} is {{name}}",
+    "scope": {
+      "variables": {
+        "name": "Al"
+      }
+    },
+    "expected": "{{name}} is Al"
+  },
+  {
+    "name": "request_data_dotted",
+    "mode": "text",
+    "template": "{{request_data.order}}",
+    "scope": {
+      "request_data": {
+        "order": "A1"
+      }
+    },
+    "expected": "A1"
+  },
+  {
+    "name": "request_data_bare_key",
+    "mode": "text",
+    "template": "{{order}}",
+    "scope": {
+      "request_data": {
+        "order": "A1"
+      }
+    },
+    "expected": "A1"
+  },
+  {
+    "name": "variables_beat_request_data",
+    "mode": "text",
+    "template": "{{order}}",
+    "scope": {
+      "variables": {
+        "order": "V"
+      },
+      "request_data": {
+        "order": "R"
+      }
+    },
+    "expected": "V"
+  },
+  {
+    "name": "input_beats_variables",
+    "mode": "text",
+    "template": "{{x}}",
+    "scope": {
+      "variables": {
+        "x": "var"
+      },
+      "input": {
+        "x": "arg"
+      }
+    },
+    "expected": "arg"
+  },
+  {
+    "name": "node_vars_beat_variables",
+    "mode": "text",
+    "template": "{{x}}",
+    "scope": {
+      "variables": {
+        "x": "var"
+      },
+      "node_vars": {
+        "x": "node"
+      }
+    },
+    "expected": "node"
+  },
+  {
+    "name": "default_on_missing",
+    "mode": "text",
+    "template": "Hi {{name|default:\"there\"}}",
+    "scope": {},
+    "expected": "Hi there"
+  },
+  {
+    "name": "default_on_null",
+    "mode": "text",
+    "template": "{{name|default:'friend'}}",
+    "scope": {
+      "variables": {
+        "name": null
+      }
+    },
+    "expected": "friend"
+  },
+  {
+    "name": "default_on_empty",
+    "mode": "text",
+    "template": "{{name|default:'friend'}}",
+    "scope": {
+      "variables": {
+        "name": ""
+      }
+    },
+    "expected": "friend"
+  },
+  {
+    "name": "missing_renders_empty_and_reports",
+    "mode": "text",
+    "template": "[{{a.b[0]}}][{{a.b[0]}}][{{c}}]",
+    "scope": {
+      "variables": {
+        "a": {
+          "b": []
+        }
+      }
+    },
+    "expected": "[][][]",
+    "missing": ["a.b[0]", "c"]
+  },
+  {
+    "name": "builtin_last_user_message",
+    "mode": "text",
+    "template": "You said: {{lastUserMessage}}",
+    "scope": {
+      "builtins": {
+        "lastUserMessage": "I want pizza",
+        "metadata": {
+          "campaign": "fall"
+        },
+        "call_id": "c-1",
+        "timezone": "America/Los_Angeles"
+      }
+    },
+    "expected": "You said: I want pizza"
+  },
+  {
+    "name": "builtin_metadata_path",
+    "mode": "text",
+    "template": "{{metadata.campaign}}",
+    "scope": {
+      "builtins": {
+        "lastUserMessage": "I want pizza",
+        "metadata": {
+          "campaign": "fall"
+        },
+        "call_id": "c-1",
+        "timezone": "America/Los_Angeles"
+      }
+    },
+    "expected": "fall"
+  },
+  {
+    "name": "url_encodes_values_only",
+    "mode": "url",
+    "template": "https://api.test/s?q={{q}}&id={{id}}",
+    "scope": {
+      "variables": {
+        "q": "a b&c",
+        "id": 7
+      }
+    },
+    "expected": "https://api.test/s?q=a%20b%26c&id=7"
+  },
+  {
+    "name": "whitespace_variants",
+    "mode": "text",
+    "template": "{{a}}{{ a }}{{\ta\n}}{{  a | upper  }}",
+    "scope": {
+      "variables": {
+        "a": "x"
+      }
+    },
+    "expected": "xxxX"
+  },
+  {
+    "name": "filter_chain",
+    "mode": "text",
+    "template": "{{s|trim|upper}}",
+    "scope": {
+      "variables": {
+        "s": "  hi there "
+      }
+    },
+    "expected": "HI THERE"
+  },
+  {
+    "name": "title_and_lower",
+    "mode": "text",
+    "template": "{{s|lower|title}}",
+    "scope": {
+      "variables": {
+        "s": "JOHN SMITH"
+      }
+    },
+    "expected": "John Smith"
+  },
+  {
+    "name": "json_filter_object",
+    "mode": "text",
+    "template": "{{o|json}}",
+    "scope": {
+      "variables": {
+        "o": {
+          "a": [1, true, null]
+        }
+      }
+    },
+    "expected": "{\"a\":[1,true,null]}"
+  },
+  {
+    "name": "booleans_and_numbers",
+    "mode": "text",
+    "template": "{{t}} {{f}} {{n}} {{x}}",
+    "scope": {
+      "variables": {
+        "t": true,
+        "f": false,
+        "n": 1.5,
+        "x": null
+      }
+    },
+    "expected": "true false 1.5 "
+  },
+  {
+    "name": "list_index",
+    "mode": "text",
+    "template": "{{items[1].name}}",
+    "scope": {
+      "variables": {
+        "items": [
+          {
+            "name": "a"
+          },
+          {
+            "name": "b"
+          }
+        ]
+      }
+    },
+    "expected": "b"
+  },
+  {
+    "name": "error_unterminated",
+    "mode": "text",
+    "template": "Hi {{ name",
+    "scope": {},
+    "error": {
+      "message": "unterminated expression",
+      "position": 3
+    }
+  },
+  {
+    "name": "error_empty",
+    "mode": "text",
+    "template": "x {{ }}",
+    "scope": {},
+    "error": {
+      "message": "empty expression",
+      "position": 2
+    }
+  },
+  {
+    "name": "error_unknown_filter",
+    "mode": "text",
+    "template": "{{ a | shout }}",
+    "scope": {},
+    "error": {
+      "message": "unknown filter 'shout'",
+      "position": 7
+    }
+  },
+  {
+    "name": "error_bad_index",
+    "mode": "text",
+    "template": "{{ a[x] }}",
+    "scope": {},
+    "error": {
+      "message": "expected a list index",
+      "position": 5
+    }
+  },
+  {
+    "name": "error_unterminated_string",
+    "mode": "text",
+    "template": "{{ a | default:\"open }}",
+    "scope": {},
+    "error": {
+      "message": "unterminated string",
+      "position": 15
+    }
+  },
+  {
+    "name": "robust_big_integer",
+    "mode": "text",
+    "template": "{{n}} {{n|json}}",
+    "scope": {
+      "variables": {
+        "n": 1180591620717411303424
+      }
+    },
+    "expected": "1180591620717411303424 1180591620717411303424"
+  },
+  {
+    "name": "robust_big_integer_nested",
+    "mode": "text",
+    "template": "{{o}}",
+    "scope": {
+      "variables": {
+        "o": {
+          "n": [1180591620717411303424]
+        }
+      }
+    },
+    "expected": "{\"n\":[1180591620717411303424]}"
+  },
+  {
+    "name": "robust_year_one_date",
+    "mode": "text",
+    "template": "{{t|date:'%Y'}}",
+    "scope": {
+      "variables": {
+        "t": "0001-01-01T00:00:00+00:00"
+      },
+      "timezone": "America/New_York"
+    },
+    "expected": "0001-01-01T00:00:00+00:00"
+  },
+  {
+    "name": "robust_year_9999_date",
+    "mode": "text",
+    "template": "{{t|date:'%Y'}}",
+    "scope": {
+      "variables": {
+        "t": "9999-12-31T23:59:59-05:00"
+      },
+      "timezone": "Asia/Tokyo"
+    },
+    "expected": "9999-12-31T23:59:59-05:00"
+  }
+]

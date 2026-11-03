@@ -170,3 +170,94 @@ Monitor heartbeat per AGENTS.md). jscpd: config models are repetitive—use shar
 ## Review P07-T01 (approved)
 - Re-ran: make lint/typecheck/placeholders pass; make test exit 0 (11386 passed, 7 skipped, total cov 99%); radon avg 2.78; jscpd 0 clones on va_engine.
 - Checked models against specs/11 §3.1–§3.4 and validation against the §11 table (codes, messages, severities drift-tested by parsing the spec). Deviations (temperature null default, transferNumber kept as stored, open bounds) are recorded in the §11 Decision. graph_hash matches specs/12 §1 (sorted keys, layout excluded).
+
+## Plan P07-T02 — Templating engine (specs/11 §8)
+
+Context: `va_engine.templating` (parser, scope layers, filters, render/render_url/render_json, MissingVariables) and
+`va_engine.builtins` already exist from P05-T09a (spec §8 Decision P05-T09a) with unit + small hypothesis tests.
+This task closes the remaining gaps: robustness (fuzz found real crashes), the spec deliverable signature
+`render(template, scope)` taking text, golden tests from the spec examples, and a grammar-driven fuzz suite.
+
+Verified crashes on HEAD (uv run python):
+- `{{b}}` with b = 2**70 → `TypeError: Integer exceeds 64-bit range` (orjson); same for `|json`.
+- `{{d}}` with d = {1: 2} → `TypeError: Dict key must be str`.
+- `{{t|date:"%Y"}}` with t = "0001-01-01T00:00:00+00:00", tz America/New_York → `OverflowError` (astimezone);
+  "9999-12-31T23:59:59-05:00" in Asia/Tokyo too.
+
+### Changes — `packages/va_engine/src/va_engine/templating.py`
+1. `_json_text(value: object) -> str` (used by `stringify` and the `json` filter):
+   `orjson.dumps(value, default=str, option=orjson.OPT_NON_STR_KEYS).decode()`; on `orjson.JSONEncodeError` (big ints,
+   etc.) fall back to `json.dumps(_jsonable(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)` where
+   `_jsonable` recurses: Mapping → `{_key(k): _jsonable(v)}` (`_key`: str as-is, bool → "true"/"false", None → "null",
+   else `str(k)`, matching orjson OPT_NON_STR_KEYS), list/tuple → list, float non-finite → None (orjson's behaviour),
+   str/int/bool/None/float as-is, anything else → `str(value)`. Never raises.
+2. `_format_date`: wrap the `astimezone` and `strftime` in one try catching `(ValueError, OverflowError)` → return
+   `stringify(value)` (value unchanged, as the Decision already says).
+3. `@lru_cache(maxsize=1024) def cached_template(text: str) -> Template` = parse_template (exceptions are not cached;
+   Template is frozen so sharing is safe). `render(template: Template | str, scope)` and `render_url(...)` accept text
+   (parsed via `cached_template`, raising `TemplateSyntaxError`); `render_text` stays (delegates to `render`).
+   `render_json` string leaves use `cached_template` too. Add `cached_template` to `__all__`.
+4. Docstring of the module mentions both.
+
+### Spec — specs/11 §8: append `> Decision (2026-11-03): templating robustness (P07-T02).`
+Rendering never raises for any value: integers beyond 64 bits render as their digits, non-string mapping keys as
+their JSON text (`1` → `"1"`, `true` → `"true"`), non-finite floats as `null`, other non-JSON values as `str()`;
+`date:` keeps the value unchanged when the timezone conversion overflows (years 1/9999). `render`/`render_url`
+accept a parsed `Template` or text (parsed through a 1 024-entry LRU cache, `cached_template`); only parsing raises
+(`TemplateSyntaxError`). Golden cases live in `packages/va_engine/tests/fixtures/templating/golden.json`.
+
+### Tests
+- `packages/va_engine/tests/fixtures/templating/golden.json`: list of cases `{name, template (str or JSON value for
+  mode json), mode: "text"|"url"|"json", scope: {variables, request_data, builtins, node_vars?, input?, timezone?},
+  expected? , error?: {message, position}, missing?: [paths]}`. Must include every spec §8 example: `"{{qty}}"`
+  qty=3 → 3 (json mode), `+14155550100|phone_spoken` → `4 1 5, 5 5 5, 0 1 0 0`, `+442071838750` →
+  `0 2 0, 7 1 8 3, 8 7 5 0`, `date:"%B %d"` in call tz (aware UTC ISO converted to America/Los_Angeles crossing a
+  day boundary), `\{{` literal, `request_data.x` and bare request_data key, `input.x` precedence over variables,
+  node_vars over variables, `default:"..."` on missing/null/"", built-ins (`lastUserMessage`, `metadata.k`),
+  URL encoding (`a b&c` → `a%20b%26c`, literal text kept), whitespace variants, filters chain
+  (`trim|upper`), `json` filter on an object, error cases (unterminated, empty, unknown filter, bad index,
+  unterminated string) with exact message/position, big int / int-key object / year-1 date robustness cases.
+  ~30 cases.
+- `packages/va_engine/tests/test_templating_golden.py`: parametrized over the file (ids = name) rendering with a
+  fresh `MissingVariables` and asserting expected/missing/error; `test_spec_phone_examples_are_golden` regex-parses
+  `specs/11-pathways-engine.md` §8 for `` `+NNN` → `"..."` `` and `` `+NNN` → `...` `` phone examples and asserts each
+  renders as written (spec drift check, like test_validation parses §11); `test_render_accepts_text_and_caches`
+  (`render("{{a}}", scope)`, `cached_template.cache_info().hits` increments; syntax error from text raises
+  `TemplateSyntaxError`).
+- `packages/va_engine/tests/test_templating_props.py` (extend): grammar strategy `templates()` building valid sources
+  from segments (literal text without `{`/`\`, escaped `\{{`, expressions with random whitespace, paths of idents and
+  `[n]`, filters incl. `default:`/`date:` with quoted args containing quotes/backslashes escaped properly);
+  `_HOSTILE_VALUES` = recursive JSON-ish values + `st.integers()` unbounded (big ints), dicts with int/bool keys,
+  floats incl. nan/inf, extreme ISO strings (`st.datetimes(timezones=st.timezones()|none).map(isoformat)` incl. year 1
+  / 9999), arbitrary text; timezones from `["UTC","America/New_York","Asia/Tokyo","Pacific/Kiritimati","Nope/Zone"]`.
+  Properties: `test_grammar_templates_always_parse` (never raises), `test_rendering_never_raises` (render, render_url,
+  render_json of `{"k": [source]}` with hostile scope → str / JSON-ish, no exception), `test_arbitrary_text_raises_only_
+  syntax_errors` (st.text incl. `{`,`}`,`|`,`\` heavy alphabet; any exception other than TemplateSyntaxError fails),
+  `test_missing_paths_reported_once` (render twice → sink count == distinct missing). Use `@settings(max_examples=200,
+  deadline=None)` only where needed.
+- Unit additions in `test_templating.py`: `test_stringify_never_raises` parametrized (2**70 → digits, {1: 2} →
+  `{"1":2}`, {True: 1}, nan → `null`, object() → str), `test_json_filter_big_int`, `test_date_filter_overflow_keeps_value`.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_engine -q` (coverage of templating 100 %), then
+`make test` in background with Monitor heartbeat (PATH needs /home/ralph/.local/bin). radon/jscpd/pip-audit for the
+build.done payload. No e2e (no call flow touched). AGENTS.md: one dated bullet (cached_template/render(text), golden
+file location, never-raise rendering).
+
+### Risks
+- `OPT_NON_STR_KEYS` changes output for non-str keys only; existing tests unaffected.
+- Hypothesis on big structures can be slow → keep max_size small; avoid `deadline` flakes with `deadline=None`.
+- lru_cache on a module function: tests asserting cache hits must call `cached_template.cache_clear()` first.
+
+## Build P07-T02 (done)
+- templating.py: `_json_text` (orjson OPT_NON_STR_KEYS, stdlib fallback via `_jsonable`), date overflow guarded,
+  `cached_template` LRU, `render`/`render_url` accept text, render_json uses cache. Spec §8 Decision P07-T02.
+- Tests: golden.json (33 cases) + test_templating_golden.py (spec phone/json drift checks, cache), grammar fuzz +
+  hostile values in test_templating_props.py, unit never-raise/overflow cases in test_templating.py.
+- Gates so far: fmt/lint/typecheck/placeholders pass; va_engine 384 passed; templating 100% cov; radon avg 3.23;
+  jscpd 0 clones; pip-audit clean.
+- make test exit 0 (11442 passed, 7 skipped, total cov 99%). No e2e (no call flow touched).
+
+## Review P07-T02 (approved)
+- Re-ran: make lint/typecheck/placeholders pass; va_engine 384 passed; make test exit 0 (11442 passed, 7 skipped, 99% cov); radon avg 3.23; jscpd 0 clones.
+- Checked against specs/11 §8 + plan acceptance (golden from spec examples, fuzz never raises). Decision P07-T02 recorded in §8.

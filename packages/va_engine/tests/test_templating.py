@@ -205,6 +205,30 @@ def test_stringify(value: object, expected: str) -> None:
     assert stringify(value) == expected
 
 
+class _Opaque:
+    def __str__(self) -> str:
+        return "opaque"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (2**70, str(2**70)),
+        (-(2**65), str(-(2**65))),
+        ({1: 2}, '{"1":2}'),
+        ({True: 1, None: 2}, '{"true":1,"null":2}'),
+        (float("nan"), "null"),
+        ([float("inf"), 1.5], "[null,1.5]"),
+        ({"n": 2**70, 3: [float("-inf")], False: _Opaque()}, f'{{"n":{2**70},"3":[null],"false":"opaque"}}'),
+        ((2**70, None, {None: True}), f'[{2**70},null,{{"null":true}}]'),
+        ({2.5: {"s"}}, '{"2.5":"{\'s\'}"}'),
+        (_Opaque(), '"opaque"'),
+    ],
+)
+def test_stringify_never_raises(value: object, expected: str) -> None:
+    assert stringify(value) == expected
+
+
 # ------------------------------------------------------------------------------------------------
 # Filters
 
@@ -254,6 +278,12 @@ def test_json_filter() -> None:
     assert text("{{s|json}}", **values) == '"say \\"hi\\""'
 
 
+def test_json_filter_handles_big_integers_and_non_string_keys() -> None:
+    values = {"variables": {"n": 2**70, "d": {1: [2**64]}}}
+
+    assert text("{{n|json}} {{d|json}}", **values) == f'{2**70} {{"1":[{2**64}]}}'
+
+
 @pytest.mark.parametrize(
     ("number", "spoken"),
     [
@@ -298,6 +328,20 @@ def test_date_filter_accepts_date_objects_and_unknown_zones() -> None:
 class _Unformattable(date):
     def strftime(self, fmt: str) -> str:
         raise ValueError(fmt)
+
+
+@pytest.mark.parametrize(
+    ("value", "timezone"),
+    [
+        ("0001-01-01T00:00:00+00:00", "America/New_York"),
+        ("9999-12-31T23:59:59-05:00", "Asia/Tokyo"),
+        (datetime(1, 1, 1, tzinfo=UTC), "Pacific/Honolulu"),
+    ],
+)
+def test_date_filter_overflow_keeps_the_value(value: object, timezone: str) -> None:
+    rendered = text("{{v|date:'%Y'}}", variables={"v": value}, timezone=timezone)
+
+    assert rendered == stringify(value)
 
 
 def test_date_filter_keeps_the_value_when_strftime_fails() -> None:

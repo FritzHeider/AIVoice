@@ -517,6 +517,15 @@ filter     := "default:" quoted | "upper" | "lower" | "title" | "json" | "phone_
 > are ISO 8601 with seconds precision, `voice_id` is the platform voice id, `agent_number` is `from_number` for
 > outbound and web calls and `to_number` for inbound (`user_number` the other side), `metadata` is `config.metadata`.
 
+> Decision (2026-11-03): templating robustness (P07-T02). Rendering never raises for any scope value: integers beyond
+> 64 bits render as their digits, non-string mapping keys as their JSON text (`1` → `"1"`, `true` → `"true"`,
+> `null` → `"null"`), non-finite floats as `null`, other non-JSON values as `str()`; the same applies to the `json`
+> filter. `date:` keeps the value unchanged when the timezone conversion overflows (years 1 and 9999).
+> `render`/`render_url` accept a parsed `Template` or template text (parsed through the 1 024-entry LRU cache
+> `cached_template`, also used by `render_json` for string leaves); only parsing raises (`TemplateSyntaxError`).
+> Golden cases, including every example of this section, live in
+> `packages/va_engine/tests/fixtures/templating/golden.json`.
+
 ## 9. EngineState serialization
 
 ```python
