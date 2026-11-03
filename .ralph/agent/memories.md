@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793709538-f7d8
+> P07-T01: pathway schemas va_engine.models.nodes/graph (camel JSON via alias_generator, extra=allow, dump exclude_unset = lossless Bland round trip; BeforeValidator normalize_node_raw outside discriminated union for Global/aliases) + va_engine.validation.validate_graph(mode, GraphRefs None=skip, code_checker); test parses specs/11 §11 table; ruff --select RUF100 --fix strips noqa of untouched files (restore with git checkout)
+<!-- tags: engine, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793695766-e1de
 > P06-T07: producers route webhooks atomically with call_events rows via EventPublisher.route(sequenced, session=) after insert_rows; media routes in DbCallEventWriter(database, router=) flush using va_events.event_of(row); WebhookRouter fakes need route_many; TurnRecorder.started publishes call.started first (category call) so filter turns by event_type; event log items carry type
 <!-- tags: events, webhooks, testing | created: 2026-11-03 -->

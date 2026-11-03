@@ -601,6 +601,38 @@ class EngineIO(Protocol):
 Validation result shape: `{"valid": bool, "errors": [{code, message, node_id?, edge_id?}], "warnings": [...]}`.
 Publish failures return HTTP 400 `INVALID_INPUT` with these items in `errors[].details`.
 
+> Decision (2026-11-03): node/edge schema and validation (P07-T01). Models live in `va_engine.models.nodes`
+> (`PathwayNode` = a discriminated union on `type`, one class per §3.3 type, `PathwayEdge`, every §3.2.x config) and
+> `va_engine.models.graph` (`GlobalConfig`, `PathwayGraph`, `load_graph`, `dump_graph`, `graph_hash`). Attributes
+> are snake_case, JSON keys camelCase as Bland writes them (`modelOptions.block_interruptions`/`resumption_speed`
+> and the `forwardingNode` object keep snake_case; `sms.from` is the attribute `from_`). Every model keeps unknown
+> keys, and dumps write only the keys that were present (`exclude_unset`, numbers keep their JSON type), so a Bland
+> export round-trips byte-identically in canonical form. Normalization happens before discrimination: the four
+> import aliases become canonical types and `"Global"` becomes `"Default"` with `data.isGlobal: true`; the legacy
+> `transferNumber` is kept as stored and read through `effective_transfer_number(data)` (`transfer.number` first).
+> `modelOptions.temperature` defaults to `null` (inherit, §13; the §3.1 `0.7` is an example value). Bounds the spec
+> leaves open: edge ids are 1–256 characters of any kind (Bland/React Flow ids such as `reactflow__edge-1-2`), Press
+> Button `durationMillis` 50–5 000, warm `targetTimeoutSecs` 1–600, scheduling `slotDurationMinutes` 5–480 and
+> `lookaheadDays` 1–90, Wait for Response `waitSeconds` 1–3 600 and `maxReprompts` 0–10, `kbTopK` 1–50,
+> `maxTotalTurns` 1–1 000. Schema violations raise `pydantic.ValidationError` from `load_graph`; `schema_field(loc)`
+> renders the `INVALID_INPUT` field (`nodes[3].data.name`, the union tag dropped). `graph_hash` removes the
+> editor-only node keys `position`, `width`, `height` and hashes compact UTF-8 JSON with sorted keys (orjson).
+> `va_engine.validation.validate_graph(graph, mode=, refs=GraphRefs(...), allow_http=, code_checker=)` returns
+> issues in table row order, then node/edge array order; an oversized graph returns only `PATHWAY_TOO_LARGE`
+> (JSON size = canonical dump). `GraphRefs` fields left `None` skip that existence check (KB, tool, pathway ids);
+> `code_checker` (the `deno check` runner, phase 08) is optional, but empty custom code is always reported
+> (diagnostic `code is empty`). Rule details: duplicate ids/names are reported on every repeat after the first;
+> `PATHWAY_EDGE_DANGLING` once per missing endpoint; `PATHWAY_EDGE_CONFLICT` once per source node (`node_id` = the
+> source); alwaysPick edges still need a label; reachability (checked only with exactly one start node) seeds the
+> start and every global node and follows edges plus node-level jumps (`forwardingNode` id, webhook `routeOnStatus`
+> and `responsePathways` targets, `waitForResponse.timeoutNodeId`, `scheduling.onFailureNodeId`, warm
+> `onTargetNoAnswer.nodeId`); a webhook URL needs scheme `https` (or `http` with `allow_http`, local/test) and a
+> literal host (no `{{` in the authority); a `forwardingNode` object is a pathway target like `transferPathway`;
+> templates are checked in `prompt`, `text`, `condition`, `globalLabel`, every string of the declared
+> `webhook`/`transfer`/`endCall`/`sms`/`pressButton`/`scheduling`/`waitForResponse`/`customCode` fields except
+> `customCode.code`, and global `globalPrompt`/`errorPhrase` (name `global_config`, no `node_id`); the detail is
+> `<json path>: <parser error>`; `PATHWAY_VAR_NAME` also covers webhook `responseData` names (unique per list).
+
 ## 12. `pathway_logs` format (deterministic)
 
 One entry per assistant turn, ordered by turn index:

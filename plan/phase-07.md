@@ -1,6 +1,6 @@
 # Phase 07 — Conversational Pathways: Engine, API, Versions, and Testing
 
-- [ ] P07-T01 Node and edge schemas with validation
+- [x] P07-T01 Node and edge schemas with validation — va_engine.models.nodes/graph (discriminated union, lossless Bland round trip, graph_hash) + va_engine.validation (all 18 §11 rules, spec-table drift test); make test 11386 passed 7 skipped, lint/typecheck/placeholders pass, new modules 100% cov, radon 2.78, jscpd 0
   - Spec refs: specs/11-pathways-engine.md (PathwayNode and PathwayEdge JSON schemas, validation rules)
   - Depends on: P01-T04
   - Deliverables: pydantic discriminated union of node types with every field, edge model, `validate_graph(nodes, edges) -> list[GraphIssue]` with exact messages, canonical JSON + `graph_hash`

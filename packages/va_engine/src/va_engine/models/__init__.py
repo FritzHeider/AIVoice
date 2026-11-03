@@ -1,5 +1,29 @@
-"""Engine data models (specs/11-pathways-engine.md §9)."""
+"""Engine data models (specs/11-pathways-engine.md §3, §9)."""
 
+from va_engine.models.graph import (
+    GlobalConfig,
+    GraphJson,
+    PathwayGraph,
+    canonical_json,
+    dump_graph,
+    graph_hash,
+    load_graph,
+    schema_field,
+)
+from va_engine.models.nodes import (
+    NODE_TYPE_ALIASES,
+    NODE_TYPES,
+    EdgeData,
+    NodeType,
+    PathwayEdge,
+    PathwayNode,
+    PathwayNodeData,
+    dump_edge,
+    dump_node,
+    effective_transfer_number,
+    parse_edge,
+    parse_node,
+)
 from va_engine.models.state import (
     HISTORY_CAP,
     HISTORY_SUMMARY_MAX_CHARS,
@@ -12,8 +36,28 @@ from va_engine.models.state import (
 __all__ = [
     "HISTORY_CAP",
     "HISTORY_SUMMARY_MAX_CHARS",
+    "NODE_TYPES",
+    "NODE_TYPE_ALIASES",
+    "EdgeData",
     "EngineState",
+    "GlobalConfig",
+    "GraphJson",
     "NodeFrame",
+    "NodeType",
+    "PathwayEdge",
+    "PathwayGraph",
+    "PathwayNode",
+    "PathwayNodeData",
     "TurnRecord",
+    "canonical_json",
+    "dump_edge",
+    "dump_graph",
+    "dump_node",
+    "effective_transfer_number",
+    "graph_hash",
     "load_engine_state",
+    "load_graph",
+    "parse_edge",
+    "parse_node",
+    "schema_field",
 ]

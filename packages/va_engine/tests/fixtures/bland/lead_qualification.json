@@ -1,0 +1,331 @@
+{
+  "nodes": [
+    {
+      "id": "hello",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Opener",
+        "isStart": true,
+        "text": "Hi {{request_data.first_name | default:\"there\"}}, this is Jordan from Northwind Solar. Do you have a minute?",
+        "pathwayExamples": []
+      }
+    },
+    {
+      "id": "lookup",
+      "type": "Webhook",
+      "position": {
+        "x": 0,
+        "y": 260
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "CRM Lookup",
+        "webhook": {
+          "url": "https://crm.northwind.test/leads?phone={{to}}",
+          "method": "GET",
+          "headers": {
+            "Authorization": "Bearer {{request_data.crm_token}}",
+            "X-Call": "{{call_id}}"
+          },
+          "body": null,
+          "timeoutMs": 5000,
+          "retries": 1,
+          "speech": "One moment while I pull up your details.",
+          "responseData": [
+            {
+              "name": "lead_status",
+              "data": "$.lead.status",
+              "context": "Lead status in the CRM"
+            },
+            {
+              "name": "monthly_bill",
+              "data": "$.lead.monthly_bill",
+              "context": "Average electricity bill"
+            }
+          ],
+          "routeOnStatus": {
+            "2xx": null,
+            "4xx": "qualify",
+            "5xx": "qualify",
+            "timeout": "qualify"
+          },
+          "responsePathways": [
+            {
+              "variable": "lead_status",
+              "operator": "==",
+              "value": "customer",
+              "targetNodeId": "existing"
+            },
+            {
+              "variable": "monthly_bill",
+              "operator": ">=",
+              "value": 150,
+              "targetNodeId": "pitch"
+            }
+          ]
+        },
+        "extractVars": [
+          {
+            "name": "homeowner",
+            "type": "boolean",
+            "description": "Caller owns the home",
+            "required": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "qualify",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Qualify",
+        "prompt": "Ask whether they own their home and roughly what their monthly electricity bill is.",
+        "extractVars": [
+          {
+            "name": "monthly_bill",
+            "type": "number",
+            "description": "Monthly bill in USD"
+          }
+        ],
+        "condition": "The caller has answered both the homeowner and bill questions."
+      }
+    },
+    {
+      "id": "pitch",
+      "type": "Default",
+      "position": {
+        "x": 360,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Pitch",
+        "prompt": "Explain that with a {{monthly_bill}} dollar bill they could save about 30 percent with solar, and offer a call with a specialist.",
+        "tools": [
+          "TL-0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a03",
+          {
+            "name": "check_roof",
+            "description": "Check roof suitability",
+            "url": "https://crm.northwind.test/roof"
+          }
+        ]
+      }
+    },
+    {
+      "id": "existing",
+      "type": "End Call",
+      "position": {
+        "x": 720,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Existing Customer",
+        "endCall": {
+          "speech": "Looks like you're already a customer — thanks so much!",
+          "speechMode": "prompt",
+          "speechPrompt": "Thank the existing customer briefly and say goodbye."
+        }
+      }
+    },
+    {
+      "id": "specialist",
+      "type": "Transfer Call",
+      "position": {
+        "x": 360,
+        "y": 780
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Specialist Handoff",
+        "transfer": {
+          "mode": "warm",
+          "number": "+14155550177",
+          "speech": "Connecting you with a specialist now.",
+          "speechMode": "static",
+          "callerIdMode": "agent_number",
+          "warm": {
+            "briefingPrompt": "Brief the specialist: {{request_data.first_name}} has a {{monthly_bill}} dollar bill.",
+            "holdAudio": "hold_music",
+            "targetTimeoutSecs": 30,
+            "onTargetNoAnswer": {
+              "action": "move_to_node",
+              "nodeId": "not_now"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "not_now",
+      "type": "End Call",
+      "position": {
+        "x": 0,
+        "y": 780
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Not Interested",
+        "endCall": {
+          "speech": "No problem at all. Have a great day!"
+        }
+      }
+    },
+    {
+      "id": "dnc",
+      "type": "Default",
+      "position": {
+        "x": 720,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Do Not Call",
+        "isGlobal": true,
+        "globalLabel": "The caller asks to be removed from the list or not to be called again",
+        "text": "Understood, I'll remove your number right away. Goodbye.",
+        "enableGlobalAutoReturn": false,
+        "enableForwarding": true,
+        "forwardingNode": "not_now"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_hello_lookup",
+      "source": "hello",
+      "target": "lookup",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Agrees to talk",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_hello_not",
+      "source": "hello",
+      "target": "not_now",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Not interested or busy",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_lookup_qualify",
+      "source": "lookup",
+      "target": "qualify",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "",
+        "description": "",
+        "isFallback": true,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_qualify_pitch",
+      "source": "qualify",
+      "target": "pitch",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Homeowner with a bill over 100 dollars",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_qualify_not",
+      "source": "qualify",
+      "target": "not_now",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Renter or bill too low",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_pitch_specialist",
+      "source": "pitch",
+      "target": "specialist",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants to talk to a specialist",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_pitch_not",
+      "source": "pitch",
+      "target": "not_now",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Declines the offer",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    }
+  ],
+  "global_config": {
+    "globalPrompt": "You are Jordan, an outbound sales rep for Northwind Solar. Be concise and respectful.",
+    "errorPhrase": "Sorry, I didn't catch that."
+  }
+}

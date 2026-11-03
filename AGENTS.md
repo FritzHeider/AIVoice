@@ -1705,3 +1705,12 @@ Grafana 3001
   collects it), `deliveries`/`wait_deliveries`. Pure body checks: `e2e_webhooks` (`live_body_failures`,
   `envelope_failures`, `retry_gap_ok`, `call_object_mismatches` ignoring per-read presigned `recording_url` and
   `recording_expiration`); `CALL_OBJECT_FIELDS` lives in `e2e_assertions`. The flow takes ~35 s (first retry 10 s).
+- 2026-11-03 (P07-T01): pathway schemas = `va_engine.models.nodes` (`parse_node`/`dump_node`, `PathwayNode` union,
+  `effective_transfer_number`) + `va_engine.models.graph` (`load_graph(nodes, edges, global_config)`, `dump_graph`,
+  `graph_hash`, `schema_field(loc)` for `INVALID_INPUT` fields) + `va_engine.validation.validate_graph(graph, mode=,
+  refs=GraphRefs(...), allow_http=, code_checker=)` / `validation_report` (rules: specs/11 §11 Decision P07-T01;
+  `test_validation.py` parses the §11 table, so a rule/message change goes in the spec, `RULES` and `MESSAGES`
+  together). Always dump with the module helpers (`exclude_unset`): that is what keeps Bland exports lossless.
+  Fixtures `packages/va_engine/tests/fixtures/bland/*.json`, builders `tests/support/graph_helpers.py` (`node`,
+  `edge`, `start`, `graph`, `fixture`, `FIXTURE_REFS`). Never run `ruff check --select RUF100 --fix`: it stripped the
+  `# noqa: PLR0913` of untouched files (task_runner.py) again.

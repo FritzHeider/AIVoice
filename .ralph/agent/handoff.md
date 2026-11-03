@@ -1,11 +1,11 @@
 # Session Handoff
 
-_Generated: 2026-11-03 02:28:58 UTC_
+_Generated: 2026-11-03 12:15:28 UTC_
 
 ## Git Context
 
 - **Branch:** `main`
-- **HEAD:** 9c6abd4: chore: auto-commit before merge (loop primary)
+- **HEAD:** 1c4bb8c: chore: auto-commit before merge (loop primary)
 
 ## Tasks
 
@@ -17,6 +17,7 @@ _Generated: 2026-11-03 02:28:58 UTC_
 - [x] P02-T04a password, token, email primitives
 - [x] P03-T01 Simulator framework and scenario DSL
 - [x] P03-T06a FakeLLM chat completions, rules engine, faults, and models
+- [x] Fix: flaky test_the_background_bed_fills_the_agent_track_between_utterances[none] (idle window catches agent speech under load)
 
 ### Remaining
 
@@ -30,16 +31,16 @@ _Generated: 2026-11-03 02:28:58 UTC_
 
 Recently modified:
 
-- `.env.example`
 - `.ralph/agent/memories.md`
 - `.ralph/agent/scratchpad.md`
 - `.ralph/agent/summary.md`
 - `.ralph/agent/tasks.jsonl`
 - `AGENTS.md`
-- `Makefile`
 - `README.md`
-- `apps/media_worker/pyproject.toml`
-- `apps/media_worker/src/va_media/main.py`
+- `apps/media_worker/tests/test_runtime_sim.py`
+- `packages/va_sim/src/va_sim/telnyx/calls.py`
+- `packages/va_sim/src/va_sim/telnyx/media_session.py`
+- `packages/va_sim/tests/telnyx/test_call_control.py`
 
 ## Next Session
 

@@ -1,0 +1,259 @@
+{
+  "nodes": [
+    {
+      "id": "intro",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Introduction",
+        "isStart": true,
+        "prompt": "Introduce yourself as the scheduling assistant for Riverside Dental and ask the reason for the visit.",
+        "extractVars": [
+          {
+            "name": "visit_reason",
+            "type": "string",
+            "description": "Why the patient wants an appointment"
+          },
+          {
+            "name": "is_new_patient",
+            "type": "boolean",
+            "description": "Whether the caller is a new patient"
+          }
+        ]
+      }
+    },
+    {
+      "id": "menu_ivr",
+      "type": "Press Button",
+      "position": {
+        "x": 0,
+        "y": 260
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Navigate Front Desk IVR",
+        "pressButton": {
+          "digits": "1w2#",
+          "speech": null,
+          "durationMillis": 250
+        }
+      }
+    },
+    {
+      "id": "schedule",
+      "type": "Scheduling",
+      "position": {
+        "x": 0,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Book Appointment",
+        "scheduling": {
+          "calendarProvider": "webhook",
+          "availabilityUrl": "https://api.riverside-dental.test/slots?date={{requested_date}}",
+          "bookingUrl": "https://api.riverside-dental.test/book",
+          "headers": {
+            "Authorization": "Bearer {{request_data.calendar_token}}"
+          },
+          "timezone": "{{timezone}}",
+          "slotDurationMinutes": 45,
+          "lookaheadDays": 21,
+          "speech": "Let me check what's available.",
+          "confirmationPrompt": "Confirm the booked time with the caller in their timezone.",
+          "onFailureNodeId": "fallback_human"
+        },
+        "extractVars": [
+          {
+            "name": "requested_date",
+            "type": "string",
+            "description": "Preferred date, YYYY-MM-DD"
+          }
+        ]
+      }
+    },
+    {
+      "id": "billing",
+      "type": "Transfer Pathway",
+      "position": {
+        "x": 360,
+        "y": 260
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Billing Questions",
+        "transferPathway": {
+          "pathwayId": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a04",
+          "version": "production",
+          "nodeId": null,
+          "carryVariables": true,
+          "returnOnEnd": true
+        }
+      }
+    },
+    {
+      "id": "survey",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 780
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Post Booking",
+        "text": "You're all set for {{booking_start | date:\"%B %d at %I:%M %p\"}}. One last thing before you go.",
+        "enableForwarding": true,
+        "forwardingNode": {
+          "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a05",
+          "version": 3,
+          "node_id": "nps_question"
+        }
+      }
+    },
+    {
+      "id": "fallback_human",
+      "type": "Transfer Call",
+      "position": {
+        "x": 360,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Front Desk",
+        "transferNumber": "+14155550142",
+        "transfer": {
+          "mode": "cold",
+          "number": "{{request_data.front_desk_number}}",
+          "speech": "I'll put you through to our front desk.",
+          "speechMode": "prompt",
+          "speechPrompt": "Tell the caller you are transferring them because booking failed.",
+          "callerIdMode": "agent_number"
+        }
+      }
+    },
+    {
+      "id": "emergency",
+      "type": "Default",
+      "position": {
+        "x": 720,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Dental Emergency",
+        "isGlobal": true,
+        "globalLabel": "The caller describes severe pain, swelling, bleeding, or a dental emergency",
+        "prompt": "Tell the caller to come in immediately or call 911 if it is life-threatening.",
+        "enableGlobalAutoReturn": false,
+        "enableForwarding": true,
+        "forwardingNode": "fallback_human"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "intro",
+      "target": "schedule",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants to book, move, or check an appointment",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e2",
+      "source": "intro",
+      "target": "menu_ivr",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "An automated phone menu answered instead of a person",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e3",
+      "source": "intro",
+      "target": "billing",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Has a billing or insurance question",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e4",
+      "source": "menu_ivr",
+      "target": "intro",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Reached a person",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": true,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e5",
+      "source": "schedule",
+      "target": "survey",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Appointment booked",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    }
+  ],
+  "global_config": {
+    "globalPrompt": "You are Sam, the scheduling assistant for Riverside Dental. Today is {{today}}.",
+    "defaultTemperature": 0.5,
+    "globalTools": ["TL-0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a03"],
+    "globalKb": ["KB-0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a01"],
+    "maxTotalTurns": 120,
+    "noMatchBehavior": "fallback_edge",
+    "editorZoom": 0.8
+  }
+}

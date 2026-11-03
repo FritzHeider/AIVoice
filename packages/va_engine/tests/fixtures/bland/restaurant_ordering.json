@@ -1,0 +1,463 @@
+{
+  "nodes": [
+    {
+      "id": "greet",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Greeting",
+        "isStart": true,
+        "prompt": "Greet the caller warmly, say you are Ava from {{request_data.restaurant_name | default:\"Bella Pasta\"}}, and ask how you can help.",
+        "extractVars": [
+          {
+            "name": "first_name",
+            "type": "string",
+            "description": "Caller's first name",
+            "required": false
+          }
+        ],
+        "extractVarsMode": "background",
+        "pathwayExamples": [
+          {
+            "conversation": [
+              {
+                "role": "assistant",
+                "content": "Hi, this is Ava, how can I help?"
+              },
+              {
+                "role": "user",
+                "content": "I'd like to order a pizza for pickup"
+              }
+            ],
+            "chosenLabel": "Wants to place an order"
+          }
+        ],
+        "modelOptions": {
+          "temperature": 0.6,
+          "interruptionThreshold": null,
+          "skipUserResponse": false,
+          "block_interruptions": false,
+          "resumption_speed": 2,
+          "interruptibility": null,
+          "model": null
+        },
+        "tag": {
+          "name": "Greeting",
+          "color": "#4F46E5"
+        },
+        "active": false
+      }
+    },
+    {
+      "id": "take_order",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 260
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Take Order",
+        "prompt": "Take the caller's order item by item. Confirm sizes and quantities. Use the menu knowledge when asked.",
+        "condition": "The caller has listed every item they want and confirmed the order is complete.",
+        "conditionThreshold": 7,
+        "conditionExamples": [
+          {
+            "conversation": [
+              {
+                "role": "user",
+                "content": "That's everything, thanks."
+              }
+            ],
+            "conditionMet": true,
+            "explanation": "Caller confirmed the order is complete"
+          }
+        ],
+        "extractVars": [
+          {
+            "name": "order_items",
+            "type": "string",
+            "description": "Comma-separated items with sizes",
+            "required": true
+          },
+          {
+            "name": "item_count",
+            "type": "integer",
+            "description": "Total number of items",
+            "required": true
+          }
+        ],
+        "dialogueExamples": [
+          {
+            "conversation": [
+              {
+                "role": "user",
+                "content": "Do you have gluten-free crust?"
+              }
+            ],
+            "assistantResponse": "We do, it's available on any medium pizza for two dollars extra."
+          }
+        ],
+        "tools": ["TL-0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a02"],
+        "maxVisits": 12,
+        "tag": {
+          "name": "Take Order",
+          "color": "#16A34A"
+        }
+      }
+    },
+    {
+      "id": "menu",
+      "type": "Knowledge Base",
+      "position": {
+        "x": 360,
+        "y": 260
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Menu Questions",
+        "prompt": "Answer questions about the menu using the knowledge provided, then offer to continue the order.",
+        "kb": "KB-0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a01",
+        "kbTopK": 4
+      }
+    },
+    {
+      "id": "price",
+      "type": "Custom Code",
+      "position": {
+        "x": 0,
+        "y": 520
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Compute Total",
+        "customCode": {
+          "language": "typescript",
+          "code": "export default async function (ctx) { return { variables: { order_total: Number(ctx.variables.item_count) * 12.5 } }; }",
+          "timeoutMs": 1000,
+          "networkAllowlist": [],
+          "speech": null
+        }
+      }
+    },
+    {
+      "id": "confirm",
+      "type": "Default",
+      "position": {
+        "x": 0,
+        "y": 780
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Confirm Order",
+        "text": "Your total is {{order_total}} dollars for {{order_items}}. Should I text you a confirmation, {{first_name | default:\"there\"}}?",
+        "modelOptions": {
+          "skipUserResponse": false
+        }
+      }
+    },
+    {
+      "id": "sms",
+      "type": "SMS",
+      "position": {
+        "x": 0,
+        "y": 1040
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Send Confirmation",
+        "sms": {
+          "to": "{{from}}",
+          "from": null,
+          "message": "Bella Pasta: your order of {{order_items}} ({{order_total}} USD) is confirmed.",
+          "messageMode": "static",
+          "messagePrompt": null,
+          "speech": "I just texted you the confirmation.",
+          "continueOnFailure": true
+        }
+      }
+    },
+    {
+      "id": "wait",
+      "type": "Wait for Response",
+      "position": {
+        "x": 0,
+        "y": 1300
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Anything Else",
+        "prompt": "Ask whether there is anything else you can help with.",
+        "waitForResponse": {
+          "waitSeconds": 20,
+          "repromptText": "Are you still there?",
+          "maxReprompts": 1,
+          "onTimeout": "end_call"
+        }
+      }
+    },
+    {
+      "id": "manager",
+      "type": "Transfer Call",
+      "position": {
+        "x": 360,
+        "y": 1300
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Transfer to Manager",
+        "transfer": {
+          "mode": "cold",
+          "number": "+14155550100",
+          "speech": "Let me connect you with the manager.",
+          "speechMode": "static",
+          "speechPrompt": null,
+          "callerIdMode": "original_caller",
+          "warm": null
+        }
+      }
+    },
+    {
+      "id": "goodbye",
+      "type": "End Call",
+      "position": {
+        "x": 0,
+        "y": 1560
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Goodbye",
+        "endCall": {
+          "speech": "Thanks for ordering with Bella Pasta. Goodbye!",
+          "speechMode": "static",
+          "speechPrompt": null
+        }
+      }
+    },
+    {
+      "id": "hours",
+      "type": "Default",
+      "position": {
+        "x": 720,
+        "y": 0
+      },
+      "width": 320,
+      "height": 180,
+      "selected": false,
+      "dragging": false,
+      "data": {
+        "name": "Opening Hours",
+        "isGlobal": true,
+        "globalLabel": "The caller asks about opening hours or location",
+        "prompt": "Tell the caller we are open 11am to 10pm daily at 12 Main Street, then return to {{prevNodePrompt}}.",
+        "enableGlobalAutoReturn": true,
+        "tag": {
+          "name": "Global",
+          "color": "#F59E0B"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_greet_order",
+      "source": "greet",
+      "target": "take_order",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants to place an order",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_greet_manager",
+      "source": "greet",
+      "target": "manager",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants to speak to a manager or has a complaint",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 1
+      }
+    },
+    {
+      "id": "e_order_menu",
+      "source": "take_order",
+      "target": "menu",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Asks a question about the menu",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_order_price",
+      "source": "take_order",
+      "target": "price",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Order is complete",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_menu_order",
+      "source": "menu",
+      "target": "take_order",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Ready to continue the order",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_price_confirm",
+      "source": "price",
+      "target": "confirm",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Total computed",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": true,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_confirm_sms",
+      "source": "confirm",
+      "target": "sms",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants a text confirmation",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_confirm_wait",
+      "source": "confirm",
+      "target": "wait",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "",
+        "description": "",
+        "isFallback": true,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_sms_wait",
+      "source": "sms",
+      "target": "wait",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Text sent",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": true,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_wait_goodbye",
+      "source": "wait",
+      "target": "goodbye",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Nothing else needed",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    },
+    {
+      "id": "e_wait_order",
+      "source": "wait",
+      "target": "take_order",
+      "type": "custom",
+      "animated": false,
+      "data": {
+        "label": "Wants to add more items",
+        "description": "",
+        "isFallback": false,
+        "alwaysPick": false,
+        "priority": 0
+      }
+    }
+  ],
+  "global_config": {
+    "globalPrompt": "You are Ava, a friendly receptionist for Bella Pasta. Keep answers short and natural.",
+    "applyGlobalPromptToAllNodes": true,
+    "defaultTemperature": 0.7,
+    "defaultVoice": null,
+    "defaultLanguage": "en",
+    "memoryEnabled": false,
+    "globalTools": [],
+    "globalKb": null,
+    "maxTotalTurns": 200,
+    "errorPhrase": "I'm sorry, I'm having trouble right now.",
+    "routerModel": null,
+    "dialogueModel": null,
+    "noMatchBehavior": "stay"
+  }
+}
