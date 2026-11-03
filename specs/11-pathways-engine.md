@@ -365,6 +365,69 @@ After a global node finishes its response: if `enableForwarding` → jump to `fo
 > 7. Waits for the user: Default/Global unless `skipUserResponse`; Wait for Response always; End Call and
 >    Transfer Call never.
 
+> Decision (2026-11-03): webhook, SMS, press button, transfer pathway and scheduling handlers (P07-T07).
+> `handler_for` now covers every type except Knowledge Base and Custom Code (phase 08).
+> 1. Side effects go through `va_engine.ports` (the engine never imports `va_tools`): `HttpPort.execute(HttpCall)`
+>    → `HttpOutcome(kind ok|http_error|timeout|connection|blocked|invalid_url, status, body, truncated,
+>    extracted, attempts, duration_ms)`, `SmsPort.send(SmsRequest)` → `SmsOutcome(sent, message_id, error)`,
+>    `ExtractionPort.extract(ctx)` → `ExtractionResult | None`, and `ActionSink.queue(action)` for speech that must
+>    start before the handler returns. Ports never raise. `TurnContext` carries them optionally; a missing port
+>    is a `problem` (`http_unavailable`, `sms_unavailable`), never an exception. `HandlerResult` gains
+>    `route_to` (next node chosen by the handler), `route_fallback` (take the node's fallback edge) and `reports`
+>    (`ExtractionReport` → `call.extraction`, `WebhookReport` → `call.webhook_node`, `SmsReport` →
+>    `call.sms_sent`, emitted in order by the turn orchestration). Reports carry no bodies, headers, URL user
+>    info/query/fragment or phone numbers. `call.webhook_node` data: `node_id`, `purpose`
+>    (`webhook`|`availability`|`booking`), `method`, `url` (scheme, host, port, path), `outcome`,
+>    `status_code`, `attempts`, `duration_ms`, `variables_set`, `route_to`. `call.sms_sent` data: `node_id`,
+>    `source: "sms_node"`, `sent`, `message_id`, `error`.
+> 2. Webhook: `extractVars` run first and are merged, so the request sees them. Voice channels queue the rendered
+>    `speech` on the sink before the request (without a sink it leads the result's actions); text channels drop
+>    it. The URL renders with percent-encoded values, header values as text, the body type-preserving (§8); a
+>    blank rendered URL is not sent (problem `webhook_url_missing`, outcome `invalid_url`). Only a 2xx response
+>    merges its non-null `responseData` values and evaluates `responsePathways` (in order, first holding
+>    condition wins); then `routeOnStatus` by status class — `2xx`, `4xx`, `5xx`; every failure without a
+>    response (timeout, connection, blocked, invalid URL) uses the `timeout` key; 3xx has no key — else normal
+>    routing. A target id not in the graph is skipped (`engine.webhook_route_missing`). `respond` speaks
+>    `text`/`prompt` when present, else nothing (the node routes at once); it waits for the user only with a
+>    reply and without `skipUserResponse` (SMS nodes follow the same rule).
+> 3. `responsePathways` operators (missing variable = null): `==`/`!=` compare numerically when both sides are
+>    numbers or numeric strings (booleans are never numbers), else as stripped, case-insensitive text; `>`, `>=`,
+>    `<`, `<=` are numeric only (non-numeric → false); `contains` = list element `==`, case-insensitive
+>    substring, or object key (`not_contains` negates); `is_empty` = null, blank text, `[]`, `{}`.
+> 4. SMS: `messageMode: "prompt"` composes the message through the `LinePort` (fallback: rendered `message`,
+>    `engine.sms_message_fallback`); a blank message is problem `sms_message_missing`. On the `sms` channel the
+>    message is just the next message (`Say`). Elsewhere `to` must render to E.164 (separators removed; else
+>    error `invalid_to`, never logged) and a blank `from` means the call's number. No `SendSmsAction` exists: the
+>    node needs the send result. Success → rendered `speech`; failure → no speech (it would claim a text was
+>    sent), problem `sms_failed`, and without `continueOnFailure` `route_fallback` (also for a missing message
+>    or port).
+> 5. Press Button: voice/widget_voice → optional `Say(speech)` then `SendDtmfAction(digits, duration_ms,
+>    after_mark=<speech mark>)`; text channels (or a missing config) do nothing (`engine.press_button_ignored`,
+>    warning). Never waits for the user.
+> 6. Transfer Pathway: `on_enter` → `SwitchGraph(pathway_id, version, node_id, carry_variables, return_on_end)`
+>    (blank `pathwayId` → problem `transfer_pathway_missing`), applied by `Navigator.switch_graph`: load the
+>    version through the `PathwayLoader`, enter `nodeId` or the start node (transition kind `switch`, visit
+>    counted, `pathway_changed`); `returnOnEnd` pushes `NodeFrame(kind="transfer_pathway")` of the source graph at
+>    the Transfer Pathway node; `carryVariables: false` clears `variables` (`request_data` and built-ins stay in
+>    the template scope). Failures stay (`pathway_unavailable`, `forward_target_missing`). While the top frame is
+>    a `transfer_pathway` frame (`pathway_return_pending()`), the turn orchestration calls
+>    `return_from_pathway()` instead of executing an End Call node: the source pathway/version is reloaded and its
+>    Transfer Pathway node becomes current without a visit and without re-running it, and routing continues from
+>    its edges (`return_target_missing` when it cannot be restored; the frame is dropped).
+> 7. Scheduling: `on_enter` queues `speech`, then GETs the rendered `availabilityUrl` (rendered headers, 10 s,
+>    one retry). Slots of `{"slots":[{start,end}]}` starting in `[now, now + lookaheadDays)` are kept (naive times
+>    read in the rendered node `timezone`, else the call's; a missing or non-increasing `end` = start +
+>    `slotDurationMinutes`), sorted, capped at 20, and stored as `variables.available_slots` = `[{start, end}]`
+>    ISO 8601 in that timezone. A failed request, a body breaking the contract, or no slot → `[]` and
+>    `route_to = onFailureNodeId` (problem `scheduling_unavailable` when unset/unknown). `respond` streams the
+>    dialogue reply with the functions `list_slots()` and `book_slot(start)` (`SCHEDULING_FUNCTIONS`, executed by
+>    `list_slots(ctx)` / `book_slot(ctx, start)`): the start must equal an offered slot as an instant (else tool
+>    message `{"error": "slot_unavailable"}`, no request); the booking POST (no retry) sends `start`/`end` of the
+>    offered slot, `name` (variable `name`, else `first_name` + `last_name`), `phone` (built-in `user_number`),
+>    `email`, `notes` (variables), `call_id`; a 2xx JSON answer with a scalar `booking_id` sets `booking_id`,
+>    `booking_start`, `booking_end` (answer times, else the slot's); anything else → `{"error":
+>    "booking_failed", "status": <code or 0>}` and `route_to = onFailureNodeId`. Always waits for the user.
+
 ## 5. Per-turn algorithm (pathway mode)
 
 Triggered by `engine.on_user_turn(UserTurn(text, words, started_ms, ended_ms, language))` after EOT

@@ -218,6 +218,21 @@ once and the connection pinned to the checked IP (custom `httpx` transport) to p
 > pinning client connects to; its rules are the specs/19 §8 Decision P05-T05a. The pinning client itself arrives with
 > tool execution.
 
+> Decision (2026-11-03): shared HTTP executor (P07-T07). `va_tools.http.HttpExecutor` implements
+> `va_engine.ports.HttpPort` for webhook nodes, scheduling nodes and (phase 08) tools: it receives an already
+> rendered `HttpCall` (rendering stays in `va_engine.templating`; `va_tools` depends on `va_engine`, never the
+> reverse) and never raises. Production executors come from `open_http_executor(settings, clock=, allow_http=,
+> resolver=, call_id=, signer=)` over `va_common.safe_http.safe_client` (connect-time DNS pinning, private ranges
+> per `WEBHOOK_ALLOW_PRIVATE`, no redirects). Pre-flight: an unparseable URL or one without a host is
+> `invalid_url`; a scheme other than `https` (plus `http` when allowed) is `blocked`; a refused connection is
+> `blocked` (never retried), an unresolvable name a `connection` failure. Timeouts: connect `min(2 s,
+> timeout_ms)`, every other phase `timeout_ms`. Steps 4–6 as above: `User-Agent`, `X-VA-Call-Id`, signer headers
+> over the exact body bytes, JSON body for every method but `GET`; retries on connect errors, timeouts and 5xx
+> with `0.25 s × attempt` sleeps on the injected clock; body capped at 1 MiB (`truncated`), parsed as JSON when it
+> parses, else text; JSONPath (`va_tools.jsonpath` over jsonpath-ng's extended parser, compiled paths LRU-cached)
+> applies to JSON bodies of any status: one match → value, several → list, none (or an invalid path, logged
+> without the path) → null. Logs carry method, host, status, outcome, attempts and duration only.
+
 ## 10. Tests required
 - CRUD, validation errors, secret masking, tenant isolation, reference-check delete.
 - Rendering with `input.*`, type preservation, URL encoding.

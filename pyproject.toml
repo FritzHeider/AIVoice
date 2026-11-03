@@ -47,6 +47,7 @@ dev = [
   "va-billing",
   "va-workflows",
   "va-engine",
+  "va-tools",
   "actionlint-py>=1.7.12.25",
   "pre-commit>=4.7.0",
   "aiosmtpd>=1.4.6",
@@ -81,6 +82,7 @@ va-compliance = { workspace = true }
 va-workflows = { workspace = true }
 va-billing = { workspace = true }
 va-engine = { workspace = true }
+va-tools = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*", "apps/*", "sdks/python", "sdks/cli"]
@@ -115,7 +117,7 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true
-mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/telephony_edge/tests/support:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/webhook_dispatcher/tests/support:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_domain/tests/support:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:packages/va_voice/src:packages/va_voice/tests/support:packages/va_compliance/src:packages/va_compliance/tests/support:packages/va_billing/src:packages/va_billing/tests/support:packages/va_workflows/src:packages/va_workflows/tests/support:packages/va_engine/src:packages/va_engine/tests/support:tests_live/support:tests_e2e/support"
+mypy_path = "scripts:packages/va_common/src:packages/va_common/tests:apps/api/src:apps/api/tests/support:apps/media_worker/tests/support:apps/worker/tests/support:apps/telephony_edge/src:apps/telephony_edge/tests/support:apps/media_worker/src:apps/worker/src:apps/webhook_dispatcher/src:apps/webhook_dispatcher/tests/support:apps/events_sink/src:apps/events_sink/tests/support:apps/sim/src:packages/va_sim/src:packages/va_sim/tests/support:packages/va_db/src:packages/va_events/src:packages/va_domain/src:packages/va_domain/tests/support:packages/va_events/tests/support:packages/va_db/tests/support:packages/va_telnyx/src:packages/va_telnyx/tests/support:packages/va_elevenlabs/src:packages/va_elevenlabs/tests/support:packages/va_llm/src:packages/va_llm/tests/support:packages/va_voice/src:packages/va_voice/tests/support:packages/va_compliance/src:packages/va_compliance/tests/support:packages/va_billing/src:packages/va_billing/tests/support:packages/va_workflows/src:packages/va_workflows/tests/support:packages/va_engine/src:packages/va_engine/tests/support:packages/va_tools/src:packages/va_tools/tests/support:tests_live/support:tests_e2e/support"
 files = [
   "scripts",
   "packages/va_common/src",
@@ -158,6 +160,8 @@ files = [
   "packages/va_workflows/tests",
   "packages/va_engine/src",
   "packages/va_engine/tests",
+  "packages/va_tools/src",
+  "packages/va_tools/tests",
   "tests_live",
   "tests_e2e",
 ]
@@ -209,6 +213,7 @@ pythonpath = [
   "packages/va_billing/tests/support",
   "packages/va_workflows/tests/support",
   "packages/va_engine/tests/support",
+  "packages/va_tools/tests/support",
   "tests_live/support",
   "tests_e2e/support",
 ]

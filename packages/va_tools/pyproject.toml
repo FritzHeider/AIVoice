@@ -1,0 +1,21 @@
+[project]
+name = "va-tools"
+version = "0.1.0"
+description = "VoiceAgents tool runtime: SSRF-safe HTTP executor and JSONPath extraction for webhook nodes and tools"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28",
+    "jsonpath-ng>=1.7",
+    "orjson>=3.13.0",
+    "pydantic>=2.9",
+    "va-common",
+    "va-engine",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }
+va-engine = { workspace = true }

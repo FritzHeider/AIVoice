@@ -20,6 +20,7 @@ members = [
     "va-sim-server",
     "va-telephony-edge",
     "va-telnyx",
+    "va-tools",
     "va-voice",
     "va-webhook-dispatcher",
     "va-worker",
@@ -1103,6 +1104,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bd/15/48ff246732232d35ee234228def22b52455fcc55577f06146602399a29b0/joserfc-1.7.7.tar.gz", hash = "sha256:471d0fd12a5a0d1c0942de280f39efe6f597878315033270b504d4d006d25510", size = 237446, upload-time = "2026-10-19T00:30:29.974Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/9f/934db284aa22f37af59708e382903860d4b81329c137b1b0ed2745daeb65/joserfc-1.7.7-py3-none-any.whl", hash = "sha256:06979cfbab78bc802f14c0358f32969826cc26720e13cb38926ffdc86bc0cb2c", size = 71758, upload-time = "2026-10-19T00:30:28.498Z" },
+]
+
+[[package]]
+name = "jsonpath-ng"
+version = "1.15.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/40/00f1c0fef301f69aae20f9b24ab4072c188afd753096d969e2cdedd09954/jsonpath_ng-1.15.0.tar.gz", hash = "sha256:6857e3817a04555375d68eb5be17562eea6d3a3de2d10dad6f54f259282ee1c9", size = 119781, upload-time = "2026-10-29T14:18:11.098Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4b/a1/ec64128a063e501bd84b73cfbd2f204f9756c20d9be7eceeea8d997bd6f2/jsonpath_ng-1.15.0-py3-none-any.whl", hash = "sha256:a079a4d1d3e9ecb452437f26c18ec6854bd1beab36f5d5bafc121ea7330ad1b7", size = 84764, upload-time = "2026-10-29T14:18:09.724Z" },
 ]
 
 [[package]]
@@ -3179,6 +3189,29 @@ requires-dist = [
 ]
 
 [[package]]
+name = "va-tools"
+version = "0.1.0"
+source = { editable = "packages/va_tools" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jsonpath-ng" },
+    { name = "orjson" },
+    { name = "pydantic" },
+    { name = "va-common" },
+    { name = "va-engine" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "jsonpath-ng", specifier = ">=1.7" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "va-common", editable = "packages/va_common" },
+    { name = "va-engine", editable = "packages/va_engine" },
+]
+
+[[package]]
 name = "va-voice"
 version = "0.1.0"
 source = { editable = "packages/va_voice" }
@@ -3377,6 +3410,7 @@ dev = [
     { name = "va-sim-server" },
     { name = "va-telephony-edge" },
     { name = "va-telnyx" },
+    { name = "va-tools" },
     { name = "va-voice" },
     { name = "va-webhook-dispatcher" },
     { name = "va-worker" },
@@ -3431,6 +3465,7 @@ dev = [
     { name = "va-sim-server", editable = "apps/sim" },
     { name = "va-telephony-edge", editable = "apps/telephony_edge" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
+    { name = "va-tools", editable = "packages/va_tools" },
     { name = "va-voice", editable = "packages/va_voice" },
     { name = "va-webhook-dispatcher", editable = "apps/webhook_dispatcher" },
     { name = "va-worker", editable = "apps/worker" },

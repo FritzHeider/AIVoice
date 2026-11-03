@@ -36,7 +36,7 @@
   - Deliverables: handlers with static text vs prompt, skipUserResponse, end-call speech modes, cold transfer action emission
   - Acceptance: unit tests per handler incl. speech_mode prompt fallback.
 
-- [ ] P07-T07 Node handlers: Webhook, SMS, Press Button, Transfer Pathway, Scheduling
+- [x] P07-T07 Node handlers: Webhook, SMS, Press Button, Transfer Pathway, Scheduling — va_engine handlers + ports + Navigator.switch_graph/return_from_pathway, new va_tools (SSRF-safe HttpExecutor, JSONPath); make test 12028 passed (99.08 % cov), lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
   - Spec refs: specs/11-pathways-engine.md (node types: Webhook, SMS, Press Button, Transfer Pathway, Scheduling); specs/13-tools-and-dynamic-data.md (HTTP execution, JSONPath mapping, SSRF)
   - Depends on: P07-T05
   - Deliverables: shared `va_tools.http` executor (templating, timeouts, retries, JSONPath, SSRF guard), handlers for each node type, extraction-before-webhook ordering

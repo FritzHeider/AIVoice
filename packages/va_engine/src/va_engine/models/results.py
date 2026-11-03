@@ -7,7 +7,9 @@ to the media worker's action handler.
 The pathway node handlers (specs/11 §4, Decision P07-T06) return the :data:`Action` union: :class:`Say` /
 :class:`SayStream` (speech), :class:`Wait` (arm a Wait for Response timer), and the terminal
 :class:`TransferAction`, :class:`EndCallAction` and :class:`HumanTakeover`, which run once the line named by
-``after_mark`` finished playing (``None`` = at once).
+``after_mark`` finished playing (``None`` = at once). The P07-T07 handlers add the non-terminal
+:class:`SendDtmfAction` (Press Button) and :class:`SwitchGraph` (Transfer Pathway, applied by
+:meth:`va_engine.navigation.Navigator.switch_graph`).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
-from va_engine.models.nodes import WarmTransfer
+from va_engine.models.nodes import PathwayVersionRef, WarmTransfer
 from va_voice.pipeline.models import BrainAction
 
 __all__ = [
@@ -27,6 +29,8 @@ __all__ = [
     "PressButton",
     "Say",
     "SayStream",
+    "SendDtmfAction",
+    "SwitchGraph",
     "TransferAction",
     "TransferRequest",
     "Wait",
@@ -104,7 +108,34 @@ class HumanTakeover:
     after_mark: str | None = None
 
 
-type Action = Say | SayStream | Wait | TransferAction | EndCallAction | HumanTakeover
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SendDtmfAction:
+    """Send ``digits`` as DTMF (``w`` = 0.5 s pause, ``W`` = 1 s), each tone ``duration_ms`` long, once
+    ``after_mark`` played."""
+
+    digits: str
+    duration_ms: int
+    after_mark: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SwitchGraph:
+    """Continue in another pathway (Transfer Pathway node).
+
+    ``node_id`` ``None`` = the target's start node; ``carry_variables`` keeps the variables; ``return_on_end``
+    makes the conversation come back to the Transfer Pathway node instead of ending at an End Call node.
+    """
+
+    pathway_id: str
+    version: PathwayVersionRef
+    node_id: str | None = None
+    carry_variables: bool = True
+    return_on_end: bool = False
+
+
+type Action = (
+    Say | SayStream | Wait | SendDtmfAction | SwitchGraph | TransferAction | EndCallAction | HumanTakeover
+)
 
 TERMINAL_ACTIONS: Final = (TransferAction, EndCallAction, HumanTakeover)
 

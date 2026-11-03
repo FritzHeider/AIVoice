@@ -9,20 +9,39 @@ Side effects stay outside: the dialogue reply streams from the injected :class:`
 orchestration assembles the §5.7 prompt), composed final lines come from the :class:`LinePort`. Templates
 render against the state's variables, ``request_data`` and the built-ins; a template with a syntax error is
 used as raw text (``engine.template_invalid``).
+
+The P07-T07 handlers (Webhook, SMS, Press Button, Transfer Pathway, Scheduling) also use the optional
+:mod:`va_engine.ports` (HTTP, SMS, extraction, the action sink); a missing port is a ``problem``, not
+an exception.
+:class:`HandlerResult` then carries the node's routing outcome (``route_to``, ``route_fallback``) and its
+:mod:`~va_engine.handlers.reports` for the turn's events.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Final, Literal, Protocol
 
+from pydantic import JsonValue
+
 from va_common.logging import get_logger
+from va_engine.handlers.reports import NodeReport
 from va_engine.models.graph import PathwayGraph
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.results import Action, Say, SayStream, is_terminal
 from va_engine.models.state import EngineState
-from va_engine.templating import MissingVariables, TemplateScope, TemplateSyntaxError, render
+from va_engine.ports import ActionSink, ExtractionPort, HttpPort, SmsPort
+from va_engine.templating import (
+    MissingVariables,
+    TemplateScope,
+    TemplateSyntaxError,
+    render,
+    render_json,
+    render_url,
+    stringify,
+)
 
 __all__ = [
     "TEXT_CHANNELS",
@@ -109,6 +128,17 @@ class TurnContext:
     missing: MissingVariables | None = None
     transfer_list: Mapping[str, str] = field(default_factory=dict)
     marks: MarkSequence = field(default_factory=MarkSequence)
+    http: HttpPort | None = None
+    sms: SmsPort | None = None
+    extractor: ExtractionPort | None = None
+    sink: ActionSink | None = None
+    clock_now: Callable[[], datetime] | None = None
+
+    def now(self) -> datetime:
+        """The current UTC time (``clock_now``, else derived from ``now_ms``)."""
+        if self.clock_now is not None:
+            return self.clock_now()
+        return datetime.fromtimestamp(self.now_ms() / 1000, tz=UTC)
 
     def scope(self) -> TemplateScope:
         """The template scope over the current variables."""
@@ -130,6 +160,28 @@ class TurnContext:
             )
             return text
 
+    def render_url(self, text: str, *, field_name: str) -> str:
+        """``text`` rendered as a URL (values percent-encoded); raw text on a template syntax error."""
+        try:
+            return render_url(text, self.scope())
+        except TemplateSyntaxError as exc:
+            _log.warning(
+                "engine.template_invalid", node_id=self.node.id, field=field_name, position=exc.position
+            )
+            return text
+
+    def render_json(self, value: JsonValue, *, field_name: str) -> JsonValue:
+        """Every string inside ``value`` rendered (a lone expression keeps its type); ``value`` unchanged on a
+        template syntax error."""
+        try:
+            rendered = render_json(value, self.scope())
+        except TemplateSyntaxError as exc:
+            _log.warning(
+                "engine.template_invalid", node_id=self.node.id, field=field_name, position=exc.position
+            )
+            return value
+        return _json_value(rendered)
+
     def next_mark(self) -> str:
         """A fresh playback mark name for this turn."""
         return self.marks.next(self.state.turn_index)
@@ -137,10 +189,18 @@ class TurnContext:
 
 @dataclass(frozen=True, slots=True)
 class HandlerResult:
-    """The actions a handler produced (executed in order) and the config problem it hit, if any."""
+    """The actions a handler produced (executed in order) and the config problem it hit, if any.
+
+    ``route_to`` names the node the conversation moves to next (webhook response routing, scheduling failure),
+    ``route_fallback`` asks for the node's fallback edge (SMS failure without ``continueOnFailure``); both
+    unset = normal routing. ``reports`` feed the turn's events in order.
+    """
 
     actions: tuple[Action, ...] = ()
     problem: str | None = None
+    route_to: str | None = None
+    route_fallback: bool = False
+    reports: tuple[NodeReport, ...] = ()
 
     @property
     def terminal(self) -> bool:
@@ -156,6 +216,17 @@ class NodeHandler(Protocol):
     async def respond(self, ctx: TurnContext) -> HandlerResult: ...
 
     def waits_for_user(self, node: PathwayNode) -> bool: ...
+
+
+def _json_value(value: object) -> JsonValue:
+    """``render_json`` output as a JSON value (template values that are not JSON become text)."""
+    if value is None or isinstance(value, str | bool | int | float):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_value(item) for item in value]
+    return stringify(value)
 
 
 def has_content(text: str | None) -> bool:

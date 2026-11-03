@@ -1754,3 +1754,18 @@ Grafana 3001
   `va_engine.final_lines.GatewayLinePort`. Tests: `packages/va_engine/tests/support/handler_helpers.py`
   (`handler_ctx(raw_node, channel=, variables=, ...)`, `FakeDialogue`, `FakeLines(reply=str|exception)`,
   `spoken(actions)` → tuples). FakeLLM rule replies use `respond: {content: ...}` (not `text`).
+- 2026-11-03 (P07-T07): handler side effects go through `va_engine.ports` (`HttpPort`/`HttpCall`/`HttpOutcome`,
+  `SmsPort`, `ExtractionPort`, `ActionSink`); `TurnContext(http=, sms=, extractor=, sink=, clock_now=)` (all
+  optional; a missing port is a `problem`), `HandlerResult(route_to=, route_fallback=, reports=)` with
+  `va_engine.handlers.reports` (`WebhookReport`/`SmsReport`/`ExtractionReport.event_data()`). New actions
+  `SendDtmfAction`, `SwitchGraph` (applied by `Navigator.switch_graph`; `pathway_return_pending()` +
+  `return_from_pathway()` replace End Call while a `transfer_pathway` frame is on top). Scheduling tool calls:
+  `va_engine.handlers.SCHEDULING_FUNCTIONS`, `list_slots(ctx)`, `book_slot(ctx, start)`. New package
+  `packages/va_tools` (dist `va-tools`, depends on va-engine, never the reverse): `va_tools.http.HttpExecutor`
+  (+ `open_http_executor(settings, clock=, allow_http=, resolver=)` over `safe_client`) and `va_tools.jsonpath`
+  (jsonpath-ng ships `py.typed`; import `parse` from `jsonpath_ng.ext.parser`, the `ext` package does not
+  re-export it for mypy). Rules: specs/11 §4 and specs/13 §9 Decisions P07-T07. Tests: handler fakes in
+  `packages/va_engine/tests/support/handler_helpers.py` (`FakeHttp`, `ok(...)`, `FakeSms`, `FakeExtractor`,
+  `RecordingSink`, one shared `order` list for "what ran first"); `packages/va_tools/tests/support/tools_helpers.py`
+  (`plain_executor()` for respx, `guarded_executor(MappedResolver, allow_private=)` for real-socket SSRF tests with
+  `webhook_receiver.served_receiver`). `va_common.net` DNS failures are `UnsafeDestinationError("resolution")`.

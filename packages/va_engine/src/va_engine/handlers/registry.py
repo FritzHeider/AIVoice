@@ -1,7 +1,7 @@
 """Node type → handler (specs/11 §4).
 
-Node types whose handler arrives in a later task (Webhook, SMS, Press Button, Transfer Pathway, Scheduling:
-P07-T07; Knowledge Base, Custom Code: phase 08) raise :class:`UnsupportedNodeError`.
+Node types whose handler arrives in a later phase (Knowledge Base, Custom Code: phase 08) raise
+:class:`UnsupportedNodeError`.
 """
 
 from __future__ import annotations
@@ -12,8 +12,13 @@ from typing import Final
 from va_engine.handlers.base import NodeHandler
 from va_engine.handlers.default import DefaultHandler
 from va_engine.handlers.end_call import EndCallHandler
+from va_engine.handlers.press_button import PressButtonHandler
+from va_engine.handlers.scheduling import SchedulingHandler
+from va_engine.handlers.sms import SmsHandler
 from va_engine.handlers.transfer_call import TransferCallHandler
+from va_engine.handlers.transfer_pathway import TransferPathwayHandler
 from va_engine.handlers.wait_for_response import WaitForResponseHandler
+from va_engine.handlers.webhook import WebhookHandler
 from va_engine.models.nodes import PathwayNode
 
 __all__ = ["HANDLERS", "UnsupportedNodeError", "handler_for"]
@@ -23,6 +28,11 @@ HANDLERS: Final[Mapping[str, NodeHandler]] = {
     "Wait for Response": WaitForResponseHandler(),
     "End Call": EndCallHandler(),
     "Transfer Call": TransferCallHandler(),
+    "Webhook": WebhookHandler(),
+    "SMS": SmsHandler(),
+    "Press Button": PressButtonHandler(),
+    "Transfer Pathway": TransferPathwayHandler(),
+    "Scheduling": SchedulingHandler(),
 }
 
 

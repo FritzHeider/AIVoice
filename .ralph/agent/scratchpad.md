@@ -806,3 +806,215 @@ Scope: pure handlers producing engine actions; no routing/orchestration (T08), n
 - Non-blocking notes for T08: the §4 `NodeHandler` protocol lists `node_type`; handlers are keyed by the registry
   instead. `HandlerResult.terminal` counts a warm `TransferAction` as terminal (§4 says warm may return): revisit in
   phase 12.
+
+## Plan P07-T07 — Node handlers: Webhook, SMS, Press Button, Transfer Pathway, Scheduling (specs/11 §3.2.1/§3.2.4–§3.2.7, §4, §7; specs/13 §5 steps 3–6, §9)
+
+Scope: the five handlers + the shared HTTP executor/JSONPath core in a new `packages/va_tools`. No turn orchestration
+(T08: it applies `route_to`/`route_fallback`, `SwitchGraph`, events, chaining), no tool CRUD/LLM function exposure
+(phase 08), no media wiring (T12). Engine stays transport-agnostic: every side effect goes through ports.
+
+### Dependency direction (avoid a cycle)
+specs/13 §1 has `va_tools.render` using `va_engine.templating`, so **va_tools depends on va_engine, never the
+reverse**. Port protocols + their plain dataclasses live in va_engine (`va_engine/ports.py`); va_tools implements
+them. JSONPath runs inside the executor (va_tools), the engine only passes `(name, path)` pairs.
+
+### New `packages/va_engine/src/va_engine/ports.py`
+```python
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpCall:            # a fully rendered request
+    method: Literal["GET","POST","PUT","PATCH","DELETE"]; url: str; headers: Mapping[str, str]
+    body: JsonValue | None; timeout_ms: int; retries: int
+    extract: tuple[tuple[str, str], ...] = ()          # (variable name, JSONPath)
+type HttpOutcomeKind = Literal["ok", "http_error", "timeout", "connection", "blocked", "invalid_url"]
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HttpOutcome:
+    kind: HttpOutcomeKind; status: int | None; body: JsonValue | str | None; truncated: bool
+    extracted: dict[str, JsonValue]; attempts: int; duration_ms: int
+    def status_class(self) -> Literal["2xx","3xx","4xx","5xx","timeout"] | None   # connection/blocked/invalid_url → "timeout"
+class HttpPort(Protocol):  async def execute(self, call: HttpCall) -> HttpOutcome   # never raises
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SmsRequest: to: str; from_: str | None; body: str; node_id: str
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SmsOutcome: sent: bool; message_id: str | None = None; error: str | None = None
+class SmsPort(Protocol):   async def send(self, request: SmsRequest) -> SmsOutcome    # never raises
+class ExtractionPort(Protocol): async def extract(self, ctx: TurnContext) -> ExtractionResult | None  # T08 adapts Extractor
+class ActionSink(Protocol): def queue(self, action: Action) -> None   # non-blocking: speech that must start NOW
+```
+`TurnContext` (handlers/base.py) gains optional fields `http: HttpPort | None = None`, `sms: SmsPort | None = None`,
+`extractor: ExtractionPort | None = None`, `sink: ActionSink | None = None`, `now: Callable[[], datetime] | None`
+(scheduling lookahead; default derive from `now_ms`). A missing port = problem (`http_unavailable`/`sms_unavailable`),
+never a raise. `HandlerResult` gains `route_to: str | None = None`, `route_fallback: bool = False`,
+`reports: tuple[NodeReport, ...] = ()` where `NodeReport = WebhookReport | SmsReport | ExtractionReport`, each a
+frozen dataclass with `event_type` (`call.webhook_node` / `call.sms_sent` / `call.extraction`) and `event_data()`
+(T08 emits them in order). Keep the defaults so T06 handlers/tests stay untouched.
+
+### New actions (`models/results.py`, exported from `va_engine.models`; extend `Action` union)
+`SendDtmfAction(digits, duration_ms, after_mark: str | None)`, `SwitchGraph(pathway_id: str, version:
+PathwayVersionRef, node_id: str | None, carry_variables: bool, return_on_end: bool)`. Not terminal. No
+`SendSmsAction`: the SMS node needs the send outcome for `continueOnFailure`, so it calls `SmsPort` directly (Decision).
+
+### Handlers (`packages/va_engine/src/va_engine/handlers/`)
+- `conditions.py` — `evaluate(operator, actual: JsonValue, expected: JsonValue) -> bool` (pure). `==`/`!=`: numeric
+  compare when both sides coerce to numbers (bool not numeric), else `stringify` compare case-insensitive after strip;
+  `>,>=,<,<=` numeric only (non-numeric → False); `contains`/`not_contains`: list → any element `==`, str →
+  case-insensitive substring, dict → key; None → contains False; `is_empty`: None, "", whitespace, [], {} ;
+  `is_not_empty` = not. Missing variable = None.
+- `webhook.py` `WebhookHandler`:
+  - `on_enter`: (1) if `node.data.extract_vars` and `ctx.extractor` → `await extract(ctx)`, merge `values` into
+    `state.variables`, add `ExtractionReport` — **before** the request (ordering test). (2) voice/widget_voice with
+    non-blank `webhook.speech` → `ctx.sink.queue(Say(render(speech), mark, interruptible))` before awaiting HTTP (text
+    channels drop speech; no sink → speech goes first in result actions, logged `engine.webhook_speech_late`).
+    (3) render: `render_url(url)`, headers values `render`, body `render_json` (type-preserving); empty/blank url →
+    problem `webhook_url_missing`, report kind `invalid_url`, no request. (4) `await ctx.http.execute(HttpCall(...,
+    extract=tuple((r.name, r.data) for r in response_data)))`. (5) merge non-null `extracted` into variables.
+    (6) route: first `responsePathways` item whose `evaluate(...)` holds and whose target exists → `route_to`; else
+    `routeOnStatus[status_class]` (existing target); a target id not in the graph is skipped
+    (`engine.webhook_route_missing`). (7) `WebhookReport` data: `{node_id, method, url` (scheme+host+path, query
+    dropped), `status_code, outcome, attempts, duration_ms, variables_set: [names], route_to}` — no bodies/headers.
+  - `respond`: `speak_node(ctx, prompt_required=True)` when text/prompt present, else empty (immediate route).
+  - `waits_for_user`: (has text or prompt) and not skipUserResponse.
+- `sms.py` `SmsHandler`:
+  - `on_enter`: body = `messageMode: "prompt"` + non-blank `messagePrompt` → `ctx.lines.compose` (fallback to rendered
+    `message`, `engine.sms_message_fallback`); blank body → problem `sms_message_missing` (+ fallback routing unless
+    continueOnFailure). Channel `sms`: `Say(body)` only (the message is the next message, no port). Other channels:
+    `to` rendered (default `{{from}}`) normalized to E.164 (reuse transfer_call normalization helper; invalid →
+    failure `invalid_to`, number never logged), `from_` rendered or None, `await ctx.sms.send(...)`. Success → `Say(
+    render(speech))` if speech set, `SmsReport(node_id, sent=True, message_id)`. Failure → report `sent=False,
+    error`, problem `sms_failed`; `continueOnFailure=False` → `route_fallback=True`; no speech on failure (it would
+    claim a text was sent).
+  - `respond`/`waits_for_user`: as Webhook.
+- `press_button.py` `PressButtonHandler`: voice/widget_voice → optional `Say(speech)` then
+  `SendDtmfAction(digits, durationMillis, after_mark=speech mark|None)`; text channels → `engine.press_button_ignored`
+  (warning), no actions. `respond` empty; `waits_for_user` False.
+- `transfer_pathway.py` `TransferPathwayHandler`: `on_enter` → `SwitchGraph(...)` (blank pathwayId → problem
+  `transfer_pathway_missing`, no action); `respond` empty; `waits_for_user` False (delegated to the target node).
+- `scheduling.py` `SchedulingHandler`:
+  - `on_enter`: speech queued like Webhook (voice); GET rendered `availabilityUrl` (headers rendered, timeout 10 s,
+    retries 1) via HttpPort; parse `{"slots":[{start,end}]}` (ISO8601, tz-aware; naive → node timezone rendered, else
+    ctx.timezone); keep slots with `now <= start < now + lookaheadDays`, sorted, max 20; store in
+    `state.variables["available_slots"]` as `[{start,end}]` ISO strings. Failure / invalid body / zero slots →
+    `route_to = onFailureNodeId` (existing) else problem `scheduling_unavailable`; WebhookReport for the GET.
+  - `respond`: `speak_node(ctx, prompt_required=False)` (dialogue port offers the functions in T08).
+  - `SCHEDULING_FUNCTIONS`: OpenAI function defs `list_slots` (no params) and `book_slot` (`start` string required)
+    for T08's dialogue port; `async book_slot(ctx, start: str) -> BookingOutcome(ok, tool_message: dict, route_to)`:
+    start must equal an offered slot start (compare as instants) else `{"error":"slot_unavailable"}`; POST
+    `bookingUrl` body `{start, end, name, phone, email, notes, call_id}` (name = `name` var or `first_name`+`last_name`,
+    phone = builtin `user_number`, email/notes vars or null, call_id builtin); 2xx with `booking_id` → variables
+    `booking_id`, `booking_start`, `booking_end`; failure → route_to onFailureNodeId. `list_slots(ctx)` → tool message.
+  - `waits_for_user` True.
+- `registry.py`: map Webhook, SMS, Press Button, Transfer Pathway, Scheduling; only Knowledge Base / Custom Code stay
+  `UnsupportedNodeError`.
+
+### Navigator (`navigation.py`)
+- `TransitionKind` += `"switch"`; `TransitionProblem` += nothing new (reuse `pathway_unavailable`,
+  `forward_target_missing`).
+- `async switch_graph(action: SwitchGraph) -> Transition`: load via loader (none/failure → stay + problem); target
+  node (`node_id` or start) must exist; `return_on_end` → push `NodeFrame(kind="transfer_pathway", pathway_id,
+  version, node_id=current)` of the source; `carry_variables=False` → `state.variables = {}` (request_data and
+  built-ins remain in the template scope); switch active/state pathway fields; `enter(target)` (visit counted),
+  `pathway_changed=True`.
+- `pathway_return_pending() -> bool` (top frame kind transfer_pathway) and `async return_from_pathway() -> Transition`:
+  pop, reload frame pathway/version, current = frame node (the Transfer Pathway node, kind "return", no visit, no
+  on_enter: T08 then routes from its edges); load failure / missing node → problem `return_target_missing`. Rule:
+  T08 calls it instead of executing an End Call node while a transfer_pathway frame is on top.
+
+### New package `packages/va_tools` (dist `va-tools`; deps va-common, va-engine, httpx, jsonpath-ng)
+Register per AGENTS (root dev group + `[tool.uv.sources]`, mypy `mypy_path`/`files`, src layout, `py.typed`,
+uv_build). jsonpath-ng has no types → commented `[[tool.mypy.overrides]] module = ["jsonpath_ng.*"]
+ignore_missing_imports`. `uv add` it to va_tools; run pip-audit.
+- `jsonpath.py`: `compile_path(path) -> JsonPath` (`jsonpath_ng.ext.parse`, `functools.lru_cache(512)`, raises
+  `InvalidJsonPathError`), `extract(document, path) -> JsonValue` (one match → value, several → list, none → None;
+  invalid path → None + `tools.jsonpath_invalid` log), `extract_all(document, pairs) -> dict`.
+- `http.py`: `HttpExecutor(client: httpx.AsyncClient, *, clock: Clock, call_id: str | None = None, signer:
+  Callable[[bytes], Mapping[str,str]] | None = None, max_bytes=1_048_576)` implementing `HttpPort`; factory
+  `open_http_executor(settings, *, clock, resolver=system_resolver, call_id=, signer=)` → async context manager over
+  `va_common.safe_http.safe_client(settings, timeout=..., allow_private=settings.webhook_allow_private, resolver=)`
+  (connect 2 s; per-request total timeout `timeout_ms`). Pre-flight `check_destination_url` for scheme (unsafe →
+  `blocked`; unparseable → `invalid_url`); connect-time `UnsafeDestinationError` → `blocked` (no retry). Headers:
+  rendered + `User-Agent: VoiceAgents-Tools/1.0`, `X-VA-Call-Id`, signer headers over the exact body bytes (JSON body
+  via `va_common.json.dumps`, `Content-Type: application/json`; GET/DELETE with body None send none). Retries on
+  connect error, timeout, 5xx: up to `retries`, sleep `0.25 × attempt` s on the injected clock; never on 4xx/blocked.
+  Body read streamed with the 1 MB cap (`truncated`); parse JSON when content-type JSON or it parses, else text.
+  Apply `extract` with jsonpath (only on JSON bodies; text → all None). Log `tools.http_request` (method, host,
+  status, attempts, ms; never URL query/headers/body).
+- Tests (`packages/va_tools/tests/`): `test_jsonpath.py` (single/multi/no match, filters `$.items[?(@.x>1)].y`, invalid
+  path, cache), `test_http.py` with respx (`respx` patches httpcore → use a plain `httpx.AsyncClient` with respx for
+  rendering/retry/truncation/parse: retries on 5xx & timeout with recorded backoff sleeps 0.25/0.5, no retry on 4xx,
+  headers incl. UA/call id/signature verified with `va_events.webhook_signing`, 1 MB cap → truncated, text body,
+  extraction), `test_http_ssrf.py` with the real-socket receiver (`packages/va_events/tests/support/webhook_receiver.py`
+  — add that dir to va_tools pytest/mypy paths or copy nothing: import via pythonpath) through `open_http_executor`:
+  fake resolver → 127.0.0.1 with `webhook_allow_private=True` succeeds; `False` → `blocked`; `http://10.0.0.1`
+  literal blocked; DNS answer containing a private address blocked (rebinding pin). Use `ManualClock`/`RecordingClock`.
+  Coverage ≥ 95 %.
+
+### Spec
+- specs/11 §4: append `> Decision (2026-11-03): webhook, SMS, press button, transfer pathway and scheduling handlers
+  (P07-T07).` with the rules above (ports, HandlerResult route_to/route_fallback/reports, operator semantics, status
+  class mapping incl. connection/blocked → `timeout` key, extraction-before-request, speech via ActionSink, SMS no
+  speech on failure + no SendSmsAction, SwitchGraph + returnOnEnd return-instead-of-End-Call, carryVariables=false
+  clears variables, scheduling slot filtering/storage `available_slots`/functions/booking body field sources,
+  webhook event data fields).
+- specs/13 §5/§9: Decision that `va_tools.http.HttpExecutor` is the shared executor (steps 3–6 subset; executor gets
+  rendered requests; dependency direction va_tools → va_engine; JSONPath via jsonpath-ng ext).
+- specs/02 package list if it enumerates packages (check; add va_tools row only if absent).
+
+### Tests in va_engine (`packages/va_engine/tests/`)
+- `support/handler_helpers.py`: extend `handler_ctx(..., http=, sms=, extractor=, sink=)`; add `FakeHttp(outcomes |
+  callable)` recording `calls` (+ shared `order` log), `FakeSms(outcome)`, `FakeExtractor(values)` writing into the
+  same `order` log, `RecordingSink`.
+- `test_conditions.py`: every operator × types table (parametrized, incl. missing, bool vs number, list contains).
+- `test_handler_webhook.py`: extraction runs before the request and its values are visible in the rendered body;
+  speech queued to the sink before execute (order log); text channels drop speech; url/headers/body rendering with
+  type preservation; extracted vars merged (null not merged); responsePathways first match wins / in order / missing
+  target skipped; routeOnStatus 2xx/4xx/5xx/timeout and connection→timeout; no match → normal routing (route_to None);
+  report data without query string; missing http port / blank url problems; respond/waits_for_user with and without
+  prompt/text; logs never contain the URL query (json_log_stream).
+- `test_handler_sms.py`: static/prompt message (+ fallback), to default `{{from}}` normalized, invalid to → failure,
+  success speech, failure with/without continueOnFailure (route_fallback), sms channel → Say only + no port call,
+  missing port problem.
+- `test_handler_press_button.py`: voice speech + DTMF after mark, no speech → after_mark None, text channels ignored
+  (warning logged), widget_voice sends.
+- `test_handler_transfer_pathway.py` + navigator tests in `test_navigation.py`: SwitchGraph emitted; navigator swaps
+  graph (state pathway id/version, current = target node or start), **variables preserved** with carry, cleared
+  without; return_on_end pushes a transfer_pathway frame, `pathway_return_pending`, `return_from_pathway` restores
+  source graph + node; loader failure / missing node problems; frame not popped by global auto-return (existing rule).
+- `test_handler_scheduling.py`: availability GET rendered, slots filtered/sorted/capped and stored, failure →
+  onFailureNodeId, book_slot success sets booking vars and POST body fields, unknown slot rejected without HTTP,
+  booking failure route, list_slots message, function schemas valid (jsonschema).
+- `test_handler_registry.py`: update mapping table (KB/Custom Code still unsupported).
+- One integration test wiring a real `va_tools.HttpExecutor` (respx) into the Webhook handler
+  (`packages/va_tools/tests/test_webhook_node.py`) — proves port compatibility + JSONPath extraction end to end.
+- All new handler modules ≥ 90 % branch (aim 100 %).
+
+### Gates
+`PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+packages/va_tools -q`; `uv run python scripts/check_spec_refs.py`; `make test` in background (truncate
+logs/make_test.log, Monitor heartbeat); radon avg < 10; `npx --yes jscpd@4 --silent` 0 clones; `uvx pip-audit` on
+`uv export` (new jsonpath-ng/ply). No e2e (handlers not wired into calls until T12).
+AGENTS.md: one dated bullet (va_tools package + HttpExecutor/jsonpath, va_engine.ports, HandlerResult new fields,
+SwitchGraph/return_from_pathway, fakes).
+
+### Risks
+- respx + `safe_client`: the guarded backend may bypass respx; keep SSRF tests on real sockets, respx tests on plain clients.
+- jsonpath-ng `ext` parser is slow to build: lru_cache compiled paths; parse is pure CPU, small inputs — fine inline.
+- Adding fields to `TurnContext`/`HandlerResult` must keep defaults (T06 tests unchanged).
+- `Action` union growth: check any exhaustive matches (grep `is_terminal`, `match action`).
+- va_tools must not be imported by va_engine (add an import test like `test_model_imports` style or rely on review).
+- Never log phone numbers, URLs with query strings, bodies or headers.
+
+## Build P07-T07 (done when make test passes)
+- va_engine: `ports.py`, handlers `webhook`/`sms`/`press_button`/`transfer_pathway`/`scheduling`/`conditions`/`reports`,
+  `TurnContext` ports + `clock_now`, `HandlerResult.route_to/route_fallback/reports`, actions `SendDtmfAction`,
+  `SwitchGraph`, `Navigator.switch_graph/pathway_return_pending/return_from_pathway` (`_load`/`_activate` shared with
+  pathway forwarding). Registry now maps all but KB/Custom Code.
+- New `packages/va_tools` (`http.HttpExecutor`, `open_http_executor`, `jsonpath`); jsonpath-ng 1.15 ships py.typed
+  (no mypy override). Deviations from plan: responsePathways + value merge only on 2xx; DNS failure (`resolution`)
+  → `connection` (retried) not `blocked`; jsonpath evaluation catches any exception (re.error seen); reports carry
+  `purpose`; SMS report only when sent through the port (sms channel = Say only).
+- Spec Decisions: specs/11 §4 P07-T07, specs/13 §9 P07-T07. AGENTS.md bullet added.
+- Coverage of new modules 100 %; ruff/mypy/placeholders/jscpd (0 clones)/radon (avg 3.04)/pip-audit clean.
+
+## Review P07-T07 (approved)
+Re-ran lint, typecheck, placeholders, spec refs, jscpd (0 clones), make test (12028 passed, 7 skipped, 99.08 %).
+Read webhook/sms/scheduling/press_button/transfer_pathway handlers, conditions, reports, ports, navigator switch/return,
+va_tools http/jsonpath against specs/11 §3.2.1-§3.2.7 + Decisions. No findings.

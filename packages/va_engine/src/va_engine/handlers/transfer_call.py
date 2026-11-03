@@ -30,6 +30,7 @@ __all__ = [
     "DEFAULT_TEXT_MODE_MESSAGE",
     "TARGET_INVALID",
     "TransferCallHandler",
+    "e164_number",
     "resolve_transfer_target",
 ]
 
@@ -43,14 +44,21 @@ _SEPARATORS: Final = re.compile(r"[\s().-]")
 _log = get_logger(__name__)
 
 
-def _target_of(value: str) -> str | None:
-    if _SIP_URI.match(value):
-        return value
+def e164_number(value: str) -> str | None:
+    """``value`` as E.164 when it starts with ``+`` (spaces, ``-``, ``.`` and parentheses removed), else
+    ``None``."""
+    value = value.strip()
     if value.startswith("+"):
         number = _SEPARATORS.sub("", value)
         if _E164.match(number):
             return number
     return None
+
+
+def _target_of(value: str) -> str | None:
+    if _SIP_URI.match(value):
+        return value
+    return e164_number(value)
 
 
 def resolve_transfer_target(ctx: TurnContext) -> str | None:

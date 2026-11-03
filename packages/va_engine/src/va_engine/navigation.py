@@ -5,6 +5,11 @@ conversation after a node executed (:meth:`Navigator.finish_node`): forwarding t
 global node auto-return, or staying. It is pure navigation: no events and no LLM calls; the turn orchestration
 reads the returned :class:`Transition` (``speaks``, ``over_limit``, ``problem``) and acts on it. Broken
 targets never raise: the conversation stays on the current node and :attr:`Transition.problem` says why.
+
+The Transfer Pathway node's :class:`~va_engine.models.results.SwitchGraph` is applied by
+:meth:`Navigator.switch_graph`; with ``returnOnEnd`` it pushes a ``transfer_pathway`` frame, and the turn
+orchestration calls :meth:`Navigator.return_from_pathway` instead of executing an End Call node while
+:meth:`Navigator.pathway_return_pending` (Decision P07-T07 under specs/11 §4).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from va_engine.models.nodes import ForwardingTarget, PathwayNode, PathwayVersion
 from va_engine.models.state import EngineState, NodeFrame
 
 if TYPE_CHECKING:
+    from va_engine.models.results import SwitchGraph
     from va_engine.router import RouteDecision
 
 __all__ = [
@@ -35,12 +41,12 @@ __all__ = [
 MAX_RETURN_STACK: Final = 16
 """Deepest return stack; pushing beyond it drops the bottom frame."""
 
-type TransitionKind = Literal["stay", "enter", "global", "return", "forward"]
+type TransitionKind = Literal["stay", "enter", "global", "return", "forward", "switch"]
 type TransitionProblem = Literal[
     "target_missing", "forward_target_missing", "return_target_missing", "pathway_unavailable"
 ]
 
-_SPEAKING: Final = frozenset({"enter", "global", "forward"})
+_SPEAKING: Final = frozenset({"enter", "global", "forward", "switch"})
 
 _logger = get_logger(__name__)
 
@@ -75,8 +81,8 @@ class PathwayLoader(Protocol):
 class Transition:
     """What a navigation step did.
 
-    ``enter``/``global``/``forward`` made ``to_node`` current with ``visits`` = its new visit count;
-    ``return`` popped a global frame (no visit counted, nothing re-spoken); ``stay`` kept the node
+    ``enter``/``global``/``forward``/``switch`` made ``to_node`` current with ``visits`` = its new visit
+    count; ``return`` popped a frame (no visit counted, nothing re-spoken); ``stay`` kept the node
     (``problem`` set when a target was broken).
     """
 
@@ -184,6 +190,85 @@ class Navigator:
             return self._return(current)
         return _stay(current.id)
 
+    async def switch_graph(self, action: SwitchGraph) -> Transition:
+        """Continue in another pathway (Transfer Pathway node; Decision P07-T07)."""
+        current = self.node
+        loaded = await self._load(current.id, action.pathway_id, action.version)
+        if loaded is None:
+            return self._failed(current.id, "pathway_unavailable")
+        node_id = action.node_id
+        if node_id is None:
+            starts = loaded.graph.start_nodes()
+            node_id = starts[0].id if starts else None
+        if node_id is None or loaded.graph.node(node_id) is None:
+            return self._failed(current.id, "forward_target_missing")
+        self._drop_global_frame()
+        if action.return_on_end:
+            self._push(
+                NodeFrame(
+                    kind="transfer_pathway",
+                    pathway_id=self.active.pathway_id,
+                    version=self.active.version,
+                    node_id=current.id,
+                )
+            )
+        if not action.carry_variables:
+            self.state.variables = {}
+        self._activate(loaded)
+        entered = self.enter(node_id, kind="switch")
+        return Transition(
+            kind=entered.kind,
+            from_node=current.id,
+            to_node=entered.to_node,
+            pathway_changed=True,
+            visits=entered.visits,
+            max_visits=entered.max_visits,
+        )
+
+    def pathway_return_pending(self) -> bool:
+        """Whether the top frame is a Transfer Pathway ``returnOnEnd`` frame (an End Call node returns)."""
+        return self._pathway_frame() is not None
+
+    async def return_from_pathway(self) -> Transition:
+        """Pop the Transfer Pathway frame: its node in its pathway becomes current (no visit, not re-run)."""
+        current = self.node
+        frame = self._pathway_frame()
+        if frame is None:
+            return _stay(current.id)
+        self.state.return_stack.pop()
+        loaded = await self._frame_graph(current.id, frame)
+        if loaded is None or loaded.graph.node(frame.node_id) is None:
+            return self._failed(current.id, "return_target_missing")
+        changed = loaded.pathway_id != self.active.pathway_id or loaded.version != self.active.version
+        self._activate(loaded)
+        self.state.current_node_id = frame.node_id
+        return Transition(kind="return", from_node=current.id, to_node=frame.node_id, pathway_changed=changed)
+
+    async def _frame_graph(self, node_id: str, frame: NodeFrame) -> ActiveGraph | None:
+        if frame.pathway_id == self.active.pathway_id and frame.version == self.active.version:
+            return self.active
+        if frame.pathway_id is None or frame.version is None:
+            return None
+        return await self._load(node_id, str(frame.pathway_id), frame.version)
+
+    async def _load(self, node_id: str, pathway_id: str, version: PathwayVersionRef) -> ActiveGraph | None:
+        if self._loader is None:
+            return None
+        try:
+            return await self._loader.load(pathway_id, version)
+        except PathwayUnavailableError as error:
+            _logger.warning("engine.pathway_load_failed", node_id=node_id, reason=error.reason)
+            return None
+
+    def _activate(self, active: ActiveGraph) -> None:
+        self.active = active
+        self.state.pathway_id = active.pathway_id
+        self.state.pathway_version = active.version
+
+    def _pathway_frame(self) -> NodeFrame | None:
+        stack = self.state.return_stack
+        return stack[-1] if stack and stack[-1].kind == "transfer_pathway" else None
+
     def prev_node_prompt(self) -> str | None:
         """``{{prevNodePrompt}}`` while a global node runs: the prompt (else text) of its return node."""
         frame = self._global_frame()
@@ -201,12 +286,8 @@ class Navigator:
         return self.enter(node_id, kind="forward")
 
     async def _forward_to_pathway(self, current: PathwayNode, target: ForwardingTarget) -> Transition:
-        if self._loader is None:
-            return self._failed(current.id, "pathway_unavailable")
-        try:
-            active = await self._loader.load(target.pathway_id, target.version)
-        except PathwayUnavailableError as error:
-            _logger.warning("engine.pathway_load_failed", node_id=current.id, reason=error.reason)
+        active = await self._load(current.id, target.pathway_id, target.version)
+        if active is None:
             return self._failed(current.id, "pathway_unavailable")
         node_id = target.node_id
         if node_id is None:
@@ -215,9 +296,7 @@ class Navigator:
         if node_id is None or active.graph.node(node_id) is None:
             return self._failed(current.id, "forward_target_missing")
         self._drop_global_frame()
-        self.active = active
-        self.state.pathway_id = active.pathway_id
-        self.state.pathway_version = active.version
+        self._activate(active)
         entered = self.enter(node_id, kind="forward")
         return Transition(
             kind=entered.kind,
