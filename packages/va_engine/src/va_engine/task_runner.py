@@ -18,7 +18,7 @@ import contextlib
 import dataclasses
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
-from typing import Final, Protocol
+from typing import Final
 
 import orjson
 
@@ -27,6 +27,7 @@ from va_common.time import Clock
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
 from va_engine.builtins import call_builtins
+from va_engine.dialogue import DialogueSource
 from va_engine.models.results import PressButton, TransferRequest
 from va_engine.models.state import EngineState, TurnRecord
 from va_engine.opener import parse_field
@@ -76,12 +77,6 @@ DEFAULT_GOODBYE: Final = "Goodbye."
 _NOT_TASK: Final = "TaskBrain needs a task-mode call config with a task"
 
 _log = get_logger(__name__)
-
-
-class DialogueSource(Protocol):
-    """Where the runner streams replies from (:class:`va_llm.LlmGateway` satisfies it)."""
-
-    async def stream_dialogue(self, request: DialogueRequest) -> DialogueStream: ...
 
 
 class _Recorder:

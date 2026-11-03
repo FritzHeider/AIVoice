@@ -42,11 +42,29 @@
   - Deliverables: shared `va_tools.http` executor (templating, timeouts, retries, JSONPath, SSRF guard), handlers for each node type, extraction-before-webhook ordering
   - Acceptance: tests with respx and the SSRF guard; Transfer Pathway swaps graph and preserves variables.
 
-- [ ] P07-T08 Turn orchestration, speculative generation, loop protection, pathway_logs
+- [ ] P07-T08 Turn orchestration, speculative generation, loop protection, pathway_logs (split into P07-T08a–c below; tick when all three are ticked)
   - Spec refs: specs/11-pathways-engine.md (per-turn algorithm, speculative generation, max node visits, pathway_logs format)
   - Depends on: P07-T06, P07-T07
   - Deliverables: `PathwayEngine.handle_user_turn(...)` streaming reply interface for the pipeline, speculative generation cancel/commit, skip-user-response chaining, visit limits, logs
   - Acceptance: snapshot tests for pathway_logs; speculative path discarded when route changes.
+
+- [x] P07-T08a Pathway dialogue prompt assembly and speculative generation coordinator — va_engine.prompt/dialogue/speculative + specs/11 §5.8 Decision; make test 12089 passed, 7 skipped, 99.09 %; lint/typecheck/placeholders/spec refs pass; jscpd 0 clones; radon 2.84
+  - Spec refs: specs/11-pathways-engine.md §5.7, §5.8, §13; specs/10-llm-gateway.md §2, §4, §5, §6, §8
+  - Depends on: P07-T06, P07-T07
+  - Deliverables: `va_engine.prompt` (pathway dialogue request: instructions, examples, history window, model options precedence), `va_engine.dialogue.GatewayDialogue` (the production `DialoguePort` over `stream_dialogue`), `va_engine.speculative` (eligibility, referenced-variable scan, `Speculation` commit/discard, committed-stream port)
+  - Acceptance: request snapshots per node kind; speculation committed when staying, discarded (no token reaches the consumer) when the route changes or a referenced variable changed; FakeLLM contract test.
+
+- [ ] P07-T08b `PathwayEngine` turn orchestration, chaining, loop protection, events
+  - Spec refs: specs/11-pathways-engine.md §4, §5.1–§5.6, §5.9, §7; specs/19-events-and-webhooks.md §2
+  - Depends on: P07-T08a
+  - Deliverables: `va_engine.engine.PathwayEngine` (`start`, `handle_user_turn`, `on_wait_timeout`, `on_interrupted`, `aclose`) yielding §7 actions, decision pipeline with speculation, skip-user-response chaining (depth 10), `maxVisits`/`maxTotalTurns` loop protection, background extraction, transfer-pathway return, scheduling function rounds, events through an `EngineEvents` port
+  - Acceptance: multi-turn tests over the restaurant fixture with scripted decisions; speculation hit/miss; loop protection and chain depth; barge-in truncation.
+
+- [ ] P07-T08c Deterministic `pathway_logs`
+  - Spec refs: specs/11-pathways-engine.md §12, §14; specs/19-events-and-webhooks.md §4 (Call Object `pathway_logs`)
+  - Depends on: P07-T08b
+  - Deliverables: `va_engine.logs` (per assistant turn entry, `call.route` summary data with `turn_index`/`tag_color`), Call Object `decision` projection aligned with §12
+  - Acceptance: syrupy snapshot of the restaurant fixture conversation; byte-stable across runs.
 
 - [ ] P07-T09 Pathways API: CRUD, versions, publish, promote, folders, import/export
   - Spec refs: specs/12-pathways-api.md (all endpoints)

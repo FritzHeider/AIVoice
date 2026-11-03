@@ -1018,3 +1018,156 @@ SwitchGraph/return_from_pathway, fakes).
 Re-ran lint, typecheck, placeholders, spec refs, jscpd (0 clones), make test (12028 passed, 7 skipped, 99.08 %).
 Read webhook/sms/scheduling/press_button/transfer_pathway handlers, conditions, reports, ports, navigator switch/return,
 va_tools http/jsonpath against specs/11 §3.2.1-§3.2.7 + Decisions. No findings.
+
+## Plan P07-T08 split (planner, 2026-11-03)
+P07-T08 was too large for one Builder pass (prompt assembly + gateway port + speculation + engine loop + events +
+logs). Split in plan/phase-07.md into T08a (prompt + dialogue port + speculation coordinator, pure/unit-testable),
+T08b (`PathwayEngine` orchestration, chaining, loop protection, events, background extraction, scheduling tool
+rounds, transfer-pathway return), T08c (`va_engine.logs` + `call.route` summary data with `turn_index`/`tag_color`
++ Call Object `decision` projection to the §12 keys + syrupy snapshot). Design notes carried to T08b/c:
+- Engine is transport-agnostic: `PathwayEngine` methods are async generators of §7 actions; the consumer resumes the
+  generator only after the yielded speech played (same contract as TaskBrain), so chaining = continue after yield.
+  T12 adapts it to `va_voice.pipeline.Brain`. Events go to an `EngineEvents.emit(event_type, data)` port.
+- `call.route` once per assistant reply (T08c) carrying §12 decision keys + flat §5.5 keys + `turn_index`/`tag_color`;
+  the Call Object projects `decision` to `route, global, loop_condition, extracted, tools` (va_db change in T08c).
+- `prevNodePrompt` reaches templates through `TurnContext.builtins` (T08b builds the ctx).
+
+## Plan P07-T08a — Pathway dialogue prompt assembly + speculative generation coordinator
+Spec refs: specs/11 §5.7, §5.8, §13; specs/10 §2 (DialogueStream commit/discard), §4, §5, §6, §8.
+
+### Spec decision — append `> Decision (2026-11-03): pathway dialogue prompt and speculation (P07-T08a).` after §5.8
+Rules (implement exactly):
+1. The pathway reply uses the specs/10 §4/§5 assembly (same as task mode): system = `render_voice_system` with
+   `instructions` = §5.7 [1] + [3] + [4] joined by one blank line (supersedes §5.7's list; [2] persona block arrives
+   phase 13, [6] knowledge phase 08, [9] runtime facts are already in the Voice System Prompt, [10] none):
+   [1] rendered `globalPrompt` when non-blank and (`applyGlobalPromptToAllNodes` or the node has no non-blank
+   prompt); [3] `## Current step: {node name}` + newline + rendered node prompt (else rendered `text`; header alone
+   when neither); [4] loop-condition suffix when given. Known information = `request_data` then `variables`
+   (variables win) via `voice_prompt_inputs`-like mapping (keys `_`-prefixed and `call_id`/`voice_id` excluded by
+   render_voice_system already). Memory context passes through. Text channels use the same prompt in phase 07
+   (phase 14 adds the text-mode system prompt).
+2. Examples ([7]): node `dialogueExamples` → for each example the last `user` message of its `conversation` paired
+   with `assistantResponse` (examples without a user message or with a blank response are skipped) →
+   `va_llm.prompts.example_messages`.
+3. Window: `EngineState.history` → ChatMessages: `user` → user, `assistant` → assistant (content as stored, so a
+   barge-in truncated reply already ends with `—`), `tool` → `system` `[Context update] Tool {tool_name} returned:
+   {content}` via `context_update` (tool_call/arguments are not persisted), `system` → `context_update(content)`;
+   `history_summary` non-blank → one leading `context_update("Earlier conversation: …")`. Then
+   `ConversationWindow(budget, counter).fit(messages)`; budget = settings `context_budget_tokens` (default 6 000).
+   Extra in-turn messages (tool rounds of T08b) are appended after the history by the caller (`extra=`).
+4. Model/temperature precedence (§13): model = node `modelOptions.model` → `global_config.dialogueModel` →
+   `settings.dialogue_model` (call) → None (provider default); temperature = node `modelOptions.temperature` →
+   `global_config.defaultTemperature` when the graph set it explicitly (`"default_temperature" in
+   global_config.model_fields_set`) → call `settings.temperature` when set → 0.7. `max_tokens` = settings (250).
+5. Speculation eligibility (`speculation_allowed`): org `engine.speculative` true, node handler streams a dialogue
+   reply at this node (Default/Global, Wait for Response with non-blank prompt, Webhook/SMS with a non-blank
+   prompt, Scheduling), the node has no non-blank static `text`, and no `before_response` extract var is referenced
+   by the node prompt or the (applied) global prompt (`referenced_variables`: first path segment of every template
+   expression; unparseable template → treat as referencing everything → not allowed). Background-mode extract vars
+   never block speculation.
+6. `Speculation.resolve(stays=, variables=, prompt_changed=)`: commit when `stays`, not `prompt_changed`, and
+   none of the referenced variables changed value (snapshot taken at start vs. variables after extraction); else
+   `await discard()`. Discard reasons: `route_changed`, `variables_changed`, `prompt_changed` (a loop condition not
+   met stays on the node but adds the [4] suffix the speculative request lacked). Logged `engine.speculation`
+   (node_id, outcome `committed|discarded`, reason). Metrics stay the gateway's `va_llm_speculation_total`.
+7. `GatewayDialogue.stream(ctx)` opens a non-speculative stream on first iteration; a pre-token
+   `LlmUnavailableError` ends the iterator empty and records `unavailable` (the engine speaks `errorPhrase`, T08b);
+   the opened `DialogueStream` is exposed (`last`) so T08b reads `tool_calls()`; closing the iterator closes the
+   stream (`aclose`).
+
+### Files
+- `packages/va_engine/src/va_engine/prompt.py` (new):
+  - `@dataclass(frozen=True, slots=True, kw_only=True) class DialogueSettings`: `dialogue_model: str | None = None`,
+    `temperature: float | None = None`, `max_tokens: int = 250`, `context_budget_tokens: int = 6_000`,
+    `speculative: bool = True`, `org_id: uuid.UUID`, `call_id: uuid.UUID | None = None`, `direction:
+    Literal["inbound","outbound","web"]`, `counterpart: str = ""`, `language_name: str = "English"`,
+    `memory_context: str | None = None`. Classmethod `for_call(context: CallContext, org: OrgSettings, *,
+    memory_context=None)` mapping CallContext/OrgSettings (`org.engine.speculative`, `org.llm.context_budget_tokens`
+    — verify field path in va_domain.org) — mirrors `voice_inputs.voice_prompt_inputs`.
+  - `node_instructions(ctx: TurnContext, *, condition_suffix: str | None = None) -> str` (rule 1).
+  - `node_examples(node) -> tuple[ChatMessage, ...]` (rule 2).
+  - `history_messages(state: EngineState) -> list[ChatMessage]` (rule 3).
+  - `dialogue_model(ctx, settings) -> str | None`, `dialogue_temperature(ctx, settings) -> float` (rule 4).
+  - `class PathwayPrompt(settings, *, counter: TokenCounter, clock: Clock)` with `request(ctx, *, condition_suffix=
+    None, tools: tuple[ToolDef, ...] = (), extra: Sequence[ChatMessage] = (), speculative=False) -> DialogueRequest`
+    (system via `voice_prompt_inputs`-equivalent `VoicePromptInputs(now_local=clock.now().astimezone(zone_named(ctx.
+    timezone)), ...)`, `fit_voice_system(inputs, counter=, extra_tokens=examples+tools tokens)`, `tool_usage_note()`
+    when tools, `assemble_messages(system, tool_note=, examples=, window=fit(history + extra))`, `turn_index=
+    state.turn_index`).
+- `packages/va_engine/src/va_engine/dialogue.py` (new): `DialogueSource` protocol (re-use `task_runner.
+  DialogueSource` — move it here and re-export from task_runner to avoid duplication); `class GatewayDialogue`
+  implements `handlers.DialoguePort`: `__init__(source, prompt: PathwayPrompt)`, `condition_suffix: str | None`
+  attribute (set by T08b per turn), `tools: tuple[ToolDef, ...]`, `extra: list[ChatMessage]`, `async open(ctx, *,
+  speculative: bool) -> DialogueStream`, `stream(ctx) -> AsyncIterator[str]` (rule 7), properties `last:
+  DialogueStream | None`, `unavailable: LlmUnavailableError | None`, `text: str` (deltas of the last stream).
+- `packages/va_engine/src/va_engine/speculative.py` (new): `referenced_variables(template_texts: Iterable[str]) ->
+  frozenset[str] | None` (None = unparseable), `speculation_allowed(node, graph, *, enabled) -> bool` (rule 5),
+  `class Speculation` (`start(dialogue: GatewayDialogue, ctx)` → opens `speculative=True` stream as a task-free
+  call (stream_dialogue returns before tokens), snapshot of referenced vars; `async resolve(*, stays: bool,
+  variables: Mapping, prompt_changed: bool = False) -> DialogueStream | None`; `outcome` property; `aclose()`
+  discards when unresolved), `class CommittedDialogue(base: GatewayDialogue, stream: DialogueStream)` — DialoguePort
+  whose first `stream(ctx)` yields the committed stream's text (recording text/unavailable like GatewayDialogue,
+  sets `base.last`), later calls delegate to `base.stream`.
+- `va_engine/__init__.py` exports only if the package already re-exports modules (check; keep import-light).
+- specs/11 Decision block (above). AGENTS.md dated bullet.
+
+### Tests (packages/va_engine/tests/)
+- `support/dialogue_helpers.py`: `FakeStream` (DialogueStream double: scripted deltas, `tool_calls` list,
+  `fail_before_token` raising `LlmUnavailableError` from `text()`, records `committed`, `discarded`, `closed`,
+  `iterated`; speculative streams yield nothing until `commit()`), `FakeSource` (records `requests`, returns
+  scripted `FakeStream`s in order), `settings(**over)`, `prompt_rig(clock=ManualClock/FrozenClock)` using
+  `va_llm.tokens.default_counter()` (load once at module scope via fixture).
+- `test_prompt.py`: instructions with/without global prompt (apply flag true/false × node prompt present/absent),
+  templating of global + node prompt (variables, request_data, built-ins), `text`-only node uses text, header-only
+  node, loop suffix last; examples mapping & skips; history mapping (interrupted assistant kept, tool → context
+  update, system → context update, summary first); window trimming keeps last turn (small budget); model and
+  temperature precedence table (parametrized); request fields (org_id, call_id, turn_index, speculative, tools +
+  tool note); known information excludes `_secret`; a full request snapshot for the restaurant fixture's start node
+  compared to an inline expected message list (deterministic: frozen clock, fixed timezone).
+- `test_dialogue.py`: stream yields deltas and records text/last; pre-token unavailable → empty + `unavailable`;
+  closing the iterator early closes the stream; `open(speculative=True)` sets the request flag; one FakeLLM contract
+  test via `task_helpers.served()` (real `LlmGateway`): stream text equals the FakeLLM rule reply and the request
+  body carries the system prompt with `## Current step:`.
+- `test_speculative.py`: `referenced_variables` (paths, filters, unparseable → None); eligibility table (static
+  text node, Wait without prompt, Webhook with/without prompt, before_response var referenced in node prompt /
+  global prompt / not referenced, background var referenced, disabled setting, End Call/Transfer/Press Button →
+  False); resolve stays + unchanged → committed, consumer of `CommittedDialogue.stream` gets the buffered tokens;
+  route change → discarded and no token ever yielded; variable referenced changed → discarded; unreferenced change →
+  committed; prompt_changed → discarded; `aclose()` unresolved → discarded; resolve twice → second is a no-op;
+  second `stream()` call on CommittedDialogue opens a fresh request; log event `engine.speculation`.
+  FakeLLM contract: speculative stream over served gateway commit → tokens arrive; discard → `text()` ends empty.
+- Coverage of new modules 100 % (branch).
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+-q`; `uv run python scripts/check_spec_refs.py`; `make test` in background (truncate logs/make_test.log; Monitor
+heartbeat); `uvx radon cc -s -a packages/va_engine/src` avg < 10; `npx --yes jscpd@4 --silent` 0 clones; audit
+unchanged deps (`uvx pip-audit` on `uv export`, `corepack pnpm audit`). No e2e (not wired into calls until T12).
+
+### Risks
+- Rule 4 temperature: `GlobalConfig.default_temperature` always has 0.7; use `model_fields_set` to know if the graph
+  set it — check CamelModel keeps `model_fields_set` after `load_graph` (exclude_unset dumps rely on it, so yes).
+- Moving `DialogueSource` must keep `va_engine.task_runner.DialogueSource` importable (tests import it).
+- Speculative `DialogueStream.text()` may be iterated once; `CommittedDialogue` must iterate it only once.
+- Do not import va_tools from va_engine; keep va_engine's modules free of va_db.
+- jscpd: `prompt.py` request building resembles `task_runner._request`; factor a shared helper if a clone appears.
+
+## Build P07-T08a (done when make test passes)
+- New `va_engine.prompt` (DialogueSettings.for_call, PathwayPrompt.system/request, node_instructions,
+  instruction_templates, global_prompt_applies, node_examples, history_messages, dialogue_model/temperature),
+  `va_engine.dialogue` (DialogueSource moved here, task_runner re-exports; GatewayDialogue with adopt/aclose/last/
+  unavailable/text), `va_engine.speculative` (referenced_variables, speculation_allowed, Speculation.start/resolve/
+  aclose). `voice_inputs.counterpart_of` made public.
+- Deviations from plan: no separate `CommittedDialogue` class — `Speculation.resolve` commits and calls
+  `GatewayDialogue.adopt(stream)`, the next `stream()` relays it. History summary sits before the window (never
+  trimmed). `GatewayDialogue.tool_speech` knob added for the tool note.
+- Spec Decision specs/11 §5.8 P07-T08a (replaces speculation_hit/miss with va_llm_speculation_total, 40-turn
+  window with ConversationWindow). AGENTS.md bullet added.
+- Tests: test_prompt.py, test_dialogue.py, test_speculative.py (FakeLLM contract tests for stream + commit/discard);
+  new modules 100 % / 100 % / 99-100 % branch.
+- make test: 12089 passed, 7 skipped, coverage 99.09 %; lint/typecheck/placeholders/spec refs pass; jscpd 0 clones; radon avg 2.84; pip-audit clean.
+
+## Review P07-T08a (approved)
+Re-ran lint, typecheck, placeholders, spec refs (pass), jscpd 0 clones, radon avg 2.84, make test (12089 passed,
+7 skipped, 99.09 %). Read prompt/dialogue/speculative against specs/11 §5.7/§5.8/§13 + Decision P07-T08a and
+va_llm DialogueStream commit/discard/aclose semantics (metrics counted by the gateway). No findings.

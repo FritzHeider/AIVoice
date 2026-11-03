@@ -15,10 +15,11 @@ from va_domain.languages import language_name
 from va_engine.builtins import call_zone
 from va_llm.prompts import PromptValue, VoicePromptInputs
 
-__all__ = ["voice_prompt_inputs"]
+__all__ = ["counterpart_of", "voice_prompt_inputs"]
 
 
-def _counterpart(context: CallContext) -> str:
+def counterpart_of(context: CallContext) -> str:
+    """The prompt's other party: the callee (outbound), our dialled number (inbound), none (web)."""
     return "" if context.direction == "web" else context.to_number
 
 
@@ -38,7 +39,7 @@ def voice_prompt_inputs(
         direction=context.direction,
         language_name=language_name(config.language),
         instructions=instructions,
-        counterpart=_counterpart(context),
+        counterpart=counterpart_of(context),
         variables=cast("Mapping[str, PromptValue]", variables),
         memory_context=memory_context,
     )

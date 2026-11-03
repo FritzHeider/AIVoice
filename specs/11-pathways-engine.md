@@ -591,6 +591,41 @@ and a fresh generation runs for the new node. Static-text nodes skip B. Speculat
 `extractVars` with mode `before_response` referenced in its prompt (detected by template variable scan), or org
 setting `engine.speculative=false`. Metrics: `speculation_hit` / `speculation_miss` counters.
 
+> Decision (2026-11-03): pathway dialogue prompt and speculation (P07-T08a). `va_engine.prompt.PathwayPrompt`
+> builds the reply request, `va_engine.dialogue.GatewayDialogue` is the handlers' `DialoguePort`,
+> `va_engine.speculative.Speculation` runs B.
+> 1. The reply uses the specs/10 §4/§5 assembly of the task runner: system = the Voice System Prompt whose
+>    `instructions` are §5.7 [1], [3], [4] joined by one blank line (this supersedes the §5.7 list: [2] arrives with
+>    personas, [6] with knowledge bases, [5]/[8]/[9] are sections of the Voice System Prompt, [10] none): [1] the
+>    rendered `globalPrompt` when non-blank and (`applyGlobalPromptToAllNodes` or the node has no non-blank
+>    prompt); [3] `## Current step: {node name}`, a newline and the rendered node prompt (else the rendered `text`;
+>    the header alone when neither); [4] the loop-condition suffix. Known information = `request_data` then
+>    `variables` (variables win). Text channels use the same prompt until the text-mode system prompt (phase 14).
+> 2. [7] examples: per `dialogueExamples` entry, the last `user` message of its `conversation` with
+>    `assistantResponse` (entries without a non-blank user message or response are skipped), rendered by
+>    `va_llm.prompts.example_messages` after the tool note.
+> 3. Messages: `EngineState.history` mapped `user`/`assistant` as stored (an interrupted reply already ends with
+>    `—`), `tool` → `[Context update] Tool {tool_name} returned: {content}`, `system` → `[Context update]
+>    {content}`; in-turn messages of the orchestration follow; the window is trimmed by
+>    `ConversationWindow(llm.context_budget_tokens)` (this replaces "last 40 turns"). A non-blank
+>    `history_summary` is one `[Context update] Earlier conversation: …` message before the window (never dropped).
+> 4. §13 for the reply: model = node `modelOptions.model` → `dialogueModel` → the call's `dialogue_model`;
+>    temperature = node `modelOptions.temperature` → `defaultTemperature` when the graph sets it explicitly → the
+>    call's `temperature` → 0.7; `max_tokens` = the call's.
+> 5. Speculation runs only when `engine.speculative` is on, the node has no non-blank static `text`, its reply
+>    streams (Default/Global and Scheduling always; Wait for Response, Webhook and SMS with a non-blank `prompt`)
+>    and no `before_response` `extractVars` name is the first path segment of an expression of the applied global
+>    prompt or the node prompt (a template that does not parse disables it). Background extraction never blocks.
+> 6. B commits when the turn stays on the node, no loop-condition suffix was added (a not-met condition changes
+>    the prompt) and none of the referenced variables changed value (deep comparison with the snapshot taken at
+>    start; all variables when a template does not parse). Otherwise B is discarded (`route_changed`,
+>    `prompt_changed`, `variables_changed`; `closed` when the turn ends unresolved) and the handler opens a fresh
+>    request. Each outcome logs `engine.speculation` (`node_id`, `outcome`, `reason`); the counters are the
+>    gateway's `va_llm_speculation_total{outcome}` (this replaces `speculation_hit`/`speculation_miss`).
+> 7. A failure before the first token ends the dialogue port's iterator empty and is kept as `unavailable` (the
+>    orchestration speaks `errorPhrase`); the stream stays open after its last delta so tool calls can be read,
+>    and closing the iterator early closes the HTTP stream.
+
 ### 5.9 Events per turn
 `call.turn` (user), [`call.route`|`call.loop_condition`|`call.extraction`|`call.tool`|`call.webhook_node`]*,
 `call.turn` (assistant, after playback ends or is interrupted), `call.latency` set.

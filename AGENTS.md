@@ -1769,3 +1769,14 @@ Grafana 3001
   `RecordingSink`, one shared `order` list for "what ran first"); `packages/va_tools/tests/support/tools_helpers.py`
   (`plain_executor()` for respx, `guarded_executor(MappedResolver, allow_private=)` for real-socket SSRF tests with
   `webhook_receiver.served_receiver`). `va_common.net` DNS failures are `UnsafeDestinationError("resolution")`.
+- 2026-11-03 (P07-T08a): pathway reply prompt = `va_engine.prompt` (`DialogueSettings.for_call(context, org)`,
+  `PathwayPrompt(settings, counter=, clock=).request(ctx, condition_suffix=, tools=, extra=, speculative=)`,
+  `node_instructions`, `instruction_templates`, `node_examples`, `history_messages`, `dialogue_model`/
+  `dialogue_temperature`); the handlers' `DialoguePort` is `va_engine.dialogue.GatewayDialogue` (per-turn
+  `condition_suffix`/`tools`/`extra`, `last` stream for `tool_calls()`, `unavailable`, `adopt(stream)`, `aclose()`);
+  `DialogueSource` moved there (task_runner re-exports it). Speculation: `va_engine.speculative`
+  (`speculation_allowed(node, graph, enabled=)`, `Speculation.start(dialogue, ctx)` → `resolve(stays=, variables=,
+  prompt_changed=)` commits by `adopt`ing the stream). Rules: specs/11 §5.8 Decision P07-T08a. Tests:
+  `packages/va_engine/tests/support/dialogue_helpers.py` (`FakeStream` speculative until `commit()`, `FakeSource().
+  reply(*deltas, fail=, calls=)`, `dialogue_rig(**settings)`, `counter()`). `copy.deepcopy(object())` returns a NEW
+  object: never deepcopy a sentinel you later compare by identity/equality.
