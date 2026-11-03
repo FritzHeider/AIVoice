@@ -56,6 +56,7 @@ from va_common.ids import new_id
 from va_common.money import dollars_to_micros
 from va_common.safe_http import safe_client
 from va_common.storage import ObjectStore
+from va_common.time import SystemClock
 from va_db.models import (
     ApiKey,
     AuditLog,
@@ -71,7 +72,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
-from va_events import EventPublisher
+from va_events import EventPublisher, LiveHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -144,7 +145,8 @@ class SessionContainer(AuthContainer):
     OIDC discovery client built from the app settings when the app opens it (intercept it with respx), and
     the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
     ``FakeCallCanceller``, ``FakeResolver``) and an object store over ``FakePresigner``, and the webhook
-    test-send deliverer (a real pinning client over ``host_resolver``) once the app opens it."""
+    test-send deliverer (a real pinning client over ``host_resolver``) once the app opens it, and a live event
+    hub over the fake Redis (closed and replaced when the app closes)."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -169,6 +171,7 @@ class SessionContainer(AuthContainer):
     presigner: FakePresigner = field(default_factory=FakePresigner)
     object_store: ObjectStore = field(init=False)
     webhook_deliverer: Deliverer = field(init=False)
+    live_hub: LiveHub = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -188,6 +191,8 @@ class SessionContainer(AuthContainer):
         self.call_limiter = CallLimiter(self.redis, clock=self.clock)
         self.event_publisher = EventPublisher(self.redis, call_events=None)
         self.object_store = self.presigner.store()
+        # Confirmation waits run on the wall clock: the frozen container clock would time them out at once.
+        self.live_hub = LiveHub(self.redis, SystemClock())
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
@@ -205,7 +210,11 @@ class SessionContainer(AuthContainer):
                 clock=self.clock,
                 timeouts=Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S),
             )
-            yield opened
+            try:
+                yield opened
+            finally:
+                await self.live_hub.aclose()
+                self.live_hub = LiveHub(self.redis, SystemClock())
 
     @property
     def authenticator(self) -> ApiKeyAuthenticator:

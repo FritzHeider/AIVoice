@@ -255,6 +255,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls/{call_id}/events/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Calls Events Stream
+         * @description The call's events as Server-Sent Events: the stored events after `Last-Event-ID` in `seq` order, then
+         *     the live ones; reconnect with the last received `id` as `Last-Event-ID` to resume.
+         */
+        get: operations["calls_events_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/calls/{call_id}/recording": {
         parameters: {
             query?: never;
@@ -6106,6 +6127,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CallEventsResponse"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_events_stream: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Last-Event-ID"?: string | null;
+            };
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-Sent Events: `id: <seq>`, `event: <type>`, `data: <bland-live JSON>`; `: ping` comments every 15 s; the stream ends 30 s after `call.completed`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
                 };
             };
             /** @description Invalid input */

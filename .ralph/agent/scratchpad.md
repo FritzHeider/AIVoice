@@ -782,3 +782,135 @@ events — run `uv run pytest apps/media_worker -q` fully.
 - Non-blocking notes: `_recover` stops when a whole own-pending batch is poison/deleted even if more own entries remain
   (those fall back to XAUTOCLAIM after 60 s); a dead-letter park failure midway through `_decode` can park earlier
   entries twice on re-read. Both acceptable for at-least-once.
+
+## Plan P06-T06a — Call event SSE stream
+P06-T06 was split in plan/phase-06.md into T06a (call SSE), T06b (transcript token + WS), T06c (org stream).
+T06a also lays the shared pieces (live hub, row body) that T06b/T06c reuse.
+
+### Decisions (add `> Decision (2026-11-03): call event stream (P06-T06a).` under specs/19 §9)
+1. `call_events` gains a nullable `event_type text` column (migration `0007_call_event_type.py`:
+   `ALTER TABLE call_events ADD COLUMN event_type text`; partitioned parent → propagates to partitions; downgrade
+   drops it). specs/03 DDL lists it LAST (after `created_at`, before the PRIMARY KEY line; `test_schema_matches_spec`
+   compares attnum). `CallEventRow.event_type: str | None = None` (last field, default) set by `row_for` to
+   `event.type.value`; `insert_rows`/`DbCallEventWriter` write it; model `CallEvent.event_type` (`text_column`-style,
+   nullable). Rows written before 0007 have NULL → the SSE frame omits the `event:` line (EventSource default
+   `message`). Check `va_events_sink.rows` builds its tuple field by field (not `astuple`) so ClickHouse is unchanged.
+2. Route `GET /v1/calls/{call_id}/events/stream` on `calls_router` (legacy family; declare it next to
+   `/{call_id}/events`), `calls:read`, `operation_id="calls_events_stream"`, `openapi_extra={"x-scope": "calls:read"}`,
+   `response_class=StreamingResponse`, `responses={200: {"description": ..., "content": {"text/event-stream": {}}}}`.
+   Errors (unknown/other-org call `CALL_NOT_FOUND`, bad `Last-Event-ID` `INVALID_INPUT` field `Last-Event-ID`,
+   hub unavailable `SERVICE_UNAVAILABLE`) are raised BEFORE the response starts (ownership check + subscription happen
+   in the route, the generator only streams). Headers: `Content-Type: text/event-stream; charset=utf-8`,
+   `Cache-Control: no-store`, `X-Accel-Buffering: no`. `test_openapi.test_operations_contract` needs a
+   `STREAM_OPERATIONS = {"calls_events_stream"}` exemption (200 with `text/event-stream`, no JSON schema) like
+   `REDIRECT_OPERATIONS`; extend the cross-tenant suite if it reads the body (it only needs the 404 for org B; the
+   owner control must not hang: either register `REGISTRY.register_owner_status` or make the factory's call already
+   completed > 30 s ago so the stream ends right after replay — prefer the latter; check what the walker does with a
+   2xx streaming body over ASGITransport, which buffers until the generator ends).
+3. Frame format: `id: <seq>\nevent: <type>\ndata: <orjson bland-live body>\n\n` (single-line JSON). Body =
+   `va_events.webhook_payloads.live_body(event, metadata)` for live events and a new
+   `row_body(row: CallEvent, metadata) -> Body` next to it (same keys/format: `call_id`, `category`, `level`,
+   `message`, `data`, `seq`, `created_at` iso_ms, `metadata`) for replayed rows; `metadata` = the call's
+   `metadata_` loaded once at start. First frame `retry: 3000`. Heartbeat comment `: ping\n\n` every 15 s of
+   clock time without a frame.
+4. Only events that have a `call_events` row are streamed (`row_for(event) is not None`), so replay and tail show the
+   same set; live events without a row still count as "seen" for gap tracking.
+5. Order and boundary: the route subscribes `call:{<id>}:live` FIRST (hub confirms), then replays rows with
+   `seq > after` (`after` = `Last-Event-ID` int ≥ 0, else 0) in pages of 500 via `load_call_events`, then tails.
+   Frames go out strictly in increasing seq. Pure helper `va_api.services.call_stream_order.SeqOrder(after)`:
+   `offer(seq, item)` → items now releasable in order (contiguous from `last + 1`), duplicates/`seq <= last`
+   dropped; `waiting_since`/`has_gap`. When a live event leaves a gap (missing seqs below it: published before the
+   subscription but not yet flushed by the media write-behind buffer, or concurrent publishers arriving out of
+   order) the stream holds it up to `GAP_HOLD_S = 2.0` (clock): live arrivals may fill the gap; at the deadline it
+   re-reads `call_events` for `last < seq < min_pending`, releases what it found, then skips the remaining holes and
+   releases the held events.
+6. Close: after a `call.completed` frame (replayed or live) the stream ends at `completed.created_at + 30 s` on the
+   clock (immediately when that is already past, e.g. an old call). Hard cap `MAX_STREAM_S = 4 h` per connection
+   (clients resume with `Last-Event-ID`). Hub overflow (subscriber queue > 1 000) or hub connection loss ends the
+   stream at once (client resumes). Client disconnect cancels the generator; the subscription is released in
+   `finally`. Log `calls.event_stream_closed` (call_id, reason, frames).
+7. Pod-wide hub `va_events.live_hub.LiveHub(redis, clock, *, confirm_timeout_s=2.0, queue_size=1000)`: ONE pub/sub
+   connection per api process (a pubsub per SSE client would exhaust the 50-connection pool). `subscribe(channel)
+   -> LiveSubscription` (ref-counted per channel: first subscriber SUBSCRIBEs and waits for the confirmation, later
+   ones join; raises `LiveHubError` on Redis error/timeout), `LiveSubscription.next() -> bytes` (raises
+   `LiveSubscriptionClosed(reason)` with reason `overflow`/`lost`/`closed`), `await hub.unsubscribe(sub)` (last one
+   UNSUBSCRIBEs). The reader task starts lazily with the first subscription (owned by the hub, not a supervisor:
+   the api has none) and is cancelled by `aclose()`; a reader RedisError closes every subscription with `lost`,
+   resets the connection, and the next subscribe starts fresh. Container field `live_hub` built in
+   `va_api.container.build_container` and `aclose`d on exit (exit stack); `SessionContainer` gets one over its
+   fakeredis. Do not copy `va_media.channels.ChannelHub` text (jscpd); write it for multi-subscriber fan-out.
+8. Spec text: specs/19 §9 Decision (above points condensed), specs/03 §6 DDL `event_type` + note, specs/05 table
+   row unchanged. AGENTS.md bullet.
+
+### Files
+- `packages/va_db/src/va_db/migrations/versions/0007_call_event_type.py` (NEW), `va_db/models/calls.py` (`event_type`).
+- `specs/03-data-model.md` (DDL line + short Decision), `specs/19-events-and-webhooks.md` §9 Decision.
+- `packages/va_events/src/va_events/call_events.py` (`CallEventRow.event_type`, `row_for`), `webhook_payloads.py`
+  (`row_body`), `live_hub.py` (NEW), `__init__.py` exports.
+- `apps/api/src/va_api/services/call_stream.py` (NEW): `StreamDeps(database, live_hub, clock)`, `stream_deps_of(request)`,
+  `open_call_stream(deps, ctx, call_id, last_event_id: str | None) -> CallStream` (ownership + parse + subscribe;
+  errors raised here), `CallStream.frames() -> AsyncIterator[bytes]` (replay, tail, gap fill, heartbeat, close,
+  `finally` unsubscribe), constants `HEARTBEAT_S=15`, `CLOSE_AFTER_COMPLETED_S=30`, `GAP_HOLD_S=2`, `MAX_STREAM_S=14400`,
+  `REPLAY_PAGE=500`. Pure SSE formatting `sse_frame(seq, event_type, body) -> bytes` (could live in
+  `va_api/sse.py` for T06c reuse) and `call_stream_order.SeqOrder`.
+- `apps/api/src/va_api/routers/calls.py` route + docstring; `container.py` field; tests support `SessionContainer`.
+- `apps/api/tests/test_openapi.py` exemption; `apps/api/tests/support/cross_tenant_factories.py` if needed.
+
+### Tests
+- va_db: migration up/down (column exists/nullable, offline SQL), schema-vs-spec + autogenerate parity still pass.
+- va_events `test_call_events.py`: `row_for` sets `event_type`; DB insert round-trips it. `test_webhook_payloads`:
+  `row_body` equals `live_body` for the same event (row built via `row_for`, inserted, read back).
+- va_events `test_live_hub.py` (fakeredis): two subscribers of one channel both get a published message; channel
+  subscribed once (PUBSUB NUMSUB 1) and unsubscribed after the last leaves; confirm timeout → `LiveHubError`
+  (fake that never confirms, ManualClock); overflow → `overflow`; reader Redis failure → `lost` for all + next subscribe works;
+  `aclose` closes subscriptions with `closed` and stops the task.
+- api `test_call_stream_order.py` pure: in-order release, duplicate drop, gap hold, `after` floor.
+- api `test_call_stream.py` (module Postgres via `session_helpers.migrated_postgres()` + fakeredis + ManualClock
+  driving `CallStream.frames()` directly): replay in seq order with exact frame bytes (`id`, `event`, body keys,
+  metadata); `Last-Event-ID: 3` replays only 4..; replay→tail boundary: an event both in DB and on live is sent once;
+  a live event published before subscribe and inserted later is recovered by the gap re-read after `GAP_HOLD_S`;
+  out-of-order live arrivals (seq 6 then 5) go out 5,6; rowless live event (no category) is not sent but closes the
+  gap; heartbeat after 15 s idle; `call.completed` → ends 30 s later; old completed call ends right after replay;
+  overflow/lost ends the stream; unknown call / other org → `CALL_NOT_FOUND`; `Last-Event-ID: abc` / `-1` →
+  `INVALID_INPUT`; NULL `event_type` row → frame without `event:`.
+- api HTTP test over a real socket (`service_helpers.RecordingServer` serving `session_app(container)`, httpx
+  `client.stream`): status 200, content type, `Cache-Control`, `X-Request-Id`, first frames, `Last-Event-ID` header honoured,
+  client disconnect releases the hub subscription (hub channel count back to 0, waited on an event, no sleeps).
+  Note httpx `ASGITransport` buffers the whole body, so it can only be used for streams that end (completed call).
+- cross-tenant suite passes (new route probed).
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest packages/va_db packages/va_events apps/api apps/events_sink -q`; `make openapi` + both `gen:api`
+(new route → schema.d.ts drift; run `make test-ts`); full `make test` in background with heartbeat Monitor
+(truncate log first); jscpd; radon. No call-flow behaviour change → no e2e (the media write path only adds a column value).
+
+### Risks
+- Middleware (`IdempotencyMiddleware`, `RateLimitHeadersMiddleware`, `MetricsMiddleware`) must pass streamed body
+  chunks through without buffering; verify with the real-socket test (first frame arrives while the stream is open).
+- StreamingResponse disconnect handling: Starlette cancels the body iterator on `http.disconnect`; make sure the
+  `finally` runs (unsubscribe awaited inside it with shielding if needed).
+- FrozenClock.sleep advances instantly → never use the default SessionContainer FrozenClock for streams that idle;
+  use ManualClock (`wait_for_sleep` / `run_for`). Seeded `call_events` rows need dates inside the migration
+  partitions (`call_helpers.business_hours_today()`), so `ManualClock().set(...)` accordingly.
+- Adding a field to `CallEventRow` may break tests constructing it positionally or comparing `asdict`; grep tests.
+
+## Build P06-T06a (builder notes)
+- Migration 0007 `call_events.event_type` (nullable, last column; spec DDL + comment line), model column,
+  `CallEventRow.event_type` set by `row_for`, `row_body(row, metadata)` == `live_body(event, metadata)`.
+- `va_events.live_hub.LiveHub` (one pubsub per process, ref-counted channels, lazy reader that exits when nothing is
+  subscribed, overflow/lost/closed reasons). Exception renamed `LiveSubscriptionClosedError` (ruff N818).
+- api: `services/call_stream_order.SeqOrder` (offer/advance), `va_api/sse.py` (`sse_frame`, `retry_frame`,
+  `EventStreamResponse(frames, on_close)` runs cleanup however the response ends; needs `status_code` init param for
+  FastAPI OpenAPI), `services/call_stream` (open_call_stream: ownership → Last-Event-ID → subscribe; frames: retry,
+  replay pages of 500, tail with 2 s gap hold + DB re-read, ping 15 s, close 30 s after call.completed, 4 h cap).
+  Route `calls_events_stream`; container `live_hub` (aclose on exit); SessionContainer hub on SystemClock.
+- Cross-tenant: `register_request(..., headers=)`; stream owner control uses bad Last-Event-ID → 400.
+- test_openapi `STREAM_OPERATIONS`. openapi.json + both schema.d.ts regenerated.
+- Replay holes (rowless seqs) are skipped silently: only live gaps are held.
+
+## Review P06-T06a — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11146 passed, 7 skipped (99.04 %); jscpd 0 clones; radon avg 2.98.
+- Checked against specs/19 §9 (frame format, Last-Event-ID, close after call.completed), specs/03 §6 DDL (event_type last),
+  error codes CALL_NOT_FOUND / INVALID_INPUT / SERVICE_UNAVAILABLE raised before streaming. LiveHub reader exit relies on
+  redis-py `PubSub.subscribed` = channels non-empty (set at SUBSCRIBE send time), so no restart race.

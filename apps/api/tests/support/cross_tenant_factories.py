@@ -107,3 +107,8 @@ REGISTRY.register_request("calls_recording", params={"format": "json"})
 REGISTRY.register_request("calls_transcript", params={"format": "json"})
 REGISTRY.register_request("calls_events", params={"limit": "1000"})
 REGISTRY.register_owner_status("calls_recording", 404)
+# The call event stream tails an in-progress call until it completes, which an in-process client would wait
+# for: the owner control sends an invalid ``Last-Event-ID`` (checked after ownership), so it answers 400 at
+# once while org B still gets ``CALL_NOT_FOUND``.
+REGISTRY.register_request("calls_events_stream", headers={"Last-Event-ID": "not-a-seq"})
+REGISTRY.register_owner_status("calls_events_stream", 400)

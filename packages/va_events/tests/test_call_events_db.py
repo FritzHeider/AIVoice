@@ -25,7 +25,9 @@ from va_events import (
     EventType,
     event_uuid,
     insert_rows,
+    live_body,
     new_event,
+    row_body,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
@@ -67,6 +69,8 @@ async def test_published_call_events_are_stored_per_org(database: Database) -> N
     assert {(r.category, r.level, r.message) for r in rows_a} == {("latency", "info", "E2E: 742ms")}
     assert rows_a[0].data == {"e2e_ms": 742}
     assert [r.created_at for r in rows_a] == [e.occurred_at for e in published]
+    assert {r.event_type for r in rows_a} == {"call.latency"}
+    assert [row_body(r, {"crm": 7}) for r in rows_a] == [live_body(e, {"crm": 7}) for e in published]
 
     rows_b = await _rows(database, org_b)
     assert [(r.id, r.category, r.level, r.seq) for r in rows_b] == [(event_uuid(other), "error", "error", 1)]

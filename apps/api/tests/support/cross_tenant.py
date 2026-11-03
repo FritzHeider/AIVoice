@@ -98,10 +98,11 @@ ResourceFactory = Callable[[FactoryContext], Awaitable[str]]
 
 @dataclass(frozen=True, slots=True)
 class RouteRequest:
-    """The JSON body (``None`` for none) and query parameters sent to a route."""
+    """The JSON body (``None`` for none), query parameters, and extra headers sent to a route."""
 
     json: Mapping[str, Any] | None = None
     params: Mapping[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
 
 
 def path_params(path: str) -> list[str]:
@@ -165,12 +166,15 @@ class CrossTenantRegistry:
         *,
         json: Mapping[str, Any] | None = None,
         params: Mapping[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
-        """Send ``json`` and ``params`` to ``operation_id`` instead of the derived request."""
+        """Send ``json``, ``params``, and ``headers`` to ``operation_id`` instead of the derived request."""
         if operation_id in self._requests:
             msg = f"a request for {operation_id} is already registered"
             raise ValueError(msg)
-        self._requests[operation_id] = RouteRequest(json=json, params=dict(params or {}))
+        self._requests[operation_id] = RouteRequest(
+            json=json, params=dict(params or {}), headers=dict(headers or {})
+        )
 
     def register_owner_status(self, operation_id: str, status: int) -> None:
         """The status the owner control of ``operation_id`` must return (instead of any 2xx)."""
@@ -390,7 +394,11 @@ class CrossTenantProbe:
             client = tenant.session
             sent = {} if method in READ_METHODS else write_headers(client)
         return await client.request(
-            method, path, json=request.json, params=dict(request.params), headers={**sent, **(headers or {})}
+            method,
+            path,
+            json=request.json,
+            params=dict(request.params),
+            headers={**sent, **request.headers, **(headers or {})},
         )
 
     @staticmethod

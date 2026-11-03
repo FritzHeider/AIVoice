@@ -9846,6 +9846,77 @@
         "x-scope": "calls:read"
       }
     },
+    "/v1/calls/{call_id}/events/stream": {
+      "get": {
+        "description": "The call's events as Server-Sent Events: the stored events after `Last-Event-ID` in `seq` order, then\nthe live ones; reconnect with the last received `id` as `Last-Event-ID` to resume.",
+        "operationId": "calls_events_stream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-Sent Events: `id: <seq>`, `event: <type>`, `data: <bland-live JSON>`; `: ping` comments every 15 s; the stream ends 30 s after `call.completed`."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Events Stream",
+        "tags": [
+          "Calls"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      }
+    },
     "/v1/calls/{call_id}/recording": {
       "get": {
         "description": "Redirect to the call's recording (15-minute link), or answer the link as JSON with `format=json`.",

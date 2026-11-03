@@ -1647,3 +1647,16 @@ Grafana 3001
   `NOGROUP`. `ch_support.FakeClickHouse` now records `insert`s (`insert_failures`, `reject(table, rows)`,
   `rows_of(table)`, `inserted` event). The media `TurnRecorder` holds the assistant `call.turn` until the next
   callback so the reply's latency rides on it as `data.latency`.
+- 2026-11-03 (P06-T06a): call event SSE = `va_api.services.call_stream` (`open_call_stream(StreamDeps(database,
+  live_hub, clock), ctx, call_id, last_event_id)` checks + subscribes; `CallStream.frames()` replay → tail, gap
+  hold via pure `call_stream_order.SeqOrder`; rules: specs/19 §9 Decision P06-T06a) behind
+  `GET /v1/calls/{call_id}/events/stream`; responses `va_api.sse.EventStreamResponse(frames, on_close)` (Starlette
+  never closes an abandoned body iterator, so cleanup goes in `on_close`; a `Response` subclass needs a
+  `status_code` parameter in `__init__` or FastAPI's OpenAPI generator crashes). Pod-wide pub/sub fan-out =
+  `va_events.LiveHub` (container `live_hub`; `SessionContainer` builds one on `SystemClock` because the frozen
+  clock times out confirmations). `call_events.event_type` (migration 0007) is set by `row_for`; `row_body(row,
+  metadata)` == `live_body(event, metadata)`. Stream tests drive `CallStream.frames()` on a `ManualClock` set to
+  real now (partitions); an in-progress stream never ends, so httpx `ASGITransport` (which buffers the body) only
+  suits ended streams — live ones go over `service_helpers.serving(app)`. Cross-tenant `register_request(op,
+  headers=...)` exists (the stream owner control sends a bad `Last-Event-ID` → 400). `test_openapi.STREAM_OPERATIONS`
+  exempts `text/event-stream` operations from the JSON example rule.

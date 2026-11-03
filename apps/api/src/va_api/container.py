@@ -42,7 +42,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
-from va_events import EventPublisher
+from va_events import EventPublisher, LiveHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -84,6 +84,7 @@ class Container:
     host_resolver: HostResolver
     object_store: ObjectStore
     webhook_deliverer: Deliverer
+    live_hub: LiveHub
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -107,7 +108,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     state store, the cached org settings reader, the agent onboarding request store and limiter, and the
     Send Call pieces: the dispatch limiter, the event publisher (``call_events`` rows are written by the
     caller's transaction, so it has no sink), the ``CallWorkflow`` starter, and the system DNS resolver for
-    webhook checks, and the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt).
+    webhook checks, the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt), and
+    the live event hub (one pub/sub connection for every SSE client).
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -148,6 +150,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             version=__version__,
         )
         stack.push_async_callback(webhook_http.aclose)
+        live_hub = LiveHub(redis, clock)
+        stack.push_async_callback(live_hub.aclose)
         webhook_timeouts = Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S)
         yield Container(
             settings=settings,
@@ -181,4 +185,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             host_resolver=system_resolver,
             object_store=object_store,
             webhook_deliverer=Deliverer(webhook_http, clock=clock, timeouts=webhook_timeouts),
+            live_hub=live_hub,
         )

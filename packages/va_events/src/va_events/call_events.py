@@ -2,8 +2,8 @@
 
 A row is derived from a published call event (``seq`` assigned). The row's category is the event's own
 ``category`` or the catalog default of its type; a call event with neither (``batch.*`` with a call
-id, ...) has no row. The row id is the uuid inside ``evt_<hex>`` and ``created_at`` is ``occurred_at``
-(the partition key).
+id, ...) has no row. The row id is the uuid inside ``evt_<hex>``, ``created_at`` is ``occurred_at``
+(the partition key), and ``event_type`` the event's type (the SSE frame name, specs/19 §9).
 
 Writers: :class:`DbCallEventWriter` bulk-inserts rows, one ``tenant_session`` per org (RLS applies). The
 insert is idempotent (``ON CONFLICT DO NOTHING`` on the ``(created_at, id)`` key), so a retried batch never
@@ -58,6 +58,7 @@ class CallEventRow:
     message: str
     data: dict[str, JsonValue]
     created_at: datetime
+    event_type: str | None = None
 
 
 def row_for(event: DomainEvent) -> CallEventRow | None:
@@ -78,6 +79,7 @@ def row_for(event: DomainEvent) -> CallEventRow | None:
         message=event.message,
         data=dict(event.data),
         created_at=event.occurred_at,
+        event_type=event.type.value,
     )
 
 

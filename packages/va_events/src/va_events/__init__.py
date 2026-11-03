@@ -28,10 +28,19 @@ from va_events.catalog import (
 )
 from va_events.consumer import StreamConsumer, StreamEntry
 from va_events.dead_letter import DeadLetter
+from va_events.live_hub import LiveHub, LiveHubError, LiveSubscription, LiveSubscriptionClosedError
 from va_events.model import DomainEvent, EventFields, decode, encode, event_uuid, is_call_event, new_event
 from va_events.publisher import EventPublisher, EventPublishError, WebhookRouter
 from va_events.usage import UsageEventData, usage_event
-from va_events.webhook_payloads import BatchFacts, batch_body, envelope_body, iso_ms, live_body, strip_phi
+from va_events.webhook_payloads import (
+    BatchFacts,
+    batch_body,
+    envelope_body,
+    iso_ms,
+    live_body,
+    row_body,
+    strip_phi,
+)
 from va_events.webhook_router import DbWebhookRouter
 
 __all__ = [
@@ -58,6 +67,10 @@ __all__ = [
     "EventPublishError",
     "EventPublisher",
     "EventType",
+    "LiveHub",
+    "LiveHubError",
+    "LiveSubscription",
+    "LiveSubscriptionClosedError",
     "Stream",
     "StreamConsumer",
     "StreamEntry",
@@ -75,6 +88,7 @@ __all__ = [
     "iso_ms",
     "live_body",
     "new_event",
+    "row_body",
     "row_for",
     "stream_for",
     "strip_phi",

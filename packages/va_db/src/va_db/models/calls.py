@@ -380,7 +380,8 @@ class CallEvent(Base):
     ahead) and dropped after the orgs' maximum retention. A partitioned table's primary key must contain the
     partition key, hence ``(created_at, id)``; ``created_at`` comes back from the server default via
     RETURNING. ``org_id`` and ``call_id`` carry no foreign keys, as in the spec, so old partitions can be
-    dropped freely.
+    dropped freely. ``event_type`` (the domain event type, NULL on rows written before migration 0007) was
+    added later, so it is the last column.
     """
 
     __tablename__ = "call_events"
@@ -402,6 +403,7 @@ class CallEvent(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[dict[str, Any]] = jsonb_column("{}")
     created_at: Mapped[datetime] = mapped_column(tz(), nullable=False, server_default=func.now())
+    event_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class CallAnalysis(IdMixin, TimestampMixin, Base):

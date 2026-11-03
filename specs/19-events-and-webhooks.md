@@ -429,6 +429,28 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
   org. Accepts dashboard session auth or an API key with scope `webhooks:read` (used by `va webhooks listen`, which
   re-signs forwarded events locally with the org signing secret so receivers can verify them).
 
+> Decision (2026-11-03): call event stream (P06-T06a). `call_events` gains a nullable `event_type text`
+> column (migration 0007, listed last in specs/03 §6; rows written before it have NULL and their frames carry
+> no `event:` line). The route `GET /v1/calls/{call_id}/events/stream` needs `calls:read` and answers
+> `text/event-stream; charset=utf-8` with `Cache-Control: no-store` and `X-Accel-Buffering: no`. Everything
+> that can fail is checked before the stream starts: unknown or other-org call → `CALL_NOT_FOUND`, then a
+> `Last-Event-ID` that is not a non-negative integer → `INVALID_INPUT` (field `Last-Event-ID`), then the live
+> subscription → `SERVICE_UNAVAILABLE`. The stream subscribes `call:{id}:live` first, then replays the stored
+> rows with `seq > Last-Event-ID` (default 0) in pages of 500, then tails, so an event published after the
+> replay read is never missed and one present on both sides is sent once. The first frame is `retry: 3000`;
+> each event frame is `id: <seq>`, `event: <type>`, `data: <single-line bland-live JSON>` (§5 body, the
+> call's `metadata` loaded once at open). Only events that have a `call_events` row are streamed, so replay
+> and tail agree; a live event without a row still fills its place in the seq order. Frames go out strictly
+> in increasing seq: a live event above a missing seq (published before the subscription but not yet written
+> by the media write-behind buffer, or concurrent publishers arriving out of order) is held up to 2 s; then
+> the missing seqs are re-read from `call_events`, what is found is sent, and the remaining holes are
+> skipped. A `: ping` comment follows 15 s without a frame. The stream ends 30 s after the `call.completed`
+> frame's `created_at` (at once when that is past), after 4 h (clients resume with `Last-Event-ID`), when the
+> subscriber falls 1 000 messages behind or the hub loses Redis, or when the client disconnects (the
+> subscription is released however the response ends). Each api process keeps one pub/sub connection
+> (`va_events.LiveHub`): the first subscriber of a channel subscribes and waits up to 2 s for Redis to
+> confirm, later ones share it, the last one unsubscribes.
+
 ## 10. Webhook endpoint management API
 
 | Method | Path | Body / query | Response |

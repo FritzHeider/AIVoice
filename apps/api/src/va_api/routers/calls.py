@@ -14,7 +14,9 @@ Call creation is recorded in ``calls`` and ``call_events``, not in the audit log
 (302 to a 15-minute link, or JSON with ``format=json``; ``channel`` mixed/caller/agent),
 ``GET /v1/calls/{call_id}/transcript`` (JSON, text, SRT, or WebVTT), and ``GET /v1/calls/{call_id}/events``
 (``after_seq`` paging) need ``calls:read``; the work is :mod:`va_api.services.call_artifacts`. The literal
-``/active`` is registered before ``/{call_id}``.
+``/active`` is registered before ``/{call_id}``. ``GET /v1/calls/{call_id}/events/stream`` (Server-Sent
+Events, ``Last-Event-ID`` resume, specs/19 §9) needs ``calls:read``; the work is
+:mod:`va_api.services.call_stream`.
 
 ``POST /v1/calls/{call_id}/stop`` and ``POST /v1/calls/active/stop`` need ``calls:write`` and the
 ``calls.operate`` permission (stop-all from a dashboard session also role ``owner``/``admin``); the work is
@@ -59,6 +61,8 @@ from va_api.services.call_stop import (
     stop_call,
     stop_deps_of,
 )
+from va_api.services.call_stream import open_call_stream, stream_deps_of
+from va_api.sse import EventStreamResponse
 from va_common.logging import get_logger
 from va_domain.call_object import CallObject, concatenated_transcript, to_srt, to_vtt
 from va_domain.calls import SendCallRequest, unknown_fields
@@ -66,6 +70,7 @@ from va_domain.calls import SendCallRequest, unknown_fields
 __all__ = [
     "calls_active",
     "calls_events",
+    "calls_events_stream",
     "calls_get",
     "calls_list",
     "calls_recording",
@@ -98,6 +103,15 @@ _TRANSCRIPT_DOC: Final[dict[int | str, dict[str, Any]]] = {
     200: {
         "description": "The transcript; `text`, `srt`, and `vtt` answer plain text in that format.",
         "content": {"text/plain": {}, "application/x-subrip": {}, "text/vtt": {}},
+    }
+}
+_STREAM_DOC: Final[dict[int | str, dict[str, Any]]] = {
+    200: {
+        "description": (
+            "Server-Sent Events: `id: <seq>`, `event: <type>`, `data: <bland-live JSON>`; `: ping` comments "
+            "every 15 s; the stream ends 30 s after `call.completed`."
+        ),
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
     }
 }
 _SRT_MEDIA_TYPE: Final = "application/x-subrip; charset=utf-8"
@@ -239,3 +253,22 @@ async def calls_events(
     """A page of the call's event log ordered by `seq`; pass `next_after_seq` as `after_seq` for the next."""
     page = await call_events(read_deps_of(request), ctx, parse_call_id(call_id), query)
     return CallEventsResponse(events=page.events, next_after_seq=page.next_after_seq)
+
+
+@calls_router.get(
+    "/{call_id}/events/stream",
+    operation_id="calls_events_stream",
+    openapi_extra=_READ_EXTRA,
+    response_class=EventStreamResponse,
+    responses=_STREAM_DOC,
+)
+async def calls_events_stream(
+    call_id: str,
+    request: Request,
+    ctx: ReadCalls,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> EventStreamResponse:
+    """The call's events as Server-Sent Events: the stored events after `Last-Event-ID` in `seq` order, then
+    the live ones; reconnect with the last received `id` as `Last-Event-ID` to resume."""
+    stream = await open_call_stream(stream_deps_of(request), ctx, parse_call_id(call_id), last_event_id)
+    return EventStreamResponse(stream.frames(), stream.aclose)

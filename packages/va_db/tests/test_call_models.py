@@ -73,7 +73,7 @@ _SPEC_COLUMNS: dict[str, str] = {
         "id org_id call_id turn_index role text text_spoken? interrupted start_ms end_ms node_id? node_name? "
         "language_code? stt_confidence? latency text_realtime? created_at updated_at"
     ),
-    "call_events": "id org_id call_id seq category level message data created_at",
+    "call_events": "id org_id call_id seq category level message data created_at event_type?",
     "call_analyses": ("id org_id call_id kind goal? questions? schema? result model created_at updated_at"),
     "citations": (
         "id org_id call_id citation_schema_id variable_name variable_type value? conditions_met? "

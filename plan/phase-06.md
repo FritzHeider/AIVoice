@@ -30,11 +30,23 @@
   - Deliverables: `apps/events_sink` consumer group, batching (1 000 rows / 1 s), mapping to `call_events`, `call_turns`, `calls_fact`, `usage_events_raw`, retry with poison-message parking stream `events:dead`
   - Acceptance: integration test with testcontainers Redis + ClickHouse.
 
-- [ ] P06-T06 Live streams: SSE and transcript WebSocket
-  - Spec refs: specs/19-events-and-webhooks.md (live streams for clients)
+- [x] P06-T06a Call event SSE stream (replay + tail, Last-Event-ID, close after completion) — migration 0007 `call_events.event_type`, `va_events.LiveHub`, `GET /v1/calls/{id}/events/stream` (replay→tail, gap hold, heartbeat, close 30 s after completion); make test 11146 passed, 7 skipped, 99.04 % coverage; lint/typecheck/placeholders pass; jscpd 0 clones; radon 2.98
+  - Spec refs: specs/19-events-and-webhooks.md §9 (live streams for clients), §5 (bland-live body); specs/03-data-model.md §6 (`call_events`)
   - Depends on: P03-T17
-  - Deliverables: `GET /v1/calls/{id}/events/stream` (replay + tail, Last-Event-ID, close after completion), `POST /v1/calls/{id}/transcript/token`, `WS /v1/calls/{id}/transcript/ws`, org stream `GET /v1/events/stream` (dashboard session only)
-  - Acceptance: tests for replay ordering, resume, token expiry/scope.
+  - Deliverables: `call_events.event_type` column (migration 0007), pod-wide `call:{id}:live` fan-out hub, `GET /v1/calls/{id}/events/stream` (`id: <seq>`, `event: <type>`, bland-live `data`, replay from `call_events` then tail, `Last-Event-ID`, heartbeat comments, closes 30 s after `call.completed`)
+  - Acceptance: tests for replay ordering, tail without gaps or duplicates across the replay/tail boundary, `Last-Event-ID` resume, close after completion, cross-tenant 404.
+
+- [ ] P06-T06b Transcript token and WebSocket
+  - Spec refs: specs/19-events-and-webhooks.md §9
+  - Depends on: P06-T06a
+  - Deliverables: `POST /v1/calls/{id}/transcript/token` (60 s, single call scope), `WS /v1/calls/{id}/transcript/ws?token=` (replayed turns then live `call.turn` / `call.post_transfer_transcript`)
+  - Acceptance: tests for token expiry, wrong-call and wrong-org tokens, replay + live order.
+
+- [ ] P06-T06c Org event stream
+  - Spec refs: specs/19-events-and-webhooks.md §9; specs/26-sdks-cli-mcp-docs.md (`va webhooks listen`)
+  - Depends on: P06-T06a
+  - Deliverables: `GET /v1/events/stream?types=` SSE scoped to the org (dashboard session or API key with `webhooks:read`), pod-wide stream tail hub, type pattern filter, internal types never sent
+  - Acceptance: tests for org scoping, type filtering, auth variants.
 
 - [ ] P06-T07 Retrofit phase-05 emitters and latency events
   - Spec refs: specs/19-events-and-webhooks.md (event type catalog: call.latency messages); specs/07-media-pipeline.md (latency tracing)

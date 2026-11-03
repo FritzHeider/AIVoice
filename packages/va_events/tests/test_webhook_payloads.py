@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 from event_helpers import ORG, event
 from pydantic import JsonValue
 
-from va_events import BatchFacts, EventType, batch_body, envelope_body, iso_ms, live_body, strip_phi
+from va_db.models import CallEvent
+from va_events import (
+    BatchFacts,
+    EventType,
+    batch_body,
+    envelope_body,
+    iso_ms,
+    live_body,
+    row_body,
+    row_for,
+    strip_phi,
+)
 from va_events.webhook_payloads import content_body
 
 CALL = uuid.UUID("0193c5d2-0000-7000-8000-0000000000aa")
@@ -74,6 +86,19 @@ def test_live_body_has_exactly_the_bland_live_keys() -> None:
         "created_at": iso_ms(latency.occurred_at),
         "metadata": {"crm": "42"},
     }
+
+
+def test_row_body_of_a_stored_row_equals_the_live_body_of_its_event() -> None:
+    turn = event(
+        EventType.CALL_TURN, call_id=CALL, message="assistant", data={"text": "Hi", "turn_index": 0}
+    ).model_copy(update={"seq": 3})
+    stored = row_for(turn)
+    assert stored is not None
+    assert stored.event_type == "call.turn"
+
+    record = CallEvent(**dataclasses.asdict(stored))
+
+    assert row_body(record, {"crm": "42"}) == live_body(turn, {"crm": "42"})
 
 
 def test_live_body_prefers_the_event_category() -> None:

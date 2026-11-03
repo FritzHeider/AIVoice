@@ -45,6 +45,7 @@ INTERNAL_PATHS = {
 }
 E2E_SEED_MARKER = "e2e seed (VA_ENV local/test only)"
 REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
+STREAM_OPERATIONS = {"calls_events_stream"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
 
@@ -70,7 +71,8 @@ def checked_operations(
     document: dict[str, Any], tag_names: tuple[str, ...]
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Each operation after the shared checks: unique well-formed operationId, one known tag, and an example
-    on every 2xx response; browser redirects (:data:`REDIRECT_OPERATIONS`) answer 302 without a body."""
+    on every 2xx response; browser redirects (:data:`REDIRECT_OPERATIONS`) answer 302 without a body, and
+    Server-Sent Events streams (:data:`STREAM_OPERATIONS`) answer 200 ``text/event-stream`` only."""
     ids = [operation["operationId"] for _, _, operation in operations(document)]
     assert len(ids) == len(set(ids))
     for path, method, operation in operations(document):
@@ -84,6 +86,11 @@ def checked_operations(
             assert "content" not in operation["responses"]["302"], where
         else:
             assert success, where
+        if operation["operationId"] in STREAM_OPERATIONS:
+            assert success == ["200"], where
+            assert list(operation["responses"]["200"]["content"]) == ["text/event-stream"], where
+            yield where, operation
+            continue
         for code in success:
             schema = operation["responses"][code]["content"]["application/json"]["schema"]
             assert resolve(document, schema).get("examples"), where

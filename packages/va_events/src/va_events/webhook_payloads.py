@@ -2,7 +2,8 @@
 
 Pure functions over a :class:`~va_events.model.DomainEvent`: the ``bland`` post-call body is the Call Object
 the post-call workflow put into ``call.completed`` ``data`` (§4); :func:`live_body` is the ``bland-live`` body
-(§5); :func:`batch_body` the batch status body (§6); :func:`envelope_body` wraps any of them (§7).
+(§5) and :func:`row_body` the same body of a stored ``call_events`` row; :func:`batch_body` the batch status
+body (§6); :func:`envelope_body` wraps any of them (§7).
 Timestamps written here are UTC ISO 8601 with milliseconds and ``Z``.
 """
 
@@ -16,6 +17,7 @@ from typing import Final
 
 from pydantic import JsonValue
 
+from va_db.models import CallEvent
 from va_events.catalog import DEFAULT_CATEGORY, EventType
 from va_events.model import DomainEvent
 
@@ -26,6 +28,7 @@ __all__ = [
     "envelope_body",
     "iso_ms",
     "live_body",
+    "row_body",
     "strip_phi",
 ]
 
@@ -59,6 +62,20 @@ def live_body(event: DomainEvent, metadata: Mapping[str, JsonValue]) -> Body:
         "data": dict(event.data),
         "seq": event.seq,
         "created_at": iso_ms(event.occurred_at),
+        "metadata": dict(metadata),
+    }
+
+
+def row_body(row: CallEvent, metadata: Mapping[str, JsonValue]) -> Body:
+    """The §5 ``bland-live`` body of a stored ``call_events`` row (equals :func:`live_body` of its event)."""
+    return {
+        "call_id": str(row.call_id),
+        "category": row.category,
+        "level": row.level,
+        "message": row.message,
+        "data": dict(row.data),
+        "seq": row.seq,
+        "created_at": iso_ms(row.created_at),
         "metadata": dict(metadata),
     }
 

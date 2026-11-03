@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793688514-633a
+> P06-T06a: call SSE = va_api.services.call_stream (open_call_stream checks+subscribes, CallStream.frames replay->tail, SeqOrder gap hold) + va_api.sse.EventStreamResponse(frames,on_close) (Starlette never closes abandoned body iterators; Response subclass needs status_code init param or FastAPI openapi crashes UnboundLocalError) + va_events.LiveHub pod-wide pubsub fan-out; SessionContainer hub on SystemClock (FrozenClock times out confirmations); ASGITransport buffers body -> live streams tested via service_helpers.serving; cross_tenant register_request(headers=)
+<!-- tags: api, events, testing | created: 2026-11-03 -->
+
 ### mem-1793685779-173d
 > P06-T05: events sink va_events_sink.sink (StreamSink.cycle/run, run_sink, build_sinks) + pure rows.rows_for_event + DeadLetter(events:dead) + StreamConsumer read_own_pending/dead_letter; billing.usage internal type (INTERNAL_TYPES never routed); fakeredis blocking XREADGROUP returns [] immediately -> read loops must yield; XPENDING on missing group raises NOGROUP; media TurnRecorder holds assistant call.turn to attach data.latency
 <!-- tags: events, clickhouse, testing | created: 2026-11-03 -->

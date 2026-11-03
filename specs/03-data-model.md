@@ -973,9 +973,11 @@ CREATE TABLE call_events (
   message     text NOT NULL,
   data        jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at  timestamptz NOT NULL DEFAULT now(),
+  event_type  text,
   PRIMARY KEY (created_at, id)
 ) PARTITION BY RANGE (created_at);
 -- Partitions are created monthly by RetentionWorkflow (next 3 months ahead) and dropped after orgs' max retention.
+-- event_type: the domain event type (specs/19 §9 Decision P06-T06a); NULL on rows written before migration 0007.
 CREATE INDEX call_events_call_idx ON call_events(call_id, seq);
 CREATE INDEX call_events_org_idx ON call_events(org_id);
 
