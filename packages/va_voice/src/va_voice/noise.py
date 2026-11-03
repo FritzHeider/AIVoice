@@ -64,6 +64,7 @@ _BINS: Final = FFT_SIZE // 2 + 1
 _EPSILON: Final = 1e-9
 _INT16_MIN: Final = -32_768
 _INT16_MAX: Final = 32_767
+_EMPTY: Final[NDArray[np.int16]] = np.zeros(0, dtype=np.int16)
 _WINDOW: Final = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(FFT_SIZE) / FFT_SIZE)).astype(np.float64)
 
 
@@ -125,38 +126,57 @@ class SpectralGate:
         self._speech = False
 
     def process(self, pcm16k: NDArray[np.int16]) -> NDArray[np.int16]:
-        """Gate ``pcm16k`` (any length); returns the final samples so far, delayed by 256 samples."""
+        """Gate ``pcm16k`` (any length); returns the final samples so far, delayed by 256 samples.
+
+        All hops that become final in one call share one forward and one inverse FFT (rows of a 2-D
+        transform); only the per-bin gain update runs hop by hop, because the profile and the smoothing
+        state depend on the previous hop.
+        """
         if pcm16k.dtype != np.int16 or pcm16k.ndim != 1:
             message = f"expected 1-D int16 samples, got {pcm16k.dtype} with shape {pcm16k.shape}"
             raise ValueError(message)
         pending = np.concatenate([self._input, pcm16k.astype(np.float64)])
         hops = max(0, (pending.size - FFT_SIZE) // HOP + 1)
-        out = np.empty(hops * HOP, dtype=np.float64)
-        for index in range(hops):
-            start = index * HOP
-            self._overlap += self._frame(pending[start : start + FFT_SIZE])
-            out[start : start + HOP] = self._overlap[:HOP]
-            self._overlap[:-HOP] = self._overlap[HOP:]
-            self._overlap[-HOP:] = 0.0
         self._input = pending[hops * HOP :]
-        return np.clip(np.rint(out), _INT16_MIN, _INT16_MAX).astype(np.int16)
+        if hops == 0:
+            return _EMPTY
+        frames = np.stack([pending[index * HOP : index * HOP + FFT_SIZE] for index in range(hops)])
+        frames *= _WINDOW
+        spectra = np.fft.rfft(frames, axis=1)
+        gains = self._gains(np.abs(spectra))
+        blocks = np.fft.irfft(spectra if gains is None else spectra * gains, n=FFT_SIZE, axis=1)
+        # Overlap-add: each final hop is the previous frame's second half plus this frame's first half.
+        out = blocks[:, :HOP] + np.concatenate([self._overlap[None, :HOP], blocks[:-1, HOP:]])
+        self._overlap[:HOP] = blocks[-1, HOP:]
+        flat = out.reshape(-1)
+        np.rint(flat, out=flat)
+        np.maximum(flat, _INT16_MIN, out=flat)
+        np.minimum(flat, _INT16_MAX, out=flat)
+        gated: NDArray[np.int16] = flat.astype(np.int16)
+        return gated
 
-    def _frame(self, frame: NDArray[np.float64]) -> NDArray[np.float64]:
-        spectrum = np.fft.rfft(frame * _WINDOW)
-        magnitude = np.abs(spectrum)
-        if not self._speech:
-            self._ring[self._ring_next] = magnitude
-            self._ring_next = (self._ring_next + 1) % PROFILE_FRAMES
-            self._ring_count = min(self._ring_count + 1, PROFILE_FRAMES)
-            self._dirty = True
-        if not self.profile_ready:
-            return np.fft.irfft(spectrum, n=FFT_SIZE)
-        self._since_refresh += 1
-        if self._since_refresh >= PROFILE_REFRESH_HOPS:
-            self._refresh_profile()
-        raw = np.maximum(GAIN_FLOOR, 1.0 - OVER_SUBTRACTION * self._noise / np.maximum(magnitude, _EPSILON))
-        self._gain = SMOOTHING * self._gain + (1.0 - SMOOTHING) * raw
-        return np.fft.irfft(spectrum * self._gain, n=FFT_SIZE)
+    def _gains(self, magnitudes: NDArray[np.float64]) -> NDArray[np.float64] | None:
+        """Per-hop gains ``(hops, bins)``, or ``None`` while every hop passes ungated (no profile yet)."""
+        gains: NDArray[np.float64] | None = None
+        for index, magnitude in enumerate(magnitudes):
+            if not self._speech:
+                self._ring[self._ring_next] = magnitude
+                self._ring_next = (self._ring_next + 1) % PROFILE_FRAMES
+                self._ring_count = min(self._ring_count + 1, PROFILE_FRAMES)
+                self._dirty = True
+            if not self.profile_ready:
+                continue
+            if gains is None:
+                gains = np.ones(magnitudes.shape, dtype=np.float64)
+            self._since_refresh += 1
+            if self._since_refresh >= PROFILE_REFRESH_HOPS:
+                self._refresh_profile()
+            raw = np.maximum(
+                GAIN_FLOOR, 1.0 - OVER_SUBTRACTION * self._noise / np.maximum(magnitude, _EPSILON)
+            )
+            self._gain = SMOOTHING * self._gain + (1.0 - SMOOTHING) * raw
+            gains[index] = self._gain
+        return gains
 
     def _refresh_profile(self) -> None:
         if not self._dirty or not self.profile_ready:

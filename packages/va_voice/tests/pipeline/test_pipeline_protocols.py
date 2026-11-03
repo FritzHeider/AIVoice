@@ -23,11 +23,10 @@ URL = "ws://127.0.0.1:9"
 
 
 class _SilentModel:
-    def infer(
+    def infer_batch(
         self, samples: NDArray[np.float32], state: NDArray[np.float32]
-    ) -> tuple[float, NDArray[np.float32]]:
-        del samples
-        return 0.0, state
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+        return np.zeros(samples.shape[0], dtype=np.float32), state
 
 
 def test_elevenlabs_streams_are_pipeline_streams() -> None:

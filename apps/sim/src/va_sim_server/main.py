@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import uvloop
 from redis.asyncio import Redis
 from starlette.applications import Starlette
 
@@ -166,7 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     async def serve_all() -> None:
         await run(settings, stop=StopController(), host=bind.host, ports=ports_from(bind.port))
 
-    return run_main(serve_all)
+    return run_main(serve_all, loop_factory=uvloop.new_event_loop)
 
 
 if __name__ == "__main__":

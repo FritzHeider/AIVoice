@@ -3007,6 +3007,7 @@ dependencies = [
     { name = "pynacl" },
     { name = "redis" },
     { name = "starlette" },
+    { name = "uvloop" },
     { name = "va-billing" },
     { name = "va-common" },
     { name = "va-db" },
@@ -3024,6 +3025,7 @@ requires-dist = [
     { name = "pynacl", specifier = ">=1.5" },
     { name = "redis", specifier = ">=5.1" },
     { name = "starlette", specifier = ">=1.0" },
+    { name = "uvloop", specifier = ">=0.23.0" },
     { name = "va-billing", editable = "packages/va_billing" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
@@ -3081,6 +3083,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "redis" },
     { name = "starlette" },
+    { name = "uvloop" },
     { name = "va-common" },
     { name = "va-sim" },
 ]
@@ -3090,6 +3093,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "redis", specifier = ">=5.1" },
     { name = "starlette", specifier = ">=1.0" },
+    { name = "uvloop", specifier = ">=0.23.0" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-sim", editable = "packages/va_sim" },
 ]

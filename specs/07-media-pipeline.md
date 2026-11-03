@@ -227,6 +227,20 @@ resampled to 16 kHz), (c) local recording buffer only when `test_mode` (Telnyx r
 > §3.1 formant synthesis at 16 kHz, noise is the `office` background asset, plus digital silence and DTMF.
 > Measured with the production thresholds: starts within +12 ms of the voiced body, ends +56..+98 ms after it (the
 > model's hangover), no speech on silence, office noise (max p 0.09), or DTMF (max p 0.15); ≈ 0.1 ms per window.
+>
+> Decision (2026-11-03) P05-T17e2: pod-wide batched inference. One pool hop per leg feed cost ≈ 1 550 thread
+> handoffs per second at 50 calls (GIL re-acquisition after every ONNX call), and the queueing behind them drove the
+> 50-call underruns. `VadModel` is now `infer_batch(samples (B, 576), state (2, B, 128)) -> (probabilities (B,),
+> states (2, B, 128))` (Silero v5 takes a batch dimension; rows are independent streams, results equal B single
+> runs within 1e-5, measured bit-identical); `SileroModel.infer` is a batch of one. `VadExecutor.infer(model,
+> samples, state)` queues one window; the first request of an event-loop turn schedules a flush on the next turn,
+> which stacks the queued windows of a model (at most `MAX_BATCH` = 64 per batch) into one `infer_batch` on the
+> pool, with at most `MEDIA_VAD_THREADS` batches in flight (new windows wait for the next free slot, so an idle pod
+> adds no wait and a busy one batches more). A waiter cancelled before the flush is left out; one cancelled after
+> it has its result discarded; a failing batch fails each of its waiters and the executor keeps serving; closing it
+> fails queued windows with `RuntimeError("VAD executor closed")`. `SileroVad.feed` awaits its completed windows
+> one by one (the recurrent state chains them) and still commits state/context only when all of them completed.
+> Measured on one media worker (8 vCPU dev host, whole compose stack): 50 calls went from 155–667 underruns to 0.
 
 ## 6. Endpointing (`va_voice.endpointing.Endpointer`)
 
@@ -501,6 +515,16 @@ Decision: noise handling is split by consumer, with no added latency on the STT 
 > partial sort (`np.partition` of the two neighbouring ranks) with `np.percentile`'s linear interpolation, so the
 > values are unchanged. A trailing 1.5 s stationary-noise estimate barely moves within 512 ms, and the ≥ 10 dB
 > reduction still holds. Measured on stationary noise: ≈ 2 ms per call-second (was ≈ 24 ms).
+>
+> Decision (2026-11-03) P05-T17e2: once per VAD window. After `T` raw samples the gate has released exactly
+> `floor(T / 256) × 256` samples, so with a 512-sample VAD window a new window completes exactly when `floor(T /
+> 512)` increases. `GatedVad(vad, window_samples=512)` (what `InboundPath` builds) keeps the raw samples until then
+> and gates + feeds them in one call: gate output, VAD events and their times are identical to gating every 20 ms
+> frame (the speech feedback only changes after a VAD feed), but the gate and the VAD run ≈ 31 instead of 50 times
+> per call-second and the trailing partial window never reaches the VAD. `window_samples` defaults to one hop (the
+> previous per-feed behaviour) and must be a multiple of 256. `SpectralGate.process` transforms all hops that
+> become final in one call as the rows of one forward and one inverse FFT and overlap-adds them vectorised; only
+> the per-bin gain update stays per hop (bit-identical output).
 
 ### 10.2 Background tracks
 
@@ -825,6 +849,15 @@ class ConversationEngine(Protocol):
 > Spoken defaults equal the specs/04 §7 org settings defaults (`max_duration_message` = "I'm sorry, we've reached the
 > time limit for this call. Goodbye.", `no_input_goodbye`); the specs/05 `max_duration` row's wording is superseded
 > by that org setting.
+>
+> Decision (2026-11-03) P05-T17e2: the stream origin is the smallest `arrival − 20 × k` over the frames read so
+> far (frame `k` ends at stream time `20 × k`; `k` counts every frame fed, gap fill included). For the first frame
+> this is the old rule; afterwards it can only move earlier. Frames that queued while a call attached (context
+> load, subscriptions, the opener) used to be read in a burst, and anchoring the origin on the first of them moved
+> every VAD time, end-of-turn deadline and `user_speech_end` of that call later by the backlog: at 50 simultaneous
+> attaches 46–338 ms per call, constant for the whole call. The estimate is never earlier than the true send time
+> plus the smallest transit (a held or late frame only yields a larger candidate). Measured: 50-call overhead
+> p50 82–87 ms (was 140–211 ms with the batched VAD alone).
 
 > Decision (2026-11-02): media call runtime (P05-T10a). The media lifespan builds the per-process collaborators
 > once in `va_media.runtime.open_runtime` (KMS envelope + `OrgProviderStore` behind one `LlmGateway` on one HTTP
@@ -1019,6 +1052,16 @@ calls; event loop lag p99 ≤ 10 ms (`va_event_loop_lag_ms`).
 > their target (`OutboundStats.late_frames`); event-loop lag (10 ms sleep overshoot) is reported, not asserted
 > (the p99 assert belongs to the phase 05 load test). Percentiles are nearest-rank. A complete, non-xdist run
 > rewrites `packages/va_voice/BENCHMARKS.md` (committed; never edited by hand).
+>
+> Decision (2026-11-03) P05-T17e2: single-pod capacity (specs/30 §6). The media worker (and the simulator runner)
+> run on uvloop as §1 states (`serve(..., loop_factory=uvloop.new_event_loop)`; the other services keep the asyncio
+> loop). `va_media.main.tune_gc()` runs `gc.collect()`, `gc.freeze()` and `gc.set_threshold(50_000, 20, 20)` before
+> serving: startup objects never get walked again and per-frame garbage (freed by reference counting) no longer
+> triggers a gen-0 pass every 700 allocations. VAD inference does use the `MEDIA_VAD_THREADS` pool (§5.3 Decisions
+> P04-T03 and P05-T17e2), superseding §1's "runs inline". Measured with `make e2e-capacity` on the 8 vCPU dev host:
+> 50 calls, none dropped, 50 attached at once, 0 underruns, overhead p50/p95 82–87/110–137 ms, loop lag p99
+> ≤ 10 ms; 10 calls overhead p50 76 ms. Profile (py-spy `--gil`, 50 calls): the event loop holds the GIL ≈ 60 % of
+> the time (was ≈ 75 % before uvloop), inbound path ≈ 20 %, gate ≈ 7 %, ONNX ≈ 4 % on the pool threads.
 
 ## 22. Tests required
 

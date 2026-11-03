@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import numpy as np
+import pytest
 import pytest_asyncio
 from numpy.typing import NDArray
 from vad_fixtures import SPEECH_SEGMENTS_MS, read_fixture
@@ -114,6 +115,53 @@ async def test_the_profile_learns_only_between_speech_start_and_end() -> None:
     assert untouched.gate.profile_ready
 
 
+async def test_window_batching_feeds_once_per_vad_window_with_identical_results() -> None:
+    noise = _noise(2.0, -30.0)
+    script = [[_event("probability", 0.0)]] * 30 + [[_event("speech_start", 10.0)]] + [[]] * 20
+    script += [[_event("speech_end", 900.0)]] + [[_event("probability", 0.0)]] * 100
+    every_feed, per_window = ScriptedVad(), ScriptedVad()
+    plain = GatedVad(_WindowVad(every_feed, *script))
+    batched = GatedVad(_WindowVad(per_window, *script), window_samples=512)
+    plain_events = await _feed(plain, noise)
+    batched_events = await _feed(batched, noise)
+    assert batched_events == plain_events
+    assert np.array_equal(np.concatenate(per_window.fed), np.concatenate(every_feed.fed))
+    assert batched.gate.profile_ready
+    assert np.array_equal(batched.gate.noise_profile, plain.gate.noise_profile)
+    # One gate run per completed 512-sample window instead of one per gate-releasing 20 ms chunk.
+    assert len(per_window.fed) == noise.size // 512
+    assert len(every_feed.fed) > len(per_window.fed)
+
+
+class _WindowVad:
+    """Records into ``recorder``; emits the next scripted events for every 512-sample window completed."""
+
+    def __init__(self, recorder: ScriptedVad, *script: list[VadEvent]) -> None:
+        self._recorder = recorder
+        self._script = list(script)
+        self._samples = 0
+
+    async def feed(self, pcm16k: NDArray[np.int16]) -> list[VadEvent]:
+        await self._recorder.feed(pcm16k)
+        before, self._samples = self._samples, self._samples + pcm16k.size
+        events: list[VadEvent] = []
+        for _ in range(self._samples // 512 - before // 512):
+            events.extend(self._script.pop(0) if self._script else [])
+        return events
+
+
+@pytest.mark.parametrize("window", [0, 100, 300])
+def test_window_samples_must_be_a_multiple_of_the_hop(window: int) -> None:
+    with pytest.raises(ValueError, match="multiple of 256"):
+        GatedVad(ScriptedVad(), window_samples=window)
+
+
+async def test_other_sample_types_are_rejected_before_buffering() -> None:
+    gated = GatedVad(ScriptedVad(), window_samples=512)
+    with pytest.raises(ValueError, match="1-D int16"):
+        await gated.feed(np.zeros(10, dtype=np.float32))
+
+
 def _l16_frames(pcm: NDArray[np.int16]) -> list[InboundAudio]:
     samples = L16_16000.frame_samples
     return [
@@ -139,7 +187,9 @@ async def test_inbound_path_gates_the_vad_with_noise_cancellation() -> None:
     # speech from the first feed on: the gate never learns a profile, so the VAD hears the delayed input
     delayed = np.concatenate([np.zeros(LATENCY_SAMPLES, dtype=np.int16), pcm])[: (pcm.size // HOP) * HOP]
     assert np.array_equal(np.concatenate(vad.fed), delayed)
-    origin = 1000.0 - 20
+    # Every frame "arrives" at t = 1000, so the origin follows the frames read: the first VAD feed happens on
+    # the second frame (its gated output completes the first 512-sample window), origin 1000 - 2 x 20.
+    origin = 1000.0 - 2 * 20
     assert [(e.kind, e.at_ms) for e in events] == [("speech_start", origin + 100.0 - LATENCY_MS)]
 
 

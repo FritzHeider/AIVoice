@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 from functools import partial
 
 import pytest
+import uvloop
 from media_helpers import FakeMediaContainer
 from service_helpers import capture_serve, settings_of
 
@@ -18,7 +20,10 @@ from va_media.settings import MediaSettings
 
 def test_main_parses_args_and_serves_with_drain(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = capture_serve(monkeypatch, media_main)
+    tuned: list[bool] = []
+    monkeypatch.setattr(media_main, "tune_gc", lambda: tuned.append(True))
     assert media_main.main(["--port", "18200"]) == 0
+    assert tuned == [True]
     [(app, bind, kwargs)] = seen
     assert bind == Bind("0.0.0.0", 18200)  # noqa: S104
     assert kwargs["stop"] is app.state.stop
@@ -27,6 +32,18 @@ def test_main_parses_args_and_serves_with_drain(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(drain, partial)
     assert drain.func is media_main.drain
     assert drain.args == (app,)
+    assert kwargs["loop_factory"] is uvloop.new_event_loop
+
+
+def test_tune_gc_freezes_startup_objects_and_raises_the_thresholds() -> None:
+    thresholds = gc.get_threshold()
+    try:
+        media_main.tune_gc()
+        assert gc.get_threshold() == media_main.GC_THRESHOLDS
+        assert gc.get_freeze_count() > 0
+    finally:
+        gc.unfreeze()
+        gc.set_threshold(*thresholds)
 
 
 async def test_container_builds_redis_and_database_and_disposes_it(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,7 +20,8 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Unit + integration tests | `make test` (single package: `uv run pytest packages/va_voice -q`) |
 | Pipeline benchmark | `uv run pytest -m bench packages/va_voice` (rewrites `packages/va_voice/BENCHMARKS.md`; commit it) |
 | Simulator end-to-end | `make e2e` (runs `scripts/dev_up.sh e2e`, rebuilding images, then `pytest tests_e2e -m e2e`; one flow on a running stack: `uv run pytest tests_e2e -m e2e -k outbound_basic -s`) |
-| Single-pod capacity check | `make e2e-capacity` (50 concurrent calls on one media worker, marker `capacity`, deselected by `make e2e`; `E2E_CONCURRENT_CALLS=10` for fewer; on a running stack: `uv run pytest tests_e2e -m capacity -s`) |
+| Single-pod capacity check | `make e2e-capacity` (50 concurrent calls on one media worker, marker `capacity`, also part of `make e2e`; `E2E_CONCURRENT_CALLS=10` for fewer; on a running stack: `uv run pytest tests_e2e -m capacity -s`) |
+| Profile a compose service | `docker run --rm --pid=container:voiceagents-media-1 --cap-add SYS_PTRACE <image with py-spy + procps> py-spy record --nonblocking --gil -p <pid> -d 15 -f raw -o out.txt` (pid via `ps -eo pid,args` in the same namespace, usually 7) |
 | Dashboard e2e | `make e2e-ui` |
 | Live vendor smoke | `LIVE_TESTS=1 LIVE_TELNYX_API_KEY=… LIVE_ELEVENLABS_API_KEY=… LIVE_LLM_API_KEY=… uv run pytest tests_live -m live -rs` (optional `LIVE_FROM_NUMBER`, `VA_ENV`; commit the generated `tests_live/fixtures/stt_phrase.*` after the first run) |
 | Dashboard dev server | `corepack pnpm --filter dashboard dev` (port 3000; set `NEXT_TELEMETRY_DISABLED=1`) |
@@ -1572,10 +1573,25 @@ Grafana 3001
   name, q)`). Compose Postgres runs with `max_connections=300`: Temporal holds ~32 and each app 2 pools x (10 + 10
   overflow); the default 100 ran out under 50 calls (`too many clients already`). `runtime_rig.SimRuntime.metrics`
   / runtime sim `Rig.metrics` expose the runtime's catalog.
-- 2026-11-02 (P05-T17e1): the 50-call flow carries marker `capacity` (registered in pyproject): `make e2e` runs
-  `-m "e2e and not capacity"`, `make e2e-capacity` runs it alone (`E2E_CONCURRENT_CALLS` 1..50, parsed by
+- 2026-11-02 (P05-T17e1): the 50-call flow carries marker `capacity` (registered in pyproject; since P05-T17e2
+  `make e2e` runs it too), `make e2e-capacity` runs it alone (`E2E_CONCURRENT_CALLS` 1..50, parsed by
   `tests_e2e/support/e2e_capacity.concurrent_calls`). Copies of one scenario in a test need
   `load_scenario(name, instance=n)` (same id otherwise: they replace each other), and many concurrent pollers need
   `finished(..., poll_s=1.0)` (0.25 s x 50 hits the plan's 100 req/s `default` bucket). Baseline: 50 calls overhead
   p50 335 ms / 667 underruns / lag p99 ≤ 150 ms; 10 calls p50 92 ms / 2 underruns / lag ≤ 5 ms (so underruns also
   appear without CPU pressure). The flow takes ~45 s.
+- 2026-11-03 (P05-T17e2): VAD inference is batched pod-wide: `VadModel.infer_batch(samples (B, 576), state (2, B,
+  128))` and `VadExecutor.infer(model, samples, state)` (coalesces the windows queued in one loop turn, ≤ 64 per
+  batch, ≤ `threads` batches in flight; `.batches`/`.windows`/`.in_flight` for tests). Fakes implement
+  `infer_batch`: `packages/va_voice/tests/support/vad_fakes.ScriptedModel` (probability script indexed by the row's
+  state value, so it stays per stream inside shared batches; `on_batch`, `fail_next`, `batch_sizes`). `InboundPath`
+  wraps the VAD in `GatedVad(vad, window_samples=512)` (gate + VAD once per VAD window) and its stream origin is
+  `min(arrival - 20 x k)` (a startup backlog no longer delays a call's whole timeline: that per-call constant was
+  most of the 50-call overhead). Media worker and sim run on uvloop (`serve(..., loop_factory=uvloop.new_event_loop)`
+  / `run_main(..., loop_factory=)`); `va_media.main.tune_gc()` freezes startup objects (tests must restore
+  `gc.unfreeze()` + thresholds). Measuring: py-spy WITHOUT `--nonblocking` pauses the target at every sample and
+  inflated the 50-call overhead by ~50-100 ms; profile with `--nonblocking` and take gate numbers from unprofiled
+  runs. Overhead varies run to run; compare several runs, and split sim v2v minus the turn's `e2e_ms` ("outside"
+  the media pipeline) from `e2e_ms` minus vendor stages ("inside") using the `call.latency` `E2E:` summaries
+  (`call_events` rows, `psql -U va -d va` in the postgres container). Restarting only the `sim` container rotates
+  its key: run `scripts/dev_up.sh e2e` afterwards, not `docker compose up sim`.

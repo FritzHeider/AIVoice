@@ -27,7 +27,9 @@ from va_voice.vad import WINDOW_MS, SileroVad, VadEvent, VadExecutor
 from va_voice.vad_model import (
     MANIFEST_NAME,
     MODEL_INPUT_SAMPLES,
+    STATE_LAYERS,
     STATE_SHAPE,
+    STATE_UNITS,
     SileroModel,
     VadModelError,
     initial_state,
@@ -143,6 +145,56 @@ def test_infer_rejects_wrong_shapes(model: SileroModel) -> None:
         model.infer(np.zeros(512, np.float32), initial_state())
     with pytest.raises(ValueError, match="expected samples"):
         model.infer(np.zeros(MODEL_INPUT_SAMPLES, np.float32), np.zeros((2, 128), np.float32))
+
+
+def test_infer_batch_equals_independent_streams(model: SileroModel) -> None:
+    speech = pcm_to_float32(read_fixture("speech.wav"))
+    start = int(SPEECH_SEGMENTS_MS[0][0] * 16)
+    rows, states = [], []
+    for stream in range(5):
+        # Distinct states: stream k has seen k windows of speech before its batched window.
+        state = initial_state()
+        for k in range(stream):
+            _, state = model.infer(speech[start + k * 512 : start + k * 512 + MODEL_INPUT_SAMPLES], state)
+        offset = start + stream * 512
+        rows.append(speech[offset : offset + MODEL_INPUT_SAMPLES])
+        states.append(state)
+    probabilities, next_states = model.infer_batch(np.stack(rows), np.concatenate(states, axis=1))
+    assert probabilities.shape == (5,)
+    assert next_states.shape == (STATE_LAYERS, 5, STATE_UNITS)
+    for stream in range(5):
+        alone, alone_state = model.infer(rows[stream], states[stream])
+        np.testing.assert_allclose(probabilities[stream], alone, atol=1e-5)
+        np.testing.assert_allclose(next_states[:, stream : stream + 1], alone_state, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("samples", "state"),
+    [
+        (np.zeros(MODEL_INPUT_SAMPLES, np.float32), np.zeros((2, 1, 128), np.float32)),
+        (np.zeros((2, 512), np.float32), np.zeros((2, 2, 128), np.float32)),
+        (np.zeros((3, MODEL_INPUT_SAMPLES), np.float32), np.zeros((2, 2, 128), np.float32)),
+        (np.zeros((0, MODEL_INPUT_SAMPLES), np.float32), np.zeros((2, 0, 128), np.float32)),
+    ],
+)
+def test_infer_batch_rejects_wrong_shapes(
+    model: SileroModel, samples: NDArray[np.float32], state: NDArray[np.float32]
+) -> None:
+    with pytest.raises(ValueError, match="expected samples"):
+        model.infer_batch(samples, state)
+
+
+async def test_concurrent_streams_batch_and_match_alone(model: SileroModel, executor: VadExecutor) -> None:
+    speech = read_fixture("speech.wav")[: 16_000 * 2]
+    alone = await _events(SileroVad(model, executor), speech)
+    batches_before = executor.batches
+    vads = [SileroVad(model, executor) for _ in range(10)]
+    together = await asyncio.gather(*(_events(vad, speech) for vad in vads))
+    for events in together:
+        assert [(e.kind, e.at_ms, e.speech) for e in events] == [(e.kind, e.at_ms, e.speech) for e in alone]
+        for got, want in zip(events, alone, strict=True):
+            assert got.probability == pytest.approx(want.probability, abs=1e-5)
+    assert executor.batches - batches_before < len(_windows(alone)) * len(vads)
 
 
 async def test_speech_fixture_segments(model: SileroModel, executor: VadExecutor) -> None:

@@ -3,9 +3,13 @@
 Every frame goes through the :class:`~va_voice.reorder.ReorderBuffer`; each in-order frame is sent to the
 STT (raw μ-law bytes; 16 kHz legs as little-endian PCM16, §15) and, decoded to 16 kHz PCM16 (μ-law resampled
 with soxr, 16 kHz legs as they are), to the VAD. VAD event times are stream time; :class:`InboundPath` maps
-them onto the pipeline timeline with ``origin_ms`` = arrival time of the first in-order frame minus one frame
-(frame ``k`` ends at stream time ``20 x k``). With ``noise_cancellation`` the VAD is wrapped in a
-:class:`~va_voice.pipeline.gated_vad.GatedVad` (one spectral gate per leg, §10.1).
+them onto the pipeline timeline with ``origin_ms`` = the smallest ``arrival - 20 x k`` over the processed
+frames (frame ``k`` ends at stream time ``20 x k``; specs/07 §16 Decision P05-T17e2). For the first frame that
+is its arrival minus one frame; a backlog the leg starts with (frames queued while the call attached) no
+longer delays the whole call's timeline, because the first frame read on time pulls the origin back. With
+``noise_cancellation`` the VAD is wrapped in a
+:class:`~va_voice.pipeline.gated_vad.GatedVad` (one spectral gate per leg, §10.1) that gates and feeds the VAD
+once per 512-sample VAD window.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from va_voice.pipeline.protocols import InboundAudio, SttStream, VoiceActivityDe
 from va_voice.reorder import NULL_OBSERVER as NULL_REORDER_OBSERVER
 from va_voice.reorder import OrderedFrame, ReorderBuffer, ReorderObserver
 from va_voice.vad import VadEvent
+from va_voice.vad_model import WINDOW_SAMPLES
 
 __all__ = ["InboundPath"]
 
@@ -32,7 +37,7 @@ type _Decoded = tuple[bytes, NDArray[np.int16]]
 class InboundPath:
     """Reorder, STT fan-out and VAD of one leg; returns VAD events on the pipeline timeline."""
 
-    __slots__ = ("_decode", "_now_ms", "_origin_ms", "_reorder", "_stt", "_vad")
+    __slots__ = ("_decode", "_frames", "_now_ms", "_origin_ms", "_reorder", "_stt", "_vad")
 
     def __init__(
         self,
@@ -44,11 +49,14 @@ class InboundPath:
         reorder_observer: ReorderObserver = NULL_REORDER_OBSERVER,
     ) -> None:
         self._stt = stt
-        self._vad: VoiceActivityDetector = GatedVad(vad) if config.noise_cancellation else vad
+        self._vad: VoiceActivityDetector = (
+            GatedVad(vad, window_samples=WINDOW_SAMPLES) if config.noise_cancellation else vad
+        )
         self._now_ms = now_ms
         self._reorder = ReorderBuffer(config.fmt, window=config.reorder_window, observer=reorder_observer)
         self._decode = _decoder(config)
         self._origin_ms: float | None = None
+        self._frames = 0
 
     @property
     def reorder(self) -> ReorderBuffer:
@@ -56,7 +64,7 @@ class InboundPath:
 
     @property
     def origin_ms(self) -> float | None:
-        """Pipeline time of VAD stream time 0 (``None`` before the first frame)."""
+        """Pipeline time of VAD stream time 0 (``None`` before the first frame); it only moves earlier."""
         return self._origin_ms
 
     async def push(self, audio: InboundAudio) -> list[VadEvent]:
@@ -70,8 +78,10 @@ class InboundPath:
     async def _process(self, frames: list[OrderedFrame]) -> list[VadEvent]:
         events: list[VadEvent] = []
         for frame in frames:
-            if self._origin_ms is None:
-                self._origin_ms = self._now_ms() - FRAME_MS
+            self._frames += 1
+            candidate = self._now_ms() - FRAME_MS * self._frames
+            if self._origin_ms is None or candidate < self._origin_ms:
+                self._origin_ms = candidate
             stt_bytes, pcm16k = self._decode(frame.payload)
             await self._stt.send_audio(stt_bytes)
             origin = self._origin_ms

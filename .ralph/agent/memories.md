@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793669923-12cd
+> P05-T17e2: 50-call overhead was mostly a per-call constant from InboundPath origin anchored on first frame processing time during attach backlog; fixed with origin=min(arrival-20k). Also batched VAD (VadExecutor.infer/VadModel.infer_batch), GatedVad window_samples=512, uvloop for media+sim, tune_gc. py-spy without --nonblocking inflates latency ~50-100ms; split sim v2v vs call.latency e2e_ms to locate overhead
+<!-- tags: media, performance, e2e | created: 2026-11-03 -->
+
 ### mem-1793656519-ccbe
 > P05-T17d: e2e barge/interrupt flows read FakeTelnyx timeline clears; voice onset = utterance start_ms + va_sim.audio.MARKER_MS; pipeline played_chars is whole-word text_spoken length (compare via whole_word_prefix, not plain ±10%); Silero onset on synthetic caller voice is bimodal (~0 or ~200 ms late on first syllable); docker kill media -> heartbeat watch ends call worker_crash ~29 s later (owner TTL beats stream_failed grace); make_test.log from an earlier run keeps a stale exit= line, so truncate logs before monitoring
 <!-- tags: e2e, testing, sim | created: 2026-11-02 -->

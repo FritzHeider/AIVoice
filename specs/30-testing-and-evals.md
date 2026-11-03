@@ -1441,6 +1441,15 @@ delays is covered by Temporal time-skipping integration tests.)
 > 50 calls — none dropped, 50 attached at once, overhead p50/p95 335/895 ms, 667 underruns, loop lag p99 ≤ 150 ms;
 > 10 calls — none dropped, overhead p50/p95 92/255 ms, 2 underruns, loop lag p99 ≤ 5 ms. P05-T17e2 (media-worker
 > capacity work) makes the 50-call gates pass and moves the flow into `make e2e`.
+>
+> Decision (2026-11-03): the capacity flow is part of `make e2e` (P05-T17e2): `make e2e` runs `-m e2e` (the flow keeps
+> its `capacity` marker, so `make e2e-capacity` still runs it alone, with `-s` for the report). The report adds the
+> overhead p50 of each caller turn across calls (the calls' turns are nearly simultaneous; turn 1 is the slowest).
+> Result on the same host after the media-worker work (batched VAD, per-window gate, uvloop, GC tuning, backlog-proof
+> stream origin; specs/07 §5.3, §10.1, §16, §21 Decisions P05-T17e2): 50 calls — none dropped, 50 attached at once,
+> 0 underruns, overhead p50/p95 82–87/110–137 ms (by turn ≈ 95/85/65 ms), loop lag p99 ≤ 10 ms, ≈ 39 s; 10 calls —
+> overhead p50/p95 76/103 ms. The simulator runner also runs on uvloop, and its per-frame agent-speech check is an
+> integer `sum(x²) > 1024² × n` (same decision as the RMS rule, no float conversion).
 
 ## 7. Live smoke tests (`tests_live/`, `LIVE_TESTS=1`, staging)
 

@@ -26,7 +26,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from va_common.logging import get_logger
 from va_sim.clock import iso_z
 from va_sim.tasks import hold_clock
-from va_sim.telnyx.agent_speech import is_speech
+from va_sim.telnyx.agent_speech import is_speech, is_speech_pcm
 from va_sim.telnyx.keys import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from va_sim.telnyx.media_format import FRAME_MS, TRACK_RATE, agent_format, stream_format
 from va_sim.telnyx.media_frames import (
@@ -320,7 +320,7 @@ class MediaSession:
         ]
         if not waiting:
             return
-        if not is_speech(self.agent_fmt.to_pcm(audio).astype("<i2").tobytes()):
+        if not is_speech_pcm(self.agent_fmt.to_pcm(audio)):
             return
         now = self._state.clock.virtual_ms()
         for entry in waiting:

@@ -52,7 +52,7 @@ test-ts: ## TypeScript tests
 
 e2e: ## Simulator end-to-end suite (brings the compose e2e stack up first, rebuilding images)
 	scripts/dev_up.sh e2e
-	uv run pytest tests_e2e -m "e2e and not capacity"
+	uv run pytest tests_e2e -m e2e
 
 e2e-capacity: ## Single-pod 50-call concurrency check (E2E_CONCURRENT_CALLS overrides the count)
 	scripts/dev_up.sh e2e

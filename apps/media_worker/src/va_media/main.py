@@ -17,6 +17,7 @@ refuses to start without ``TELNYX_PUBLIC_KEY`` (``local`` falls back to the simu
 
 from __future__ import annotations
 
+import gc
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from functools import partial
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
+import uvloop
 from redis.asyncio import Redis
 from starlette.applications import Starlette
 
@@ -80,6 +82,8 @@ __all__ = [
 ]
 
 DEFAULT_PORT: Final = 8200
+GC_THRESHOLDS: Final = (50_000, 20, 20)
+"""Collector thresholds of a serving media worker (generation 0, 1, 2)."""
 DEFAULT_MODELS_DIR: Final = Path("models")
 DRAIN_END_GRACE_S: Final = 10.0
 """How long the drain waits for sessions ended at the drain timeout to finish their cleanup."""
@@ -336,11 +340,25 @@ async def drain(app: Starlette) -> None:
         _log.error("media.drain_unfinished", sessions=len(media.sessions))
 
 
+def tune_gc() -> None:
+    """Keep the cyclic collector out of the media loop's way (specs/07 §21 Decision P05-T17e2).
+
+    Everything allocated at startup (modules, settings, the app) moves to the permanent generation, so no
+    later collection walks it, and generation 0 collects every :data:`GC_THRESHOLDS` allocations instead of
+    700: per-frame objects are freed by reference counting, and fewer, smaller collections do not stall the
+    20 ms send loops of 50 calls.
+    """
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(*GC_THRESHOLDS)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     bind = parse_bind(argv, default_port=DEFAULT_PORT, description="VoiceAgents media worker")
     stop = StopController()
     app = create_app(stop=stop)
-    return serve(app, bind, stop=stop, drain=partial(drain, app))
+    tune_gc()
+    return serve(app, bind, stop=stop, drain=partial(drain, app), loop_factory=uvloop.new_event_loop)
 
 
 if __name__ == "__main__":

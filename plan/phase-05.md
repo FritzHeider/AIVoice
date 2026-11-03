@@ -290,7 +290,7 @@
   - Deliverables: `PostCallWorkflow` (registered on the post-call queue by the worker) running `finalize_call_record` → (`await_recording`: stored `call.recording.saved` lookup, else signal wait 10 min, else `call.error` `RECORDING_MISSING`) → `store_recording` → `finalize_billing` (P05-T18a) → `emit_completed` (`queue_status='complete'`, `call.completed` with the Call Object incl. 7-day recording URL); steps recorded in `calls.config.postcall_steps` and skipped on re-execution; not-connected calls run 1, 11, 13; later phases insert their steps at the specs/18 positions
   - Acceptance: Temporal time-skipping tests with fake activities (order, skips, recording timeout, failures still reach `emit_completed`); activity DB tests; `call.completed` price equals the metering result for connected, transferred, and failed calls; worker registration test.
 
-- [ ] P05-T17 End-to-end flows and concurrency check
+- [x] P05-T17 End-to-end flows and concurrency check — P05-T17a–e ticked; make e2e 16 flows green incl. 50-call capacity
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list)
   - Depends on: P05-T10, P05-T11, P05-T12, P05-T13, P05-T14, P05-T15, P05-T16a, P05-T16b, P05-T18a, P05-T18b
   - Deliverables: `tests_e2e/` harness (compose profile e2e, fixtures to start services, scenario helpers) and flows outbound_basic, inbound_basic, barge_in, worker_crash_recovery, plus the e2e flows of tasks finished before the harness existed (voicemail_leave_message, voicemail_hangup, amd_ivr_mode from P05-T10; others named in earlier tasks' acceptance when they also predate it); a 50-concurrent-call simulator test against one media worker process
@@ -324,7 +324,7 @@
   - Deliverables: flows `barge_in`, `interruptibility_levels` (levels 0–4), `worker_crash_recovery` (harness kills and restarts the media container)
   - Acceptance: `make e2e` green with every flow of the phase exit gate.
 
-- [ ] P05-T17e 50-concurrent-call media worker check
+- [x] P05-T17e 50-concurrent-call media worker check — delivered as P05-T17e1 + P05-T17e2 (0 underruns, overhead p50 82–92 ms at 50 calls)
   - Spec refs: specs/30-testing-and-evals.md §6 (pass criteria, scaled to one pod); specs/00 §5; phase 05 constraints
   - Depends on: P05-T17b
   - Deliverables: a simulator test (marker `slow`/`e2e`) running 50 concurrent scripted calls through one media worker process, reporting frame underruns and platform overhead percentiles
@@ -343,7 +343,7 @@
   - Deliverables: the working-tree work of the first P05-T17e build (outbound underrun accounting + `va_audio_underruns_total`, `pipeline_ended` outbound stats, SpectralGate profile cadence, `e2e_metrics`, harness `create_org(plan_id=, dollars=)`/`media_metrics`/`watch_active_calls`/`load_scenario(instance=)`/poll intervals, Postgres `max_connections=300`, `tests_e2e/test_concurrent_calls.py` + scenario/rules) with the flow marked `capacity` (deselected by `make e2e`, run by `make e2e-capacity`; call count from `E2E_CONCURRENT_CALLS`, default 50)
   - Acceptance: `make check` and `make e2e` (15 flows, capacity deselected) green; `make e2e-capacity` runs and prints the report (baseline numbers recorded in the tick; failing gates expected and reported); `E2E_CONCURRENT_CALLS=10 make e2e-capacity` reported.
 
-- [ ] P05-T17e2 Media worker 50-call capacity
+- [x] P05-T17e2 Media worker 50-call capacity — pod-wide batched Silero (`VadExecutor.infer`/`VadModel.infer_batch`), per-window GatedVad + batched-FFT gate, uvloop media+sim, `tune_gc`, backlog-proof stream origin min(arrival − 20k); 50 calls: 0 dropped, peak 50, 0 underruns, overhead p50/p95 82–92/110–137 ms, lag p99 ≤ 10 ms (10 calls p50 76 ms); py-spy before/after in scratchpad; capacity flow in `make e2e` (16 passed); make test 10821 passed / 7 skipped (99.14 %), lint/typecheck/placeholders/spec refs clean, jscpd 0 clones
   - Spec refs: specs/07 §5.3, §16, §21; specs/30 §6; phase 05 constraints
   - Depends on: P05-T17e1
   - Deliverables: per-pod batched Silero inference across legs, cheaper per-frame inbound/outbound paths (Telnyx frame decode/encode, frame batching, task-switch and GIL-handoff reduction), py-spy before/after evidence; the `capacity` flow joins `make e2e`

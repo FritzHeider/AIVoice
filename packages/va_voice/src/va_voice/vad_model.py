@@ -25,7 +25,9 @@ __all__ = [
     "MODEL_NAME",
     "OUTPUT_NAMES",
     "SAMPLE_RATE",
+    "STATE_LAYERS",
     "STATE_SHAPE",
+    "STATE_UNITS",
     "WINDOW_SAMPLES",
     "SileroModel",
     "VadModel",
@@ -41,13 +43,17 @@ SAMPLE_RATE: Final = 16_000
 WINDOW_SAMPLES: Final = 512
 CONTEXT_SAMPLES: Final = 64
 MODEL_INPUT_SAMPLES: Final = CONTEXT_SAMPLES + WINDOW_SAMPLES
-STATE_SHAPE: Final = (2, 1, 128)
+STATE_LAYERS: Final = 2
+STATE_UNITS: Final = 128
+STATE_SHAPE: Final = (STATE_LAYERS, 1, STATE_UNITS)
+"""The recurrent state of one stream; a batch of ``B`` streams is ``(2, B, 128)``."""
 INPUT_NAMES: Final = ("input", "state", "sr")
 OUTPUT_NAMES: Final = ("output", "stateN")
 
 # onnxruntime logs warnings (e.g. unused initializers) to stderr at load; only errors are of interest.
 _ORT_LOG_ERROR: Final = 3
 _SAMPLE_RATE_INPUT: Final = np.array(SAMPLE_RATE, dtype=np.int64)
+_BATCH_DIMS: Final = 2
 
 
 class VadModelError(RuntimeError):
@@ -55,12 +61,13 @@ class VadModelError(RuntimeError):
 
 
 class VadModel(Protocol):
-    """One Silero step: ``(probability, next_state)`` for a 576-sample input and the current state."""
+    """One Silero step over a batch of independent streams (each row is one stream's next window)."""
 
-    def infer(
+    def infer_batch(
         self, samples: NDArray[np.float32], state: NDArray[np.float32]
-    ) -> tuple[float, NDArray[np.float32]]:
-        """Speech probability of ``samples`` (64 context + 512 new, in [-1, 1]) and the next state."""
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """Speech probabilities ``(B,)`` of ``samples`` ``(B, 576)`` (64 context + 512 new per row, in
+        [-1, 1]) and the next states ``(2, B, 128)`` for the current states ``state`` ``(2, B, 128)``."""
         ...
 
 
@@ -142,17 +149,31 @@ class SileroModel:
     def infer(
         self, samples: NDArray[np.float32], state: NDArray[np.float32]
     ) -> tuple[float, NDArray[np.float32]]:
-        """Run one 32 ms window (``samples`` = 64 context + 512 new samples); see :class:`VadModel`."""
+        """Run one 32 ms window of one stream (``samples`` = 64 context + 512 new samples, ``state``
+        ``(2, 1, 128)``): a batch of one."""
         if samples.shape != (MODEL_INPUT_SAMPLES,) or state.shape != STATE_SHAPE:
             expected = f"expected samples {(MODEL_INPUT_SAMPLES,)} and state {STATE_SHAPE}"
             msg = f"{expected}, got {samples.shape}, {state.shape}"
             raise ValueError(msg)
+        probabilities, next_state = self.infer_batch(samples.reshape(1, MODEL_INPUT_SAMPLES), state)
+        return float(probabilities[0]), next_state
+
+    def infer_batch(
+        self, samples: NDArray[np.float32], state: NDArray[np.float32]
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """One ``session.run`` over ``B`` streams; see :class:`VadModel`."""
+        batch = samples.shape[0] if samples.ndim == _BATCH_DIMS else 0
+        state_shape = (STATE_LAYERS, batch, STATE_UNITS)
+        if batch < 1 or samples.shape[1] != MODEL_INPUT_SAMPLES or state.shape != state_shape:
+            expected = f"expected samples (B, {MODEL_INPUT_SAMPLES}) and state (2, B, 128) with B >= 1"
+            msg = f"{expected}, got {samples.shape}, {state.shape}"
+            raise ValueError(msg)
         feeds = {
-            "input": np.ascontiguousarray(samples, dtype=np.float32).reshape(1, MODEL_INPUT_SAMPLES),
+            "input": np.ascontiguousarray(samples, dtype=np.float32),
             "state": np.ascontiguousarray(state, dtype=np.float32),
             "sr": _SAMPLE_RATE_INPUT,
         }
         output, next_state = self._session.run(list(OUTPUT_NAMES), feeds)
-        probability = float(np.asarray(output, dtype=np.float32).reshape(-1)[0])
-        updated: NDArray[np.float32] = np.asarray(next_state, dtype=np.float32).reshape(STATE_SHAPE)
-        return probability, updated
+        probabilities: NDArray[np.float32] = np.asarray(output, dtype=np.float32).reshape(batch)
+        updated: NDArray[np.float32] = np.asarray(next_state, dtype=np.float32).reshape(state_shape)
+        return probabilities, updated

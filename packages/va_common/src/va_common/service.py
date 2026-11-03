@@ -51,6 +51,7 @@ __all__ = [
     "SHUTDOWN_SIGNALS",
     "Bind",
     "ContainerFactory",
+    "LoopFactory",
     "ManagedServer",
     "ProbeState",
     "ReadinessSource",
@@ -89,6 +90,7 @@ type Checks = Callable[[], Mapping[str, CheckFn]]
 type Liveness = Callable[[], str | None]
 type Drain = Callable[[], Awaitable[None]]
 type TaskFactory = Callable[[], Coroutine[Any, Any, None]]
+type LoopFactory = Callable[[], asyncio.AbstractEventLoop]
 type ServerFactory = Callable[[uvicorn.Config], uvicorn.Server]
 
 
@@ -439,10 +441,14 @@ async def run_server(  # noqa: PLR0913 - keyword-only knobs and test seams
             await asyncio.gather(serving, stopping, return_exceptions=True)
 
 
-def run_main(main: TaskFactory) -> int:
-    """``asyncio.run(main())``: 0 on a clean exit, 130 on ``KeyboardInterrupt``, 1 after logging a crash."""
+def run_main(main: TaskFactory, *, loop_factory: LoopFactory | None = None) -> int:
+    """``asyncio.run(main())``: 0 on a clean exit, 130 on ``KeyboardInterrupt``, 1 after logging a crash.
+
+    ``loop_factory`` picks the event loop implementation (``uvloop.new_event_loop`` for the media worker and
+    the simulators; the default asyncio loop otherwise).
+    """
     try:
-        asyncio.run(main())
+        asyncio.run(main(), loop_factory=loop_factory)
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
     except Exception:
@@ -466,12 +472,21 @@ def parse_bind(argv: Sequence[str] | None, *, default_port: int, description: st
     return Bind(host=str(args.host), port=int(args.port))
 
 
-def serve(app: Any, bind: Bind, *, stop: StopController | None = None, drain: Drain | None = None) -> int:
-    """Run ``app`` on ``bind`` until SIGTERM/SIGINT; returns the exit code (1 after a task failure)."""
+def serve(
+    app: Any,
+    bind: Bind,
+    *,
+    stop: StopController | None = None,
+    drain: Drain | None = None,
+    loop_factory: LoopFactory | None = None,
+) -> int:
+    """Run ``app`` on ``bind`` until SIGTERM/SIGINT; returns the exit code (1 after a task failure).
+
+    ``loop_factory`` as in :func:`run_main`."""
     controller = stop if stop is not None else StopController()
 
     async def main() -> None:
         await run_server(app, host=bind.host, port=bind.port, stop=controller, drain=drain)
 
-    code = run_main(main)
+    code = run_main(main, loop_factory=loop_factory)
     return EXIT_CRASHED if code == 0 and controller.failed else code

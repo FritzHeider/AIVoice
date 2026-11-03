@@ -7,6 +7,7 @@ dependencies = [
     "pynacl>=1.5",
     "starlette>=1.0",
     "redis>=5.1",
+    "uvloop>=0.23.0",
     "va-billing",
     "va-common",
     "va-db",

@@ -1320,3 +1320,189 @@ make e2e 15 passed, 51 deselected (capacity opt-in), 300 s; jscpd 0 clones; chec
 specs/07 §9/§10.1 Decisions (underrun definition matches OutboundAudio: continuity reset on gap, clear, finish, idle),
 specs/30 §6 opt-in Decision, specs/02 make table, specs/29 Postgres Decision. Capacity gates themselves remain for
 P05-T17e2 (task perf:media-50-calls).
+
+## Plan P05-T17e2 — Media worker 50-call capacity (planner 2026-11-03)
+
+Context: P05-T17e1 baseline (8 vCPU runner, compose stack shares the host): 50 calls → 0 dropped, peak 50,
+overhead p50/p95 335/895 ms, 667 underruns, loop lag p99 ≤ 150 ms; 10 calls → p50 92 ms, 2 underruns, lag ≤ 5 ms.
+Earlier py-spy: `InboundPath.push` ≈ 60 % of the main thread, ≈ 15 % futex (GIL re-take after soxr/FFT/ORT release),
+~31 executor hops/s per call (one per completed 32 ms window feed) → ~1 550 thread handoffs/s at 50 calls.
+Gates are NOT loosened (zero underruns, overhead p50 ≤ 150 ms, zero dropped, peak == n). `nproc` is 8 again
+(the 16-vCPU plan note was reverted), so the 8-vCPU baseline stands.
+
+Work in measured stages; after each stage run `E2E_CONCURRENT_CALLS=50` capacity (stack up: `uv run pytest
+tests_e2e -m capacity -s`, after `docker compose build media && docker compose up -d --no-deps media` or
+`make e2e-capacity` which rebuilds) and record the report line in the Build section. Long runs: Bash
+`run_in_background` + Monitor heartbeat (AGENTS P05-T10d), truncate logs first.
+
+### Stage 0 — baseline + profile (evidence only)
+- `make e2e-capacity` (50) and `E2E_CONCURRENT_CALLS=10` → record.
+- py-spy on the media process during the 50-call run: `MPID=$(docker inspect -f '{{.State.Pid}}' $(docker compose
+  ps -q media))`; the Python process is the container's PID 1 child or itself — find with `pgrep -P $MPID -f
+  va_media` / `ps --ppid`. `sudo uvx py-spy record --idle --native --gil -d 20 -r 100 -f speedscope -o
+  logs/pyspy_before.json -p <pid>` (also a plain `--format raw` top summary: `sudo uvx py-spy top`/`dump` is fine).
+  Save the top-15 self-time frames as text in `logs/pyspy_before.txt` and paste the summary into the scratchpad
+  (logs/ is not committed; the scratchpad/tick is the evidence).
+
+### Stage 1 — pod-wide batched Silero inference (the main structural fix)
+Goal: one pool hop per batch of windows from MANY legs instead of one hop per leg feed.
+Files:
+- `packages/va_voice/src/va_voice/vad_model.py`
+  - `VadModel` protocol gains `infer_batch(samples: NDArray[float32] (B, 576), state: NDArray[float32] (2, B, 128))
+    -> tuple[NDArray[float32] (B,), NDArray[float32] (2, B, 128)]`. Keep `infer` (single window) in the protocol for
+    existing callers/tests; `SileroModel.infer` delegates to `infer_batch` with B = 1 (one code path).
+  - `SileroModel.infer_batch`: shape checks (`samples.ndim == 2 and samples.shape[1] == MODEL_INPUT_SAMPLES`,
+    `state.shape == (2, B, 128)`, B ≥ 1), one `session.run`, returns probabilities `(B,)` float32 and state.
+    Silero v5 ONNX supports a batch dimension on `input` (B, N) and `state` (2, B, 128) with scalar `sr` — verify
+    with the real-model test below before building on it. If ORT rejects B > 1 (it should not), STOP and record a
+    blocker with the error text.
+  - `STATE_SHAPE` stays (2, 1, 128) for a single stream; add `STATE_LAYERS: Final = 2`, `STATE_UNITS: Final = 128`.
+- `packages/va_voice/src/va_voice/vad.py` — `VadExecutor` becomes the coalescing batcher (no new long-lived task,
+  so nothing to supervise; SileroVad/VadExecutor constructor signatures unchanged → the ~30 existing test call
+  sites and `runtime.py` stay as they are):
+  - new `async def infer(self, model: VadModel, samples: NDArray[float32] (576,), state: (2,1,128)) ->
+    tuple[float, NDArray[float32]]`: appends `_Request(model, samples, state, future)` to `self._pending`
+    (per-model grouping: key the pending dict by `id(model)`; in practice one model per process) and, if fewer
+    than `threads` batches are in flight, schedules `_flush` with `loop.call_soon` (once; flag `_flush_scheduled`).
+    Awaits the future. On cancellation the request stays in the batch; its result is discarded (future cancelled
+    → `_resolve` skips it). State is never mutated in place (the batch builds new arrays).
+  - `_flush()`: takes up to `MAX_BATCH = 64` pending requests (drop already-cancelled ones), stacks samples
+    `(B, 576)` and states `np.concatenate(axis=1)` → `(2, B, 128)`, submits `model.infer_batch` via
+    `loop.run_in_executor(self._pool, ...)`, `add_done_callback` → `_resolve(requests, fut)`: on success
+    `future.set_result((float(p[i]), state[:, i:i+1, :].copy()))` for not-done futures; on exception
+    `set_exception(exc)` on each (a fresh exception per waiter is not needed; same instance is OK). Then decrement
+    in-flight and, if pending remains, `_flush` again (call_soon). Natural batching: while a batch runs in the
+    pool, new windows accumulate; no added latency when idle (a lone request flushes on the next loop turn).
+  - `run(fn)` stays (used by tests/others? grep; keep it, it is the generic pool hop).
+  - `close()`: also fail pending futures with `RuntimeError("VAD executor closed")` (loop-side, before shutting
+    the pool) so no waiter hangs; `__aexit__` unchanged.
+  - Metrics hook (optional, keep small): `VadExecutor.batches`/`windows` counters as plain ints (properties) so
+    tests can assert coalescing; no Prometheus change needed.
+- `SileroVad.feed`: replace the single `_infer_windows` pool hop with a loop over completed windows: float
+  conversion of the whole ready block once (`pcm_to_float32`), per window `prob, state = await
+  self._executor.infer(self._model, np.concatenate([context, window]), state)`; levels via `rms_dbfs` per window
+  (cheap; or vectorised: `_window_levels(samples)` computing all levels with one numpy reshape — add it to
+  `va_voice.audio.levels` only if `rms_dbfs` semantics are kept bit-identical, test it). Commit state/context
+  only after all windows of the feed completed (same cancellation semantics as today). Delete `_Inference` /
+  `_infer_windows` if unused.
+- specs/07 §5.3: new `> Decision (2026-11-03) P05-T17e2:` — VadExecutor coalesces window inferences of all legs
+  into batched `session.run` calls (≤ 64 windows, up to `MEDIA_VAD_THREADS` batches in flight, flush on the next
+  loop turn, cancelled waiters discarded); per-leg state stays per leg; results identical to unbatched within
+  1e-5. specs/02 §6 `MEDIA_VAD_THREADS` description: "Silero VAD batch inference threads per process" (keep the
+  `.env.example` comment in sync — `test_env_example` compares). Default stays 2.
+Tests (packages/va_voice/tests):
+- `test_vad_silero.py` (real model): `infer_batch` of B = 5 rows (fixture WAV windows, distinct states from
+  running a few windows first) equals 5 independent `infer` calls (probabilities and states `allclose(atol=1e-5)`);
+  shape errors raise `ValueError` (1-D samples, wrong width, state batch mismatch).
+- `test_vad.py` (scripted model implementing `infer` + `infer_batch`, counting calls and batch sizes):
+  - 20 SileroVad legs fed concurrently with `asyncio.gather` → events identical to feeding each leg alone, and the
+    model saw fewer `infer_batch` calls than windows (coalescing proven, e.g. first batch size == 20).
+  - a lone feed flushes without waiting for others (completes; batch size 1).
+  - cancelling one leg's feed mid-batch: other legs get their results; the cancelled leg's state/pending are
+    unchanged (next feed produces the same events as a fresh feed of that audio would after the earlier windows).
+  - model exception in a batch → every waiter of that batch raises it; the executor keeps working afterwards.
+  - `close()` with pending requests → waiters raise `RuntimeError`, no hang.
+  - more than MAX_BATCH requests → split into ⌈n/64⌉ batches; in-flight never exceeds `threads`.
+  - Update `ScriptedModel` helpers (test_vad, test_gated_vad, test_noise, pipeline/test_pipeline_protocols,
+    media runtime_rig/test_runtime) to provide `infer_batch` — put ONE shared scripted model in
+    `packages/va_voice/tests/support/vad_fakes.py` (support dir already on pythonpath/mypy_path) instead of
+    copying, so jscpd stays at 0 clones.
+- Re-run the VAD fixture/real-model tests and `pytest -m bench packages/va_voice` (bench (c) is 50 pipelines on one
+  loop — it should improve; rewrite BENCHMARKS.md only from a full non-xdist bench run and commit it).
+Measure (50 + 10 calls) and py-spy again.
+
+### Stage 2 — cheaper per-frame inbound/outbound paths (driven by the stage-1 profile; do the top items until
+the gates pass, in this order of expected payoff)
+a. `SileroVad.feed` fast path: when `pending.size + pcm.size < WINDOW_SAMPLES` append to a preallocated buffer
+   and return `[]` without taking the asyncio.Lock or concatenating (still correct: only called from the leg's
+   single reader; keep the lock for the inference path). Same in `GatedVad`: skip `dataclasses.replace` list build
+   when `events` is empty.
+b. `InboundPath._process`: when the reorder releases several frames, decode/resample them as ONE block (join
+   payloads → one soxr call, one gate call, one VAD feed) — the timeline is unchanged because VAD times are
+   stream-sample based; STT gets the joined bytes in one `send_audio`. Only for consecutive frames released by
+   one push (no change to per-frame latency).
+c. μ-law decode: confirm `va_voice.audio.ulaw_decode` is a 256-entry numpy table lookup (`table[np.frombuffer]`),
+   and `FrameMixer.speech`/μ-law encode use a 65 536-entry table; fix if not (vectors must stay bit-identical,
+   existing codec tests cover it).
+d. Transport: inbound `parse_media_message` fast path already avoids Pydantic; check `base64.b64decode` uses
+   `validate=False` and that `InboundAudio` construction has no per-frame dataclass `replace`. Outbound
+   `media_message`: build bytes with a preformatted prefix + `base64.b64encode(payload)` + suffix instead of
+   `orjson.dumps(dict)` if the profile shows it (keep exact JSON; existing tests compare frames).
+e. GC: in `va_media.main` after startup call `gc.collect(); gc.freeze()` and raise gen0 threshold
+   (`gc.set_threshold(50_000, 20, 20)`) to avoid multi-ms gen2 pauses during calls — record as a specs/07 §21
+   Decision; test that `main` applies it via a seam (e.g. `va_media.main.tune_gc()` called by `main`, unit-tested
+   by checking `gc.get_threshold()` and restoring afterwards).
+f. Only if the profile still shows GIL handoff futex time: `sys.setswitchinterval(0.001)` is NOT wanted (more
+   switches); instead check that `MEDIA_VAD_THREADS=1` (fewer threads contending) is better under batching and,
+   if so, change the default to 1 (spec + .env.example + settings) with the measurement as the Decision evidence.
+Every change keeps its existing tests green; add a test only where behaviour changes (b: multi-frame release gives
+the same VAD events/STT bytes as single frames; a: fast path returns [] and the next completing feed sees all
+samples).
+
+### Stage 3 — remaining underruns
+- If underruns remain after stage 2 with lag p99 small (the 10-call run already had 2 with lag ≤ 5 ms): log, at
+  each underrun, `outbound_underrun` debug event fields `lateness_ms`, `queued_frames`, `since_last_send_ms` (no
+  payloads) and inspect which step stalls the send loop (likely a synchronous burst in `push_audio` re-framing a
+  large TTS chunk, a GC pause, or a socket send backpressure await inside `_send_frame`). Fix the cause (e.g. make
+  the pacer send the due frame before re-framing; time-slice `push_audio` re-framing of large chunks; send audio
+  without awaiting the transport lock when no mark/clear is pending). Never redefine an underrun (specs/07 §9
+  Decision P05-T17e stands) and never raise the lead.
+
+### Stage 4 — capacity flow joins `make e2e`
+- `Makefile`: `e2e` → `uv run pytest tests_e2e -m e2e` (capacity included; keep `pytestmark` incl. `capacity` so
+  `make e2e-capacity` still selects it alone). Check `scripts/tests/test_compose.py` / `test_check_toolchain.py`
+  Makefile readers.
+- specs/02 make table row for `make e2e` (drop "and not capacity"), specs/30 §6: Decision P05-T17e2 replacing the
+  opt-in note (flow now in `make e2e`; before/after numbers). AGENTS.md: Commands rows (`make e2e` includes the
+  capacity flow) and a dated P05-T17e2 bullet (batched VAD API, measurement commands incl. py-spy on the media
+  container, any GC/threads decision). Remove/adjust the P05-T17e1 bullet text that says make e2e deselects it.
+- Plan tick: P05-T17e2, then P05-T17e and P05-T17 (all sub-tasks done) — Reviewer ticks.
+
+### Gates (Builder)
+make fmt, lint, typecheck, placeholders; `make test` (background + heartbeat, ~25 min); `make e2e` (now 16 flows
+incl. capacity) green; `make e2e-capacity` 50-call report with zero dropped, peak 50, zero underruns, overhead p50
+≤ 150 ms; `E2E_CONCURRENT_CALLS=10` report; py-spy before/after summaries in the scratchpad; jscpd 0 clones; radon;
+`uvx pip-audit` + `corepack pnpm audit`; `check_spec_refs.py`; bench run if BENCHMARKS.md changes.
+
+### Risks
+- Silero batch support: verified first by the real-model equivalence test; abort with a blocker if it fails.
+- Batching changes timing of VAD results across legs only by ≤ one batch duration (~1 ms for 50 windows); VAD
+  event times are stream-sample based, so endpointing/barge-in tests are unaffected. Run va_voice + media_worker
+  suites early.
+- If after stages 1–3 the gates still fail on this 8-vCPU host where the whole stack (sim, Temporal, Postgres,
+  api, worker) shares the CPU, emit build.blocked with the stage-by-stage numbers and py-spy summaries; do NOT
+  loosen gates, and do not move the flow into `make e2e` while it fails (keep the committed state green).
+
+## Build P05-T17e2 (2026-11-03)
+
+Stage-by-stage 50-call capacity (unprofiled unless noted; 8 vCPU host, whole compose stack):
+- Stage 0 baseline (py-spy blocking attached): overhead p50/p95 368/542, 155 underruns, lag p99 ≤ 100 ms.
+  py-spy before: main loop ≈ 72 % GIL; InboundPath.push 45 %, GatedVad 25 % (SpectralGate 17 %), outbound 11 %,
+  VAD pool threads 6 %. Silero batch check: ORT accepts (B,576)/(2,B,128), bit-identical to single runs; 0.10 ms
+  per window at B=1, 0.04 ms at B=50.
+- Stage 1 batched VAD (VadExecutor coalescing, VadModel.infer_batch): 0 underruns, overhead p50 194 (profiled),
+  lag p99 ≤ 25 ms.
+- Stage 2 per-window gate (GatedVad window_samples=512), batched-FFT SpectralGate, GC tune: p50 140–211, 0 underruns.
+  (Discovery: py-spy without --nonblocking pauses the target and inflates overhead ~50-100 ms.)
+- uvloop for media + sim (specs/07 §1 already required it): lag p99 ≤ 10 ms, media-internal overhead p50 22 ms
+  (unloaded level), total p50 134–160 but bimodal outliers 220/321.
+- Root cause of the rest: per-call constant 46–338 ms "outside" the pipeline's e2e (spread ≤ 41 ms across a call's
+  turns) = InboundPath origin anchored on the first frame's PROCESSING time; frames queued during the 50-call
+  attach burst shifted the whole call's timeline/EOT deadlines. Fix: origin = min(arrival − 20k).
+  Result: y1/y2/y3 overhead p50 82/87/86, p95 110/119/137, 0 underruns, peak 50, lag p99 ≤ 10 ms; 10 calls p50 76.
+  py-spy after (--idle --gil, nonblocking): GIL ≈ 61 %, inbound path 20 %, gate 7 %, ONNX 4 % on pool threads.
+- Sim: is_speech integer check, uvloop.
+- Stage 3 (underrun root cause): no underruns remained after stage 1; nothing to fix.
+- Stage 4: make e2e = -m e2e (capacity included); specs 07 §5.3/§10.1/§16/§21, 30 §6, 02 make table + MEDIA_VAD_THREADS;
+  AGENTS row + bullet. Media idle-frame cache skipped (media no longer the bottleneck).
+- Gates: make fmt 0, lint 0, typecheck 0, placeholders 0; make test 10821 passed / 7 skipped, coverage 99.15 %;
+  make e2e 16 passed (capacity included), 335 s; post-e2e capacity run: overhead p50/p95 92/127, 0 underruns, peak 50.
+  jscpd 0 clones; radon avg 2.45; check_spec_refs 0; pip-audit none; pnpm audit 3 moderate (< high).
+  Bench not re-run (BENCHMARKS.md untouched).
+
+## Review P05-T17e2 (2026-11-03): approved
+Re-ran: lint 0, typecheck 0, placeholders 0, check_spec_refs 0; make test 10821 passed / 7 skipped, 99.14 %;
+make e2e 16 passed (capacity flow included), 339 s. Diff checked: VadExecutor batching/cancel/close paths, SileroModel
+infer_batch shape checks, GatedVad window equivalence (gate primed with 256 zeros, so release = floor(T/256)x256 holds),
+InboundPath origin rule matches specs/07 §16 Decision, uvloop/GC seams tested, env/spec mirror updated. Ticked
+P05-T17e2, P05-T17e, P05-T17.

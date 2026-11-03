@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from va_sim.audio.codec import ulaw_decode
-from va_sim.telnyx.agent_speech import AGENT_SPEECH_LEVEL, SpeechDetector, is_speech
+from va_sim.telnyx.agent_speech import AGENT_SPEECH_LEVEL, SpeechDetector, is_speech, is_speech_pcm
 
 ASSETS = Path(__file__).resolve().parents[4] / "assets" / "audio"
 
@@ -76,3 +76,14 @@ def test_leading_silence_is_counted() -> None:
     detector = SpeechDetector(gap_ms=700)
     feed(detector, "...")
     assert (detector.turn_ms, detector.silence_ms) == (0, 60)
+
+
+def test_integer_check_matches_the_rms_definition() -> None:
+    rng = np.random.default_rng(5)
+    for scale in (200, 900, 1024, 1030, 1100, 5000, 32_767):
+        frame = np.clip(rng.normal(0, scale, 160), -32_768, 32_767).astype(np.int16)
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+        assert is_speech_pcm(frame) == (rms > AGENT_SPEECH_LEVEL)
+        assert is_speech(frame.astype("<i2").tobytes()) == (rms > AGENT_SPEECH_LEVEL)
+    assert not is_speech_pcm(np.zeros(0, dtype=np.int16))
+    assert not is_speech(b"")

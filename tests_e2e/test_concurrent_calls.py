@@ -88,6 +88,16 @@ def _lag(run: Run, q: float) -> str:
     return "> largest bucket" if math.isinf(bound) else f"<= {bound:g} ms"
 
 
+def _by_turn(run: Run) -> str:
+    """Overhead p50 of the n-th caller turn across calls (the calls' turns are nearly simultaneous)."""
+    per_call = [turn_overheads(finished.timeline, finished.events) for finished in run.finished]
+    columns = [
+        [turns[index].overhead_ms for turns in per_call if len(turns) > index]
+        for index in range(CALLER_TURNS)
+    ]
+    return " / ".join(f"{nearest_rank(column, 50):g}" if column else "n/a" for column in columns)
+
+
 def _report(run: Run, overheads: Sequence[TurnOverhead], failures: Sequence[str], underruns: float) -> str:
     platform = [turn.overhead_ms for turn in overheads]
     sim = [turn.sim_ms for turn in overheads]
@@ -104,6 +114,7 @@ def _report(run: Run, overheads: Sequence[TurnOverhead], failures: Sequence[str]
         verdict = "PASS" if p95 <= OVERHEAD_P95_MS else "WARN"
         lines += [
             f"| platform overhead p50 / p95 / max | {p50:g} / {p95:g} ({verdict}) / {max(platform)} ms |",
+            f"| platform overhead p50 by caller turn | {_by_turn(run)} ms |",
             f"| sim voice-to-voice p50 / p95 | {nearest_rank(sim, 50):g} / {nearest_rank(sim, 95):g} ms |",
         ]
     lines += [

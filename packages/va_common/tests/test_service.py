@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+import uvloop
 from service_helpers import (
     FakeContainer,
     RecordingServer,
@@ -429,3 +430,21 @@ def test_serve_runs_server_and_reports_task_failure(
     app = object()
     assert serve(app, Bind("127.0.0.1", 8123)) == expected
     assert seen == [(app, "127.0.0.1", 8123)]
+
+
+def test_run_main_and_serve_use_the_given_loop_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    loops: list[str] = []
+
+    async def record_loop() -> None:
+        loops.append(type(asyncio.get_running_loop()).__module__)
+
+    assert run_main(record_loop, loop_factory=uvloop.new_event_loop) == 0
+    assert run_main(record_loop) == 0
+
+    async def fake_run_server(app: object, *, host: str, port: int, stop: StopController, **_: Any) -> None:
+        del app, host, port, stop
+        await record_loop()
+
+    monkeypatch.setattr(service, "run_server", fake_run_server)
+    assert serve(object(), Bind("127.0.0.1", 8123), loop_factory=uvloop.new_event_loop) == 0
+    assert loops == ["uvloop", "asyncio.unix_events", "uvloop"]

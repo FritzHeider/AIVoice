@@ -12,10 +12,13 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from numpy.typing import NDArray
+from vad_fakes import ScriptedModel
 
 from va_voice.audio import pcm_to_float32
 from va_voice.vad import (
+    CLOSED_MESSAGE,
     ENERGY_FLOOR_DBFS,
+    MAX_BATCH,
     START_WINDOWS,
     WINDOW_MS,
     SileroVad,
@@ -130,40 +133,9 @@ def test_decider_reset() -> None:
     assert _edges(_run(decider, [0.4, 0.9, 0.9, 0.9])) == [("speech_start", 32.0)]
 
 
-class ScriptedModel:
-    """A thread-safe fake Silero: probabilities from a script, state = previous state + 1."""
-
-    def __init__(self, probabilities: Callable[[int], float] = lambda _: 0.9) -> None:
-        self._probabilities = probabilities
-        self._lock = threading.Lock()
-        self.inputs: list[NDArray[np.float32]] = []
-        self.states: list[NDArray[np.float32]] = []
-        self.threads: list[str] = []
-
-    def infer(
-        self, samples: NDArray[np.float32], state: NDArray[np.float32]
-    ) -> tuple[float, NDArray[np.float32]]:
-        with self._lock:
-            index = len(self.inputs)
-            self.inputs.append(samples.copy())
-            self.states.append(state.copy())
-            self.threads.append(threading.current_thread().name)
-        return self._probabilities(index), state + 1
-
-
-class CountingExecutor(VadExecutor):
-    def __init__(self) -> None:
-        super().__init__(2)
-        self.submissions = 0
-
-    async def run[T](self, fn: Callable[[], T]) -> T:
-        self.submissions += 1
-        return await super().run(fn)
-
-
 @pytest.fixture
-def executor() -> Iterator[CountingExecutor]:
-    pool = CountingExecutor()
+def executor() -> Iterator[VadExecutor]:
+    pool = VadExecutor(2)
     yield pool
     pool.close()
 
@@ -174,12 +146,12 @@ def _ramp(n: int, start: int = 0) -> NDArray[np.int16]:
     return values.astype(np.int16)
 
 
-async def test_windows_complete_across_feeds_and_leftover_is_kept(executor: CountingExecutor) -> None:
+async def test_windows_complete_across_feeds_and_leftover_is_kept(executor: VadExecutor) -> None:
     model = ScriptedModel()
     vad = SileroVad(model, executor)
     assert await vad.feed(_ramp(300)) == []
     assert vad.pending_samples == 300
-    assert executor.submissions == 0
+    assert executor.batches == 0
     events = await vad.feed(_ramp(400, 300))
     assert [e.at_ms for e in events if e.kind == "probability"] == [0.0]
     assert vad.pending_samples == 188
@@ -187,7 +159,7 @@ async def test_windows_complete_across_feeds_and_leftover_is_kept(executor: Coun
     np.testing.assert_array_equal(model.inputs[0][CONTEXT_SAMPLES:], pcm_to_float32(_ramp(WINDOW_SAMPLES)))
 
 
-async def test_context_is_previous_window_tail_and_state_is_threaded(executor: CountingExecutor) -> None:
+async def test_context_is_previous_window_tail_and_state_is_threaded(executor: VadExecutor) -> None:
     model = ScriptedModel()
     vad = SileroVad(model, executor)
     audio = _ramp(3 * WINDOW_SAMPLES)
@@ -207,11 +179,13 @@ async def test_context_is_previous_window_tail_and_state_is_threaded(executor: C
     assert float(model.states[3].flat[0]) == 3.0
 
 
-async def test_inference_runs_on_the_vad_pool_one_submission_per_feed(executor: CountingExecutor) -> None:
+async def test_inference_runs_on_the_vad_pool_one_batch_per_window_of_a_lone_stream(
+    executor: VadExecutor,
+) -> None:
     model = ScriptedModel()
     vad = SileroVad(model, executor)
     events = await vad.feed(_ramp(5 * WINDOW_SAMPLES))
-    assert executor.submissions == 1
+    assert (executor.batches, executor.windows, model.batch_sizes) == (5, 5, [1] * 5)
     assert len(model.threads) == 5
     assert all(name.startswith("va-vad") for name in model.threads)
     assert threading.current_thread().name not in model.threads
@@ -240,7 +214,7 @@ def test_any_chunking_gives_the_same_events(cuts: list[int]) -> None:
     assert len([e for e in whole if e.kind == "probability"]) == 6
 
 
-async def test_concurrent_feeds_keep_audio_order(executor: CountingExecutor) -> None:
+async def test_concurrent_feeds_keep_audio_order(executor: VadExecutor) -> None:
     model = ScriptedModel()
     vad = SileroVad(model, executor)
     chunks = [_ramp(WINDOW_SAMPLES, k * WINDOW_SAMPLES) for k in range(8)]
@@ -251,7 +225,7 @@ async def test_concurrent_feeds_keep_audio_order(executor: CountingExecutor) -> 
         np.testing.assert_array_equal(samples[CONTEXT_SAMPLES:], pcm_to_float32(chunks[k]))
 
 
-async def test_reset_returns_to_initial_state(executor: CountingExecutor) -> None:
+async def test_reset_returns_to_initial_state(executor: VadExecutor) -> None:
     model = ScriptedModel()
     vad = SileroVad(model, executor)
     await vad.feed(_ramp(3 * WINDOW_SAMPLES + 10))
@@ -264,7 +238,7 @@ async def test_reset_returns_to_initial_state(executor: CountingExecutor) -> Non
     assert float(model.states[-1].flat[0]) == 0.0
 
 
-async def test_cancelled_feed_leaves_the_stream_consistent(executor: CountingExecutor) -> None:
+async def test_cancelled_feed_leaves_the_stream_consistent(executor: VadExecutor) -> None:
     release = threading.Event()
     entered = threading.Event()
 
@@ -289,7 +263,7 @@ async def test_cancelled_feed_leaves_the_stream_consistent(executor: CountingExe
     assert float(model.states[-1].flat[0]) == 0.0
 
 
-async def test_silent_input_is_never_speech_whatever_the_model_says(executor: CountingExecutor) -> None:
+async def test_silent_input_is_never_speech_whatever_the_model_says(executor: VadExecutor) -> None:
     vad = SileroVad(ScriptedModel(lambda _: 1.0), executor)
     events = await vad.feed(np.zeros(4 * WINDOW_SAMPLES, dtype=np.int16))
     assert [e.speech for e in events] == [False] * 4
@@ -300,7 +274,7 @@ async def test_silent_input_is_never_speech_whatever_the_model_says(executor: Co
     [np.zeros(512, dtype=np.float32), np.zeros((2, 256), dtype=np.int16), np.zeros(512, dtype=np.int32)],
 )
 async def test_feed_rejects_other_shapes_and_types(
-    executor: CountingExecutor, samples: NDArray[np.generic]
+    executor: VadExecutor, samples: NDArray[np.generic]
 ) -> None:
     vad = SileroVad(ScriptedModel(), executor)
     with pytest.raises(ValueError, match="1-D int16"):
@@ -318,3 +292,124 @@ async def test_executor_context_manager_shuts_the_pool_down() -> None:
         assert await pool.run(lambda: threading.current_thread().name.startswith("va-vad"))
     with pytest.raises(RuntimeError):
         await pool.run(lambda: None)
+    with pytest.raises(RuntimeError, match=CLOSED_MESSAGE):
+        await pool.infer(ScriptedModel(), np.zeros(CONTEXT_SAMPLES + WINDOW_SAMPLES, np.float32), _state())
+
+
+def _state(value: float = 0.0) -> NDArray[np.float32]:
+    return np.full(STATE_SHAPE, value, dtype=np.float32)
+
+
+def _window(value: float) -> NDArray[np.float32]:
+    return np.full(CONTEXT_SAMPLES + WINDOW_SAMPLES, value, dtype=np.float32)
+
+
+async def test_windows_of_concurrent_legs_share_one_batch(executor: VadExecutor) -> None:
+    script: Callable[[int], float] = lambda i: (0.1, 0.9, 0.9, 0.9, 0.4, 0.2)[i % 6]  # noqa: E731
+    audio = _ramp(6 * WINDOW_SAMPLES)
+    legs = 20
+    alone = []
+    for _ in range(legs):
+        alone.append(await SileroVad(ScriptedModel(script), executor).feed(audio))
+    batches_before = executor.batches
+    shared = ScriptedModel(script)
+    vads = [SileroVad(shared, executor) for _ in range(legs)]
+    together = await asyncio.gather(*(vad.feed(audio) for vad in vads))
+    assert together == alone
+    # Every window position of the 20 legs went out as one batch of 20.
+    assert shared.batch_sizes == [legs] * 6
+    assert executor.batches - batches_before == 6
+
+
+async def test_batch_rows_keep_their_own_state_and_samples(executor: VadExecutor) -> None:
+    model = ScriptedModel()
+    results = await asyncio.gather(*(executor.infer(model, _window(k / 10), _state(k)) for k in range(5)))
+    assert model.batch_sizes == [5]
+    for k, (_, state) in enumerate(results):
+        assert state.shape == STATE_SHAPE
+        assert float(state.flat[0]) == k + 1
+        np.testing.assert_array_equal(model.inputs[k], _window(k / 10))
+
+
+async def test_a_lone_window_is_not_held_back() -> None:
+    async with VadExecutor(1) as pool:
+        model = ScriptedModel()
+        probability, state = await pool.infer(model, _window(0.0), _state())
+    assert (float(state.flat[0]), model.batch_sizes) == (1.0, [1])
+    assert probability == pytest.approx(0.9)
+
+
+async def test_more_windows_than_a_batch_holds_are_split_and_in_flight_is_bounded() -> None:
+    async with VadExecutor(2) as pool:
+        model = ScriptedModel()
+        model.on_batch = lambda: model.in_flight_seen.append(pool.in_flight)
+        count = 2 * MAX_BATCH + 10
+        await asyncio.gather(*(pool.infer(model, _window(0.0), _state()) for _ in range(count)))
+    assert sum(model.batch_sizes) == count
+    assert max(model.batch_sizes) == MAX_BATCH
+    assert len(model.batch_sizes) == 3
+    assert max(model.in_flight_seen) <= 2
+
+
+async def test_a_failing_batch_fails_each_waiter_and_the_executor_keeps_working(
+    executor: VadExecutor,
+) -> None:
+    model = ScriptedModel()
+    model.fail_next = True
+    results = await asyncio.gather(
+        *(executor.infer(model, _window(0.0), _state()) for _ in range(3)), return_exceptions=True
+    )
+    assert [type(r) for r in results] == [OSError] * 3
+    probability, _ = await executor.infer(model, _window(0.0), _state())
+    assert probability == pytest.approx(0.9)
+
+
+async def test_a_cancelled_waiter_does_not_disturb_its_batch(executor: VadExecutor) -> None:
+    release = threading.Event()
+    model = ScriptedModel()
+    model.on_batch = lambda: release.wait(5)
+    first = asyncio.create_task(executor.infer(model, _window(0.1), _state(1)))
+    second = asyncio.create_task(executor.infer(model, _window(0.2), _state(2)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    first.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    _, state = await second
+    assert float(state.flat[0]) == 3.0
+
+
+async def test_a_cancelled_waiter_before_the_flush_is_left_out(executor: VadExecutor) -> None:
+    model = ScriptedModel()
+    first = asyncio.create_task(executor.infer(model, _window(0.1), _state(1)))
+    second = asyncio.create_task(executor.infer(model, _window(0.2), _state(2)))
+    await asyncio.sleep(0)  # both queued, flush scheduled for the next turn
+    first.cancel()
+    _, state = await second
+    assert first.cancelled()
+    assert model.batch_sizes == [1]
+    assert float(state.flat[0]) == 3.0
+
+
+async def test_closing_fails_queued_windows() -> None:
+    pool = VadExecutor(1)
+    release, entered = threading.Event(), threading.Event()
+    model = ScriptedModel()
+
+    def hold() -> None:
+        entered.set()
+        release.wait(5)
+
+    model.on_batch = hold
+    running = asyncio.create_task(pool.infer(model, _window(0.0), _state()))
+    await asyncio.to_thread(entered.wait, 5)
+    assert pool.in_flight == 1
+    queued = asyncio.create_task(pool.infer(model, _window(0.0), _state()))
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(pool.__aexit__(None, None, None))
+    with pytest.raises(RuntimeError, match=CLOSED_MESSAGE):
+        await queued
+    release.set()
+    await closing
+    assert (await running)[0] == pytest.approx(0.9)

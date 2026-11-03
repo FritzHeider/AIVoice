@@ -14,21 +14,31 @@ from __future__ import annotations
 from typing import Final
 
 import numpy as np
+from numpy.typing import NDArray
 
 from va_sim.telnyx.media_format import FRAME_MS
 
-__all__ = ["AGENT_SPEECH_LEVEL", "SpeechDetector", "is_speech"]
+__all__ = ["AGENT_SPEECH_LEVEL", "SpeechDetector", "is_speech", "is_speech_pcm"]
 
 # A frame of agent audio whose RMS exceeds this counts as speech (runner and timeline latency); -30 dBFS.
 AGENT_SPEECH_LEVEL: Final = 1024
 
 
+_LEVEL_SQUARED: Final = AGENT_SPEECH_LEVEL * AGENT_SPEECH_LEVEL
+
+
 def is_speech(pcm8k: bytes) -> bool:
     """Whether one frame of PCM16 little-endian audio is speech (RMS above :data:`AGENT_SPEECH_LEVEL`)."""
-    samples = np.frombuffer(pcm8k, dtype="<i2").astype(np.float64)
+    return is_speech_pcm(np.frombuffer(pcm8k, dtype="<i2"))
+
+
+def is_speech_pcm(samples: NDArray[np.int16]) -> bool:
+    """:func:`is_speech` of decoded samples: ``sum(x^2) > level^2 x n`` in exact integer arithmetic (the
+    simulator checks every agent frame it receives, so this avoids float conversions and the square root)."""
     if samples.size == 0:
         return False
-    return float(np.sqrt(np.mean(samples * samples))) > AGENT_SPEECH_LEVEL
+    wide = samples.astype(np.int64)
+    return int(np.dot(wide, wide)) > _LEVEL_SQUARED * samples.size
 
 
 class SpeechDetector:
