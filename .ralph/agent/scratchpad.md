@@ -1500,3 +1500,6 @@ FakeElevenLabs audio, ~65 chars → several seconds).
 ## Review P06-FIX-1 — approved
 - Gates re-run: make check exit 0 (lint/typecheck/placeholders/TS, 11268 passed, 7 skipped, 99.04 %); make e2e 17 passed (375 s, exit 0).
 - Diff: test-only change. SpeechDetector semantics checked (caller_steps/agent_speech): a stall after ≥ 1.5 s of speech satisfies the step, an earlier stall restarts the turn with ≥ 2 s of the 3.5 s opener left, so the > 24 000-byte assert holds. Phase 06 exit gate (make check && make e2e) passes on this tree.
+
+## Phase 06 exit gate re-run on 72b7ecb — passed
+- make check exit 0; make e2e 17 passed in 377 s (exit 0). README row 06 → complete (2026-11-03, 72b7ecb).
