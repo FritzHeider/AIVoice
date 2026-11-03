@@ -371,3 +371,194 @@ in background + Monitor heartbeat (PATH += /home/ralph/.local/bin). radon, jscpd
 ## Review P07-T03 (approved)
 - Re-ran: make lint/typecheck/placeholders pass, check_spec_refs 0 problems; make test exit 0 (11489 passed, 7 skipped, 99% cov).
 - Diff checked against specs/11 §9 and plan deliverables (pending actions, versioned serialization, v1 back-compat fixture). Decision P07-T03 recorded.
+
+## Plan P07-T04 — Decision calls: routing, extraction, loop conditions (specs/11 §5.2–§5.5, specs/10 §3 + §9.1–§9.3)
+
+Scope: the three router-model decision components only (pure inputs → typed result). No orchestration, no event
+emission, no state mutation (T05 globals/return stack, T08 turn orchestration/speculation/events use these results).
+
+### Spec conflicts to resolve (one Decision block under specs/11 §5.5, cross-ref note under specs/10 §9.2)
+`> Decision (2026-11-03): decision calls (P07-T04).`
+1. Prompts, function names and output schemas are specs/10 §9.1–§9.3 (packaged `va_llm/prompts/router.txt`,
+   `loop_condition.txt`, `extract.txt`); the inline prompts of §5.3–§5.5 here are superseded (they describe the
+   same calls). Router `choice 0` ≡ `path_id == "stay"`; global candidates are `global:{node_id}`.
+2. Loop threshold = node `conditionThreshold` (default 6); specs/10 §9.2 "≥ 7" applies only as FakeLLM's own
+   `met` flag. The model's `met` field is stored for diagnostics, never decides.
+3. `conditionExamples` render as `{examples_block}` in loop_condition.txt before the last line:
+   `Examples:\n` + `- Conversation: {caller/agent lines joined " / "} → satisfied: {true|false} ({explanation})` +
+   blank line; empty when none. specs/10 §9.2 block updated to show the placeholder.
+4. Router examples (`pathwayExamples`): `chosenLabel` maps to the first outgoing edge whose label equals it
+   (case-insensitive, stripped); `x` = last user message of the example conversation; examples whose label matches
+   no edge, or with no user message, are skipped. `{node_purpose}` = name + first 300 chars of node `prompt`
+   (or `text` when no prompt).
+5. Router result interpretation (§5.5 steps 4–6 + §5.2): scores = {chosen: confidence} ∪ alternatives (unknown
+   ids ignored, first occurrence wins, missing = 0). Local winner = highest-scored local edge (ties: chosen id
+   first, then `priority` desc, then edge order) if its score ≥ 5 else none. Global winner = highest-scored global
+   id with score ≥ 6 and ≥ best local score (tie → global). Outcome kinds: `global` | `edge` | `fallback` (no
+   local winner, node has a fallback edge — every fallback edge counts, `noMatchBehavior` irrelevant when a fallback
+   edge exists, per §5.5 rule 5) | `stay`.
+6. Failure fallbacks (never raise for LLM problems): router on `LlmUnavailableError`/`StructuredOutputError` →
+   specs/10 §9.1 heuristic (exactly one local edge label sharing ≥ 2 content words with the user text, stop-words
+   removed → that edge, else stay/fallback rule) with `degraded=True`; loop condition → `met=False`, `score=None`,
+   `degraded=True`; extraction → no values, `degraded=True`. Each logs a warning (`engine.router_degraded`,
+   `engine.loop_condition_degraded`, `engine.extraction_degraded`, with `reason`), never transcript text.
+7. Extraction typed coercion: the per-node schema allows `T | string | null` for integer/number/boolean and
+   `string | null` for string (all required); after validation `coerce_value(type, value)`: string → stripped,
+   "" → null; integer ← int, integral float, digit strings ("1,200" ok), spoken numbers ("twenty five",
+   "a hundred and five", "two thousand"), non-integral → rejected; number ← int/float, numeric strings, spoken
+   integers; boolean ← bool, yes/no words (yes, yeah, yep, true, correct, sure / no, nope, false, nah, not). Values
+   that fail → null + name in `rejected`. Merge rule (non-null overwrites) stays with the caller.
+8. Dynamic schemas: one pydantic model class per distinct option set / variable set, built by
+   `va_engine.decision_schemas` under `functools.lru_cache(maxsize=256)`; the names are NOT registered with
+   `register_structured_function` (dynamic classes per graph). va_llm `_tool_schema`/`_validator` move from
+   `functools.cache` to `lru_cache(maxsize=1024)` so per-graph classes cannot grow memory unboundedly.
+
+### Files
+- `packages/va_llm/src/va_llm/prompts/router.txt`, `loop_condition.txt`, `extract.txt` — verbatim specs/10 §9.1–9.3
+  System blocks with `{placeholders}` (`{examples_block}` added to loop_condition per Decision 3). Drift test like
+  `voice_system.txt` (parse the fenced block after the `### 9.N` heading; extend the existing voice_system drift test
+  in va_llm tests, e.g. `test_prompts.py`, parametrized over the three names). Rendering with `str.format_map`-style
+  safe substitution: use a small `render_prompt(name, **values)` in `va_llm.prompts` that replaces only `{known}`
+  keys (values may contain braces — do NOT use str.format on user text; replace placeholders in one regex pass).
+- `packages/va_llm/src/va_llm/structured.py`: `_tool_schema`/`_validator` → `functools.lru_cache(maxsize=1024)`.
+- `packages/va_engine/src/va_engine/decision_schemas.py`:
+  `route_schema(option_ids: tuple[str, ...]) -> type[BaseModel]` (fields `path_id: Literal[*ids]`, `confidence:
+  int ge0 le10`, `alternatives: list[RouteAlternative]` (path_id str, confidence 0–10), `reason: str max 200`) —
+  build with `pydantic.create_model`, `Literal.__getitem__(ids)`; `condition_schema()` static `ConditionScore`
+  (score 0–10, met bool, missing str ≤ 200); `extraction_schema(vars: tuple[tuple[str, str], ...])` (name, type).
+  Model docstrings are sent to the model: none (or instruction-like). Var names that are not valid python
+  identifiers: use `create_model` with field aliases (`Field(alias=name)`, internal `f0..fn`) and dump `by_alias`;
+  make sure `model_json_schema(by_alias=True)` (default) lists the real names; reject duplicate names (validation
+  already does for graphs; dedupe keep first).
+- `packages/va_engine/src/va_engine/conversation_text.py` (pure): `transcript_lines(history: Sequence[TurnRecord],
+  limit: int) -> str` (`Caller: …`/`Agent: …` for user/assistant, skip tool/system; interrupted assistant turns as
+  stored), `example_lines(...)`, `content_words(text) -> frozenset[str]` (lowercase word tokens via
+  `va_voice.text_norm.tokens`, minus a fixed English stop-word frozenset), `known_information(variables)` (compact
+  orjson, keys starting with `_` excluded, `OPT_SORT_KEYS`).
+- `packages/va_engine/src/va_engine/router.py`:
+  ```python
+  @dataclass(frozen=True, slots=True)
+  class DecisionInputs:  # shared by all three
+      org_id: uuid.UUID; call_id: uuid.UUID | None
+      history: Sequence[TurnRecord]; latest: str; variables: Mapping[str, JsonValue]
+  @dataclass(frozen=True, slots=True)
+  class RouteCandidate: path_id: str; label: str; edge: PathwayEdge | None; global_node_id: str | None
+  @dataclass(frozen=True, slots=True)
+  class RouteDecision:
+      kind: Literal["edge", "global", "fallback", "stay"]; edge: PathwayEdge | None; global_node_id: str | None
+      label: str | None; alternatives: tuple[ScoredOption, ...]  # (label, score) sorted score desc then order
+      reason: str; router_ms: int; degraded: bool; llm_called: bool
+      def event_data(self, from_node: str) -> dict[str, JsonValue]  # specs/19 call.route data (+ to_node, global)
+  class Router:
+      def __init__(self, gateway: StructuredPort, *, clock: Clock) -> None
+      async def choose(self, graph: PathwayGraph, node: PathwayNode, inputs: DecisionInputs, *,
+                       include_globals: bool, webhook_edge: PathwayEdge | None = None) -> RouteDecision
+  ```
+  `StructuredPort` = Protocol with `call_structured` matching `LlmGateway.call_structured` (va_engine.ports or in
+  router.py; LlmGateway satisfies it structurally). Order in `choose`: alwaysPick edge → `edge`, no LLM; webhook
+  edge given → `edge`; no local candidates and (no globals or not include_globals) → stay (or fallback when a
+  fallback edge exists? — no: §5.5 rule 3 "no candidates → stay"); else one `call_structured("router",
+  route_schema(ids), function_name="select_path", description="Choose the next path of the conversation.")` with
+  messages [system(router.txt rendered), user(last 8 transcript lines + `Known information: …` + `Latest caller
+  message: "…"`)]; globals included only when `include_globals` and the node is not itself global and the graph
+  has globals; a global equal to the current node is excluded. `router_ms` from `clock.monotonic()` around the call.
+  Also `heuristic_route(edges, text)` pure function (Decision 6).
+- `packages/va_engine/src/va_engine/loop_condition.py`: `ConditionResult(score: int | None, met: bool, missing: str,
+  model_met: bool | None, threshold: int, degraded: bool, ms: int)` with `message` property `"Likely {score}/10"`
+  (`None` score → `"Condition check unavailable"`) and `event_data()` (`score`, `met`); `NOT_MET_SUFFIX` template
+  `The following condition is not yet satisfied; keep working toward it: "{condition}"` + `not_met_suffix(cond)`;
+  `class LoopCondition(gateway, *, clock)` → `async def score(node, inputs) -> ConditionResult | None` (None when
+  the node has no condition; messages system(loop_condition.txt) + user(last 10 transcript lines + latest)).
+- `packages/va_engine/src/va_engine/extraction.py`: `ExtractionResult(values: dict[str, JsonValue] (non-null only),
+  nulls: tuple[str,...], rejected: tuple[str,...], degraded: bool, ms: int)`, `event_data()` = `{"variables":
+  values}`; `coerce_value(type, raw) -> JsonValue | _Rejected`; `class Extractor(gateway, *, clock)` →
+  `async def extract(node, inputs, *, now: datetime, timezone: str) -> ExtractionResult | None` (None when no
+  extractVars). `{now_local}` = `now.astimezone(ZoneInfo(tz))` formatted `%A %Y-%m-%d %H:%M` with fixed English day
+  names (locale-free table, see AGENTS.md calendar gotcha); bad tz → UTC. Messages system(extract.txt) + user (last
+  10 transcript lines + latest). `background` vs `before_response` scheduling is the caller's (T08); docstring says so.
+- `packages/va_engine/src/va_engine/spoken_numbers.py`: `parse_spoken_integer(text) -> int | None` (zero–nineteen,
+  tens, hundred, thousand, million, billion; "a"/"and"/hyphens; digit strings with commas; negative "minus").
+- Export the public names from `va_engine/__init__.py` only if that file already re-exports (check; else leave).
+
+### Tests (packages/va_engine/tests/)
+Unit with a fake `StructuredPort` (records schema/messages/function_name, returns scripted instances or raises):
+- `test_router.py`: alwaysPick skips LLM; webhook edge; no candidates → stay without LLM; chosen edge ≥5;
+  chosen <5 → stay / fallback edge; `stay` with fallback edge → fallback; ties (alternative equal confidence: chosen
+  id wins; two alternatives equal and chosen=stay below 5 irrelevant; equal-score non-chosen → priority desc then
+  order); global ≥6 beats local; global tie with local → global; global 5 → ignored; global excluded when
+  include_globals=False / node is global / self; enum of schema = edge ids + stay + globals in order; prompt render
+  snapshot (exact text for a 2-edge + 1-global node with examples and description) — compare against an inline
+  expected string; examples mapping (unknown label skipped); user message has last 8 lines + known info without
+  `_secret`; degraded on LlmUnavailableError and StructuredOutputError → heuristic edge (2 shared words) and stay
+  (0 or 2 matching edges); alternatives sorted, unknown ids dropped; `event_data` shape; router_ms from ManualClock.
+- `test_loop_condition.py`: threshold default 6 (score 6 met, 5 not), node threshold 8; `model_met` ignored;
+  examples block rendered/absent; degraded → met False; message strings; suffix text; no condition → None.
+- `test_extraction.py`: parametrized `coerce_value` table (spoken numbers, "1,200", 3.0 → 3, 3.5 integer rejected,
+  "yeah" → True, "nope" → False, "maybe" rejected, "" → null); schema: every var required + nullable, aliases for
+  non-identifier names ("first name", "1st"), cache returns same class for same vars; result splits values/nulls/
+  rejected; degraded; prompt lines `- name (type): description`; now_local formatting incl. invalid tz → UTC.
+- `test_spoken_numbers.py`: table incl. edge cases + hypothesis: `parse_spoken_integer(str(n)) == n`.
+- `test_decision_schemas.py`: tool_schema(route_schema(...)) validates FakeLLM-like outputs; lru caching identity.
+- FakeLLM-driven integration `test_decisions_sim.py` (using `task_helpers.served()` Sim + real `LlmGateway`):
+  routing by heuristic (caller text sharing label words → edge), `Sim.rules` scripting a malformed `select_path`
+  argument (path_id not in enum / confidence 11) first then valid → repaired result (assert 2 requests, second has the
+  repair user message); malformed twice → degraded heuristic; `score_condition` via rule returning score 7 vs
+  threshold 8; extraction via sim heuristic of an integer var from "I need four tables" or a rule returning
+  `"four"` → coerced 4; rule with fault `timeout`/500 → degraded results. Check how FakeLLM rules script tool-call
+  arguments (llm rules docs in specs/30 §3.4 / `va_sim/llm/rules.py`) and malformed args (`raw_arguments`?) — use
+  whatever the rules engine supports; if it cannot emit invalid JSON, emit schema-invalid values.
+- va_llm: prompt drift test for the three new prompt files; `render_prompt` leaves braces in values untouched;
+  structured cache is bounded (`_tool_schema.cache_info().maxsize == 1024`).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_engine packages/va_llm -q` (new modules ≥ 95 %,
+handlers N/A), `uv run python scripts/check_spec_refs.py`, then `make test` in background with Monitor heartbeat
+(PATH += /home/ralph/.local/bin; truncate log first). radon (<10 avg), jscpd 0, pip-audit for build.done. No e2e
+(no call flow wired yet). AGENTS.md: one dated bullet (decision modules, prompts, StructuredPort, lru caches).
+
+### Risks
+- FakeLLM `select_path` heuristic returns `stay` with confidence 5 when nothing matches: fine (stay).
+- mypy with `create_model` + dynamic Literal: type the factory as `type[BaseModel]` and read fields via
+  `model_dump(by_alias=True)`, not attribute access.
+- jsonschema `enum` of path ids must keep spec order: edges (graph order), `stay`, globals.
+- `structured_drift` test requires literal `function_name=` at call sites: keep literals in router/loop/extraction.
+- Don't let the Router mutate EngineState (pure result); T05/T08 apply it.
+
+## Build P07-T04 (done)
+- New: va_engine `decisions` (StructuredPort, DecisionInputs, text helpers), `decision_schemas` (LRU dynamic route/extraction
+  classes, static ConditionScore), `router` (Router.choose, interpret_route, heuristic_route), `loop_condition`,
+  `extraction` (coerce_value), `spoken_numbers`. va_llm: prompts router/loop_condition/extract.txt + `render_prompt`;
+  structured caches LRU 1024 (`SCHEMA_CACHE_SIZE`).
+- Specs: specs/10 §9.2 block gains `{examples_block}` + Decision; specs/11 §5.5 Decision P07-T04 (rules 1-7). Deviations from
+  plan: winner rule scores `stay` like an option (edge must beat stay; global must tie-or-beat edge AND stay); ties among edges
+  = priority then edge order (not chosen-first); no candidates + fallback edge → fallback without LLM; module for the port is
+  `va_engine.decisions` (not conversation_text); extraction `number` returns int for integral values.
+- Gates so far: lint/typecheck/placeholders pass, spec_refs 0, va_engine+va_llm 1021 passed (new modules 99-100 %),
+  radon avg A 2.91 (new 3.51), jscpd 0, pip-audit clean (pnpm 3 moderate, none high).
+- make test exit 0 (11639 passed, 7 skipped, 99.06% cov). No e2e (no call flow wired yet).
+
+## Review P07-T04 (rejected, 1 finding)
+- Re-ran: make lint/typecheck/placeholders pass, check_spec_refs 0 problems. Design reviewed against specs/11 §5.2-§5.5,
+  specs/10 §9.1-§9.3, specs/19 §2 event data: router/loop/extraction rules, prompts, schemas, event_data shapes OK.
+1. `packages/va_engine/src/va_engine/extraction.py` `_number_text` (int(digits)) and
+   `packages/va_engine/src/va_engine/spoken_numbers.py` `_digit_value` (`int(text.replace(",", ""))`) raise
+   `ValueError: Exceeds the limit (4300 digits) for integer string conversion` for a model-returned digit string longer
+   than 4 300 digits: `coerce_value("integer", "1"*5000)`, `coerce_value("number", "1"*5000)` and
+   `parse_spoken_integer("9"*5000)` all raise (verified). The extraction string fields are unbounded, so
+   `Extractor.extract` raises out of a turn, contradicting the Decision P07-T04 rule 5/6 contract ("values that fail
+   coercion become null and are listed in rejected"; "failures never raise"). Fix: cap the accepted digit length (e.g.
+   reject strings with more than ~30 digits, or catch ValueError → REJECTED / None) in both places, and add regression
+   tests (coerce_value integer/number + parse_spoken_integer with a 5 000-digit string → REJECTED / None; a hypothesis
+   property that coerce_value never raises for arbitrary text would also cover it).
+
+## Build P07-T04 rework (finding 1)
+- `spoken_numbers.MAX_DIGITS = 18`: `_digit_value` returns None for longer digit runs (no `int()` on them).
+- `extraction._number_text` rejects digit strings with > 18 integer digits before converting; `_number` rejects ints
+  outside signed 64-bit (also integral floats like 1e300). Spec specs/11 §5.5 Decision rule 5 states the bound.
+- Tests: 5 000-digit / comma / spoken-scale cases in both test files, the 20-digit case now REJECTED, hypothesis
+  `test_coerce_value_never_raises` over text/ints/floats for every type.
+- Build P07-T04 rework gates: lint/typecheck/placeholders pass, spec_refs 0, make test exit 0 (11654 passed, 7 skipped, 99.06%), radon avg A 3.90 for touched modules.
+
+## Review P07-T04 rework (approved)
+- Finding 1 fixed: 5 000-digit strings → REJECTED/None, huge spoken scales → None, 1e300 → REJECTED (verified by hand).
+- make lint/typecheck/placeholders pass, check_spec_refs 0, make test exit 0 (11654 passed, 7 skipped, 99.06%).

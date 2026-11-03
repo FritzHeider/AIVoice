@@ -36,6 +36,7 @@ __all__ = [
     "interrupted_message",
     "load_prompt",
     "render_answer_classifier",
+    "render_prompt",
     "render_voice_system",
     "tool_usage_note",
 ]
@@ -169,6 +170,16 @@ def render_answer_classifier(transcript: str, seconds: float) -> str:
     left as they are) and the whole seconds since the answer; trailing whitespace removed."""
     values = {"transcript": transcript.strip(), "seconds": str(max(int(seconds), 0))}
     return load_prompt("answer_classifier").format_map(values).rstrip()
+
+
+def render_prompt(name: str, values: Mapping[str, str]) -> str:
+    """The packaged prompt ``name`` with every ``{field}`` filled from ``values`` (trailing whitespace
+    removed).
+
+    Values are inserted as they are (braces inside them stay literal); ``KeyError`` for a field that
+    ``values`` lacks.
+    """
+    return load_prompt(name).format_map(values).rstrip()
 
 
 def fit_voice_system(

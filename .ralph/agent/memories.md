@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793715505-4859
+> P07-T04: decision calls va_engine.router/loop_condition/extraction over va_engine.decisions.StructuredPort, dynamic LRU schemas in decision_schemas (never registered), prompts via va_llm.prompts.render_prompt; tests ScriptedPort validates against real schema; jscpd ignore markers need a reason suffix or ruff ERA001 flags them
+<!-- tags: engine, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793709538-f7d8
 > P07-T01: pathway schemas va_engine.models.nodes/graph (camel JSON via alias_generator, extra=allow, dump exclude_unset = lossless Bland round trip; BeforeValidator normalize_node_raw outside discriminated union for Global/aliases) + va_engine.validation.validate_graph(mode, GraphRefs None=skip, code_checker); test parses specs/11 §11 table; ruff --select RUF100 --fix strips noqa of untouched files (restore with git checkout)
 <!-- tags: engine, pathways, testing | created: 2026-11-03 -->
@@ -469,6 +473,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793715612-b9ec
+> Python int(str) raises ValueError beyond 4300 digits: any never-raise coercion of model/caller text (int(digits)) must cap length or catch ValueError
+<!-- tags: engine, testing | created: 2026-11-03 -->
 
 ### mem-1793702021-fdbe
 > Runtime sim agent-track window tests must anchor on Call.mark_echoes[-1].track_ms (FakeTelnyx mark echo = where that agent audio ended in the aligned track), not fixed ms after answer: under load the opener starts late

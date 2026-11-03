@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 __all__ = [
     "MAX_ERRORS",
     "MAX_ERROR_CHARS",
+    "SCHEMA_CACHE_SIZE",
     "TOOL_NAMES",
     "InvalidOutputError",
     "check_function",
@@ -51,6 +52,8 @@ TOOL_NAMES: Final[frozenset[str]] = frozenset(
 )
 
 MAX_ERRORS: Final = 5
+# Bounded: the pathway engine builds one schema class per graph option set (specs/11 §5.5 Decision P07-T04).
+SCHEMA_CACHE_SIZE: Final = 1024
 MAX_ERROR_CHARS: Final = 200
 _DEFS_PREFIX: Final = "#/$defs/"
 _JSON_MODE_PREFIX: Final = "Respond with only a JSON object that matches this JSON Schema: "
@@ -118,7 +121,7 @@ def tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
     return copy.deepcopy(_tool_schema(schema))
 
 
-@functools.cache
+@functools.lru_cache(maxsize=SCHEMA_CACHE_SIZE)
 def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
     document = schema.model_json_schema()
     defs: dict[str, Any] = document.get("$defs", {})
@@ -126,7 +129,7 @@ def _tool_schema(schema: type[BaseModel]) -> dict[str, Any]:
     return inlined
 
 
-@functools.cache
+@functools.lru_cache(maxsize=SCHEMA_CACHE_SIZE)
 def _validator(schema: type[BaseModel]) -> Draft202012Validator:
     return Draft202012Validator(_tool_schema(schema))
 

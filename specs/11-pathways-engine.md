@@ -370,6 +370,54 @@ Entering a node increments `visit_counts[node_id]`; if it exceeds `maxVisits`, t
 if any, else speaks `errorPhrase` and ends the call (`end_reason="loop_protection"`) — an `end_reason` value defined
 in `05-calls-api.md` §9.
 
+> Decision (2026-11-03): decision calls (P07-T04). `va_engine.router.Router.choose`, `va_engine.loop_condition.
+> LoopCondition.score` and `va_engine.extraction.Extractor.extract` are pure decision components: inputs → typed
+> result (no state mutation, no events; the turn orchestration applies them and emits `call.route`/
+> `call.loop_condition`/`call.extraction` from their `event_data`). They talk to the gateway through
+> `va_engine.decisions.StructuredPort` (`LlmGateway.call_structured`), with call types `router`, `loop_condition`,
+> `extraction`.
+> 1. Prompts, function names, and output schemas are specs/10 §9.1–§9.3 (`va_llm` `prompts/router.txt`,
+>    `loop_condition.txt`, `extract.txt`, rendered by `va_llm.prompts.render_prompt`); the inline prompts of
+>    §5.3–§5.5 here are superseded. Router choice 0 ≡ `path_id: "stay"`; global candidates are `global:{node_id}`.
+>    User message: the last 8 (router) / 10 (loop condition, extraction) user/assistant history turns as
+>    `Caller: …`/`Agent: …` lines, then (router only) `Known information: {compact JSON, sorted keys, keys starting
+>    with "_" left out}`, then `Latest caller message: "{text}"`. `{node_purpose}` = node name + `: ` + the first 300
+>    characters of the node prompt (static `text` when there is no prompt; the name alone when neither).
+> 2. Router examples: a `pathwayExamples` entry maps `chosenLabel` to the first candidate edge whose label equals it
+>    (case-insensitive, stripped); `x` is the example's last user message; entries matching no edge or without a
+>    user message are skipped.
+> 3. Rules, in order: an `alwaysPick` edge → `edge` (no LLM); a webhook-selected edge → `edge`; no candidate edges
+>    and no global candidates → the fallback edge when the node has one, else `stay` (no LLM). Global candidates
+>    are offered when the caller asks for them (§5.2), the node is not global, and the graph has another global
+>    node. Router result: scores = {chosen: confidence} ∪ alternatives (unknown ids ignored, first occurrence
+>    wins, missing = 0; `stay` is scored like any option). Outcome `global` when the best global candidate (ties:
+>    graph order) scores ≥ 6 and at least as high as the best candidate edge and `stay` (global precedence);
+>    else `edge` when the best candidate edge (ties: `priority` desc, then edge order) scores ≥ 5 and higher than
+>    `stay` (a tie with `stay` stays); else `fallback` (every node with a fallback edge, whatever
+>    `noMatchBehavior`); else `stay`. `alternatives` = every scored candidate edge and global node except the
+>    winner, score desc then option order (empty when no router call was made).
+> 4. Loop condition: met when `score ≥ conditionThreshold`; the model's `met` is stored as `model_met` only.
+>    `conditionExamples` render as the specs/10 §9.2 `{examples_block}`. Not met → prompt suffix
+>    `The following condition is not yet satisfied; keep working toward it: "{condition}"`.
+> 5. Extraction: per-node schema built from `extractVars` (all required; integer/number/boolean also accept a
+>    string, every type accepts null; JSON property names are the variable names). After validation strings are
+>    coerced: string → stripped (empty → null); integer ← integers, integral floats, digit strings (`1,200`), and
+>    spoken numbers (`twenty five`, `a hundred and five`); number ← numbers, numeric strings, spoken integers;
+>    boolean ← yes/no words (`yes yeah yep yup true correct sure right` / `no nope nah false incorrect`) as the
+>    first word with no word of the other side. Integers must fit a signed 64-bit integer and digit strings may
+>    carry at most 18 digits before the decimal point (longer ones are rejected, never converted). Values that fail
+>    coercion become null and are listed in `rejected`. `{now_local}` = `%A %Y-%m-%d %H:%M` in the zone (English weekday names; an unknown zone → UTC).
+>    `background` vs `before_response` scheduling and the overwrite merge are the caller's.
+> 6. Failures never raise: on `LlmUnavailableError`/`StructuredOutputError` the router applies the specs/10 §9.1
+>    heuristic (exactly one candidate edge label sharing ≥ 2 content words with the caller's latest message →
+>    that edge, else rule 3's fallback/stay; `degraded=True`), the loop condition returns `met=False`,
+>    `score=None` (message `Condition check unavailable`), extraction returns no values; each logs
+>    `engine.router_degraded` / `engine.loop_condition_degraded` / `engine.extraction_degraded` with `reason`,
+>    never conversation text.
+> 7. Dynamic schemas: one pydantic class per distinct option tuple / variable tuple
+>    (`va_engine.decision_schemas`, LRU 256); they are not registered with `register_structured_function`. The
+>    `va_llm.structured` tool-schema and validator caches are LRU 1 024 so per-graph classes stay bounded.
+
 ### 5.6 Execute
 If the node changed: run `on_enter` of the new node (actions executed in order; `Say` actions queue to TTS). Then
 `respond` of the current node unless `on_enter` produced a terminal action. If the node's handler says it doesn't

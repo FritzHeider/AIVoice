@@ -18,7 +18,7 @@
   - Deliverables: `EngineState` model (current node, return stack, variables, visit counts, history window, pending actions), versioned JSON serialization
   - Acceptance: round-trip tests; backward-compat test with a v1 fixture.
 
-- [ ] P07-T04 Decision calls: routing, extraction, loop conditions
+- [x] P07-T04 Decision calls: routing, extraction, loop conditions — va_engine router/loop_condition/extraction over StructuredPort, LRU dynamic schemas, va_llm router/loop_condition/extract prompts (drift-checked); make test 11654 passed, 99.06% cov; lint/typecheck/placeholders/spec refs pass
   - Spec refs: specs/11-pathways-engine.md (per-turn algorithm); specs/10-llm-gateway.md (router prompt, loop-condition prompt, extraction prompt)
   - Depends on: P03-T14, P07-T03
   - Deliverables: `Router.choose(...)` with examples and alternatives, `Extractor.extract(...)` typed coercion, `LoopCondition.score(...)` with threshold

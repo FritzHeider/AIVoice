@@ -425,10 +425,18 @@ You check whether a step of a phone conversation is complete.
 Completion condition: {condition}
 
 Read the conversation and decide how likely it is that the condition has been fully satisfied, from 0 (certainly not) to 10 (certainly yes). If anything the condition requires is still missing, say what is missing.
-Call score_condition exactly once.
+{examples_block}Call score_condition exactly once.
 ```
 User: last 10 messages + latest caller message. Schema `{"score": integer 0–10, "met": boolean, "missing": string ≤ 200}`.
 Met when `score ≥ 7` (logged as `Likely {score}/10`), regardless of the `met` field (stored for diagnostics).
+
+> Decision (2026-11-03): decision calls (P07-T04). The pathway engine's router, loop-condition, and extraction calls
+> use the §9.1–§9.3 prompts and schemas (the inline prompts of specs/11 §5.3–§5.5 are superseded; rules in the
+> specs/11 §5.5 Decision P07-T04). Loop condition: met when `score ≥` the node's `conditionThreshold` (default 6);
+> the "≥ 7" above is only FakeLLM's own `met` flag. `{examples_block}` holds the node's `conditionExamples`
+> (`Examples:\n` + one `- Conversation: {lines joined " / "} → satisfied: {true|false} ({explanation})` line each +
+> a blank line; empty when there are none). Extraction: integer/number/boolean variables accept `T | string | null`,
+> string variables `string | null`; the engine coerces strings (spoken numbers, yes/no words) after validation.
 
 ### 9.3 Variable extraction — `prompts/extract.txt`, function `extract_variables`
 

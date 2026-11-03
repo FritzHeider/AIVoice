@@ -23,6 +23,7 @@ from va_llm.prompts import (
     interrupted_message,
     load_prompt,
     render_answer_classifier,
+    render_prompt,
     render_voice_system,
     tool_usage_note,
 )
@@ -282,3 +283,29 @@ def test_answer_classifier_render_fills_transcript_and_whole_seconds() -> None:
 
 def test_answer_classifier_negative_seconds_render_as_zero() -> None:
     assert "Seconds since answer: 0\n" in render_answer_classifier("Hello?", -1.0)
+
+
+# Pathway decision prompts (specs/10 §9.1-§9.3; specs/11 §5.5 Decision P07-T04)
+
+
+@pytest.mark.parametrize(
+    ("name", "heading"),
+    [
+        ("router", "### 9.1 Router"),
+        ("loop_condition", "### 9.2 Loop condition"),
+        ("extract", "### 9.3 Variable extraction"),
+    ],
+)
+def test_decision_prompt_files_are_the_spec_blocks_verbatim(name: str, heading: str) -> None:
+    assert load_prompt(name) == spec_block(heading)
+
+
+def test_render_prompt_inserts_values_literally() -> None:
+    rendered = render_prompt("loop_condition", {"condition": "Said {{name}} and {x}", "examples_block": ""})
+    assert "Completion condition: Said {{name}} and {x}\n" in rendered
+    assert rendered.endswith("say what is missing.\nCall score_condition exactly once.")
+
+
+def test_render_prompt_needs_every_value() -> None:
+    with pytest.raises(KeyError, match="examples_block"):
+        render_prompt("loop_condition", {"condition": "c"})

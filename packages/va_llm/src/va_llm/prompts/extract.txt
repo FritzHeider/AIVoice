@@ -1,0 +1,7 @@
+Extract the following information from the phone conversation. Use only what the caller or the agent explicitly stated. If a value was not stated, return null for it. Do not guess.
+
+Variables:
+{variable_lines}
+
+Current date and time for resolving relative dates: {now_local} ({timezone}).
+Call extract_variables exactly once.

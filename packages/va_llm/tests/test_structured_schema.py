@@ -13,7 +13,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field
 from structured_models import Citations, GuardRails, Loop, Route
 
-from va_llm import TOOL_NAMES, register_structured_function, registered_schema, tool_schema
+from va_llm import TOOL_NAMES, register_structured_function, registered_schema, structured, tool_schema
 from va_llm.structured import (
     MAX_ERROR_CHARS,
     InvalidOutputError,
@@ -243,3 +243,9 @@ def test_check_function() -> None:
         check_function("score_condition", Route)
     with pytest.raises(ValueError, match="not a registered structured function name"):
         check_function("nope", Loop)
+
+
+def test_schema_caches_are_bounded() -> None:
+    """Per-graph schema classes (specs/11 §5.5 Decision P07-T04 rule 7) must not grow the caches forever."""
+    assert structured._tool_schema.cache_info().maxsize == structured.SCHEMA_CACHE_SIZE == 1024
+    assert structured._validator.cache_info().maxsize == structured.SCHEMA_CACHE_SIZE

@@ -1726,3 +1726,14 @@ Grafana 3001
   bump + one upgrader + a frozen `packages/va_engine/tests/fixtures/engine_state/vN.json` (never edit an old one; the
   canonical test compares parsed JSON, so prettier formatting is fine). `pending_actions` (discriminated by `kind`,
   `after_mark`) are drained with `EngineState.take_pending(mark)`.
+- 2026-11-03 (P07-T04): pathway decision calls = `va_engine.router.Router.choose(graph, node, DecisionInputs, include_globals=,
+  webhook_edge=)` → `RouteDecision` (pure `interpret_route`/`heuristic_route`), `va_engine.loop_condition.LoopCondition.
+  score` → `ConditionResult` (+ `not_met_suffix`), `va_engine.extraction.Extractor.extract(node, inputs, now=, timezone=)`
+  → `ExtractionResult` (`coerce_value`, `va_engine.spoken_numbers.parse_spoken_integer`); rules: specs/11 §5.5 Decision
+  P07-T04. All three take a `va_engine.decisions.StructuredPort` (LlmGateway), return data only (events via
+  `event_data()`), and never raise for LLM failures (`degraded=True`). `DecisionInputs.history` holds the turns BEFORE
+  `latest`. Prompts are `va_llm` `router.txt`/`loop_condition.txt`/`extract.txt` (drift-checked against specs/10 §9.1-§9.3)
+  rendered by `va_llm.prompts.render_prompt(name, values)` (`format_map`: values stay literal). Per-node schemas come from
+  `va_engine.decision_schemas` (LRU-cached dynamic classes, never registered). Tests: `tests/support/decision_helpers.
+  ScriptedPort` (validates scripted outputs against the real schema, advances its clock 0.25 s per call), `inputs`,
+  `unavailable()`, `invalid(name)`; FakeLLM contract tests in `test_decisions_sim.py` use `task_helpers.served()`.
