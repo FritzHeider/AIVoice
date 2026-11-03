@@ -6,6 +6,7 @@ and build settings with :func:`settings_of` so a developer ``.env`` never leaks 
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -19,6 +20,7 @@ from typing import Any, Final, Self
 import httpx
 import pytest
 import structlog
+import uvicorn
 from asgi_lifespan import LifespanManager
 from pydantic_settings import BaseSettings
 from redis.asyncio import Redis
@@ -26,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from va_common.health import CheckFn
 from va_common.logging import configure_logging
-from va_common.service import Bind, ReadyServer
+from va_common.service import Bind, ReadyServer, StopController, run_server
 from va_common.settings import BaseServiceSettings
 
 
@@ -142,6 +144,32 @@ def capture_serve(
 
 # Kept under its historical test name: a ``ManagedServer`` with a ``ready`` event and the bound ``url``.
 RecordingServer = ReadyServer
+
+
+@asynccontextmanager
+async def serving(app: Any, *, port: int = 0) -> AsyncIterator[ReadyServer]:
+    """Serve ``app`` with real uvicorn on 127.0.0.1 (``port`` 0 = ephemeral); yields the started server."""
+    ready = asyncio.Event()
+    servers: list[ReadyServer] = []
+
+    def factory(config: uvicorn.Config) -> ReadyServer:
+        servers.append(ReadyServer(config, ready=ready))
+        return servers[-1]
+
+    stop = StopController()
+    task = asyncio.ensure_future(
+        run_server(app, host="127.0.0.1", port=port, stop=stop, install_signals=False, server_factory=factory)
+    )
+    try:
+        waiter = asyncio.ensure_future(ready.wait())
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if task.done():
+            waiter.cancel()
+            task.result()
+        yield servers[0]
+    finally:
+        stop.request("serving.exit")
+        await task
 
 
 def track_closes(monkeypatch: pytest.MonkeyPatch) -> list[str]:

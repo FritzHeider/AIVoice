@@ -2744,6 +2744,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "asyncpg" },
     { name = "cryptography" },
+    { name = "httpcore" },
     { name = "httpx", extra = ["http2"] },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
@@ -2773,6 +2774,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=25.1.0" },
     { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "opentelemetry-api", specifier = ">=1.45.1" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.45.1" },
@@ -3198,16 +3200,30 @@ name = "va-webhook-dispatcher"
 version = "0.1.0"
 source = { editable = "apps/webhook_dispatcher" }
 dependencies = [
+    { name = "httpx" },
+    { name = "opentelemetry-api" },
+    { name = "orjson" },
     { name = "pydantic" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "starlette" },
     { name = "va-common" },
+    { name = "va-db" },
+    { name = "va-domain" },
+    { name = "va-events" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "orjson", specifier = ">=3.13.0" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "starlette", specifier = ">=1.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-events", editable = "packages/va_events" },
 ]
 
 [[package]]

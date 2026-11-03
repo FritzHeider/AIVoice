@@ -27,6 +27,7 @@ __all__ = [
     "invitation",
     "password_reset",
     "verify_email",
+    "webhook_endpoint_disabled",
 ]
 
 EMAIL_VERIFICATION_HOURS: Final = 24
@@ -180,8 +181,36 @@ _AGENT_REQUEST: Final = _Copy(
     ),
 )
 
+_ENDPOINT_DISABLED: Final = _Copy(
+    template="webhook_endpoint_disabled",
+    subject="A VoiceAgents webhook endpoint was disabled",
+    button="Review webhook endpoints",
+    text_intro=(
+        "The webhook endpoint $url answered 410 Gone, so VoiceAgents disabled it and stopped sending events "
+        "to it. Review\nyour webhook endpoints here"
+    ),
+    html_intro=(
+        "The webhook endpoint $url answered 410 Gone, so VoiceAgents disabled it and stopped sending\n"
+        "events to it. Review your webhook endpoints here"
+    ),
+    text_notice=(
+        "Events that occurred while the endpoint was disabled are not sent to it. Enable the endpoint again "
+        "once it accepts\nrequests."
+    ),
+    html_notice=(
+        "Events that occurred while the endpoint was disabled are not sent to it. Enable the endpoint\n"
+        "again once it accepts requests."
+    ),
+)
+
 TEMPLATES: Final[frozenset[str]] = frozenset(
-    {_VERIFY.template, _RESET.template, _INVITATION.template, _AGENT_REQUEST.template}
+    {
+        _VERIFY.template,
+        _RESET.template,
+        _INVITATION.template,
+        _AGENT_REQUEST.template,
+        _ENDPOINT_DISABLED.template,
+    }
 )
 
 
@@ -216,3 +245,8 @@ def agent_key_request(
         to=to,
         values={"agent": agent_name, "scopes": ", ".join(scopes), "purpose": stated},
     )
+
+
+def webhook_endpoint_disabled(*, url: str, link: str, to: str) -> EmailMessage:
+    """Tells an org owner/admin that an endpoint answered ``410 Gone`` and was disabled (specs/19 §8)."""
+    return _ENDPOINT_DISABLED.render(name="there", link=link, to=to, values={"url": url})

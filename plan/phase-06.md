@@ -6,7 +6,7 @@
   - Deliverables: `WebhookRouter.route(event, session)` creating `webhook_deliveries` rows for per-call webhook (respecting `webhook_events`), batch status webhooks, org endpoints (glob match), conversation/widget webhooks; serializers for `bland`, `bland-live`, `envelope`
   - Acceptance: routing matrix tests; outbox atomicity test.
 
-- [ ] P06-T03 Webhook dispatcher service
+- [x] P06-T03 Webhook dispatcher service — va_webhooks Dispatcher (SKIP LOCKED claims, 200/pod + 20/host), signing (X-VA-Signature + X-Webhook-Signature), 10/15 s timeouts, 8 jittered retries, 410 auto-disable + admin email, va_common.safe_http pinning SSRF guard, call.webhook_delivery call log rows, metrics; review: make test 10952 passed / 7 skipped (99.06 % cov), lint/typecheck/placeholders pass
   - Spec refs: specs/19-events-and-webhooks.md (delivery semantics); specs/28-security.md (SSRF)
   - Depends on: P06-T02
   - Deliverables: `apps/webhook_dispatcher` poll loop with SKIP LOCKED, concurrency (global + per-host), signing headers (both formats), timeouts (10 s batch / 15 s others), retry schedule with jitter, 410 handling + endpoint auto-disable + admin email, DNS-resolving SSRF guard, per-attempt `call_events` rows, metrics

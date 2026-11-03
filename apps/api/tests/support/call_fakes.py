@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
 
 from botocore.exceptions import ClientError
+from dns_fakes import MappedResolver
 
 from va_api.services.call_starter import CallStartError
 from va_api.services.call_stop import CallCancelError
@@ -59,15 +60,10 @@ class FakeCallCanceller:
 
 
 @dataclass
-class FakeResolver:
+class FakeResolver(MappedResolver):
     """Answers ``answers[host]`` (default: one public address); records every lookup."""
 
-    answers: dict[str, list[str]] = field(default_factory=dict)
-    lookups: list[str] = field(default_factory=list)
-
-    async def __call__(self, host: str) -> list[str]:
-        self.lookups.append(host)
-        return self.answers.get(host, [PUBLIC_ADDRESS])
+    default: list[str] | None = field(default_factory=lambda: [PUBLIC_ADDRESS])
 
 
 @dataclass

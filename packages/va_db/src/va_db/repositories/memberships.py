@@ -136,6 +136,20 @@ class MembershipLookupRepo(SystemRepository):
         membership, org, mfa_enabled = row
         return _record(membership, org, mfa_enabled)
 
+    async def admin_emails(self, org_id: uuid.UUID) -> list[str]:
+        """Email addresses of the org's active owners and admins, ordered by address (org notifications)."""
+        statement = (
+            select(User.email)
+            .join(Membership, Membership.user_id == User.id)
+            .where(
+                Membership.org_id == org_id,
+                Membership.role.in_(PARENT_ACCESS_ROLES),
+                User.status == "active",
+            )
+            .order_by(User.email)
+        )
+        return list((await self.session.scalars(statement)).all())
+
     async def via_parent(self, user_id: uuid.UUID, org_id: uuid.UUID) -> MembershipRecord | None:
         """``org_id`` as the user reaches it through an owner/admin membership of its parent, or ``None``.
 

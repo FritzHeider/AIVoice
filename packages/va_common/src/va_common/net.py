@@ -25,6 +25,7 @@ __all__ = [
     "blocked_address",
     "check_destination_url",
     "parse_ip",
+    "resolve_host",
     "system_resolver",
 ]
 
@@ -80,7 +81,11 @@ def blocked_address(address: IpAddress, *, allow_private: bool = False) -> bool:
     return not allow_private and not address.is_global
 
 
-async def _resolve(host: str, resolver: HostResolver, timeout_s: float) -> list[IpAddress]:
+async def resolve_host(
+    host: str, resolver: HostResolver, timeout_s: float = DNS_TIMEOUT_S
+) -> list[IpAddress]:
+    """Every address ``host`` resolves to within ``timeout_s``; :class:`UnsafeDestinationError` ``resolution``
+    on a resolver error, the timeout, an empty answer, or an answer that is not an IP address."""
     try:
         async with asyncio.timeout(timeout_s):
             answers = await resolver(host)
@@ -115,7 +120,7 @@ async def check_destination_url(
     if not host:
         raise UnsafeDestinationError("host")
     literal = parse_ip(host)
-    addresses = [literal] if literal is not None else await _resolve(host, resolver, timeout_s)
+    addresses = [literal] if literal is not None else await resolve_host(host, resolver, timeout_s)
     if any(blocked_address(address, allow_private=allow_private) for address in addresses):
         raise UnsafeDestinationError("address")
     return tuple(addresses)

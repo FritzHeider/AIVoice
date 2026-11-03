@@ -50,6 +50,7 @@ class EventType(StrEnum):
     CALL_TOOL = "call.tool"
     CALL_DYNAMIC_DATA = "call.dynamic_data"
     CALL_WEBHOOK_NODE = "call.webhook_node"
+    CALL_WEBHOOK_DELIVERY = "call.webhook_delivery"
     CALL_GUARD_RAIL = "call.guard_rail"
     CALL_TRANSFER_STARTED = "call.transfer_started"
     CALL_TRANSFERRED = "call.transferred"
@@ -115,6 +116,7 @@ _CATEGORIES: dict[str, CallEventCategory] = {
     "call.tool": "tool",
     "call.dynamic_data": "dynamic_data",
     "call.webhook_node": "webhook",
+    "call.webhook_delivery": "webhook",
     "call.guard_rail": "guard_rail",
     "call.transfer_started": "transfer",
     "call.transferred": "transfer",

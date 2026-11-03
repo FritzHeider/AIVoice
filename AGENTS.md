@@ -1605,3 +1605,15 @@ Grafana 3001
   `webhook_events` keys are `va_events.WEBHOOK_KEY` (`test_catalog` parses the last spec column). Rules: specs/19 §3
   Decision P06-T02. Seeding a call's metadata in tests: `seed_call(..., metadata_={...})` (`metadata=` silently sets
   the declarative `MetaData` attribute instead of the column).
+- 2026-11-03 (P06-T03): webhook dispatcher = `va_webhooks.dispatcher.Dispatcher` (`run(stop)` poll loop, `run_once()`
+  test seam, `refresh_backlog()`) over `Deliverer` (`delivery.py`: `Outgoing`, `SendResult`, pure `decide`),
+  `SigningSecrets`, `DestinationPolicy`, `EndpointDisabledNotifier`; `container.build_container(settings, metrics=,
+  resolver=, limits=)` needs `LOCAL_MASTER_KEY` (local KMS). Rules: specs/19 §8 Decision P06-T03. Customer URLs go
+  through `va_common.safe_http.safe_client(settings, timeout=, allow_private=, resolver=)` (connect-time DNS pinning;
+  refusals raise `UnsafeDestinationError` out of the request, not an httpx error). New event type
+  `call.webhook_delivery` (dispatcher only). Tests: `apps/webhook_dispatcher/tests/support/` (`webhook_receiver.Receiver`
+  real-socket receiver with scripted `Reply(status, hold=)`, `wait_for(predicate)`, per-host `in_flight`;
+  `signature_ok(received, secret)`; `dispatch_helpers.dispatch_rig(url, ...)` empties the outbox, provisions orgs with a
+  local-KMS envelope, fake DNS maps `hooks.test`/`a.hooks.test`/`b.hooks.test` to 127.0.0.1; rigs sharing orgs need one
+  `master_key`); session fixture `dispatcher_db_url`. Keep the rig's 5 s timeouts for normal deliveries: 0.5 s ones
+  timed out under coverage + xdist load.

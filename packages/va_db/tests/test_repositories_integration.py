@@ -422,6 +422,41 @@ async def test_attempt_outcomes_are_recorded(database: Database, org: uuid.UUID)
                 await outcome
 
 
+async def test_backlog_counts_due_rows_and_the_oldest(database: Database, org: uuid.UUID) -> None:
+    await _deliveries(
+        database,
+        org,
+        [
+            {"status": "pending", "next_attempt_at": _NOW - timedelta(minutes=3)},
+            {"status": "delivering", "next_attempt_at": _NOW},
+            {"status": "pending", "next_attempt_at": _NOW + _SECOND},
+            {"status": "dead", "next_attempt_at": _NOW - timedelta(hours=1)},
+            {"status": "succeeded", "next_attempt_at": _NOW - timedelta(hours=1)},
+        ],
+    )
+    async with database.system_session() as session:
+        repo = OutboxRepo(session)
+        backlog = await repo.backlog(_NOW)
+        empty = await repo.backlog(_NOW - timedelta(hours=2))
+    assert (backlog.due, backlog.oldest_due_at) == (2, _NOW - timedelta(minutes=3))
+    assert (empty.due, empty.oldest_due_at) == (0, None)
+
+
+async def test_endpoint_enabled_and_disable_flips_once(database: Database, org: uuid.UUID) -> None:
+    enabled, disabled = await _ids(
+        database, "webhook_endpoints", org, [{"enabled": True}, {"enabled": False}]
+    )
+    async with database.system_session() as session:
+        repo = OutboxRepo(session)
+        assert await repo.endpoint_enabled([]) == {}
+        assert await repo.endpoint_enabled([enabled, disabled, new_id()]) == {enabled: True, disabled: False}
+        assert await repo.disable_endpoint(enabled) is True
+        assert await repo.disable_endpoint(enabled) is False
+        assert await repo.disable_endpoint(disabled) is False
+        assert await repo.disable_endpoint(new_id()) is False
+        assert await repo.endpoint_enabled([enabled]) == {enabled: False}
+
+
 # ---- SchedulerRepo ----------------------------------------------------------------------------------------
 
 

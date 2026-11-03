@@ -249,10 +249,10 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `PUBLIC_API_BASE_URL` | api, docs, sdk tests | `http://localhost:8000` | |
 | `EDGE_PUBLIC_HOST` | worker, edge, media | `localhost:8100` (tunnel host for live tests) | host Telnyx posts webhooks to |
 | `MEDIA_PUBLIC_HOST` | worker, edge, media | `localhost:8200` | host Telnyx opens media WS to |
-| `DASHBOARD_BASE_URL` | api | `http://localhost:3000` | CORS + email links |
+| `DASHBOARD_BASE_URL` | api, dispatcher | `http://localhost:3000` | CORS + email links |
 | `SECRET_KEY` | api | 64 random hex chars | session signing |
 | `STREAM_TOKEN_SECRET` | worker, edge, media | 64 random hex chars | HMAC for media WS tokens |
-| `KMS_PROVIDER` | api, worker, media, edge | `local` | `local` (AES-256-GCM master key from env) or `aws` |
+| `KMS_PROVIDER` | api, worker, media, edge, dispatcher | `local` | `local` (AES-256-GCM master key from env) or `aws` |
 | `LOCAL_MASTER_KEY` | same | 64 hex chars | 32-byte master key for envelope encryption in local/test |
 | `AWS_KMS_KEY_ID` | same | empty | KMS key ARN in AWS |
 | `TELNYX_API_BASE` | worker, edge, api, media | `http://localhost:9100/v2` (sim) | real: `https://api.telnyx.com/v2` |
@@ -278,7 +278,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `STRIPE_API_BASE` | api, worker | `http://localhost:9400` (sim) | real: `https://api.stripe.com` |
 | `STRIPE_SECRET_KEY` | same | `sk_test_sim` | |
 | `STRIPE_WEBHOOK_SECRET` | api | `whsec_sim` | |
-| `SMTP_URL` | api, worker | `smtp://localhost:1025` (mailpit in compose) | transactional email |
+| `SMTP_URL` | api, worker, dispatcher | `smtp://localhost:1025` (mailpit in compose) | transactional email |
 | `EMAIL_FROM` | same | `VoiceAgents <no-reply@voiceagents.local>` | |
 | `OIDC_ENABLED` | api | `false` | enterprise SSO |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | all | `http://localhost:4317` (otel-collector in compose) | |

@@ -84,7 +84,7 @@ from va_db.repositories.memberships import (
     MembershipRepo,
 )
 from va_db.repositories.orgs import OrgOverview, OrgRepo
-from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxRepo
+from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxBacklog, OutboxRepo
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
 from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
@@ -156,6 +156,7 @@ __all__ = [
     "OrgDataKeyStore",
     "OrgOverview",
     "OrgRepo",
+    "OutboxBacklog",
     "OutboxRepo",
     "PhoneNumberRoutingRepo",
     "PurgeRule",

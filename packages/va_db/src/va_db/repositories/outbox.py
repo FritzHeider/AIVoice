@@ -7,20 +7,30 @@ rows and records each attempt's outcome.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
-from va_db.models import WebhookDelivery
+from va_db.models import WebhookDelivery, WebhookEndpoint
 from va_db.repositories.base import NotFoundError, SystemRepository, require_positive
 
-__all__ = ["CLAIM_LIMIT", "DEFAULT_LEASE", "OutboxRepo"]
+__all__ = ["CLAIM_LIMIT", "DEFAULT_LEASE", "OutboxBacklog", "OutboxRepo"]
 
 CLAIM_LIMIT: Final = 200
 DEFAULT_LEASE: Final = timedelta(minutes=5)
 
 _DUE_STATUSES: Final = ("pending", "delivering")
+
+
+@dataclass(frozen=True, slots=True)
+class OutboxBacklog:
+    """Due deliveries (``pending``/``delivering`` with ``next_attempt_at <= now``) and the oldest due time."""
+
+    due: int
+    oldest_due_at: datetime | None
 
 
 class OutboxRepo(SystemRepository):
@@ -50,6 +60,33 @@ class OutboxRepo(SystemRepository):
             .execution_options(populate_existing=True, synchronize_session=False)
         )
         return list((await self.session.scalars(statement)).all())
+
+    async def backlog(self, now: datetime) -> OutboxBacklog:
+        """How many rows are due at ``now`` and the earliest ``next_attempt_at`` among them."""
+        statement = select(func.count(), func.min(WebhookDelivery.next_attempt_at)).where(
+            WebhookDelivery.status.in_(_DUE_STATUSES), WebhookDelivery.next_attempt_at <= now
+        )
+        due, oldest = (await self.session.execute(statement)).one()
+        return OutboxBacklog(due=int(due), oldest_due_at=oldest)
+
+    async def endpoint_enabled(self, endpoint_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID, bool]:
+        """``enabled`` of each existing endpoint among ``endpoint_ids`` (deleted endpoints are absent)."""
+        ids = set(endpoint_ids)
+        if not ids:
+            return {}
+        statement = select(WebhookEndpoint.id, WebhookEndpoint.enabled).where(WebhookEndpoint.id.in_(ids))
+        return {row.id: row.enabled for row in (await self.session.execute(statement)).all()}
+
+    async def disable_endpoint(self, endpoint_id: uuid.UUID) -> bool:
+        """Disable an enabled endpoint; ``True`` only for the call that flipped it (410 auto-disable)."""
+        statement = (
+            update(WebhookEndpoint)
+            .where(WebhookEndpoint.id == endpoint_id, WebhookEndpoint.enabled)
+            .values(enabled=False)
+            .returning(WebhookEndpoint.id)
+            .execution_options(synchronize_session=False)
+        )
+        return (await self.session.scalar(statement)) is not None
 
     async def _finish(self, delivery_id: uuid.UUID, values: dict[str, Any]) -> WebhookDelivery:
         statement = (

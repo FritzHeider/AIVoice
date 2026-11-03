@@ -182,6 +182,14 @@ proxy (Squid in the cluster, `29` §4) that also enforces the blocklist; vendor 
 > `blocked_address` (specs/19 §8 Decision P05-T05a), covering every range listed here; `safe_client` builds on them
 > when tools and webhook delivery arrive.
 
+> Decision (2026-11-03): `safe_client` lives in `va_common.safe_http` (it builds on `va_common.http.http_client`, so it
+> cannot live in that module without an import cycle) (P06-T03). `GuardedBackend` is an `httpcore` network backend
+> that vets every TCP connect: IP literals by `blocked_address`, names resolved once (2 s) with every answer checked,
+> then it dials the first vetted address; SNI and `Host` stay the name. A refusal raises `UnsafeDestinationError`
+> before any socket opens; Unix sockets are refused. `safe_transport` swaps httpx's private connection pool for one
+> using the guarded backend (httpx 0.28 has no backend argument; a test pins the attribute). The webhook dispatcher
+> never follows redirects; the "max 3 redirects each re-validated" rule applies to the tool/fetch callers that add it.
+
 ### 6.5 Custom code sandbox
 
 Deno 2 subprocess per execution: `deno run --no-prompt --no-config --no-npm --no-remote --v8-flags=--max-old-space-size=64

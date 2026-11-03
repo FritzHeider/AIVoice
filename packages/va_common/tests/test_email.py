@@ -33,6 +33,7 @@ from va_common.email import (
     password_reset,
     to_mime,
     verify_email,
+    webhook_endpoint_disabled,
 )
 from va_common.time import FrozenClock
 
@@ -147,7 +148,13 @@ def test_password_reset_template() -> None:
     message = password_reset(name="<b>Ravi</b>", link=link, to="ravi@example.com")
     assert message.template == "password_reset"
     assert message.template in TEMPLATES
-    assert {"verify_email", "password_reset", "invitation", "agent_key_request"} == TEMPLATES
+    assert {
+        "verify_email",
+        "password_reset",
+        "invitation",
+        "agent_key_request",
+        "webhook_endpoint_disabled",
+    } == TEMPLATES
     assert message.subject == "Reset your VoiceAgents password"
     assert message.to == "ravi@example.com"
     assert "<b>Ravi</b>" not in message.html
@@ -405,3 +412,21 @@ async def test_smtp_rejection_reports_code(
     monkeypatch.setattr(aiosmtplib, "send", refuse)
     with pytest.raises(EmailDeliveryError, match=r"SMTPRecipientsRefused$"):
         await sender.send(message)
+
+
+def test_webhook_endpoint_disabled_template() -> None:
+    link = "https://app.voiceagents.local/settings/webhooks"
+    url = "https://hooks.example.com/va?a=1&b=<2>"
+    message = webhook_endpoint_disabled(url=url, link=link, to="ops@example.com")
+    assert message.template == "webhook_endpoint_disabled"
+    assert message.template in TEMPLATES
+    assert message.subject == "A VoiceAgents webhook endpoint was disabled"
+    assert message.to == "ops@example.com"
+    assert message.text.startswith("Hi there,\n")
+    assert f"The webhook endpoint {url} answered 410 Gone" in message.text
+    assert "a=1&amp;b=&lt;2&gt;" in message.html
+    assert "<2>" not in message.html
+    assert ">Review webhook endpoints</a>" in message.html
+    for body in (message.text, message.html):
+        assert link in body
+        assert "$" not in body

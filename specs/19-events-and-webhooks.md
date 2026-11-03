@@ -95,6 +95,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | `call.tool` | tool | media | tool request/response (data: tool_name, request{url,method,body}, status_code, response_excerpt ≤ 2 KB, duration_ms, extracted) | `tool` |
 | `call.dynamic_data` | dynamic_data | worker/media | dynamic data fetch result | `dynamic_data` |
 | `call.webhook_node` | webhook | media | pathway webhook node executed | `webhook` |
+| `call.webhook_delivery` | webhook | dispatcher | each delivery attempt of a webhook about the call (§8) | — |
 | `call.guard_rail` | guard_rail | media | guard rail evaluated/triggered | `call` |
 | `call.transfer_started` | transfer | media | transfer initiated (data: type cold/warm, target) | `call` |
 | `call.transferred` | transfer | edge | `call.bridged` on target | `call` |
@@ -343,6 +344,34 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 > multicast, reserved, and unspecified addresses stay blocked. `WEBHOOK_ALLOW_PRIVATE` is the shared settings mixin
 > `va_common.settings.WebhookSafetySettings` (forced false in staging/production) used by the dispatcher and the api.
 > Send Call (specs/05 §3.7) maps the reasons to `WEBHOOK_URL_REJECTED` on field `webhook`.
+
+> Decision (2026-11-03): webhook dispatcher (P06-T03). `apps/webhook_dispatcher` (`va_webhooks`):
+> (1) Attempts = the first send plus 8 retries (MASTER_PROMPT "8 retries over ~24 h"; the table above lists the delay
+> after failed attempt n = 1..8: 10 s, 30 s, 2 min, 10 min, 30 min, 2 h, 6 h, 15 h, sum 85 360 s ≈ 23.7 h) with a
+> uniform ×[0.9, 1.1] jitter; failed attempt 9 → `dead`. `attempts` counts sends. (2) Timeout per attempt, whole
+> request: 10 s for `batch.*` (§6), 15 s otherwise. (3) `last_error` codes: `redirect` (3xx, never followed),
+> `http_status` (other non-2xx, code in `last_status_code`), `gone` (410 → `dead` at once), `timeout`, `connection`,
+> `blocked_destination:<reason>` (reasons of the guard above; `scheme` → `dead` at once since the URL never changes,
+> `host`/`address`/`resolution` retry because DNS may change), `endpoint_disabled` (row of a disabled endpoint →
+> `dead` without a request), `secret_unavailable` (retry). `last_response_ms` is set when a response arrived or the
+> timeout elapsed. (4) `http` is allowed in `local`/`test` or when the org setting `allow_insecure_webhooks` is true;
+> the URL is vetted before sending (`check_destination_url`, classifies the refusal) and again at connect time by the
+> pinning client of specs/28 §6.4 (`va_common.safe_http.safe_client`), so DNS rebinding cannot reach a blocked
+> address. (5) The body is `orjson.dumps(payload)`; the signed bytes are the sent bytes. `X-VA-Signature` carries one
+> `v1=` per active org secret, current first (rotation, P06-T04); `X-Webhook-Signature` uses the current secret. The
+> response body is read up to 64 KiB and discarded. Decrypted secrets are cached in process for 300 s. (6) A 410 on an
+> org endpoint disables it with a conditional UPDATE in the attempt's transaction; only the attempt that flipped it
+> emails every active owner/admin (template `webhook_endpoint_disabled`, link `{DASHBOARD_BASE_URL}/settings/webhooks`;
+> failures logged, never raised). (7) Every attempt of a delivery with `call_id` writes a `call.webhook_delivery`
+> event (§2; category `webhook`, level `info` / `warning` (retry) / `error` (dead), message
+> `Webhook delivered to <host>: 200 (123ms)` / `Webhook to <host> failed: <500|code> (attempt n), retrying in 30s` /
+> `Webhook to <host> failed: <500|code>, giving up`, data `{delivery_id, event_id, event_type, attempt, status_code,
+> error, response_ms, host}`; host only, never the URL) in the same system transaction as the outbox update (a failing
+> `call_events` insert rolls back only its savepoint), broadcast after the commit. The dispatcher's publisher has no
+> router, so deliveries about deliveries are never created. (8) Concurrency: 200 per pod, 20 per lower-cased URL host,
+> claim batch 200 under the 5 min lease, re-poll at once after a full claim, else every 1 s; the backlog gauges are
+> refreshed at most once per poll interval. (9) SIGTERM stops claiming and waits up to 20 s for in-flight attempts;
+> unfinished rows become due again when their lease runs out.
 - Replay: `POST /v1/webhooks/deliveries/{id}/replay` re-queues (new attempt series, same event id).
 - Dead-letter view: `GET /v1/webhooks/deliveries?status=dead`.
 

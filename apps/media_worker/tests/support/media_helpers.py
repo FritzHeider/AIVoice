@@ -17,17 +17,15 @@ from typing import Any, Final, Literal
 from urllib.parse import urlencode
 
 import fakeredis
-import uvicorn
 from clock_helpers import ManualClock
 from nacl.signing import SigningKey
 from redis.asyncio import Redis
 from resolved_configs import resolved_config
-from service_helpers import FakeContainer, RecordingServer, ok_check, settings_of
+from service_helpers import FakeContainer, ok_check, serving, settings_of
 from starlette.applications import Starlette
 from websockets.asyncio.client import ClientConnection, connect
 
 from va_common.health import CheckFn
-from va_common.service import StopController, run_server
 from va_common.stream_tokens import mint_stream_token, stream_token_expiry
 from va_common.time import Clock
 from va_domain.call_context import CallContext
@@ -204,27 +202,8 @@ def media_app(  # noqa: PLR0913 - keyword-only test knobs
 @asynccontextmanager
 async def served_media(app: Starlette, *, port: int = 0) -> AsyncIterator[str]:
     """Serve ``app`` with real uvicorn on 127.0.0.1; yields the ``ws://host:port`` base URL."""
-    ready = asyncio.Event()
-    servers: list[RecordingServer] = []
-
-    def factory(config: uvicorn.Config) -> RecordingServer:
-        servers.append(RecordingServer(config, ready=ready))
-        return servers[-1]
-
-    stop = StopController()
-    task = asyncio.ensure_future(
-        run_server(app, host="127.0.0.1", port=port, stop=stop, install_signals=False, server_factory=factory)
-    )
-    try:
-        waiter = asyncio.ensure_future(ready.wait())
-        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-        if task.done():
-            waiter.cancel()
-            task.result()
-        yield servers[0].url.replace("http://", "ws://")
-    finally:
-        stop.request("served_media.exit")
-        await task
+    async with serving(app, port=port) as server:
+        yield server.url.replace("http://", "ws://")
 
 
 def stream_query(call_id: uuid.UUID, token: str, *, leg: str | None = None) -> str:

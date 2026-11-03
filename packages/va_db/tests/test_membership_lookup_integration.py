@@ -248,3 +248,23 @@ async def test_via_parent_exposes_the_parent_status_and_gates_on_the_stricter(
         gate_status,
     )
     assert (own.acting_parent_status, own.gate_status) == (None, parent_status)
+
+
+async def test_admin_emails_lists_active_owners_and_admins_of_one_org(identity_db: IdentityDb) -> None:
+    database = identity_db.database
+    roles: list[MemberRole] = ["owner", "admin", "developer", "viewer", "admin"]
+    async with database.system_session() as session:
+        org, other_org = await make_org(session), await make_org(session)
+        users = [await make_user(session, unique_email()) for _ in roles]
+        outsider = await make_user(session, unique_email())
+    async with database.tenant_session(org.id) as session:
+        for user, role in zip(users, roles, strict=True):
+            await MembershipRepo(session, org.id).add(user.id, role)
+    async with database.tenant_session(other_org.id) as session:
+        await MembershipRepo(session, other_org.id).add(outsider.id, "owner")
+    async with database.system_session() as session:
+        await session.execute(update(User).where(User.id == users[4].id).values(status="disabled"))
+    async with database.system_session() as session:
+        emails = await MembershipLookupRepo(session).admin_emails(org.id)
+        assert await MembershipLookupRepo(session).admin_emails(uuid.uuid4()) == []
+    assert emails == sorted([users[0].email, users[1].email])
