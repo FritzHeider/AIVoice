@@ -49,8 +49,10 @@ __all__ = [
     "CheckedGraph",
     "DraftUpdate",
     "GraphInput",
+    "PathwayCreation",
     "VersionSelector",
     "check_graph",
+    "create_checked",
     "create_pathway",
     "delete_pathway",
     "insecure_urls_allowed",
@@ -232,7 +234,16 @@ def _summary(pathway: Pathway, draft: PathwayVersion) -> dict[str, Any]:
     }
 
 
-async def create_pathway(  # noqa: PLR0913 - keyword-only body fields
+@dataclass(frozen=True, slots=True)
+class PathwayCreation:
+    """A new pathway, its draft v1, and the save-mode report of the draft's graph."""
+
+    pathway: Pathway
+    draft: PathwayVersion
+    report: ValidationReport
+
+
+async def create_checked(  # noqa: PLR0913 - keyword-only body fields and audit options
     session: AsyncSession,
     ctx: RequestContext,
     *,
@@ -241,8 +252,13 @@ async def create_pathway(  # noqa: PLR0913 - keyword-only body fields
     folder_id: uuid.UUID | None,
     graph_input: GraphInput,
     allow_http: bool,
-) -> tuple[Pathway, PathwayVersion]:
-    """Create a pathway with draft v1; empty ``nodes`` and ``edges`` give the §3 default start node."""
+    action: str = "pathway.create",
+    audit_extra: Mapping[str, Any] | None = None,
+) -> PathwayCreation:
+    """Create a pathway with draft v1 and audit ``action`` (the summary plus ``audit_extra``).
+
+    Empty ``nodes`` and ``edges`` give the §3 default start node; save-mode errors reject the write.
+    """
     repo = PathwayRepo(session, ctx.org_id)
     await _check_folder(repo, folder_id)
     if not graph_input.nodes and not graph_input.edges:
@@ -254,8 +270,32 @@ async def create_pathway(  # noqa: PLR0913 - keyword-only body fields
     pathway, draft = await repo.create(
         name=name, description=description, folder_id=folder_id, graph=checked.stored
     )
-    await audit(session, ctx, "pathway.create", "pathway", pathway.id, after=_summary(pathway, draft))
-    return pathway, draft
+    after = {**_summary(pathway, draft), **(audit_extra or {})}
+    await audit(session, ctx, action, "pathway", pathway.id, after=after)
+    return PathwayCreation(pathway=pathway, draft=draft, report=checked.report)
+
+
+async def create_pathway(  # noqa: PLR0913 - keyword-only body fields
+    session: AsyncSession,
+    ctx: RequestContext,
+    *,
+    name: str,
+    description: str,
+    folder_id: uuid.UUID | None,
+    graph_input: GraphInput,
+    allow_http: bool,
+) -> tuple[Pathway, PathwayVersion]:
+    """Create a pathway and its draft v1 (``pathway.create``)."""
+    created = await create_checked(
+        session,
+        ctx,
+        name=name,
+        description=description,
+        folder_id=folder_id,
+        graph_input=graph_input,
+        allow_http=allow_http,
+    )
+    return created.pathway, created.draft
 
 
 def _check_expected_hash(expected: str | None, draft: PathwayVersion) -> None:

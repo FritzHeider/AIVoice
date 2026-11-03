@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, Final
 
 import httpx
@@ -12,9 +13,10 @@ from session_helpers import SessionContainer, make_member, store_api_key
 from va_db.models import Pathway
 from va_db.repositories import PathwayGraphJson, PathwayRepo
 
-__all__ = ["BASE", "START_ONLY", "Api", "add", "seed_pathway", "star_api"]
+__all__ = ["BASE", "FOLDERS", "START_ONLY", "Api", "add", "seed_pathway", "star_api"]
 
 BASE: Final = "/v1/pathway"
+FOLDERS: Final = f"{BASE}/folders"
 
 
 class Api:
@@ -68,6 +70,40 @@ class Api:
 
     async def revert(self, pathway_id: str, **body: Any) -> httpx.Response:
         return await self.client.post(f"{BASE}/{pathway_id}/revert", json=body, headers=self.headers)
+
+    async def export(self, pathway_id: str, **params: str) -> httpx.Response:
+        return await self.client.get(f"{BASE}/{pathway_id}/export", params=params, headers=self.headers)
+
+    async def import_(self, body: dict[str, Any]) -> httpx.Response:
+        return await self.client.post(f"{BASE}/import", json=body, headers=self.headers)
+
+    async def duplicate(self, pathway_id: str, body: dict[str, Any] | None = None) -> httpx.Response:
+        return await self.client.post(f"{BASE}/{pathway_id}/duplicate", json=body, headers=self.headers)
+
+    async def folders(self) -> httpx.Response:
+        return await self.client.get(FOLDERS, headers=self.headers)
+
+    async def folder(self, folder_id: str) -> httpx.Response:
+        return await self.client.get(f"{FOLDERS}/{folder_id}", headers=self.headers)
+
+    async def create_folder(self, name: str, parent_id: str | None = None) -> httpx.Response:
+        body = {"name": name, "parent_id": parent_id}
+        return await self.client.post(FOLDERS, json=body, headers=self.headers)
+
+    async def folder_created(self, name: str, parent_id: str | None = None) -> str:
+        response = await self.create_folder(name, parent_id)
+        assert response.status_code == 200, response.text
+        return str(response.json()["folder"]["folder_id"])
+
+    async def patch_folder(self, folder_id: str, **body: Any) -> httpx.Response:
+        return await self.client.patch(f"{FOLDERS}/{folder_id}", json=body, headers=self.headers)
+
+    async def delete_folder(self, folder_id: str) -> httpx.Response:
+        return await self.client.delete(f"{FOLDERS}/{folder_id}", headers=self.headers)
+
+    async def move(self, folder_id: str, pathway_ids: Sequence[str]) -> httpx.Response:
+        body = {"pathway_ids": list(pathway_ids)}
+        return await self.client.post(f"{FOLDERS}/{folder_id}/move", json=body, headers=self.headers)
 
 
 async def add(identity: IdentityDb, org_id: uuid.UUID, *rows: Any) -> None:

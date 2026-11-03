@@ -52,6 +52,12 @@ from va_db.repositories import PathwayRepo
 __all__ = [
     "DEFAULT_LIST_LIMIT",
     "DELETED_MESSAGE",
+    "EDITOR",
+    "READ_SCOPE",
+    "WRITE_SCOPE",
+    "ReadPathways",
+    "WritePathways",
+    "allow_http",
     "pathways_create",
     "pathways_delete",
     "pathways_get",
@@ -69,20 +75,21 @@ pathways_router = legacy_router(prefix="/v1/pathway", tags=["Pathways"])
 
 ReadPathways = Annotated[RequestContext, Depends(require_scope("pathways:read"))]
 WritePathways = Annotated[RequestContext, Depends(require_scope("pathways:write"))]
-_EDITOR: Final = [Depends(require_pathway_editor)]
-_READ_SCOPE: Final = {"x-scope": "pathways:read"}
-_WRITE_SCOPE: Final = {"x-scope": "pathways:write"}
+EDITOR: Final = [Depends(require_pathway_editor)]
+READ_SCOPE: Final = {"x-scope": "pathways:read"}
+WRITE_SCOPE: Final = {"x-scope": "pathways:write"}
 
 
-def _allow_http(request: Request) -> bool:
+def allow_http(request: Request) -> bool:
+    """Whether ``http`` and private webhook URLs pass validation (``local``/``test`` only)."""
     return insecure_urls_allowed(settings_of(request).va_env)
 
 
 @pathways_router.post(
     "/create",
     operation_id="pathways_create",
-    dependencies=_EDITOR,
-    openapi_extra={**_WRITE_SCOPE, **audited("pathway.create")},
+    dependencies=EDITOR,
+    openapi_extra={**WRITE_SCOPE, **audited("pathway.create")},
 )
 async def pathways_create(body: PathwayCreate, request: Request, ctx: WritePathways) -> PathwayCreated:
     """Create a pathway and its draft version 1 (a single start node when no graph is given)."""
@@ -95,12 +102,12 @@ async def pathways_create(body: PathwayCreate, request: Request, ctx: WritePathw
             description=body.description or "",
             folder_id=body.folder_id,
             graph_input=graph,
-            allow_http=_allow_http(request),
+            allow_http=allow_http(request),
         )
         return PathwayCreated(pathway_id=pathway.id, version_number=draft.version_number)
 
 
-@pathways_router.get("", operation_id="pathways_list", openapi_extra=_READ_SCOPE)
+@pathways_router.get("", operation_id="pathways_list", openapi_extra=READ_SCOPE)
 async def pathways_list(
     *,
     request: Request,
@@ -122,7 +129,7 @@ async def pathways_list(
         )
 
 
-@pathways_router.get("/{pathway_id}", operation_id="pathways_get", openapi_extra=_READ_SCOPE)
+@pathways_router.get("/{pathway_id}", operation_id="pathways_get", openapi_extra=READ_SCOPE)
 async def pathways_get(
     pathway_id: uuid.UUID,
     request: Request,
@@ -141,8 +148,8 @@ async def pathways_get(
 @pathways_router.post(
     "/{pathway_id}",
     operation_id="pathways_update",
-    dependencies=_EDITOR,
-    openapi_extra={**_WRITE_SCOPE, **audited("pathway.update")},
+    dependencies=EDITOR,
+    openapi_extra={**WRITE_SCOPE, **audited("pathway.update")},
 )
 async def pathways_update(
     pathway_id: uuid.UUID, body: PathwayUpdate, request: Request, ctx: WritePathways
@@ -158,7 +165,7 @@ async def pathways_update(
     )
     async with database_of(request).tenant_session(ctx.org_id) as session:
         pathway, draft, report = await update_draft(
-            session, ctx, pathway_id, change, allow_http=_allow_http(request)
+            session, ctx, pathway_id, change, allow_http=allow_http(request)
         )
         return PathwayUpdated(
             pathway_id=pathway.id,
@@ -171,8 +178,8 @@ async def pathways_update(
 @pathways_router.delete(
     "/{pathway_id}",
     operation_id="pathways_delete",
-    dependencies=_EDITOR,
-    openapi_extra={**_WRITE_SCOPE, **audited("pathway.delete")},
+    dependencies=EDITOR,
+    openapi_extra={**WRITE_SCOPE, **audited("pathway.delete")},
 )
 async def pathways_delete(
     pathway_id: uuid.UUID,
@@ -191,8 +198,8 @@ async def pathways_delete(
 @pathways_router.post(
     "/{pathway_id}/validate",
     operation_id="pathways_validate",
-    dependencies=_EDITOR,
-    openapi_extra={**_WRITE_SCOPE, **audit_exempt("read-only check")},
+    dependencies=EDITOR,
+    openapi_extra={**WRITE_SCOPE, **audit_exempt("read-only check")},
 )
 async def pathways_validate(
     pathway_id: uuid.UUID, request: Request, ctx: WritePathways, body: PathwayValidate | None = None
@@ -202,6 +209,6 @@ async def pathways_validate(
     graph = GraphInput(nodes=payload.nodes, edges=payload.edges, global_config=payload.global_config)
     async with database_of(request).tenant_session(ctx.org_id) as session:
         report = await validate_pathway(
-            session, ctx, pathway_id, graph, mode=payload.mode, allow_http=_allow_http(request)
+            session, ctx, pathway_id, graph, mode=payload.mode, allow_http=allow_http(request)
         )
         return PathwayValidated(validation=validation_view(report))

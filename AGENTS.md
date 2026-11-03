@@ -1820,3 +1820,12 @@ Grafana 3001
   factories returning non-unique values (version `1`) use `register_resource_factory(..., marker=False)` or every
   response containing "1" is a list leak. Pathway API test helpers: `tests/support/pathway_helpers.py` (`Api`,
   `star_api`, `add`).
+- 2026-11-03 (P07-T09c): pathway folders/import/export/duplicate live on their own routers
+  (`routers/pathway_folders.pathway_folders_router` prefix `/v1/pathway/folders`, `routers/pathway_io.pathway_io_router`),
+  listed in `main.ROUTERS` BEFORE `pathways_router` (else `/folders` and `/import` hit the uuid `/{pathway_id}` routes
+  → 400). Services `va_api.services.pathway_folders` (depth/cycle checks on `PathwayFolderRepo.lock_tree()`, which
+  locks every folder row then re-reads the tree) and `services.pathway_io`; creating flows share
+  `services.pathways.create_checked(..., action=, audit_extra=)` → `PathwayCreation(pathway, draft, report)`. Pure tree
+  helper `va_db.repositories.FolderTree` (`depth`/`height`/`is_within`). `dict(await session.execute(...))` fails
+  (`ChunkedIteratorResult` is not a mapping source): build dicts from `.all()`. Test helpers: `pathway_helpers.Api`
+  gained `export`/`import_`/`duplicate`/`folders`/`folder_created`/`patch_folder`/`delete_folder`/`move`.

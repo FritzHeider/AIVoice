@@ -227,6 +227,48 @@ Request `{"name": "Copy of …", "version": "production"}` → new pathway with 
 `pathway_folders` CRUD. POST body `{name, parent_id?}`; max depth 5; deleting a folder moves its pathways to the
 parent (or root). Move: `{"pathway_ids":[…]}`.
 
+> Decision (2026-11-03): pathway folders, duplicate, import/export (P07-T09c).
+> 1. Routes: the folder routes (`/v1/pathway/folders…`) and the import/export/duplicate routes live on routers that
+>    `va_api.main.ROUTERS` lists before the pathways router, so the literal `folders` and `import` segments are never
+>    captured by the uuid-typed `/{pathway_id}` routes. Export and the folder reads need `pathways:read`; import,
+>    duplicate, and folder writes need `pathways:write` and an editing role (§10).
+> 2. Duplicate: body `{name?, version?}`; `name` is 1-200 characters (trimmed), default `"Copy of " + source name` cut
+>    to 200 characters; `version` is a positive integer or `draft` (default) / `production` / `staging`; an unset pin
+>    or unknown number is 404 `PATHWAY_VERSION_NOT_FOUND` (field `version`). The copy keeps the description and the
+>    folder and gets draft v1 holding the chosen version's graph (save-mode errors still reject). Response like
+>    create. Audit `pathway.duplicate` on the new pathway (after: the create summary plus `source_pathway_id`,
+>    `source_version`).
+> 3. Export: `GET /v1/pathway/{id}/export?version=` (default draft; same selector and errors as `GET`). `exported_at`
+>    is the request time (ISO-8601 UTC, `Z`). No audit row.
+> 4. Import: body `{format?, name?, description?, nodes, edges, global_config?, folder_id?}`; other keys
+>    (`exported_at`, Bland fields) are ignored and Bland's `globalConfig` is accepted for `global_config`. A present
+>    `format` must be `voiceagents.pathway.v1` (else 400 `INVALID_INPUT`, field `format`); absent = a Bland export.
+>    `name` defaults to `Imported pathway`. Save-mode errors reject (one item each); missing tools/KBs stay in the
+>    graph. Response `{status, pathway_id, version_number, validation, warnings}`, `warnings` = the validation
+>    warnings with code `PATHWAY_TOOL_MISSING`/`PATHWAY_KB_MISSING`. Audit `pathway.import` (after: the create
+>    summary plus `format`: `voiceagents.pathway.v1` | `bland`). An exported graph imports with the same
+>    `graph_hash`.
+> 5. Folders: depth = the number of folders on the path from the root (a root folder has depth 1), at most 5. Every
+>    structural write (create with a parent, a parent change, delete) first locks all folder rows of the org
+>    (`SELECT … FOR UPDATE`, id order) and checks the tree, so concurrent moves cannot build a cycle or exceed the
+>    depth. Errors: unknown folder in the path → 404 `NOT_FOUND` "Folder not found."; unknown `parent_id` → 404
+>    `NOT_FOUND` (field `parent_id`); too deep → 400 `INVALID_INPUT` "Folders nest at most 5 levels deep." (field
+>    `parent_id`); a move into itself or a sub-folder → 400 `INVALID_INPUT` "A folder cannot move into itself or one
+>    of its sub-folders." (field `parent_id`).
+>    - `GET /v1/pathway/folders` → `{status, folders}` ordered by name, id (no pagination); a folder is
+>      `{folder_id, name, parent_id, created_at, updated_at}`. `GET /folders/{id}` → `{status, folder}`.
+>    - `POST /folders` `{name, parent_id?}` and `PATCH /folders/{id}` `{name?, parent_id?}` (`parent_id: null` = root;
+>      only sent fields apply; a no-op writes no audit row) → `{status, folder}`.
+>    - `DELETE /folders/{id}`: its pathways (soft-deleted ones included) and direct sub-folders move to its parent
+>      (or the root), then the row is deleted, so the DB cascade never removes nested folders →
+>      `{status, message: "Folder deleted.", moved_pathways, moved_folders}`.
+>    - `POST /folders/{id}/move` `{pathway_ids}` (at most 100, unique) sets the folder of those live pathways; an id
+>      that is not a live pathway of the org → 404 `NOT_FOUND` "Pathway not found." (field `pathway_ids[i]`) and
+>      nothing moves. → `{status, moved}` (rows whose folder changed); an empty list is a no-op.
+> 6. Audit action names (two-part form of the specs/04 §13 list): `pathway.import`, `pathway.duplicate`,
+>    `pathway_folder.create`, `pathway_folder.update`, `pathway_folder.delete`, `pathway_folder.move` (the §11
+>    `pathway.folder.*`).
+
 ## 7. Test chat (text simulation of a pathway)
 
 ### POST `/v1/pathway/chat/create`
@@ -316,7 +358,8 @@ API keys: scope `pathways:read`, `pathways:write`, `pathways:publish`, or `*`.
 ## 11. Audit log entries
 `pathway.create`, `pathway.update` (changes: name/description + `graph_hash` before/after, not full graph),
 `pathway.delete`, `pathway.version_save` (Decision P07-T09b item 9), `pathway.publish` (version, environment), `pathway.promote`,
-`pathway.revert`, `pathway.import`, `pathway.duplicate`, `pathway.folder.*`, `pathway.test.*`.
+`pathway.revert`, `pathway.import`, `pathway.duplicate`, `pathway.folder.*` (named `pathway_folder.*`, Decision
+P07-T09c item 6), `pathway.test.*`.
 
 ## 12. Tests required
 - CRUD happy paths and tenant isolation (other org → 404) for every endpoint.

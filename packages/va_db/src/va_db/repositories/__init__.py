@@ -93,6 +93,12 @@ from va_db.repositories.outbox import (
     OutboxBacklog,
     OutboxRepo,
 )
+from va_db.repositories.pathway_folders import (
+    FOLDER_RESOURCE,
+    MAX_FOLDER_DEPTH,
+    FolderTree,
+    PathwayFolderRepo,
+)
 from va_db.repositories.pathways import (
     PATHWAY_RESOURCE,
     PathwayGraphJson,
@@ -136,12 +142,14 @@ __all__ = [
     "ENDPOINT_DELETED_ERROR",
     "ENDPOINT_DELETED_MESSAGE",
     "ENDPOINT_DISABLED_MESSAGE",
+    "FOLDER_RESOURCE",
     "IMMUTABLE_COLUMNS",
     "INSUFFICIENT_TRANSFER_MESSAGE",
     "INVITATION_TTL",
     "LAST_OWNER_MESSAGE",
     "LOCK_TTL",
     "MANUAL_REFERENCE",
+    "MAX_FOLDER_DEPTH",
     "NOT_OWNER_MESSAGE",
     "PARENT_ACCESS_ROLES",
     "PASSWORD_RESET_TTL",
@@ -168,6 +176,7 @@ __all__ = [
     "CreditTransfer",
     "CreditTransferRepo",
     "DeliveryCancelledError",
+    "FolderTree",
     "IdempotencyClaim",
     "IdempotencyConflict",
     "IdempotencyReplay",
@@ -192,6 +201,7 @@ __all__ = [
     "OrgRepo",
     "OutboxBacklog",
     "OutboxRepo",
+    "PathwayFolderRepo",
     "PathwayGraphJson",
     "PathwayListRow",
     "PathwayRefIds",

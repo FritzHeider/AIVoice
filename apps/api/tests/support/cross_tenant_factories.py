@@ -16,7 +16,7 @@ from session_helpers import add_member, store_api_key, sub_account
 
 from va_common.ids import new_id
 from va_db.models import WebhookDelivery, WebhookEndpoint
-from va_db.repositories import InvitationRepo, PathwayGraphJson, PathwayRepo
+from va_db.repositories import InvitationRepo, PathwayFolderRepo, PathwayGraphJson, PathwayRepo
 from va_engine.models import graph_hash
 
 __all__ = ["REGISTRY"]
@@ -111,6 +111,14 @@ async def _pathway(context: FactoryContext) -> str:
         return str(pathway.id)
 
 
+async def _folder(context: FactoryContext) -> str:
+    """A root pathway folder of the tenant's org."""
+    org_id = context.tenant.org_id
+    async with context.identity.database.tenant_session(org_id) as session:
+        folder = await PathwayFolderRepo(session, org_id).create(name="Cross-tenant folder", parent_id=None)
+        return str(folder.id)
+
+
 async def _first_version(context: FactoryContext) -> str:
     """Version 1, which every pathway has."""
     del context
@@ -129,6 +137,11 @@ REGISTRY.register_resource_factory("version_number", _first_version, path_prefix
 # The factory pathway has no staging version, so the owner's promote control is ``409 CONFLICT`` while org B
 # gets ``NOT_FOUND`` (Decision P07-T09b).
 REGISTRY.register_owner_status("pathways_promote", 409)
+REGISTRY.register_resource_factory("folder_id", _folder)
+# The move example names a pathway id that exists nowhere; an empty move is the owner's no-op control.
+REGISTRY.register_request("pathways_folders_move", json={"pathway_ids": []})
+# The duplicate example copies the production pin, which the factory pathway does not have.
+REGISTRY.register_request("pathways_duplicate", json={"name": "Copy"})
 # The revert example names version 2; the factory pathway only has version 1.
 REGISTRY.register_request("pathways_revert", json={"version_number": 1})
 # ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;

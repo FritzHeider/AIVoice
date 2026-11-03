@@ -6,9 +6,10 @@ from __future__ import annotations
 import secrets
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, Final
+from typing import Any
 
 import pytest
+from pathway_rows import GRAPH
 from sms_rows import random_e164
 from tenant_rows import OrgFactory, open_database
 
@@ -28,13 +29,6 @@ from va_db.repositories import NotFoundError, PathwayGraphJson, PathwayReference
 from va_db.session import Database
 
 pytestmark = pytest.mark.integration
-
-GRAPH: Final = PathwayGraphJson(
-    nodes=[{"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "prompt": "Hi"}}],
-    edges=[],
-    global_config={},
-    graph_hash="0" * 64,
-)
 
 
 @pytest.fixture

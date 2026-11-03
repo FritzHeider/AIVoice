@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793739301-6682
+> P07-T09c: pathway folders/io routers must precede pathways_router in main.ROUTERS (literal /folders,/import vs uuid /{pathway_id}); PathwayFolderRepo.lock_tree locks all folder rows FOR UPDATE then re-reads (READ COMMITTED sees rows committed while waiting); create_checked(action=,audit_extra=) shared by create/import/duplicate; dict(await session.execute()) fails -> build from .all()
+<!-- tags: api, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793737035-ef46
 > P07-T09b: pathway versions = services/pathway_versions + routers/pathway_versions (side-effect import) + PathwayRepo freeze/fork_draft/set_pin + va_db.pathway_cache; test_audit_unit parses only two-part audit action names (pathway.version_save); cross-tenant factories with non-unique values need register_resource_factory(marker=False)
 <!-- tags: api, pathways, testing | created: 2026-11-03 -->

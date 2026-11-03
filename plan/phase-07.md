@@ -84,7 +84,7 @@
   - Deliverables: version routes, publish in publish-mode validation (regression gating arrives with P07-T11), `pathway:{id}:v:{env}` cache invalidation, audit `pathway.version.save`/`pathway.publish`/`pathway.promote`/`pathway.revert`
   - Acceptance: lifecycle test create → edit → save → publish production → publish staging → promote → revert with exactly one draft at every step; publish validation 400; promote without staging 409.
 
-- [ ] P07-T09c Pathway folders, duplicate, import/export
+- [x] P07-T09c Pathway folders, duplicate, import/export — folder CRUD with locked-tree depth/cycle checks, delete re-parenting, move; import (ours + Bland, KB/tool warnings), export round trip by graph_hash, duplicate any version; specs/12 §6 Decision; make test 12255 passed 99.08 %, lint/typecheck/placeholders/jscpd 0/spec refs/openapi drift pass
   - Spec refs: specs/12-pathways-api.md §4 (duplicate), §5, §6, §11, §12
   - Depends on: P07-T09b
   - Deliverables: folder CRUD + move (depth ≤ 5, delete moves pathways to parent), duplicate, export (`voiceagents.pathway.v1`), import (Bland aliases, missing tool/KB warnings), audit entries

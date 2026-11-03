@@ -749,6 +749,98 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Folders List
+         * @description Every pathway folder of the org, ordered by name.
+         */
+        get: operations["pathways_folders_list"];
+        put?: never;
+        /**
+         * Pathways Folders Create
+         * @description Create a folder at the root or under ``parent_id`` (at most 5 levels deep).
+         */
+        post: operations["pathways_folders_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/folders/{folder_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Folders Get
+         * @description One pathway folder.
+         */
+        get: operations["pathways_folders_get"];
+        put?: never;
+        post?: never;
+        /**
+         * Pathways Folders Delete
+         * @description Delete a folder; its pathways and sub-folders move to its parent (or the root).
+         */
+        delete: operations["pathways_folders_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Pathways Folders Update
+         * @description Rename a folder or move it under another folder (``parent_id: null`` = root).
+         */
+        patch: operations["pathways_folders_update"];
+        trace?: never;
+    };
+    "/v1/pathway/folders/{folder_id}/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Folders Move
+         * @description Put live pathways into the folder; nothing moves when any id is unknown.
+         */
+        post: operations["pathways_folders_move"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Import
+         * @description Create a pathway from our export or a Bland export; missing tools/KBs are kept and reported.
+         */
+        post: operations["pathways_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}": {
         parameters: {
             query?: never;
@@ -772,6 +864,46 @@ export interface paths {
          * @description Soft-delete a pathway that nothing live references (or any pathway with ``force``).
          */
         delete: operations["pathways_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Duplicate
+         * @description Copy one version of the pathway into a new pathway (draft v1).
+         */
+        post: operations["pathways_duplicate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Export
+         * @description The ``voiceagents.pathway.v1`` document of the selected version.
+         */
+        get: operations["pathways_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3058,6 +3190,27 @@ export interface components {
             type: "default" | "local" | "custom_pooling";
         };
         /**
+         * DuplicateBody
+         * @description ``POST /v1/pathway/{pathway_id}/duplicate``: the copy's name and the version to copy.
+         * @example {
+         *       "name": "Copy of Bella Pasta Orders",
+         *       "version": "production"
+         *     }
+         */
+        DuplicateBody: {
+            /**
+             * Name
+             * @description Name of the copy; default `Copy of <name>`.
+             */
+            name?: string | null;
+            /**
+             * Version
+             * @description Version number, `draft` (default), `production`, or `staging`.
+             * @default draft
+             */
+            version: number | ("draft" | "production" | "staging");
+        };
+        /**
          * DynamicDataSpec
          * @description A pre-call (or per-turn) HTTP fetch whose extracted values become variables (specs/13 §7).
          */
@@ -3245,6 +3398,239 @@ export interface components {
              */
             sticky_by_contact: boolean;
         };
+        /**
+         * ExportBody
+         * @description ``GET /v1/pathway/{pathway_id}/export``: the ``voiceagents.pathway.v1`` document.
+         * @example {
+         *       "description": "Takes phone orders",
+         *       "edges": [],
+         *       "exported_at": "2026-11-03T10:42:10Z",
+         *       "format": "voiceagents.pathway.v1",
+         *       "global_config": {
+         *         "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+         *       },
+         *       "name": "Bella Pasta Orders",
+         *       "nodes": [
+         *         {
+         *           "data": {
+         *             "isStart": true,
+         *             "name": "Start",
+         *             "prompt": "Greet the caller."
+         *           },
+         *           "id": "start",
+         *           "type": "Default"
+         *         }
+         *       ]
+         *     }
+         */
+        ExportBody: {
+            /** Description */
+            description: string;
+            /** Edges */
+            edges: unknown[];
+            /**
+             * Exported At
+             * Format: date-time
+             */
+            exported_at: string;
+            /**
+             * Format
+             * @default voiceagents.pathway.v1
+             * @constant
+             */
+            format: "voiceagents.pathway.v1";
+            /** Global Config */
+            global_config: {
+                [key: string]: unknown;
+            };
+            /** Name */
+            name: string;
+            /** Nodes */
+            nodes: unknown[];
+        };
+        /**
+         * FolderCreate
+         * @description ``POST /v1/pathway/folders``.
+         * @example {
+         *       "name": "Restaurants"
+         *     }
+         */
+        FolderCreate: {
+            /**
+             * Name
+             * @description Folder name (1-200 characters).
+             */
+            name: string;
+            /**
+             * Parent Id
+             * @description Parent folder; null = root.
+             */
+            parent_id?: string | null;
+        };
+        /**
+         * FolderDeleted
+         * @description ``DELETE /v1/pathway/folders/{folder_id}`` result.
+         * @example {
+         *       "message": "Folder deleted.",
+         *       "moved_folders": 1,
+         *       "moved_pathways": 3,
+         *       "status": "success"
+         *     }
+         */
+        FolderDeleted: {
+            /** Message */
+            message: string;
+            /**
+             * Moved Folders
+             * @description Sub-folders moved to the parent folder (or the root).
+             */
+            moved_folders: number;
+            /**
+             * Moved Pathways
+             * @description Pathways moved to the parent folder (or the root).
+             */
+            moved_pathways: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * FolderList
+         * @description ``GET /v1/pathway/folders`` result: every folder ordered by name.
+         * @example {
+         *       "folders": [
+         *         {
+         *           "created_at": "2026-11-03T09:15:00Z",
+         *           "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+         *           "name": "Restaurants",
+         *           "updated_at": "2026-11-03T09:15:00Z"
+         *         }
+         *       ],
+         *       "status": "success"
+         *     }
+         */
+        FolderList: {
+            /** Folders */
+            folders: components["schemas"]["FolderView"][];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * FolderMove
+         * @description ``POST /v1/pathway/folders/{folder_id}/move``.
+         * @example {
+         *       "pathway_ids": [
+         *         "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70"
+         *       ]
+         *     }
+         */
+        FolderMove: {
+            /**
+             * Pathway Ids
+             * @description Live pathways to move (at most 100, unique).
+             */
+            pathway_ids: string[];
+        };
+        /**
+         * FolderMoved
+         * @description ``POST /v1/pathway/folders/{folder_id}/move`` result.
+         * @example {
+         *       "moved": 1,
+         *       "status": "success"
+         *     }
+         */
+        FolderMoved: {
+            /**
+             * Moved
+             * @description Pathways whose folder changed.
+             */
+            moved: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * FolderOne
+         * @description One folder (get, create, update).
+         * @example {
+         *       "folder": {
+         *         "created_at": "2026-11-03T09:15:00Z",
+         *         "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+         *         "name": "Restaurants",
+         *         "updated_at": "2026-11-03T09:15:00Z"
+         *       },
+         *       "status": "success"
+         *     }
+         */
+        FolderOne: {
+            folder: components["schemas"]["FolderView"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * FolderUpdate
+         * @description ``PATCH /v1/pathway/folders/{folder_id}``: only sent fields apply; ``parent_id: null`` = root.
+         * @example {
+         *       "name": "Restaurants"
+         *     }
+         */
+        FolderUpdate: {
+            /**
+             * Name
+             * @description New name (1-200 characters).
+             */
+            name?: string | null;
+            /**
+             * Parent Id
+             * @description New parent folder; null = root.
+             */
+            parent_id?: string | null;
+        };
+        /**
+         * FolderView
+         * @description A pathway folder; ``parent_id`` null = a root folder.
+         * @example {
+         *       "created_at": "2026-11-03T09:15:00Z",
+         *       "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+         *       "name": "Restaurants",
+         *       "updated_at": "2026-11-03T09:15:00Z"
+         *     }
+         */
+        FolderView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Folder Id
+             * Format: uuid
+             */
+            folder_id: string;
+            /** Name */
+            name: string;
+            /** Parent Id */
+            parent_id: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
         /** GuardRail */
         GuardRail: {
             action?: components["schemas"]["GuardRailAction"] | null;
@@ -3324,6 +3710,123 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /**
+         * ImportBody
+         * @description ``POST /v1/pathway/import``: our export (``format`` set) or a Bland export (no ``format``).
+         *
+         *     Other keys (``exported_at``, Bland fields) are ignored; Bland's ``globalConfig`` is read as
+         *     ``global_config``.
+         * @example {
+         *       "description": "Takes phone orders",
+         *       "edges": [],
+         *       "format": "voiceagents.pathway.v1",
+         *       "global_config": {
+         *         "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+         *       },
+         *       "name": "Bella Pasta Orders",
+         *       "nodes": [
+         *         {
+         *           "data": {
+         *             "isStart": true,
+         *             "name": "Start",
+         *             "prompt": "Greet the caller."
+         *           },
+         *           "id": "start",
+         *           "type": "Default"
+         *         }
+         *       ]
+         *     }
+         */
+        ImportBody: {
+            /** Description */
+            description?: string | null;
+            /**
+             * Edges
+             * @description Every edge of the graph.
+             */
+            edges: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /**
+             * Folder Id
+             * @description Folder of the new pathway; null = root.
+             */
+            folder_id?: string | null;
+            /**
+             * Format
+             * @description `voiceagents.pathway.v1`; omit for a Bland export.
+             */
+            format?: "voiceagents.pathway.v1" | null;
+            /**
+             * Global Config
+             * @description Graph-wide settings (`globalConfig` in Bland exports).
+             */
+            global_config?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /**
+             * Name
+             * @description Pathway name; default `Imported pathway`.
+             */
+            name?: string | null;
+            /**
+             * Nodes
+             * @description Every node; Bland node type aliases are accepted (specs/11 §3.3).
+             */
+            nodes: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+        };
+        /**
+         * Imported
+         * @description ``POST /v1/pathway/import`` result: like create, plus the validation and missing-reference warnings.
+         * @example {
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "status": "success",
+         *       "validation": {
+         *         "errors": [],
+         *         "valid": true,
+         *         "warnings": [
+         *           {
+         *             "code": "PATHWAY_KB_MISSING",
+         *             "message": "Knowledge base 'KB-0193c5d27a417c3e9b0d5f2e8a1c4d72' not found.",
+         *             "node_id": "menu"
+         *           }
+         *         ]
+         *       },
+         *       "version_number": 1,
+         *       "warnings": [
+         *         {
+         *           "code": "PATHWAY_KB_MISSING",
+         *           "message": "Knowledge base 'KB-0193c5d27a417c3e9b0d5f2e8a1c4d72' not found.",
+         *           "node_id": "menu"
+         *         }
+         *       ]
+         *     }
+         */
+        Imported: {
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            validation: components["schemas"]["ValidationView"];
+            /** Version Number */
+            version_number: number;
+            /**
+             * Warnings
+             * @description `PATHWAY_TOOL_MISSING`/`PATHWAY_KB_MISSING` warnings: references kept in the graph.
+             */
+            warnings: {
+                [key: string]: string;
+            }[];
         };
         /**
          * InlineTool
@@ -8223,6 +8726,287 @@ export interface operations {
             };
         };
     };
+    pathways_folders_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderList"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_folders_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FolderCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_folders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                folder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_folders_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                folder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderDeleted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_folders_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                folder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FolderUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_folders_move: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                folder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FolderMove"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderMoved"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Imported"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
     pathways_get: {
         parameters: {
             query?: {
@@ -8331,6 +9115,93 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PathwayDeleted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_duplicate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DuplicateBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayCreated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_export: {
+        parameters: {
+            query?: {
+                /** @description Version number, `draft` (default), `production`, or `staging`. */
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExportBody"];
                 };
             };
             /** @description Invalid input */

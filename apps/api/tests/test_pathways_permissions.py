@@ -26,7 +26,7 @@ from va_api.auth.pathway_roles import (
 )
 from va_common.ids import new_id
 from va_db.models import MemberRole
-from va_db.repositories import PathwayRepo
+from va_db.repositories import PathwayFolderRepo, PathwayRepo
 
 pytestmark = pytest.mark.integration
 
@@ -185,3 +185,42 @@ def test_publisher_helper_for_principals() -> None:
     assert is_pathway_publisher(_ctx("user", "developer", frozenset()))
     assert not is_pathway_publisher(_ctx("user", "analyst", frozenset()))
     assert not is_pathway_publisher(_ctx("user", None, frozenset()))
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_io_and_folder_role_matrix(
+    role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    member = await signed_in(client, identity, container, role)
+    pathway = await seed_pathway(identity, member.org.id)
+    async with identity.database.tenant_session(member.org.id) as session:
+        folder = await PathwayFolderRepo(session, member.org.id).create(name="Seeded", parent_id=None)
+    reads = [
+        await client.get(f"{BASE}/{pathway.id}/export"),
+        await client.get(f"{BASE}/folders"),
+        await client.get(f"{BASE}/folders/{folder.id}"),
+    ]
+    if role in READERS:
+        assert [response.status_code for response in reads] == [200, 200, 200]
+    else:
+        for response in reads:
+            assert error_of(response)[:2] == (403, "FORBIDDEN")
+
+    headers = write_headers(client)
+    nodes = [{"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "text": "Hi"}}]
+    writes = [
+        await client.post(f"{BASE}/import", json={"nodes": nodes, "edges": []}, headers=headers),
+        await client.post(f"{BASE}/{pathway.id}/duplicate", headers=headers),
+        await client.post(f"{BASE}/folders", json={"name": "New"}, headers=headers),
+        await client.patch(f"{BASE}/folders/{folder.id}", json={"name": "Renamed"}, headers=headers),
+        await client.post(
+            f"{BASE}/folders/{folder.id}/move", json={"pathway_ids": [str(pathway.id)]}, headers=headers
+        ),
+        await client.delete(f"{BASE}/folders/{folder.id}", headers=headers),
+    ]
+    if role in EDITORS:
+        assert [response.status_code for response in writes] == [200] * 6, [r.text for r in writes]
+    else:
+        for response in writes:
+            assert error_of(response)[:2] == (403, "FORBIDDEN")
+            assert response.json()["errors"][0]["message"] == NOT_EDITOR_MESSAGE

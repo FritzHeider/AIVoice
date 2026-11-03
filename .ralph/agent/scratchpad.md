@@ -1751,3 +1751,140 @@ Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift
 12219 passed, 7 skipped, 99.08 %. Diff matches specs/12 §1/§4 and Decision P07-T09b (row lock, one draft invariant,
 publish-mode validation, first-publish published_at, promote 409, revert save-mode report, cache invalidation after
 commit, audit actions in specs/04 §13 + AUDIT_ACTIONS).
+
+## Plan P07-T09c — Pathway folders, duplicate, import/export (specs/12 §4 duplicate, §5, §6, §10, §11, §12)
+
+### Spec decision — append `> Decision (2026-11-03): pathway folders, duplicate, import/export (P07-T09c).` after specs/12 §6 (before §7)
+1. Route order: `/v1/pathway/folders…` and `POST /v1/pathway/import` would be captured by the uuid-typed
+   `/{pathway_id}` routes, so they live on routers listed in `main.ROUTERS` BEFORE `pathways_router`:
+   `routers/pathway_folders.py` `pathway_folders_router` (prefix `/v1/pathway/folders`) and
+   `routers/pathway_io.py` `pathway_io_router` (prefix `/v1/pathway`: `POST /import`, `GET /{pathway_id}/export`,
+   `POST /{pathway_id}/duplicate`). Permissions: export + folder list/get = `pathways:read`; everything else
+   `pathways:write` + `require_pathway_editor`.
+2. Duplicate: body `{name?: 1-200 trimmed, version?: int ≥1 | "draft"|"production"|"staging" = "draft"}`
+   (selector parsed with `parse_version_selector`, field `version`; unset pin/unknown number → 404
+   `PATHWAY_VERSION_NOT_FOUND` field `version`). Name default `"Copy of " + source name` cut to 200 chars. The copy
+   keeps description and folder, gets draft v1 with the chosen version's graph (re-checked in save mode; references
+   to the source pathway are kept). Response like create. Audit `pathway.duplicate` on the NEW pathway, after
+   = create summary + `{source_pathway_id, source_version}`.
+3. Export: `GET /v1/pathway/{id}/export?version=` (default draft; same selector + errors as GET) →
+   `{"format":"voiceagents.pathway.v1","name","description","nodes","edges","global_config","exported_at"}`
+   (`exported_at` = request clock, ISO-8601 UTC with `Z`). No audit (read).
+4. Import: body `{format?, name?, description?, nodes, edges, global_config?, folder_id?}`; extra keys ignored
+   (`exported_at`, Bland fields). `format`, when present, must be `voiceagents.pathway.v1` (else 400
+   `INVALID_INPUT` field `format`); absent = Bland export. Bland's `globalConfig` key is accepted as an alias of
+   `global_config` (validation_alias AliasChoices). Name default `"Imported pathway"`. Node aliases and
+   `transferNumber` normalisation come from `load_graph` (specs/11 §3.3). Save-mode validation: errors reject (one
+   item each), missing tools/KBs stay in the graph. Response `{status, pathway_id, version_number, validation,
+   warnings}` where `warnings` = the validation warnings with code `PATHWAY_TOOL_MISSING`/`PATHWAY_KB_MISSING`.
+   Audit `pathway.import` (create summary + `{format: "voiceagents.pathway.v1"|"bland"}`). Round trip: an export
+   imported again has the same `graph_hash`.
+5. Folders: depth = number of folders on the path from the root (a root folder has depth 1), max 5. Every
+   structural write (create with parent, PATCH parent, delete) locks all folder rows of the org
+   (`SELECT id … FOR UPDATE ORDER BY id`) and checks the in-memory tree, so concurrent moves cannot build a cycle
+   or exceed the depth. Errors: unknown folder (path) → 404 `NOT_FOUND` "Folder not found."; unknown `parent_id`
+   → 404 `NOT_FOUND` field `parent_id`; too deep → 400 `INVALID_INPUT` "Folders nest at most 5 levels deep."
+   field `parent_id`; moving into itself/a descendant → 400 `INVALID_INPUT` "A folder cannot move into itself or
+   one of its sub-folders." field `parent_id`.
+   - `GET /v1/pathway/folders` → `{status, folders:[FolderView]}` ordered by name, id (no pagination).
+     `FolderView = {folder_id, name, parent_id, created_at, updated_at}`. `GET /folders/{id}` → `{status, folder}`.
+   - `POST /folders` `{name, parent_id?}` → `{status, folder}`; `PATCH /folders/{id}` `{name?, parent_id?}`
+     (`parent_id: null` = root; only sent fields apply; no-op writes no audit) → `{status, folder}`.
+   - `DELETE /folders/{id}`: its pathways (every row with that folder_id, soft-deleted included) and its direct
+     sub-folders move to its parent (or root), then the row is deleted (so the DB cascade never deletes nested
+     folders). → `{status, message:"Folder deleted.", moved_pathways: n, moved_folders: m}`.
+   - `POST /folders/{id}/move` `{pathway_ids: [uuid], max 100, unique}` → sets `folder_id` on those live pathways;
+     any id not a live pathway of the org → 404 `NOT_FOUND` "Pathway not found." field `pathway_ids[i]`, nothing
+     changes. Empty list = no-op 200. → `{status, moved: n}` (moved = rows whose folder changed).
+6. Audit actions (two-part form required by the specs/04 §13 parser): `pathway.import`, `pathway.duplicate`,
+   `pathway_folder.create`, `pathway_folder.update`, `pathway_folder.delete`, `pathway_folder.move` (the §11
+   `pathway.folder.*`). Add them to specs/04 §13 after `pathway.revert` and to `va_db.audit.AUDIT_ACTIONS`;
+   update the specs/12 §11 line with a note.
+
+### Files
+- `packages/va_db/src/va_db/repositories/pathway_folders.py` (new; export from `va_db.repositories.__init__`):
+  - pure `FolderTree(parents: Mapping[uuid, uuid|None])`: `depth(id)`, `height(id)` (levels of the subtree incl.
+    itself), `is_within(candidate, root)` (candidate == root or a descendant), `children(id)`.
+    `MAX_FOLDER_DEPTH: Final = 5`.
+  - `PathwayFolderRepo(session, org_id, clock=)`: `list_folders()`, `get(folder_id)` (NotFoundError → AppError
+    NOT_FOUND "Folder not found."), `lock_tree() -> FolderTree` (FOR UPDATE), `create(name, parent_id)`,
+    `update(folder, values)`, `delete(folder) -> (moved_pathways, moved_folders)` (two UPDATEs then DELETE, all
+    org-filtered), `move_pathways(folder_id, ids) -> int` (UPDATE … WHERE id IN ids AND org_id AND deleted_at IS
+    NULL AND folder_id IS DISTINCT FROM :f), `live_pathway_ids(ids) -> set`.
+  - `PathwayRepo.folder_exists` stays (or delegates).
+- `apps/api/src/va_api/services/pathway_folders.py` (new): `create_folder`, `update_folder`, `delete_folder`,
+  `move_pathways`, messages constants; audits; depth/cycle checks via FolderTree.
+- `apps/api/src/va_api/services/pathway_io.py` (new): `EXPORT_FORMAT = "voiceagents.pathway.v1"`,
+  `export_pathway(session, ctx, pathway_id, selector, now) -> dict`, `import_pathway(session, ctx, body-values,
+  allow_http) -> (pathway, draft, report)`, `duplicate_pathway(...)`, `missing_reference_warnings(report)`.
+  `services.pathways.create_pathway` gains keyword `action: str = "pathway.create"` and `audit_extra: Mapping |
+  None = None` and returns the CheckedGraph report too (or add `create_checked` returning `(pathway, draft,
+  report)`; keep the existing signature for the create route).
+- `apps/api/src/va_api/routers/pathway_folders.py` + `pathway_folders_schemas.py`; `routers/pathway_io.py` +
+  `pathway_io_schemas.py` (reuse `Name`/`Description`/`GraphNodes`/`GraphEdges`/`ValidationView`/`validation_view`
+  from `pathways_schemas`; every model has an `examples` entry; operation ids `pathways_folders_list`,
+  `pathways_folders_get`, `pathways_folders_create`, `pathways_folders_update`, `pathways_folders_delete`,
+  `pathways_folders_move`, `pathways_import`, `pathways_export`, `pathways_duplicate`; audited markers).
+- `apps/api/src/va_api/main.py`: add both routers to `ROUTERS` before `pathways_router`.
+- `packages/va_db/src/va_db/audit.py` + specs/04 §13 + specs/12 §11/§6 Decision; AGENTS.md bullet.
+- Cross-tenant (`apps/api/tests/support/cross_tenant_factories.py`): `folder_id` factory (root folder via
+  `PathwayFolderRepo.create`); `register_request("pathways_folders_move", json={"pathway_ids": []})`;
+  `pathways_duplicate` json `{"name": "Copy"}` (default draft); import example must be a valid graph.
+- `make openapi` + both `gen:api`.
+
+### Tests
+- `packages/va_db/tests/test_pathway_folders_unit.py`: FolderTree depth/height/is_within (chains, siblings, unknown).
+- `packages/va_db/tests/test_pathway_folder_repo_db.py`: create/list/update, delete re-parents pathways (incl.
+  soft-deleted) and sub-folders, move_pathways counts only changes, org isolation (other org folder invisible,
+  other org pathway ids not moved).
+- `apps/api/tests/test_pathway_folders_api.py`: create root/child; depth 5 ok, 6th → 400 field parent_id; PATCH
+  into own descendant → 400; PATCH moving a 3-level subtree under depth-3 folder → 400 (height check); parent_id
+  null → root; delete moves pathways + sub-folders to parent; move 404 for unknown/deleted/other-org id with field
+  `pathway_ids[1]` and nothing moved; list filter `GET /v1/pathway?folder_id=` reflects moves; audit rows for each
+  action, none for no-op PATCH/empty move; concurrent PATCHes A→under B and B→under A (gather) → exactly one 400.
+- `apps/api/tests/test_pathway_io_api.py`: import each Bland fixture (`graph_helpers.fixture`) — legacy_import
+  aliases normalised (`Transfer Node` → `Transfer Call` in GET body), missing KB → `warnings` item
+  `PATHWAY_KB_MISSING`; `globalConfig` alias; bad `format` → 400 field format; save-mode error (dangling edge) →
+  400 items, no pathway created; export → import round trip equal `graph_hash` + nodes/edges/global_config for all
+  fixtures; export `?version=production` without pin → 404; export body keys exact + `exported_at` = container
+  clock; duplicate default draft, `version: 1`, `"production"` after publish, name default `Copy of …` (and a
+  200-char source name truncated), unknown version 404; audit rows `pathway.import`/`pathway.duplicate`.
+- `apps/api/tests/test_pathways_permissions.py`: extend the role matrix (export/folder list → analyst/viewer ok,
+  billing 403; import/duplicate/folder writes → analyst 403, developer ok).
+- Cross-tenant, audit-marker, openapi contract suites pass; `test_audit_unit` list mirror.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; targeted pytest; `make openapi`
++ `corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api` + `make test-ts`;
+`uv run python scripts/check_spec_refs.py`; `make test` in background (truncate `logs/make_test.log` first, Monitor
+heartbeat); `uvx radon cc -s -a`; `npx --yes jscpd@4 --silent` 0 clones; pip-audit + pnpm audit. No e2e.
+
+### Risks
+- Route order: verify `GET /v1/pathway/folders` and `POST /v1/pathway/import` are not answered by the
+  `{pathway_id}` routes (test it explicitly).
+- jscpd: folder/io schemas mirror pathways_schemas — import the shared aliases, don't copy.
+- Export → import hash equality relies on `dump_graph(load_graph(dump))` being idempotent; if a fixture breaks it,
+  that is a real engine bug — fix it in va_engine, don't weaken the test.
+- `services/pathways.py` is 372 lines: put new logic in new modules.
+
+## Build P07-T09c (in progress → done when make test passes)
+- va_db: `repositories/pathway_folders.py` (`FolderTree`, `PathwayFolderRepo` lock_tree/create/update/delete/move,
+  `MAX_FOLDER_DEPTH`), audit actions (`pathway.import|duplicate`, `pathway_folder.create|update|delete|move`) in
+  specs/04 §13 + AUDIT_ACTIONS.
+- api: `services/pathway_folders.py`, `services/pathway_io.py`, `services.pathways.create_checked` (+`PathwayCreation`),
+  routers `pathway_folders(.py|_schemas)`, `pathway_io(.py|_schemas)` before `pathways_router` in ROUTERS; shared
+  router aliases (`EDITOR`, `READ_SCOPE`, `WRITE_SCOPE`, `ReadPathways`, `WritePathways`, `allow_http`) now public in
+  `routers/pathways.py`.
+- Tests: va_db unit + repo db, api folders (9), io (12), permissions matrix +6; cross-tenant `folder_id` factory, move
+  + duplicate registered requests; `tests/support/pathway_rows.GRAPH` (va_db) shared.
+- Spec: specs/12 §6 Decision P07-T09c, §11 note. openapi + both schema.d.ts regenerated. AGENTS.md bullet.
+- Gates so far: lint/typecheck/placeholders pass, spec refs 0, jscpd 0, radon avg A 2.92, test-ts 22/52/48,
+  pip-audit clean, pnpm audit 3 moderate (pre-existing); targeted pytest 142 passed.
+- make test: 12255 passed, 7 skipped, coverage 99.08 %, exit 0 (the jscpd router/test refactor landed mid-run; the
+  142 affected tests were re-run afterwards and pass).
+
+## Review P07-T09c (approved)
+Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift current; jscpd 0 clones; make test
+12255 passed, 7 skipped, 99.08 %. Diff matches specs/12 §4/§5/§6 and Decision P07-T09c (route order, locked folder
+tree, depth/cycle errors, delete re-parenting, move 404 field paths, import format/alias/warnings, export round trip,
+duplicate selector + copy name, audit actions in specs/04 §13 + AUDIT_ACTIONS).

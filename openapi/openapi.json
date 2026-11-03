@@ -3336,6 +3336,52 @@
         "title": "DialingStrategy",
         "type": "object"
       },
+      "DuplicateBody": {
+        "description": "``POST /v1/pathway/{pathway_id}/duplicate``: the copy's name and the version to copy.",
+        "examples": [
+          {
+            "name": "Copy of Bella Pasta Orders",
+            "version": "production"
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Name of the copy; default `Copy of <name>`.",
+            "title": "Name"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "draft",
+                  "production",
+                  "staging"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "draft",
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "title": "Version"
+          }
+        },
+        "title": "DuplicateBody",
+        "type": "object"
+      },
       "DynamicDataSpec": {
         "additionalProperties": false,
         "description": "A pre-call (or per-turn) HTTP fetch whose extracted values become variables (specs/13 §7).",
@@ -3652,6 +3698,365 @@
         "title": "ExperimentsSettings",
         "type": "object"
       },
+      "ExportBody": {
+        "description": "``GET /v1/pathway/{pathway_id}/export``: the ``voiceagents.pathway.v1`` document.",
+        "examples": [
+          {
+            "description": "Takes phone orders",
+            "edges": [],
+            "exported_at": "2026-11-03T10:42:10Z",
+            "format": "voiceagents.pathway.v1",
+            "global_config": {
+              "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+            },
+            "name": "Bella Pasta Orders",
+            "nodes": [
+              {
+                "data": {
+                  "isStart": true,
+                  "name": "Start",
+                  "prompt": "Greet the caller."
+                },
+                "id": "start",
+                "type": "Default"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "edges": {
+            "items": {},
+            "title": "Edges",
+            "type": "array"
+          },
+          "exported_at": {
+            "format": "date-time",
+            "title": "Exported At",
+            "type": "string"
+          },
+          "format": {
+            "const": "voiceagents.pathway.v1",
+            "default": "voiceagents.pathway.v1",
+            "title": "Format",
+            "type": "string"
+          },
+          "global_config": {
+            "additionalProperties": true,
+            "title": "Global Config",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {},
+            "title": "Nodes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "nodes",
+          "edges",
+          "global_config",
+          "exported_at"
+        ],
+        "title": "ExportBody",
+        "type": "object"
+      },
+      "FolderCreate": {
+        "description": "``POST /v1/pathway/folders``.",
+        "examples": [
+          {
+            "name": "Restaurants"
+          }
+        ],
+        "properties": {
+          "name": {
+            "description": "Folder name (1-200 characters).",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parent folder; null = root.",
+            "title": "Parent Id"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "FolderCreate",
+        "type": "object"
+      },
+      "FolderDeleted": {
+        "description": "``DELETE /v1/pathway/folders/{folder_id}`` result.",
+        "examples": [
+          {
+            "message": "Folder deleted.",
+            "moved_folders": 1,
+            "moved_pathways": 3,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "moved_folders": {
+            "description": "Sub-folders moved to the parent folder (or the root).",
+            "title": "Moved Folders",
+            "type": "integer"
+          },
+          "moved_pathways": {
+            "description": "Pathways moved to the parent folder (or the root).",
+            "title": "Moved Pathways",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message",
+          "moved_pathways",
+          "moved_folders"
+        ],
+        "title": "FolderDeleted",
+        "type": "object"
+      },
+      "FolderList": {
+        "description": "``GET /v1/pathway/folders`` result: every folder ordered by name.",
+        "examples": [
+          {
+            "folders": [
+              {
+                "created_at": "2026-11-03T09:15:00Z",
+                "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+                "name": "Restaurants",
+                "updated_at": "2026-11-03T09:15:00Z"
+              }
+            ],
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/FolderView"
+            },
+            "title": "Folders",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "folders"
+        ],
+        "title": "FolderList",
+        "type": "object"
+      },
+      "FolderMove": {
+        "description": "``POST /v1/pathway/folders/{folder_id}/move``.",
+        "examples": [
+          {
+            "pathway_ids": [
+              "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70"
+            ]
+          }
+        ],
+        "properties": {
+          "pathway_ids": {
+            "description": "Live pathways to move (at most 100, unique).",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Pathway Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pathway_ids"
+        ],
+        "title": "FolderMove",
+        "type": "object"
+      },
+      "FolderMoved": {
+        "description": "``POST /v1/pathway/folders/{folder_id}/move`` result.",
+        "examples": [
+          {
+            "moved": 1,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "moved": {
+            "description": "Pathways whose folder changed.",
+            "title": "Moved",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "moved"
+        ],
+        "title": "FolderMoved",
+        "type": "object"
+      },
+      "FolderOne": {
+        "description": "One folder (get, create, update).",
+        "examples": [
+          {
+            "folder": {
+              "created_at": "2026-11-03T09:15:00Z",
+              "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+              "name": "Restaurants",
+              "updated_at": "2026-11-03T09:15:00Z"
+            },
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "folder": {
+            "$ref": "#/components/schemas/FolderView"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "folder"
+        ],
+        "title": "FolderOne",
+        "type": "object"
+      },
+      "FolderUpdate": {
+        "description": "``PATCH /v1/pathway/folders/{folder_id}``: only sent fields apply; ``parent_id: null`` = root.",
+        "examples": [
+          {
+            "name": "Restaurants"
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New name (1-200 characters).",
+            "title": "Name"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New parent folder; null = root.",
+            "title": "Parent Id"
+          }
+        },
+        "title": "FolderUpdate",
+        "type": "object"
+      },
+      "FolderView": {
+        "description": "A pathway folder; ``parent_id`` null = a root folder.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T09:15:00Z",
+            "folder_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73",
+            "name": "Restaurants",
+            "updated_at": "2026-11-03T09:15:00Z"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "folder_id": {
+            "format": "uuid",
+            "title": "Folder Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "folder_id",
+          "name",
+          "parent_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "FolderView",
+        "type": "object"
+      },
       "GuardRail": {
         "additionalProperties": false,
         "properties": {
@@ -3848,6 +4253,195 @@
           "status"
         ],
         "title": "HealthStatus",
+        "type": "object"
+      },
+      "ImportBody": {
+        "description": "``POST /v1/pathway/import``: our export (``format`` set) or a Bland export (no ``format``).\n\nOther keys (``exported_at``, Bland fields) are ignored; Bland's ``globalConfig`` is read as\n``global_config``.",
+        "examples": [
+          {
+            "description": "Takes phone orders",
+            "edges": [],
+            "format": "voiceagents.pathway.v1",
+            "global_config": {
+              "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+            },
+            "name": "Bella Pasta Orders",
+            "nodes": [
+              {
+                "data": {
+                  "isStart": true,
+                  "name": "Start",
+                  "prompt": "Greet the caller."
+                },
+                "id": "start",
+                "type": "Default"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "edges": {
+            "description": "Every edge of the graph.",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Folder of the new pathway; null = root.",
+            "title": "Folder Id"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "const": "voiceagents.pathway.v1",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`voiceagents.pathway.v1`; omit for a Bland export.",
+            "title": "Format"
+          },
+          "global_config": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Graph-wide settings (`globalConfig` in Bland exports).",
+            "title": "Global Config"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway name; default `Imported pathway`.",
+            "title": "Name"
+          },
+          "nodes": {
+            "description": "Every node; Bland node type aliases are accepted (specs/11 §3.3).",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Nodes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "title": "ImportBody",
+        "type": "object"
+      },
+      "Imported": {
+        "description": "``POST /v1/pathway/import`` result: like create, plus the validation and missing-reference warnings.",
+        "examples": [
+          {
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "status": "success",
+            "validation": {
+              "errors": [],
+              "valid": true,
+              "warnings": [
+                {
+                  "code": "PATHWAY_KB_MISSING",
+                  "message": "Knowledge base 'KB-0193c5d27a417c3e9b0d5f2e8a1c4d72' not found.",
+                  "node_id": "menu"
+                }
+              ]
+            },
+            "version_number": 1,
+            "warnings": [
+              {
+                "code": "PATHWAY_KB_MISSING",
+                "message": "Knowledge base 'KB-0193c5d27a417c3e9b0d5f2e8a1c4d72' not found.",
+                "node_id": "menu"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationView"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          },
+          "warnings": {
+            "description": "`PATHWAY_TOOL_MISSING`/`PATHWAY_KB_MISSING` warnings: references kept in the graph.",
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pathway_id",
+          "version_number",
+          "validation",
+          "warnings"
+        ],
+        "title": "Imported",
         "type": "object"
       },
       "InlineTool": {
@@ -12706,6 +13300,401 @@
         "x-scope": "pathways:write"
       }
     },
+    "/v1/pathway/folders": {
+      "get": {
+        "description": "Every pathway folder of the org, ordered by name.",
+        "operationId": "pathways_folders_list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders List",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "post": {
+        "description": "Create a folder at the root or under ``parent_id`` (at most 5 levels deep).",
+        "operationId": "pathways_folders_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FolderCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders Create",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_folder.create"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/folders/{folder_id}": {
+      "delete": {
+        "description": "Delete a folder; its pathways and sub-folders move to its parent (or the root).",
+        "operationId": "pathways_folders_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "folder_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Folder Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders Delete",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_folder.delete"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      },
+      "get": {
+        "description": "One pathway folder.",
+        "operationId": "pathways_folders_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "folder_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Folder Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "patch": {
+        "description": "Rename a folder or move it under another folder (``parent_id: null`` = root).",
+        "operationId": "pathways_folders_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "folder_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Folder Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FolderUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders Update",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_folder.update"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/folders/{folder_id}/move": {
+      "post": {
+        "description": "Put live pathways into the folder; nothing moves when any id is unknown.",
+        "operationId": "pathways_folders_move",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "folder_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Folder Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FolderMove"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderMoved"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Folders Move",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_folder.move"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/import": {
+      "post": {
+        "description": "Create a pathway from our export or a Bland export; missing tools/KBs are kept and reported.",
+        "operationId": "pathways_import",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Imported"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Import",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.import"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
     "/v1/pathway/{pathway_id}": {
       "delete": {
         "description": "Soft-delete a pathway that nothing live references (or any pathway with ``force``).",
@@ -12914,6 +13903,156 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/duplicate": {
+      "post": {
+        "description": "Copy one version of the pathway into a new pathway (draft v1).",
+        "operationId": "pathways_duplicate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DuplicateBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Duplicate",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.duplicate"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/export": {
+      "get": {
+        "description": "The ``voiceagents.pathway.v1`` document of the selected version.",
+        "operationId": "pathways_export",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Version number, `draft` (default), `production`, or `staging`.",
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Export",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
       }
     },
     "/v1/pathway/{pathway_id}/promote": {
