@@ -77,6 +77,7 @@ class Rig:
     metrics: ServiceMetrics
     sender: InMemoryEmailSender
     redis: FakeAsyncRedis
+    envelope: Envelope
 
     def url(self, path: str, host: str = "hooks.test", scheme: str = "http") -> str:
         return f"{scheme}://{host}:{self.port}{path}"
@@ -204,4 +205,5 @@ async def dispatch_rig(  # noqa: PLR0913 - keyword-only rig knobs
             metrics=metrics,
             sender=sender,
             redis=redis,
+            envelope=envelope,
         )

@@ -1617,3 +1617,10 @@ Grafana 3001
   local-KMS envelope, fake DNS maps `hooks.test`/`a.hooks.test`/`b.hooks.test` to 127.0.0.1; rigs sharing orgs need one
   `master_key`); session fixture `dispatcher_db_url`. Keep the rig's 5 s timeouts for normal deliveries: 0.5 s ones
   timed out under coverage + xdist load.
+- 2026-11-03 (P06-T04a): webhook signing secrets = `va_db.webhook_secrets` (`active_signing_secrets(envelope, org,
+  now=)` current first + previous while `now < prev_expires_at`, `secret_info`, `rotate_signing_secret(session,
+  envelope, org_id, now=)` in a `global_session`: org lock, active data key read via `use_org` in the same
+  transaction, `encrypt_with_key`, never `envelope.encrypt` inside an open session; `ROTATION_OVERLAP` 24 h). Routes
+  `GET /v1/webhooks/signing-secret` and `POST .../rotate` live on `routers/webhooks.webhooks_router` (in `ROUTERS`;
+  P06-T04b adds the endpoint routes there). The dispatcher's `SigningSecrets` caches no longer than the previous
+  secret's expiry. Dispatcher tests: `dispatch_rig(...).envelope` for rotating a rig org.

@@ -2911,6 +2911,57 @@
         "title": "DataResponse[OwnershipTransferred]",
         "type": "object"
       },
+      "DataResponse_RotatedSigningSecret_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-11-03T09:30:00Z",
+              "previous_expires_at": "2026-11-04T09:30:00Z",
+              "secret": "whsec_Ex4mpleS1gn1ngS3cretV4lueOnlyF0rD0csQ2Nw"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RotatedSigningSecret"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[RotatedSigningSecret]",
+        "type": "object"
+      },
+      "DataResponse_SigningSecretView_": {
+        "examples": [
+          {
+            "data": {
+              "created_at": "2026-11-03T09:30:00Z",
+              "previous_expires_at": "2026-11-04T09:30:00Z",
+              "previous_secret_last4": "8Bq1",
+              "secret_last4": "Q2Nw"
+            }
+          }
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SigningSecretView"
+          },
+          "errors": {
+            "title": "Errors",
+            "type": "null"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DataResponse[SigningSecretView]",
+        "type": "object"
+      },
       "DataResponse_SsoConnectionDeleted_": {
         "examples": [
           {
@@ -5716,6 +5767,49 @@
         "title": "RetryRequest",
         "type": "object"
       },
+      "RotatedSigningSecret": {
+        "description": "A newly issued signing secret, shown once.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T09:30:00Z",
+            "previous_expires_at": "2026-11-04T09:30:00Z",
+            "secret": "whsec_Ex4mpleS1gn1ngS3cretV4lueOnlyF0rD0csQ2Nw"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "description": "When the new secret was issued.",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "previous_expires_at": {
+            "description": "Until then deliveries carry a second `v1=` signature made with the old secret.",
+            "format": "date-time",
+            "title": "Previous Expires At",
+            "type": "string"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The new secret (`whsec_...`); only in this response, `null` on an Idempotency-Key replay.",
+            "title": "Secret"
+          }
+        },
+        "required": [
+          "secret",
+          "created_at",
+          "previous_expires_at"
+        ],
+        "title": "RotatedSigningSecret",
+        "type": "object"
+      },
       "SendCallRequest": {
         "description": "The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.",
         "examples": [
@@ -6484,6 +6578,61 @@
           "call_id"
         ],
         "title": "SendCallResponse",
+        "type": "object"
+      },
+      "SigningSecretView": {
+        "description": "The org's webhook signing secret by its last four characters.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T09:30:00Z",
+            "previous_expires_at": "2026-11-04T09:30:00Z",
+            "previous_secret_last4": "8Bq1",
+            "secret_last4": "Q2Nw"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "description": "When the current secret was issued.",
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "previous_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the previous secret stops signing deliveries (24 h after a rotation).",
+            "title": "Previous Expires At"
+          },
+          "previous_secret_last4": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last four characters of the previous secret while deliveries are still signed with it.",
+            "title": "Previous Secret Last4"
+          },
+          "secret_last4": {
+            "description": "Last four characters of the current secret.",
+            "title": "Secret Last4",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret_last4",
+          "created_at"
+        ],
+        "title": "SigningSecretView",
         "type": "object"
       },
       "SmsSettings": {
@@ -10253,6 +10402,79 @@
         "x-envelope": "legacy",
         "x-permission": "subaccounts.manage",
         "x-scope": "org:write"
+      }
+    },
+    "/v1/webhooks/signing-secret": {
+      "get": {
+        "description": "The current secret's last four characters and issue time, plus the previous one's while it signs.",
+        "operationId": "webhooks_signing_secret_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_SigningSecretView_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Webhooks Signing Secret Get",
+        "tags": [
+          "Webhooks"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "webhooks.secret",
+        "x-scope": "webhooks:read"
+      }
+    },
+    "/v1/webhooks/signing-secret/rotate": {
+      "post": {
+        "description": "Issue a new signing secret, returned only here; the old one keeps signing (second `v1=`) for 24 h.",
+        "operationId": "webhooks_signing_secret_rotate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataResponse_RotatedSigningSecret_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Webhooks Signing Secret Rotate",
+        "tags": [
+          "Webhooks"
+        ],
+        "x-audit": [
+          "webhook.secret_rotate"
+        ],
+        "x-envelope": "envelope",
+        "x-permission": "webhooks.secret",
+        "x-scope": "webhooks:write"
       }
     }
   },

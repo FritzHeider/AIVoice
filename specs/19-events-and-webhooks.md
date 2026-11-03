@@ -401,6 +401,19 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 | GET | `/v1/webhooks/signing-secret` | — | `{data:{secret_last4, created_at}}` (owner/admin) |
 | POST | `/v1/webhooks/signing-secret/rotate` | — | `{data:{secret}}` shown once; old secret valid 24 h (dual-sign `v1=` twice) |
 
+> Decision (2026-11-03): signing secret rotation (P06-T04a). `orgs` gains `webhook_signing_secret_created_at`,
+> `webhook_signing_secret_prev_enc` (envelope-encrypted under AAD `column_aad("orgs", "webhook_signing_secret_prev_enc",
+> org_id)`), and `webhook_signing_secret_prev_expires_at` (migration `0006`, specs/03 §3). Rotation runs in one
+> transaction after `SELECT ... FOR UPDATE` on the org row, so concurrent rotations serialise: the new secret is
+> `whsec_<token>`, the current secret becomes the previous one until `now + 24 h`, and only one previous secret is kept
+> (a rotation inside an open window drops the older one). The active set is the current secret plus the previous one
+> while `now < prev_expires_at`, current first; the dispatcher caches it for at most 300 s and never past the previous
+> secret's expiry. `GET` returns `{secret_last4, created_at, previous_secret_last4, previous_expires_at}` (the previous
+> fields are `null` outside a window); `POST .../rotate` returns `{secret, created_at, previous_expires_at}`, with
+> `secret` `null` on an `Idempotency-Key` replay. Both need the `webhooks.secret` permission (owners, admins, API keys
+> with `*`; specs/04 §3.2) next to `webhooks:read` / `webhooks:write`. The `webhook.secret_rotate` audit row (resource
+> `org`) records last four characters and timestamps only.
+
 ## 11. Tests required
 
 - Signature generation matches a fixed vector (secret `whsec_test`, timestamp `1700000000`, body `{"a":1}`) in both

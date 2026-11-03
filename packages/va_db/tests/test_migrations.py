@@ -65,6 +65,10 @@ def test_offline_upgrade_creates_every_model_table(upgrade_sql: str) -> None:
         "UPDATE alembic_version SET version_num='0005' WHERE alembic_version.version_num = '0004'"
         in upgrade_sql
     )
+    assert (
+        "UPDATE alembic_version SET version_num='0006' WHERE alembic_version.version_num = '0005'"
+        in upgrade_sql
+    )
 
 
 def test_offline_upgrade_keeps_spec_ddl(upgrade_sql: str) -> None:

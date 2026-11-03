@@ -12,10 +12,16 @@
   - Deliverables: `apps/webhook_dispatcher` poll loop with SKIP LOCKED, concurrency (global + per-host), signing headers (both formats), timeouts (10 s batch / 15 s others), retry schedule with jitter, 410 handling + endpoint auto-disable + admin email, DNS-resolving SSRF guard, per-attempt `call_events` rows, metrics
   - Acceptance: tests with a local receiver for success, 500 retry, timeout, redirect, 410, private-IP refusal (each blocked range), multi-pod no-duplicate test.
 
-- [ ] P06-T04 Webhook endpoint management API
-  - Spec refs: specs/19-events-and-webhooks.md (webhook endpoint management API)
+- [x] P06-T04a Webhook signing secret view and rotation (24 h dual-signing) — migration 0006, va_db.webhook_secrets, GET/rotate routes (withheld on replay, audited last4 only), dispatcher dual-sign until expiry; make test 10980 passed, 7 skipped; lint/typecheck/placeholders pass
+  - Spec refs: specs/19-events-and-webhooks.md §8, §10 (signing-secret rows), §11 (dual-sign during rotation); specs/28-security.md §3; specs/04 §3.2 (secret row), §13 (`webhook.secret_rotate`)
   - Depends on: P06-T03, P02-T08
-  - Deliverables: endpoints CRUD, test send, deliveries list/filter, replay, signing secret view/rotate with 24 h dual-signing
+  - Deliverables: migration 0006 (current secret `created_at`, previous secret + expiry on `orgs`), `va_db.webhook_secrets` (read active secrets, rotate), `GET /v1/webhooks/signing-secret`, `POST /v1/webhooks/signing-secret/rotate` (shown once, withheld on idempotent replay, audited), dispatcher signs with both secrets until the previous one expires
+  - Acceptance: API tests incl. RBAC (owner/admin only, API keys need `webhooks:write` + `webhooks.secret`), cross-tenant registration; dispatcher dual-sign test before and after the 24 h expiry; migration/schema parity tests green.
+
+- [ ] P06-T04b Webhook endpoint and delivery management API
+  - Spec refs: specs/19-events-and-webhooks.md §8 (replay, dead-letter view), §10 (endpoint and delivery rows)
+  - Depends on: P06-T04a
+  - Deliverables: endpoints CRUD (URL vetted, deleting an endpoint cancels its pending deliveries), test send (synthetic signed event through the shared SSRF-safe sender, returns the delivery result), deliveries list/filter (cursor, limit ≤ 100), replay (new attempt series, same event id)
   - Acceptance: API tests incl. RBAC and cross-tenant registration with the P02-T15 suite.
 
 - [ ] P06-T05 Events sink to ClickHouse

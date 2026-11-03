@@ -21,7 +21,7 @@ paths = ['''^specs/[^/]+\.md$''', '''^\.ralph/agent/(memories|scratchpad)\.md$''
 condition = "AND"
 
 [[allowlists]]
-description = "fixed OpenAPI example values (minted API keys, poll secret, email-link tokens) in schemas, generated specs and types, and the tests that reuse them"
+description = "fixed OpenAPI example values (minted API keys, poll secret, email-link tokens, webhook signing secret) in schemas, generated specs and types, and the tests that reuse them"
 targetRules = ["generic-api-key"]
 regexes = [
   '''^va_live_3kQ9xT2mLpR7vB1nZc8dHf4sWq6yJa0e$''',
@@ -29,6 +29,7 @@ regexes = [
   '''^Qm9sZC1wb2xsLXNlY3JldC1leGFtcGxlLXZhbHVlLTE$''',
   '''^Vq3nT8bLw0eZ5yRk2mXc7hJd4sGa9uPf1oNi6tWe8Bq$''',
   '''^Xb4LZ0c9qkV2mR7tWn1sYe8pHu3aGj6dKf5oQi2NwTs$''',
+  '''^whsec_Ex4mpleS1gn1ngS3cretV4lueOnlyF0rD0csQ2Nw$''',
 ]
 paths = [
   '''^openapi/(openapi|internal)\.json$''',

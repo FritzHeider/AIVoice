@@ -57,8 +57,9 @@
     `kek_id = key ARN`.
 - API: `encrypt(org_id, plaintext: bytes, aad: str) -> bytes`, `decrypt(org_id, blob, aad) -> bytes`,
   `encrypt_str/decrypt_str` helpers, `platform_encrypt` (platform-level secrets with org_id = nil UUID).
-- Encrypted columns (complete): `orgs.webhook_signing_secret_enc`, `users.mfa_totp_secret_enc`,
-  `sso_connections.client_secret_enc`, `telnyx_accounts.api_key_enc`, `tools.secret_headers_enc`,
+- Encrypted columns (complete): `orgs.webhook_signing_secret_enc`, `orgs.webhook_signing_secret_prev_enc`,
+  `users.mfa_totp_secret_enc`, `sso_connections.client_secret_enc`, `telnyx_accounts.api_key_enc`,
+  `tools.secret_headers_enc`,
   `org_secrets.value_enc` (new table from `04` §7). Recording objects in S3 use SSE-KMS (bucket key), and in
   `hipaa_mode` additionally client-side encryption with the org data key (stream-chunked AES-GCM, 64 KiB chunks,
   per-chunk nonce = base nonce XOR chunk index) with metadata `x-amz-meta-va-enc=v1`.

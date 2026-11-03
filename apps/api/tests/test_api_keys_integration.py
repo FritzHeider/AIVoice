@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
@@ -16,8 +15,6 @@ from session_helpers import (
     add_member,
     error_of,
     login,
-    session_app,
-    session_client,
     signed_in,
     store_api_key,
     sub_account,
@@ -51,13 +48,6 @@ VIEW_FIELDS = {
 
 def bearer(key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"}
-
-
-@pytest.fixture
-async def bare(container: SessionContainer) -> AsyncIterator[httpx.AsyncClient]:
-    """A second client without a session, for requests authenticated by API keys only."""
-    async with session_client(session_app(container)) as other:
-        yield other
 
 
 async def post(client: httpx.AsyncClient, path: str, body: dict[str, Any], **headers: str) -> httpx.Response:

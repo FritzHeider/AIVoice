@@ -645,6 +645,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/webhooks/signing-secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Webhooks Signing Secret Get
+         * @description The current secret's last four characters and issue time, plus the previous one's while it signs.
+         */
+        get: operations["webhooks_signing_secret_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/webhooks/signing-secret/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Webhooks Signing Secret Rotate
+         * @description Issue a new signing secret, returned only here; the old one keeps signing (second `v1=`) for 24 h.
+         */
+        post: operations["webhooks_signing_secret_rotate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2374,6 +2414,37 @@ export interface components {
             errors?: null;
         };
         /**
+         * DataResponse[RotatedSigningSecret]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-11-03T09:30:00Z",
+         *         "previous_expires_at": "2026-11-04T09:30:00Z",
+         *         "secret": "whsec_Ex4mpleS1gn1ngS3cretV4lueOnlyF0rD0csQ2Nw"
+         *       }
+         *     }
+         */
+        DataResponse_RotatedSigningSecret_: {
+            data: components["schemas"]["RotatedSigningSecret"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[SigningSecretView]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-11-03T09:30:00Z",
+         *         "previous_expires_at": "2026-11-04T09:30:00Z",
+         *         "previous_secret_last4": "8Bq1",
+         *         "secret_last4": "Q2Nw"
+         *       }
+         *     }
+         */
+        DataResponse_SigningSecretView_: {
+            data: components["schemas"]["SigningSecretView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[SsoConnectionDeleted]
          * @example {
          *       "data": {
@@ -3942,6 +4013,34 @@ export interface components {
             wait?: number | null;
         };
         /**
+         * RotatedSigningSecret
+         * @description A newly issued signing secret, shown once.
+         * @example {
+         *       "created_at": "2026-11-03T09:30:00Z",
+         *       "previous_expires_at": "2026-11-04T09:30:00Z",
+         *       "secret": "whsec_Ex4mpleS1gn1ngS3cretV4lueOnlyF0rD0csQ2Nw"
+         *     }
+         */
+        RotatedSigningSecret: {
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the new secret was issued.
+             */
+            created_at: string;
+            /**
+             * Previous Expires At
+             * Format: date-time
+             * @description Until then deliveries carry a second `v1=` signature made with the old secret.
+             */
+            previous_expires_at: string;
+            /**
+             * Secret
+             * @description The new secret (`whsec_...`); only in this response, `null` on an Idempotency-Key replay.
+             */
+            secret: string | null;
+        };
+        /**
          * SendCallRequest
          * @description The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.
          * @example {
@@ -4244,6 +4343,39 @@ export interface components {
              * @constant
              */
             status: "success";
+        };
+        /**
+         * SigningSecretView
+         * @description The org's webhook signing secret by its last four characters.
+         * @example {
+         *       "created_at": "2026-11-03T09:30:00Z",
+         *       "previous_expires_at": "2026-11-04T09:30:00Z",
+         *       "previous_secret_last4": "8Bq1",
+         *       "secret_last4": "Q2Nw"
+         *     }
+         */
+        SigningSecretView: {
+            /**
+             * Created At
+             * Format: date-time
+             * @description When the current secret was issued.
+             */
+            created_at: string;
+            /**
+             * Previous Expires At
+             * @description When the previous secret stops signing deliveries (24 h after a rotation).
+             */
+            previous_expires_at?: string | null;
+            /**
+             * Previous Secret Last4
+             * @description Last four characters of the previous secret while deliveries are still signed with it.
+             */
+            previous_secret_last4?: string | null;
+            /**
+             * Secret Last4
+             * @description Last four characters of the current secret.
+             */
+            secret_last4: string;
         };
         /**
          * SmsSettings
@@ -6399,6 +6531,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    webhooks_signing_secret_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_SigningSecretView_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_signing_secret_rotate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_RotatedSigningSecret_"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };

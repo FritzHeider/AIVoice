@@ -23,6 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB
@@ -114,6 +115,14 @@ class Org(IdMixin, TimestampMixin, Base):
     recording_retention_days: Mapped[int] = int_column(90)
     # Envelope-encrypted.
     webhook_signing_secret_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Rotation columns appended by migration 0006, so they sort after the TimestampMixin columns like the
+    # database columns (specs/03 §3 Decision 2026-11-03).
+    webhook_signing_secret_created_at: Mapped[datetime] = mapped_column(
+        tz(), nullable=False, server_default=func.now(), sort_order=1
+    )
+    # Envelope-encrypted previous secret, signed with until ``webhook_signing_secret_prev_expires_at``.
+    webhook_signing_secret_prev_enc: Mapped[bytes | None] = mapped_column(LargeBinary, sort_order=2)
+    webhook_signing_secret_prev_expires_at: Mapped[datetime | None] = mapped_column(tz(), sort_order=3)
 
 
 class User(IdMixin, TimestampMixin, Base):

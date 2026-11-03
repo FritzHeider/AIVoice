@@ -297,3 +297,130 @@ mark_succeeded/schedule_retry/mark_dead, each attempts+1), `va_common.net.check_
   2. A deleted endpoint (FK SET NULL) leaves pending rows delivered to its old URL; endpoint management (P06-T05)
      should cancel pending rows on delete.
 - Verdict: APPROVED (make test 10952 passed, 7 skipped, 99.06 %; lint/typecheck/placeholders pass).
+
+## Plan P06-T04a — Webhook signing secret view and rotation
+P06-T04 was split (plan file updated) into T04a (this: secret storage, rotate/view routes, dispatcher dual-sign) and
+T04b (endpoints CRUD, test send, deliveries list, replay; T04b also moves Deliverer/signing/destinations into a shared
+package so the api test send can reuse them, and cancels pending rows on endpoint delete — reviewer note 2 of T03).
+
+### Decisions (add `> Decision (2026-11-03): signing secret rotation (P06-T04a).` under specs/19 §10)
+1. Storage: `orgs` gains three columns, appended LAST in the specs/03 orgs DDL (ADD COLUMN attnum rule):
+   `webhook_signing_secret_created_at timestamptz NOT NULL DEFAULT now()`,
+   `webhook_signing_secret_prev_enc bytea` (envelope-encrypted, same AAD shape via
+   `column_aad("orgs","webhook_signing_secret_prev_enc", org_id)`), `webhook_signing_secret_prev_expires_at timestamptz`.
+   Migration `0006_webhook_secret_rotation.py`: three `ALTER TABLE orgs ADD COLUMN …` (one statement each through
+   `op.execute(sa.text(...))`), then `UPDATE orgs SET webhook_signing_secret_created_at = created_at`; downgrade drops
+   the three columns. Existing grants cover new columns. Add the prev column to specs/28 §3 encrypted-columns list.
+2. Active secrets = current, plus previous while `now < prev_expires_at` (current first). Rotation window 24 h
+   (`ROTATION_OVERLAP = timedelta(hours=24)`).
+3. Rotate (in one `global_session`, `OrgRepo.lock(org_id)` first so concurrent rotations serialize): new secret =
+   `WEBHOOK_SECRET_PREFIX + generate_token()`; previous := the CURRENT secret (re-encrypted under the prev AAD — decrypt
+   current, encrypt with prev AAD), `prev_expires_at = now + 24 h`; current := new, `created_at = now`. A rotation
+   during an open window drops the older previous secret (only one previous kept; documented). Response
+   `{data:{secret, created_at, previous_expires_at}}`: `secret` shown once; `withhold_on_replay(request, "data.secret")`.
+   Audit `webhook.secret_rotate` resource_type `org`, resource_id org id, before `{secret_last4: old4, created_at}`,
+   after `{secret_last4: new4, created_at, previous_expires_at}` (last4 only; `redact` would hide a key named
+   `secret`, so never pass the secret itself).
+4. View `GET /v1/webhooks/signing-secret` → `{data:{secret_last4, created_at, previous_secret_last4|null,
+   previous_expires_at|null}}` (previous fields only while the window is open). Spec table lists
+   `{secret_last4, created_at}`; extra fields documented in the Decision.
+5. Auth: both routes on a new envelope router `webhooks_router` (`envelope_router(prefix="/v1/webhooks")`, tag
+   `webhooks`, in `main.ROUTERS`); GET `require_scope("webhooks:read")` + `require_permission("webhooks.secret")`,
+   POST `require_scope("webhooks:write")` + `require_permission("webhooks.secret")`; `openapi_extra={"x-scope":…,
+   "x-permission":"webhooks.secret"}`; rotate `**audited("webhook.secret_rotate")`. Developer/analyst/viewer/billing
+   sessions → 403; a `*` API key passes; a `webhooks:write` key without `*` lacks the permission → 403 (per
+   holds_permission semantics — verify, keep whatever `holds_permission` does and assert it).
+   The orgs table has no RLS: use `global_session()` + `OrgRepo` with `ctx.org_id` only (as `GET /v1/org`). Acting
+   parent on sub-account → operates on the child's (ctx.org_id) secret, which is correct.
+6. Dispatcher: `SigningSecrets.get` returns `active_signing_secrets(...)` result; cache entry expiry =
+   `min(monotonic + ttl, monotonic + (prev_expires_at - now))` so an expired previous secret stops being signed with
+   promptly. Rotation visibility lag ≤ 300 s is fine (old secret valid 24 h).
+
+### Files
+- `packages/va_db/src/va_db/migrations/versions/0006_webhook_secret_rotation.py` (pattern of 0005).
+- `specs/03-data-model.md` orgs DDL (3 columns last, after `updated_at` — check `test_schema_matches_spec` compares
+  attnum; 0001 DDL must not change).
+- `packages/va_db/src/va_db/models/tenancy.py` `Org`: `webhook_signing_secret_created_at: Mapped[datetime]` (`tz()`
+  server_default now()), `webhook_signing_secret_prev_enc: Mapped[bytes | None]` (LargeBinary),
+  `webhook_signing_secret_prev_expires_at: Mapped[datetime | None]`. Autogenerate parity must stay `[]`.
+- NEW `packages/va_db/src/va_db/webhook_secrets.py`:
+  - `ROTATION_OVERLAP: Final = timedelta(hours=24)`; `previous_secret_aad(org_id) -> str`.
+  - `@dataclass(frozen=True) SecretInfo(secret_last4: str, created_at: datetime, previous_secret_last4: str | None,
+    previous_expires_at: datetime | None)`.
+  - `@dataclass(frozen=True) ActiveSecrets(secrets: tuple[str, ...] (repr=False), previous_expires_at: datetime | None)`.
+  - `async def active_signing_secrets(envelope, org: Org, *, now) -> ActiveSecrets` (current first, previous only
+    while open).
+  - `async def secret_info(envelope, org, *, now) -> SecretInfo` (decrypts to compute last4; last4 = last 4 chars).
+  - `@dataclass(frozen=True) RotatedSecret(secret: str (repr=False), created_at, previous_expires_at, before: SecretInfo,
+    after: SecretInfo)`.
+  - `async def rotate_signing_secret(session, envelope, org_id, *, now) -> RotatedSecret` (lock via
+    `OrgRepo(session).lock`, NotFoundError/AppError NOT_FOUND if missing; writes via ORM attribute assignment + flush).
+  - Move `webhook_secret_aad` here? NO — keep it in provisioning (imported by dispatcher); import it from there.
+  - Provisioning: set nothing new (server default now()); `ProvisionedOrg` unchanged.
+- `apps/webhook_dispatcher/src/va_webhooks/signing_secrets.py`: use `active_signing_secrets`, cache expiry rule (6).
+- NEW `apps/api/src/va_api/routers/webhooks.py` (router + two routes) and `routers/webhooks_schemas.py`
+  (`SigningSecretView`, `RotatedSigningSecret` pydantic models with `examples`; secret example must be obviously fake
+  but pass gitleaks — e.g. `"whsec_" + "x"*43` literal? gitleaks generic rule may trip: use a short illustrative
+  `whsec_EXAMPLE…`; if gitleaks complains add a scoped allowlist entry like earlier api_key examples — check
+  `.gitleaks.toml` for the api_keys example pattern and mirror it).
+- `apps/api/src/va_api/main.py` ROUTERS; `make openapi` + both `gen:api` (dashboard, sdk schema.d.ts).
+- specs/19 §10 Decision; specs/28 §3 encrypted column list; AGENTS.md learned bullet (P06-T04a).
+
+### Tests
+- `packages/va_db/tests/test_webhook_secrets_db.py` (module Postgres like other va_db DB tests; local-KMS Envelope +
+  OrgProvisioner): fresh org → active = (provisioned secret,), info previous None, created_at set; rotate → returns new
+  `whsec_` secret ≠ old, active = (new, old), prev_expires_at = now + 24 h; at now+24h-1s still two, at now+24h → one;
+  second rotate during window → (newest, second), first gone; rotate unknown org → NOT_FOUND; concurrent rotations
+  (two sessions via gather) serialize: final previous == the secret produced by the first committed rotation (assert
+  active secrets are two distinct and both returned secrets appear consistently) — keep it simple: assert no lost
+  update, i.e. the second rotation's previous equals the first rotation's new secret.
+- Migration tests: `migration_helpers` upgrade to head then downgrade to 0005 and back (existing generic up/down tests
+  may cover; add an assertion that 0006 backfills `webhook_signing_secret_created_at = created_at` for a pre-existing
+  org row inserted at revision 0005). Schema-vs-spec + autogenerate parity tests must pass unchanged.
+- `apps/api/tests/test_webhook_signing_secret.py` (session_helpers migrated_postgres, SessionContainer with
+  `FrozenClock`): owner GET → last4 matches provisioned secret's last 4, created_at; rotate → 200 with secret, GET
+  shows new last4 + previous fields; audit row `webhook.secret_rotate` without the secret anywhere in `changes`
+  (search the serialized JSON for both secrets); idempotent replay of rotate with same `Idempotency-Key` → `secret`
+  null and no second rotation (GET last4 unchanged); roles: admin 200, developer/analyst/viewer/billing 403 on both;
+  API key `*` 200; key with only `webhooks:read`/`webhooks:write` → 403 (permission) — assert against actual
+  holds_permission semantics; clock advanced 24 h → previous fields null.
+- Cross-tenant suite: routes have no path params → probed automatically; run `apps/api/tests/test_cross_tenant_routes.py`
+  and `test_audit_markers.py`, `test_openapi.py`, `test_operations_contract`.
+- Dispatcher: `apps/webhook_dispatcher/tests/test_signing_secrets*.py` / extend DB test: after rotation a delivery's
+  `X-VA-Signature` has two `v1=` (new first), both verify with hmac; `X-Webhook-Signature` uses the new secret; after
+  advancing the clock past the expiry (and the cache) only one `v1=`. Cache unit test: entry expires at prev expiry
+  even when ttl is longer (ManualClock/RecordingClock with monotonic).
+- Gates: `make fmt lint typecheck placeholders`; `uv run pytest packages/va_db apps/api apps/webhook_dispatcher -q`;
+  `make openapi` + gen:api + `make test-ts`; full `make test` in background with heartbeat Monitor; `make check`.
+  No e2e (no call flow touched).
+
+### Risks
+- `test_schema_matches_spec` attnum: columns must be the last three in the spec's orgs DDL.
+- gitleaks on `whsec_` example strings in schemas/openapi.json — check `.gitleaks.toml` before choosing the example.
+- FrozenClock vs DB `now()`: compute `created_at`/expiry from the injected clock, never DB now().
+- uv PATH on the runner: `export PATH=/home/ralph/.local/bin:$PATH`.
+
+## Build P06-T04a (builder notes)
+- Implemented per plan. Migration 0006 (3 ADD COLUMN + backfill), Org model columns sort_order 1-3, specs/03 DDL +
+  Decision, specs/19 §10 Decision P06-T04a, specs/28 §3 list. `va_db.webhook_secrets` (active/info/rotate).
+- Deviation: rotate reads the active data key inside the same global_session via `use_org` + `OrgDataKeyRepo` and
+  seals with `encrypt_with_key` (Envelope.encrypt would open a second pool session while holding the org lock).
+- Routes on `routers/webhooks.webhooks_router` (in ROUTERS); openapi + both gen:api regenerated. OpenAPI secret example
+  `whsec_Ex4mple...` added to the .gitleaks.toml example allowlist (generic-api-key tripped on it; gitleaks dir clean).
+- Dispatcher SigningSecrets uses active_signing_secrets; cache lifetime = min(ttl, prev expiry - now).
+- Tests: va_db test_webhook_secrets_db (6) + test_webhook_secret_rotation_migration (4, backfill on real PG);
+  head-revision asserts bumped to 0006; tenancy model column/default tables; api test_webhook_signing_secret (14:
+  view, rotate, 24 h window, audit w/o secrets, idempotent replay withholds + no 2nd rotation, admin ok, 4 roles 403,
+  `*` key ok, narrow keys 403, parent acting on sub-account); dispatcher test_signing_secrets_db (4: dual v1 new first,
+  cache expiry at prev expiry, full TTL without window, unknown org).
+- Gates: make check exit 0 (10980 passed, 7 skipped, coverage 99.07 %, TS tests pass, openapi + spec refs current).
+  Then a test-only jscpd fix (3 clones from the new api test → 0): shared `bare` fixture moved to apps/api/tests/conftest.py
+  (test_api_keys_integration uses it), `bearer` imported from call_helpers, local `signed_in_owner`/`db_idempotency`.
+  Re-ran: ruff check/format, mypy (1330 files), placeholders 0, apps/api tests 1437 passed. pip-audit clean; pnpm audit
+  3 moderate (no high); radon avg 1.95 for new modules. No e2e (no call flow touched).
+
+## Review P06-T04a (reviewer notes)
+- Gates re-run: lint pass, typecheck pass (1330 files), placeholders 0, make test 10980 passed / 7 skipped (exit 0).
+- Diff checked vs specs/19 §10 Decision, specs/03 orgs DDL (columns last), specs/28 §3, specs/04 §3.2 permission.
+  Rotation decrypts via embedded key (no extra pool session); encrypt_with_key with key read in-transaction.
+- Verdict: APPROVED.

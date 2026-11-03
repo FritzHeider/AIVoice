@@ -163,7 +163,10 @@ CREATE TABLE orgs (
   recording_retention_days integer NOT NULL DEFAULT 90 CHECK (recording_retention_days BETWEEN 0 AND 3650),
   webhook_signing_secret_enc bytea NOT NULL,                   -- envelope-encrypted
   created_at              timestamptz NOT NULL DEFAULT now(),
-  updated_at              timestamptz NOT NULL DEFAULT now()
+  updated_at              timestamptz NOT NULL DEFAULT now(),
+  webhook_signing_secret_created_at timestamptz NOT NULL DEFAULT now(),  -- when the current secret was issued
+  webhook_signing_secret_prev_enc bytea,                       -- envelope-encrypted previous secret (rotation)
+  webhook_signing_secret_prev_expires_at timestamptz           -- previous secret signs until then (24 h)
 );
 CREATE INDEX orgs_parent_idx ON orgs(parent_org_id);
 
@@ -305,6 +308,11 @@ CREATE TABLE idempotency_keys (
 > `ALTER TABLE ... ADD COLUMN` appends the column, and the schema conformance test compares column positions, so the
 > DDL above lists it last; `0001_initial` keeps its original `sessions` text. Columns added by later migrations follow
 > the same rule.
+
+> Decision (2026-11-03): migration `0006_webhook_secret_rotation` appends the three `orgs.webhook_signing_secret_*`
+> rotation columns (`created_at` backfilled from `orgs.created_at`), which is why the `orgs` DDL lists them after
+> `updated_at`. The previous secret is sealed under AAD `column_aad("orgs", "webhook_signing_secret_prev_enc", org_id)`;
+> rotation rules are the specs/19 §10 Decision P06-T04a.
 
 ## 4. Telephony: carrier accounts, numbers, pools
 

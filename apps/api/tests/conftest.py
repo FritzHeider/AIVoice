@@ -60,6 +60,13 @@ async def client(container: SessionContainer) -> AsyncIterator[httpx.AsyncClient
 
 
 @pytest.fixture
+async def bare(container: SessionContainer) -> AsyncIterator[httpx.AsyncClient]:
+    """A second client without a session, for requests authenticated by API keys only."""
+    async with session_client(session_app(container)) as other:
+        yield other
+
+
+@pytest.fixture
 def idp(container: SessionContainer) -> Iterator[respx.MockRouter]:
     with mocked_idp(FakeOidcProvider(now=container.clock.now)) as router:
         yield router

@@ -1,7 +1,10 @@
 """Org webhook signing secrets for the dispatcher (specs/28-security.md §3; specs/19 §8).
 
-The secret is ``orgs.webhook_signing_secret_enc`` decrypted with the org's data key and cached in process for
-``ttl_s`` seconds of the injected clock. :meth:`SigningSecrets.get` returns the active secrets, current first.
+The secrets are ``orgs.webhook_signing_secret_enc`` plus, during a rotation window, the previous
+secret (:func:`va_db.webhook_secrets.active_signing_secrets`), decrypted with the org's data key and cached
+in process for ``ttl_s`` seconds of the injected clock, never past the previous secret's expiry, so an
+expired previous secret stops signing promptly. :meth:`SigningSecrets.get` returns the active secrets,
+current first.
 """
 
 from __future__ import annotations
@@ -13,9 +16,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from va_common.crypto import CryptoError, Envelope
 from va_common.time import Clock
-from va_db.provisioning import webhook_secret_aad
 from va_db.repositories import OrgRepo
 from va_db.session import Database
+from va_db.webhook_secrets import active_signing_secrets
 
 __all__ = ["SECRET_TTL_S", "SecretUnavailableError", "SigningSecrets"]
 
@@ -43,19 +46,18 @@ class SigningSecrets:
         cached = self._cache.get(org_id)
         if cached is not None and cached[0] > self._clock.monotonic():
             return cached[1]
+        now = self._clock.now()
         try:
             async with self._database.global_session() as session:
                 org = await OrgRepo(session).get(org_id)
-                encrypted = None if org is None else org.webhook_signing_secret_enc
-        except (SQLAlchemyError, OSError) as exc:
-            raise SecretUnavailableError(type(exc).__name__) from exc
-        if encrypted is None:
-            msg = "org not found"
-            raise SecretUnavailableError(msg)
-        try:
-            secret = await self._envelope.decrypt_str(org_id, encrypted, webhook_secret_aad(org_id))
+                active = None if org is None else await active_signing_secrets(self._envelope, org, now=now)
         except (CryptoError, SQLAlchemyError, OSError) as exc:
             raise SecretUnavailableError(type(exc).__name__) from exc
-        secrets = (secret,)
-        self._cache[org_id] = (self._clock.monotonic() + self._ttl_s, secrets)
-        return secrets
+        if active is None:
+            msg = "org not found"
+            raise SecretUnavailableError(msg)
+        lifetime = self._ttl_s
+        if active.previous_expires_at is not None:
+            lifetime = min(lifetime, (active.previous_expires_at - now).total_seconds())
+        self._cache[org_id] = (self._clock.monotonic() + lifetime, active.secrets)
+        return active.secrets

@@ -78,6 +78,9 @@ _COLUMNS: dict[str, list[tuple[str, bool]]] = {
         ("webhook_signing_secret_enc", False),
         ("created_at", False),
         ("updated_at", False),
+        ("webhook_signing_secret_created_at", False),
+        ("webhook_signing_secret_prev_enc", True),
+        ("webhook_signing_secret_prev_expires_at", True),
     ],
     "users": [
         ("id", False),
@@ -268,6 +271,7 @@ _SERVER_DEFAULTS: dict[tuple[str, str], str] = {
     ("orgs", "data_region"): "'us'",
     ("orgs", "retention_days"): "365",
     ("orgs", "recording_retention_days"): "90",
+    ("orgs", "webhook_signing_secret_created_at"): "now()",
     ("users", "name"): "''",
     ("users", "mfa_enabled"): "false",
     ("users", "mfa_recovery_codes_hash"): "'{}'",
