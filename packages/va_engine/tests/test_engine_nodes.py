@@ -74,6 +74,8 @@ async def test_webhook_speech_plays_while_the_request_runs_and_the_response_rout
         "alternatives": [],
         "global": False,
         "router_ms": 0,
+        "turn_index": 0,
+        "tag_color": None,
     }
     assert rig.port.calls == []
     assert ("assistant", "One moment.") in rig.history()
@@ -331,4 +333,4 @@ async def test_extraction_without_a_caller_message_reads_the_whole_history() -> 
     rig = engine_rig(pathway, http=FakeHttp([ok()]), port=port)
     assert await rig.start() == [("say", "Done.", "t0.1", None)]
     assert 'Latest caller message: ""' in port.calls[0].user
-    assert rig.events.of("call.extraction")[0] == {"node_id": "hook", "variables": {}}
+    assert rig.events.of("call.extraction")[0] == {"node_id": "hook", "variables": {}, "turn_index": 0}

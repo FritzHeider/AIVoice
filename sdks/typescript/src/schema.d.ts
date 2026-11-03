@@ -4117,12 +4117,12 @@ export interface components {
             /**
              * Created At
              * Format: date-time
-             * @description When the turn was recorded (UTC).
+             * @description When the turn was recorded (UTC, milliseconds).
              */
             created_at: string;
             /**
              * Decision
-             * @description Route decision, extracted variables, and tool calls of the turn (`call.route` data).
+             * @description The turn's decisions: `route` (`from`, `to`, `label`, `alternatives`), `global`, `loop_condition` (`score`, `met`), `extracted` variables, and `tools` (`name`, `status`, `ms`).
              */
             decision: {
                 [key: string]: unknown;

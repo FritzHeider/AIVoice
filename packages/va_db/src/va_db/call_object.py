@@ -38,18 +38,21 @@ from va_db.models import (
 )
 from va_domain.call_object import (
     CALL_ENDED_BY,
+    LOG_EVENT_TYPES,
     CallCitation,
     CallListItem,
     CallObject,
     EvalSummary,
     GuardRailEntry,
+    LogEvent,
+    LogTurn,
     PathwayLog,
-    PathwayTag,
     Transcript,
     VoicemailSummary,
     WarmTransferCall,
     bland_answered_by,
     bland_status,
+    build_pathway_logs,
     concatenated_transcript,
     dollars,
     latency_summary,
@@ -65,7 +68,6 @@ _VOICEMAIL_END_ACTIONS: Final[Mapping[str, str]] = {
     "voicemail_hangup": "hangup",
     "voicemail_left": "leave_message",
 }
-_ROUTE_META_KEYS: Final = frozenset({"turn_index", "tag_color"})
 
 
 @dataclass(slots=True)
@@ -85,7 +87,7 @@ class _Details:
     """The detail-only child rows."""
 
     turns: dict[uuid.UUID, list[CallTurn]] = field(default_factory=lambda: defaultdict(list))
-    routes: dict[tuple[uuid.UUID, int], dict[str, Any]] = field(default_factory=dict)
+    log_events: dict[uuid.UUID, list[LogEvent]] = field(default_factory=lambda: defaultdict(list))
     analyses: dict[uuid.UUID, dict[str, Any] | None] = field(default_factory=dict)
     citations: dict[uuid.UUID, list[CallCitation]] = field(default_factory=lambda: defaultdict(list))
     evals: dict[uuid.UUID, EvalSummary] = field(default_factory=dict)
@@ -163,15 +165,19 @@ async def _details(session: AsyncSession, calls: Sequence[Call]) -> _Details:
     found = _Details()
     for turn in await _turns(session, calls):
         found.turns[turn.call_id].append(turn)
-    routes = await session.execute(
-        select(CallEvent.call_id, CallEvent.data)
-        .where(CallEvent.org_id.in_(orgs), CallEvent.call_id.in_(ids), CallEvent.category == "route")
+    log_events = await session.execute(
+        select(CallEvent.call_id, CallEvent.event_type, CallEvent.data)
+        .where(
+            CallEvent.org_id.in_(orgs),
+            CallEvent.call_id.in_(ids),
+            CallEvent.event_type.in_(LOG_EVENT_TYPES),
+        )
         .order_by(CallEvent.call_id, CallEvent.seq)
     )
-    for call_id, data in routes:
-        turn_index = data.get("turn_index")
-        if isinstance(turn_index, int) and not isinstance(turn_index, bool):
-            found.routes[call_id, turn_index] = data
+    for call_id, event_type, data in log_events:
+        if event_type is None:
+            continue
+        found.log_events[call_id].append(LogEvent(event_type=event_type, data=data))
     analyses = await session.scalars(
         select(CallAnalysis)
         .where(CallAnalysis.org_id.in_(orgs), CallAnalysis.call_id.in_(ids))
@@ -335,32 +341,23 @@ def _transcripts(turns: Sequence[CallTurn]) -> list[Transcript]:
 
 
 def _pathway_logs(call: Call, turns: Sequence[CallTurn], details: _Details) -> list[PathwayLog]:
-    logs: list[PathwayLog] = []
-    user_text: str | None = None
-    for turn in turns:
-        if turn.role == "user":
-            user_text = turn.text_
-            continue
-        if turn.role != "assistant" or turn.node_id is None:
-            continue
-        route = details.routes.get((call.id, turn.turn_index))
-        color = None if route is None else route.get("tag_color")
-        logs.append(
-            PathwayLog(
-                tag=PathwayTag(name=turn.node_name, color=color if isinstance(color, str) else None),
-                node_id=turn.node_id,
-                pathway_id=call.pathway_id,
-                pathway_version=call.pathway_version,
-                role="assistant",
+    """specs/11 §12 entries from the turns and the route/condition/extraction/tool events (P07-T08c)."""
+    return build_pathway_logs(
+        [
+            LogTurn(
+                turn_index=turn.turn_index,
+                role=turn.role,
                 text=turn.text_,
-                user_text=user_text,
-                decision=None
-                if route is None
-                else {key: value for key, value in route.items() if key not in _ROUTE_META_KEYS},
+                node_id=turn.node_id,
+                node_name=turn.node_name,
                 created_at=turn.created_at,
             )
-        )
-    return logs
+            for turn in turns
+        ],
+        details.log_events.get(call.id, []),
+        pathway_id=call.pathway_id,
+        pathway_version=call.pathway_version,
+    )
 
 
 async def load_transcripts(session: AsyncSession, call: Call) -> list[Transcript]:

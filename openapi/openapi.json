@@ -5600,7 +5600,7 @@
         "description": "One assistant turn of a pathway call (specs/11 §12); every key present, `null` when not applicable.",
         "properties": {
           "created_at": {
-            "description": "When the turn was recorded (UTC).",
+            "description": "When the turn was recorded (UTC, milliseconds).",
             "format": "date-time",
             "title": "Created At",
             "type": "string"
@@ -5615,7 +5615,7 @@
                 "type": "null"
               }
             ],
-            "description": "Route decision, extracted variables, and tool calls of the turn (`call.route` data).",
+            "description": "The turn's decisions: `route` (`from`, `to`, `label`, `alternatives`), `global`, `loop_condition` (`score`, `met`), `extracted` variables, and `tools` (`name`, `status`, `ms`).",
             "title": "Decision"
           },
           "node_id": {

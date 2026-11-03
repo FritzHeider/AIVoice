@@ -78,9 +78,13 @@ async def test_route_with_background_extraction_and_a_fresh_reply_at_the_new_nod
             ],
             "global": False,
             "router_ms": 0,
+            "turn_index": 1,
+            "tag_color": "#16A34A",
         }
     ]
-    assert rig.events.of("call.extraction") == [{"node_id": "greet", "variables": {"first_name": "Mike"}}]
+    assert rig.events.of("call.extraction") == [
+        {"node_id": "greet", "variables": {"first_name": "Mike"}, "turn_index": 1}
+    ]
     speculative, fresh = rig.source.streams[1:]
     assert speculative.request.speculative
     assert speculative.discarded
@@ -106,7 +110,7 @@ async def test_unmet_condition_holds_the_node_with_the_prompt_suffix() -> None:
     assert rig.state.current_node_id == "take_order"
     assert rig.events.types() == ["call.extraction", "call.loop_condition"]
     assert rig.events.of("call.loop_condition") == [
-        {"node_id": "take_order", "score": 3, "met": False, "message": "Likely 3/10"}
+        {"node_id": "take_order", "score": 3, "met": False, "message": "Likely 3/10", "turn_index": 2}
     ]
     assert rig.state.variables["order_items"] == "large margherita"
     speculative, fresh = rig.source.streams[-2:]
@@ -211,6 +215,8 @@ async def test_wait_timeout_move_to_node_enters_the_target() -> None:
             "alternatives": [],
             "global": False,
             "router_ms": 0,
+            "turn_index": 0,
+            "tag_color": None,
         }
     ]
 

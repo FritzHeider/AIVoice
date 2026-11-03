@@ -9,10 +9,10 @@ extends it with those fields, so both share one field definition. Serialize with
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Any, Final, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PlainSerializer, WithJsonSchema
 
 __all__ = [
     "LIST_EXCLUDED_FIELDS",
@@ -140,6 +140,12 @@ def _model_config(example: dict[str, JsonValue]) -> ConfigDict:
     return ConfigDict(populate_by_name=True, json_schema_extra={"examples": [example]})
 
 
+def _log_time(value: datetime) -> str:
+    """``YYYY-MM-DDTHH:MM:SS.mmmZ`` in UTC (specs/11 §12); naive values are read as UTC."""
+    moment = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
+
+
 class PathwayTag(BaseModel):
     name: str | None = Field(description="Name of the node that produced the turn.")
     color: str | None = Field(description="Tag colour of the route taken into the node (`#RRGGBB`).")
@@ -156,9 +162,16 @@ class PathwayLog(BaseModel):
     text: str = Field(description="What the agent said.")
     user_text: str | None = Field(description="The caller turn the agent answered.")
     decision: dict[str, Any] | None = Field(
-        description="Route decision, extracted variables, and tool calls of the turn (`call.route` data)."
+        description=(
+            "The turn's decisions: `route` (`from`, `to`, `label`, `alternatives`), `global`,"
+            " `loop_condition` (`score`, `met`), `extracted` variables, and `tools` (`name`, `status`, `ms`)."
+        )
     )
-    created_at: datetime = Field(description="When the turn was recorded (UTC).")
+    created_at: Annotated[
+        datetime,
+        PlainSerializer(_log_time, return_type=str, when_used="json"),
+        WithJsonSchema({"type": "string", "format": "date-time"}),
+    ] = Field(description="When the turn was recorded (UTC, milliseconds).")
 
 
 class Transcript(BaseModel):

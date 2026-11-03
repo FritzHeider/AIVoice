@@ -1356,3 +1356,134 @@ scheduling rounds and event data all match specs/11 §5 + Decision P07-T08b and 
 Finding 1 fixed: `_drop_turn` counts records added since the superseded turn's mark; tests cover HISTORY_CAP folding
 and non-latest supersedes. Gates re-run: lint/typecheck/placeholders pass; make test 12142 passed, 7 skipped,
 coverage 99.07 %.
+
+## Plan P07-T08c — Deterministic `pathway_logs` (specs/11 §12, §14; specs/19 §4 Call Object)
+
+### Facts that shape the design
+- `call_turns` is UNIQUE (call_id, turn_index, role): a call has at most ONE assistant row per turn index, so
+  pathway_logs granularity is per turn index (chained speech in one turn is one entry), both engine-side and in DB.
+- The Call Object projection (`va_db.call_object._pathway_logs`, P05-T16a Decision in specs/19 §4) today takes the
+  last category-`route` event per `turn_index` as `decision` — that mixes `call.loop_condition` (also category
+  route) and does not produce the §12 `decision` shape (`route`, `global`, `loop_condition`, `extracted`, `tools`).
+- Engine events today carry no `turn_index`/`tag_color` (Decision P07-T08b rule 9 deferred enrichment; T08c owns it).
+- `PathwayLog` model already exists in `va_domain.call_object.models`; syrupy ≥ 6.1 is a root dev dep, unused so far.
+
+### Spec decision — append `> Decision (2026-11-03): deterministic pathway_logs (P07-T08c).` under specs/11 §12
+1. One entry per turn index that has an assistant turn with a node (task calls: none), ordered by turn index.
+   `text` = the assistant text of that turn (engine: the turn's assistant records joined with one space, after
+   barge-in truncation); `node_id` = the last node that spoke in the turn; `tag.name` = that node's `name`;
+   `user_text` = the user text of the same turn index (null for turn 0 / no user turn).
+2. Every engine event carries `turn_index` (the engine turn it belongs to; a background extraction keeps the turn
+   index of the pass that started it). `call.route` also carries `tag_color` = the `to_node`'s `tag.color` (null
+   when untagged / unknown).
+3. `decision` is always an object built from that turn's events in emission (seq) order:
+   `route` = last `call.route` → `{from, to, label, alternatives}` (null when none); `global` = that route's
+   `global` (false without route); `loop_condition` = last `call.loop_condition` → `{score, met}` (null when none);
+   `extracted` = merge (later wins) of the turn's `call.extraction` `variables` (null when no extraction event);
+   `tools` = `call.webhook_node` + `call.tool` events in order → `{name, status, ms}` (name = `tool_name`, else
+   `node_name`, else `node_id`; status = `status_code`; ms = `duration_ms`), `[]` when none.
+4. `tag.color` = `tag_color` of the turn's last `call.route`; without one, carried over from the latest earlier
+   turn's route (the node stayed current); null before the first route.
+5. Serialization: keys in §12 order (model field order), `created_at` UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`;
+   `va_engine.logs.dump_pathway_logs(entries) -> bytes` = orjson of the dumped models (no sort, no indent... use
+   `OPT_INDENT_2` for snapshot readability is fine as long as it is fixed) — byte-stable.
+6. specs/19 §4 P05-T16a Decision: append one sentence "`decision`/`tag.color` are built per specs/11 §12
+   Decision P07-T08c (supersedes the `call.route`-data rule above)." Keep same line `specs/11 §12` for spec refs.
+
+### Files
+- `packages/va_domain/src/va_domain/call_object/pathway_logs.py` (new, pure, shared by va_db and va_engine so the two
+  are identical by construction): frozen dataclasses `LogTurn(turn_index, role, text, node_id, node_name,
+  created_at)` and `LogEvent(turn_index, event_type, data: Mapping[str, Any])`; constants `ROUTE_EVENT`,
+  `CONDITION_EVENT`, `EXTRACTION_EVENT`, `TOOL_EVENTS = ("call.webhook_node", "call.tool")`, `LOG_EVENT_TYPES`
+  (all five); `pathway_decision(events: Sequence[LogEvent]) -> dict[str, Any]`;
+  `build_pathway_logs(turns, events, *, pathway_id, pathway_version) -> list[PathwayLog]` (rules 1, 3, 4; events
+  without an int `turn_index` are ignored; bool is not int). Export from `va_domain.call_object.__init__`.
+- `packages/va_domain/src/va_domain/call_object/models.py`: `PathwayLog.created_at` serialized with milliseconds +
+  `Z` (`PlainSerializer(..., return_type=str, when_used="json")` or field_serializer); keep JSON schema
+  `format: date-time` (check `make openapi` drift; regenerate `openapi/openapi.json` + both TS `gen:api` if the
+  schema changes). `decision` stays `dict[str, Any] | None` but description updated to the §12 shape.
+- `packages/va_db/src/va_db/call_object.py`: `_details` loads `CallEvent.call_id, event_type, data` where
+  `event_type IN LOG_EVENT_TYPES` ordered by `(call_id, seq)` into `found.log_events[call_id]: list[LogEvent]`
+  (replaces `routes` + `_ROUTE_META_KEYS`); `_pathway_logs` maps `CallTurn` rows → `LogTurn` and calls
+  `build_pathway_logs`. Rows with NULL event_type (pre-0007) are skipped.
+- `packages/va_engine/src/va_engine/logs.py` (new): `PathwayLogBook` — `on_record(turn_index, record: TurnRecord)`
+  (keeps the record object: `on_interrupted` mutates `content` in place, so truncation shows up),
+  `on_event(turn_index, event_type, data)`, `drop_from(turn_index)` (supersede), `entries(*, pathway_id,
+  pathway_version, graph_names: Callable[[str], str | None]) -> list[PathwayLog]` (maps to LogTurn/LogEvent:
+  per turn index one user LogTurn (last user record) and one assistant LogTurn (assistant records joined " ",
+  node = last assistant record's node_id, name from the active/any graph, created_at = first assistant record's
+  time from the engine clock captured at on_record) then `build_pathway_logs`); `dump_pathway_logs(entries) ->
+  bytes`. Tool records (`role="tool"`) are ignored.
+- `packages/va_engine/src/va_engine/engine.py`: `PathwayEngine(..., logbook: PathwayLogBook | None = None)`
+  (default: a fresh book, exposed as `engine.logbook`); `_emit(event_type, data, *, turn_index=None)` adds
+  `turn_index` (default `state.turn_index`) to every event and `tag_color` to `call.route` (to_node lookup in the
+  current graph, incl. after `switch_graph`); background extraction passes the captured turn index; `_record`
+  calls `logbook.on_record(state.turn_index, record)` with `clock.now()`; `_drop_turn` calls `drop_from(index)`.
+  Node names: the book receives `node_name` at on_record time (engine knows the node) to avoid graph lookups later
+  (preferred: `on_record(turn_index, record, node_name=..., at=clock.now())`).
+- `packages/va_engine/src/va_engine/engine_events.py`: `with_turn(data, turn_index)` / `route_tag_color(graph,
+  node_id)` helpers if it keeps engine.py small.
+- `packages/va_engine/src/va_engine/handlers/reports.py`: `WebhookReport.node_name` → `event_data()["node_name"]`
+  (handlers/webhook.py passes `ctx.node.data.name`); update handler tests' expected event data.
+- AGENTS.md dated bullet; specs/11 §12 Decision; specs/19 §4 one-line pointer.
+
+### Tests
+- `packages/va_domain/tests/test_pathway_logs.py`: decision shape (all keys present, nulls/[]), last route wins,
+  loop_condition without route, extraction merge later-wins, tools mapping name fallbacks, tag colour carry-over,
+  events without int turn_index / bool turn_index ignored, user_text pairing, turns without node skipped, created_at
+  JSON `...412Z` (ms truncation, non-UTC input converted).
+- `packages/va_engine/tests/test_logs.py`: (a) restaurant fixture conversation (reuse test_engine `at_take_order`
+  style: start → order → loop condition unmet → met → chained confirm → global hours → end call, plus one webhook
+  node event via a small graph or fixture node) → `dump_pathway_logs(...)` compared with syrupy
+  `snapshot` (commit `packages/va_engine/tests/__snapshots__/test_logs.ambr`; create with
+  `uv run pytest packages/va_engine/tests/test_logs.py --snapshot-update`); (b) byte-stability: run the same
+  scripted conversation in two fresh rigs → identical bytes; (c) every event in the run has `turn_index`, every
+  `call.route` has `tag_color`; (d) barge-in truncation shows the truncated text in the entry; (e) supersede drops
+  the turn's entry and events; (f) background extraction completing after the next turn started is attributed to
+  its own turn.
+- Existing tests to update: `packages/va_engine/tests/test_engine*.py` expected event dicts (now carry
+  `turn_index`, route `tag_color`), handler webhook tests (`node_name`), `packages/va_db/tests/test_call_object_db.py`
+  and `packages/va_domain/tests/test_call_object.py` pathway_logs expectations (new decision shape, ms timestamps),
+  `packages/va_events/tests/test_webhook_payloads.py` / `test_webhook_router_db.py` if they build pathway_logs.
+  Add a va_db DB test: turn with route + loop_condition + extraction + webhook_node events → §12 decision; a
+  pre-0007 row (event_type NULL) ignored.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+packages/va_domain -q`; `uv run pytest packages/va_db/tests/test_call_object_db.py -q`; `make openapi` +
+`git diff --exit-code openapi/` (regenerate TS types if changed); `uv run python scripts/check_spec_refs.py`;
+`make test` in background (truncate `logs/make_test.log` first, Monitor heartbeat); radon avg; jscpd 0 clones;
+pip-audit + pnpm audit. No e2e (not wired into calls until P07-T12).
+
+### Risks
+- syrupy + xdist: unused-snapshot detection can misreport under `-n auto`; if `make test` fails with "unused
+  snapshots", run the snapshot module serially to confirm and add `--snapshot-warn-unused` to pytest addopts
+  (document in AGENTS.md). Snapshot must not contain uuids/timestamps that vary: FrozenClock + fixed PATHWAY_ID.
+- Do not bump EngineState schema: the logbook lives beside the engine (T12 persists DB rows, T10 test chat uses the
+  book directly); nothing new in `EngineState`.
+- Pydantic datetime serializer must not break `CallObject` JSON schema / OpenAPI examples; check drift.
+- Keep engine.py methods ≤ radon B; jscpd: va_db and va_engine both map to LogTurn — keep the mappers tiny.
+
+## Build P07-T08c (done)
+- New: `va_domain.call_object.pathway_logs` (LogTurn/LogEvent, `build_pathway_logs`, `pathway_decision`,
+  `LOG_EVENT_TYPES`, `event_turn_index`), `va_engine.logs` (PathwayLogBook, `dump_pathway_logs`),
+  `PathwayEngine(logbook=)` + `.logbook` / `.pathway_logs()`; `_emit` stamps `turn_index` on every event and
+  `tag_color` on routes (`engine_events.route_tag_color`); background extraction keeps its starting turn index;
+  supersede drops the turn from the book. `WebhookReport.node_name`. `PathwayLog.created_at` → `...mmmZ`.
+  va_db Call Object projection now uses the builder (events by `event_type`, NULL rows skipped).
+- Deviations: `text` joins stripped non-blank parts (FakeSource tokens end in spaces); tag.name = node name
+  (the hours node's tag name is "Global" but §12 shows node names).
+- Spec: specs/11 §12 Decision P07-T08c; specs/19 §4 P05-T16a pointer updated. openapi + both schema.d.ts
+  regenerated (description-only). AGENTS.md bullet.
+- Tests: va_domain test_pathway_logs (100 %), va_engine test_logs (2 syrupy snapshots in
+  tests/__snapshots__/test_logs.ambr), updated engine/handler expectations, va_db call object DB test.
+- Gates: lint/typecheck/placeholders pass; check_spec_refs 0; make test 12158 passed, 7 skipped, 99.03 %
+  (pathway_decision was split for radon after the run started — re-ran its tests: 16 passed, 100 % cov);
+  radon avg A 3.27 (max in new code B 8); jscpd 0 clones; pip-audit clean; pnpm audit 3 moderate (pre-existing).
+
+## Review P07-T08c (approved)
+Gates re-run: make lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift current; jscpd 0 clones; radon
+avg A 3.09; make test 12158 passed, 7 skipped, 99 % total (pathway_logs.py/logs.py/engine_events.py 100 %, engine.py
+97 %). The §12 key order, decision shape, and ms timestamps match the spec; the engine and the DB share one builder.
+Minor (not blocking): the `event_type is None` skip in va_db/call_object.py:179 can never run, because the SQL
+`IN` filter already excludes NULL rows.

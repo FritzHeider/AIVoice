@@ -46,6 +46,7 @@ class WebhookReport:
 
     event_type: Literal["call.webhook_node"] = "call.webhook_node"
     node_id: str
+    node_name: str | None = None
     purpose: WebhookPurpose = "webhook"
     method: str
     url: str
@@ -59,6 +60,7 @@ class WebhookReport:
     def event_data(self) -> dict[str, JsonValue]:
         return {
             "node_id": self.node_id,
+            "node_name": self.node_name,
             "purpose": self.purpose,
             "method": self.method,
             "url": redacted_url(self.url),

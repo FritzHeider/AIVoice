@@ -3,6 +3,7 @@ bare call, list items, batched reads, and RLS (specs/19 §4; Decision P05-T16a).
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
@@ -75,7 +76,10 @@ async def _runner(database: Database, org_id: uuid.UUID) -> Runner:
     return Runner(version["agent_id"], version["id"], arm["experiment_id"], arm["id"])
 
 
-def _turn(call: SeededCall, index: int, role: CallTurnRole, text: str, **values: Any) -> CallTurn:
+def _turn(
+    call: SeededCall, index: int, role: CallTurnRole, text: str, *, at: int | None = None, **values: Any
+) -> CallTurn:
+    second = index if at is None else at
     return CallTurn(
         id=new_id(),
         org_id=call.org_id,
@@ -83,22 +87,55 @@ def _turn(call: SeededCall, index: int, role: CallTurnRole, text: str, **values:
         turn_index=index,
         role=role,
         text_=text,
-        start_ms=index * 1000,
-        end_ms=index * 1000 + 800,
+        start_ms=second * 1000,
+        end_ms=second * 1000 + 800,
         **values,
     )
 
 
-def _event(call: SeededCall, seq: int, category: Any, data: dict[str, Any]) -> CallEvent:
+def _event(
+    call: SeededCall, seq: int, category: Any, data: dict[str, Any], event_type: str | None = None
+) -> CallEvent:
     return CallEvent(
         id=new_id(),
         org_id=call.org_id,
         call_id=call.call_id,
         seq=seq,
         category=category,
+        event_type=event_type,
         message="m",
         data=data,
     )
+
+
+def _log_events(call: SeededCall) -> list[CallEvent]:
+    """Turn 1's decision events, plus rows the projection must skip (pre-0007, non-integer turn index)."""
+    route = {
+        "turn_index": 1,
+        "from_node": "greet",
+        "to_node": "pitch",
+        "label": "Interested",
+        "alternatives": [{"label": "Busy", "score": 2}],
+        "global": False,
+        "router_ms": 120,
+        "tag_color": "#16A34A",
+    }
+    return [
+        _event(call, 1, "route", {**route, "tag_color": "#000000"}),
+        _event(call, 2, "route", {"turn_index": 1, "score": 7, "met": True}, "call.loop_condition"),
+        _event(
+            call, 3, "extraction", {"turn_index": 1, "variables": {"first_name": "Mike"}}, "call.extraction"
+        ),
+        _event(call, 4, "route", route, "call.route"),
+        _event(
+            call,
+            5,
+            "webhook",
+            {"turn_index": 1, "node_id": "hook", "node_name": "CRM", "status_code": 200, "duration_ms": 184},
+            "call.webhook_node",
+        ),
+        _event(call, 6, "route", {**route, "turn_index": "1", "tag_color": "#FFFFFF"}, "call.route"),
+    ]
 
 
 async def _populated(database: Database) -> tuple[SeededCall, Runner]:
@@ -149,17 +186,28 @@ async def _populated(database: Database) -> tuple[SeededCall, Runner]:
         session.add_all(
             [
                 _turn(call, 0, "system", "context update"),
-                _turn(call, 1, "assistant", "Hi Mike.", node_id="greet", node_name="Greeting"),
+                _turn(call, 0, "assistant", "Hi Mike.", at=1, node_id="greet", node_name="Greeting"),
                 _turn(
-                    call, 2, "user", "Hello.", latency={"e2e_ms": 700, "llm_ttft_ms": 300, "tts_ttfa_ms": 150}
+                    call,
+                    1,
+                    "user",
+                    "Hello.",
+                    at=2,
+                    latency={"e2e_ms": 700, "llm_ttft_ms": 300, "tts_ttfa_ms": 150},
                 ),
                 _turn(
-                    call, 3, "assistant", "Want a demo?", node_id="pitch", node_name="Pitch", interrupted=True
+                    call,
+                    1,
+                    "assistant",
+                    "Want a demo?",
+                    at=3,
+                    node_id="pitch",
+                    node_name="Pitch",
+                    interrupted=True,
                 ),
-                _turn(call, 4, "user", "Sure.", latency={"e2e_ms": 900, "llm_ttft_ms": 301}),
-                _turn(call, 5, "agent-action", "Booked."),
-                _event(call, 1, "route", {"turn_index": 3, "tag_color": "#16A34A", "route": {"to": "pitch"}}),
-                _event(call, 2, "route", {"turn_index": "3", "tag_color": "#000000"}),
+                _turn(call, 2, "user", "Sure.", at=4, latency={"e2e_ms": 900, "llm_ttft_ms": 301}),
+                _turn(call, 2, "agent-action", "Booked.", at=5),
+                *_log_events(call),
                 GuardRailEvent(
                     org_id=org_id,
                     call_id=call.call_id,
@@ -326,6 +374,7 @@ async def test_a_populated_call_fills_every_field(database: Database) -> None:
         (4, "user", "Sure.", 4000, False),
         (5, "agent-action", "Booked.", 5000, False),
     ]
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", log["created_at"]) for log in logs)
     assert [{k: v for k, v in log.items() if k != "created_at"} for log in logs] == [
         {
             "tag": {"name": "Greeting", "color": None},
@@ -335,7 +384,13 @@ async def test_a_populated_call_fills_every_field(database: Database) -> None:
             "role": "assistant",
             "text": "Hi Mike.",
             "user_text": None,
-            "decision": None,
+            "decision": {
+                "route": None,
+                "global": False,
+                "loop_condition": None,
+                "extracted": None,
+                "tools": [],
+            },
         },
         {
             "tag": {"name": "Pitch", "color": "#16A34A"},
@@ -345,7 +400,18 @@ async def test_a_populated_call_fills_every_field(database: Database) -> None:
             "role": "assistant",
             "text": "Want a demo?",
             "user_text": "Hello.",
-            "decision": {"route": {"to": "pitch"}},
+            "decision": {
+                "route": {
+                    "from": "greet",
+                    "to": "pitch",
+                    "label": "Interested",
+                    "alternatives": [{"label": "Busy", "score": 2}],
+                },
+                "global": False,
+                "loop_condition": {"score": 7, "met": True},
+                "extracted": {"first_name": "Mike"},
+                "tools": [{"name": "CRM", "status": 200, "ms": 184}],
+            },
         },
     ]
     assert [(c["variable_name"], c["value"], c["conditions_met"]) for c in citations] == [

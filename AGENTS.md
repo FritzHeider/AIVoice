@@ -1792,3 +1792,11 @@ Grafana 3001
   timeout()/history()`, `rig.events.of(type)`; `drive(agen)`; `first_stream(agen)` to stop at a stream and close
   mid-reply). Speculation consumes a `FakeSource` script entry whenever it starts (Default/Scheduling nodes without
   static text), so script a throwaway reply before the real one when the route changes.
+- 2026-11-03 (P07-T08c): pathway_logs are built only by `va_domain.call_object.build_pathway_logs(turns=[LogTurn],
+  events=[LogEvent], pathway_id=, pathway_version=)` (rules: specs/11 §12 Decision P07-T08c); `va_db.call_object`
+  feeds it `call_turns` + `call_events` rows whose `event_type` is in `LOG_EVENT_TYPES`, the engine feeds it through
+  `va_engine.logs.PathwayLogBook` (`PathwayEngine.logbook` / `pathway_logs()`, bytes `dump_pathway_logs`). Every
+  engine event now carries `turn_index` (`PathwayEngine._emit` stamps it; routes also get `tag_color`), so test
+  expectations of event data must include them. `PathwayLog.created_at` serializes as `...SS.mmmZ`. Snapshot tests
+  use syrupy (`snapshot` fixture; create/update with `uv run pytest <file> --snapshot-update`, commit the
+  `__snapshots__/*.ambr`); it works under xdist.

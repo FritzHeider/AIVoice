@@ -1,0 +1,261 @@
+# serializer version: 1
+# name: test_restaurant_call_logs_match_the_snapshot
+  '''
+  [
+    {
+      "tag": {
+        "name": "Greeting",
+        "color": null
+      },
+      "node_id": "greet",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Hi, this is Ava from Bella Pasta.",
+      "user_text": null,
+      "decision": {
+        "route": null,
+        "global": false,
+        "loop_condition": null,
+        "extracted": null,
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:00.000Z"
+    },
+    {
+      "tag": {
+        "name": "Take Order",
+        "color": "#16A34A"
+      },
+      "node_id": "take_order",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "What would you like?",
+      "user_text": "Hi, I'm Mike and I want to order",
+      "decision": {
+        "route": {
+          "from": "greet",
+          "to": "take_order",
+          "label": "Wants to place an order",
+          "alternatives": [
+            {
+              "label": "Wants to speak to a manager or has a complaint",
+              "score": 2
+            },
+            {
+              "label": "The caller asks about opening hours or location",
+              "score": 0
+            }
+          ]
+        },
+        "global": false,
+        "loop_condition": null,
+        "extracted": {
+          "first_name": "Mike"
+        },
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:04.250Z"
+    },
+    {
+      "tag": {
+        "name": "Take Order",
+        "color": "#16A34A"
+      },
+      "node_id": "take_order",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Anything else?",
+      "user_text": "A large margherita please",
+      "decision": {
+        "route": null,
+        "global": false,
+        "loop_condition": {
+          "score": 3,
+          "met": false
+        },
+        "extracted": {
+          "order_items": "large margherita",
+          "item_count": 1
+        },
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:07.750Z"
+    },
+    {
+      "tag": {
+        "name": "Opening Hours",
+        "color": "#F59E0B"
+      },
+      "node_id": "hours",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "We are open 11 to 10.",
+      "user_text": "What are your hours?",
+      "decision": {
+        "route": {
+          "from": "take_order",
+          "to": "hours",
+          "label": "The caller asks about opening hours or location",
+          "alternatives": [
+            {
+              "label": "Asks a question about the menu",
+              "score": 0
+            },
+            {
+              "label": "Order is complete",
+              "score": 0
+            }
+          ]
+        },
+        "global": true,
+        "loop_condition": {
+          "score": 2,
+          "met": false
+        },
+        "extracted": {},
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:09.875Z"
+    },
+    {
+      "tag": {
+        "name": "Confirm Order",
+        "color": null
+      },
+      "node_id": "confirm",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Your total is  dollars for large margherita. Should I text you a confirmation, Mike?",
+      "user_text": "That's everything",
+      "decision": {
+        "route": {
+          "from": "price",
+          "to": "confirm",
+          "label": "Total computed",
+          "alternatives": []
+        },
+        "global": false,
+        "loop_condition": {
+          "score": 9,
+          "met": true
+        },
+        "extracted": {},
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:14.875Z"
+    },
+    {
+      "tag": {
+        "name": "Anything Else",
+        "color": null
+      },
+      "node_id": "wait",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Is there anything else I can help with?",
+      "user_text": "No thanks",
+      "decision": {
+        "route": {
+          "from": "confirm",
+          "to": "wait",
+          "label": null,
+          "alternatives": [
+            {
+              "label": "Wants a text confirmation",
+              "score": 0
+            },
+            {
+              "label": "The caller asks about opening hours or location",
+              "score": 0
+            }
+          ]
+        },
+        "global": false,
+        "loop_condition": null,
+        "extracted": null,
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:15.876Z"
+    },
+    {
+      "tag": {
+        "name": "Goodbye",
+        "color": null
+      },
+      "node_id": "goodbye",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Thanks for ordering with Bella Pasta. Goodbye!",
+      "user_text": "Nothing else, bye",
+      "decision": {
+        "route": {
+          "from": "wait",
+          "to": "goodbye",
+          "label": "Nothing else needed",
+          "alternatives": [
+            {
+              "label": "Wants to add more items",
+              "score": 0
+            },
+            {
+              "label": "The caller asks about opening hours or location",
+              "score": 0
+            }
+          ]
+        },
+        "global": false,
+        "loop_condition": null,
+        "extracted": null,
+        "tools": []
+      },
+      "created_at": "2026-11-03T17:45:17.876Z"
+    }
+  ]
+  
+  '''
+# ---
+# name: test_webhook_node_logs_its_request_as_a_tool
+  '''
+  [
+    {
+      "tag": {
+        "name": "Open",
+        "color": "#0EA5E9"
+      },
+      "node_id": "open",
+      "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+      "pathway_version": 1,
+      "role": "assistant",
+      "text": "Hi. One moment. We are open.",
+      "user_text": null,
+      "decision": {
+        "route": {
+          "from": "hook",
+          "to": "open",
+          "label": "Open",
+          "alternatives": []
+        },
+        "global": false,
+        "loop_condition": null,
+        "extracted": null,
+        "tools": [
+          {
+            "name": "CRM Lookup",
+            "status": 200,
+            "ms": 42
+          }
+        ]
+      },
+      "created_at": "2026-11-03T17:45:00.000Z"
+    }
+  ]
+  
+  '''
+# ---

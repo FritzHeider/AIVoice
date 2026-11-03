@@ -35,6 +35,7 @@ from pydantic import JsonValue
 
 from va_common.logging import get_logger
 from va_common.time import Clock
+from va_domain.call_object import PathwayLog
 from va_engine.decisions import DecisionInputs
 from va_engine.dialogue import GatewayDialogue
 from va_engine.engine_decide import Decider, TurnDecision
@@ -48,6 +49,7 @@ from va_engine.engine_events import (
     extraction_worth_reporting,
     handler_route_data,
     report_event,
+    route_tag_color,
 )
 from va_engine.engine_tools import (
     MAX_SCHEDULING_ROUNDS,
@@ -71,6 +73,7 @@ from va_engine.handlers import (
     speak_node,
 )
 from va_engine.handlers.webhook import node_waits
+from va_engine.logs import PathwayLogBook
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.results import Action, EndCallAction, Say, SayStream, SwitchGraph, is_terminal
 from va_engine.models.state import EngineState, TurnRecord
@@ -217,7 +220,7 @@ async def _cancelled(task: asyncio.Task[Any]) -> None:
 class PathwayEngine:
     """One pathway conversation over ``state`` (mutated in place)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - the conversation, its graph, ports, facts, clock, and log book
         self,
         state: EngineState,
         active: ActiveGraph,
@@ -225,8 +228,11 @@ class PathwayEngine:
         ports: EnginePorts,
         facts: ConversationFacts,
         clock: Clock,
+        logbook: PathwayLogBook | None = None,
     ) -> None:
         self._nav = Navigator(state, active, loader=ports.loader)
+        self._active = active
+        self._logbook = PathwayLogBook() if logbook is None else logbook
         self._ports = ports
         self._facts = facts
         self._clock = clock
@@ -235,7 +241,7 @@ class PathwayEngine:
         self._marks = MarkSequence()
         self._marks_turn = state.turn_index
         self._spoken: TurnRecord | None = None
-        self._turn_starts: dict[int, int] = {}
+        self._turn_starts: dict[int, tuple[int, int]] = {}
         self._records_added = 0
         self._speculation: Speculation | None = None
         self._background: set[asyncio.Task[None]] = set()
@@ -248,6 +254,14 @@ class PathwayEngine:
     @property
     def navigator(self) -> Navigator:
         return self._nav
+
+    @property
+    def logbook(self) -> PathwayLogBook:
+        return self._logbook
+
+    def pathway_logs(self) -> list[PathwayLog]:
+        """The specs/11 §12 entries of the conversation so far (pathway = the one the engine started on)."""
+        return self._logbook.entries(pathway_id=self._active.pathway_id, pathway_version=self._active.version)
 
     # Public API.
 
@@ -691,25 +705,30 @@ class PathwayEngine:
             node, self._latest_inputs(), now=self._clock.now(), timezone=self._facts.timezone
         )
 
-    def _merge_extraction(self, node: PathwayNode, result: ExtractionResult) -> None:
+    def _merge_extraction(
+        self, node: PathwayNode, result: ExtractionResult, *, turn_index: int | None = None
+    ) -> None:
         self.state.variables.update(result.values)
         if extraction_worth_reporting(result):
-            self._emit(EXTRACTION_EVENT, extraction_event_data(node.id, result))
+            self._emit(EXTRACTION_EVENT, extraction_event_data(node.id, result), turn_index=turn_index)
 
     def _schedule_background(self, node: PathwayNode, inputs: DecisionInputs) -> None:
         """Start the node's ``background`` extraction (merged and reported when it completes)."""
         if not node.data.extract_vars or node.data.extract_vars_mode != "background":
             return
-        task = asyncio.create_task(self._background_extraction(node, inputs))
+        task = asyncio.create_task(self._background_extraction(node, inputs, self.state.turn_index))
         self._background.add(task)
         task.add_done_callback(lambda done: self._background_done(node.id, done))
 
-    async def _background_extraction(self, node: PathwayNode, inputs: DecisionInputs) -> None:
+    async def _background_extraction(
+        self, node: PathwayNode, inputs: DecisionInputs, turn_index: int
+    ) -> None:
+        """Run a ``background`` extraction; its event keeps the turn index of the pass that started it."""
         result = await self._ports.decider.extract(
             node, inputs, now=self._clock.now(), timezone=self._facts.timezone
         )
         if result is not None:
-            self._merge_extraction(node, result)
+            self._merge_extraction(node, result, turn_index=turn_index)
 
     def _background_done(self, node_id: str, task: asyncio.Task[None]) -> None:
         self._background.discard(task)
@@ -788,7 +807,7 @@ class PathwayEngine:
         """Record the caller's turn (keypad turns as ``[Caller pressed: …]``); its text."""
         self.state.turn_index += 1
         # The pipeline only ever supersedes the turn right before the new one: keep that turn's mark alone.
-        self._turn_starts = {turn.index: self._records_added}
+        self._turn_starts = {turn.index: (self._records_added, self.state.turn_index)}
         content = (dtmf_message(turn.dtmf).content or "") if turn.dtmf else turn.text
         self._record(
             TurnRecord(
@@ -803,9 +822,11 @@ class PathwayEngine:
         The turn is located by the number of records added since, not by a history index: once the history
         passes ``HISTORY_CAP`` the oldest records fold into the summary and every index shifts.
         """
-        added = self._turn_starts.pop(index, None)
-        if added is None:
+        mark = self._turn_starts.pop(index, None)
+        if mark is None:
             return
+        added, turn_index = mark
+        self._logbook.drop_turn(turn_index)
         dropped = min(self._records_added - added, len(self.state.history))
         if dropped > 0:
             del self.state.history[-dropped:]
@@ -828,6 +849,22 @@ class PathwayEngine:
     def _record(self, record: TurnRecord) -> None:
         self.state.add_turn(record)
         self._records_added += 1
+        self._logbook.on_record(
+            self.state.turn_index, record, node_name=self._node_name(record.node_id), at=self._clock.now()
+        )
 
-    def _emit(self, event_type: str, data: dict[str, JsonValue]) -> None:
-        self._ports.events.emit(event_type, data)
+    def _node_name(self, node_id: str | None) -> str | None:
+        node = None if node_id is None else self._nav.graph.node(node_id)
+        return None if node is None else node.data.name
+
+    def _emit(self, event_type: str, data: dict[str, JsonValue], *, turn_index: int | None = None) -> None:
+        """Hand an event to the sink and the log book, stamped with its ``turn_index`` (routes also carry
+        the ``tag_color`` of the node they enter; Decision P07-T08c)."""
+        stamped: dict[str, JsonValue] = {
+            **data,
+            "turn_index": self.state.turn_index if turn_index is None else turn_index,
+        }
+        if event_type == ROUTE_EVENT:
+            stamped["tag_color"] = route_tag_color(self._nav.graph, data.get("to_node"))
+        self._logbook.on_event(event_type, stamped)
+        self._ports.events.emit(event_type, stamped)

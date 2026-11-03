@@ -944,6 +944,32 @@ One entry per assistant turn, ordered by turn index:
 ```
 Keys always present (null when not applicable); keys sorted as above; times UTC with milliseconds.
 
+> Decision (2026-11-03): deterministic pathway_logs (P07-T08c). Both the engine (`va_engine.logs.PathwayLogBook`,
+> `PathwayEngine.pathway_logs()`, bytes via `dump_pathway_logs`) and the Call Object (`va_db.call_object`) build the
+> entries with one pure function, `va_domain.call_object.build_pathway_logs(turns, events, ...)`, so a test chat, a
+> simulation and a stored call render identically. Rules:
+> 1. One entry per turn index that has an assistant turn spoken at a node (task calls have none), ordered by turn
+>    index (`call_turns` holds at most one assistant row per turn index). `text` = the turn's stripped, non-blank
+>    assistant texts joined with one space (after barge-in truncation); `node_id` and `tag.name` = the last of
+>    those turns' node and node name; `created_at` = the first one's time; `user_text` = the user text of the same
+>    turn index (`null` for the opener and chained turns without a caller message).
+> 2. Every engine event carries `turn_index` (the engine turn it belongs to; a `background` extraction keeps the
+>    turn index of the pass that started it). `call.route` also carries `tag_color` = the entered node's
+>    `tag.color` (`null` when untagged). `call.webhook_node` carries `node_name`.
+> 3. `decision` is always an object built from that turn's `call.route`, `call.loop_condition`,
+>    `call.extraction`, `call.webhook_node` and `call.tool` events in emission (`seq`) order: `route` = the last
+>    route as `{from, to, label, alternatives}` (`null` without one); `global` = that route's `global` (false
+>    without a route); `loop_condition` = the last condition's `{score, met}` (`null` without one); `extracted` =
+>    the merged (later wins) `variables` of the turn's extraction events (`null` without one); `tools` = one
+>    `{name, status, ms}` per webhook/tool event in order (`name` = `tool_name`, else `node_name`, else
+>    `node_id`; `status` = `status_code`; `ms` = `duration_ms`), `[]` without one. Events without an integer
+>    `turn_index` (and rows written before `call_events.event_type` existed) are ignored.
+> 4. `tag.color` = the `tag_color` of the turn's last route; a turn without a route keeps the colour of the
+>    latest earlier route (the node stayed current); `null` before the first route.
+> 5. A superseded turn (specs/07 §8) loses its records and events. `created_at` serializes as
+>    `YYYY-MM-DDTHH:MM:SS.mmmZ` (UTC, truncated to milliseconds); the canonical bytes are the entries as JSON in
+>    the key order above, two-space indented, with a trailing newline (snapshot-tested).
+
 ## 13. Configuration precedence for node model options
 `node.modelOptions` → `global_config` defaults → call config (`temperature`, `interruptibility`,
 `interruption_threshold`, `block_interruptions`) → org settings → platform defaults (temperature 0.7,

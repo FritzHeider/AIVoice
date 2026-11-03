@@ -278,6 +278,7 @@ async def test_report_event_data_has_no_query_and_no_bodies() -> None:
     assert report.event_type == "call.webhook_node"
     assert report.event_data() == {
         "node_id": "hook",
+        "node_name": "hook",
         "purpose": "webhook",
         "method": "POST",
         "url": "https://api.acme.test:8443/v1/lookup",

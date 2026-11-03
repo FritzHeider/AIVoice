@@ -108,6 +108,7 @@ def _report(
 ) -> WebhookReport:
     return WebhookReport(
         node_id=ctx.node.id,
+        node_name=ctx.node.data.name,
         purpose=purpose,
         method=call.method,
         url=call.url,

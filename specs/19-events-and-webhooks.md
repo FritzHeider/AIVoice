@@ -315,10 +315,9 @@ Exact field set (Bland-compatible names; additional fields are ours and document
 > semver, `experiment_arm` the arm label. `transcripts` lists every `call_turns` row except role `system`, ordered
 > by `(turn_index, start_ms, id)`, with `id` = 1-based position; `concatenated_transcript` is `"{role}: {text}\n"`
 > per transcript entry joined by one space. `pathway_logs` (specs/11 §12 keys) has one entry per assistant turn with
-> a `node_id` (empty for task calls): `tag.name` = `node_name`, `user_text` = the preceding user turn, and `decision`
-> / `tag.color` come from the `call.route` event (category `route`) whose data carries `turn_index` equal to the
-> turn's (`decision` = that data without `turn_index`/`tag_color`); the pathway engine (P07) must put `turn_index`
-> and `tag_color` into `call.route` data. `latency` = nearest-rank p50/p95 of the turns' `latency.e2e_ms`, rounded
+> a `node_id` (empty for task calls): `tag.name` = `node_name`; `user_text`, `decision` and `tag.color` follow
+> specs/11 §12 Decision P07-T08c (same-turn-index user text; `decision` built from the turn's route, loop condition,
+> extraction, and webhook/tool events, which supersedes the earlier "route data" rule). `latency` = nearest-rank p50/p95 of the turns' `latency.e2e_ms`, rounded
 > means of `llm_ttft_ms`/`tts_ttfa_ms`, `turns` = turns with an `e2e_ms` (all `null`/0 without). `voicemail` is
 > `null` unless a `call.voicemail` event exists, `answered_by = 'voicemail'`, or `end_reason` is
 > `voicemail_hangup`/`voicemail_left`; then `{detected: true, action_taken: <latest event's data.action, else

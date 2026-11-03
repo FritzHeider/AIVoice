@@ -60,7 +60,7 @@
   - Deliverables: `va_engine.engine.PathwayEngine` (`start`, `handle_user_turn`, `on_wait_timeout`, `on_interrupted`, `aclose`) yielding §7 actions, decision pipeline with speculation, skip-user-response chaining (depth 10), `maxVisits`/`maxTotalTurns` loop protection, background extraction, transfer-pathway return, scheduling function rounds, events through an `EngineEvents` port
   - Acceptance: multi-turn tests over the restaurant fixture with scripted decisions; speculation hit/miss; loop protection and chain depth; barge-in truncation.
 
-- [ ] P07-T08c Deterministic `pathway_logs`
+- [x] P07-T08c Deterministic `pathway_logs` — shared pure builder `va_domain.call_object.build_pathway_logs` used by `va_engine.logs.PathwayLogBook` and the Call Object projection; events stamped with `turn_index`/route `tag_color`; 2 syrupy snapshots + byte-stability test; make test 12158 passed, 7 skipped, 99 % coverage; lint/typecheck/placeholders/openapi drift/jscpd 0 clones pass
   - Spec refs: specs/11-pathways-engine.md §12, §14; specs/19-events-and-webhooks.md §4 (Call Object `pathway_logs`)
   - Depends on: P07-T08b
   - Deliverables: `va_engine.logs` (per assistant turn entry, `call.route` summary data with `turn_index`/`tag_color`), Call Object `decision` projection aligned with §12

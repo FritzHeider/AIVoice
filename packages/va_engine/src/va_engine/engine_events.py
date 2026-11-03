@@ -26,6 +26,7 @@ __all__ = [
     "extraction_worth_reporting",
     "handler_route_data",
     "report_event",
+    "route_tag_color",
 ]
 
 ROUTE_EVENT = "call.route"
@@ -74,3 +75,11 @@ def handler_route_data(graph: PathwayGraph, from_node: str, to_node: str) -> dic
         "global": False,
         "router_ms": 0,
     }
+
+
+def route_tag_color(graph: PathwayGraph, to_node: JsonValue) -> str | None:
+    """The ``tag.color`` of the node a route enters (``None`` when untagged or not in ``graph``)."""
+    node = graph.node(to_node) if isinstance(to_node, str) else None
+    if node is None or node.data.tag is None:
+        return None
+    return node.data.tag.color
