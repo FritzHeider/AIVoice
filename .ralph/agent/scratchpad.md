@@ -261,3 +261,113 @@ file location, never-raise rendering).
 ## Review P07-T02 (approved)
 - Re-ran: make lint/typecheck/placeholders pass; va_engine 384 passed; make test exit 0 (11442 passed, 7 skipped, 99% cov); radon avg 3.23; jscpd 0 clones.
 - Checked against specs/11 §8 + plan acceptance (golden from spec examples, fuzz never raises). Decision P07-T02 recorded in §8.
+
+## Plan P07-T03 — EngineState and versioned serialization (specs/11 §9)
+
+Context: `va_engine.models.state` already has `EngineState` v1 (P05-T09a: NodeFrame, TurnRecord, history cap,
+`load_engine_state` = strict `model_validate_json`). Missing per the plan deliverables: pending actions, a versioned
+serialization with upgraders, and a committed v1 fixture proving backward compatibility.
+
+### Changes — `packages/va_engine/src/va_engine/models/state.py`
+1. `CURRENT_SCHEMA_VERSION: Final = 2`; `EngineState.schema_version: Literal[2] = 2`.
+2. New v2 fields on `EngineState` (all defaulted, so v1 data upgrades by adding them):
+   - `pending_actions: list[PendingAction] = []` — actions decided but not yet executed (terminal actions waiting
+     for a playback mark, queued SMS/DTMF, a pending graph switch); runners append, the executor removes on success.
+   - `wait_armed_at_ms: int | None = None` — when the current Wait for Response timer was armed (text channels
+     persist it across turns: inactivity close after `waitSeconds*10`, §4).
+3. `PendingAction` = `Annotated[Union[...], Field(discriminator="kind")]` of strict (`extra="forbid"`, frozen)
+   models, each with `after_mark: str | None = None` (execute after that playback mark echoes, §7):
+   - `PendingSay(kind="say", text: str, mark: str, interruptible: bool | None = None)`
+   - `PendingDtmf(kind="send_dtmf", digits: str (min_length 1), duration_ms: int = 250 (ge 50, le 1000? use ge=1))`
+   - `PendingTransfer(kind="transfer", mode: Literal["cold","warm"]="cold", target: str, caller_id_mode:
+     Literal["agent_number","original_caller"]="agent_number")`
+   - `PendingEndCall(kind="end_call", reason: str, ended_by: str = "agent")`
+   - `PendingSms(kind="send_sms", to: str, from_: str = Field(serialization_alias="from",
+     validation_alias=AliasChoices("from","from_")), body: str)` (populate_by_name)
+   - `PendingSetVariables(kind="set_variables", variables: dict[str, JsonValue])`
+   - `PendingSwitchGraph(kind="switch_graph", pathway_id: UUID, version: int | None, node_id: str | None)`
+   - `PendingHumanTakeover(kind="human_takeover")`
+   Add `TERMINAL_ACTION_KINDS = frozenset({"transfer", "end_call"})` and `EngineState.take_pending(mark: str | None)
+   -> list[PendingAction]` that removes and returns, in order, the actions whose `after_mark` is `None` or == mark
+   (pure helper the executor uses; keeps order of the rest).
+4. Versioned serialization:
+   - `class EngineStateError(ValueError)` with `.version: object` (message `unsupported engine state schema_version
+     {v!r}` / `engine state is not a JSON object` / `engine state has no schema_version`).
+   - `dump_engine_state(state) -> str` = `state.model_dump_json(by_alias=True)` (canonical form; field order = model
+     order). Docstring: the only writer for `conversations.engine_state` / Redis `call:{id}:engine`.
+   - `load_engine_state(data: str | bytes | Mapping[str, object]) -> EngineState`: str/bytes → `orjson.loads`
+     (orjson.JSONDecodeError → EngineStateError); must be a dict; read `schema_version` (missing → error; `bool`
+     is not an int; not in `1..CURRENT` → error); apply `_UPGRADERS[v]` for v in range(version, CURRENT) on a
+     shallow copy (never mutates the caller's mapping); then `EngineState.model_validate(raw)` (unknown fields
+     still raise ValidationError).
+   - `_upgrade_v1(raw) -> dict`: copy, `schema_version=2`, `pending_actions=[]`, `wait_armed_at_ms=None`
+     (setdefault-free: v1 forbids these keys, so a v1 doc containing them raises at validation — assign only).
+   Docstring: adding a field = bump version + one upgrader + a frozen `engine_state_vN.json` fixture.
+5. `models/__init__.py` and `va_engine/__init__.py` (if it re-exports) export: `CURRENT_SCHEMA_VERSION`,
+   `EngineStateError`, `dump_engine_state`, `PendingAction` + each Pending* class, `TERMINAL_ACTION_KINDS`.
+6. `task_runner.py`: no behaviour change (constructs EngineState with defaults). Builder greps any callers that
+   serialize state (`model_dump_json` on EngineState) and switches them to `dump_engine_state`.
+
+### Spec — specs/11 §9
+Update the code block: `schema_version: Literal[2] = 2`, add `pending_actions: list[PendingAction] = []` and
+`wait_armed_at_ms: int | None = None`, and a short `PendingAction` union listing. Append
+`> Decision (2026-11-03): versioned EngineState (P07-T03).` — v2 fields and meaning; `after_mark` semantics; writer
+`dump_engine_state` (by_alias, `from` key); reader upgrades older versions step by step (1→2 adds the two fields
+with defaults), rejects versions < 1, > current, missing or non-integer with `EngineStateError`; unknown fields still
+rejected; every released version keeps a frozen fixture `packages/va_engine/tests/fixtures/engine_state/vN.json` that
+must keep loading forever.
+
+### Tests — `packages/va_engine/tests/test_state.py` (extend; update the v1-specific asserts)
+- Fixtures: `packages/va_engine/tests/fixtures/engine_state/v1.json` (hand-written realistic v1 pathway state:
+  return_stack with 2 frames, visit_counts, nested variables incl. null/bool/list, history with user/assistant/
+  tool/system and an interrupted turn, summary, graph_stack_versions, wait_reprompts, ended false) and
+  `v2.json` (same + every pending action kind incl. `send_sms` with key `from`, `after_mark` set on end_call/
+  transfer, `wait_armed_at_ms`), written in the exact `dump_engine_state` form (single line, no trailing newline,
+  or compare parsed JSON — builder: compare `orjson.loads` equality AND `dump_engine_state(load(v2)) == text.strip()`
+  so the canonical form is pinned).
+- `test_v1_fixture_upgrades`: load v1 → schema_version 2, pending_actions [], wait_armed_at_ms None, every v1 field
+  equal to the fixture's values; dump → re-load equal.
+- `test_v2_fixture_is_canonical` (pinned dump), `test_round_trip_every_pending_kind` (parametrized over kinds;
+  str, bytes, and dict inputs), `test_sms_from_alias` (dump key `from`, accepts `from` and `from_`).
+- `test_load_does_not_mutate_input` (dict input unchanged after v1 upgrade).
+- `test_rejects_bad_versions` parametrized: 0, 3, -1, "1", True, None, missing → EngineStateError with `.version`.
+- `test_rejects_non_object` ("[]", "1", b"null", invalid JSON "{") → EngineStateError.
+- `test_v1_with_v2_fields_rejected` (v1 doc containing `pending_actions` → ValidationError, upgrader overwrites? —
+  decide: the upgrader assigns defaults, so a v1 doc with those keys silently loses them; instead upgrader raises
+  EngineStateError if they are present? Choose: assign only when absent is wrong for v1 strictness → builder
+  implements `_upgrade_v1` that raises EngineStateError("v1 engine state carries v2 field ...") when present;
+  test asserts that.)
+- `test_unknown_fields_rejected` keeps working for state/turn/pending action.
+- `test_take_pending`: mixed after_mark list; take(None) returns unmarked in order; take("m1") returns unmarked +
+  m1, leaves m2; order preserved.
+- hypothesis `test_round_trip_property`: strategy building EngineState with random variables (JSON values,
+  bounded), history, pending actions → `load_engine_state(dump_engine_state(s)) == s`; `@settings(max_examples=100,
+  deadline=None)`.
+- Existing `test_defaults` updated to schema_version 2 and the new defaults; existing schema-version test replaced
+  by the parametrized one (version 3 rejected).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_engine -q` (state.py 100 % cov), then `make test`
+in background + Monitor heartbeat (PATH += /home/ralph/.local/bin). radon, jscpd, pip-audit for build.done. No e2e
+(no call flow touched). AGENTS.md: one dated bullet (dump/load_engine_state, upgrader rule, frozen fixtures dir).
+
+### Risks
+- mypy without pydantic plugin: construct `PendingSms` via `model_validate({...})` or `from_=` (validation_alias
+  AliasChoices + populate_by_name accepts `from_` kwarg at runtime; mypy sees the field name `from_` — fine).
+- Discriminated union with frozen models inside a mutable list: fine. JsonValue in hypothesis: keep ints bounded
+  (orjson 64-bit) — use `st.integers(-2**53, 2**53)`, finite floats.
+- Any other code asserting `schema_version == 1` (only test_state today) — grep apps/ and tests_e2e too.
+
+## Build P07-T03 (in progress → done when make test passes)
+- state.py: v2 (pending_actions discriminated union of 8 frozen Pending* models with after_mark, wait_armed_at_ms),
+  take_pending, EngineStateError(problem, version, field) (problem literal avoids TRY003), dump_engine_state,
+  load_engine_state(str|bytes|Mapping) with _UPGRADERS {1: _upgrade_v1} (v1 doc carrying v2 field rejected).
+- Fixtures engine_state/v1.json + v2.json (prettier-formatted; canonical test compares orjson re-dump), excluded from
+  jscpd (frozen copies). Spec §9 code block + Decision P07-T03. AGENTS.md bullet.
+- Gates: fmt/lint/typecheck/placeholders/spec_refs pass; va_engine 431 passed, state.py 100%; radon avg 2.70;
+  jscpd 0; pip-audit clean.
+- make test exit 0 (11489 passed, 7 skipped, 99.05% cov). No e2e (no call flow touched).
+
+## Review P07-T03 (approved)
+- Re-ran: make lint/typecheck/placeholders pass, check_spec_refs 0 problems; make test exit 0 (11489 passed, 7 skipped, 99% cov).
+- Diff checked against specs/11 §9 and plan deliverables (pending actions, versioned serialization, v1 back-compat fixture). Decision P07-T03 recorded.

@@ -3,6 +3,7 @@
   "ignore": [
     "**/schema.d.ts",
     "**/bland_send_call_resolved/**",
+    "**/fixtures/engine_state/**",
     "**/node_modules/**",
     "**/.next/**",
     "**/dist/**",

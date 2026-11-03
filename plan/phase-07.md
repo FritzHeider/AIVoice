@@ -12,7 +12,7 @@
   - Deliverables: `va_engine.templating.render(template, scope)` with dot paths, `{{input.x}}`, `default` filter, missing-variable policy, escaping rules
   - Acceptance: golden tests from spec examples; fuzz test never raises on arbitrary input.
 
-- [ ] P07-T03 EngineState and serialization
+- [x] P07-T03 EngineState and serialization — v2 state (pending_actions, wait_armed_at_ms), dump/load_engine_state with v1 upgrader, frozen v1/v2 fixtures; make test 11489 passed, lint/typecheck/placeholders pass
   - Spec refs: specs/11-pathways-engine.md §9
   - Depends on: P07-T01
   - Deliverables: `EngineState` model (current node, return stack, variables, visit counts, history window, pending actions), versioned JSON serialization

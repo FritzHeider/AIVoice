@@ -543,8 +543,11 @@ class TurnRecord(BaseModel):
     tool_name: str | None = None
     at_ms: int
 
+PendingAction = (PendingSay | PendingDtmf | PendingTransfer | PendingEndCall | PendingSms | PendingSetVariables
+                 | PendingSwitchGraph | PendingHumanTakeover)   # discriminated by `kind`; each has `after_mark`
+
 class EngineState(BaseModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     runner: Literal["task", "pathway"]
     pathway_id: UUID | None
     pathway_version: int | None
@@ -559,9 +562,11 @@ class EngineState(BaseModel):
     ended: bool = False
     end_reason: str | None = None
     graph_stack_versions: dict[str, int] = {}   # pathway_id -> version for transfer-pathway frames
+    pending_actions: list[PendingAction] = []   # decided, not yet executed
+    wait_armed_at_ms: int | None = None         # when the current Wait for Response timer was armed
 ```
 
-Serialized with `model_dump_json()` into `conversations.engine_state` (SMS/widget) after every turn, and into Redis
+Serialized with `dump_engine_state()` into `conversations.engine_state` (SMS/widget) after every turn, and into Redis
 `call:{id}:engine` (TTL 2 h) every turn for voice (for warm-transfer proxies and crash forensics). Final state merges
 `variables` into `calls.variables`. Deserialization rejects unknown `schema_version`.
 
@@ -570,6 +575,21 @@ Serialized with `model_dump_json()` into `conversations.engine_state` (SMS/widge
 > `EngineState.add_turn(record)` appends; once `history` exceeds 200 turns the oldest move into `history_summary` as
 > `role: content` lines (newline-joined after the existing summary), and the summary keeps only its last 4 000
 > characters. The fold is deterministic (no LLM call); an LLM summary may replace it later without a schema change.
+
+> Decision (2026-11-03): versioned EngineState (P07-T03). Schema version 2 adds `pending_actions` (actions a runner
+> decided but the executor has not run yet, in order: `say` {text, mark, interruptible}, `send_dtmf` {digits,
+> duration_ms 250}, `transfer` {mode cold|warm, target, caller_id_mode}, `end_call` {reason, ended_by "agent"},
+> `send_sms` {to, from, body}, `set_variables` {variables}, `switch_graph` {pathway_id, version, node_id},
+> `human_takeover`; `transfer` and `end_call` are terminal) and `wait_armed_at_ms` (text channels persist the Wait for
+> Response timer across turns). Every action has `after_mark`: `null` = due now, otherwise it runs once that playback
+> mark echoed (§7); `EngineState.take_pending(mark)` removes and returns the due actions in order. The only writer is
+> `va_engine.models.dump_engine_state` (`model_dump_json(by_alias=True)`, so the SMS sender key is `from`). The reader
+> `load_engine_state` accepts JSON text or a decoded object (never mutated), upgrades older versions step by step
+> (1 → 2 adds the two fields with their defaults; a v1 document that already carries a v2 field is rejected), and
+> raises `EngineStateError` (`.problem`, `.version`) for invalid JSON, a non-object, or a missing, non-integer, < 1, or newer
+> `schema_version`; unknown fields still raise `ValidationError`. Every released version keeps a frozen fixture
+> `packages/va_engine/tests/fixtures/engine_state/vN.json` that must keep loading; a new field means a version bump,
+> one upgrader, and a new fixture.
 
 ## 10. `EngineIO` protocol
 
