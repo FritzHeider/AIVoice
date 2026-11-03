@@ -1171,3 +1171,188 @@ unchanged deps (`uvx pip-audit` on `uv export`, `corepack pnpm audit`). No e2e (
 Re-ran lint, typecheck, placeholders, spec refs (pass), jscpd 0 clones, radon avg 2.84, make test (12089 passed,
 7 skipped, 99.09 %). Read prompt/dialogue/speculative against specs/11 §5.7/§5.8/§13 + Decision P07-T08a and
 va_llm DialogueStream commit/discard/aclose semantics (metrics counted by the gateway). No findings.
+
+## Plan P07-T08b — `PathwayEngine` turn orchestration, chaining, loop protection, events
+Spec refs: specs/11 §4 (+ Decisions P07-T05/T06/T07), §5.1–§5.6, §5.8 (+ Decision P07-T08a), §5.9, §7; specs/19 §2.
+Depends on T08a (prompt/dialogue/speculative). No DB, no va_tools import, no va_db import in va_engine.
+
+### Spec decision — append `> Decision (2026-11-03): pathway turn orchestration (P07-T08b).` under §5.9
+1. Contract: `va_engine.engine.PathwayEngine` methods `start(greeting=None)`, `handle_user_turn(turn)`,
+   `on_wait_timeout()` are async generators of §7 actions (`Say`, `SayStream`, `Wait`, `SendDtmfAction`,
+   `TransferAction`, `EndCallAction`, `HumanTakeover`; `SwitchGraph` is applied internally, never yielded). The
+   consumer resumes the generator only after the yielded speech finished playing (text: was delivered), so
+   chaining and terminal actions need no mark wait inside the engine (`after_mark` stays informational). A
+   barge-in = the consumer closes the generator (`aclose`) and calls `on_interrupted(spoken_text)`. `UserTurn` is
+   `va_voice.pipeline.models.UserTurn` (DTMF turns become `[Caller pressed: …]` via `va_llm.prompts.dtmf_message`
+   content). `aclose()` cancels background work, closes an open speculation and the dialogue port.
+2. Turn pipeline (one decision pass): with the current node N, run concurrently (TaskGroup) — §5.3
+   `before_response` extraction, §5.4 loop condition, §5.5 router (`include_globals=navigator.
+   global_check_enabled()`, the §5.2 combined call) — and start the §5.8 speculation at N when
+   `speculation_allowed(N, graph, enabled=settings.speculative)`. Running them in parallel keeps them off each
+   other's critical path; the router therefore sees the variables from before this turn's extraction. Apply in
+   order: merge non-null extracted values (overwrite); a `global` router outcome wins over everything (§5.2
+   precedence); else a condition that is not met → stay with the [4] suffix (router result discarded); else apply
+   the router decision through `Navigator.apply`. Resolve the speculation with `stays` = (transition kind stay),
+   `prompt_changed` = suffix added, variables after the merge. Events emitted in this order: `call.extraction`
+   (only when values/nulls/rejected exist or degraded — use `ExtractionResult.event_data()` + `node_id`),
+   `call.loop_condition` (when a condition was scored), `call.route` (when the decision was applied and either moved
+   or the router LLM was called; `RouteDecision.event_data()`). `background` extraction runs as a supervised task
+   (engine task set; one per node pass), merges + emits `call.extraction` when it completes, is cancelled by
+   `aclose`; it never blocks speculation or the reply.
+3. Execute (§5.6), loop per pass: entering a node → loop protection check (rule 5); End Call node while
+   `navigator.pathway_return_pending()` → `return_from_pathway()` and continue with a decision pass from the
+   restored node (chain step, empty latest); else `on_enter` (Wait for Response also via on_enter) → yield its
+   actions; `SwitchGraph` → `navigator.switch_graph` and the new node counts as entered (the Transfer Pathway node
+   itself never responds); a handler `route_to` / `route_fallback` is applied right after the handler call that
+   produced it (`Navigator.enter(route_to)`; fallback = the node's fallback edge target, none → stay), emitted as
+   `call.route` (label = the edge from N to the target if one exists, else null; `router_ms` 0, `alternatives`
+   []) and the node's `respond` is skipped; terminal actions end the pass. Otherwise `respond` → yield. After the
+   node executed: `navigator.finish_node()` (forward = entered, executes the new node; return = no re-speak).
+   Handler reports are emitted as their `event_type` with `event_data()` in order as soon as the handler returns.
+   A handler problem is logged `engine.handler_problem` (node_id, problem) and never raises.
+4. Chaining: after a pass whose final node does not wait for the user (`handler.waits_for_user(node)` false or
+   `skipUserResponse`) and no terminal action, run another decision pass with an empty latest message (no user
+   record). At most 10 chained passes per user turn (`CHAIN_DEPTH_LIMIT`); the 11th → loop protection end.
+5. Loop protection: entering a node whose visit count exceeds `maxVisits` → the node's fallback edge target when
+   it has one (entered without speaking at the over-limit node; a second over-limit in the same pass ends), else
+   `Say(errorPhrase)` + `EndCallAction(reason="loop_protection", ended_by="system")`, `state.ended`/`end_reason`.
+   `global_config.maxTotalTurns`: a user turn whose `turn_index` exceeds it ends the same way before any decision.
+   Logged `engine.loop_protection` (node_id, cause `max_visits|chain_depth|max_total_turns`).
+6. Speech + history: every yielded `Say` appends an assistant `TurnRecord(node_id=N)` before the yield; a
+   `SayStream` is recorded after the consumer resumed (`dialogue.text`), or with the partial text when the
+   generator is closed while it was out (finally block). An LLM unavailable before the first token (`dialogue.
+   unavailable`) → `Say(errorPhrase)` (nothing recorded for the empty stream). `on_interrupted(text)` replaces the
+   last spoken record's content with `text` (or `—` when blank; already ends with `—`) and sets `interrupted=True`
+   (§5.1). A user turn with `supersedes` removes the superseded user record and everything after it (TaskBrain
+   rule). Wait for Response timer: a user turn calls `handlers.disarm(state)`.
+7. Handler speech queued on the `ActionSink` (webhook/scheduling `speech`) is yielded while the handler call is
+   still running: the engine runs `on_enter` as a task with an `asyncio.Queue` sink and yields queued actions as
+   they arrive, then the result's actions; closing the generator cancels the task.
+8. Scheduling: a Scheduling node's `respond` runs with `dialogue.tools` = `SCHEDULING_FUNCTIONS` as `ToolDef`s;
+   after the stream, `dialogue.last.tool_calls()` are executed (`list_slots(ctx)`, `book_slot(ctx, start)` with
+   arguments parsed from `arguments_json`; invalid JSON / missing `start` → tool message `{"error":
+   "invalid_arguments"}`), the assistant tool-call message and one tool message per call are appended to
+   `dialogue.extra` (and tool `TurnRecord`s with `tool_name` to history), then the node responds again; at most 3
+   tool rounds per pass (the 4th request offers no tools). A booking `route_to` routes after the round (rule 3)
+   and booking reports are emitted. Other nodes offer no tools in phase 07 (custom node tools: phase 08).
+   `dialogue.extra`, `tools`, `condition_suffix` are reset before every `respond`.
+9. Node types without a phase-07 handler (`UnsupportedNodeError`: Knowledge Base, Custom Code) degrade: Knowledge
+   Base responds like Default (no knowledge block) and waits for the user; Custom Code runs nothing, speaks its
+   `text`/`prompt` when present (`speak_node(prompt_required=True)`), and waits only when it spoke and has no
+   `skipUserResponse`. Logged `engine.node_degraded` (node_id, type). Phase 08 replaces both.
+10. `start(greeting)`: a greeting is recorded as the first user turn (turn_index 1, no decision pass); the current
+    node (state's, normally the start node — visit counted by the engine's constructor helper `EngineState`
+    factory `new_pathway_state(graph, pathway_id, version)` when the state is fresh) executes as entered (§5.6),
+    then chains per rule 4. `on_wait_timeout()` runs `WaitForResponseHandler.timeout(ctx)` at a Wait for Response
+    node (else yields nothing): its actions, then `move_to` → enter + execute.
+11. Events go through `EngineEvents.emit(event_type: str, data: dict[str, JsonValue]) -> None` (sync; the media
+    adapter publishes). Turn index / tag colour enrichment is P07-T08c.
+
+### Files
+- `packages/va_engine/src/va_engine/engine_events.py`: `EngineEvents` Protocol; `report_event(report) ->
+  tuple[str, dict]`; `route_event_data(decision)`; `handler_route_data(from_node, to_node, label)`.
+- `packages/va_engine/src/va_engine/engine_decide.py`: `TurnDecision` dataclass (`route: RouteDecision | None`,
+  `condition: ConditionResult | None`, `extraction: ExtractionResult | None`, `suffix: str | None`); `Decider(router:
+  Router, condition: LoopCondition, extractor: Extractor, clock: Clock)` with `async decide(graph, node, inputs,
+  *, include_globals, now, timezone) -> TurnDecision` (TaskGroup over the three; rule 2) and `background(...)`.
+  `DecisionInputs` from state: `org_id`, `call_id`, `latest`, `history` = records before latest (user/assistant).
+- `packages/va_engine/src/va_engine/engine_tools.py`: `scheduling_tools() -> tuple[ToolDef, ...]` (from
+  `SCHEDULING_FUNCTIONS`), `async run_scheduling_calls(ctx, calls) -> SchedulingRound(messages, records, route_to,
+  reports)`; `MAX_SCHEDULING_ROUNDS = 3`.
+- `packages/va_engine/src/va_engine/engine.py`: `EnginePorts` (frozen, kw_only: `decider: Decider`, `dialogue:
+  GatewayDialogue`, `lines: LinePort`, `events: EngineEvents`, `loader: PathwayLoader | None`, `http`, `sms`),
+  `ConversationFacts` (frozen, kw_only: `org_id`, `call_id`, `channel: Channel`, `request_data`, `builtins`,
+  `timezone`, `transfer_list`, `speculative: bool`), `CHAIN_DEPTH_LIMIT = 10`, `LOOP_PROTECTION = "loop_protection"`,
+  `new_pathway_state(active: ActiveGraph) -> EngineState` (runner pathway, start node current, visit 1),
+  `class PathwayEngine(state, active, *, ports, facts, clock)` with `state`, `navigator` properties and the rule
+  1 methods. `ExtractionPort` for handlers (webhook extractVars) = small adapter over `Decider`'s Extractor
+  (`_ExtractionAdapter.extract(ctx)`). Keep functions ≤ radon B; split helpers rather than one huge method.
+- `specs/11` Decision block above; AGENTS.md dated bullet (engine contract + test helpers).
+
+### Tests (`packages/va_engine/tests/`)
+- `support/engine_helpers.py`: `KeyedPort` (StructuredPort keyed by `function_name` → FIFO of replies/exceptions,
+  records requests; needed because decisions run concurrently), `route_reply(path_id, confidence, alternatives=)`,
+  `condition_reply(score)`, `extract_reply(**values)`, `RecordingEvents` (`.events` list of (type, data)),
+  `engine_rig(fixture_name|graph, channel="voice", speculative=True, http=, sms=, loader=)` → `Rig(engine, port,
+  source: FakeSource, events, lines: FakeLines)`, `drive(agen, interrupt_after_tokens=None) -> list[Action]`
+  (consumes SayStream tokens; returns actions with streams replaced by their text tuple), `user(text, index)`.
+- `test_engine.py`: restaurant fixture multi-turn: start speaks greet stream; "Hi, I'm Mike and I want to order"
+  → extraction first_name merged, route greet→take_order (`call.extraction`, `call.route` order), reply streamed
+  at take_order; loop condition not met → stays, request carries the suffix, router result ignored, no
+  `call.route`; condition met → route to `price` (Custom Code degraded, chains) → `confirm` static text rendered
+  with variables → waits; global "what are your hours?" → global wins on tie, return stack pushed, auto-return no
+  re-speak; `wait` timeout path via `on_wait_timeout`; End Call → line + EndCallAction, `state.ended`.
+- `test_engine_speculation.py`: hit (stay, no suffix) → only one dialogue request, speculative flag true, stream
+  committed and its tokens yielded; miss on route change → discarded (FakeStream.discarded) and a fresh request
+  at the new node; miss on variable change referenced by prompt; miss on unmet condition (prompt_changed);
+  speculation disabled → no speculative request.
+- `test_engine_protection.py`: maxVisits exceeded → fallback edge taken / else errorPhrase + EndCallAction
+  loop_protection; chain depth: a cycle of skipUserResponse nodes ends after 10 chained passes; maxTotalTurns.
+- `test_engine_interrupt.py`: closing the generator mid-SayStream keeps the partial then `on_interrupted("Hel—")`
+  replaces content + interrupted=True; blank → `—`; supersedes removes records; unavailable LLM → errorPhrase.
+- `test_engine_nodes.py`: webhook node with speech: queued Say yielded before the HTTP finishes (FakeHttp gated by
+  an Event), responsePathways route_to skips respond, `call.webhook_node` event; SMS failure → fallback;
+  Transfer Pathway switch + End Call return (`MemoryLoader.with_other()`); Scheduling tool round book_slot →
+  booking variables, tool records, second stream; book failure route_to onFailureNodeId; press button DTMF
+  yielded; background extraction emitted after completion and cancelled by `aclose`.
+- Coverage of new modules ≥ 95 % branch (target 100 %).
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+-q`; `uv run python scripts/check_spec_refs.py`; `make test` in background (truncate `logs/make_test.log` first,
+Monitor heartbeat); `uvx radon cc -s -a packages/va_engine/src` avg < 10; `npx --yes jscpd@4 --silent` 0 clones;
+`uvx pip-audit` on `uv export` + `corepack pnpm audit` (deps unchanged). No e2e (wired into calls in T12).
+
+### Risks
+- Concurrency + generator: never `yield` inside a TaskGroup/`async with` that would leak on aclose — gather decisions
+  first, then yield. Sink relay task must be cancelled in `finally`.
+- Speculation stream must always be resolved or closed (also on early generator close) → `finally: await spec.aclose()`.
+- ScriptedPort is FIFO across function names → use KeyedPort for engine tests.
+- jscpd: tool-round code resembles task_runner `_run_tools`; reuse `task_tools` helpers where they fit.
+- Keep `PathwayEngine` small: radon complexity per method < 10; split into engine_decide/engine_tools/engine_events.
+
+## Build P07-T08b (done when make test passes)
+- New: `va_engine.engine` (PathwayEngine, EnginePorts, ConversationFacts, new_pathway_state, CHAIN_DEPTH_LIMIT,
+  LOOP_PROTECTION), `engine_decide` (Decider, TurnDecision.held/suffix), `engine_events` (EngineEvents + data helpers),
+  `engine_tools` (scheduling_tools, run_scheduling_calls, MAX_SCHEDULING_ROUNDS). Spec Decision specs/11 §5.9
+  P07-T08b; AGENTS.md bullet.
+- Deviations from plan: (a) speculation flag read from `GatewayDialogue.prompt.settings.speculative` (single source,
+  DialogueSettings.for_call already maps org engine.speculative) — not in ConversationFacts; (b) scheduling tool
+  answers are recorded only as `tool` history turns (shown as context updates by PathwayPrompt), not also as
+  `dialogue.extra` messages — both would duplicate them in the next request; (c) streamed replies are wrapped to
+  record exactly what the consumer received (GatewayDialogue.text is stale when a stream was never read);
+  (d) public `settle_background()` added; (e) loop condition event data adds node_id + message.
+- Tests: test_engine.py (restaurant flow), test_engine_turns.py (speculation, protection, interruptions),
+  test_engine_nodes.py (webhook relay/route, SMS fallback, pathway switch+return, scheduling rounds, DTMF,
+  degraded nodes, background extraction); helpers tests/support/engine_helpers.py. 53 tests.
+- Gates: make fmt/lint/typecheck/placeholders pass; check_spec_refs 0; make test 12140 passed, 7 skipped, total
+  coverage 99 % (engine.py 97 %, engine_decide/events 100 %, engine_tools 99 %); jscpd 0 clones; radon avg 2.86
+  (no engine method above B); pip-audit clean; pnpm audit --audit-level high clean (3 moderate, pre-existing).
+  No e2e: the engine is not wired into calls yet (P07-T12).
+
+## Review P07-T08b (rejected, 1 finding)
+Gates re-run: make lint / typecheck / placeholders pass, check_spec_refs 0. make test was started and stopped once
+the finding below was confirmed. Engine flow, decision order, speculation resolution, relay sink, loop protection,
+scheduling rounds and event data all match specs/11 §5 + Decision P07-T08b and specs/19 §2.
+1. packages/va_engine/src/va_engine/engine.py:786-805 (`_accept` / `_drop_turn`): the superseded turn is located by
+   an absolute `len(state.history)` index stored in `_turn_starts`. `EngineState.add_turn` folds the oldest records
+   into `history_summary` once history passes HISTORY_CAP (200), which shifts every index left, so
+   `del history[position:]` then cuts at the wrong place. Repro (checked): start, add 205 filler records, user turn 1
+   "first", then turn 2 with `supersedes=1` → `("user", "first")` stays in the history (the stale index points past
+   it). Rule 6 of the Decision says a superseding turn "removes the superseded user record and everything after it".
+   Fix like `TaskBrain._drop_turn` (task_runner.py:478): remember the number of records added since the engine
+   started (a counter bumped in `_record`) and delete the last `added_now - added_then` records (bounded by
+   len(history)), and add a test that supersedes a turn after the history reached HISTORY_CAP. While there, drop
+   `_turn_starts` entries for earlier turns so the dict does not grow for the whole call.
+
+## Build P07-T08b rework (finding 1)
+- engine.py: `_record` bumps `_records_added`; `_accept` keeps only the new turn's mark (`{turn.index:
+  records_added}`; the pipeline supersedes only the previous turn, barge_in.py), `_drop_turn` deletes the last
+  `records_added - mark` records (bounded by len(history)) and rewinds the counter — survives HISTORY_CAP folding.
+- Tests (test_engine_turns.py): supersede after HISTORY_CAP+5 filler records drops "first"/"Reply one."; an older
+  (non-latest) turn cannot be superseded. Both fail on the old index logic (checked by temporarily restoring it).
+
+## Review P07-T08b rework (approved)
+Finding 1 fixed: `_drop_turn` counts records added since the superseded turn's mark; tests cover HISTORY_CAP folding
+and non-latest supersedes. Gates re-run: lint/typecheck/placeholders pass; make test 12142 passed, 7 skipped,
+coverage 99.07 %.

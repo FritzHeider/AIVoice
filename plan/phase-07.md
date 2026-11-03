@@ -54,7 +54,7 @@
   - Deliverables: `va_engine.prompt` (pathway dialogue request: instructions, examples, history window, model options precedence), `va_engine.dialogue.GatewayDialogue` (the production `DialoguePort` over `stream_dialogue`), `va_engine.speculative` (eligibility, referenced-variable scan, `Speculation` commit/discard, committed-stream port)
   - Acceptance: request snapshots per node kind; speculation committed when staying, discarded (no token reaches the consumer) when the route changes or a referenced variable changed; FakeLLM contract test.
 
-- [ ] P07-T08b `PathwayEngine` turn orchestration, chaining, loop protection, events
+- [x] P07-T08b `PathwayEngine` turn orchestration, chaining, loop protection, events — va_engine.engine + engine_decide/engine_events/engine_tools, specs/11 §5.9 Decision; make test 12142 passed, 7 skipped, cov 99.07 %; lint/typecheck/placeholders pass
   - Spec refs: specs/11-pathways-engine.md §4, §5.1–§5.6, §5.9, §7; specs/19-events-and-webhooks.md §2
   - Depends on: P07-T08a
   - Deliverables: `va_engine.engine.PathwayEngine` (`start`, `handle_user_turn`, `on_wait_timeout`, `on_interrupted`, `aclose`) yielding §7 actions, decision pipeline with speculation, skip-user-response chaining (depth 10), `maxVisits`/`maxTotalTurns` loop protection, background extraction, transfer-pathway return, scheduling function rounds, events through an `EngineEvents` port

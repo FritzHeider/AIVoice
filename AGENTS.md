@@ -1780,3 +1780,15 @@ Grafana 3001
   `packages/va_engine/tests/support/dialogue_helpers.py` (`FakeStream` speculative until `commit()`, `FakeSource().
   reply(*deltas, fail=, calls=)`, `dialogue_rig(**settings)`, `counter()`). `copy.deepcopy(object())` returns a NEW
   object: never deepcopy a sentinel you later compare by identity/equality.
+- 2026-11-03 (P07-T08b): pathway turn orchestration = `va_engine.engine.PathwayEngine(state, active, ports=EnginePorts(
+  decider=va_engine.engine_decide.Decider(gateway, clock=), dialogue=GatewayDialogue, lines=, events=EngineEvents,
+  loader=, http=, sms=), facts=ConversationFacts(...), clock=)`; `new_pathway_state(active)` for a fresh call (rules:
+  specs/11 §5.9 Decision P07-T08b). `start`/`handle_user_turn`/`on_wait_timeout` are async generators of actions:
+  read every `SayStream` before resuming, close the generator on barge-in then `on_interrupted(text)`; call
+  `settle_background()` before persisting state and `aclose()` at the end. mypy narrows `run.done` after `while not
+  run.done` even when a callee sets it (unreachable error): read such flags through a method (`_Run.over()`). Tests:
+  `packages/va_engine/tests/support/engine_helpers.py` (`KeyedPort` answers decision calls by function name, since they
+  run concurrently, with neutral defaults and per-name `gates`; `engine_rig(graph, ...)` → `Rig.start()/say()/
+  timeout()/history()`, `rig.events.of(type)`; `drive(agen)`; `first_stream(agen)` to stop at a stream and close
+  mid-reply). Speculation consumes a `FakeSource` script entry whenever it starts (Default/Scheduling nodes without
+  static text), so script a throwaway reply before the real one when the route changes.

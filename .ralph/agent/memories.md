@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793727197-2b39
+> P07-T08b: PathwayEngine (va_engine.engine) async-generator turns over Decider/GatewayDialogue/Navigator; tests KeyedPort answers decision calls per function name (concurrent); mypy narrows dataclass flag after while-not loop even when callee mutates it -> read via method; killing make test leaves a stale exit= line from the wrapper, truncate log AFTER the old wrapper exits
+<!-- tags: engine, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793718805-5413
 > P07-T05: va_engine.navigation Navigator (apply RouteDecision / finish_node / enter, Transition speaks/over_limit/problem, never raises for broken targets); EngineState v3 NodeFrame.kind required, v2 upgrader derives kind from pathway id; service_helpers.json_log_stream returns a stream (not a context manager), filter log_events(stream) by event
 <!-- tags: engine, pathways, testing | created: 2026-11-03 -->

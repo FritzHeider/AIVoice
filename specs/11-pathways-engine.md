@@ -630,6 +630,57 @@ setting `engine.speculative=false`. Metrics: `speculation_hit` / `speculation_mi
 `call.turn` (user), [`call.route`|`call.loop_condition`|`call.extraction`|`call.tool`|`call.webhook_node`]*,
 `call.turn` (assistant, after playback ends or is interrupted), `call.latency` set.
 
+> Decision (2026-11-03): pathway turn orchestration (P07-T08b). `va_engine.engine.PathwayEngine(state, active,
+> ports=EnginePorts(...), facts=ConversationFacts(...), clock=)` runs §5 over the handlers, the
+> `va_engine.navigation.Navigator`, the decision components (`va_engine.engine_decide.Decider`) and the dialogue port.
+> 1. `start(greeting=None)`, `handle_user_turn(turn)` and `on_wait_timeout()` are async generators of the §7 actions
+>    (`SwitchGraph` is applied inside, never yielded). The consumer resumes a generator only after the yielded speech
+>    played (text: was delivered), so chaining and terminal actions need no mark wait inside the engine (`after_mark`
+>    stays for the executor). A barge-in = the consumer closes the generator, then calls `on_interrupted(text)`.
+>    `aclose()` cancels background extraction and closes an open speculation and the dialogue streams;
+>    `settle_background()` waits for running background extractions (before the state is persisted).
+> 2. Decision pass: the `before_response` extraction, the loop condition and the router (the §5.2 combined call when
+>    `Navigator.global_check_enabled()`) run concurrently with the §5.8 speculation, so the router sees the variables
+>    from before this turn's extraction. Applied in order: non-null extracted values merge (overwrite); a `global`
+>    outcome wins over everything; else an unmet condition holds the node with the [4] suffix (the router result is
+>    discarded, no `call.route`); else the decision goes through `Navigator.apply`. Events in this order:
+>    `call.extraction` (`{node_id, variables}`, when values, nulls or rejected values exist or the call degraded),
+>    `call.loop_condition` (`{node_id, score, met, message}`), `call.route` (when the decision moved or the router
+>    model was called). `background` extraction runs as a task and merges/emits when it completes.
+> 3. Execution: an entered node runs `on_enter` (speech queued on the `ActionSink`, e.g. webhook `speech`, is yielded
+>    while the handler still runs; closing the generator cancels the handler), then `respond` unless `on_enter` ended
+>    the AI's part, routed or switched pathways. A handler `route_to` / `route_fallback` (the node's fallback edge) is
+>    entered at once and emitted as `call.route` with the label of an edge between the two nodes (else `null`), no
+>    alternatives, `router_ms` 0; the routing node's `respond` is skipped. Handler reports become their events in
+>    order; a handler problem is logged `engine.handler_problem`. After the node: `Navigator.finish_node()`
+>    (forwarding executes the target; a global auto-return re-speaks nothing). An End Call node entered while a
+>    Transfer Pathway `returnOnEnd` frame is on top returns instead and the engine decides again from the restored
+>    node.
+> 4. Chaining: when the final node does not wait for the caller (its handler says so, or `skipUserResponse`) and no
+>    terminal action ran, another decision pass runs with an empty latest message; at most 10 chained passes per
+>    user turn, the 11th ends the call.
+> 5. Loop protection: an entered node over its `maxVisits` takes its own fallback edge when that target is within
+>    its limit, else (and on the chain-depth limit and a user turn whose `turn_index` exceeds `maxTotalTurns`,
+>    checked before any decision) the engine says the rendered `errorPhrase` (nothing when blank) and yields
+>    `EndCallAction(reason="loop_protection", ended_by="system")`; `state.ended`/`end_reason` are set and
+>    `engine.loop_protection` logs `cause` (`max_visits`, `chain_depth`, `max_total_turns`).
+> 6. History: a `Say` is recorded as an assistant turn when it is yielded; a stream records what the consumer
+>    received, also when the generator is closed mid-stream. A stream without a token because the model was
+>    unavailable is followed by the `errorPhrase`. `on_interrupted` replaces the last spoken record (blank text →
+>    `—`) and sets `interrupted`. DTMF turns are recorded as `[Caller pressed: …]`; a turn with `supersedes`
+>    removes the superseded user record and everything after it; any user turn disarms the wait timer. Marks are
+>    `t{turn_index}.{n}`, unique per turn index (wait-timeout lines continue the numbering).
+> 7. Scheduling: the node's reply is offered `list_slots`/`book_slot`; after a streamed reply its tool calls are
+>    answered in order (invalid JSON or a blank `start` → `{"error":"invalid_arguments"}`, other names →
+>    `{"error":"unknown_tool"}`, the calls after a failed booking that routes → `{"error":"skipped"}`) and recorded
+>    as `tool` history turns (the next request shows them as §5.8 rule 3 context updates, so no separate in-turn
+>    messages are added), then the node responds again; the 4th request of a pass offers no tools. A failed
+>    booking with `onFailureNodeId` routes there (rule 3). Other nodes offer no tools until phase 08.
+> 8. Until phase 08, Knowledge Base nodes respond like Default nodes (no knowledge block) and Custom Code nodes run
+>    nothing, speak their `text`/`prompt` when present and wait only then (`engine.node_degraded`).
+> 9. Events go to `va_engine.engine_events.EngineEvents.emit(event_type, data)` (sync; the transport adapter
+>    publishes them); turn index and tag enrichment of `call.route` is the adapter's.
+
 ## 6. Task-mode runner
 
 Used when the call has `task` (or persona/agent resolving to a prompt). A synthetic single-node graph:
