@@ -500,6 +500,25 @@ async def test_timeline_reports_every_agent_clear(media_agent: MediaAgent) -> No
         assert timeline["answered_ms"] <= clears[0] <= clears[1]
 
 
+async def test_timeline_reports_every_echoed_mark_with_its_agent_track_offset(
+    media_agent: MediaAgent,
+) -> None:
+    state = telnyx_state(RecordingTransport())
+    async with telnyx_client(state) as client:
+        ccid = await streaming(client, state, media_agent)
+        for name in ("first", "second"):
+            await media_agent.send(agent_media(ulaw_encode(tone(40))))
+            await media_agent.send({"event": "mark", "mark": {"name": name}})
+        await media_agent.wait_for(lambda agent: len(agent.of("mark")) == 2)
+        marks = (await client.get(f"/sim/telnyx/calls/{ccid}/timeline")).json()["marks"]
+        assert [mark["name"] for mark in marks] == ["first", "second"]
+        # Each mark echoes after its audio played: the second one at least one more frame of track later.
+        assert 0 < marks[0]["track_ms"] < marks[1]["track_ms"]
+        found = state.telnyx.call(ccid)
+        assert found is not None
+        assert [echo.track_ms for echo in found[1].mark_echoes] == [mark["track_ms"] for mark in marks]
+
+
 async def test_media_control_errors(media_agent: MediaAgent) -> None:
     state = telnyx_state(RecordingTransport())
     async with telnyx_client(state) as client:

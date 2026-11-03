@@ -822,15 +822,20 @@ async def test_the_background_bed_fills_the_agent_track_between_utterances(
     track: str | None, noise: bool, level: float | None
 ) -> None:
     async with rig() as r:
-        r.scenario("silence: {ms: 3000}", "hangup: {}")
+        r.scenario("silence: {ms: 4000}", "hangup: {}")
         async with r.call(
             background_track=track, noise_cancellation=noise, wait_for_greeting=False
         ) as streamed:
             assert await r.body.end() == STREAM_CLOSED
-            agent = bytes(streamed.sim_call().audio.agent)
+            call = streamed.sim_call()
+            agent = bytes(call.audio.agent)
+            echoes = list(call.mark_echoes)
         assert spoken(r.state) == [OPENER]
-        # The opener (~1 s) is over by 2 s after the answer; the caller hangs up at 3.2 s.
-        idle = window_dbfs(agent, 2000, 2800)
+        # The opener's last mark echoes when its audio has played out (the caller stays silent, so nothing
+        # else is spoken): the idle window starts there, wherever a loaded host pushed the opener.
+        assert echoes, "the opener's marks were never echoed"
+        opener_end_ms = echoes[-1].track_ms
+        idle = window_dbfs(agent, opener_end_ms + 200, opener_end_ms + 1000)
         if level is None:
             assert idle == -math.inf
         else:

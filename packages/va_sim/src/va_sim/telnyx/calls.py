@@ -35,6 +35,7 @@ __all__ = [
     "DtmfEntry",
     "EventEntry",
     "LegOutcome",
+    "MarkEcho",
     "PendingMedia",
     "Playback",
     "StreamState",
@@ -81,6 +82,14 @@ class CallAudio:
 
     caller: bytearray = field(default_factory=bytearray)
     agent: bytearray = field(default_factory=bytearray)
+
+
+@dataclass(frozen=True, slots=True)
+class MarkEcho:
+    """One agent ``mark`` the media session echoed; ``track_ms`` = the aligned agent track length then."""
+
+    name: str
+    track_ms: int
 
 
 @dataclass(slots=True)
@@ -197,6 +206,8 @@ class Call:
     first_agent_speech_ms: int | None = None
     # Sim ``virtual_ms`` of every agent ``clear`` frame received on the media stream, in arrival order.
     clear_ms: list[int] = field(default_factory=list)
+    # Every agent ``mark`` echoed back (its audio played out), with the agent-track offset (ms) at the echo.
+    mark_echoes: list[MarkEcho] = field(default_factory=list)
     ended_at: datetime | None = None
     ended_ms: int | None = None
     hangup_cause: str | None = None
@@ -324,6 +335,7 @@ class Call:
             "ended_ms": self.ended_ms,
             "first_agent_speech_ms": self.first_agent_speech_ms,
             "clears": list(self.clear_ms),
+            "marks": [{"name": echo.name, "track_ms": echo.track_ms} for echo in self.mark_echoes],
             "utterances": list(self.timeline_utterances),
             "script": self.script_summary(),
         }

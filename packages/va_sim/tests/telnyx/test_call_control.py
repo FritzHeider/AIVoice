@@ -142,6 +142,7 @@ async def test_listing_detail_and_timeline() -> None:
             "ended_ms": 2000,
             "first_agent_speech_ms": None,
             "clears": [],
+            "marks": [],
             "utterances": [],
             "script": None,
         }

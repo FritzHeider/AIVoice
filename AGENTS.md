@@ -1479,6 +1479,8 @@ Grafana 3001
   tests use `runtime_rig.ASSETS_DIR`; `va_media.runtime.background_mixer` builds the leg mixer (missing asset →
   `media.background_unavailable`, no bed). Every runtime sim call now plays the `static` bed (continuous idle
   frames on the agent track): assertions on agent-track digital silence need `background_track="none"`.
+  Measure agent-track windows from where speech actually ended (`streamed.sim_call().mark_echoes[-1].track_ms`,
+  timeline `marks`), never fixed offsets after the answer: under load the opener starts late.
   FakeTelnyx agent speech = frame RMS > 1024 (was 256; the static bed is ≈ 330); the -22 dBFS office/cafe/
   restaurant beds read as agent speech, so `wait_agent_speech` scenarios must not use them. The default resolved
   config waits up to 6 s for a callee greeting: pass `wait_for_greeting=False` when a test needs the opener at

@@ -1434,3 +1434,20 @@ alone on the running stack: `uv run pytest tests_e2e -m e2e -k webhooks -s`).
 ## Review P06-T08 — approved
 - Gates re-run: lint/typecheck/placeholders pass; make test 11267 passed, 7 skipped (99.04 %); make e2e 17 passed (374 s) incl. webhooks_call_completed_and_live.
 - Checked against specs/19 §8 headers (X-VA-*, X-Webhook-Signature, X-Event-Id, UA), §5/§7 bodies, specs/30 §5 Decision P06-T08; signature verification independent of the signer; compose override test + specs/29 updated.
+
+## Phase 06 exit gate — passed
+- make check exit 0 (all Python + TS gates, coverage); make e2e 17 passed in 375 s (exit 0) incl. webhooks_call_completed_and_live. README row 06 → complete (2026-11-03, fa007d9).
+
+## Build fix:bed-none-flake (builder notes)
+- plan.ready arrived with no new `## Plan` (phase 06 complete); built the only open task, the flaky
+  `test_the_background_bed_fills_the_agent_track_between_utterances` (fixed 2000-2800 ms window overlapped a late opener).
+- FakeTelnyx: `Call.mark_echoes` (`MarkEcho(name, track_ms)` = aligned agent-track length when the mark echoed, i.e. where
+  that audio ended), timeline `marks: [{name, track_ms}]`; specs/30 §3 (14) text updated; sim tests added/updated.
+- Media test: window = [last mark echo + 200, + 1000] ms, caller silence 4000 ms. Passes under 4×`yes` CPU load with -n 8.
+- AGENTS.md P05-T15 bullet: measure agent-track windows from mark echoes.
+- Gates: fmt/lint/typecheck/placeholders pass; make test 11268 passed, 7 skipped, 99.03 %; jscpd 0 clones; radon A (2.11);
+  pip-audit clean; pnpm audit 3 moderate (no high). No e2e: sim instrumentation + unit test only.
+
+## Review fix:bed-none-flake — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11268 passed, 7 skipped (99.04 %); targeted bed + mark-echo tests pass.
+- Diff checked: FakeTelnyx `Call.mark_echoes`/timeline `marks` documented in specs/30 §3 (14); test window anchored on last mark echo with length assert; no plan task (runtime task only).

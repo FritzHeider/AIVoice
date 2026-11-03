@@ -382,9 +382,11 @@ Behavioural rules:
 > to, state, is_alive, scenario_id, client_state, created_at, answered_at, ended_at, hangup_cause, hangup_source,
 > commands: [{name, command_id, at, duplicate}], events: [{event_type, event_id, at}], dtmf_sent, transfers:
 > [{call_control_id, to, from, at}], recordings, stream, conference_id}`; `GET .../timeline` → `{call_control_id,
-> initiated_ms, answered_ms, ended_ms, first_agent_speech_ms, clears, utterances}` (sim `virtual_ms`; utterances come
-> with the media client; `first_agent_speech_ms` since P05-T17c, `clears` = the `virtual_ms` of every agent `clear`
-> frame received, since P05-T17d; see the §5 Decisions).
+> initiated_ms, answered_ms, ended_ms, first_agent_speech_ms, clears, marks, utterances}` (sim `virtual_ms`; utterances
+> come with the media client; `first_agent_speech_ms` since P05-T17c, `clears` = the `virtual_ms` of every agent `clear`
+> frame received, since P05-T17d; see the §5 Decisions; `marks` = `[{name, track_ms}]` for every agent `mark` echoed
+> back, `track_ms` being the aligned agent-track offset at the echo, i.e. where that audio ended in the recording,
+> since 2026-11-03, `Call.mark_echoes` in process).
 > Payload `state`: `bridging` (outgoing initiated), `parked` (incoming initiated, or after unbridge), `answered`,
 > `bridged`, `hangup`; `is_alive` is true only between answer and hang-up. `GET /sim/state` `telnyx` adds `calls`
 > and `conferences` counts; `/sim/reset` drops calls and conferences and cancels pending progress. (15) Accelerated

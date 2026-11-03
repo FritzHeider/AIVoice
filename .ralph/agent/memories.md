@@ -466,6 +466,10 @@
 
 ## Fixes
 
+### mem-1793702021-fdbe
+> Runtime sim agent-track window tests must anchor on Call.mark_echoes[-1].track_ms (FakeTelnyx mark echo = where that agent audio ended in the aligned track), not fixed ms after answer: under load the opener starts late
+<!-- tags: media, sim, testing | created: 2026-11-03 -->
+
 ### mem-1793675044-c0b4
 > flake: apps/media_worker/tests/test_runtime_sim.py::test_the_background_bed_fills_the_agent_track_between_utterances[none-False-None] failed once under full make check (idle -21.8 dBFS vs -inf); passes in isolation
 <!-- tags: media, testing, flaky | created: 2026-11-03 -->

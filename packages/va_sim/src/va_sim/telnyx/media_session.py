@@ -27,6 +27,7 @@ from va_common.logging import get_logger
 from va_sim.clock import iso_z
 from va_sim.tasks import hold_clock
 from va_sim.telnyx.agent_speech import is_speech, is_speech_pcm
+from va_sim.telnyx.calls import MarkEcho
 from va_sim.telnyx.keys import SIGNATURE_HEADER, TIMESTAMP_HEADER
 from va_sim.telnyx.media_format import FRAME_MS, TRACK_RATE, agent_format, stream_format
 from va_sim.telnyx.media_frames import (
@@ -350,6 +351,8 @@ class MediaSession:
         self._call.audio.agent.extend(agent_pcm)
         frames = [mark_frame(stream_id, self._next_sequence(), name) for name in marks]
         self.marks_echoed += len(marks)
+        track_ms = len(self._call.audio.agent) * 1000 // (TRACK_RATE * 2)
+        self._call.mark_echoes.extend(MarkEcho(name, track_ms) for name in marks)
         frames.extend(self._outbox)
         self._outbox.clear()
         if self._dtmf:
