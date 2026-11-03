@@ -6,6 +6,7 @@ from typing import Any, Final
 
 import pytest
 from e2e_assertions import (
+    CALL_OBJECT_FIELDS,
     alternating_roles,
     event_order_failures,
     event_types,
@@ -15,16 +16,11 @@ from e2e_assertions import (
 )
 from e2e_harness import FinishedCall, Harness, wav_channels
 
-from va_domain.call_object import CallObject
-
 pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]
 
 FIRST_SENTENCE: Final = "Hi, this is Maya from Bella Pasta calling about your reservation."
 TASK: Final = "You are Maya from Bella Pasta. Ask when the caller would like to come in, then end the call."
 OVERHEAD_P95_MS: Final = 250
-CALL_OBJECT_FIELDS: Final = frozenset(
-    info.serialization_alias or info.alias or name for name, info in CallObject.model_fields.items()
-)
 
 
 def user_turns(call: dict[str, Any]) -> list[dict[str, Any]]:

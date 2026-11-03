@@ -54,7 +54,7 @@
   - Deliverables: all call lifecycle emitters use the publisher; per-turn `call.latency` events with Bland-style stage messages; `webhook_events` filtering honored
   - Acceptance: e2e outbound_basic asserts the presence and order of expected event types.
 
-- [ ] P06-T08 E2E: webhooks
+- [x] P06-T08 E2E: webhooks — tests_e2e/test_webhooks_call_completed_and_live.py + signature-verifying receiver (e2e_receiver), live filtering, 500 retry, Call Object; make test 11267 passed (99 %), make e2e 17 passed
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list); specs/19-events-and-webhooks.md (tests required)
   - Depends on: P06-T03, P06-T07
   - Deliverables: `tests_e2e/test_webhooks_call_completed_and_live.py` with signature-verifying receiver fixture

@@ -1691,3 +1691,15 @@ Grafana 3001
   must implement `route_many`. The media `TurnRecorder.started(media_format)` publishes `call.started` first, so
   call event filters by category `call` also see it: filter turns by `event_type == "call.turn"`. Event log items
   (`GET /v1/calls/{id}/events`) carry `type`; e2e `event_order_failures(event_types(events))` checks the causal order.
+- 2026-11-03 (P06-T08): e2e webhook receiver = `tests_e2e/support/e2e_receiver.py` (fixture `receiver` →
+  `ServedReceiver(receiver, url)`; `WebhookReceiver.script(path, Reply(500), event_type=...)`, `of(path, type)`,
+  event-driven `wait_for(predicate, timeout_s=)`; pure `signature_failures(received, secret, now=)`) served in the
+  pytest process on `E2E_RECEIVER_BIND` (0.0.0.0) / `E2E_RECEIVER_PORT` (0); containers reach it as
+  `E2E_RECEIVER_HOST` (default `host.docker.internal`, mapped by `extra_hosts: host-gateway` on `api` and `webhooks`
+  in `docker-compose.e2e.yml`; on the EC2 runner that is docker0 `172.17.0.1`, reachable from the compose network).
+  After editing the override on a running stack: `docker compose -f docker-compose.yml -f docker-compose.e2e.yml
+  --profile e2e up -d --no-deps --wait api webhooks`. Rotate the org secret first (only the rotate response shows the
+  plaintext); harness `rotate_signing_secret`, `create_endpoint`, `send_endpoint_test` (never `test_*`: pytest
+  collects it), `deliveries`/`wait_deliveries`. Pure body checks: `e2e_webhooks` (`live_body_failures`,
+  `envelope_failures`, `retry_gap_ok`, `call_object_mismatches` ignoring per-read presigned `recording_url` and
+  `recording_expiration`); `CALL_OBJECT_FIELDS` lives in `e2e_assertions`. The flow takes ~35 s (first retry 10 s).

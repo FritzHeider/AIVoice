@@ -492,6 +492,61 @@ class Harness:
                 return collected
             after = page["next_after_seq"]
 
+    # --- webhooks ------------------------------------------------------------------------------------------
+
+    async def rotate_signing_secret(self, org: E2eOrg) -> str:
+        """``POST /v1/webhooks/signing-secret/rotate``: the new plaintext secret (shown only here)."""
+        response = await self.http.post(
+            f"{self.urls.api}/v1/webhooks/signing-secret/rotate", headers=org.headers
+        )
+        secret: str = _ok(response).json()["data"]["secret"]
+        return secret
+
+    async def create_endpoint(self, org: E2eOrg, url: str, event_types: Sequence[str]) -> dict[str, Any]:
+        """``POST /v1/webhooks/endpoints``: the created endpoint."""
+        body = {"url": url, "event_types": list(event_types)}
+        response = await self.http.post(
+            f"{self.urls.api}/v1/webhooks/endpoints", json=body, headers=org.headers
+        )
+        endpoint: dict[str, Any] = _ok(response, 201).json()["data"]
+        return endpoint
+
+    async def send_endpoint_test(self, org: E2eOrg, endpoint_id: str) -> dict[str, Any]:
+        """``POST /v1/webhooks/endpoints/{id}/test`` (a synthetic ``call.completed``): the send result."""
+        response = await self.http.post(
+            f"{self.urls.api}/v1/webhooks/endpoints/{endpoint_id}/test", json={}, headers=org.headers
+        )
+        result: dict[str, Any] = _ok(response).json()["data"]
+        return result
+
+    async def deliveries(self, org: E2eOrg, **filters: str) -> list[dict[str, Any]]:
+        """Every ``GET /v1/webhooks/deliveries`` row matching ``filters``, following the cursor."""
+        collected: list[dict[str, Any]] = []
+        params: dict[str, str | int] = {**filters, "limit": 100}
+        while True:
+            response = await self.http.get(
+                f"{self.urls.api}/v1/webhooks/deliveries", params=params, headers=org.headers
+            )
+            page = _ok(response).json()
+            collected.extend(page["data"])
+            if not page["pagination"]["has_more"]:
+                return collected
+            params["cursor"] = page["pagination"]["next_cursor"]
+
+    async def wait_deliveries(
+        self,
+        org: E2eOrg,
+        done: Callable[[list[dict[str, Any]]], bool],
+        *,
+        what: str,
+        timeout_s: float = DEFAULT_WAIT_S,
+        **filters: str,
+    ) -> list[dict[str, Any]]:
+        """The delivery rows matching ``filters`` once ``done`` holds for them."""
+        return await _poll(
+            lambda: self.deliveries(org, **filters), done, timeout_s=timeout_s, what=f"deliveries {what}"
+        )
+
     async def recording_wav(self, url: str) -> bytes:
         """Download a presigned recording URL from the host.
 

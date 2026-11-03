@@ -1294,3 +1294,143 @@ jscpd; radon; touches the call flow → `make e2e` (at least outbound_basic, the
 ## Review P06-T07 — approved
 - Gates re-run: lint/typecheck/placeholders pass; make test 11224 passed, 7 skipped (99 %); test-ts pass; make e2e 16 passed (342 s).
 - Checked against specs/19 §1 step 5 + Decision P06-T07, §2 catalog, specs/05 §7.9, specs/07 §3 step 7. Routing in-session for api/worker/edge accept; media routes in the per-org flush; dispatcher unrouted. Rollback proofs for api dispatch, persist_events, media writer.
+
+## Plan P06-T08 — E2E: webhooks_call_completed_and_live
+Spec: specs/30 §5 (flow table; Decision P05-T17b (3) promised the receiver with phase 06), specs/19 §3 (+P06-T02
+Decision), §4 Call Object, §5 bland-live body, §7 envelope, §8 headers/retry (+P06-T03 Decision), §10 signing secret
+rotate / endpoints / deliveries / test send. Phase exit gate wording: "receiver fixture verifies signatures, live
+categories filtering, retries after a 500, and final Call Object fields".
+
+### Decisions (add `> Decision (2026-11-03): webhooks e2e flow (P06-T08).` under specs/30 §5 after the P05-T17d one)
+1. Receiver = `tests_e2e/support/e2e_receiver.py` (not `tests_e2e/receiver.py` as the T17b Decision guessed: the
+   support dir is on pytest pythonpath/mypy_path; amend T17b (3) text with "(phase 06: `e2e_receiver`, see Decision
+   P06-T08)"). It runs in the pytest process (real uvicorn via `va_common.service.run_server` + `ReadyServer`, bound
+   on `E2E_RECEIVER_BIND` default `0.0.0.0`, port `E2E_RECEIVER_PORT` default 0) and the containers reach it as
+   `http://{E2E_RECEIVER_HOST}:{port}` (default host `host.docker.internal`, mapped to the docker host by
+   `extra_hosts: ["host.docker.internal:host-gateway"]` on `api` and `webhooks` in `docker-compose.e2e.yml`; the api
+   resolves it too because Send Call and endpoint create vet the URL). `docker-compose.e2e.yml` also pins
+   `WEBHOOK_ALLOW_PRIVATE: "true"` on `api` (the gateway address is private; the dispatcher already has it).
+2. Secret: the flow rotates the fresh org's secret (`POST /v1/webhooks/signing-secret/rotate`, the only call that
+   returns plaintext) BEFORE any delivery, so the dispatcher's 300 s cache is filled with the new set. Verification:
+   `X-VA-Signature` = `t=<unix>,v1=<hex>[,v1=<hex>]` (dual-sign window: two v1s, current first) — accept when ANY v1
+   equals HMAC(secret, "<t>.<raw body>"); `t` == `X-VA-Timestamp`, |t − receipt wall time| ≤ 300 s;
+   `X-Webhook-Signature` == HMAC(secret, raw body) (current secret); `X-VA-Event-Id` == `X-Event-Id` starts `evt_`;
+   `User-Agent` `VoiceAgents-Webhooks/1.0`; `Content-Type` application/json. Every request the receiver got must
+   verify (a forged/unsigned one fails the test).
+3. Flow (one outbound call reusing the `outbound_basic` scenario + rules via `harness.load_scenario("outbound_basic")`):
+   - Org endpoint `POST /v1/webhooks/endpoints {url: <recv>/org, event_types: ["call.completed", "call.ended"]}`;
+     preflight `POST /v1/webhooks/endpoints/{id}/test` must answer `succeeded: true, status_code: 200` (proves the
+     api container reaches the receiver; failure message names `E2E_RECEIVER_HOST`), and the synthetic envelope it
+     sent verifies (data.test true, type call.completed).
+   - Receiver script: path `/call` answers 500 to the FIRST `call.completed` request, 200 otherwise.
+   - Send Call with `webhook: <recv>/call`, `webhook_events: ["queue", "latency"]`, `metadata: {"run": token}`,
+     `record: true`, same task/first_sentence as outbound_basic.
+   - Wait (event-driven `receiver.wait_for`, timeout ~180 s) for a 200-answered `call.completed` on `/call`.
+4. Assertions:
+   - Signatures (decision 2) on every received request.
+   - Live filtering on `/call`: event types (header) ⊆ {call.queued, call.latency, call.completed}; exactly one
+     distinct `call.queued` event id; distinct `call.latency` event ids == the event log's `call.latency` rows
+     (count ≥ 1 per caller turn, match by `seq`); every live body is §5 shaped: keys exactly {call_id, category, level,
+     message, data, seq, created_at, metadata}, category ∈ {queue, latency}, `metadata == {"run": token}`, `call_id`
+     matches, `created_at` ISO-Z ms; at least one latency message matches `^(E2E|STT|LLM|TTS): \d+ms$`. No
+     `call.turn`/`call.dialing`/`call.ended` reached `/call`.
+   - Retry: exactly two `call.completed` requests on `/call`, same `X-VA-Event-Id`, second − first receipt (monotonic)
+     ∈ [9, 25] s (10 s × 0.9 jitter floor; upper = 11 s + 1 s poll + slack), first answered 500, second 200. Then poll
+     `GET /v1/webhooks/deliveries?call_id=<id>&event_type=call.completed` until the per-call row (`endpoint_id` null,
+     url `/call`, format `bland`) is `succeeded`, `attempts == 2`, `last_status_code == 200`; the org-endpoint row
+     (format `envelope`) `succeeded`, `attempts == 1`. Event log contains `call.webhook_delivery` rows for that
+     delivery: one level `warning` message matching `failed: 500 (attempt 1), retrying in` and one `info`
+     `Webhook delivered to <host>: 200` (host only, never the URL path).
+   - Final Call Object (`/call` 200 body, bare, `bland`): keys ⊇ outbound_basic's `CALL_OBJECT_FIELDS` (import from
+     a shared place, see Files), `call_id`, `status == "completed"`, `completed is True`, `metadata == {"run": token}`,
+     transcripts alternate and start with the first sentence, `recording_url` set; equals `GET /v1/calls/{id}` on
+     every key except `recording_url` (presigned per request; both non-empty). Both 500'd and retried bodies are
+     byte-identical (same stored payload).
+   - Org endpoint `/org`: envelope §7 for `call.ended` and `call.completed` (each once): keys {id, type, created_at,
+     org_id, call_id, batch_id, conversation_id, data}, `id` == header event id, `type` == header type, `org_id`,
+     `call_id`; `data` of call.completed == the `/call` Call Object; `data` of call.ended is the §5 body with
+     `data.end_reason == "agent_end_call"`. Nothing else reached `/org` (besides the preflight test event).
+5. outbound_basic is unchanged (keeps the event-log path); Decision P05-T17b (3) amended: flows may now wait on the
+   receiver; event-log checks remain valid.
+
+### Files
+- `tests_e2e/support/e2e_receiver.py` (new): `Reply(status=200)`, `Received(path, headers: dict[str,str], body: bytes,
+  at: float (time.monotonic), wall: float (time.time()), status: int)`, `WebhookReceiver` (scripts per path FIFO then
+  200, records, `changed` event, `wait_for(predicate, timeout_s)`, `of(path, event_type=None)`, `event_type(r)`),
+  `served_receiver(receiver, *, bind, port) -> AsyncIterator[int]` (asynccontextmanager; `run_server(app, host=bind,
+  port=port, stop=StopController(), install_signals=False, server_factory=ReadyServer factory)` like
+  `service_helpers.serving` but bind host configurable), `ReceiverSettings.from_env(environ)` (bind, port, public host),
+  pure `signature_failures(received, secret, *, now, tolerance_s=300) -> list[str]` (empty = ok; reasons), `hex_hmac`,
+  `parse_signature_header(value) -> (t, [v1...])`. Put `signature_failures` & parsing pure so they're unit-tested.
+- `tests_e2e/support/e2e_webhooks.py` (new, pure): `LIVE_BODY_KEYS`, `ENVELOPE_KEYS`, `live_body_failures(body, *,
+  call_id, categories, metadata) -> list[str]`, `envelope_failures(body, *, headers, org_id, call_id) -> list[str]`,
+  `retry_gap_ok(first_at, second_at, *, base_s=10.0, jitter=0.1, slack_s=14.0)`, `LATENCY_MESSAGE` regex,
+  `call_object_mismatches(webhook_body, api_body, ignore=("recording_url",)) -> list[str]`.
+  Move `CALL_OBJECT_FIELDS` to `e2e_assertions.py` (outbound_basic imports it from there).
+- `tests_e2e/support/e2e_harness.py`: `rotate_signing_secret(org) -> str`; `create_endpoint(org, url, event_types)
+  -> dict`; `test_endpoint(org, endpoint_id) -> dict` — NAME IT `send_endpoint_test` (never `test_*`, pytest collects);
+  `deliveries(org, **filters) -> list[dict]`; `wait_deliveries(org, predicate, *, call_id, timeout_s)` via `_poll`.
+  `Harness.open` gains nothing else; receiver is a separate fixture.
+- `tests_e2e/conftest.py`: fixture `receiver` → `async with served_receiver(...) as port:` yields
+  `(WebhookReceiver, base_url)` (small dataclass `ServedReceiver(receiver, url)`).
+- `tests_e2e/test_webhooks_call_completed_and_live.py` (new): `pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]`;
+  one test `test_webhooks_call_completed_and_live(harness, receiver)` per Decisions 3-4, split into small check
+  helpers (`check_signatures`, `check_live`, `check_retry`, `check_call_object`, `check_org_endpoint`) to keep radon low.
+- `docker-compose.e2e.yml`: `api: {extra_hosts: [...], environment: {WEBHOOK_ALLOW_PRIVATE: "true"}}`,
+  `webhooks: {extra_hosts: [...]}`; update header comment. `scripts/tests/test_compose.py::
+  test_e2e_override_pins_the_realtime_sim_clock` → rename/extend to assert the full expected override dict.
+  specs/29 §2: extend the P05-T17a decision text (or a new P06-T08 sentence) for the override contents.
+- Specs: 30 §5 Decision P06-T08 + T17b (3) amendment. AGENTS.md bullet (receiver, host-gateway, env knobs, rotate
+  first, `send_endpoint_test` naming).
+
+### Tests (unit, `tests_e2e/unit/test_e2e_webhooks.py`, run by make test)
+- `signature_failures`: valid single v1; valid dual v1 where only the second matches; wrong secret → failure; body
+  tampered → failure; `t` ≠ X-VA-Timestamp → failure; stale t (> 300 s) → failure; missing headers → failure (no
+  KeyError); `X-Webhook-Signature` mismatch → failure; event id header mismatch (X-VA-Event-Id ≠ X-Event-Id).
+  Secrets generated with `secrets.token_hex` at test time (never literals that look like keys; gitleaks).
+- `parse_signature_header` ordering / malformed.
+- `live_body_failures`: ok body; extra key; wrong category; wrong metadata; bad created_at.
+- `envelope_failures`: ok; id/type mismatch with headers; wrong org.
+- `retry_gap_ok`: 9.0 ok, 8.9 not, 25 ok, 25.1 not (defaults).
+- `call_object_mismatches`: ignores recording_url, reports differing key.
+- `WebhookReceiver` in-process: serve on 127.0.0.1 port 0 (`served_receiver(bind="127.0.0.1")`), POST with httpx:
+  scripted 500 then default 200; `received.status` recorded; `wait_for` wakes; `ReceiverSettings.from_env` defaults
+  and overrides.
+- `scripts/tests/test_compose.py` override assertion.
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest tests_e2e/unit scripts/tests/test_compose.py -q`; full `make test` in background + heartbeat Monitor
+(truncate log first); jscpd; radon; `make e2e` (full: rebuilds stack with the new override; first run the new flow
+alone on the running stack: `uv run pytest tests_e2e -m e2e -k webhooks -s`).
+
+### Risks
+- host-gateway reachability on the Linux EC2 runner (iptables INPUT from docker0); preflight test-send gives a clear
+  message. If blocked, fallback: `E2E_RECEIVER_HOST=<docker0 IP>` or run the receiver bound to the docker bridge IP;
+  document whatever works in AGENTS.md.
+- Binding 0.0.0.0 exposes the receiver briefly on the host; acceptable for a test (ephemeral port), configurable.
+- Retry timing: dispatcher polls every 1 s; jitter ×[0.9,1.1] → gap 9–11 s + ≤1 s poll + delivery time; bound 25 s.
+- The dispatcher secret cache: rotate before the first delivery (the preflight test send does not go through the
+  dispatcher, so the cache is empty until the call's first delivery).
+- latency event count vs log: deliveries are written in the media flush transaction; by the time call.completed
+  arrives all are routed; but dispatcher may still be delivering the last latency rows → wait_for until the
+  receiver has every log `call.latency` seq (bounded) before asserting.
+
+## Build P06-T08 (builder notes)
+- Receiver `tests_e2e/support/e2e_receiver.py` (WebhookReceiver scripts per path + optional event_type — needed because
+  call.queued/latency also hit `/call` before call.completed; ServedReceiver; ReceiverSettings; signature_failures,
+  parse_signature_header); fixture `receiver` in conftest. Pure checks `e2e_webhooks.py`; CALL_OBJECT_FIELDS moved
+  to e2e_assertions. Harness: rotate_signing_secret, create_endpoint, send_endpoint_test, deliveries, wait_deliveries.
+- Flow `tests_e2e/test_webhooks_call_completed_and_live.py` passes on the running stack (~33 s). Finding: Call Object
+  differs from GET on `recording_expiration` too (per-read presign) → PRESIGNED_FIELDS ignored.
+- host-gateway verified on EC2: containers reach 172.17.0.1 (docker0) from the compose network.
+- docker-compose.e2e.yml: api/webhooks extra_hosts, api WEBHOOK_ALLOW_PRIVATE; test_compose updated; specs/29 §2
+  P05-T17a (5) extended; specs/30 §5 row + Decision P06-T08 + T17b (3) amendment; AGENTS.md bullet.
+- Unit tests tests_e2e/unit/test_e2e_webhooks.py (signing via production request_headers + independent verification).
+- served_receiver reuses `service_helpers.serving(app, port=, host=)` (host param added) — jscpd 0 clones.
+- Gates: fmt/lint/typecheck/placeholders pass; make test 11267 passed, 7 skipped, 99 %; post-edit re-run of
+  tests_e2e/unit + va_common + va_events + dispatcher 1295 passed; make e2e 17 passed (370 s) incl. the new flow; radon A.
+
+## Review P06-T08 — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11267 passed, 7 skipped (99.04 %); make e2e 17 passed (374 s) incl. webhooks_call_completed_and_live.
+- Checked against specs/19 §8 headers (X-VA-*, X-Webhook-Signature, X-Event-Id, UA), §5/§7 bodies, specs/30 §5 Decision P06-T08; signature verification independent of the signer; compose override test + specs/29 updated.

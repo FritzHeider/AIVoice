@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from e2e_harness import Harness, StackUrls
+from e2e_receiver import ReceiverSettings, ServedReceiver, WebhookReceiver, served_receiver
 
 STACK_PROBE_TIMEOUT_S = 5.0
 STACK_DOWN_MESSAGE = "e2e stack is not running: run make e2e (or make up PROFILE=e2e)"
@@ -39,3 +40,12 @@ def stack() -> StackUrls:
 async def harness(stack: StackUrls) -> AsyncIterator[Harness]:
     async with Harness.open(stack) as opened:
         yield opened
+
+
+@pytest.fixture
+async def receiver() -> AsyncIterator[ServedReceiver]:
+    """A webhook receiver served from the pytest process (specs/30 §5 Decision P06-T08)."""
+    settings = ReceiverSettings.from_env()
+    recorder = WebhookReceiver()
+    async with served_receiver(recorder, bind=settings.bind, port=settings.port) as port:
+        yield ServedReceiver(recorder, settings.url(port))

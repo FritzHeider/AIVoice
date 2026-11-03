@@ -20,6 +20,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
+from va_domain.call_object import CallObject
 from va_events import DEFAULT_CATEGORY, ENDED_MESSAGE, EventType
 from va_media.transfer import TRANSFER_STARTED_MESSAGE
 from va_media.voicemail import VOICEMAIL_MESSAGE
@@ -28,6 +29,7 @@ from va_workflows.activities.post_call import COMPLETED_MESSAGE
 
 __all__ = [
     "ANSWERED_BY",
+    "CALL_OBJECT_FIELDS",
     "EVENT_MESSAGES",
     "REQUIRED_CALL_EVENTS",
     "TurnOverhead",
@@ -43,6 +45,10 @@ __all__ = [
 
 # Scenario `answered_by` → Call Object `answered_by` (Bland form).
 ANSWERED_BY: Final[Mapping[str, str]] = {"human": "human", "machine": "voicemail"}
+# Every key a Call Object carries (serialized names).
+CALL_OBJECT_FIELDS: Final = frozenset(
+    info.serialization_alias or info.alias or name for name, info in CallObject.model_fields.items()
+)
 # Event types whose rows have a fixed message.
 EVENT_MESSAGES: Final[Mapping[str, str]] = {
     EventType.CALL_COMPLETED.value: COMPLETED_MESSAGE,

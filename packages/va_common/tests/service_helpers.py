@@ -147,8 +147,8 @@ RecordingServer = ReadyServer
 
 
 @asynccontextmanager
-async def serving(app: Any, *, port: int = 0) -> AsyncIterator[ReadyServer]:
-    """Serve ``app`` with real uvicorn on 127.0.0.1 (``port`` 0 = ephemeral); yields the started server."""
+async def serving(app: Any, *, port: int = 0, host: str = "127.0.0.1") -> AsyncIterator[ReadyServer]:
+    """Serve ``app`` with real uvicorn on ``host`` (``port`` 0 = ephemeral); yields the started server."""
     ready = asyncio.Event()
     servers: list[ReadyServer] = []
 
@@ -158,7 +158,7 @@ async def serving(app: Any, *, port: int = 0) -> AsyncIterator[ReadyServer]:
 
     stop = StopController()
     task = asyncio.ensure_future(
-        run_server(app, host="127.0.0.1", port=port, stop=stop, install_signals=False, server_factory=factory)
+        run_server(app, host=host, port=port, stop=stop, install_signals=False, server_factory=factory)
     )
     try:
         waiter = asyncio.ensure_future(ready.wait())

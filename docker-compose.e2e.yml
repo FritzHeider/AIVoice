@@ -1,9 +1,19 @@
-# e2e override (specs/29 §2 Decision P05-T17a): `make up PROFILE=e2e` (scripts/dev_up.sh) adds this file whenever the
-# profile list contains `e2e`. The simulators stay on the realtime clock: the accelerated clock starts at a fixed
-# virtual date and jumps ahead whenever the sim's event loop idles, while the real services stamp and verify against
-# wall time (Telnyx webhook and media WS signature tolerances, Temporal timers, 20 ms media pacing). The file is the
-# home of later e2e-only sim settings.
+# e2e override (specs/29 §2 Decisions P05-T17a and P06-T08): `make up PROFILE=e2e` (scripts/dev_up.sh) adds this file
+# whenever the profile list contains `e2e`. The simulators stay on the realtime clock: the accelerated clock starts at
+# a fixed virtual date and jumps ahead whenever the sim's event loop idles, while the real services stamp and verify
+# against wall time (Telnyx webhook and media WS signature tolerances, Temporal timers, 20 ms media pacing).
+# The e2e webhook receiver runs in the pytest process on the docker host (tests_e2e/support/e2e_receiver.py): the
+# api (Send Call / endpoint URL checks, endpoint test sends) and the webhook dispatcher reach it as
+# `host.docker.internal`, a private address, so the api pins WEBHOOK_ALLOW_PRIVATE as the dispatcher does.
 services:
   sim:
     environment:
       SIM_CLOCK: realtime
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      WEBHOOK_ALLOW_PRIVATE: "true"
+  webhooks:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

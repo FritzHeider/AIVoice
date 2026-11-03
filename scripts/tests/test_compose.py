@@ -231,8 +231,15 @@ def test_sim_matches_spec() -> None:
     assert (ROOT / sim["build"]["dockerfile"]).is_file()
 
 
-def test_e2e_override_pins_the_realtime_sim_clock() -> None:
-    assert _load_yaml(E2E_OVERRIDE_PATH) == {"services": {"sim": {"environment": {"SIM_CLOCK": "realtime"}}}}
+def test_e2e_override_pins_the_realtime_sim_clock_and_the_receiver_host() -> None:
+    host_gateway = ["host.docker.internal:host-gateway"]
+    assert _load_yaml(E2E_OVERRIDE_PATH) == {
+        "services": {
+            "sim": {"environment": {"SIM_CLOCK": "realtime"}},
+            "api": {"extra_hosts": host_gateway, "environment": {"WEBHOOK_ALLOW_PRIVATE": "true"}},
+            "webhooks": {"extra_hosts": host_gateway},
+        }
+    }
     assert SERVICES["sim"]["environment"]["SIM_CLOCK"] == "realtime"
 
 
@@ -666,6 +673,11 @@ def test_docker_compose_e2e_override_renders_the_e2e_stack() -> None:
         "postgresql+asyncpg://va:va@postgres:5432/va",
     )
     assert services["edge"]["environment"]["TELNYX_PUBLIC_KEY"] == ""
+    api = services["api"]
+    assert api["environment"]["WEBHOOK_ALLOW_PRIVATE"] == "true"
+    assert api["environment"]["DATABASE_URL"] == webhooks["DATABASE_URL"]
+    assert api["extra_hosts"] == services["webhooks"]["extra_hosts"]
+    assert set(api["extra_hosts"]) == {"host.docker.internal=host-gateway"}
 
 
 @needs_docker_cli

@@ -1290,6 +1290,7 @@ seed helper `POST /internal/test/orgs` available only when `VA_ENV in (local,tes
 | `retry_on_voicemail` | machine answer; `retry: {wait: 10, voicemail_action: "hangup"}` | second call created with `parent_call_id`, dialed ≥ 10 s later |
 | `guard_rail_opt_out` | `guard_rails: [{type:"tcpa:opt_out", action:"end_call"}]`; caller says "stop calling me" | call ends; DNC entry created source `opt_out_voice`; subsequent call to the number → `NUMBER_BLOCKED` |
 | `max_duration` | `max_duration: 1` (minute), accelerated | call ends at 60 s ± 1 s with `end_reason=max_duration` |
+| `webhooks_call_completed_and_live` | Org endpoint (`call.completed`, `call.ended`) + test send; `outbound_basic` call with `webhook`, `webhook_events: ["queue","latency"]`, `metadata`; receiver answers the first `call.completed` with 500 | every request verifies (`X-VA-Signature`, `X-Webhook-Signature`, headers); only `call.queued`/`call.latency`/`call.completed` reach the per-call webhook, live bodies per `19` §5; `call.completed` retried once ~10 s later with the same event id and body; delivery rows and `call.webhook_delivery` log entries; final Call Object fields and equality with `GET /v1/calls/{id}`; endpoint envelopes per `19` §7 |
 | `stop_via_api` | Long call; `POST /v1/calls/{id}/stop` at 10 s | hangup within 1 s; `ended_by=api` |
 | `worker_crash_recovery` | Start call; `docker kill` the media container mid-call (harness restarts it) | workflow backstop hangs up within 30 s; `end_reason=worker_crash`; post-call completes with partial transcript |
 | `recording_and_post_call` | record=true, summary_prompt, dispositions, analysis_schema | recording copied to MinIO; batch STT invoked; summary, disposition_tag in allowed set, analysis fields typed; `call.completed` after recording_ready |
@@ -1324,8 +1325,8 @@ delays is covered by Temporal time-skipping integration tests.)
 > LLM rule files substitute `{{run}}` (rule ids) and `{{marker}}` (the call prompt's `[[SCENARIO:<name>-<token>]]`).
 > Rules are deleted and ordered simulator numbers released after each test; scenarios stay registered (the control
 > API has no delete) but are inert. Loading a scenario applies its `profile` to the vendor simulators. (3)
-> Completion: until the phase-06 webhook dispatcher delivers webhooks (and `tests_e2e/receiver.py` arrives with it),
-> flows wait for `GET /v1/calls/{id}` `queue_status == "complete"` and read the event log `GET
+> Completion: until the phase-06 webhook dispatcher delivers webhooks (and `tests_e2e/receiver.py` arrives with it;
+> phase 06: `tests_e2e/support/e2e_receiver.py`, see Decision P06-T08), flows wait for `GET /v1/calls/{id}` `queue_status == "complete"` and read the event log `GET
 > /v1/calls/{id}/events`; `assertions.webhook_events` entries are checked against that log, by fixed message
 > (`call.completed` = "Call completed.", `call.ended` = "Call ended.") or by a category no other event type shares,
 > and an entry the log cannot identify is a failure. `outbound_basic` sends no `webhook` for the same reason;
@@ -1405,6 +1406,37 @@ delays is covered by Temporal time-skipping integration tests.)
 > end ≤ 10 + 20 + 3 + 2 s = 35 s (and ≥ 20 s, proving the watch ended it); the table's "30 s" is the typical case.
 > The call ends `worker_crash` (`call_ended_by` `ERROR`, specs/05 §9), the platform side sends the `hangup`, and
 > post-call processing completes with the transcripts written before the kill.
+
+> Decision (2026-11-03): webhooks e2e flow (P06-T08). (1) Receiver: `tests_e2e/support/e2e_receiver.py` (the
+> `tests_e2e/receiver.py` of §3.5 and Decision P05-T17b (3)), a Starlette app served by real uvicorn in the pytest
+> process (fixture `receiver` → `ServedReceiver(receiver, url)`), bound on `E2E_RECEIVER_BIND` (default `0.0.0.0`),
+> port `E2E_RECEIVER_PORT` (default 0 = ephemeral). The containers reach it as `http://{E2E_RECEIVER_HOST}:{port}`
+> (default `host.docker.internal`): `docker-compose.e2e.yml` maps that name to the docker host
+> (`extra_hosts: host-gateway`) on `api` and `webhooks`, and pins `WEBHOOK_ALLOW_PRIVATE: "true"` on `api` (specs/29
+> §2 Decision P05-T17a (5)). Replies are scripted per path and optionally per event type (FIFO, then 200); every
+> request is recorded with raw body, lower-cased headers, monotonic and wall receipt times, and the status answered.
+> (2) Secret: the flow rotates the fresh org's signing secret (`POST /v1/webhooks/signing-secret/rotate`, the only
+> response with the plaintext) before any delivery. Verification is independent of the signer: any `v1` of
+> `X-VA-Signature` (one per active secret, so the dual-sign window verifies too) equals HMAC-SHA256(secret,
+> `"<t>.<raw body>"`), `t` equals `X-VA-Timestamp` and lies within 300 s of the receipt time,
+> `X-Webhook-Signature` is the HMAC of the raw body with the current secret, `X-VA-Event-Id` equals `X-Event-Id`
+> and starts `evt_`, `User-Agent` is `VoiceAgents-Webhooks/1.0`, `Content-Type` JSON. Every received request must
+> verify. (3) Flow: an org endpoint for `call.completed` and `call.ended`, whose test send must answer
+> `succeeded: true, status_code: 200` (the preflight that proves the stack reaches the receiver); then the
+> `outbound_basic` scenario with `webhook=<receiver>/call`, `webhook_events: ["queue", "latency"]`, `metadata`,
+> `record=true`; the receiver answers the first `call.completed` on `/call` with 500; the flow waits (event-driven)
+> for a 200-answered `call.completed` and for every `call.latency` row of the event log. (4) Assertions: per-call
+> event types ⊆ {`call.queued`, `call.latency`, `call.completed`}, one `call.queued`, latency `seq`s equal the event
+> log's, live bodies exactly the §5 keys with the call's `metadata`, a latency message `^(E2E|STT|LLM|TTS): \d+ms$`;
+> two `call.completed` requests with the same event id and byte-identical bodies, 500 then 200, 9-25 s apart (10 s
+> ± 10 % plus poll and send time); `GET /v1/webhooks/deliveries` shows the per-call row (`bland`) succeeded on
+> attempt 2 and the endpoint row (`envelope`) on attempt 1; the event log holds the delivery's `call.webhook_delivery`
+> entries (`warning` attempt 1 "failed: 500 (attempt 1), retrying in", `info` attempt 2 "Webhook delivered to
+> <host>: 200", never the URL path); the Call Object carries every §4 field, `status completed`, `completed true`,
+> the metadata, alternating transcripts that start with the first sentence, and equals `GET /v1/calls/{id}` on every
+> key except the per-read presigned `recording_url` and `recording_expiration`; the endpoint got one `call.ended`
+> (§5 body, `end_reason agent_end_call`) and one `call.completed` (data = the per-call Call Object), as §7
+> envelopes matching the request headers. `outbound_basic` keeps its event-log path.
 
 ## 6. Load testing (`scripts/load/`)
 
