@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793735038-296f
+> P07-T09a: pathways API = va_api.routers.pathways (legacy) + services.pathways (check_graph in to_thread, MultiAppError for many errors[] items) + va_db PathwayRepo (method page not list: a method named list breaks mypy list[...] annotations in the class); require_pathway_editor guard because analysts hold pathways:write; api tests can import graph_helpers
+<!-- tags: api, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793727197-2b39
 > P07-T08b: PathwayEngine (va_engine.engine) async-generator turns over Decider/GatewayDialogue/Navigator; tests KeyedPort answers decision calls per function name (concurrent); mypy narrows dataclass flag after while-not loop even when callee mutates it -> read via method; killing make test leaves a stale exit= line from the wrapper, truncate log AFTER the old wrapper exits
 <!-- tags: engine, pathways, testing | created: 2026-11-03 -->

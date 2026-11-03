@@ -8,7 +8,8 @@ sub-account credit moves; specs/04 §8.4) and :func:`grant_credits` (manual gran
 the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), the
 tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), the tenant :class:`ContactRepo` (inbound
 caller contacts; specs/06 §7), the tenant :class:`WebhookEndpointRepo` and :class:`WebhookDeliveryRepo`
-(webhook endpoints and delivery history; specs/19 §10), and the system-scope ones.
+(webhook endpoints and delivery history; specs/19 §10), the tenant :class:`PathwayRepo` (pathways and their
+versions; specs/12 §1-§3), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -92,6 +93,16 @@ from va_db.repositories.outbox import (
     OutboxBacklog,
     OutboxRepo,
 )
+from va_db.repositories.pathways import (
+    PATHWAY_RESOURCE,
+    PathwayGraphJson,
+    PathwayListRow,
+    PathwayReference,
+    PathwayRefIds,
+    PathwayRepo,
+    ReferenceType,
+    escape_like,
+)
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
 from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
@@ -133,6 +144,7 @@ __all__ = [
     "NOT_OWNER_MESSAGE",
     "PARENT_ACCESS_ROLES",
     "PASSWORD_RESET_TTL",
+    "PATHWAY_RESOURCE",
     "PURGE_RULES",
     "REPLAY_WINDOW",
     "RETRY_CLAIM_LIMIT",
@@ -179,8 +191,14 @@ __all__ = [
     "OrgRepo",
     "OutboxBacklog",
     "OutboxRepo",
+    "PathwayGraphJson",
+    "PathwayListRow",
+    "PathwayRefIds",
+    "PathwayReference",
+    "PathwayRepo",
     "PhoneNumberRoutingRepo",
     "PurgeRule",
+    "ReferenceType",
     "RetentionPolicy",
     "RetentionRepo",
     "SchedulerRepo",
@@ -199,6 +217,7 @@ __all__ = [
     "WebhookDeliveryRepo",
     "WebhookEndpointRepo",
     "conflict_savepoint",
+    "escape_like",
     "grant_credits",
     "held_micros",
     "is_unique_violation",

@@ -2695,6 +2695,7 @@ dependencies = [
     { name = "va-compliance" },
     { name = "va-db" },
     { name = "va-domain" },
+    { name = "va-engine" },
     { name = "va-events" },
 ]
 
@@ -2716,6 +2717,7 @@ requires-dist = [
     { name = "va-compliance", editable = "packages/va_compliance" },
     { name = "va-db", editable = "packages/va_db" },
     { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
 ]
 

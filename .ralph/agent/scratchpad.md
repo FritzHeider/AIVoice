@@ -1487,3 +1487,130 @@ avg A 3.09; make test 12158 passed, 7 skipped, 99 % total (pathway_logs.py/logs.
 97 %). The §12 key order, decision shape, and ms timestamps match the spec; the engine and the DB share one builder.
 Minor (not blocking): the `event_type is None` skip in va_db/call_object.py:179 can never run, because the SQL
 `IN` filter already excludes NULL rows.
+
+## Plan split P07-T09 (planner, 2026-11-03)
+P07-T08 parent ticked (a–c done). P07-T09 is too large for one iteration: split into T09a (core CRUD + validate +
+delete references), T09b (versions/publish/promote/revert; regression gating stays in T11), T09c (folders,
+duplicate, import/export). Regression settings `GET/PUT /regression`, tests, runs, simulations → T11; chat → T10.
+
+## Plan P07-T09a — Pathways API core (specs/12 §1–§3, §10–§12; specs/11 §11; specs/31 §1/§3a)
+
+### Spec decision — append `> Decision (2026-11-03): pathways API core (P07-T09a).` under specs/12 §3
+1. Permissions: reads need `pathways:read`; every write `pathways:write`. specs/04 §3.2 gives analysts
+   `pathways:write` (for tests/chat) but §10 here denies them graph edits, so create/update/delete/validate
+   (and later import/duplicate/folders/version/revert) also pass `va_api.auth.pathway_roles.require_pathway_editor`
+   (session principals with role `analyst`/`viewer`/`billing` → 403 `FORBIDDEN` "Your role cannot edit pathways.";
+   API keys pass). The §10 "`pathways:publish`" API-key scope is not a §2.3 scope: publish/promote/revert (T09b)
+   use `pathways:write` + `require_permission("pathways.publish")` (a `*` key holds it). `?force=true` delete needs a
+   session role owner/admin, or an API key with `*`; else 403 FORBIDDEN "Force delete requires an owner or admin.".
+2. Create: name 1–200 chars (trimmed non-empty), description ≤ 2 000; `nodes`/`edges` both empty or absent → the
+   §3 default start node, edges []. Graph parsed with `va_engine.models.load_graph` (schema errors → 400
+   `INVALID_INPUT` with `field` from `schema_field(loc)`, e.g. `nodes[3].data.name`), then validated in **save**
+   mode: each error-severity issue becomes one `errors[]` item `{error: INVALID_INPUT, message: <issue message>,
+   details: {code, node_id?, edge_id?}}` (all items, HTTP 400). Stored JSON = `dump_graph(graph)`;
+   `graph_hash(dumped)`. Pathway row `draft_version=latest_version=1`; version row v1 `status='draft'`.
+   `folder_id` must name an org folder (else 404 `NOT_FOUND` field `folder_id`).
+3. Validation refs for an org: `GraphRefs(pathway_id=str(id) | None, kb_ids={to_public("KB", id)} ∪ {str(id)} of
+   non-deleted KBs, tool_ids={to_public("TL", id)} ∪ {str(id)} of tools, pathway_ids=str(id) of non-deleted
+   pathways)`; `allow_http = VA_ENV in {local, test}`; no `code_checker` (phase 08).
+4. List: `limit` 1–100 default 50, `cursor` per specs/31 §2 Decision (created_at DESC, id DESC),
+   `folder_id` filter, `search` = name ILIKE `%term%` with `%`/`_`/`\` escaped; soft-deleted rows hidden;
+   `node_count` = `jsonb_array_length(nodes)` of the draft version (one join, no N+1). `next_cursor` null at end.
+5. Get: `version` = draft (default) | production | staging | positive int. production/staging unset → 404
+   `PATHWAY_VERSION_NOT_FOUND`; unknown int → same. Response per §3 plus `version_status`.
+6. Update draft: body all optional + `expected_graph_hash`; locks the pathway row (`SELECT … FOR UPDATE`) then the
+   draft. Hash mismatch → 409 `CONFLICT` "The draft changed since it was loaded." `details.current_graph_hash`.
+   `nodes`/`edges`/`global_config` each replace the stored value when present (absent ones keep stored). Save-mode
+   validation errors → 400 as in 2. Response `validation` = the full `validation_report` (save mode).
+   `folder_id: null` moves to root (use `model_fields_set` to distinguish absent from null).
+7. Validate: body optional `{nodes, edges, global_config, mode: "save"|"publish"(default "publish")}`; no graph in
+   body → validate the draft. Never 400 for issues: returns `{"status":"success","validation":{...}}`; schema
+   errors still 400.
+8. Delete: references (only non-deleted owners) = phone numbers whose `inbound_config->>'pathway_id' = id` and
+   status in (pending, active); agents whose `env_pins` semver points to an `agent_versions` row with this
+   `pathway_id`; personas whose production version `config->>'pathway_id' = id`; widgets with `pathway_id = id`.
+   Each `{type: phone_number|agent|persona|widget, id, name}` (`name` = e164 / name). Non-empty and not force → 409
+   `CONFLICT` "Pathway is in use." `details.references`. Soft delete sets `deleted_at`; a deleted pathway reads as 404
+   everywhere.
+9. Audit: `pathway.create` (after `{name, description, folder_id, graph_hash}`), `pathway.update` (before/after
+   only of changed `name`/`description`/`folder_id` plus `graph_hash`; no row when nothing changed),
+   `pathway.delete` (`{force, references: n}`). Validate is `audit_exempt("read-only check")`.
+
+### Files
+- `apps/api/pyproject.toml`: add `va-engine` dependency + `[tool.uv.sources] va-engine = { workspace = true }`;
+  `uv lock`. (T10 test chat needs the engine in the api anyway.)
+- `packages/va_db/src/va_db/repositories/pathways.py` (new; export from `va_db.repositories.__init__`):
+  `PathwayRepo(session, org_id, clock=)`: `create(name, description, folder_id, graph_json, graph_hash) ->
+  tuple[Pathway, PathwayVersion]`, `get(pathway_id, *, lock=False) -> Pathway` (NotFoundError for absent/deleted/
+  other org), `version(pathway: Pathway, number: int) -> PathwayVersion | None`, `draft(pathway, *, lock=False)`,
+  `list(limit=, cursor=, folder_id=, search=) -> Page[PathwayListRow]` (dataclass with pathway + node_count),
+  `folder_exists(folder_id) -> bool`, `references(pathway_id) -> list[PathwayReference]`, `soft_delete(pathway)`,
+  `validation_refs(pathway_id) -> (kb_ids, tool_ids, pathway_ids)` sets. Every query filters `org_id`.
+- `apps/api/src/va_api/auth/pathway_roles.py` (new): `require_pathway_editor` dependency, `can_force_delete(ctx)`.
+- `apps/api/src/va_api/services/pathways.py` (new): `parse_graph(nodes, edges, global_config) -> PathwayGraph`
+  (ValidationError → AppError INVALID_INPUT field via `schema_field`; multiple schema errors → first one is fine),
+  `validation_errors(issues) -> AppErrors`, `graph_refs(repo, pathway_id) -> GraphRefs`, `allow_http(settings)`,
+  `create_pathway`, `update_draft`, `delete_pathway`, `validate_pathway` — each takes the open tenant session.
+- `apps/api/src/va_api/errors.py` (or va_common.errors): `AppErrors(items: Sequence[AppError])` exception
+  rendered by the AppError handler path with all items (status = first item's) — reuse `error_response`; check
+  `test_errors` parity tests.
+- `apps/api/src/va_api/routers/pathways.py` + `pathways_schemas.py` (new): `pathways_router =
+  legacy_router(prefix="/v1/pathway", tags=["Pathways"])` (tag must exist in `va_api.openapi.TAG_NAMES`; add if
+  missing), operation ids `pathways_create`, `pathways_list`, `pathways_get`, `pathways_update`, `pathways_delete`,
+  `pathways_validate`; literal `/create` declared before `/{pathway_id}`; every op `x-scope`, examples, audited/
+  audit_exempt markers; register in `va_api.main.ROUTERS`. Responses are legacy bodies (`status: "success"` +
+  fields), models with `examples`.
+- `apps/api/tests/support/cross_tenant_factories.py`: factory `pathway_id` (seed a pathway + draft via
+  PathwayRepo in the other org); register create/update/validate request bodies if the model example is not enough.
+- specs/12 §3 Decision; AGENTS.md dated bullet; `make openapi` + both TS `gen:api` (commit `openapi/*.json`,
+  `schema.d.ts`).
+
+### Tests (apps/api/tests/)
+- `test_pathways_api.py` (session/API-key via `session_helpers`, module Postgres): create default start node →
+  get returns it with graph_hash = `graph_hash(dump)`; create with Bland fixture graph (`packages/va_engine/tests/
+  fixtures/bland/*.json`, copy one into `apps/api/tests/fixtures/pathways/` or load by path) → warnings in
+  update response; schema error → 400 field `nodes[0].data...`; save-mode error (duplicate node id) → 400 with
+  details.code `PATHWAY_DUPLICATE_NODE_ID`; list paging (limit 2, cursor), search escaping (`%` literal),
+  folder filter, node_count; get `?version=production` unset → 404 PATHWAY_VERSION_NOT_FOUND, `?version=abc` → 400;
+  update replaces nodes only, keeps global_config; `expected_graph_hash` mismatch 409 with current hash; folder_id
+  null vs absent; validate draft (publish mode errors returned with 200) and supplied graph; delete referenced by
+  phone number/widget/agent pin/persona → 409 references; force by owner ok / developer 403; deleted → 404 on get/
+  update/list hides; other org → 404 for every `{pathway_id}` route.
+- `test_pathways_permissions.py`: parametrized roles × (read, write, force delete) per §10 (analyst/viewer read ok,
+  write 403; billing read 403 via scope).
+- Audit rows via `session_helpers.audit_rows` (create/update/delete, none for no-op update).
+- va_db `packages/va_db/tests/test_pathway_repo_db.py`: list ordering/cursor, references query each type,
+  other-org isolation.
+- Cross-tenant suite + audit markers + openapi contract tests pass automatically once routes exist.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; targeted pytest of new tests;
+`make openapi` + gen:api ×2 and `make test-ts`; `check_spec_refs`; `make test` in background with Monitor
+heartbeat (truncate `logs/make_test.log` after the old wrapper exits); radon avg; jscpd 0 clones; pip-audit +
+pnpm audit. No e2e (no call flow).
+
+### Risks
+- Adding va-engine to the api pulls va_voice/onnxruntime into the api image — acceptable; check the Dockerfile
+  test still passes and mypy `files` unchanged.
+- Cross-tenant suite needs request bodies for create/update/validate examples that pass validation.
+- Concurrency: two updates with the same expected hash must serialise on the row lock (one 409) — add a test.
+
+## Build P07-T09a (done)
+- New: `va_db.repositories.PathwayRepo` (+ `PathwayGraphJson`, `PathwayListRow`, `PathwayReference`, `PathwayRefIds`,
+  `escape_like`; method `page` instead of `list`, mypy rejects a `list` method used in annotations), `va_api.services.pathways`
+  (`GraphInput`, `DraftUpdate.column_values`, `check_graph` in a worker thread, create/update/validate/delete/load_version,
+  `parse_version_selector`), `va_api.auth.pathway_roles` (editor guard from the §3.2 "Pathways / folders" cell, force-delete
+  check), legacy `routers/pathways.py` + `pathways_schemas.py` (in `main.ROUTERS`), `va_common.errors.MultiAppError`
+  (N818 forbids the plan's `AppErrors` name; `AppError.error_items()` used by the api handler). api depends on va-engine.
+- Spec: specs/12 §3 Decision P07-T09a. AGENTS.md bullet. openapi + both schema.d.ts regenerated.
+- Tests: apps/api test_pathways_api.py (15), test_pathways_permissions.py (10), va_db test_pathway_repo_db.py (9),
+  va_common test_errors MultiAppError (3); cross-tenant factory `pathway_id`.
+- Gates: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift clean; test-ts pass (22/52/48);
+  make test 12195 passed, 7 skipped, 99.07 %; after the run update_draft was split for radon (C13 → B7) and the
+  unused `GraphInput.sent` removed, then pathway api/repo/cross-tenant tests re-run: 44 passed, services/pathways.py 100 %.
+  radon avg A 2.92; jscpd 0 clones; pip-audit clean; pnpm audit 3 moderate (pre-existing, none high).
+
+## Review P07-T09a (approved)
+Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift current; jscpd 0 clones; radon avg A
+2.63 (new modules); make test 12195 passed, 7 skipped, 99.07 %. Diff matches specs/12 §3/§10/§11 and the
+P07-T09a Decision (editor guard, force delete owner/admin or `*` key, MultiAppError items, row-locked hash check).

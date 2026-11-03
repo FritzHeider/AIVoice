@@ -5596,6 +5596,476 @@
         "title": "Pagination",
         "type": "object"
       },
+      "PathwayCreate": {
+        "description": "``POST /v1/pathway/create``; empty ``nodes`` and ``edges`` create a single start node.",
+        "examples": [
+          {
+            "description": "Takes phone orders",
+            "edges": [],
+            "global_config": {
+              "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+            },
+            "name": "Bella Pasta Orders",
+            "nodes": []
+          }
+        ],
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free text; default empty.",
+            "title": "Description"
+          },
+          "edges": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every edge of the graph (specs/11 §3.3); replaces the stored array.",
+            "title": "Edges"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Folder of the pathway; null = root.",
+            "title": "Folder Id"
+          },
+          "global_config": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Graph-wide settings (specs/11 §3.4); replaces the stored object.",
+            "title": "Global Config"
+          },
+          "name": {
+            "description": "Pathway name (1-200 characters).",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every node of the graph (specs/11 §3.1); replaces the stored array.",
+            "title": "Nodes"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PathwayCreate",
+        "type": "object"
+      },
+      "PathwayCreated": {
+        "description": "``POST /v1/pathway/create`` result.",
+        "examples": [
+          {
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "status": "success",
+            "version_number": 1
+          }
+        ],
+        "properties": {
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "version_number": {
+            "description": "The draft version number (1).",
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pathway_id",
+          "version_number"
+        ],
+        "title": "PathwayCreated",
+        "type": "object"
+      },
+      "PathwayDeleted": {
+        "description": "``DELETE /v1/pathway/{pathway_id}`` result.",
+        "examples": [
+          {
+            "message": "Pathway deleted.",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "PathwayDeleted",
+        "type": "object"
+      },
+      "PathwayDetail": {
+        "description": "``GET /v1/pathway/{pathway_id}`` result: the pathway with one version's graph.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T09:15:00Z",
+            "description": "Takes phone orders",
+            "edges": [],
+            "global_config": {
+              "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+            },
+            "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+            "name": "Bella Pasta Orders",
+            "nodes": [
+              {
+                "data": {
+                  "isStart": true,
+                  "name": "Start",
+                  "prompt": "Greet the caller."
+                },
+                "id": "start",
+                "type": "Default"
+              }
+            ],
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "production_version": 3,
+            "staging_version": 4,
+            "status": "success",
+            "updated_at": "2026-11-03T10:42:10Z",
+            "version_number": 5,
+            "version_status": "draft"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "edges": {
+            "items": {},
+            "title": "Edges",
+            "type": "array"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "global_config": {
+            "additionalProperties": true,
+            "title": "Global Config",
+            "type": "object"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {},
+            "title": "Nodes",
+            "type": "array"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "production_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Version"
+          },
+          "staging_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staging Version"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          },
+          "version_status": {
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ],
+            "title": "Version Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pathway_id",
+          "name",
+          "description",
+          "folder_id",
+          "version_number",
+          "version_status",
+          "production_version",
+          "staging_version",
+          "nodes",
+          "edges",
+          "global_config",
+          "graph_hash",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PathwayDetail",
+        "type": "object"
+      },
+      "PathwayList": {
+        "description": "``GET /v1/pathway`` result: newest first; ``next_cursor`` is null on the last page.",
+        "examples": [
+          {
+            "pathways": [
+              {
+                "created_at": "2026-11-03T09:15:00Z",
+                "description": "Takes phone orders",
+                "draft_version": 5,
+                "latest_version": 5,
+                "name": "Bella Pasta Orders",
+                "node_count": 12,
+                "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+                "production_version": 3,
+                "staging_version": 4,
+                "updated_at": "2026-11-03T10:42:10Z"
+              }
+            ],
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "pathways": {
+            "items": {
+              "$ref": "#/components/schemas/PathwayListItem"
+            },
+            "title": "Pathways",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pathways",
+          "next_cursor"
+        ],
+        "title": "PathwayList",
+        "type": "object"
+      },
+      "PathwayListItem": {
+        "description": "One live pathway; ``node_count`` counts the draft's nodes.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T09:15:00Z",
+            "description": "Takes phone orders",
+            "draft_version": 5,
+            "latest_version": 5,
+            "name": "Bella Pasta Orders",
+            "node_count": 12,
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "production_version": 3,
+            "staging_version": 4,
+            "updated_at": "2026-11-03T10:42:10Z"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "latest_version": {
+            "title": "Latest Version",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "node_count": {
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "production_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Version"
+          },
+          "staging_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staging Version"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pathway_id",
+          "name",
+          "description",
+          "folder_id",
+          "production_version",
+          "staging_version",
+          "draft_version",
+          "latest_version",
+          "node_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PathwayListItem",
+        "type": "object"
+      },
       "PathwayLog": {
         "description": "One assistant turn of a pathway call (specs/11 §12); every key present, `null` when not applicable.",
         "properties": {
@@ -5722,6 +6192,283 @@
           "color"
         ],
         "title": "PathwayTag",
+        "type": "object"
+      },
+      "PathwayUpdate": {
+        "description": "``POST /v1/pathway/{pathway_id}``: every field optional; a sent graph part replaces the stored one.",
+        "examples": [
+          {
+            "description": "Takes phone orders",
+            "name": "Bella Pasta Orders"
+          }
+        ],
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "edges": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every edge of the graph (specs/11 §3.3); replaces the stored array.",
+            "title": "Edges"
+          },
+          "expected_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optimistic concurrency: the graph_hash of the draft as loaded; a stale hash is 409.",
+            "title": "Expected Graph Hash"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Move to this folder; null = root.",
+            "title": "Folder Id"
+          },
+          "global_config": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Graph-wide settings (specs/11 §3.4); replaces the stored object.",
+            "title": "Global Config"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pathway name (1-200 characters).",
+            "title": "Name"
+          },
+          "nodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every node of the graph (specs/11 §3.1); replaces the stored array.",
+            "title": "Nodes"
+          }
+        },
+        "title": "PathwayUpdate",
+        "type": "object"
+      },
+      "PathwayUpdated": {
+        "description": "``POST /v1/pathway/{pathway_id}`` result with the save-mode validation of the new draft.",
+        "examples": [
+          {
+            "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "status": "success",
+            "validation": {
+              "errors": [],
+              "valid": true,
+              "warnings": [
+                {
+                  "code": "PATHWAY_UNREACHABLE",
+                  "message": "Node 'Hours' cannot be reached from the start node.",
+                  "node_id": "node_hours"
+                }
+              ]
+            },
+            "version_number": 5
+          }
+        ],
+        "properties": {
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationView"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pathway_id",
+          "version_number",
+          "graph_hash",
+          "validation"
+        ],
+        "title": "PathwayUpdated",
+        "type": "object"
+      },
+      "PathwayValidate": {
+        "description": "``POST /v1/pathway/{pathway_id}/validate``: graph parts not sent come from the draft.",
+        "examples": [
+          {
+            "mode": "publish"
+          }
+        ],
+        "properties": {
+          "edges": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every edge of the graph (specs/11 §3.3); replaces the stored array.",
+            "title": "Edges"
+          },
+          "global_config": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Graph-wide settings (specs/11 §3.4); replaces the stored object.",
+            "title": "Global Config"
+          },
+          "mode": {
+            "default": "publish",
+            "description": "Severity table to apply.",
+            "enum": [
+              "save",
+              "publish"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "nodes": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/JsonValue"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Every node of the graph (specs/11 §3.1); replaces the stored array.",
+            "title": "Nodes"
+          }
+        },
+        "title": "PathwayValidate",
+        "type": "object"
+      },
+      "PathwayValidated": {
+        "description": "``POST /v1/pathway/{pathway_id}/validate`` result (issues never fail the request).",
+        "examples": [
+          {
+            "status": "success",
+            "validation": {
+              "errors": [],
+              "valid": true,
+              "warnings": [
+                {
+                  "code": "PATHWAY_UNREACHABLE",
+                  "message": "Node 'Hours' cannot be reached from the start node.",
+                  "node_id": "node_hours"
+                }
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationView"
+          }
+        },
+        "required": [
+          "validation"
+        ],
+        "title": "PathwayValidated",
         "type": "object"
       },
       "PollStatus": {
@@ -7651,6 +8398,56 @@
           "user_id"
         ],
         "title": "TransferOwnershipRequest",
+        "type": "object"
+      },
+      "ValidationView": {
+        "description": "The validation result (specs/11 §11): ``valid`` is false only when an error-severity issue exists.",
+        "examples": [
+          {
+            "errors": [],
+            "valid": true,
+            "warnings": [
+              {
+                "code": "PATHWAY_UNREACHABLE",
+                "message": "Node 'Hours' cannot be reached from the start node.",
+                "node_id": "node_hours"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "errors": {
+            "description": "Issues with `code`, `message`, `node_id`?, `edge_id`?.",
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "valid",
+          "errors",
+          "warnings"
+        ],
+        "title": "ValidationView",
         "type": "object"
       },
       "VoiceSettings": {
@@ -11352,6 +12149,463 @@
         "x-envelope": "legacy",
         "x-permission": "subaccounts.manage",
         "x-scope": "org:write"
+      }
+    },
+    "/v1/pathway": {
+      "get": {
+        "description": "The org's live pathways, newest first.",
+        "operationId": "pathways_list",
+        "parameters": [
+          {
+            "description": "Only pathways in this folder.",
+            "in": "query",
+            "name": "folder_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only pathways in this folder.",
+              "title": "Folder Id"
+            }
+          },
+          {
+            "description": "Case-insensitive name substring.",
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Case-insensitive name substring.",
+              "title": "Search"
+            }
+          },
+          {
+            "description": "Page size (1-100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (1-100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "next_cursor of the previous page.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways List",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/create": {
+      "post": {
+        "description": "Create a pathway and its draft version 1 (a single start node when no graph is given).",
+        "operationId": "pathways_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathwayCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Create",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.create"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}": {
+      "delete": {
+        "description": "Soft-delete a pathway that nothing live references (or any pathway with ``force``).",
+        "operationId": "pathways_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Delete even while referenced (owner/admin sessions, `*` API keys).",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Delete even while referenced (owner/admin sessions, `*` API keys).",
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Delete",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.delete"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      },
+      "get": {
+        "description": "One pathway with the graph of the selected version.",
+        "operationId": "pathways_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Version number, `draft` (default), `production`, or `staging`.",
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "post": {
+        "description": "Update the draft; graph parts replace the stored ones and are validated in save mode.",
+        "operationId": "pathways_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PathwayUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayUpdated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Update",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.update"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/validate": {
+      "post": {
+        "description": "Validate the draft or a supplied graph; issues are returned, never raised.",
+        "operationId": "pathways_validate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PathwayValidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayValidated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Validate",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "read-only check",
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
       }
     },
     "/v1/webhooks/deliveries": {

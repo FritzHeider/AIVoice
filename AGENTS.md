@@ -1800,3 +1800,14 @@ Grafana 3001
   expectations of event data must include them. `PathwayLog.created_at` serializes as `...SS.mmmZ`. Snapshot tests
   use syrupy (`snapshot` fixture; create/update with `uv run pytest <file> --snapshot-update`, commit the
   `__snapshots__/*.ambr`); it works under xdist.
+- 2026-11-03 (P07-T09a): pathways API core = legacy `va_api.routers.pathways` (`/v1/pathway/create`, list, get,
+  update draft, delete, validate; schemas `pathways_schemas`) over `va_api.services.pathways` (`GraphInput`,
+  `check_graph` parses + validates in a worker thread against `PathwayRepo.ref_ids()`, `DraftUpdate`) and the tenant
+  `va_db.repositories.PathwayRepo` (`create`, `get(lock=)`, `draft`, `version`, `page`, `references`, `ref_ids`,
+  `update_draft`, `soft_delete`); rules: specs/12 §3 Decision P07-T09a. The api now depends on va-engine. Several
+  error items in one response: raise `va_common.errors.MultiAppError([AppError, ...])` (first item sets status and
+  legacy `message`; the handler renders `exc.error_items()`). Graph editing routes add
+  `Depends(va_api.auth.pathway_roles.require_pathway_editor)` (analysts hold `pathways:write` but may not edit);
+  later pathway routes (versions, folders, import) reuse it. Cross-tenant factory `pathway_id` creates a one-node
+  pathway through `PathwayRepo`. Tests: `apps/api/tests/test_pathways_api.py` (`Api` helper on a `*` key),
+  `test_pathways_permissions.py` (role matrix); api tests can import `graph_helpers` (va_engine tests/support).

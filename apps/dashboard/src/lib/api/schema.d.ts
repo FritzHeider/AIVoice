@@ -709,6 +709,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways List
+         * @description The org's live pathways, newest first.
+         */
+        get: operations["pathways_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/create": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Create
+         * @description Create a pathway and its draft version 1 (a single start node when no graph is given).
+         */
+        post: operations["pathways_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Get
+         * @description One pathway with the graph of the selected version.
+         */
+        get: operations["pathways_get"];
+        put?: never;
+        /**
+         * Pathways Update
+         * @description Update the draft; graph parts replace the stored ones and are validated in save mode.
+         */
+        post: operations["pathways_update"];
+        /**
+         * Pathways Delete
+         * @description Soft-delete a pathway that nothing live references (or any pathway with ``force``).
+         */
+        delete: operations["pathways_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Validate
+         * @description Validate the draft or a supplied graph; issues are returned, never raised.
+         */
+        post: operations["pathways_validate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/webhooks/deliveries": {
         parameters: {
             query?: never;
@@ -4110,6 +4198,266 @@ export interface components {
             next_cursor: string | null;
         };
         /**
+         * PathwayCreate
+         * @description ``POST /v1/pathway/create``; empty ``nodes`` and ``edges`` create a single start node.
+         * @example {
+         *       "description": "Takes phone orders",
+         *       "edges": [],
+         *       "global_config": {
+         *         "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+         *       },
+         *       "name": "Bella Pasta Orders",
+         *       "nodes": []
+         *     }
+         */
+        PathwayCreate: {
+            /**
+             * Description
+             * @description Free text; default empty.
+             */
+            description?: string | null;
+            /**
+             * Edges
+             * @description Every edge of the graph (specs/11 §3.3); replaces the stored array.
+             */
+            edges?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+            /**
+             * Folder Id
+             * @description Folder of the pathway; null = root.
+             */
+            folder_id?: string | null;
+            /**
+             * Global Config
+             * @description Graph-wide settings (specs/11 §3.4); replaces the stored object.
+             */
+            global_config?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /**
+             * Name
+             * @description Pathway name (1-200 characters).
+             */
+            name: string;
+            /**
+             * Nodes
+             * @description Every node of the graph (specs/11 §3.1); replaces the stored array.
+             */
+            nodes?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+        };
+        /**
+         * PathwayCreated
+         * @description ``POST /v1/pathway/create`` result.
+         * @example {
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "status": "success",
+         *       "version_number": 1
+         *     }
+         */
+        PathwayCreated: {
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /**
+             * Version Number
+             * @description The draft version number (1).
+             */
+            version_number: number;
+        };
+        /**
+         * PathwayDeleted
+         * @description ``DELETE /v1/pathway/{pathway_id}`` result.
+         * @example {
+         *       "message": "Pathway deleted.",
+         *       "status": "success"
+         *     }
+         */
+        PathwayDeleted: {
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * PathwayDetail
+         * @description ``GET /v1/pathway/{pathway_id}`` result: the pathway with one version's graph.
+         * @example {
+         *       "created_at": "2026-11-03T09:15:00Z",
+         *       "description": "Takes phone orders",
+         *       "edges": [],
+         *       "global_config": {
+         *         "globalPrompt": "You are Ava, the friendly host of Bella Pasta."
+         *       },
+         *       "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *       "name": "Bella Pasta Orders",
+         *       "nodes": [
+         *         {
+         *           "data": {
+         *             "isStart": true,
+         *             "name": "Start",
+         *             "prompt": "Greet the caller."
+         *           },
+         *           "id": "start",
+         *           "type": "Default"
+         *         }
+         *       ],
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "production_version": 3,
+         *       "staging_version": 4,
+         *       "status": "success",
+         *       "updated_at": "2026-11-03T10:42:10Z",
+         *       "version_number": 5,
+         *       "version_status": "draft"
+         *     }
+         */
+        PathwayDetail: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string;
+            /** Edges */
+            edges: unknown[];
+            /** Folder Id */
+            folder_id: string | null;
+            /** Global Config */
+            global_config: {
+                [key: string]: unknown;
+            };
+            /** Graph Hash */
+            graph_hash: string;
+            /** Name */
+            name: string;
+            /** Nodes */
+            nodes: unknown[];
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /** Production Version */
+            production_version: number | null;
+            /** Staging Version */
+            staging_version: number | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version Number */
+            version_number: number;
+            /**
+             * Version Status
+             * @enum {string}
+             */
+            version_status: "draft" | "published" | "archived";
+        };
+        /**
+         * PathwayList
+         * @description ``GET /v1/pathway`` result: newest first; ``next_cursor`` is null on the last page.
+         * @example {
+         *       "pathways": [
+         *         {
+         *           "created_at": "2026-11-03T09:15:00Z",
+         *           "description": "Takes phone orders",
+         *           "draft_version": 5,
+         *           "latest_version": 5,
+         *           "name": "Bella Pasta Orders",
+         *           "node_count": 12,
+         *           "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *           "production_version": 3,
+         *           "staging_version": 4,
+         *           "updated_at": "2026-11-03T10:42:10Z"
+         *         }
+         *       ],
+         *       "status": "success"
+         *     }
+         */
+        PathwayList: {
+            /** Next Cursor */
+            next_cursor: string | null;
+            /** Pathways */
+            pathways: components["schemas"]["PathwayListItem"][];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * PathwayListItem
+         * @description One live pathway; ``node_count`` counts the draft's nodes.
+         * @example {
+         *       "created_at": "2026-11-03T09:15:00Z",
+         *       "description": "Takes phone orders",
+         *       "draft_version": 5,
+         *       "latest_version": 5,
+         *       "name": "Bella Pasta Orders",
+         *       "node_count": 12,
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "production_version": 3,
+         *       "staging_version": 4,
+         *       "updated_at": "2026-11-03T10:42:10Z"
+         *     }
+         */
+        PathwayListItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string;
+            /** Draft Version */
+            draft_version: number;
+            /** Folder Id */
+            folder_id: string | null;
+            /** Latest Version */
+            latest_version: number;
+            /** Name */
+            name: string;
+            /** Node Count */
+            node_count: number;
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /** Production Version */
+            production_version: number | null;
+            /** Staging Version */
+            staging_version: number | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
          * PathwayLog
          * @description One assistant turn of a pathway call (specs/11 §12); every key present, `null` when not applicable.
          */
@@ -4173,6 +4521,157 @@ export interface components {
              * @description Name of the node that produced the turn.
              */
             name: string | null;
+        };
+        /**
+         * PathwayUpdate
+         * @description ``POST /v1/pathway/{pathway_id}``: every field optional; a sent graph part replaces the stored one.
+         * @example {
+         *       "description": "Takes phone orders",
+         *       "name": "Bella Pasta Orders"
+         *     }
+         */
+        PathwayUpdate: {
+            /** Description */
+            description?: string | null;
+            /**
+             * Edges
+             * @description Every edge of the graph (specs/11 §3.3); replaces the stored array.
+             */
+            edges?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+            /**
+             * Expected Graph Hash
+             * @description Optimistic concurrency: the graph_hash of the draft as loaded; a stale hash is 409.
+             */
+            expected_graph_hash?: string | null;
+            /**
+             * Folder Id
+             * @description Move to this folder; null = root.
+             */
+            folder_id?: string | null;
+            /**
+             * Global Config
+             * @description Graph-wide settings (specs/11 §3.4); replaces the stored object.
+             */
+            global_config?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /**
+             * Name
+             * @description Pathway name (1-200 characters).
+             */
+            name?: string | null;
+            /**
+             * Nodes
+             * @description Every node of the graph (specs/11 §3.1); replaces the stored array.
+             */
+            nodes?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+        };
+        /**
+         * PathwayUpdated
+         * @description ``POST /v1/pathway/{pathway_id}`` result with the save-mode validation of the new draft.
+         * @example {
+         *       "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "status": "success",
+         *       "validation": {
+         *         "errors": [],
+         *         "valid": true,
+         *         "warnings": [
+         *           {
+         *             "code": "PATHWAY_UNREACHABLE",
+         *             "message": "Node 'Hours' cannot be reached from the start node.",
+         *             "node_id": "node_hours"
+         *           }
+         *         ]
+         *       },
+         *       "version_number": 5
+         *     }
+         */
+        PathwayUpdated: {
+            /** Graph Hash */
+            graph_hash: string;
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            validation: components["schemas"]["ValidationView"];
+            /** Version Number */
+            version_number: number;
+        };
+        /**
+         * PathwayValidate
+         * @description ``POST /v1/pathway/{pathway_id}/validate``: graph parts not sent come from the draft.
+         * @example {
+         *       "mode": "publish"
+         *     }
+         */
+        PathwayValidate: {
+            /**
+             * Edges
+             * @description Every edge of the graph (specs/11 §3.3); replaces the stored array.
+             */
+            edges?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+            /**
+             * Global Config
+             * @description Graph-wide settings (specs/11 §3.4); replaces the stored object.
+             */
+            global_config?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /**
+             * Mode
+             * @description Severity table to apply.
+             * @default publish
+             * @enum {string}
+             */
+            mode: "save" | "publish";
+            /**
+             * Nodes
+             * @description Every node of the graph (specs/11 §3.1); replaces the stored array.
+             */
+            nodes?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[] | null;
+        };
+        /**
+         * PathwayValidated
+         * @description ``POST /v1/pathway/{pathway_id}/validate`` result (issues never fail the request).
+         * @example {
+         *       "status": "success",
+         *       "validation": {
+         *         "errors": [],
+         *         "valid": true,
+         *         "warnings": [
+         *           {
+         *             "code": "PATHWAY_UNREACHABLE",
+         *             "message": "Node 'Hours' cannot be reached from the start node.",
+         *             "node_id": "node_hours"
+         *           }
+         *         ]
+         *       }
+         *     }
+         */
+        PathwayValidated: {
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            validation: components["schemas"]["ValidationView"];
         };
         /** @enum {string} */
         PollStatus: "pending_verification" | "approved" | "delivered" | "denied" | "expired";
@@ -5190,6 +5689,36 @@ export interface components {
              * Format: uuid
              */
             user_id: string;
+        };
+        /**
+         * ValidationView
+         * @description The validation result (specs/11 §11): ``valid`` is false only when an error-severity issue exists.
+         * @example {
+         *       "errors": [],
+         *       "valid": true,
+         *       "warnings": [
+         *         {
+         *           "code": "PATHWAY_UNREACHABLE",
+         *           "message": "Node 'Hours' cannot be reached from the start node.",
+         *           "node_id": "node_hours"
+         *         }
+         *       ]
+         *     }
+         */
+        ValidationView: {
+            /**
+             * Errors
+             * @description Issues with `code`, `message`, `node_id`?, `edge_id`?.
+             */
+            errors: {
+                [key: string]: string;
+            }[];
+            /** Valid */
+            valid: boolean;
+            /** Warnings */
+            warnings: {
+                [key: string]: string;
+            }[];
         };
         /**
          * VoiceSettings
@@ -7231,6 +7760,269 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubAccountResult"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_list: {
+        parameters: {
+            query?: {
+                /** @description Only pathways in this folder. */
+                folder_id?: string | null;
+                /** @description Case-insensitive name substring. */
+                search?: string | null;
+                /** @description Page size (1-100). */
+                limit?: number;
+                /** @description next_cursor of the previous page. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayList"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PathwayCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayCreated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_get: {
+        parameters: {
+            query?: {
+                /** @description Version number, `draft` (default), `production`, or `staging`. */
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayDetail"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PathwayUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayUpdated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_delete: {
+        parameters: {
+            query?: {
+                /** @description Delete even while referenced (owner/admin sessions, `*` API keys). */
+                force?: boolean;
+            };
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayDeleted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_validate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PathwayValidate"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayValidated"];
                 };
             };
             /** @description Invalid input */

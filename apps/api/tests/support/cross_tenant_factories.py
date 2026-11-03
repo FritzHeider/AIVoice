@@ -7,6 +7,8 @@ imported from here); the suite reports any path parameter without one.
 
 from __future__ import annotations
 
+from typing import Any
+
 from call_rows import seed_call
 from cross_tenant import REGISTRY, FactoryContext
 from identity_db import unique_email
@@ -14,7 +16,8 @@ from session_helpers import add_member, store_api_key, sub_account
 
 from va_common.ids import new_id
 from va_db.models import WebhookDelivery, WebhookEndpoint
-from va_db.repositories import InvitationRepo
+from va_db.repositories import InvitationRepo, PathwayGraphJson, PathwayRepo
+from va_engine.models import graph_hash
 
 __all__ = ["REGISTRY"]
 
@@ -91,6 +94,23 @@ async def _webhook_delivery(context: FactoryContext) -> str:
         return str(delivery.id)
 
 
+async def _pathway(context: FactoryContext) -> str:
+    """A pathway of the tenant's org with a one-node draft (unreferenced, so the owner may delete it)."""
+    org_id = context.tenant.org_id
+    nodes: list[Any] = [
+        {"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "text": "Hi"}}
+    ]
+    graph: dict[str, Any] = {"nodes": nodes, "edges": [], "global_config": {}}
+    async with context.identity.database.tenant_session(org_id) as session:
+        pathway, _ = await PathwayRepo(session, org_id).create(
+            name="Cross-tenant pathway",
+            description="",
+            folder_id=None,
+            graph=PathwayGraphJson(nodes=nodes, edges=[], global_config={}, graph_hash=graph_hash(graph)),
+        )
+        return str(pathway.id)
+
+
 REGISTRY.register_resource_factory("user_id", _member)
 REGISTRY.register_resource_factory("invitation_id", _invitation)
 REGISTRY.register_resource_factory("key_id", _api_key)
@@ -98,6 +118,7 @@ REGISTRY.register_resource_factory("org_id", _sub_account)
 REGISTRY.register_resource_factory("call_id", _call)
 REGISTRY.register_resource_factory("endpoint_id", _webhook_endpoint)
 REGISTRY.register_resource_factory("delivery_id", _webhook_delivery)
+REGISTRY.register_resource_factory("pathway_id", _pathway)
 # ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;
 # the unfiltered listing must hold none of org A's calls.
 REGISTRY.register_request("calls_list", params={"limit": "1000"})

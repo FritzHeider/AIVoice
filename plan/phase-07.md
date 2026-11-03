@@ -42,7 +42,7 @@
   - Deliverables: shared `va_tools.http` executor (templating, timeouts, retries, JSONPath, SSRF guard), handlers for each node type, extraction-before-webhook ordering
   - Acceptance: tests with respx and the SSRF guard; Transfer Pathway swaps graph and preserves variables.
 
-- [ ] P07-T08 Turn orchestration, speculative generation, loop protection, pathway_logs (split into P07-T08a–c below; tick when all three are ticked)
+- [x] P07-T08 Turn orchestration, speculative generation, loop protection, pathway_logs (split into P07-T08a–c below; all three ticked: 06b8143)
   - Spec refs: specs/11-pathways-engine.md (per-turn algorithm, speculative generation, max node visits, pathway_logs format)
   - Depends on: P07-T06, P07-T07
   - Deliverables: `PathwayEngine.handle_user_turn(...)` streaming reply interface for the pipeline, speculative generation cancel/commit, skip-user-response chaining, visit limits, logs
@@ -66,11 +66,29 @@
   - Deliverables: `va_engine.logs` (per assistant turn entry, `call.route` summary data with `turn_index`/`tag_color`), Call Object `decision` projection aligned with §12
   - Acceptance: syrupy snapshot of the restaurant fixture conversation; byte-stable across runs.
 
-- [ ] P07-T09 Pathways API: CRUD, versions, publish, promote, folders, import/export
+- [ ] P07-T09 Pathways API: CRUD, versions, publish, promote, folders, import/export (split into P07-T09a–c below; tick when all three are ticked)
   - Spec refs: specs/12-pathways-api.md (all endpoints)
   - Depends on: P07-T01, P02-T11
   - Deliverables: routers with legacy envelope, draft editing, version creation, publish/promote with validation, folders, duplicate, import/export, audit entries, cross-tenant factories
   - Acceptance: API tests for every endpoint and error path.
+
+- [x] P07-T09a Pathways API core: create, list, get, update draft, delete with references, validate — make test 12195 passed/7 skipped, 99.07 % cov; lint/typecheck/placeholders/spec refs/openapi drift pass; jscpd 0 clones; radon A 2.63
+  - Spec refs: specs/12-pathways-api.md §1, §2, §3, §10, §11, §12; specs/11-pathways-engine.md §11; specs/31-error-catalog.md §1, §3a; specs/04-auth-tenancy-rbac.md §2.3, §3.2
+  - Depends on: P07-T01, P02-T11
+  - Deliverables: `va_db.repositories.PathwayRepo` (tenant), `va_api.services.pathways` (graph parse/validate with org refs, draft update with optimistic concurrency, reference scan), legacy `pathways_router` (`POST /v1/pathway/create`, `GET /v1/pathway`, `GET|POST|DELETE /v1/pathway/{pathway_id}`, `POST /v1/pathway/{pathway_id}/validate`), audit entries, cross-tenant factory, role guard for analysts
+  - Acceptance: API tests for every endpoint and error path (400 validation items, 409 hash conflict with `current_graph_hash`, 409 references + force, 404 other org), permissions matrix parametrized.
+
+- [ ] P07-T09b Pathway versions: list/get, save version, publish, promote, revert
+  - Spec refs: specs/12-pathways-api.md §1, §4, §10, §11, §12 (version lifecycle, draft invariants)
+  - Depends on: P07-T09a
+  - Deliverables: version routes, publish in publish-mode validation (regression gating arrives with P07-T11), `pathway:{id}:v:{env}` cache invalidation, audit `pathway.version.save`/`pathway.publish`/`pathway.promote`/`pathway.revert`
+  - Acceptance: lifecycle test create → edit → save → publish production → publish staging → promote → revert with exactly one draft at every step; publish validation 400; promote without staging 409.
+
+- [ ] P07-T09c Pathway folders, duplicate, import/export
+  - Spec refs: specs/12-pathways-api.md §4 (duplicate), §5, §6, §11, §12
+  - Depends on: P07-T09b
+  - Deliverables: folder CRUD + move (depth ≤ 5, delete moves pathways to parent), duplicate, export (`voiceagents.pathway.v1`), import (Bland aliases, missing tool/KB warnings), audit entries
+  - Acceptance: Bland fixture import with aliases; export → import round trip keeps the graph hash; folder depth/delete/move tests; cross-tenant factories.
 
 - [ ] P07-T10 Test chat (text mode)
   - Spec refs: specs/12-pathways-api.md (test chat); specs/11-pathways-engine.md (text-mode degradations)

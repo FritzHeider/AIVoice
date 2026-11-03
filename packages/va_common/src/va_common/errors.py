@@ -6,11 +6,11 @@ parity.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Final
 
-__all__ = ["ALTERNATE_STATUSES", "CODES", "AppError", "status_for"]
+__all__ = ["ALTERNATE_STATUSES", "CODES", "AppError", "MultiAppError", "status_for"]
 
 CODES: Final[Mapping[str, int]] = MappingProxyType(
     {
@@ -132,8 +132,40 @@ class AppError(Exception):
             item["details"] = dict(self.details)
         return item
 
+    def error_items(self) -> list[dict[str, Any]]:
+        """Every ``errors[]`` item of the response (one for a plain ``AppError``)."""
+        return [self.to_error_item()]
+
     def __str__(self) -> str:
         return f"{self.code}: {self.message}"
 
     def __repr__(self) -> str:
         return f"AppError(code={self.code!r}, message={self.message!r}, http_status={self.http_status})"
+
+
+class MultiAppError(AppError):
+    """Several errors of one request (e.g. every pathway validation error); the first sets the HTTP status,
+    the top-level message, and the response headers.
+    """
+
+    def __init__(self, errors: Sequence[AppError]) -> None:
+        if not errors:
+            msg = "MultiAppError needs at least one error"
+            raise ValueError(msg)
+        first = errors[0]
+        super().__init__(
+            first.code,
+            first.message,
+            first.http_status,
+            first.details,
+            field=first.field,
+            headers=first.headers,
+        )
+        self.errors: tuple[AppError, ...] = tuple(errors)
+
+    def error_items(self) -> list[dict[str, Any]]:
+        """One item per error, in order."""
+        return [error.to_error_item() for error in self.errors]
+
+    def __repr__(self) -> str:
+        return f"MultiAppError(count={len(self.errors)}, first={self.errors[0]!r})"

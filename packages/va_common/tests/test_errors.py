@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from va_common.errors import ALTERNATE_STATUSES, CODES, AppError, status_for
+from va_common.errors import ALTERNATE_STATUSES, CODES, AppError, MultiAppError, status_for
 
 CATALOG = Path(__file__).resolve().parents[3] / "specs" / "31-error-catalog.md"
 ROW_RE = re.compile(r"^\| `(?P<code>[A-Z_]+)` \| (?P<statuses>[0-9]{3}(?:/[0-9]{3})*) \|")
@@ -118,3 +118,24 @@ def test_str_and_repr_do_not_leak_details() -> None:
     assert str(error) == "INVALID_INPUT: Bad value"
     assert "s3cr3t" not in repr(error)
     assert repr(error) == "AppError(code='INVALID_INPUT', message='Bad value', http_status=400)"
+
+
+def test_plain_error_has_one_item() -> None:
+    error = AppError("NOT_FOUND", "Gone", field="id")
+    assert error.error_items() == [{"error": "NOT_FOUND", "message": "Gone", "field": "id"}]
+
+
+def test_multi_app_error_renders_every_item_and_takes_the_first_status() -> None:
+    first = AppError("INVALID_INPUT", "Duplicate node id 'a'.", details={"code": "PATHWAY_DUPLICATE_NODE_ID"})
+    second = AppError("CONFLICT", "Busy", headers={"Retry-After": "1"})
+    error = MultiAppError([first, second])
+    assert (error.code, error.message, error.http_status) == ("INVALID_INPUT", first.message, 400)
+    assert error.details == {"code": "PATHWAY_DUPLICATE_NODE_ID"}
+    assert error.error_items() == [first.to_error_item(), second.to_error_item()]
+    assert error.errors == (first, second)
+    assert repr(error).startswith("MultiAppError(count=2, first=AppError(code='INVALID_INPUT'")
+
+
+def test_multi_app_error_needs_an_error() -> None:
+    with pytest.raises(ValueError, match="at least one error"):
+        MultiAppError([])

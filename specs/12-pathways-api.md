@@ -103,6 +103,43 @@ pinned in an env, persona production version, or widget — `details.references:
 `?force=true` (owner/admin only), which leaves references dangling (calls using them fail with `NOT_FOUND`).
 Response `{"status":"success","message":"Pathway deleted."}`.
 
+> Decision (2026-11-03): pathways API core (P07-T09a). Code: `va_api.routers.pathways`, `va_api.services.pathways`,
+> `va_db.repositories.PathwayRepo`, `va_api.auth.pathway_roles`.
+> 1. Permissions: reads need `pathways:read`, every write `pathways:write`. specs/04 §3.2 gives analysts
+>    `pathways:write` (tests, chat) but §10 denies them graph edits, so create/update/delete/validate (and later
+>    import/duplicate/folders/publish) also refuse session roles whose specs/04 §3.2 "Pathways / folders" cell is not
+>    `W` (403 `FORBIDDEN` "Your role cannot edit pathways."); API keys pass. The §10 `pathways:publish` key scope is
+>    not a specs/04 §2.3 scope: publish/promote/revert use `pathways:write` plus the `pathways.publish` permission.
+>    `?force=true` needs an owner/admin session or a `*` API key (else 403 "Force delete requires an owner or
+>    admin."), checked before the pathway is loaded.
+> 2. Create: `name` 1-200 characters after trimming, `description` ≤ 2 000; `nodes` and `edges` both empty or
+>    absent → the default start node above. `folder_id` must name an org folder (404 `NOT_FOUND`, field
+>    `folder_id`). Graph JSON is parsed with the specs/11 §3 schema: a schema problem is one 400 `INVALID_INPUT`
+>    whose `field` is the graph path (`nodes[3].data.name`). The parsed graph is validated in save mode; every
+>    error-severity issue becomes one `errors[]` item `{error: INVALID_INPUT, message, details: {code, node_id?,
+>    edge_id?}}` (HTTP 400, all items). The stored graph is the canonical dump (layout keys kept, unset fields
+>    dropped) and `graph_hash` is computed from it.
+> 3. Reference checks use the org's live knowledge bases and tools (public `KB-`/`TL-` form or the bare uuid) and
+>    live pathways; `http`/private webhook URLs pass only in `VA_ENV` `local`/`test`.
+> 4. List: `limit` 1-100 (default 50), cursor per specs/31 §2 Decision (`created_at DESC, id DESC`), `search` is a
+>    case-insensitive substring with `%`, `_`, `\` matched literally; `node_count` counts the draft's nodes.
+> 5. Get: `version` is a positive integer, `draft` (default), `production`, or `staging`; anything else is 400
+>    `INVALID_INPUT` field `version`; an unset pin or unknown number is 404 `PATHWAY_VERSION_NOT_FOUND`.
+> 6. Update: the pathway row is locked (`SELECT … FOR UPDATE`) before the hash comparison, so two edits with the same
+>    `expected_graph_hash` serialise and the second gets 409 (`field` `expected_graph_hash`,
+>    `details.current_graph_hash`). Graph parts not sent keep their stored value; `folder_id: null` moves to the
+>    root while an absent `folder_id` keeps it. The stored draft is always revalidated in save mode, and the
+>    response `validation` is the full save-mode report. `pathway.update` records only changed
+>    `name`/`description`/`folder_id`/`graph_hash`; a no-op writes no audit row.
+> 7. Validate: body optional (`nodes`, `edges`, `global_config`, `mode` `save`|`publish`, default `publish`);
+>    parts not sent come from the draft. Issues are returned with 200, never raised; schema problems are still 400.
+>    The route is audit-exempt (read-only).
+> 8. References: phone numbers in `pending`/`active` whose `inbound_config.pathway_id` is the pathway; live agents
+>    whose `env_pins` pin a semver of an `agent_versions` row with this `pathway_id`; live personas whose production
+>    version `config.pathway_id` is the pathway; live widgets with this `pathway_id`. Items are
+>    `{type: phone_number|agent|persona|widget, id, name}` (`name` = E.164 for numbers), in that type order.
+>    `pathway.delete` records `{force, references: <count>}`.
+
 ## 4. Versions
 
 ### GET `/v1/pathway/{id}/versions`

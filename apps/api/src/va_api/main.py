@@ -46,6 +46,7 @@ from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
 from va_api.routers.org_sso import org_router
 from va_api.routers.orgs import orgs_router
+from va_api.routers.pathways import pathways_router
 from va_api.routers.webhooks import webhooks_router
 from va_api.settings import ApiSettings
 from va_common.metrics import Service, build_metrics
@@ -78,6 +79,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     org_router,
     orgs_router,
     calls_router,
+    pathways_router,
     api_keys_router,
     agent_onboarding_router,
     audit_logs_router,
