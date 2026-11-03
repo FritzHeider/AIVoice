@@ -5,15 +5,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 
 import pytest
 from clock_helpers import ManualClock
 from event_helpers import publisher_rig, row
-from migration_helpers import migrated_postgres, query
+from migration_helpers import query
 from sqlalchemy import select
-from tenant_rows import OrgFactory, open_database
+from tenant_rows import OrgFactory
 
 from va_common.time import SystemClock
 from va_db.models import CallEvent
@@ -30,18 +29,6 @@ from va_events import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
-
-
-@pytest.fixture(scope="module")
-def migrated_url() -> Iterator[str]:
-    with migrated_postgres() as url:
-        yield url
-
-
-@pytest.fixture
-async def database(migrated_url: str) -> AsyncIterator[Database]:
-    async with open_database(migrated_url) as db:
-        yield db
 
 
 async def _rows(database: Database, org_id: uuid.UUID) -> list[CallEvent]:

@@ -148,6 +148,36 @@ Level is `warning` for recoverable codes and `error` for `pipeline_fatal`, `llm_
    receive events whose type matches any pattern in `event_types` (glob, `*` = all), format `envelope` (§7).
 4. **SMS / widget conversation webhooks**: `conversation.*`, `sms.*`, `widget.message` in `envelope` format.
 
+> Decision (2026-11-03): webhook router (P06-T02). `va_events.DbWebhookRouter` implements `WebhookRouter`; the pure
+> planner is `va_events.webhook_routing`, the bodies `va_events.webhook_payloads`.
+> 1. `webhook_deliveries.format` stores the signing family: `bland` for the bare Call Object, the `bland-live` body
+>    (§5), and the batch body (§6); `envelope` otherwise. The `payload` column holds the rendered body.
+> 2. Targets are planned in this order and deduplicated by URL (the first planned target wins; inserts are
+>    `ON CONFLICT (event_id, url) DO NOTHING`, so routing an event twice is harmless): per-call `webhook`
+>    (`calls.config.webhook`) → batch `status_webhook` → conversation `webhook` → widget `webhook_url` (not soft-deleted)
+>    → enabled org endpoints ordered by `(created_at, id)`.
+> 3. Per-call webhook: `call.completed` always (body = the event's `data`, the Call Object); any other call event only
+>    when its §2 key is in `calls.config.webhook_events` (body §5 with `metadata` = `calls.metadata`); `—`
+>    (`call.analysis_ready`) is never sent live. The org setting `webhook_format` (specs/04 §7) picks the per-call
+>    format: `bland` (default) as above, `envelope` wraps the same body in §7.
+> 4. Batch: `batch.*` events with `batch_id` whose batch has a `status_webhook` get the §6 body (format `bland`):
+>    `status` = the type without `batch.`, `phase` = the type, counts and `created_at`/`updated_at` from the row;
+>    `batch.completed`/`batch.stopped` add `completed_at` (row value, else the event time); `batch.failed` adds `code`
+>    and `reason` (row `failure_code`/`failure_reason`, else event `data.code`/`data.reason`, else `batch_failed`/`""`).
+> 5. Conversation webhooks: `sms.*`/`conversation.*` events with `conversation_id`; widget webhooks: `widget.message`/
+>    `conversation.*` events with `widget_id`. Both envelope.
+> 6. Org endpoints match with case-sensitive globs (`fnmatchcase`; `*` = all, `call.*`). Envelope `data` is the Call
+>    Object for `call.completed`, the §5 body for other call events, the §6 body for `batch.*` events of a known
+>    batch, else the event's `data`. The platform-admin side of `system.fraud_suspected` is not routed here.
+> 7. HIPAA (specs/23 §7): in a `hipaa_mode` org every target except an org endpoint with `phi_allowed = true` gets
+>    transcripts removed: Call Object `transcripts` → `[]`, `concatenated_transcript` → `""`, `pathway_logs` entries
+>    lose `text` and `user_text`; `call.turn` and `call.post_transfer_transcript` bodies lose `data.text`.
+> 8. Timestamps written by the router (`created_at` of §5/§7, batch times) are UTC ISO 8601 with milliseconds and `Z`.
+> 9. `route(event, session=)` inserts in the caller's transaction (outbox); with `session=None` it opens its own
+>    `tenant_session(event.org_id)`. `route_many(events, session=)` serves batched callers (one transaction per org
+>    without a session). The call, batch, conversation, and widget are read only for events that can reach them; org
+>    settings are read from `orgs.settings` in the same session, only when a delivery is planned.
+
 ## 4. Call Object (post-call webhook body and `GET /v1/calls/{call_id}` response)
 
 Exact field set (Bland-compatible names; additional fields are ours and documented as such):

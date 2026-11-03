@@ -2933,6 +2933,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "va-common" },
     { name = "va-db" },
+    { name = "va-domain" },
 ]
 
 [package.metadata]
@@ -2943,6 +2944,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },
     { name = "va-common", editable = "packages/va_common" },
     { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
 ]
 
 [[package]]

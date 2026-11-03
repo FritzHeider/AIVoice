@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793673488-d9e9
+> P06-T02: webhook outbox va_events.DbWebhookRouter (route/route_many, caller session = outbox) + pure webhook_routing.plan_deliveries + webhook_payloads (live_body/batch_body/envelope_body/strip_phi/iso_ms); WEBHOOK_KEY in catalog; org webhook_format picks per-call format; Call(metadata=...) silently sets declarative MetaData attr -> use metadata_=
+<!-- tags: events, webhooks, testing | created: 2026-11-03 -->
+
 ### mem-1793669923-12cd
 > P05-T17e2: 50-call overhead was mostly a per-call constant from InboundPath origin anchored on first frame processing time during attach backlog; fixed with origin=min(arrival-20k). Also batched VAD (VadExecutor.infer/VadModel.infer_batch), GatedVad window_samples=512, uvloop for media+sim, tune_gc. py-spy without --nonblocking inflates latency ~50-100ms; split sim v2v vs call.latency e2e_ms to locate overhead
 <!-- tags: media, performance, e2e | created: 2026-11-03 -->
@@ -445,6 +449,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793675044-c0b4
+> flake: apps/media_worker/tests/test_runtime_sim.py::test_the_background_bed_fills_the_agent_track_between_utterances[none-False-None] failed once under full make check (idle -21.8 dBFS vs -inf); passes in isolation
+<!-- tags: media, testing, flaky | created: 2026-11-03 -->
 
 ### mem-1793660249-6e32
 > P05-T17e: e2e load copies of one scenario need Harness.load_scenario(instance=n) (same run token = same scenario id, later registrations replace earlier ones -> calls get scenario_id null); 50 pollers at 0.25 s hit 429 on scale plan; compose Postgres max_connections default 100 runs out (temporal ~32). py-spy into containers: docker cp static binary from uvx cache, docker exec --privileged -u 0 /tmp/py-spy record --pid <python pid> --idle --threads [--native needs blocking mode]; --gil view undercounts main thread because numpy/soxr release the GIL

@@ -1,6 +1,6 @@
 # Phase 06 — Event Bus, Webhooks, Live Streams, and Analytics Sink
 
-- [ ] P06-T02 Webhook router and payload formats
+- [x] P06-T02 Webhook router and payload formats — va_events DbWebhookRouter (transactional outbox, ON CONFLICT dedupe) + pure webhook_routing/webhook_payloads (bland, bland-live, batch, envelope, HIPAA strip), WEBHOOK_KEY drift-checked vs specs/19 §2, rollback test; make check: lint/typecheck/placeholders pass, 10866 passed + 1 unrelated media_worker flake (passes on rerun)
   - Spec refs: specs/19-events-and-webhooks.md (routing rules, Call Object, live body, batch body, envelope format)
   - Depends on: P03-T17, P05-T16
   - Deliverables: `WebhookRouter.route(event, session)` creating `webhook_deliveries` rows for per-call webhook (respecting `webhook_events`), batch status webhooks, org endpoints (glob match), conversation/widget webhooks; serializers for `bland`, `bland-live`, `envelope`

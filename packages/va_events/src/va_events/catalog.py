@@ -15,8 +15,10 @@ from typing import Final, Literal
 from va_db.models import CallEventCategory
 
 __all__ = [
+    "ALWAYS_CALL_WEBHOOK",
     "DEFAULT_CATEGORY",
     "STREAMS",
+    "WEBHOOK_KEY",
     "CallEventCategory",
     "EventType",
     "Stream",
@@ -136,6 +138,47 @@ _CATEGORIES: dict[str, CallEventCategory] = {
 DEFAULT_CATEGORY: Final[Mapping[EventType, CallEventCategory | None]] = MappingProxyType(
     {member: _CATEGORIES.get(member.value) for member in EventType}
 )
+
+_WEBHOOK_KEYS: dict[str, str] = {
+    "call.queued": "queue",
+    "call.scheduled": "queue",
+    "call.dispatch_blocked": "queue",
+    "call.dialing": "call",
+    "call.ringing": "call",
+    "call.answered": "call",
+    "call.amd": "call",
+    "call.voicemail": "call",
+    "call.started": "call",
+    "call.turn": "call",
+    "call.interrupt": "call",
+    "call.latency": "latency",
+    "call.route": "call",
+    "call.extraction": "call",
+    "call.loop_condition": "call",
+    "call.tool": "tool",
+    "call.dynamic_data": "dynamic_data",
+    "call.webhook_node": "webhook",
+    "call.guard_rail": "call",
+    "call.transfer_started": "call",
+    "call.transferred": "call",
+    "call.post_transfer_transcript": "post_transfer_transcript",
+    "call.sms_sent": "call",
+    "call.error": "call",
+    "call.ended": "call",
+    "call.recording_ready": "call",
+    "citations.ready": "citations",
+    "evals.completed": "evals",
+    "call.retranscription_ready": "call",
+    "call.transcript_corrected": "call",
+}
+
+WEBHOOK_KEY: Final[Mapping[EventType, str | None]] = MappingProxyType(
+    {member: _WEBHOOK_KEYS.get(member.value) for member in EventType}
+)
+"""The per-call ``webhook_events`` key of each type (§2 last column); ``None`` = never sent live."""
+
+ALWAYS_CALL_WEBHOOK: Final[frozenset[EventType]] = frozenset({EventType.CALL_COMPLETED})
+"""Types every per-call ``webhook`` receives whatever its ``webhook_events`` (the Call Object, §3 rule 1)."""
 
 _STREAM_BY_PREFIX: Final[Mapping[str, Stream]] = MappingProxyType(
     {

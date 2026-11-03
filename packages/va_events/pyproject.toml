@@ -10,6 +10,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.35",
     "va-common",
     "va-db",
+    "va-domain",
 ]
 
 [build-system]
@@ -19,3 +20,4 @@ build-backend = "uv_build"
 [tool.uv.sources]
 va-common = { workspace = true }
 va-db = { workspace = true }
+va-domain = { workspace = true }

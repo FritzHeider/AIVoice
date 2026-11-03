@@ -1598,3 +1598,10 @@ Grafana 3001
 - 2026-11-03 (P05 exit gate): on the EC2 Ralph runner the agent shell PATH may lack `uv` (it lives in
   `/home/ralph/.local/bin`); `make check`/`make e2e` then fail at once with `uv: command not found` (exit 127). Prepend
   that dir to PATH before running the gates.
+- 2026-11-03 (P06-T02): webhook outbox = `va_events.DbWebhookRouter(database)` (`route(event, session=)` /
+  `route_many(events, session=)`; pass the caller's session for the transactional outbox), pure planning in
+  `va_events.webhook_routing` (`RoutingFacts`, `plan_deliveries(event, facts, DeliveryPolicy(hipaa=, call_format=))`),
+  bodies in `va_events.webhook_payloads` (`live_body`, `batch_body`, `envelope_body`, `strip_phi`, `iso_ms`); the §2
+  `webhook_events` keys are `va_events.WEBHOOK_KEY` (`test_catalog` parses the last spec column). Rules: specs/19 §3
+  Decision P06-T02. Seeding a call's metadata in tests: `seed_call(..., metadata_={...})` (`metadata=` silently sets
+  the declarative `MetaData` attribute instead of the column).
