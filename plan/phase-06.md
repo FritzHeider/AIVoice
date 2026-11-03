@@ -36,7 +36,7 @@
   - Deliverables: `call_events.event_type` column (migration 0007), pod-wide `call:{id}:live` fan-out hub, `GET /v1/calls/{id}/events/stream` (`id: <seq>`, `event: <type>`, bland-live `data`, replay from `call_events` then tail, `Last-Event-ID`, heartbeat comments, closes 30 s after `call.completed`)
   - Acceptance: tests for replay ordering, tail without gaps or duplicates across the replay/tail boundary, `Last-Event-ID` resume, close after completion, cross-tenant 404.
 
-- [ ] P06-T06b Transcript token and WebSocket
+- [x] P06-T06b Transcript token and WebSocket — POST token (calls:read, vtt_ token hashed in Redis 60 s) + token-only WS over shared CallTail (turns only, 1000/1011 closes, denial responses); make test 11163 passed 99.03 %, lint/typecheck/placeholders pass, test-ts pass, jscpd 0, radon 2.75
   - Spec refs: specs/19-events-and-webhooks.md §9
   - Depends on: P06-T06a
   - Deliverables: `POST /v1/calls/{id}/transcript/token` (60 s, single call scope), `WS /v1/calls/{id}/transcript/ws?token=` (replayed turns then live `call.turn` / `call.post_transfer_transcript`)

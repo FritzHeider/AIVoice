@@ -7,20 +7,19 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Final
 
 import httpx
 import pytest
 from call_helpers import bearer
-from call_rows import seed_call
 from clock_helpers import ManualClock
 from identity_db import IdentityDb
+from live_stream_helpers import ReleaseWatch, partition_clock, publish_event, streamed_call
 from service_helpers import serving
-from session_helpers import SessionContainer, error_of, session_app, session_client, store_api_key
+from session_helpers import SessionContainer, error_of, session_app, session_client
 
-from va_common.time import FrozenClock
-from va_events import DomainEvent, EventType, LiveHub, insert_rows, new_event, row_for
+from va_events import EventType
 from va_events.keys import call_live_channel
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
@@ -34,9 +33,7 @@ def _stream_path(call_id: uuid.UUID | str) -> str:
 
 @pytest.fixture
 def clock() -> ManualClock:
-    manual = ManualClock()
-    manual.set(datetime.now(UTC))  # call_events partitions exist around the real current month
-    return manual
+    return partition_clock()
 
 
 @pytest.fixture
@@ -50,42 +47,12 @@ async def http(streaming: SessionContainer) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-async def _call(
-    container: SessionContainer, *, scopes: tuple[str, ...] = ("*",)
-) -> tuple[uuid.UUID, uuid.UUID, str]:
-    call = await seed_call(container.database, status="in_progress", metadata_={"crm": "7"})
-    key, _ = await store_api_key(container, call.org_id, scopes)
-    return call.org_id, call.call_id, key
-
-
-async def _publish(  # noqa: PLR0913 - the event and where it goes
-    container: SessionContainer,
-    org_id: uuid.UUID,
-    call_id: uuid.UUID,
-    event_type: EventType,
-    *,
-    at: datetime | None = None,
-    live: bool = True,
-) -> DomainEvent:
-    event = new_event(
-        event_type, org_id=org_id, clock=FrozenClock(at or container.clock.now()), call_id=call_id
-    )
-    event = await container.event_publisher.sequence(event)
-    row = row_for(event)
-    assert row is not None
-    async with container.database.tenant_session(org_id) as session:
-        await insert_rows(session, [row])
-    if live:
-        await container.event_publisher.broadcast(event)
-    return event
-
-
 async def _finished_call(container: SessionContainer) -> tuple[uuid.UUID, str]:
     """A call with ``call.started`` (seq 1) and a ``call.completed`` from ten minutes ago (seq 2) stored."""
-    org_id, call_id, key = await _call(container)
-    await _publish(container, org_id, call_id, EventType.CALL_STARTED, live=False)
+    org_id, call_id, key = await streamed_call(container)
+    await publish_event(container, org_id, call_id, EventType.CALL_STARTED, live=False)
     old = container.clock.now() - timedelta(minutes=10)
-    await _publish(container, org_id, call_id, EventType.CALL_COMPLETED, at=old, live=False)
+    await publish_event(container, org_id, call_id, EventType.CALL_COMPLETED, at=old, live=False)
     return call_id, key
 
 
@@ -125,8 +92,8 @@ async def test_last_event_id_header_skips_received_events(
 async def test_errors_are_answered_before_the_stream_starts(
     streaming: SessionContainer, http: httpx.AsyncClient
 ) -> None:
-    _, call_id, key = await _call(streaming)
-    _, _, narrow = await _call(streaming, scopes=("org:read",))
+    _, call_id, key = await streamed_call(streaming)
+    _, _, narrow = await streamed_call(streaming, scopes=("org:read",))
 
     assert error_of(await http.get(_stream_path(uuid.uuid4()), headers=bearer(key)))[:2] == (
         404,
@@ -145,21 +112,6 @@ async def test_errors_are_answered_before_the_stream_starts(
     assert streaming.live_hub.subscribed_channels == frozenset()
 
 
-class _ReleaseWatch:
-    """Sets :attr:`released` once the hub's last subscriber of ``channel`` is gone."""
-
-    def __init__(self, hub: LiveHub, channel: str) -> None:
-        self.released = asyncio.Event()
-        self._hub = hub
-        self._channel = channel
-        self._unsubscribe = hub.unsubscribe
-
-    async def __call__(self, subscription: object) -> None:
-        await self._unsubscribe(subscription)  # type: ignore[arg-type]
-        if self._hub.subscribers(self._channel) == 0:
-            self.released.set()
-
-
 async def _next_frame(chunks: AsyncIterator[bytes], buffer: bytearray) -> bytes:
     async with asyncio.timeout(WAIT_S):
         while b"\n\n" not in buffer:
@@ -173,10 +125,10 @@ async def _next_frame(chunks: AsyncIterator[bytes], buffer: bytearray) -> bytes:
 async def test_live_frames_arrive_on_an_open_socket_and_disconnect_releases_the_subscription(
     streaming: SessionContainer, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    org_id, call_id, key = await _call(streaming)
-    await _publish(streaming, org_id, call_id, EventType.CALL_STARTED, live=False)
+    org_id, call_id, key = await streamed_call(streaming)
+    await publish_event(streaming, org_id, call_id, EventType.CALL_STARTED, live=False)
     async with serving(session_app(streaming)) as server, httpx.AsyncClient(base_url=server.url) as client:
-        watch = _ReleaseWatch(streaming.live_hub, call_live_channel(call_id))
+        watch = ReleaseWatch(streaming.live_hub, call_live_channel(call_id))
         monkeypatch.setattr(streaming.live_hub, "unsubscribe", watch)
         async with client.stream("GET", _stream_path(call_id), headers=bearer(key)) as response:
             assert response.status_code == 200
@@ -185,7 +137,7 @@ async def test_live_frames_arrive_on_an_open_socket_and_disconnect_releases_the_
             buffer = bytearray()
             assert await _next_frame(chunks, buffer) == b"retry: 3000\n\n"
             assert (await _next_frame(chunks, buffer)).startswith(b"id: 1\nevent: call.started\n")
-            live = await _publish(streaming, org_id, call_id, EventType.CALL_LATENCY)
+            live = await publish_event(streaming, org_id, call_id, EventType.CALL_LATENCY)
             assert (await _next_frame(chunks, buffer)).startswith(
                 f"id: {live.seq}\nevent: call.latency\n".encode()
             )

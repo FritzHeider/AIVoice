@@ -7561,6 +7561,62 @@
         ],
         "type": "string"
       },
+      "TranscriptTokenResponse": {
+        "description": "A short-lived token for the call's transcript WebSocket.",
+        "examples": [
+          {
+            "expires_at": "2026-10-24T18:20:09.000000Z",
+            "status": "success",
+            "token": "vtt_example-transcript-token",
+            "ws_url": "/v1/calls/0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01/transcript/ws?token=vtt_example-transcript-token"
+          }
+        ],
+        "properties": {
+          "expires_at": {
+            "description": "When the token stops opening connections (UTC).",
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The token (60 s, this call only); `null` on an `Idempotency-Key` replay.",
+            "title": "Token"
+          },
+          "ws_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Path of the transcript WebSocket with the token; `null` on an `Idempotency-Key` replay.",
+            "title": "Ws Url"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at",
+          "ws_url"
+        ],
+        "title": "TranscriptTokenResponse",
+        "type": "object"
+      },
       "TransferOwnershipRequest": {
         "additionalProperties": false,
         "description": "``POST /v1/org/transfer-ownership``: the member who becomes an owner.",
@@ -10143,6 +10199,62 @@
         "tags": [
           "Calls"
         ],
+        "x-envelope": "legacy",
+        "x-scope": "calls:read"
+      }
+    },
+    "/v1/calls/{call_id}/transcript/token": {
+      "post": {
+        "description": "A 60-second token for `WS /v1/calls/{call_id}/transcript/ws?token=`; any number of connections to\nthis call may open with it until it expires. An `Idempotency-Key` replay answers `token` and `ws_url` as\n`null`.",
+        "operationId": "calls_transcript_token",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "call_id",
+            "required": true,
+            "schema": {
+              "title": "Call Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Calls Transcript Token",
+        "tags": [
+          "Calls"
+        ],
+        "x-audit-exempt": "short-lived read token, no state change",
         "x-envelope": "legacy",
         "x-scope": "calls:read"
       }

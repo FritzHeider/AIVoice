@@ -914,3 +914,135 @@ T06a also lays the shared pieces (live hub, row body) that T06b/T06c reuse.
 - Checked against specs/19 §9 (frame format, Last-Event-ID, close after call.completed), specs/03 §6 DDL (event_type last),
   error codes CALL_NOT_FOUND / INVALID_INPUT / SERVICE_UNAVAILABLE raised before streaming. LiveHub reader exit relies on
   redis-py `PubSub.subscribed` = channels non-empty (set at SUBSCRIBE send time), so no restart race.
+
+## Plan P06-T06b — Transcript token and WebSocket
+Spec: specs/19 §9 (WS + token), specs/05 §2 table row (`POST /v1/calls/{call_id}/transcript/token`, `calls:read`).
+Reuses the T06a machinery (LiveHub, SeqOrder, replay/tail/gap logic). No new event types.
+
+### Decisions (add `> Decision (2026-11-03): transcript token and WebSocket (P06-T06b).` under specs/19 §9, after the T06a one)
+1. Scope: `calls:read` (specs/05 table wins over the specs/04 §? `calls:write` scope description "transcript tokens";
+   edit that specs/04 table cell to drop "transcript tokens" from `calls:write` and mention it under `calls:read`,
+   same commit). No extra permission. Route on `calls_router` (legacy body), `operation_id="calls_transcript_token"`,
+   `openapi_extra={"x-scope": "calls:read", **audit_exempt("short-lived read token, no state change")}`.
+   Answers 200 `TranscriptTokenResponse {status: "success", token, expires_at, ws_url}` where
+   `ws_url = "/v1/calls/{call_id}/transcript/ws?token=<token>"` (path only; the host is the api's). The route calls
+   `withhold_on_replay(request, "token")` (one-time secret; same rule as minted API keys). Unknown / other-org call →
+   `CALL_NOT_FOUND` (reuse `call_read.owned_call`). Any call status may get a token (ended calls replay then close).
+2. Token = `vtt_` + `secrets.token_urlsafe(32)`; stored in Redis `transcript:token:{sha256hex(token)}` → JSON
+   `{"org_id", "call_id", "expires_at"}` with `SET ... EX 60` (TTL 60 s, `TRANSCRIPT_TOKEN_TTL_S`). Not single use:
+   any number of connections may open with it until it expires (reconnects inside the minute); expiry is checked
+   both by the TTL and by `expires_at <= clock.now()` (the injected clock; tests use it). Redis failure on mint →
+   `SERVICE_UNAVAILABLE`. Add the row to the specs/03 §11 Redis table.
+3. `WS /v1/calls/{call_id}/transcript/ws?token=` (`@calls_router.websocket(...)` — `APIWebSocketRoute`, not in
+   OpenAPI, not walked by the cross-tenant/audit suites). Authentication is ONLY the token (browsers cannot set
+   headers; `Authorization`/cookies are ignored). Before `accept()` the handler validates: token present and
+   well-formed, Redis record exists and not expired, record `call_id == path call_id` (else `call_mismatch`), the
+   call exists in the record's org (`tenant_session(record.org_id)` + `owned_call`-equivalent by org) and the live
+   subscription succeeds. Refusals use `websocket.send_denial_response(error_response(...))` (Starlette denial
+   extension; uvicorn supports it) with the normal error envelope: missing/invalid/expired/mismatched token →
+   401 `AUTH_FAILURE` "The transcript token is invalid or expired." (one message for all, reason only in the log
+   `calls.transcript_ws_refused` with `reason` ∈ `missing|unknown|expired|call_mismatch`), call gone → 404
+   `CALL_NOT_FOUND`, hub unavailable → 503 `SERVICE_UNAVAILABLE`. If the server lacks the extension Starlette falls
+   back to closing (403) — fine. Builder: check `error_response` signature in `va_api.errors` (it needs a request id;
+   use `request_id_of(websocket)`).
+4. Messages: after accept, one JSON text message per event, `{"id": <seq>, "event": "<type>", "data": <bland-live
+   body>}` (same body as the SSE frame: `live_body`/`row_body`, call metadata loaded once), only for
+   `call.turn` and `call.post_transfer_transcript`, strictly increasing seq; replay of stored rows with those types
+   first (all of them; no resume parameter), then the live tail. Partials: the event bus carries no partial
+   transcript event (specs/19 §2 has none and adding one would reach webhooks and the sink), so the socket sends
+   finalized turns only — record this in the Decision as the reading of "partials and finals". The server closes
+   with code 1000 reason `completed` 30 s after `call.completed` (at once for an older call; the call.completed
+   event itself is NOT sent, it only drives the close), `max_duration` (4 h, code 1000), and 1011 `overflow`/`lost`
+   (client reconnects with a new token). Client messages are read and ignored; a client disconnect ends it. No app
+   heartbeat (uvicorn sends protocol pings every 20 s). Log `calls.transcript_ws_closed` (call_id, reason, messages).
+5. Refactor, no behaviour change for SSE: move the replay/tail/gap/close core of `CallStream` into
+   `va_api/services/call_tail.py` `CallTail(deps, *, org_id, call_id, metadata, after, sub, types: frozenset[str] |
+   None, heartbeat_s: float | None)` with `async def items() -> AsyncGenerator[TailItem | None]` where
+   `TailItem(seq: int, event_type: str | None, body: Body)` and `None` = heartbeat due (only when `heartbeat_s` set);
+   `.reason`, `.aclose()` (unsubscribe, idempotent). The filter applies at item build time: non-matching rows/events
+   still advance `SeqOrder` (frame `None`), replay/gap re-reads stay unfiltered, so a missing non-transcript row
+   never holds a turn longer than the existing 2 s gap rule. `call.completed` sets the close deadline even when
+   filtered out. `CallStream` (SSE) becomes a thin renderer over `CallTail` (types=None, heartbeat 15 s,
+   `sse_frame`/`HEARTBEAT_FRAME`); keep its public API and constants (`call_stream.py` re-exports the constants the
+   tests import). Shared opener: `open_tail(deps, org_id, call_id, after, types, heartbeat_s)` does ownership check +
+   subscribe (used by both `open_call_stream` and the WS opener). Keep T06a tests green unchanged (only imports may move).
+
+### Files
+- NEW `apps/api/src/va_api/services/call_tail.py` (core, from call_stream.py), modify `services/call_stream.py`.
+- NEW `apps/api/src/va_api/services/transcript_tokens.py`: `TRANSCRIPT_TOKEN_TTL_S=60`, `TOKEN_PREFIX="vtt_"`,
+  `token_key(token) -> str`, `TranscriptTokenRecord(org_id, call_id, expires_at)` (pydantic/dataclass + JSON),
+  `TranscriptTokens(redis, clock)`: `mint(org_id, call_id) -> (token, expires_at)`, `resolve(token, call_id) ->
+  TranscriptTokenRecord` raising `TranscriptTokenError(reason)`.
+- NEW `apps/api/src/va_api/services/transcript_ws.py`: `TRANSCRIPT_TYPES = frozenset({"call.turn",
+  "call.post_transfer_transcript"})`, `open_transcript(deps, websocket, call_id_text, token) -> CallTail` (raises
+  AppError for refusals) and `serve_transcript(websocket, tail)` (accept, TaskGroup of sender + receiver, close code
+  by reason, log). Deps: reuse `StreamDeps` + `redis` (add `redis` to StreamDeps or a new `TranscriptDeps`).
+- `apps/api/src/va_api/routers/calls.py`: token POST route + websocket route + docstring lines;
+  `routers/calls_detail_schemas.py`: `TranscriptTokenResponse` (examples entry).
+- Specs: specs/19 §9 Decision; specs/03 §11 row; specs/04 scope table cell; specs/05 row unchanged.
+- AGENTS.md bullet (WS route test pattern, denial response, token key).
+- `make openapi` + both `gen:api` (new POST route).
+
+### Tests
+- `apps/api/tests/test_transcript_tokens.py` (fakeredis + FrozenClock/ManualClock): mint stores hashed key with TTL 60
+  (`ttl` ≤ 60), token prefix/length, resolve ok; expired by clock (advance 61 s) → `expired`; unknown → `unknown`;
+  other call id → `call_mismatch`; malformed (no prefix / empty) → `unknown`/`missing`; raw token never in Redis keys.
+- `apps/api/tests/test_call_tail.py` or keep coverage via existing `test_call_stream.py` + new filter tests: type
+  filter skips other events but they fill the seq gap; filtered `call.completed` still closes; no heartbeat when
+  `heartbeat_s=None`.
+- `apps/api/tests/test_transcript_ws.py` (module Postgres `session_helpers.migrated_postgres()`, real uvicorn via
+  `service_helpers.serving(app)` / `RecordingServer`, `websockets.asyncio.client.connect`; container on a
+  ManualClock or SystemClock set inside partitions — use `call_helpers.business_hours_today()` as in T06a tests):
+  * POST token: 200 body shape, `CALL_NOT_FOUND` for other org's call, `calls:read` key works, key without
+    `calls:read` → 403, Idempotency-Key replay returns `token: null`.
+  * WS happy path: seeded rows (call.created, call.turn x2, call.latency) → client receives only the two turns in
+    seq order with exact body keys; then a live `call.turn` published via `EventPublisher` arrives next; a live
+    `call.completed` then closes 1000 `completed` after 30 s of clock (ManualClock `wait_for_sleep`/`run_for`, or an
+    old completed call that closes right after replay to avoid timing).
+  * replay+live order with a live event already stored (sent once).
+  * refusals: no token / garbage token → handshake rejected with 401 and error envelope `AUTH_FAILURE`
+    (`websockets.exceptions.InvalidStatus`, `.response.status_code == 401`, body JSON code); expired token (clock
+    advanced past 60 s) → 401; token minted for call X used on call Y of the same org → 401; token of org B used on
+    org A's call → 401; token valid but call deleted? (skip) ; log reasons asserted via `json_log_stream`.
+  * client disconnect releases the hub subscription (hub channel count back to 0, wait on an event, no sleeps).
+- Existing: `test_call_stream.py`, `test_openapi.py`, cross-tenant suite (token route probed: factory call_id exists,
+  owner 200), `test_audit_markers.py` (audit_exempt present).
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest apps/api packages/va_events -q`; `make openapi` + both gen:api + `make test-ts`; full `make test` in
+background with heartbeat Monitor (truncate log first); jscpd; radon. No call-flow change → no e2e.
+
+### Risks
+- Denial response: verify uvicorn 0.54 websockets implementation advertises `websocket.http.response` in
+  `scope["extensions"]`; if a test server (websockets vs wsproto impl) lacks it Starlette raises/falls back — test
+  over real uvicorn with the default `ws` impl.
+- `RequestContextMiddleware` handles websocket scopes: make sure the denial `http.response.start` still gets
+  `X-Request-Id` (it wraps `http.response.start` — the denial message type is `websocket.http.response.start`; it
+  may not add headers; acceptable, but `error_response` sets X-Request-Id itself).
+- Refactoring `CallStream` must keep T06a frame bytes identical (tests compare bytes).
+- The WS sender awaiting the tail must be cancelled when the receiver sees `websocket.disconnect`; aclose in finally
+  (shield the unsubscribe like T06a does if needed).
+
+## Build P06-T06b (builder notes)
+- `services/call_tail.py` = shared core (call_metadata → subscribe_tail(types, heartbeat_s) → CallTail.items yields
+  TailItem | None); filtered events still fill SeqOrder slots; call.completed sets the close even when filtered.
+  `call_stream.CallStream` now renders the tail (frame bytes unchanged; T06a tests untouched except helper moves).
+- `call_read.org_call(session, org_id, call_id)`; `owned_call` delegates.
+- `services/transcript_tokens.py` (vtt_ + token_urlsafe(32), `transcript:token:{sha256}` EX 60, reasons
+  missing/unknown/expired/call_mismatch), `services/transcript_ws.py` (issue/open/serve; accept → sender+receiver
+  tasks; 1000 completed/max_duration, 1011 overflow/lost/closed; logs refused/closed).
+- Routes: POST `/{call_id}/transcript/token` (calls:read, audit_exempt, withhold token+ws_url on replay) and
+  `@calls_router.websocket("/{call_id}/transcript/ws")` with denial response via `error_response(websocket, ...)`
+  (`error_response` now takes HTTPConnection).
+- Specs: 19 §9 Decision, 03 §11 row, 04 §2.3 scope list (transcript tokens under calls:read). AGENTS.md bullet.
+- Tests: test_transcript_tokens.py, test_transcript_ws.py; shared `tests/support/live_stream_helpers.py`
+  (SSE http test now uses it). openapi.json + both schema.d.ts regenerated.
+- Gates: fmt/lint/typecheck/placeholders pass; make test-ts pass (22/52/48); jscpd 0 clones; radon avg A
+  (CallTail.items C(12) = same as old CallStream.frames).
+
+## Review P06-T06b — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11163 passed, 7 skipped (99.03 %).
+- Checked against specs/19 §9 (+ Decision), specs/05 §2 row (calls:read), specs/04 scope table, specs/03 §11 key row.
+  Token stored only as sha256; uvicorn access_log=False so the `?token=` query never hits logs. Refusals before
+  accept via denial response; tail aclose in finally; SSE frames unchanged (T06a tests green).

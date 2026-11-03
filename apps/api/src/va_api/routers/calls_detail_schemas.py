@@ -1,5 +1,6 @@
-"""Query and response models of the call artifact endpoints: active calls, recording, transcript, and events
-(specs/05-calls-api.md §7.4, §7.5, §7.6, §7.9; Decision P05-T16b; legacy envelope)."""
+"""Query and response models of the call artifact endpoints: active calls, recording, transcript, events, and
+the transcript token (specs/05-calls-api.md §7.4, §7.5, §7.6, §7.9; Decision P05-T16b;
+specs/19-events-and-webhooks.md §9 Decision P06-T06b; legacy envelope)."""
 
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ __all__ = [
     "TranscriptFormat",
     "TranscriptQuery",
     "TranscriptResponse",
+    "TranscriptTokenResponse",
 ]
 
 DEFAULT_EVENTS_LIMIT: Final = 100
@@ -194,3 +196,25 @@ class CallEventsResponse(BaseModel):
     status: Literal["success"] = "success"
     events: list[CallEventItem]
     next_after_seq: int | None
+
+
+class TranscriptTokenResponse(BaseModel):
+    """A short-lived token for the call's transcript WebSocket."""
+
+    model_config = _examples(
+        {
+            "status": "success",
+            "token": "vtt_example-transcript-token",
+            "expires_at": _CREATED_AT,
+            "ws_url": f"/v1/calls/{_CALL_ID}/transcript/ws?token=vtt_example-transcript-token",
+        }
+    )
+
+    status: Literal["success"] = "success"
+    token: str | None = Field(
+        description="The token (60 s, this call only); `null` on an `Idempotency-Key` replay."
+    )
+    expires_at: datetime = Field(description="When the token stops opening connections (UTC).")
+    ws_url: str | None = Field(
+        description="Path of the transcript WebSocket with the token; `null` on an `Idempotency-Key` replay."
+    )

@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import HTTPConnection
 
 from va_api.envelopes import Envelope, route_envelope
 from va_api.middleware import REQUEST_ID_HEADER, SECURITY_HEADERS, request_id_of, route_label
@@ -129,7 +130,7 @@ def error_body(envelope: Envelope, items: Sequence[Mapping[str, Any]], request_i
 
 
 def error_response(
-    request: Request,
+    request: HTTPConnection,
     status: int,
     items: Sequence[Mapping[str, Any]],
     headers: Mapping[str, str] | None = None,

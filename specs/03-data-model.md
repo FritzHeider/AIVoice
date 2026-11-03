@@ -1477,6 +1477,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:control_ack:{msg_id}` | string `1` | 30 s | Owner handled the control message (specs/07 §17) |
 | `call:{id}:carrier` | pub/sub channel | — | Carrier events to owner |
 | `call:{id}:live` | pub/sub channel | — | Live events for dashboard/API SSE listeners |
+| `transcript:token:{sha256(token)}` | string JSON (`org_id`, `call_id`, `expires_at`) | 60 s | Transcript WebSocket token (specs/19 §9 Decision P06-T06b) |
 | `events:calls`, `events:sms`, `events:widget`, `events:billing`, `events:system` | streams (MAXLEN ~ 1 000 000) | — | Event bus |
 | `events:dead` | stream (MAXLEN ~ 100 000; fields `stream`, `entry_id`, `reason`, `payload`) | — | Entries the events sink could not decode, map, or insert (specs/19 §1 Decision P06-T05) |
 | `rl:key:{api_key_id}:{bucket}` | hash (`tokens`, `ts`) | 2 × fill time | Request rate limiting per API key (specs/04 §11; `bucket` = `default`, `calls_send`) |

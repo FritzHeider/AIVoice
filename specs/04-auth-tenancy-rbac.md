@@ -99,8 +99,8 @@ Every repository call receives `ctx.org_id`; `tenant_session(ctx.org_id)` sets `
 | Scope | Grants |
 |---|---|
 | `*` | All scopes below |
-| `calls:read` | GET calls, transcripts, recordings, events, active calls, analysis results |
-| `calls:write` | Send/stop/analyze calls, transcript tokens, live control (transfer, say, takeover) |
+| `calls:read` | GET calls, transcripts, recordings, events, active calls, analysis results, transcript tokens |
+| `calls:write` | Send/stop/analyze calls, live control (transfer, say, takeover) |
 | `batches:read` | GET batches, logs |
 | `batches:write` | Create/stop batches |
 | `pathways:read` | GET pathways, versions, folders, unit tests, test runs |

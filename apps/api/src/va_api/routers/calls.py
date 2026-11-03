@@ -16,7 +16,9 @@ Call creation is recorded in ``calls`` and ``call_events``, not in the audit log
 (``after_seq`` paging) need ``calls:read``; the work is :mod:`va_api.services.call_artifacts`. The literal
 ``/active`` is registered before ``/{call_id}``. ``GET /v1/calls/{call_id}/events/stream`` (Server-Sent
 Events, ``Last-Event-ID`` resume, specs/19 §9) needs ``calls:read``; the work is
-:mod:`va_api.services.call_stream`.
+:mod:`va_api.services.call_stream`. ``POST /v1/calls/{call_id}/transcript/token`` (``calls:read``) mints the
+60-second token of ``WS /v1/calls/{call_id}/transcript/ws?token=`` (specs/19 §9 Decision P06-T06b), which
+authenticates with that token only; the work is :mod:`va_api.services.transcript_ws`.
 
 ``POST /v1/calls/{call_id}/stop`` and ``POST /v1/calls/active/stop`` need ``calls:write`` and the
 ``calls.operate`` permission (stop-all from a dashboard session also role ``owner``/``admin``); the work is
@@ -27,7 +29,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Final
 
-from fastapi import Depends, Header, Query, Request, Response
+from fastapi import Depends, Header, Query, Request, Response, WebSocket
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from va_api.audit import audit_exempt, audited
@@ -35,6 +37,8 @@ from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import rate_limit, require_scope
 from va_api.auth.permissions import require_permission
 from va_api.envelopes import legacy_router
+from va_api.errors import error_response
+from va_api.idempotency import withhold_on_replay
 from va_api.routers.calls_detail_schemas import (
     ActiveCallsResponse,
     CallEventsQuery,
@@ -43,6 +47,7 @@ from va_api.routers.calls_detail_schemas import (
     RecordingResponse,
     TranscriptQuery,
     TranscriptResponse,
+    TranscriptTokenResponse,
 )
 from va_api.routers.calls_read_schemas import CallListQuery, CallListResponse
 from va_api.routers.calls_schemas import (
@@ -62,7 +67,14 @@ from va_api.services.call_stop import (
     stop_deps_of,
 )
 from va_api.services.call_stream import open_call_stream, stream_deps_of
+from va_api.services.transcript_ws import (
+    issue_transcript_token,
+    open_transcript,
+    serve_transcript,
+    transcript_deps_of,
+)
 from va_api.sse import EventStreamResponse
+from va_common.errors import AppError
 from va_common.logging import get_logger
 from va_domain.call_object import CallObject, concatenated_transcript, to_srt, to_vtt
 from va_domain.calls import SendCallRequest, unknown_fields
@@ -79,6 +91,8 @@ __all__ = [
     "calls_stop",
     "calls_stop_active",
     "calls_transcript",
+    "calls_transcript_token",
+    "calls_transcript_ws",
 ]
 
 _log = get_logger(__name__)
@@ -114,6 +128,8 @@ _STREAM_DOC: Final[dict[int | str, dict[str, Any]]] = {
         "content": {"text/event-stream": {"schema": {"type": "string"}}},
     }
 }
+_DENIAL_EXTENSION: Final = "websocket.http.response"
+_POLICY_VIOLATION: Final = 1008
 _SRT_MEDIA_TYPE: Final = "application/x-subrip; charset=utf-8"
 _VTT_MEDIA_TYPE: Final = "text/vtt; charset=utf-8"
 
@@ -272,3 +288,43 @@ async def calls_events_stream(
     the live ones; reconnect with the last received `id` as `Last-Event-ID` to resume."""
     stream = await open_call_stream(stream_deps_of(request), ctx, parse_call_id(call_id), last_event_id)
     return EventStreamResponse(stream.frames(), stream.aclose)
+
+
+@calls_router.post(
+    "/{call_id}/transcript/token",
+    operation_id="calls_transcript_token",
+    openapi_extra={**_READ_EXTRA, **audit_exempt("short-lived read token, no state change")},
+)
+async def calls_transcript_token(call_id: str, request: Request, ctx: ReadCalls) -> TranscriptTokenResponse:
+    """A 60-second token for `WS /v1/calls/{call_id}/transcript/ws?token=`; any number of connections to
+    this call may open with it until it expires. An `Idempotency-Key` replay answers `token` and `ws_url` as
+    `null`."""
+    parsed = parse_call_id(call_id)
+    minted = await issue_transcript_token(transcript_deps_of(request), ctx, parsed)
+    withhold_on_replay(request, "token", "ws_url")
+    return TranscriptTokenResponse(
+        token=minted.token,
+        expires_at=minted.expires_at,
+        ws_url=f"/v1/calls/{parsed}/transcript/ws?token={minted.token}",
+    )
+
+
+@calls_router.websocket("/{call_id}/transcript/ws")
+async def calls_transcript_ws(websocket: WebSocket, call_id: str) -> None:
+    """The call's transcript turns as JSON messages; authenticated by the `token` query parameter only."""
+    deps = transcript_deps_of(websocket)
+    try:
+        tail = await open_transcript(deps, call_id, websocket.query_params.get("token"))
+    except AppError as exc:
+        await _deny(websocket, exc)
+        return
+    await serve_transcript(websocket, tail, call_id)
+
+
+async def _deny(websocket: WebSocket, exc: AppError) -> None:
+    """Refuse the handshake with the error body, or close it (HTTP 403) when the server cannot send one."""
+    if _DENIAL_EXTENSION in websocket.scope.get("extensions", {}):
+        response = error_response(websocket, exc.http_status, [exc.to_error_item()], exc.headers or None)
+        await websocket.send_denial_response(response)
+        return
+    await websocket.close(code=_POLICY_VIOLATION)

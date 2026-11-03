@@ -41,6 +41,7 @@ __all__ = [
     "ReadDeps",
     "get_call",
     "list_calls",
+    "org_call",
     "owned_call",
     "read_deps_of",
     "recording_urls",
@@ -109,12 +110,17 @@ async def recording_urls(
     return urls
 
 
-async def owned_call(session: AsyncSession, ctx: RequestContext, call_id: uuid.UUID) -> Call:
-    """The call ``call_id`` of ``ctx.org_id``; ``CALL_NOT_FOUND`` when absent (or another org's)."""
-    call = await session.scalar(select(Call).where(Call.org_id == ctx.org_id, Call.id == call_id))
+async def org_call(session: AsyncSession, org_id: uuid.UUID, call_id: uuid.UUID) -> Call:
+    """The call ``call_id`` of ``org_id``; ``CALL_NOT_FOUND`` when absent (or another org's)."""
+    call = await session.scalar(select(Call).where(Call.org_id == org_id, Call.id == call_id))
     if call is None:
         raise AppError("CALL_NOT_FOUND", CALL_NOT_FOUND_MESSAGE)
     return call
+
+
+async def owned_call(session: AsyncSession, ctx: RequestContext, call_id: uuid.UUID) -> Call:
+    """The call ``call_id`` of ``ctx.org_id``; ``CALL_NOT_FOUND`` when absent (or another org's)."""
+    return await org_call(session, ctx.org_id, call_id)
 
 
 async def get_call(deps: ReadDeps, ctx: RequestContext, call_id: uuid.UUID) -> CallObject:

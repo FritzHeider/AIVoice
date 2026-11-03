@@ -1660,3 +1660,14 @@ Grafana 3001
   suits ended streams — live ones go over `service_helpers.serving(app)`. Cross-tenant `register_request(op,
   headers=...)` exists (the stream owner control sends a bad `Last-Event-ID` → 400). `test_openapi.STREAM_OPERATIONS`
   exempts `text/event-stream` operations from the JSON example rule.
+- 2026-11-03 (P06-T06b): the replay/tail/gap core of the call live streams is `va_api.services.call_tail`
+  (`call_metadata` → `subscribe_tail(..., types=, heartbeat_s=)` → `CallTail.items()` yielding `TailItem` or `None`
+  for a due heartbeat); `call_stream.CallStream` (SSE) and `transcript_ws.serve_transcript` (WebSocket) only render
+  it. Transcript tokens: `va_api.services.transcript_tokens.TranscriptTokens` (`transcript:token:{sha256}`, 60 s).
+  WebSocket routes (`@router.websocket`) are `APIWebSocketRoute`s: not in OpenAPI, not walked by the cross-tenant or
+  audit-marker suites, and an `AppError` raised in one is NOT rendered by the exception handlers: catch it and
+  refuse with `websocket.send_denial_response(error_response(websocket, ...))` (uvicorn advertises
+  `websocket.http.response`; `error_response` accepts any `HTTPConnection`). WS tests: real uvicorn via
+  `service_helpers.serving(app)` + `websockets.asyncio.client.connect`; a refused handshake raises
+  `websockets.exceptions.InvalidStatus` (`.response.status_code`, `.response.body`). A client's close races the
+  server's cleanup: sync on a wrapped module `_log` (see `_ClosedLog` in `test_transcript_ws.py`), not on the close.

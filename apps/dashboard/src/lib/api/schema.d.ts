@@ -336,6 +336,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calls/{call_id}/transcript/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Calls Transcript Token
+         * @description A 60-second token for `WS /v1/calls/{call_id}/transcript/ws?token=`; any number of connections to
+         *     this call may open with it until it expires. An `Idempotency-Key` replay answers `token` and `ws_url` as
+         *     `null`.
+         */
+        post: operations["calls_transcript_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -5094,6 +5116,40 @@ export interface components {
         /** @enum {string} */
         TranscriptRole: "user" | "assistant" | "agent-action" | "human_agent";
         /**
+         * TranscriptTokenResponse
+         * @description A short-lived token for the call's transcript WebSocket.
+         * @example {
+         *       "expires_at": "2026-10-24T18:20:09.000000Z",
+         *       "status": "success",
+         *       "token": "vtt_example-transcript-token",
+         *       "ws_url": "/v1/calls/0193c5d2-7b1e-7a10-9c4e-3f1d2a6b8c01/transcript/ws?token=vtt_example-transcript-token"
+         *     }
+         */
+        TranscriptTokenResponse: {
+            /**
+             * Expires At
+             * Format: date-time
+             * @description When the token stops opening connections (UTC).
+             */
+            expires_at: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /**
+             * Token
+             * @description The token (60 s, this call only); `null` on an `Idempotency-Key` replay.
+             */
+            token: string | null;
+            /**
+             * Ws Url
+             * @description Path of the transcript WebSocket with the token; `null` on an `Idempotency-Key` replay.
+             */
+            ws_url: string | null;
+        };
+        /**
          * TransferOwnershipRequest
          * @description ``POST /v1/org/transfer-ownership``: the member who becomes an owner.
          * @example {
@@ -6309,6 +6365,46 @@ export interface operations {
                     "application/x-subrip": unknown;
                     "text/plain": unknown;
                     "text/vtt": unknown;
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    calls_transcript_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                call_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptTokenResponse"];
                 };
             };
             /** @description Invalid input */

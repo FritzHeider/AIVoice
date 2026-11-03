@@ -451,6 +451,31 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 > (`va_events.LiveHub`): the first subscriber of a channel subscribes and waits up to 2 s for Redis to
 > confirm, later ones share it, the last one unsubscribes.
 
+> Decision (2026-11-03): transcript token and WebSocket (P06-T06b). `POST /v1/calls/{call_id}/transcript/token`
+> needs `calls:read` (specs/05 §2; the specs/04 §2.3 scope list now names transcript tokens under `calls:read`),
+> writes no audit row, and answers `{status: "success", token, expires_at, ws_url}` where `token` is `vtt_` + 43
+> URL-safe characters and `ws_url` is the path `/v1/calls/{call_id}/transcript/ws?token=<token>`; an
+> `Idempotency-Key` replay answers `token` and `ws_url` as `null`. Unknown or other-org call → `CALL_NOT_FOUND`;
+> any call status may get a token. Redis keeps only `transcript:token:{sha256(token)}` (specs/03 §11, `SET ... EX
+> 60`) with `{org_id, call_id, expires_at}`; Redis failure → `SERVICE_UNAVAILABLE`. A token is not single use: any
+> number of connections to its call may open with it until it expires (TTL and `expires_at` both checked). The
+> WebSocket authenticates with the `token` query parameter only (headers and cookies are ignored). Before the
+> handshake is accepted the token is resolved, the call is checked in the token's org, and the live channel is
+> subscribed; refusals are HTTP responses with the legacy error body (WebSocket denial response): a missing,
+> unknown, expired, or other-call token → 401 `AUTH_FAILURE` "The transcript token is invalid or expired." (the
+> reason `missing|unknown|expired|call_mismatch` only in the log line `calls.transcript_ws_refused`), call gone →
+> 404 `CALL_NOT_FOUND`, hub unavailable → 503 `SERVICE_UNAVAILABLE` (a server without the denial extension closes
+> the handshake, HTTP 403). After the accept the server sends one JSON text message per event `{"id": <seq>,
+> "event": <type>, "data": <bland-live body>}` (the SSE frame's body) for `call.turn` and
+> `call.post_transfer_transcript` only: every stored one, then the live tail, strictly in increasing seq, over the
+> same replay/tail/gap core as the SSE stream (other events still fill their place in the seq order). The event
+> bus carries no partial-transcript event (§2), so "partials and finals" reads as finalized turns. The server
+> closes with 1000 `completed` 30 s after `call.completed` (at once for an older call; that event itself is not
+> sent), 1000 `max_duration` after 4 h, and 1011 `overflow`/`lost`/`closed` when the live subscription ends
+> (clients reconnect with a new token). Client messages are read and ignored; there is no app-level heartbeat
+> (the server's WebSocket pings keep the connection alive). Log `calls.transcript_ws_closed` (`call_id`,
+> `reason`, `messages`).
+
 ## 10. Webhook endpoint management API
 
 | Method | Path | Body / query | Response |
