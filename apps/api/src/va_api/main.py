@@ -33,6 +33,7 @@ from va_api.routers import (
     org_invitations,  # noqa: F401  (registers the /v1/org/members/invitations routes on org_router)
     org_members,  # noqa: F401  (registers the /v1/org/members routes on org_router)
     org_settings,  # noqa: F401  (registers the /v1/org/settings routes on org_router)
+    pathway_versions,  # noqa: F401  (registers the /v1/pathway/{pathway_id} version routes on pathways_router)
     webhook_endpoints,  # noqa: F401  (registers the endpoint and delivery routes on webhooks_router)
 )
 from va_api.routers.agent_onboarding import agent_onboarding_router

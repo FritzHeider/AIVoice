@@ -45,6 +45,7 @@ __all__ = [
     "DRAFT_CHANGED_MESSAGE",
     "FOLDER_NOT_FOUND_MESSAGE",
     "IN_USE_MESSAGE",
+    "VERSION_NOT_FOUND_MESSAGE",
     "CheckedGraph",
     "DraftUpdate",
     "GraphInput",
@@ -56,6 +57,7 @@ __all__ = [
     "load_version",
     "parse_graph",
     "parse_version_selector",
+    "reject_errors",
     "update_draft",
     "validate_pathway",
     "validation_errors",
@@ -84,6 +86,11 @@ class GraphInput:
     nodes: list[Any] | None = None
     edges: list[Any] | None = None
     global_config: dict[str, Any] | None = None
+
+    @classmethod
+    def of(cls, stored: PathwayVersion) -> GraphInput:
+        """Every graph part of the stored version ``stored``."""
+        return cls().over(stored)
 
     def over(self, stored: PathwayVersion) -> GraphInput:
         """The sent parts with every missing one taken from ``stored``."""
@@ -203,7 +210,8 @@ async def check_graph(
     return await asyncio.to_thread(_check_sync, graph_input, refs, mode, allow_http)
 
 
-def _reject_errors(checked: CheckedGraph) -> None:
+def reject_errors(checked: CheckedGraph) -> None:
+    """``MultiAppError`` with one ``INVALID_INPUT`` item per error-severity issue of ``checked``."""
     errors = validation_errors(checked.issues)
     if errors:
         raise MultiAppError(errors)
@@ -242,7 +250,7 @@ async def create_pathway(  # noqa: PLR0913 - keyword-only body fields
             nodes=[DEFAULT_START_NODE], edges=[], global_config=graph_input.global_config
         )
     checked = await check_graph(repo, graph_input, pathway_id=None, mode="save", allow_http=allow_http)
-    _reject_errors(checked)
+    reject_errors(checked)
     pathway, draft = await repo.create(
         name=name, description=description, folder_id=folder_id, graph=checked.stored
     )
@@ -276,7 +284,7 @@ async def update_draft(
     checked = await check_graph(
         repo, change.graph.over(draft), pathway_id=pathway.id, mode="save", allow_http=allow_http
     )
-    _reject_errors(checked)
+    reject_errors(checked)
     values = change.column_values()
     if "folder_id" in values:
         await _check_folder(repo, change.folder_id)

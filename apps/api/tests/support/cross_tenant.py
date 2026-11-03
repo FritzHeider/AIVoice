@@ -132,18 +132,33 @@ class CrossTenantRegistry:
 
     def __init__(self) -> None:
         self._factories: dict[tuple[str, str], ResourceFactory] = {}
+        self._unmarked: set[str] = set()
         self._requests: dict[str, RouteRequest] = {}
         self._owner_status: dict[str, int] = {}
 
     def register_resource_factory(
-        self, path_param: str, factory: ResourceFactory, *, path_prefix: str = "/"
+        self, path_param: str, factory: ResourceFactory, *, path_prefix: str = "/", marker: bool = True
     ) -> None:
-        """Create resources for ``{path_param}`` in paths starting with ``path_prefix``."""
+        """Create resources for ``{path_param}`` in paths starting with ``path_prefix``.
+
+        ``marker=False`` keeps the value out of the list-leak markers: for values that are not unique to org
+        A (a version number such as ``1``), which would match unrelated response text.
+        """
         key = (path_param, path_prefix)
         if key in self._factories:
             msg = f"a factory for {{{path_param}}} under {path_prefix!r} is already registered"
             raise ValueError(msg)
         self._factories[key] = factory
+        if not marker:
+            self._unmarked.add(path_param)
+
+    def is_marker(self, path_param: str) -> bool:
+        """Whether values of ``path_param`` identify org A's resources (list-leak markers)."""
+        return path_param not in self._unmarked
+
+    def marker_params(self) -> frozenset[str]:
+        """Every path parameter name whose values are list-leak markers."""
+        return self.params() - self._unmarked
 
     def factory_for(self, path: str, param: str) -> ResourceFactory | None:
         """The factory of ``param`` with the longest prefix of ``path`` (``None`` when none matches)."""
@@ -318,7 +333,8 @@ class CrossTenantProbe:
                 params=ids,
             )
             ids[param] = await factory(context)
-            self.markers.add(ids[param])
+            if self.registry.is_marker(param):
+                self.markers.add(ids[param])
         return ids
 
     async def _check(self, route: APIRoute) -> list[str]:

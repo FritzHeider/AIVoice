@@ -179,6 +179,40 @@ Request `{"version_number": 2}` → draft content replaced with v2 content (draf
 ### POST `/v1/pathway/{id}/duplicate`
 Request `{"name": "Copy of …", "version": "production"}` → new pathway with draft v1. Response like create.
 
+> Decision (2026-11-03): pathway versions (P07-T09b).
+> 1. Permissions (supersedes P07-T09a item 1 for publishing): the versions list and `GET
+>    /v1/pathway/{id}/version/{version_number}` need `pathways:read`; saving a version needs `pathways:write` and an
+>    editing role; publish, promote, and revert need `pathways:write` and, for session principals, the
+>    `pathways.publish` permission (specs/04 §3.2 "Pathways: publish / promote production"; otherwise 403
+>    `FORBIDDEN` "Your role cannot publish pathways."). API keys pass on `pathways:write` (specs/04 §2.3 lists
+>    publish/promote under it); the §10 `pathways:publish` name is not a key scope.
+> 2. Invariant: exactly one `draft` row per pathway and `draft_version == latest_version` after every operation;
+>    every write takes the pathway row lock first, so concurrent saves serialise.
+> 3. Save version: body `{name?}` (1-200 characters, trimmed). The draft becomes `archived` with the name, and a new
+>    draft `latest_version + 1` copies its graph (name NULL).
+> 4. Publish: an unknown `version_number` is 404 `PATHWAY_VERSION_NOT_FOUND` (field `version_number`); publish-mode
+>    errors reject with one `INVALID_INPUT` item each (as draft writes do). `published_at`/`published_by` are set on
+>    the first publish of a version only (a later publish to the other environment moves only the pin);
+>    `published_by` is the session user or the key's creating user (NULL for keys without one). Publishing the draft
+>    opens a new draft; publishing a saved version opens none. `run_regression` and the suite setting
+>    `run_on_publish` are accepted; regression gating (step 2, `pending_regression`) is wired with the unit tests in
+>    P07-T11, until then no tests run. Every publish writes a `pathway.publish` audit row (before/after
+>    `{environment, version}`).
+> 5. Promote: no body; without `staging_version` 409 `CONFLICT` "The pathway has no staging version." A promote
+>    that does not move production succeeds without an audit row or cache invalidation.
+> 6. Revert: body `{version_number}` required; unknown → 404 `PATHWAY_VERSION_NOT_FOUND` (field `version_number`).
+>    The draft keeps its number and name, takes a copy of the version's graph, and is never rejected for
+>    validation issues (stored versions passed save mode); the response is
+>    `{"status":"success","draft_version":d,"graph_hash":h,"validation":{...}}` with the save-mode report.
+>    Reverting to an identical graph (or the draft itself) writes no audit row.
+> 7. `GET /v1/pathway/{id}/version/{version_number}` returns the same body as `GET /v1/pathway/{id}?version=n`.
+> 8. Cache: `va_db.pathway_cache` builds `pathway:{id}:v:{env}` (`production` | `staging`). After the transaction
+>    commits, publish deletes its environment's key and a moving promote deletes `production`; Redis failures are
+>    logged (`pathway_cache_unavailable`) and never fail the request. Only pinned versions may be cached: a draft
+>    fallback (no production pin, §1) is never written to these keys.
+> 9. Audit action names: `pathway.version_save` (the §11 `pathway.version.save`, renamed to the two-part form of
+>    the specs/04 §13 list) and `pathway.revert`.
+
 ## 5. Import / export
 
 - Export: `GET /v1/pathway/{id}/export?version=` →
@@ -281,7 +315,7 @@ API keys: scope `pathways:read`, `pathways:write`, `pathways:publish`, or `*`.
 
 ## 11. Audit log entries
 `pathway.create`, `pathway.update` (changes: name/description + `graph_hash` before/after, not full graph),
-`pathway.delete`, `pathway.version.save`, `pathway.publish` (version, environment), `pathway.promote`,
+`pathway.delete`, `pathway.version_save` (Decision P07-T09b item 9), `pathway.publish` (version, environment), `pathway.promote`,
 `pathway.revert`, `pathway.import`, `pathway.duplicate`, `pathway.folder.*`, `pathway.test.*`.
 
 ## 12. Tests required

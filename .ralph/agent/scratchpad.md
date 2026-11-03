@@ -1614,3 +1614,140 @@ pnpm audit. No e2e (no call flow).
 Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift current; jscpd 0 clones; radon avg A
 2.63 (new modules); make test 12195 passed, 7 skipped, 99.07 %. Diff matches specs/12 §3/§10/§11 and the
 P07-T09a Decision (editor guard, force delete owner/admin or `*` key, MultiAppError items, row-locked hash check).
+
+## Plan P07-T09b — Pathway versions: list/get, save version, publish, promote, revert (specs/12 §1, §4, §10, §11, §12)
+
+### Spec decision — append `> Decision (2026-11-03): pathway versions (P07-T09b).` after the specs/12 §4 revert/duplicate text (before §5)
+1. Permissions (supersedes P07-T09a item 1 for API keys): list/get versions need `pathways:read`. Save version =
+   `pathways:write` + `require_pathway_editor`. Publish/promote/revert = `pathways:write` + new
+   `va_api.auth.pathway_roles.require_pathway_publisher`: session principals must hold the `pathways.publish`
+   permission (specs/04 §3.2 row "Pathways: publish / promote production": owner/admin/developer) else 403
+   `FORBIDDEN` "Your role cannot publish pathways."; API keys pass on `pathways:write` (specs/04 §2.3 lists
+   publish/promote under `pathways:write`; the §10 `pathways:publish` name is not a scope). Declare
+   `x-permission: pathways.publish` in openapi_extra on those three.
+2. Invariant: exactly one `status='draft'` row per pathway and `draft_version == latest_version` after every
+   operation. Every mutating operation takes the pathway row lock (`PathwayRepo.get(lock=True)`) first.
+3. Save version: body `{name?: str 1-200 trimmed | null}`; draft row → `status='archived'`, `name` set; a new
+   draft `latest_version+1` copies nodes/edges/global_config/graph_hash (name NULL); pathway
+   `draft_version = latest_version = n+1`. Response `{"status":"success","saved_version":n,"draft_version":n+1}`.
+   Audit `pathway.version.save` after `{version_number, name, graph_hash}`.
+4. Publish: body `{version_number?: int ≥ 1, environment: "production"|"staging" = "production",
+   run_regression?: bool}`. Missing number = the draft; unknown number → 404 `PATHWAY_VERSION_NOT_FOUND` field
+   `version_number`. Publish-mode validation (refs as in T09a, `pathway_id` = this pathway) → 400 with one
+   `INVALID_INPUT` item per error (same `validation_errors`). `run_regression` / suite `run_on_publish` are
+   accepted but regression gating (and `pending_regression`) is wired in P07-T11; T09b never runs tests.
+   Version → `published`; `published_at`/`published_by` set on the FIRST publish only (a later publish of the same
+   version to another environment moves only the pin); `published_by` = `creating_user_id(ctx, session)`.
+   Pin `production_version` or `staging_version`. If it was the draft → new draft `latest+1` copied from it.
+   Response `{"status":"success","published_version":v,"environment":env,"draft_version":d}`. Audit
+   `pathway.publish` before `{environment, version: previous pin}` after `{environment, version: v}`.
+5. Promote: no body. `staging_version` NULL → 409 `CONFLICT` "The pathway has no staging version." (no field).
+   Sets `production_version = staging_version`; audit `pathway.promote` before/after `{production_version}` only
+   when it changed (always 200). Response `{"status":"success","production_version":v}`.
+6. Revert: body `{version_number: int ≥ 1}` required; unknown → 404 `PATHWAY_VERSION_NOT_FOUND` field
+   `version_number`. Draft graph columns replaced with a copy of that version's (number unchanged, name
+   unchanged); never rejected for validation issues (stored versions passed save mode once), the response carries
+   the save-mode report: `{"status":"success","draft_version":d,"graph_hash":h,"validation":{...}}`. Reverting to
+   the draft itself or to an identical graph is a no-op without audit. Audit `pathway.revert` before
+   `{graph_hash}` after `{graph_hash, version_number}`.
+7. Versions list: all versions, `version_number DESC`, item `{version_number, name, status, is_production,
+   is_staging, graph_hash, published_at, published_by, created_at}` (no pagination, as in the spec). Get one:
+   `GET /v1/pathway/{id}/version/{version_number}` returns the same body as `GET /v1/pathway/{id}?version=n`
+   (`pathway_detail`), 404 `PATHWAY_VERSION_NOT_FOUND` when absent.
+8. Cache: `pathway:{<id>}:v:{env}` — WAIT: specs/03 key is literally `pathway:{id}:v:{env}`; build it with a new
+   `va_db.pathway_cache.pathway_cache_key(pathway_id, environment)` → `f"pathway:{pathway_id}:v:{environment}"`
+   (environment `production`|`staging`), and `invalidate_pathway_cache(redis, pathway_id, environments) ->
+   list[str]` (DEL per key; `RedisError`/`OSError` logged `pathway_cache_unavailable`, never raised; returns
+   failed envs). Called after the transaction commits: publish → its env; promote → `production`. Only pinned
+   versions are cached; a draft fallback (no production pin, specs/12 §1) must never be cached (note for P07-T12).
+9. specs/04 §13 audit list: add `pathway.version.save` and `pathway.revert` (after `pathway.promote`); add both to
+   `va_db.audit.AUDIT_ACTIONS` (test_audit_unit compares).
+
+### Files
+- `packages/va_db/src/va_db/repositories/pathways.py`: add `versions(pathway) -> list[PathwayVersion]` (desc),
+  `fork_draft(pathway, source: PathwayVersion) -> PathwayVersion` (insert copy as `latest+1` draft, bump
+  `pathway.draft_version`/`latest_version`, flush, refresh), `freeze(version, *, status: "archived"|"published",
+  name: str | None = None, published_by: uuid | None = None)` (sets published_at from clock only when first
+  publish), `set_pin(pathway, environment, number)`, and `copy_graph(source) -> PathwayGraphJson` helper (or a
+  `PathwayGraphJson.of(version)` classmethod) reused by revert via existing `update_draft(..., graph=)`. Keep
+  every query org-filtered. Order of writes in save/publish: freeze the old draft first, flush, then insert the new
+  draft (no unique clash: numbers differ).
+- `packages/va_db/src/va_db/pathway_cache.py` (new): `PATHWAY_CACHE_ENVIRONMENTS`, `pathway_cache_key`,
+  `invalidate_pathway_cache`.
+- `packages/va_db/src/va_db/audit.py`: two actions.
+- `apps/api/src/va_api/auth/pathway_roles.py`: `NOT_PUBLISHER_MESSAGE`, `is_pathway_publisher(ctx)`,
+  `require_pathway_publisher`.
+- `apps/api/src/va_api/services/pathway_versions.py` (new; keep services/pathways.py < ~400 lines): `list_versions`,
+  `get_version` (reuse `load_version`), `save_version(session, ctx, pathway_id, name) -> (saved, draft)`,
+  `publish_version(session, ctx, pathway_id, PublishRequest, allow_http) -> PublishOutcome(published, environment,
+  draft_version)`, `promote(session, ctx, pathway_id) -> (pathway, changed: bool)`, `revert(session, ctx,
+  pathway_id, number, allow_http) -> (pathway, draft, report)`. Reuse `check_graph`, `validation_errors`/
+  `_reject_errors` (make public `reject_errors` in services.pathways), `VERSION_NOT_FOUND_MESSAGE`,
+  `GraphInput.over`-style construction from a stored version (add `GraphInput.of(version)` classmethod).
+- `apps/api/src/va_api/routers/pathway_versions.py` (new; routes attach to `pathways_router`, side-effect import in
+  `va_api/main.py` with `# noqa: F401`, like auth_password) + `routers/pathway_versions_schemas.py` (request/response
+  models with `examples`; `VersionItem`, `PathwayVersions`, `VersionSave`, `VersionSaved`, `PublishBody`,
+  `Published`, `Promoted`, `RevertBody`, `Reverted`). Operation ids `pathways_versions_list`,
+  `pathways_version_get`, `pathways_version_save`, `pathways_publish`, `pathways_promote`, `pathways_revert`;
+  audited markers `pathway.version.save|publish|promote|revert`. Path `version_number` `Annotated[int, Path(ge=1)]`.
+  Cache invalidation after the `tenant_session` block via `redis_of(request)`.
+- `apps/api/tests/support/cross_tenant_factories.py`: `register_resource_factory("version_number", <returns "1">,
+  path_prefix="/v1/pathway/")`; `register_owner_status("pathways_promote", 409)` (factory pathway has no staging);
+  if the factory's one-node graph fails publish-mode validation, give the factory a publishable graph instead
+  (don't weaken). Revert/publish owner controls must be 2xx.
+- specs/12 §4 Decision, specs/04 §13 list; AGENTS.md dated bullet; `make openapi` + both `gen:api`.
+
+### Tests
+- `apps/api/tests/test_pathway_versions_api.py` (module Postgres via existing pathways test helpers; reuse the `Api`
+  helper from test_pathways_api — move it to `tests/support/pathway_helpers.py` if needed to avoid jscpd clones):
+  lifecycle create → update → save ("v1 greeting") → publish production (draft) → update → publish staging → promote
+  → revert to 1; after EVERY step assert exactly one draft row, `draft_version == latest_version`, statuses and pins
+  (`versions` list order/flags); publish of archived v1 → status published, no new draft; second publish of same
+  version keeps `published_at`; publish validation error (publish-mode-only issue, e.g. unreachable node or a
+  rule that is warning in save but error in publish — pick from va_engine.validation RULES) → 400 items, nothing
+  changed; unknown version_number → 404 for publish/revert/get; promote without staging → 409; revert no-op writes
+  no audit; audit rows for all four actions with expected before/after; cache: pre-set
+  `pathway:{id}:v:production` / `:staging` in the container redis, publish staging deletes only staging, promote
+  deletes production; Redis failure (monkeypatch broken redis / patch DEL) → publish still 200 + log
+  `pathway_cache_unavailable`; concurrent save-version ×2 (asyncio.gather on two clients) → numbers distinct,
+  one draft.
+- `apps/api/tests/test_pathways_permissions.py`: extend parametrization — versions list/get for analyst/viewer ok,
+  billing 403; save version analyst 403; publish/promote/revert developer ok, analyst/viewer 403; API key with only
+  `pathways:write` can publish; key with only `pathways:read` cannot.
+- `packages/va_db/tests/test_pathway_repo_db.py`: fork_draft/freeze/set_pin/versions + other-org isolation;
+  `packages/va_db/tests/test_pathway_cache.py` (fakeredis: key format, invalidate, failure returns envs).
+- Cross-tenant, audit markers, openapi contract suites pass.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`; targeted pytest; `make openapi`
++ `corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api` + `make test-ts`;
+`uv run python scripts/check_spec_refs.py`; `make test` in background (truncate `logs/make_test.log` first,
+Monitor heartbeat); radon avg; `npx --yes jscpd@4 --silent` 0 clones; pip-audit + pnpm audit. No e2e.
+
+### Risks
+- jscpd: new router/service mirror T09a patterns — share helpers instead of copying (version-not-found raise,
+  lock+load).
+- `published_by` FK to users: API key without creator → NULL.
+- FastAPI `Path(ge=1)` violations render as 400 INVALID_INPUT via the existing handler — assert it.
+- Promote owner control status registration; publish owner control needs a publish-valid factory graph.
+
+## Build P07-T09b (done)
+- va_db: `PathwayRepo.versions/freeze/fork_draft/set_pin`, `PathwayGraphJson.of`, `PinEnvironment`; new
+  `va_db.pathway_cache` (key + invalidate, logs `pathway_cache_unavailable`); audit actions `pathway.version_save`
+  (two-part: the §13 parser regex only reads `a.b`), `pathway.revert` (specs/04 §13 + AUDIT_ACTIONS).
+- api: `services/pathway_versions.py`, `routers/pathway_versions.py` (+ schemas; side-effect import in main),
+  `pathway_roles.require_pathway_publisher`; `services.pathways.reject_errors` public, `GraphInput.of`.
+- Tests: test_pathway_versions_api.py (11), permissions extended (version role matrix ×6, key scopes ×2, helper),
+  va_db repo + cache tests; `tests/support/pathway_helpers.py` (Api moved, `star_api`, `seed_pathway`).
+  Cross-tenant: `version_number` factory with new `marker=False` option (value "1" leaked everywhere as marker),
+  promote owner status 409, revert request version 1.
+- Spec: specs/12 §4 Decision P07-T09b (+ §11 name note). openapi + both schema.d.ts regenerated.
+- Gates: lint/typecheck/placeholders pass, check_spec_refs 0, test-ts 22/52/48, radon avg A 1.85, jscpd 0 clones,
+  pip-audit clean, pnpm audit 3 moderate (pre-existing).
+- make test: 12219 passed, 7 skipped, 99.08 % (tests refactored for jscpd afterwards; those 45 re-run, pass).
+
+## Review P07-T09b (approved)
+Gates re-run: lint/typecheck/placeholders pass; check_spec_refs 0; openapi drift current; jscpd 0 clones; make test
+12219 passed, 7 skipped, 99.08 %. Diff matches specs/12 §1/§4 and Decision P07-T09b (row lock, one draft invariant,
+publish-mode validation, first-publish published_at, promote 409, revert save-mode report, cache invalidation after
+commit, audit actions in specs/04 §13 + AUDIT_ACTIONS).

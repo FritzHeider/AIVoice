@@ -136,7 +136,7 @@ async def test_every_tenant_route_is_isolated(identity: IdentityDb, container: S
         own = await probe.b.session.patch("/v1/org/settings", json={}, headers=write_headers(probe.b.session))
         assert own.status_code == 200, own.text
         assert await probe.problems(routes) == []
-        assert len(probe.markers) >= 4 + len(REGISTRY.params())
+        assert len(probe.markers) >= 4 + len(REGISTRY.marker_params())
 
 
 async def test_an_unscoped_route_is_caught(identity: IdentityDb, container: SessionContainer) -> None:

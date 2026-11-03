@@ -5,6 +5,11 @@ pathway owns exactly one draft version (``pathways.draft_version``); creating a 
 its draft v1 in the caller's transaction. Soft-deleted pathways and other orgs' rows read as
 :class:`~va_db.repositories.base.NotFoundError`. :meth:`PathwayRepo.references` finds the live resources that
 would break when the pathway goes away (specs/12 §3 "DELETE").
+
+Versions (specs/12 §4; Decision P07-T09b): :meth:`PathwayRepo.freeze` turns a version into a saved
+(``archived``) or ``published`` one, :meth:`PathwayRepo.fork_draft` inserts the next draft as a copy of a
+version, and :meth:`PathwayRepo.set_pin` moves the ``production``/``staging`` pin. Callers hold the pathway
+row lock (``get(..., lock=True)``) so that exactly one draft exists and ``draft_version == latest_version``.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ __all__ = [
     "PathwayRefIds",
     "PathwayReference",
     "PathwayRepo",
+    "PinEnvironment",
     "ReferenceType",
     "escape_like",
 ]
@@ -50,6 +56,7 @@ PATHWAY_RESOURCE: Final = "Pathway"
 """The resource name of the pathway ``NOT_FOUND`` message ("Pathway not found.")."""
 
 ReferenceType = Literal["phone_number", "agent", "persona", "widget"]
+PinEnvironment = Literal["production", "staging"]
 
 _LIVE_NUMBER_STATUSES: Final = ("pending", "active")
 _LIKE_ESCAPE: Final = "\\"
@@ -63,6 +70,16 @@ class PathwayGraphJson:
     edges: list[Any]
     global_config: dict[str, Any]
     graph_hash: str
+
+    @classmethod
+    def of(cls, version: PathwayVersion) -> PathwayGraphJson:
+        """A copy of the graph columns of ``version``."""
+        return cls(
+            nodes=list(version.nodes),
+            edges=list(version.edges),
+            global_config=dict(version.global_config),
+            graph_hash=version.graph_hash,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +181,66 @@ class PathwayRepo:
             PathwayVersion.version_number == number,
         )
         return await self.session.scalar(statement)
+
+    async def versions(self, pathway: Pathway) -> list[PathwayVersion]:
+        """Every version of ``pathway``, newest first."""
+        statement = (
+            select(PathwayVersion)
+            .where(PathwayVersion.org_id == self.org_id, PathwayVersion.pathway_id == pathway.id)
+            .order_by(PathwayVersion.version_number.desc())
+        )
+        return list((await self.session.scalars(statement)).all())
+
+    async def freeze(
+        self,
+        version: PathwayVersion,
+        *,
+        status: Literal["archived", "published"],
+        name: str | None = None,
+        published_by: uuid.UUID | None = None,
+    ) -> None:
+        """Set ``status`` (and ``name`` when given); the first publish records ``published_at``/``by``."""
+        version.status = status
+        if name is not None:
+            version.name = name
+        if status == "published" and version.published_at is None:
+            version.published_at = self._clock.now()
+            version.published_by = published_by
+        await self.session.flush()
+
+    async def fork_draft(self, pathway: Pathway, source: PathwayVersion) -> PathwayVersion:
+        """Insert draft ``latest_version + 1`` copied from ``source`` and point the pathway at it.
+
+        Freeze the previous draft first: the pathway keeps exactly one ``draft`` row.
+        """
+        number = pathway.latest_version + 1
+        graph = PathwayGraphJson.of(source)
+        draft = PathwayVersion(
+            org_id=self.org_id,
+            pathway_id=pathway.id,
+            version_number=number,
+            status="draft",
+            nodes=graph.nodes,
+            edges=graph.edges,
+            global_config=graph.global_config,
+            graph_hash=graph.graph_hash,
+        )
+        self.session.add(draft)
+        pathway.draft_version = number
+        pathway.latest_version = number
+        await self.session.flush()
+        await self.session.refresh(pathway)
+        await self.session.refresh(draft)
+        return draft
+
+    async def set_pin(self, pathway: Pathway, environment: PinEnvironment, number: int) -> None:
+        """Pin version ``number`` to ``environment``."""
+        if environment == "production":
+            pathway.production_version = number
+        else:
+            pathway.staging_version = number
+        await self.session.flush()
+        await self.session.refresh(pathway)
 
     async def draft(self, pathway: Pathway) -> PathwayVersion:
         """The draft version of ``pathway`` (every pathway has one; a missing row is a data error)."""

@@ -100,6 +100,7 @@ from va_db.repositories.pathways import (
     PathwayReference,
     PathwayRefIds,
     PathwayRepo,
+    PinEnvironment,
     ReferenceType,
     escape_like,
 )
@@ -197,6 +198,7 @@ __all__ = [
     "PathwayReference",
     "PathwayRepo",
     "PhoneNumberRoutingRepo",
+    "PinEnvironment",
     "PurgeRule",
     "ReferenceType",
     "RetentionPolicy",

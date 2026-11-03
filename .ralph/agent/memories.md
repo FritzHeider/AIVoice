@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793737035-ef46
+> P07-T09b: pathway versions = services/pathway_versions + routers/pathway_versions (side-effect import) + PathwayRepo freeze/fork_draft/set_pin + va_db.pathway_cache; test_audit_unit parses only two-part audit action names (pathway.version_save); cross-tenant factories with non-unique values need register_resource_factory(marker=False)
+<!-- tags: api, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793735038-296f
 > P07-T09a: pathways API = va_api.routers.pathways (legacy) + services.pathways (check_graph in to_thread, MultiAppError for many errors[] items) + va_db PathwayRepo (method page not list: a method named list breaks mypy list[...] annotations in the class); require_pathway_editor guard because analysts hold pathways:write; api tests can import graph_helpers
 <!-- tags: api, pathways, testing | created: 2026-11-03 -->

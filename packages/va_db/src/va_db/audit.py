@@ -93,6 +93,8 @@ AUDIT_ACTIONS: Final = frozenset(
         "pathway.delete",
         "pathway.publish",
         "pathway.promote",
+        "pathway.version_save",
+        "pathway.revert",
         "persona.publish",
         "agent.version_create",
         "agent.env_pin",

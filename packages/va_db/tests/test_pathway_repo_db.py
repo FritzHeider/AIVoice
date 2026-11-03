@@ -263,3 +263,34 @@ async def test_ref_ids_hold_live_kbs_tools_and_pathways_of_the_org(database: Dat
     assert ids.tool_ids == {tool.id}
     assert ids.kb_ids == {kb.id}
     assert ids.pathway_ids == {pathway_id}
+
+
+async def test_versions_freeze_fork_and_pin(database: Database) -> None:
+    org_id, other = await OrgFactory(database).create(), await OrgFactory(database).create()
+    pathway_id = await create(database, org_id, "Versions")
+    user_id = uuid.uuid4()
+    async with database.tenant_session(org_id) as session:
+        repo = PathwayRepo(session, org_id)
+        pathway = await repo.get(pathway_id, lock=True)
+        draft = await repo.draft(pathway)
+        await repo.freeze(draft, status="archived", name="first")
+        second = await repo.fork_draft(pathway, draft)
+        assert (second.version_number, second.status, second.name) == (2, "draft", None)
+        assert PathwayGraphJson.of(second) == PathwayGraphJson.of(draft) == GRAPH
+        assert (pathway.draft_version, pathway.latest_version) == (2, 2)
+        assert (draft.status, draft.name, draft.published_at) == ("archived", "first", None)
+
+        await repo.freeze(second, status="published")
+        first_publish = second.published_at
+        assert first_publish is not None
+        assert second.published_by is None
+        await repo.freeze(second, status="published", published_by=user_id)
+        assert (second.published_at, second.published_by) == (first_publish, None)
+
+        await repo.set_pin(pathway, "staging", 2)
+        await repo.set_pin(pathway, "production", 1)
+        assert (pathway.production_version, pathway.staging_version) == (1, 2)
+        assert [version.version_number for version in await repo.versions(pathway)] == [2, 1]
+    async with database.tenant_session(other) as session:
+        with pytest.raises(NotFoundError):
+            await PathwayRepo(session, other).get(pathway_id)

@@ -777,6 +777,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/{pathway_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Promote
+         * @description Pin the staging version to production.
+         */
+        post: operations["pathways_promote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Publish
+         * @description Validate a version in publish mode and pin it to production or staging.
+         */
+        post: operations["pathways_publish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/revert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Revert
+         * @description Replace the draft graph with a copy of an earlier version.
+         */
+        post: operations["pathways_revert"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}/validate": {
         parameters: {
             query?: never;
@@ -791,6 +851,66 @@ export interface paths {
          * @description Validate the draft or a supplied graph; issues are returned, never raised.
          */
         post: operations["pathways_validate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Version Save
+         * @description Freeze the draft as a saved version and open the next draft.
+         */
+        post: operations["pathways_version_save"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/version/{version_number}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Version Get
+         * @description The pathway with the graph of one version (same body as ``GET /v1/pathway/{id}?version=n``).
+         */
+        get: operations["pathways_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Versions List
+         * @description Every version of the pathway, newest first, with its environment pins.
+         */
+        get: operations["pathways_versions_list"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4673,6 +4793,44 @@ export interface components {
             status: "success";
             validation: components["schemas"]["ValidationView"];
         };
+        /**
+         * PathwayVersions
+         * @description ``GET /v1/pathway/{pathway_id}/versions``: every version, newest first.
+         * @example {
+         *       "status": "success",
+         *       "versions": [
+         *         {
+         *           "created_at": "2026-11-03T10:42:10Z",
+         *           "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *           "is_production": false,
+         *           "is_staging": false,
+         *           "status": "draft",
+         *           "version_number": 5
+         *         },
+         *         {
+         *           "created_at": "2026-11-03T09:15:00Z",
+         *           "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *           "is_production": true,
+         *           "is_staging": true,
+         *           "name": "v4 - new greeting",
+         *           "published_at": "2026-11-03T10:40:00Z",
+         *           "published_by": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+         *           "status": "published",
+         *           "version_number": 4
+         *         }
+         *       ]
+         *     }
+         */
+        PathwayVersions: {
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Versions */
+            versions: components["schemas"]["VersionItem"][];
+        };
         /** @enum {string} */
         PollStatus: "pending_verification" | "approved" | "delivered" | "denied" | "expired";
         /** PostCallEvals */
@@ -4702,6 +4860,24 @@ export interface components {
              */
             zero_retention: boolean;
         };
+        /**
+         * Promoted
+         * @description ``POST /v1/pathway/{pathway_id}/promote`` result.
+         * @example {
+         *       "production_version": 4,
+         *       "status": "success"
+         *     }
+         */
+        Promoted: {
+            /** Production Version */
+            production_version: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
         /** PronunciationRule */
         PronunciationRule: {
             /**
@@ -4718,6 +4894,61 @@ export interface components {
             spaced: boolean;
             /** Word */
             word: string;
+        };
+        /**
+         * PublishBody
+         * @description ``POST /v1/pathway/{pathway_id}/publish``.
+         * @example {
+         *       "environment": "production",
+         *       "run_regression": false,
+         *       "version_number": 4
+         *     }
+         */
+        PublishBody: {
+            /**
+             * Environment
+             * @description Environment pin to move.
+             * @default production
+             * @enum {string}
+             */
+            environment: "production" | "staging";
+            /**
+             * Run Regression
+             * @description Run the pathway's unit tests before publishing (specs/12 §4 step 2).
+             */
+            run_regression?: boolean | null;
+            /**
+             * Version Number
+             * @description Version to publish; default the draft.
+             */
+            version_number?: number | null;
+        };
+        /**
+         * Published
+         * @description ``POST /v1/pathway/{pathway_id}/publish`` result.
+         * @example {
+         *       "draft_version": 5,
+         *       "environment": "production",
+         *       "published_version": 4,
+         *       "status": "success"
+         *     }
+         */
+        Published: {
+            /** Draft Version */
+            draft_version: number;
+            /**
+             * Environment
+             * @enum {string}
+             */
+            environment: "production" | "staging";
+            /** Published Version */
+            published_version: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
         };
         /**
          * RecordingResponse
@@ -4831,6 +5062,47 @@ export interface components {
              * @description Seconds before the retry call.
              */
             wait?: number | null;
+        };
+        /**
+         * RevertBody
+         * @description ``POST /v1/pathway/{pathway_id}/revert``.
+         * @example {
+         *       "version_number": 2
+         *     }
+         */
+        RevertBody: {
+            /**
+             * Version Number
+             * @description Version whose graph replaces the draft's.
+             */
+            version_number: number;
+        };
+        /**
+         * Reverted
+         * @description ``POST /v1/pathway/{pathway_id}/revert`` result with the save-mode validation of the new draft.
+         * @example {
+         *       "draft_version": 5,
+         *       "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *       "status": "success",
+         *       "validation": {
+         *         "errors": [],
+         *         "valid": true,
+         *         "warnings": []
+         *       }
+         *     }
+         */
+        Reverted: {
+            /** Draft Version */
+            draft_version: number;
+            /** Graph Hash */
+            graph_hash: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            validation: components["schemas"]["ValidationView"];
         };
         /**
          * RotatedSigningSecret
@@ -5719,6 +5991,86 @@ export interface components {
             warnings: {
                 [key: string]: string;
             }[];
+        };
+        /**
+         * VersionItem
+         * @description One version of a pathway with its environment pins.
+         * @example {
+         *       "created_at": "2026-11-03T10:42:10Z",
+         *       "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *       "is_production": false,
+         *       "is_staging": false,
+         *       "status": "draft",
+         *       "version_number": 5
+         *     }
+         */
+        VersionItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Graph Hash */
+            graph_hash: string;
+            /** Is Production */
+            is_production: boolean;
+            /** Is Staging */
+            is_staging: boolean;
+            /** Name */
+            name: string | null;
+            /**
+             * Published At
+             * @description Time of the version's first publish.
+             */
+            published_at: string | null;
+            /**
+             * Published By
+             * @description User who first published it (null for keyless).
+             */
+            published_by: string | null;
+            /**
+             * Status
+             * @description `draft`, `published`, or `archived` (saved, unpublished).
+             * @enum {string}
+             */
+            status: "draft" | "published" | "archived";
+            /** Version Number */
+            version_number: number;
+        };
+        /**
+         * VersionSave
+         * @description ``POST /v1/pathway/{pathway_id}/version``: freeze the draft with an optional label.
+         * @example {
+         *       "name": "v4 - new greeting"
+         *     }
+         */
+        VersionSave: {
+            /**
+             * Name
+             * @description Label of the saved version (1-200 characters).
+             */
+            name?: string | null;
+        };
+        /**
+         * VersionSaved
+         * @description ``POST /v1/pathway/{pathway_id}/version`` result.
+         * @example {
+         *       "draft_version": 5,
+         *       "saved_version": 4,
+         *       "status": "success"
+         *     }
+         */
+        VersionSaved: {
+            /** Draft Version */
+            draft_version: number;
+            /** Saved Version */
+            saved_version: number;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
         };
         /**
          * VoiceSettings
@@ -8001,6 +8353,134 @@ export interface operations {
             };
         };
     };
+    pathways_promote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Promoted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_publish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PublishBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Published"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_revert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevertBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Reverted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
     pathways_validate: {
         parameters: {
             query?: never;
@@ -8023,6 +8503,132 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PathwayValidated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_version_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["VersionSave"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionSaved"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_version_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+                /** @description Version number (1 or more). */
+                version_number: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayDetail"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_versions_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathwayVersions"];
                 };
             };
             /** @description Invalid input */

@@ -1811,3 +1811,12 @@ Grafana 3001
   later pathway routes (versions, folders, import) reuse it. Cross-tenant factory `pathway_id` creates a one-node
   pathway through `PathwayRepo`. Tests: `apps/api/tests/test_pathways_api.py` (`Api` helper on a `*` key),
   `test_pathways_permissions.py` (role matrix); api tests can import `graph_helpers` (va_engine tests/support).
+- 2026-11-03 (P07-T09b): pathway versions = `va_api/routers/pathway_versions.py` (side-effect import in `main.py`,
+  routes on `pathways_router`) over `va_api.services.pathway_versions` and `PathwayRepo.versions/freeze/fork_draft/
+  set_pin` (+ `PathwayGraphJson.of(version)`); publish/promote/revert add `pathway_roles.require_pathway_publisher`
+  (session `pathways.publish`, API keys on `pathways:write`). Cache keys `va_db.pathway_cache` (`pathway_cache_key`,
+  `invalidate_pathway_cache` after commit, never raises). Rules: specs/12 §4 Decision P07-T09b. Audit actions must
+  be two-part (`pathway.version_save`): `test_audit_unit` parses specs/04 §13 with `[a-z_]+\.[a-z_]+`. Cross-tenant
+  factories returning non-unique values (version `1`) use `register_resource_factory(..., marker=False)` or every
+  response containing "1" is a list leak. Pathway API test helpers: `tests/support/pathway_helpers.py` (`Api`,
+  `star_api`, `add`).

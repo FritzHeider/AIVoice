@@ -111,6 +111,12 @@ async def _pathway(context: FactoryContext) -> str:
         return str(pathway.id)
 
 
+async def _first_version(context: FactoryContext) -> str:
+    """Version 1, which every pathway has."""
+    del context
+    return "1"
+
+
 REGISTRY.register_resource_factory("user_id", _member)
 REGISTRY.register_resource_factory("invitation_id", _invitation)
 REGISTRY.register_resource_factory("key_id", _api_key)
@@ -119,6 +125,12 @@ REGISTRY.register_resource_factory("call_id", _call)
 REGISTRY.register_resource_factory("endpoint_id", _webhook_endpoint)
 REGISTRY.register_resource_factory("delivery_id", _webhook_delivery)
 REGISTRY.register_resource_factory("pathway_id", _pathway)
+REGISTRY.register_resource_factory("version_number", _first_version, path_prefix="/v1/pathway/", marker=False)
+# The factory pathway has no staging version, so the owner's promote control is ``409 CONFLICT`` while org B
+# gets ``NOT_FOUND`` (Decision P07-T09b).
+REGISTRY.register_owner_status("pathways_promote", 409)
+# The revert example names version 2; the factory pathway only has version 1.
+REGISTRY.register_request("pathways_revert", json={"version_number": 1})
 # ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;
 # the unfiltered listing must hold none of org A's calls.
 REGISTRY.register_request("calls_list", params={"limit": "1000"})

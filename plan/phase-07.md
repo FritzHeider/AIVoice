@@ -78,7 +78,7 @@
   - Deliverables: `va_db.repositories.PathwayRepo` (tenant), `va_api.services.pathways` (graph parse/validate with org refs, draft update with optimistic concurrency, reference scan), legacy `pathways_router` (`POST /v1/pathway/create`, `GET /v1/pathway`, `GET|POST|DELETE /v1/pathway/{pathway_id}`, `POST /v1/pathway/{pathway_id}/validate`), audit entries, cross-tenant factory, role guard for analysts
   - Acceptance: API tests for every endpoint and error path (400 validation items, 409 hash conflict with `current_graph_hash`, 409 references + force, 404 other org), permissions matrix parametrized.
 
-- [ ] P07-T09b Pathway versions: list/get, save version, publish, promote, revert
+- [x] P07-T09b Pathway versions: list/get, save version, publish, promote, revert — make test 12219 passed/7 skipped, 99.08 % cov; lint/typecheck/placeholders/spec refs/openapi drift pass; jscpd 0 clones; radon A 1.85
   - Spec refs: specs/12-pathways-api.md §1, §4, §10, §11, §12 (version lifecycle, draft invariants)
   - Depends on: P07-T09a
   - Deliverables: version routes, publish in publish-mode validation (regression gating arrives with P07-T11), `pathway:{id}:v:{env}` cache invalidation, audit `pathway.version.save`/`pathway.publish`/`pathway.promote`/`pathway.revert`

@@ -1,7 +1,8 @@
 """Role matrix of the pathways API core (specs/12 §10; specs/04 §3.2; Decision P07-T09a).
 
 Every role signs in to its own org through the dashboard session and tries to read, create, update, validate,
-delete, and force-delete a pathway of that org.
+delete, and force-delete a pathway of that org, and to list, save, publish, promote, and revert its versions
+(Decision P07-T09b).
 """
 
 from __future__ import annotations
@@ -11,18 +12,21 @@ from typing import Final
 import httpx
 import pytest
 from identity_db import IdentityDb
-from session_helpers import SessionContainer, error_of, signed_in, write_headers
+from pathway_helpers import seed_pathway
+from session_helpers import SessionContainer, error_of, make_member, signed_in, store_api_key, write_headers
 
 from va_api.auth.context import PrincipalType, RequestContext
 from va_api.auth.pathway_roles import (
     FORCE_DELETE_MESSAGE,
     NOT_EDITOR_MESSAGE,
+    NOT_PUBLISHER_MESSAGE,
     can_force_delete,
     is_pathway_editor,
+    is_pathway_publisher,
 )
 from va_common.ids import new_id
 from va_db.models import MemberRole
-from va_db.repositories import PathwayGraphJson, PathwayRepo
+from va_db.repositories import PathwayRepo
 
 pytestmark = pytest.mark.integration
 
@@ -48,14 +52,7 @@ async def test_role_matrix(
         pathway_id = created.json()["pathway_id"]
     else:
         assert error_of(await _create(client))[:2] == (403, "FORBIDDEN")
-        async with identity.database.tenant_session(member.org.id) as session:
-            pathway, _ = await PathwayRepo(session, member.org.id).create(
-                name="Orders",
-                description="",
-                folder_id=None,
-                graph=PathwayGraphJson(nodes=[], edges=[], global_config={}, graph_hash="0" * 64),
-            )
-            pathway_id = str(pathway.id)
+        pathway_id = str((await seed_pathway(identity, member.org.id, [])).id)
 
     listed = await client.get(BASE)
     got = await client.get(f"{BASE}/{pathway_id}")
@@ -122,3 +119,69 @@ def test_role_helpers_for_api_keys_and_widgets() -> None:
     assert is_pathway_editor(_ctx("platform_admin", "admin", frozenset()))
     assert not is_pathway_editor(_ctx("user", None, frozenset()))
     assert FORCE_DELETE_MESSAGE == "Force delete requires an owner or admin."
+
+
+PUBLISHERS: Final[frozenset[MemberRole]] = frozenset({"owner", "admin", "developer"})
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_version_role_matrix(
+    role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    member = await signed_in(client, identity, container, role)
+    pathway = await seed_pathway(identity, member.org.id)
+    base = f"{BASE}/{pathway.id}"
+    reads = [await client.get(f"{base}/versions"), await client.get(f"{base}/version/1")]
+    if role in READERS:
+        assert [response.status_code for response in reads] == [200, 200]
+    else:
+        for response in reads:
+            assert error_of(response)[:2] == (403, "FORBIDDEN")
+
+    headers = write_headers(client)
+    saved = await client.post(f"{base}/version", json={"name": "v1"}, headers=headers)
+    if role in EDITORS:
+        assert saved.status_code == 200, saved.text
+    else:
+        assert error_of(saved)[:2] == (403, "FORBIDDEN")
+    publishes = [
+        await client.post(
+            f"{base}/publish", json={"version_number": 1, "environment": "staging"}, headers=headers
+        ),
+        await client.post(f"{base}/promote", headers=headers),
+        await client.post(f"{base}/revert", json={"version_number": 1}, headers=headers),
+    ]
+    if role not in PUBLISHERS:
+        for response in publishes:
+            assert error_of(response)[:2] == (403, "FORBIDDEN")
+        assert publishes[0].json()["errors"][0]["message"] == NOT_PUBLISHER_MESSAGE
+        return
+    assert [response.status_code for response in publishes] == [200, 200, 200], publishes[0].text
+    async with identity.database.tenant_session(member.org.id) as session:
+        version = await PathwayRepo(session, member.org.id).version(pathway, 1)
+        assert version is not None
+        assert version.published_by == member.user.id
+
+
+@pytest.mark.parametrize(
+    ("scopes", "status"), [(("pathways:read", "pathways:write"), 200), (("pathways:read",), 403)]
+)
+async def test_api_keys_publish_with_pathways_write(
+    scopes: tuple[str, ...],
+    status: int,
+    bare: httpx.AsyncClient,
+    identity: IdentityDb,
+    container: SessionContainer,
+) -> None:
+    member = await make_member(identity, container.password_hasher)
+    key, _ = await store_api_key(container, member.org.id, scopes)
+    pathway = await seed_pathway(identity, member.org.id)
+    response = await bare.post(f"{BASE}/{pathway.id}/publish", headers={"Authorization": key})
+    assert response.status_code == status, response.text
+
+
+def test_publisher_helper_for_principals() -> None:
+    assert is_pathway_publisher(_ctx("api_key", None, frozenset({"pathways:write"})))
+    assert is_pathway_publisher(_ctx("user", "developer", frozenset()))
+    assert not is_pathway_publisher(_ctx("user", "analyst", frozenset()))
+    assert not is_pathway_publisher(_ctx("user", None, frozenset()))

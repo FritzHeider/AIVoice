@@ -5,12 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Final
 
 import httpx
 import pytest
 from graph_helpers import edge, fixture, node, start
 from identity_db import IdentityDb
+from pathway_helpers import Api, add, star_api
 from session_helpers import SessionContainer, audit_rows, error_of, make_member, store_api_key
 from sms_rows import random_e164
 from sqlalchemy import update
@@ -22,56 +22,10 @@ from va_engine.models import graph_hash, load_graph
 
 pytestmark = pytest.mark.integration
 
-BASE: Final = "/v1/pathway"
-
-
-class Api:
-    """An org's ``*`` API key on the shared client."""
-
-    def __init__(self, client: httpx.AsyncClient, org_id: uuid.UUID, key: str) -> None:
-        self.client = client
-        self.org_id = org_id
-        self.headers = {"Authorization": key}
-
-    async def create(self, **body: Any) -> httpx.Response:
-        return await self.client.post(
-            f"{BASE}/create", json={"name": "Bella Pasta", **body}, headers=self.headers
-        )
-
-    async def created(self, **body: Any) -> str:
-        response = await self.create(**body)
-        assert response.status_code == 200, response.text
-        assert response.json()["version_number"] == 1
-        return str(response.json()["pathway_id"])
-
-    async def get(self, pathway_id: str, **params: str) -> httpx.Response:
-        return await self.client.get(f"{BASE}/{pathway_id}", params=params, headers=self.headers)
-
-    async def list(self, **params: str) -> httpx.Response:
-        return await self.client.get(BASE, params=params, headers=self.headers)
-
-    async def update(self, pathway_id: str, **body: Any) -> httpx.Response:
-        return await self.client.post(f"{BASE}/{pathway_id}", json=body, headers=self.headers)
-
-    async def delete(self, pathway_id: str, **params: str) -> httpx.Response:
-        return await self.client.delete(f"{BASE}/{pathway_id}", params=params, headers=self.headers)
-
-    async def validate(self, pathway_id: str, body: dict[str, Any] | None = None) -> httpx.Response:
-        return await self.client.post(f"{BASE}/{pathway_id}/validate", json=body, headers=self.headers)
-
 
 @pytest.fixture
 async def api(client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer) -> Api:
-    member = await make_member(identity, container.password_hasher)
-    key, _ = await store_api_key(container, member.org.id)
-    return Api(client, member.org.id, key)
-
-
-async def add(identity: IdentityDb, org_id: uuid.UUID, *rows: Any) -> None:
-    async with identity.database.tenant_session(org_id) as session:
-        for row in rows:
-            session.add(row)
-            await session.flush()
+    return await star_api(client, identity, container)
 
 
 def codes(response: httpx.Response, kind: str = "warnings") -> list[str]:

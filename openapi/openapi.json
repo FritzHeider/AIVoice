@@ -6471,6 +6471,55 @@
         "title": "PathwayValidated",
         "type": "object"
       },
+      "PathwayVersions": {
+        "description": "``GET /v1/pathway/{pathway_id}/versions``: every version, newest first.",
+        "examples": [
+          {
+            "status": "success",
+            "versions": [
+              {
+                "created_at": "2026-11-03T10:42:10Z",
+                "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+                "is_production": false,
+                "is_staging": false,
+                "status": "draft",
+                "version_number": 5
+              },
+              {
+                "created_at": "2026-11-03T09:15:00Z",
+                "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+                "is_production": true,
+                "is_staging": true,
+                "name": "v4 - new greeting",
+                "published_at": "2026-11-03T10:40:00Z",
+                "published_by": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+                "status": "published",
+                "version_number": 4
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/VersionItem"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "versions"
+        ],
+        "title": "PathwayVersions",
+        "type": "object"
+      },
       "PollStatus": {
         "enum": [
           "pending_verification",
@@ -6541,6 +6590,32 @@
         "title": "PrivacySettings",
         "type": "object"
       },
+      "Promoted": {
+        "description": "``POST /v1/pathway/{pathway_id}/promote`` result.",
+        "examples": [
+          {
+            "production_version": 4,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "production_version": {
+            "title": "Production Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "production_version"
+        ],
+        "title": "Promoted",
+        "type": "object"
+      },
       "PronunciationRule": {
         "additionalProperties": false,
         "properties": {
@@ -6572,6 +6647,97 @@
           "pronunciation"
         ],
         "title": "PronunciationRule",
+        "type": "object"
+      },
+      "PublishBody": {
+        "description": "``POST /v1/pathway/{pathway_id}/publish``.",
+        "examples": [
+          {
+            "environment": "production",
+            "run_regression": false,
+            "version_number": 4
+          }
+        ],
+        "properties": {
+          "environment": {
+            "default": "production",
+            "description": "Environment pin to move.",
+            "enum": [
+              "production",
+              "staging"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
+          "run_regression": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Run the pathway's unit tests before publishing (specs/12 §4 step 2).",
+            "title": "Run Regression"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Version to publish; default the draft.",
+            "title": "Version Number"
+          }
+        },
+        "title": "PublishBody",
+        "type": "object"
+      },
+      "Published": {
+        "description": "``POST /v1/pathway/{pathway_id}/publish`` result.",
+        "examples": [
+          {
+            "draft_version": 5,
+            "environment": "production",
+            "published_version": 4,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "environment": {
+            "enum": [
+              "production",
+              "staging"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
+          "published_version": {
+            "title": "Published Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "published_version",
+          "environment",
+          "draft_version"
+        ],
+        "title": "Published",
         "type": "object"
       },
       "RecordingResponse": {
@@ -6752,6 +6918,68 @@
           }
         },
         "title": "RetryRequest",
+        "type": "object"
+      },
+      "RevertBody": {
+        "description": "``POST /v1/pathway/{pathway_id}/revert``.",
+        "examples": [
+          {
+            "version_number": 2
+          }
+        ],
+        "properties": {
+          "version_number": {
+            "description": "Version whose graph replaces the draft's.",
+            "minimum": 1.0,
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version_number"
+        ],
+        "title": "RevertBody",
+        "type": "object"
+      },
+      "Reverted": {
+        "description": "``POST /v1/pathway/{pathway_id}/revert`` result with the save-mode validation of the new draft.",
+        "examples": [
+          {
+            "draft_version": 5,
+            "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+            "status": "success",
+            "validation": {
+              "errors": [],
+              "valid": true,
+              "warnings": []
+            }
+          }
+        ],
+        "properties": {
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/ValidationView"
+          }
+        },
+        "required": [
+          "draft_version",
+          "graph_hash",
+          "validation"
+        ],
+        "title": "Reverted",
         "type": "object"
       },
       "RotatedSigningSecret": {
@@ -8448,6 +8676,160 @@
           "warnings"
         ],
         "title": "ValidationView",
+        "type": "object"
+      },
+      "VersionItem": {
+        "description": "One version of a pathway with its environment pins.",
+        "examples": [
+          {
+            "created_at": "2026-11-03T10:42:10Z",
+            "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+            "is_production": false,
+            "is_staging": false,
+            "status": "draft",
+            "version_number": 5
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "is_production": {
+            "title": "Is Production",
+            "type": "boolean"
+          },
+          "is_staging": {
+            "title": "Is Staging",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Time of the version's first publish.",
+            "title": "Published At"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "User who first published it (null for keyless).",
+            "title": "Published By"
+          },
+          "status": {
+            "description": "`draft`, `published`, or `archived` (saved, unpublished).",
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version_number",
+          "name",
+          "status",
+          "is_production",
+          "is_staging",
+          "graph_hash",
+          "published_at",
+          "published_by",
+          "created_at"
+        ],
+        "title": "VersionItem",
+        "type": "object"
+      },
+      "VersionSave": {
+        "description": "``POST /v1/pathway/{pathway_id}/version``: freeze the draft with an optional label.",
+        "examples": [
+          {
+            "name": "v4 - new greeting"
+          }
+        ],
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Label of the saved version (1-200 characters).",
+            "title": "Name"
+          }
+        },
+        "title": "VersionSave",
+        "type": "object"
+      },
+      "VersionSaved": {
+        "description": "``POST /v1/pathway/{pathway_id}/version`` result.",
+        "examples": [
+          {
+            "draft_version": 5,
+            "saved_version": 4,
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "saved_version": {
+            "title": "Saved Version",
+            "type": "integer"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "saved_version",
+          "draft_version"
+        ],
+        "title": "VersionSaved",
         "type": "object"
       },
       "VoiceSettings": {
@@ -12534,6 +12916,213 @@
         "x-scope": "pathways:write"
       }
     },
+    "/v1/pathway/{pathway_id}/promote": {
+      "post": {
+        "description": "Pin the staging version to production.",
+        "operationId": "pathways_promote",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Promoted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Promote",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.promote"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "pathways.publish",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/publish": {
+      "post": {
+        "description": "Validate a version in publish mode and pin it to production or staging.",
+        "operationId": "pathways_publish",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PublishBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Publish",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.publish"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "pathways.publish",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/revert": {
+      "post": {
+        "description": "Replace the draft graph with a copy of an earlier version.",
+        "operationId": "pathways_revert",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reverted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Revert",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.revert"
+        ],
+        "x-envelope": "legacy",
+        "x-permission": "pathways.publish",
+        "x-scope": "pathways:write"
+      }
+    },
     "/v1/pathway/{pathway_id}/validate": {
       "post": {
         "description": "Validate the draft or a supplied graph; issues are returned, never raised.",
@@ -12606,6 +13195,206 @@
         "x-audit-exempt": "read-only check",
         "x-envelope": "legacy",
         "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/version": {
+      "post": {
+        "description": "Freeze the draft as a saved version and open the next draft.",
+        "operationId": "pathways_version_save",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/VersionSave"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionSaved"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Version Save",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.version_save"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/version/{version_number}": {
+      "get": {
+        "description": "The pathway with the graph of one version (same body as ``GET /v1/pathway/{id}?version=n``).",
+        "operationId": "pathways_version_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Version number (1 or more).",
+            "in": "path",
+            "name": "version_number",
+            "required": true,
+            "schema": {
+              "description": "Version number (1 or more).",
+              "minimum": 1,
+              "title": "Version Number",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Version Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/{pathway_id}/versions": {
+      "get": {
+        "description": "Every version of the pathway, newest first, with its environment pins.",
+        "operationId": "pathways_versions_list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PathwayVersions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Versions List",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
       }
     },
     "/v1/webhooks/deliveries": {
