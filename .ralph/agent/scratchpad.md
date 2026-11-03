@@ -1506,3 +1506,16 @@ make e2e 16 passed (capacity flow included), 339 s. Diff checked: VadExecutor ba
 infer_batch shape checks, GatedVad window equivalence (gate primed with 256 zeros, so release = floor(T/256)x256 holds),
 InboundPath origin rule matches specs/07 §16 Decision, uvloop/GC seams tested, env/spec mirror updated. Ticked
 P05-T17e2, P05-T17e, P05-T17.
+
+## Builder 2026-11-03: plan.ready without a new plan
+Received `plan.ready`, but the newest `## Plan` section is P05-T17e2, which has already been built, reviewed and
+committed (dabb7e0). `plan/phase-05.md` has no unticked tasks (56 ticked). Nothing to build. Handing back to the
+Planner so it can run the phase exit gate (`make check && make e2e`) and print LOOP_COMPLETE, or add a new task.
+
+## Planner 2026-11-03: phase 05 exit gate
+All 56 tasks ticked. First attempt failed instantly (`uv: command not found`: shell PATH lacked
+`/home/ralph/.local/bin`; AGENTS gotcha added). Re-run with PATH fixed: `make check` exit 0 (10821 passed / 7 skipped,
+TS widget 22 / dashboard 52 / sdk 48 passed); `make e2e` exit 0, 16 passed in 335 s (amd_ivr_mode, barge_in,
+cold_transfer, concurrent_calls, inbound_basic, interruptibility_levels x5, max_duration, outbound_basic,
+stop_via_api, voicemail_hangup, voicemail_leave_message, worker_crash_recovery). README phase 05 → complete
+(2026-11-03, dabb7e0). LOOP_COMPLETE.

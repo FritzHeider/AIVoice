@@ -1595,3 +1595,6 @@ Grafana 3001
   the media pipeline) from `e2e_ms` minus vendor stages ("inside") using the `call.latency` `E2E:` summaries
   (`call_events` rows, `psql -U va -d va` in the postgres container). Restarting only the `sim` container rotates
   its key: run `scripts/dev_up.sh e2e` afterwards, not `docker compose up sim`.
+- 2026-11-03 (P05 exit gate): on the EC2 Ralph runner the agent shell PATH may lack `uv` (it lives in
+  `/home/ralph/.local/bin`); `make check`/`make e2e` then fail at once with `uv: command not found` (exit 127). Prepend
+  that dir to PATH before running the gates.

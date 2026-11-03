@@ -84,7 +84,7 @@ resumes from the first unticked task. Each phase is sized to finish within one R
 | 02 | Authentication, tenancy, RBAC, API foundations | complete (2026-10-29, a64df23) |
 | 03 | Vendor clients and simulators (Telnyx, ElevenLabs, Telnyx Inference, Stripe) + event publisher | complete (2026-11-01, 69e4ea4) |
 | 04 | Real-time media pipeline core | complete (2026-11-01, 7d78256) |
-| 05 | Telephony edge, call lifecycle, task-mode calling end to end | pending |
+| 05 | Telephony edge, call lifecycle, task-mode calling end to end | complete (2026-11-03, dabb7e0) |
 | 06 | Event bus, webhooks, live streams, analytics sink | pending |
 | 07 | Conversational Pathways engine, API, versions, testing | pending |
 | 08 | Tools, dynamic data, custom code sandbox, knowledge bases | pending |
