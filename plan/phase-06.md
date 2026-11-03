@@ -60,5 +60,11 @@
   - Deliverables: `tests_e2e/test_webhooks_call_completed_and_live.py` with signature-verifying receiver fixture
   - Acceptance: flow green in `make e2e`.
 
+- [x] P06-FIX-1: make exit gate pass — scenario waits for a continuous 1.5 s agent turn, agent track > 24 000 bytes; 20× under CPU load green; make check exit 0 (11268 passed, 99.04 %), make e2e 17 passed. Original failure: `make check` re-run on dab9593: 1 failed, 11267 passed (`apps/media_worker/tests/test_runtime_sim.py::test_a_prerendered_opener_plays_from_the_phrase_cache`, agent track 14 816 bytes ≤ 16 000 after an 865 ms outbound stall let `wait_agent_speech` see 700 ms of silence and hang up)
+  - Spec refs: specs/30-testing-and-evals.md §3 (scenario steps); specs/07-media-pipeline.md §9 (outbound pacing)
+  - Depends on: P06-T08
+  - Deliverables: the prerendered-opener runtime sim test (and any sibling with the same `wait_agent_speech: {}` + byte-length pattern) waits for enough continuous agent speech that a load stall cannot end the call early; root cause of the stall recorded in the scratchpad
+  - Acceptance: test passes repeatedly under CPU load (`-n 8` with background load); `make check && make e2e` pass.
+
 ## Phase exit gate
 `make check && make e2e` pass.

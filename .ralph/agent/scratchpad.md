@@ -1451,3 +1451,52 @@ alone on the running stack: `uv run pytest tests_e2e -m e2e -k webhooks -s`).
 ## Review fix:bed-none-flake — approved
 - Gates re-run: lint/typecheck/placeholders pass; make test 11268 passed, 7 skipped (99.04 %); targeted bed + mark-echo tests pass.
 - Diff checked: FakeTelnyx `Call.mark_echoes`/timeline `marks` documented in specs/30 §3 (14); test window anchored on last mark echo with length assert; no plan task (runtime task only).
+
+## Phase 06 exit gate re-run on dab9593 — failed (make check)
+- `make check`: 1 failed, 11267 passed, 7 skipped (exit 2). Failure:
+  `apps/media_worker/tests/test_runtime_sim.py::test_a_prerendered_opener_plays_from_the_phrase_cache` —
+  `assert len(agent_audio) > 16_000` got 14 816 (0.93 s). Log: `pipeline_ended outbound_frames=10 late_frames=1
+  max_lateness_ms=865.5`, transport `sent_frames=8 dropped_sends=2`. So after ~8 cached opener frames the outbound
+  loop stalled ~865 ms (xdist CPU load; all sims + media in one process/loop); FakeTelnyx's `SpeechDetector` counted
+  the stall as agent silence ≥ `then_silence_ms` 700 → `wait_agent_speech: {}` (min_ms 0) satisfied → hangup.
+- `make e2e`: 17 passed in 372 s (exit 0). Added P06-FIX-1 to plan/phase-06.md.
+
+## Plan P06-FIX-1 — make exit gate pass (prerendered-opener flake)
+Root cause: test design, not product: `wait_agent_speech: {}` accepts a 20 ms turn, so any loop stall ≥ 700 ms
+mid-opener ends the call early; the byte-length assert then fails. PRERENDERED opener ≈ 4 s of speech at 5 ms/char? (it is
+FakeElevenLabs audio, ~65 chars → several seconds).
+### Changes (apps/media_worker/tests/test_runtime_sim.py only, unless the builder finds a product cause)
+1. `test_a_prerendered_opener_plays_from_the_phrase_cache` (line ~363): scenario
+   `"wait_agent_speech: {min_ms: 1500, then_silence_ms: 700, timeout_ms: 20000}"`, `"hangup: {}"`. `SpeechDetector`
+   resets `turn_ms` after a gap ≥ gap_ms, so the caller now hangs up only after a ≥ 1.5 s continuous agent turn
+   (a stall restarts the count; the opener is long enough to still produce one). Keep `len(agent_audio) > 16_000`
+   (now guaranteed: ≥ 1.5 s speech + pre-speech audio ⇒ > 24 000 bytes) and `any(agent_audio)`, plus add
+   `sim_call().first_agent_speech_ms is not None` if readily available (timeline). Verify first that the opener
+   really yields ≥ 1.5 s of speech frames on an idle machine (print once, or compute: FakeElevenLabs duration); if
+   shorter, use min_ms = 60 % of the measured opener duration.
+2. Sibling `test_a_cached_maintenance_message_plays_from_the_phrase_cache` (line ~770) uses `expect_hangup` (the
+   agent hangs up after the whole message), so it is not exposed: leave it.
+3. Optional root-cause note: check whether a cached `SpeakStatic` pushes the whole phrase into `OutboundAudio` in
+   one synchronous loop (would starve the loop and explain lateness). If yes and it is cheap, chunk with a yield;
+   otherwise record "load stall in test process" in builder notes. No sleeps/retries.
+### Tests / gates
+- `uv run pytest apps/media_worker/tests/test_runtime_sim.py -k "prerendered or <sibling>" -n 8 --count`-style
+  repetition: run the two tests 20× (`for i in $(seq 20)`) while `yes > /dev/null` ×4 loads the CPU; all pass.
+- `make fmt lint typecheck placeholders`; full `make check` (background + heartbeat Monitor; truncate log first);
+  `make e2e`. PATH: `export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`.
+### Risks
+- Too-high min_ms on a short opener → timeout_ms failure; measure first.
+
+## Build P06-FIX-1 (builder notes)
+- Measured on an idle machine: the prerendered opener yields 3 480 ms of agent speech frames (75 248 bytes of agent track).
+- `test_a_prerendered_opener_plays_from_the_phrase_cache`: scenario `wait_agent_speech: {min_ms: 1500, then_silence_ms: 700,
+  timeout_ms: 20000}`; length assert raised to > 24 000 bytes (1.5 s of PCM16 8 kHz). Sibling maintenance test untouched.
+- Root cause: CPU stall in the shared test process. `Speaker._play_cached` only appends the phrase bytes to OutboundAudio's
+  buffer (cheap, no per-frame work), so nothing to chunk in the product.
+- 20 repeated runs (prerendered + cached maintenance, -n 8) under 4× `yes` load: 0 failures.
+- Gates: fmt/lint/typecheck/placeholders pass; make check exit 0 (11268 passed, 7 skipped, 99.04 %); make e2e 17 passed
+  (372 s, exit 0); jscpd 0 clones; radon A (4.94 file avg); pip-audit clean; pnpm audit 3 moderate (no high).
+
+## Review P06-FIX-1 — approved
+- Gates re-run: make check exit 0 (lint/typecheck/placeholders/TS, 11268 passed, 7 skipped, 99.04 %); make e2e 17 passed (375 s, exit 0).
+- Diff: test-only change. SpeechDetector semantics checked (caller_steps/agent_speech): a stall after ≥ 1.5 s of speech satisfies the step, an earlier stall restarts the turn with ≥ 2 s of the 3.5 s opener left, so the > 24 000-byte assert holds. Phase 06 exit gate (make check && make e2e) passes on this tree.

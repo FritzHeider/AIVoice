@@ -364,15 +364,17 @@ async def test_a_prerendered_opener_plays_from_the_phrase_cache() -> None:
     async with rig() as r:
         opener = await prerender(r, wait_for_greeting=False)
         assert opener == PRERENDERED
-        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        # The caller hangs up only after one continuous agent turn of 1.5 s (the opener is ~3.5 s of speech):
+        # an outbound stall under CPU load restarts the turn instead of ending the call mid-opener.
+        r.scenario("wait_agent_speech: {min_ms: 1500, then_silence_ms: 700, timeout_ms: 20000}", "hangup: {}")
         async with r.call(
             opener_text=opener, first_sentence=PRERENDERED, wait_for_greeting=False
         ) as streamed:
             end = await r.body.end()
             agent_audio = bytes(streamed.sim_call().audio.agent)
         assert end == STREAM_CLOSED
-        # The caller heard the cached opener (over a second of PCM16 8 kHz agent audio, not silence).
-        assert len(agent_audio) > 16_000
+        # The caller heard the cached opener (at least 1.5 s of PCM16 8 kHz agent speech, not silence).
+        assert len(agent_audio) > 24_000
         assert any(agent_audio)
         assert socket_texts(r.state) == []
         assert r.state.llm.requests == []
