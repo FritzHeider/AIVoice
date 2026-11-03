@@ -14,16 +14,17 @@ from datetime import UTC, datetime, timedelta
 import orjson
 import pytest
 from dispatch_helpers import DASHBOARD, Rig, StaticOrgSettings, dispatch_rig, short_timeouts
+from service_helpers import json_log_stream, log_events
 from sqlalchemy import select
 from webhook_receiver import Receiver, Reply, signature_ok
 
 from va_common.ids import new_id
 from va_common.settings import Environment
 from va_db.models import CallEvent, Org
-from va_db.repositories import OutboxRepo
+from va_db.repositories import OutboxRepo, WebhookEndpointRepo
 from va_domain.org import OrgSettings
+from va_events.webhook_schedule import Timeouts
 from va_webhooks.dispatcher import DispatchLimits
-from va_webhooks.schedule import Timeouts
 
 pytestmark = pytest.mark.integration
 
@@ -311,3 +312,34 @@ async def test_backlog_gauges(dispatcher_db_url: str) -> None:
     oldest = registry.get_sample_value("va_webhook_oldest_pending_seconds")
     assert oldest is not None
     assert 89 <= oldest <= 120
+
+
+async def test_a_delivery_cancelled_mid_attempt_keeps_its_cancelled_state(dispatcher_db_url: str) -> None:
+    """Deleting the endpoint while the attempt is in flight wins: no outcome, no call log row, no metric."""
+    receiver = Receiver()
+    receiver.script("/held", Reply(hold=True))
+    stream = json_log_stream()
+    async with dispatch_rig(dispatcher_db_url, receiver=receiver, timeouts=LONG) as rig:
+        org = await rig.org()
+        call_id = new_id()
+        endpoint_id = await rig.endpoint(org, rig.url("/held"))
+        delivery_id = await rig.delivery(org, rig.url("/held"), call_id=call_id, endpoint_id=endpoint_id)
+        run = asyncio.ensure_future(rig.dispatcher.run_once())
+        await receiver.wait_for(lambda: receiver.in_flight["hooks.test"] == 1)
+        async with rig.database.tenant_session(org.id) as session:
+            assert await WebhookEndpointRepo(session, org.id).delete(endpoint_id) == 1
+        receiver.release()
+        async with asyncio.timeout(10):
+            await run
+        row = await rig.row(delivery_id)
+        events = await call_events(rig, call_id)
+    assert (row.status, row.attempts, row.last_error, row.endpoint_id) == (
+        "dead",
+        0,
+        "endpoint_deleted",
+        None,
+    )
+    assert events == []
+    assert rig.deliveries("succeeded") == 0
+    (cancelled,) = [e for e in log_events(stream) if e["event"] == "webhook.delivery_cancelled"]
+    assert cancelled["delivery_id"] == str(delivery_id)

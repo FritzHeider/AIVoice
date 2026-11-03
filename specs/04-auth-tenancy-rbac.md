@@ -1264,7 +1264,8 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
   `kb.delete`, `voice.clone`, `voice.delete`, `number.purchase`, `number.release`, `number.inbound_update`,
   `telnyx_account.create`, `telnyx_account.delete`, `tendlc.brand_submit`, `tendlc.campaign_submit`,
   `widget.create`, `widget.update`, `widget.delete`, `webhook_endpoint.create`, `webhook_endpoint.update`,
-  `webhook_endpoint.delete`, `webhook.secret_rotate`, `dnc.add`, `dnc.remove`, `dnc.import`, `memory.reset`,
+  `webhook_endpoint.delete`, `webhook_delivery.replay`, `webhook.secret_rotate`, `dnc.add`, `dnc.remove`,
+  `dnc.import`, `memory.reset`,
   `memory.erase`, `contact.erase`, `billing.topup`, `billing.auto_recharge_update`, `billing.plan_change`,
   `billing.credit_transfer`, `call.stop`, `call.takeover`, `call.recording_download`, `batch.create`, `batch.stop`,
   `data.export`.

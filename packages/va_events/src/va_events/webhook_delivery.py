@@ -4,7 +4,9 @@ Error codes stored in ``webhook_deliveries.last_error`` (specs/19 §8 Decision P
 never followed), ``http_status`` (other non-2xx; the code is in ``last_status_code``), ``gone`` (410, dead at
 once), ``timeout``, ``connection``, ``blocked_destination:<reason>`` (SSRF guard; ``scheme`` is dead at once,
 the other reasons retry because DNS may change), ``endpoint_disabled`` (dead without a request), and
-``secret_unavailable`` (retry).
+``secret_unavailable`` (retry). ``endpoint_deleted`` marks a queued delivery cancelled by deleting its
+endpoint (specs/19 §10 Decision P06-T04b); the dispatcher never produces it. The API's test send (specs/19
+§10) reuses :class:`Deliverer` for its single unrecorded attempt.
 """
 
 from __future__ import annotations
@@ -26,11 +28,13 @@ from opentelemetry.trace import TracerProvider
 from va_common.net import UnsafeDestinationError, UnsafeReason
 from va_common.time import Clock
 from va_db.models import WebhookDelivery
-from va_webhooks.schedule import Timeouts, retry_delay_s, timeout_for
-from va_webhooks.signing import request_headers
+from va_db.repositories.webhooks import ENDPOINT_DELETED_ERROR
+from va_events.webhook_schedule import Timeouts, retry_delay_s, timeout_for
+from va_events.webhook_signing import request_headers
 
 __all__ = [
     "CONNECTION",
+    "ENDPOINT_DELETED",
     "ENDPOINT_DISABLED",
     "GONE",
     "HTTP_STATUS",
@@ -52,6 +56,7 @@ GONE: Final = "gone"
 TIMEOUT: Final = "timeout"
 CONNECTION: Final = "connection"
 ENDPOINT_DISABLED: Final = "endpoint_disabled"
+ENDPOINT_DELETED: Final = ENDPOINT_DELETED_ERROR
 SECRET_UNAVAILABLE: Final = "secret_unavailable"  # noqa: S105 - an error code, not a secret
 _BLOCKED_PREFIX: Final = "blocked_destination:"
 _FINAL_ERRORS: Final = frozenset({GONE, ENDPOINT_DISABLED, f"{_BLOCKED_PREFIX}scheme"})

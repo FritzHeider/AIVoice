@@ -39,6 +39,7 @@ from va_api.auth.sessions import SessionManager
 from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
+from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
 from va_common.auth import (
@@ -53,6 +54,7 @@ from va_common.crypto import Envelope
 from va_common.email import EmailSender, InMemoryEmailSender
 from va_common.ids import new_id
 from va_common.money import dollars_to_micros
+from va_common.safe_http import safe_client
 from va_common.storage import ObjectStore
 from va_db.models import (
     ApiKey,
@@ -70,6 +72,8 @@ from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
 from va_events import EventPublisher
+from va_events.webhook_delivery import Deliverer
+from va_events.webhook_schedule import Timeouts
 
 __all__ = [
     "ACCEPT_INVITATION",
@@ -139,7 +143,8 @@ class SessionContainer(AuthContainer):
     login state store, the cached org settings reader, the agent onboarding request store and limiter, the
     OIDC discovery client built from the app settings when the app opens it (intercept it with respx), and
     the Send Call pieces (dispatch limiter, sink-less event publisher, ``FakeCallStarter``,
-    ``FakeCallCanceller``, ``FakeResolver``) and an object store over ``FakePresigner``."""
+    ``FakeCallCanceller``, ``FakeResolver``) and an object store over ``FakePresigner``, and the webhook
+    test-send deliverer (a real pinning client over ``host_resolver``) once the app opens it."""
 
     identity: IdentityDb = field(kw_only=True)
     password_hasher: PasswordHasher = field(default_factory=lambda: PasswordHasher(CHEAP_ARGON2))
@@ -163,6 +168,7 @@ class SessionContainer(AuthContainer):
     host_resolver: FakeResolver = field(default_factory=FakeResolver)
     presigner: FakePresigner = field(default_factory=FakePresigner)
     object_store: ObjectStore = field(init=False)
+    webhook_deliverer: Deliverer = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -186,8 +192,19 @@ class SessionContainer(AuthContainer):
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
         assert isinstance(settings, ApiSettings)
-        async with super().__call__(settings) as opened, httpx.AsyncClient() as http:
+        webhook_http = safe_client(
+            settings,
+            timeout=TEST_SEND_TIMEOUT_S,
+            allow_private=settings.webhook_allow_private,
+            resolver=self.host_resolver,
+        )
+        async with super().__call__(settings) as opened, httpx.AsyncClient() as http, webhook_http:
             self.oidc_discovery = discovery_for(settings, http)
+            self.webhook_deliverer = Deliverer(
+                webhook_http,
+                clock=self.clock,
+                timeouts=Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S),
+            )
             yield opened
 
     @property

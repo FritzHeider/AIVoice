@@ -6,7 +6,7 @@ import random
 
 import pytest
 
-from va_webhooks.schedule import (
+from va_events.webhook_schedule import (
     MAX_ATTEMPTS,
     RETRY_DELAYS_S,
     Timeouts,

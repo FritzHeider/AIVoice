@@ -1,5 +1,7 @@
 """Webhook signing secret under ``/v1/webhooks/signing-secret`` (specs/19-events-and-webhooks.md §10).
 
+The router also carries the endpoint and delivery routes of :mod:`va_api.routers.webhook_endpoints`.
+
 Viewing needs ``webhooks:read`` and rotating ``webhooks:write`` (specs/04 §2.3), and both need the
 ``webhooks.secret`` permission (§3.2 "Webhook signing secret view last4 / rotate": owners, admins, API keys
 with ``*``). ``orgs`` has no RLS, so the row is read in a ``global_session`` with ``ctx.org_id`` only; while a

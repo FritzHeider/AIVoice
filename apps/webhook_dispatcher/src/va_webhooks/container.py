@@ -21,12 +21,12 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.repositories.data_keys import OrgDataKeyStore
 from va_db.session import Database
 from va_events import EventPublisher
+from va_events.webhook_delivery import Deliverer
+from va_events.webhook_schedule import DEFAULT_TIMEOUT_S
 from va_webhooks import __version__
-from va_webhooks.delivery import Deliverer
 from va_webhooks.destinations import DestinationPolicy
 from va_webhooks.dispatcher import Dispatcher, DispatchLimits
 from va_webhooks.notify import EndpointDisabledNotifier
-from va_webhooks.schedule import DEFAULT_TIMEOUT_S
 from va_webhooks.settings import DispatcherSettings
 from va_webhooks.signing_secrets import SigningSecrets
 

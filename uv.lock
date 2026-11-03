@@ -2930,6 +2930,9 @@ version = "0.1.0"
 source = { editable = "packages/va_events" }
 dependencies = [
     { name = "clickhouse-connect", extra = ["async"] },
+    { name = "httpx" },
+    { name = "opentelemetry-api" },
+    { name = "orjson" },
     { name = "pydantic" },
     { name = "redis" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -2941,6 +2944,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "clickhouse-connect", extras = ["async"], specifier = ">=1.11" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "opentelemetry-api", specifier = ">=1.45.1" },
+    { name = "orjson", specifier = ">=3.13.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "redis", specifier = ">=5.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.35" },

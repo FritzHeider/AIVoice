@@ -31,11 +31,11 @@ from va_db.repositories.identity import IdentityRepo, NewUser
 from va_db.session import Database
 from va_domain.org import OrgSettings
 from va_events import EventPublisher
-from va_webhooks.delivery import Deliverer
+from va_events.webhook_delivery import Deliverer
+from va_events.webhook_schedule import Timeouts
 from va_webhooks.destinations import DestinationPolicy
 from va_webhooks.dispatcher import Dispatcher, DispatchLimits
 from va_webhooks.notify import EndpointDisabledNotifier
-from va_webhooks.schedule import Timeouts
 from va_webhooks.settings import DispatcherSettings
 from va_webhooks.signing_secrets import SigningSecrets
 

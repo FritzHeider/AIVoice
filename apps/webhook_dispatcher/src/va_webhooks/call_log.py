@@ -12,7 +12,7 @@ from typing import Final
 from va_common.time import Clock
 from va_db.models import CallEventLevel
 from va_events import DomainEvent, EventType, new_event
-from va_webhooks.delivery import HTTP_STATUS, Outcome, Outgoing, SendResult
+from va_events.webhook_delivery import HTTP_STATUS, Outcome, Outgoing, SendResult
 
 __all__ = ["attempt_event", "attempt_level", "attempt_message", "human_delay"]
 

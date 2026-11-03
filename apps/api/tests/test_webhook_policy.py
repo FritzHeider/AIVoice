@@ -7,7 +7,7 @@ import secrets
 import pytest
 from api_helpers import make_settings
 
-from va_api.services.webhook_policy import MESSAGES, check_call_webhook
+from va_api.services.webhook_policy import MESSAGES, check_call_webhook, check_webhook_url
 from va_api.settings import ApiSettings
 from va_common.errors import AppError
 from va_common.net import HostResolver
@@ -117,3 +117,25 @@ async def test_error_chains_the_guard_reason() -> None:
     assert error.message == MESSAGES["scheme"]
     assert error.__cause__ is not None
     assert getattr(error.__cause__, "reason", None) == "scheme"
+
+
+@pytest.mark.parametrize(
+    ("url", "env", "message"),
+    [
+        ("http://hooks.example.com/hook", "production", "url must use https."),
+        ("https:///hook", "test", "url must be an absolute http(s) URL with a host."),
+        ("https://gone.example.com/hook", "test", "The url host could not be resolved."),
+        ("http://169.254.169.254/latest", "test", "The url URL resolves to a blocked address."),
+    ],
+)
+async def test_endpoint_urls_are_rejected_on_their_own_field(url: str, env: str, message: str) -> None:
+    """Org webhook endpoints (specs/19 §10 Decision P06-T04b) use the same rules on field ``url``."""
+    with pytest.raises(AppError) as caught:
+        await check_webhook_url(
+            url, org=OrgSettings(), settings=settings_for(env), field="url", resolver=resolver
+        )
+    assert (caught.value.code, caught.value.field, caught.value.message) == (
+        "WEBHOOK_URL_REJECTED",
+        "url",
+        message,
+    )

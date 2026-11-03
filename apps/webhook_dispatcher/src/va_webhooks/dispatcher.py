@@ -4,7 +4,9 @@ Each pod claims due rows with ``FOR UPDATE SKIP LOCKED`` under a 5 min lease (``
 several pods never deliver the same row concurrently, and a crashed pod's rows become due again when the
 lease runs out. Deliveries run concurrently: at most ``concurrency`` per pod and ``per_host`` per URL host.
 Each attempt's outcome, the 410 endpoint disable, and the call log row commit in one system transaction; the
-live broadcast of the call log event and the admin email follow the commit.
+live broadcast of the call log event and the admin email follow the commit. A row cancelled while its attempt
+ran (its endpoint was deleted; specs/19 §10 Decision P06-T04b) keeps its state: nothing is recorded, logged
+as ``webhook.delivery_cancelled``.
 """
 
 from __future__ import annotations
@@ -25,11 +27,10 @@ from va_common.logging import get_logger
 from va_common.metrics import ServiceMetrics
 from va_common.time import Clock
 from va_common.waits import wait_until_set, within
-from va_db.repositories import OutboxRepo
+from va_db.repositories import DeliveryCancelledError, OutboxRepo
 from va_db.session import Database
 from va_events import DomainEvent, EventPublisher, EventPublishError, insert_rows, row_for
-from va_webhooks.call_log import attempt_event
-from va_webhooks.delivery import (
+from va_events.webhook_delivery import (
     ENDPOINT_DISABLED,
     GONE,
     SECRET_UNAVAILABLE,
@@ -40,6 +41,7 @@ from va_webhooks.delivery import (
     blocked,
     decide,
 )
+from va_webhooks.call_log import attempt_event
 from va_webhooks.destinations import DestinationPolicy
 from va_webhooks.signing_secrets import SecretUnavailableError, SigningSecrets
 
@@ -227,15 +229,19 @@ class Dispatcher:
         now = self._clock.now()
         outcome = decide(item.attempt, result, now, self._rng)
         event = await self._sequenced(attempt_event(item, result, outcome, clock=self._clock))
-        async with self._database.system_session() as session:
-            repo = OutboxRepo(session)
-            await self._apply(repo, item, result, outcome, now)
-            disabled = (
-                result.error == GONE
-                and item.endpoint_id is not None
-                and await repo.disable_endpoint(item.endpoint_id)
-            )
-            event = await self._insert_call_event(session, event)
+        try:
+            async with self._database.system_session() as session:
+                repo = OutboxRepo(session)
+                await self._apply(repo, item, result, outcome, now)
+                disabled = (
+                    result.error == GONE
+                    and item.endpoint_id is not None
+                    and await repo.disable_endpoint(item.endpoint_id)
+                )
+                event = await self._insert_call_event(session, event)
+        except DeliveryCancelledError:
+            _log.info("webhook.delivery_cancelled", delivery_id=str(item.id))
+            return
         if event is not None:
             await self._broadcast(event)
         if disabled:

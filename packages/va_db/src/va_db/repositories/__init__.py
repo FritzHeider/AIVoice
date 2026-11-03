@@ -7,7 +7,8 @@ sub-account credit moves; specs/04 §8.4) and :func:`grant_credits` (manual gran
 :class:`OrgDataKeyStore` (specs/28 §3), :class:`OrgRepo` (``orgs`` on the global session; specs/04 §8.1),
 the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the audit log; specs/04 §13), the
 tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), the tenant :class:`ContactRepo` (inbound
-caller contacts; specs/06 §7), and the system-scope ones.
+caller contacts; specs/06 §7), the tenant :class:`WebhookEndpointRepo` and :class:`WebhookDeliveryRepo`
+(webhook endpoints and delivery history; specs/19 §10), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -84,7 +85,13 @@ from va_db.repositories.memberships import (
     MembershipRepo,
 )
 from va_db.repositories.orgs import OrgOverview, OrgRepo
-from va_db.repositories.outbox import CLAIM_LIMIT, DEFAULT_LEASE, OutboxBacklog, OutboxRepo
+from va_db.repositories.outbox import (
+    CLAIM_LIMIT,
+    DEFAULT_LEASE,
+    DeliveryCancelledError,
+    OutboxBacklog,
+    OutboxRepo,
+)
 from va_db.repositories.retention import PURGE_RULES, PurgeRule, RetentionPolicy, RetentionRepo
 from va_db.repositories.routing import PhoneNumberRoutingRepo
 from va_db.repositories.scheduler import SchedulerRepo
@@ -97,13 +104,26 @@ from va_db.repositories.telnyx_accounts import (
     TelnyxWebhookKey,
 )
 from va_db.repositories.telnyx_events import RETRY_CLAIM_LIMIT, NewTelnyxEvent, TelnyxEventRepo
+from va_db.repositories.webhooks import (
+    ALREADY_QUEUED_MESSAGE,
+    ENDPOINT_DELETED_ERROR,
+    ENDPOINT_DELETED_MESSAGE,
+    ENDPOINT_DISABLED_MESSAGE,
+    WebhookDeliveryFilter,
+    WebhookDeliveryRepo,
+    WebhookEndpointRepo,
+)
 
 __all__ = [
+    "ALREADY_QUEUED_MESSAGE",
     "CLAIM_LIMIT",
     "DEFAULT_LEASE",
     "DIALING_ACCOUNT_STATUS",
     "DUPLICATE_TRANSFER_MESSAGE",
     "EMAIL_VERIFY_TTL",
+    "ENDPOINT_DELETED_ERROR",
+    "ENDPOINT_DELETED_MESSAGE",
+    "ENDPOINT_DISABLED_MESSAGE",
     "IMMUTABLE_COLUMNS",
     "INSUFFICIENT_TRANSFER_MESSAGE",
     "INVITATION_TTL",
@@ -134,6 +154,7 @@ __all__ = [
     "ContactRepo",
     "CreditTransfer",
     "CreditTransferRepo",
+    "DeliveryCancelledError",
     "IdempotencyClaim",
     "IdempotencyConflict",
     "IdempotencyReplay",
@@ -174,6 +195,9 @@ __all__ = [
     "TelnyxEventRepo",
     "TelnyxWebhookKey",
     "TenantRepository",
+    "WebhookDeliveryFilter",
+    "WebhookDeliveryRepo",
+    "WebhookEndpointRepo",
     "conflict_savepoint",
     "grant_credits",
     "held_micros",

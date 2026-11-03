@@ -1,10 +1,13 @@
 [project]
 name = "va-events"
 version = "0.1.0"
-description = "VoiceAgents events: domain event bus (publisher, call-event buffer, stream consumers) and ClickHouse schema"
+description = "VoiceAgents events: domain event bus (publisher, call-event buffer, stream consumers) and ClickHouse schema, webhook outbox routing and delivery"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "clickhouse-connect[async]>=1.11",
+    "httpx>=0.28.1",
+    "opentelemetry-api>=1.45.1",
+    "orjson>=3.13.0",
     "pydantic>=2.9",
     "redis>=5.1",
     "sqlalchemy[asyncio]>=2.0.35",

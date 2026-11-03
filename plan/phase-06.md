@@ -18,7 +18,7 @@
   - Deliverables: migration 0006 (current secret `created_at`, previous secret + expiry on `orgs`), `va_db.webhook_secrets` (read active secrets, rotate), `GET /v1/webhooks/signing-secret`, `POST /v1/webhooks/signing-secret/rotate` (shown once, withheld on idempotent replay, audited), dispatcher signs with both secrets until the previous one expires
   - Acceptance: API tests incl. RBAC (owner/admin only, API keys need `webhooks:write` + `webhooks.secret`), cross-tenant registration; dispatcher dual-sign test before and after the 24 h expiry; migration/schema parity tests green.
 
-- [ ] P06-T04b Webhook endpoint and delivery management API
+- [x] P06-T04b Webhook endpoint and delivery management API — endpoints CRUD (URL vetting, 20 cap, phi gate, audit), delete cancels queued deliveries (dispatcher keeps cancelled rows), signed test send via shared va_events delivery code, deliveries list/filters/cursor, replay; make test 11025 passed / 7 skipped, coverage 99.07 %, lint/typecheck/placeholders pass, TS 122 passed, openapi current, jscpd 0 clones
   - Spec refs: specs/19-events-and-webhooks.md §8 (replay, dead-letter view), §10 (endpoint and delivery rows)
   - Depends on: P06-T04a
   - Deliverables: endpoints CRUD (URL vetted, deleting an endpoint cancels its pending deliveries), test send (synthetic signed event through the shared SSRF-safe sender, returns the delivery result), deliveries list/filter (cursor, limit ≤ 100), replay (new attempt series, same event id)

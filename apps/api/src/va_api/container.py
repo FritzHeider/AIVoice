@@ -11,6 +11,7 @@ import httpx
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from va_api import __version__
 from va_api.auth.agent_onboarding import AgentRequestStore, OnboardingLimiter
 from va_api.auth.api_key_auth import ApiKeyAuthenticator, db_lookup, db_touch
 from va_api.auth.login_throttle import LoginThrottle
@@ -23,6 +24,7 @@ from va_api.idempotency import DbIdempotencyStore, IdempotencyStore
 from va_api.rate_limit import RateLimiter
 from va_api.services.call_starter import CallStarter, TemporalCallStarter
 from va_api.services.call_stop import CallCanceller, TemporalCallCanceller
+from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
 from va_common.auth import ApiKeyHasher, PasswordHasher
@@ -31,6 +33,7 @@ from va_common.crypto import Envelope, open_kms_provider
 from va_common.email import EmailSender, InMemoryEmailSender, SmtpEmailSender
 from va_common.health import CheckFn
 from va_common.net import HostResolver, system_resolver
+from va_common.safe_http import safe_client
 from va_common.service import ReadinessSource
 from va_common.settings import Environment
 from va_common.storage import ObjectStore, open_object_store
@@ -40,6 +43,8 @@ from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 from va_events import EventPublisher
+from va_events.webhook_delivery import Deliverer
+from va_events.webhook_schedule import Timeouts
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
 
@@ -78,6 +83,7 @@ class Container:
     call_canceller: CallCanceller
     host_resolver: HostResolver
     object_store: ObjectStore
+    webhook_deliverer: Deliverer
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -101,7 +107,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     state store, the cached org settings reader, the agent onboarding request store and limiter, and the
     Send Call pieces: the dispatch limiter, the event publisher (``call_events`` rows are written by the
     caller's transaction, so it has no sink), the ``CallWorkflow`` starter, and the system DNS resolver for
-    webhook checks.
+    webhook checks, and the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt).
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -132,6 +138,17 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         oidc_http = httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT_S, follow_redirects=False)
         stack.push_async_callback(oidc_http.aclose)
         object_store = await stack.enter_async_context(open_object_store(settings))
+        webhook_http = safe_client(
+            settings,
+            timeout=TEST_SEND_TIMEOUT_S,
+            allow_private=settings.webhook_allow_private,
+            resolver=system_resolver,
+            max_connections=20,
+            max_keepalive=5,
+            version=__version__,
+        )
+        stack.push_async_callback(webhook_http.aclose)
+        webhook_timeouts = Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S)
         yield Container(
             settings=settings,
             engine=engine,
@@ -163,4 +180,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             call_canceller=TemporalCallCanceller(temporal),
             host_resolver=system_resolver,
             object_store=object_store,
+            webhook_deliverer=Deliverer(webhook_http, clock=clock, timeouts=webhook_timeouts),
         )

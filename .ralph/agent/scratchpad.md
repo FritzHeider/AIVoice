@@ -424,3 +424,195 @@ package so the api test send can reuse them, and cancels pending rows on endpoin
 - Diff checked vs specs/19 §10 Decision, specs/03 orgs DDL (columns last), specs/28 §3, specs/04 §3.2 permission.
   Rotation decrypts via embedded key (no extra pool session); encrypt_with_key with key read in-transaction.
 - Verdict: APPROVED.
+
+## Plan P06-T04b — Webhook endpoint and delivery management API
+Spec: specs/19 §8 (replay, dead-letter view), §10 table; specs/04 §3.2 row "Webhook endpoints / deliveries / replay"
+(owner/admin/developer W, analyst/viewer R, billing —) → GETs `require_scope("webhooks:read")`, mutations
+`require_scope("webhooks:write")`, no extra permission (except phi_allowed, below). All routes go on the existing
+`routers/webhooks.webhooks_router` (envelope). Every tenant read/write in `tenant_session(ctx.org_id)`.
+
+### Decisions (add `> Decision (2026-11-03): webhook endpoint and delivery management (P06-T04b).` under specs/19 §10)
+1. Endpoint body (`WebhookEndpointCreate`, extra forbidden): `url` (absolute http(s), ≤ 2048 chars, vetted at
+   create/PATCH time with the Send Call rules: https unless `VA_ENV` local/test or org `allow_insecure_webhooks`;
+   private targets only with `WEBHOOK_ALLOW_PRIVATE` → `WEBHOOK_URL_REJECTED` field `url`), `description` (≤ 500,
+   default ""), `event_types` (1-100 unique entries; each `*`, an exact `va_events.EventType` value, or `<prefix>.*`
+   where some catalog type starts with `<prefix>.`; anything else `INVALID_INPUT` field `event_types[i]`; default
+   `["*"]`), `enabled` (default true), `phi_allowed` (default false; setting it true needs the `org.compliance`
+   permission (`holds_permission`), else `PERMISSION_DENIED`/403 like other permission refusals — use whatever error
+   `require_permission` raises). PATCH (`WebhookEndpointPatch`) = any subset, `model_dump(exclude_unset=True)`;
+   explicit `null` on a non-nullable field → INVALID_INPUT. At most 20 endpoints per org → INVALID_INPUT
+   ("An org can have at most 20 webhook endpoints.", no field). PATCH re-enabling an auto-disabled endpoint is allowed.
+   Changing `url` leaves already-created deliveries on the URL they were created for (the URL is part of the row's
+   identity, UNIQUE(event_id,url)); new events use the new URL.
+2. View `WebhookEndpointView`: `id, url, description, event_types, enabled, phi_allowed, created_at, updated_at`.
+   List = `{data:[...]}` oldest first (no pagination; ≤ 20 rows). DELETE → `{data:{deleted:true}}`.
+3. Delete: one tenant transaction: rows with `endpoint_id = id AND status IN ('pending','delivering')` become
+   `dead` with `last_error = 'endpoint_deleted'` (new code `ENDPOINT_DELETED`), then the endpoint row is deleted
+   (FK sets `endpoint_id` NULL on the rest). In-flight attempts: `OutboxRepo._finish` gains the condition
+   `status = 'delivering'`; when no row matches it raises new `va_db.repositories.DeliveryCancelledError`
+   (subclass of NotFoundError is NOT wanted — plain `Exception` subclass exported from repositories). The dispatcher
+   `_record` catches it (around the system session block), logs `webhook.delivery_cancelled` (info, delivery_id),
+   writes no call event, sends no notification, and still counts nothing in metrics. Closes T03 review note 2.
+4. Test send `POST /v1/webhooks/endpoints/{id}/test` body `{event_type?}` (must be a catalog `EventType` value,
+   default `call.completed`; else INVALID_INPUT field `event_type`). Works on disabled endpoints too. Builds an
+   envelope body (§7) `{id: "evt_<uuid7>", type, created_at: iso_ms(now), org_id, call_id: null, batch_id: null,
+   conversation_id: null, data: {"test": true, "message": "Test event from VoiceAgents."}}` via
+   `va_events.webhook_payloads.envelope_body(new_event(...), data)` (check its exact signature/fields), signs it with
+   the org's active secrets (`va_db.webhook_secrets.active_signing_secrets` in a `global_session`, read BEFORE any
+   outbound I/O and with no session open during the send), pre-checks the URL with the same rule as (1)
+   (refusal → result `blocked_destination:<reason>`, no request), then sends ONCE through the shared
+   `Deliverer` (10 s timeout for test sends: `Timeouts(batch_s=10.0, default_s=10.0)`). No `webhook_deliveries`
+   row, no retry, no call event. Response `{data: WebhookTestResult{event_id, event_type, succeeded, status_code,
+   error, response_ms}}` (always 200; the delivery outcome is in the body). `**audit_exempt("synthetic test
+   delivery; stores nothing")`.
+5. Deliveries list `GET /v1/webhooks/deliveries` query: `status?` (one of the 5 statuses), `event_type?` (exact),
+   `call_id?` (uuid), `endpoint_id?` (uuid, extra filter), `cursor?`, `limit` 1-100 (default `DEFAULT_PAGE_LIMIT`);
+   newest first via `TenantRepository.list` (cursor format of specs/31 §2). Returns `PageResponse[WebhookDeliveryView]`.
+   View: `id, event_id, event_type, url, endpoint_id, format, status, attempts, next_attempt_at (only when status
+   pending, else null), last_status_code, last_error, last_response_ms, call_id, batch_id, conversation_id,
+   delivered_at, created_at, updated_at`. The `payload` is never returned (size, PHI). Dead-letter view =
+   `?status=dead`. Use a FastAPI query model or `Depends(_filters)` like audit_logs (if a query MODEL is used,
+   register a cross-tenant request; with plain `Query` params nothing is needed).
+6. Replay `POST /v1/webhooks/deliveries/{id}/replay`: conditional UPDATE in the tenant session
+   `WHERE id AND org_id AND status IN ('succeeded','failed','dead')` → `status='pending', attempts=0,
+   next_attempt_at=now (injected clock), last_status_code/last_error/last_response_ms/delivered_at = NULL`,
+   RETURNING the row → `{data: WebhookDeliveryView}`. Same row, same `event_id`, same URL/payload (new attempt series).
+   Refusals: absent/other org → `NOT_FOUND`; `pending`/`delivering` → `CONFLICT` "The delivery is already queued.";
+   `last_error == 'endpoint_deleted'` → `CONFLICT` "The delivery's endpoint was deleted."; endpoint exists but
+   disabled → `CONFLICT` "Enable the webhook endpoint before replaying its deliveries.". Audit
+   `webhook_delivery.replay` (resource_type `webhook_delivery`, before `{status, attempts, last_error}`, after
+   `{status: "pending"}`): add the action to the specs/04 §13 list AND `va_db.audit.AUDIT_ACTIONS`.
+7. Audit endpoint routes: `webhook_endpoint.create` (after = view dict), `.update` (before/after views; no row when
+   nothing changed), `.delete` (before view, after `{cancelled_deliveries: n}`). Pass dicts with JSON-safe values
+   (`model_dump(mode="json")`).
+
+### Shared delivery code (move, no behaviour change)
+- Move `apps/webhook_dispatcher/src/va_webhooks/{signing,schedule,delivery}.py` to
+  `packages/va_events/src/va_events/webhook_signing.py`, `webhook_schedule.py`, `webhook_delivery.py` (update their
+  internal imports and docstrings; add `ENDPOINT_DELETED = "endpoint_deleted"` to webhook_delivery codes + `__all__`;
+  it is NOT in `_FINAL_ERRORS` usage since the dispatcher never produces it). Delete the old modules; update imports
+  in `va_webhooks.call_log`, `container`, `dispatcher` and dispatcher tests. Add explicit deps to
+  `packages/va_events/pyproject.toml`: `httpx`, `orjson`, `opentelemetry-api` (copy version specs from va_common's
+  pyproject), then `uv lock` (check `uv.lock` diff is only va-events metadata).
+- Move tests: `apps/webhook_dispatcher/tests/test_signing.py` → `packages/va_events/tests/test_webhook_signing.py`,
+  `test_schedule.py` → `packages/va_events/tests/test_webhook_schedule.py`;
+  `apps/webhook_dispatcher/tests/support/webhook_receiver.py` → `packages/va_events/tests/support/webhook_receiver.py`
+  (already on pytest pythonpath + check mypy_path lists `packages/va_events/tests/support`).
+- Do NOT move `destinations.py` / `signing_secrets.py` (dispatcher-only caching); the api uses
+  `active_signing_secrets` directly and its own URL check.
+
+### Files
+- `packages/va_db/src/va_db/repositories/webhooks.py` (NEW, export from `va_db.repositories`):
+  - `WebhookEndpointRepo(TenantRepository[WebhookEndpoint])` `__init__(session, org_id, *, clock=None)`;
+    `all() -> list[WebhookEndpoint]` (created_at, id ascending); `count() -> int`;
+    `delete(endpoint_id) -> int` (get → NOT_FOUND; cancel pending/delivering rows UPDATE ... RETURNING count; DELETE;
+    returns cancelled count).
+  - `WebhookDeliveryFilter` frozen dataclass (`status, event_type, call_id, endpoint_id`, `.conditions()`);
+    `WebhookDeliveryRepo(TenantRepository[WebhookDelivery])`: `page(filters, *, limit, cursor) -> Page`,
+    `replay(delivery_id, *, now) -> WebhookDelivery` (raises NotFoundError / `AppError("CONFLICT", ...)` per (6);
+    read the row first (`get`) to choose the refusal, check the endpoint's enabled flag, then the conditional UPDATE;
+    a lost race (UPDATE matched nothing) → CONFLICT "already queued").
+  - `ENDPOINT_DELETED_ERROR: Final = "endpoint_deleted"` here too? NO: import the constant from one place — put it in
+    `va_db.repositories.webhooks` (va_db cannot import va_events) and have `va_events.webhook_delivery.ENDPOINT_DELETED`
+    re-export it.
+- `packages/va_db/src/va_db/repositories/outbox.py`: `_finish` condition + `DeliveryCancelledError`.
+- `apps/webhook_dispatcher/src/va_webhooks/dispatcher.py`: catch `DeliveryCancelledError` in `_record`.
+- `packages/va_db/src/va_db/audit.py` + specs/04 §13: `webhook_delivery.replay`.
+- `apps/api/src/va_api/services/webhook_policy.py`: generalise to `check_webhook_url(url, *, org, settings, resolver,
+  field)` with messages built from `field` (`"{field} must use https."` ...); `check_call_webhook` keeps its
+  signature (field `webhook`, same messages as today) — existing tests must pass unchanged.
+- NEW `apps/api/src/va_api/services/webhook_test_send.py`: `async def send_test_event(*, database, envelope,
+  deliverer, org_settings: OrgSettings, settings, resolver, org_id, endpoint_url, event_type, clock) ->
+  SendResult + event_id` (pure-ish orchestration of (4)); keep the router thin.
+- `apps/api/src/va_api/container.py`: field `webhook_deliverer: Deliverer` built from
+  `safe_client(settings, timeout=TEST_SEND_TIMEOUT_S, allow_private=settings.webhook_allow_private,
+  resolver=system_resolver, version=...)` (aclose on exit via stack) + `Deliverer(http, clock=clock,
+  timeouts=Timeouts(10.0, 10.0))`; accessor `session_auth.webhook_deliverer_of(request)` (pattern of the `_of` helpers;
+  the fake container uses `getattr` the same way the others do).
+- `apps/api/src/va_api/routers/webhooks.py`: 7 new routes (operation ids `webhooks_endpoints_list`,
+  `webhooks_endpoints_create` (201), `webhooks_endpoints_update`, `webhooks_endpoints_delete`,
+  `webhooks_endpoints_test`, `webhooks_deliveries_list`, `webhooks_deliveries_replay`); path params `endpoint_id: uuid.UUID`,
+  `delivery_id: uuid.UUID`; literal `/deliveries` and `/endpoints` paths before any `{id}` route. Update the module
+  docstring. If the file grows past ~250 lines, put endpoints/deliveries in `routers/webhook_endpoints.py` attaching
+  to `webhooks_router` and add the side-effect import in `main.py` (AGENTS.md P02-T05 gotcha).
+- `apps/api/src/va_api/routers/webhooks_schemas.py`: `WebhookEndpointCreate`, `WebhookEndpointPatch`,
+  `WebhookEndpointView`, `WebhookEndpointDeleted`, `WebhookTestRequest`, `WebhookTestResult`, `WebhookDeliveryView`
+  (each with an `examples` entry; endpoint example URL `https://hooks.example.com/voiceagents` is fine in tests/openapi
+  but `check_no_placeholders` flags `example.com` in production code — use `https://hooks.acme.test/voiceagents`
+  or similar non-example.com host) + view builders; event_types validator in the schema module (uses
+  `va_events.EventType`).
+- `make openapi` + `corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api`.
+- specs/19 §10 Decision (above) and §8 code list mention `endpoint_deleted`; specs/04 §13 action; AGENTS.md bullet.
+
+### Tests
+- `packages/va_db/tests/test_webhook_repos_db.py` (migrated module DB as other repo tests): endpoint all/count;
+  delete cancels pending+delivering rows of that endpoint only (succeeded/dead and other endpoints untouched; returns
+  2), FK nulls the rest; delivery page filters (status/event_type/call_id/endpoint_id) + cursor paging + RLS (other
+  org's rows invisible); replay from dead/succeeded/failed resets fields and keeps event_id/url/payload; replay of
+  pending/delivering → CONFLICT; endpoint_deleted → CONFLICT; disabled endpoint → CONFLICT; other org → NOT_FOUND.
+  Outbox: `_finish` on a non-delivering row raises `DeliveryCancelledError` (mark_succeeded/schedule_retry/mark_dead).
+- `apps/webhook_dispatcher/tests/test_dispatcher_db.py`: a row cancelled (status → dead endpoint_deleted) while its
+  attempt is gated in the receiver stays dead with `endpoint_deleted` after release, no call event row, log
+  `webhook.delivery_cancelled`. Existing dispatcher tests pass with moved imports.
+- `packages/va_events/tests/test_webhook_signing.py` / `test_webhook_schedule.py` (moved, unchanged asserts).
+- `apps/api/tests/test_webhook_endpoints.py` (session_helpers.migrated_postgres, `SessionContainer` with
+  `FrozenClock`, `host_resolver.answers["hooks.test"] = ["127.0.0.1"]`, real `webhook_receiver.Receiver` on port 0):
+  create (201 view, defaults `["*"]`, audit row), list oldest first, PATCH subset + audit before/after, PATCH no-op →
+  no audit row, delete → `{deleted:true}` + pending rows dead `endpoint_deleted` + audit; URL rejections (https
+  required when `allow_insecure_webhooks` false in a non-local env — build settings with `va_env=staging`? if the
+  api refuses staging settings in tests, test `check_webhook_url` directly; blocked address with
+  `webhook_allow_private=False`) → `WEBHOOK_URL_REJECTED` field `url`; event_types validation (`foo.bar`,
+  `call.*` ok, `nope.*` rejected, empty list, duplicates) with `field` paths; 21st endpoint → INVALID_INPUT;
+  phi_allowed true by developer → 403, by owner → ok; RBAC: developer write ok, analyst/viewer GET ok + POST 403,
+  billing GET 403; API key with `webhooks:read` only → POST 403.
+  Test send: receiver gets one POST with envelope body, `X-VA-Signature` verifies with the org secret
+  (`webhook_receiver.signature_ok`), result `succeeded: true, status_code: 200`; receiver replying 500 →
+  `succeeded: false, error: "http_status", status_code: 500`; bad event_type → INVALID_INPUT; disabled endpoint still
+  sends; no `webhook_deliveries` row created; blocked URL (resolver answer `10.0.0.1` with allow_private False, or
+  metadata `169.254.169.254` which stays blocked even with allow_private) → `error: "blocked_destination:address"` and
+  the receiver got nothing.
+  Deliveries: seed rows (via `RowFactory`/direct inserts in a tenant session) → list newest first, filters, cursor,
+  `limit=101` → INVALID_INPUT field `limit`, payload absent from items, `next_attempt_at` null for non-pending;
+  replay dead → 200 pending attempts 0 + audit `webhook_delivery.replay`; replay pending → 409; other org → 404.
+- Cross-tenant: factories `endpoint_id` (seed endpoint url `http://127.0.0.1:9/hook` — IP literal, no DNS; test env
+  allows http + private, refused port → quick `connection` result for the owner control of test send) and
+  `delivery_id` (seed a `dead` delivery so the replay owner control is 200) in
+  `apps/api/tests/support/cross_tenant_factories.py`; run `test_cross_tenant_routes.py`, `test_audit_markers.py`,
+  `test_openapi.py`, operations contract, `test_rbac_matrix.py`.
+- `packages/va_db` audit unit test (spec list == AUDIT_ACTIONS) passes with the new action.
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest packages/va_db packages/va_events apps/api apps/webhook_dispatcher -q`; `make openapi` + gen:api +
+`make test-ts`; full `make test` in background with heartbeat Monitor (truncate the log first); `make check`;
+jscpd (new api tests tend to clone helpers: reuse `call_helpers`/`session_helpers`); radon. No e2e (no call flow).
+
+### Risks
+- Cross-tenant suite performs real outbound requests for test send: make sure the factory URL never leaves the host
+  (IP literal 127.0.0.1 closed port) and the api test settings keep `webhook_allow_private=True` (default, local/test).
+- Moving modules: keep `uv.lock` consistent (`uv lock`), mypy paths unchanged (va_events src already listed).
+- `example.com` in production schemas trips the placeholder gate; gitleaks unaffected (no secrets in examples).
+- DeliveryCancelledError change touches the dispatcher hot path: existing dispatcher DB tests must stay green.
+
+## Build P06-T04b (builder notes)
+- Moved signing/schedule/delivery to `va_events.webhook_{signing,schedule,delivery}` (+ tests, receiver to
+  va_events tests/support); va-events deps httpx/orjson/opentelemetry-api (uv.lock: metadata only).
+- `va_db.repositories.webhooks`: `WebhookEndpointRepo` (all/count/delete cancelling queued rows),
+  `WebhookDeliveryFilter`, `WebhookDeliveryRepo` (page/replay); `ENDPOINT_DELETED_ERROR` re-exported as
+  `va_events.webhook_delivery.ENDPOINT_DELETED`.
+- `OutboxRepo._finish` only on `delivering` rows → `DeliveryCancelledError`; dispatcher `_record` catches it, logs
+  `webhook.delivery_cancelled`, records nothing. Existing outbox test adjusted (mark_dead after schedule_retry now
+  needs a re-claim; split into separate rows) + new parametrized test.
+- API: `routers/webhook_endpoints.py` (7 routes, side-effect import in main), schemas in
+  `routers/webhook_endpoints_schemas.py`, `services/webhook_test_send.py`, `webhook_policy.check_webhook_url`
+  (check_call_webhook unchanged behaviour), container `webhook_deliverer`; audit action `webhook_delivery.replay`
+  (specs/04 §13 + AUDIT_ACTIONS). Cross-tenant factories `endpoint_id`/`delivery_id`. openapi + gen:api regenerated.
+- va_db conftest gained `tenant_db`/`fresh_org` fixtures (jscpd clones otherwise).
+- Deviations from plan: phi refusal is `FORBIDDEN` (what require_permission raises); test-send returns 404 for unknown
+  endpoint; list `status` query typed as the status Literal (bad value → INVALID_INPUT field status).
+
+## Review P06-T04b — approved
+- Re-ran: lint/typecheck/placeholders pass; make test 11025 passed, 7 skipped, coverage 99.07 %; make test-ts pass
+  (122); openapi drift current; jscpd 0 clones.
+- Note (non-blocking): the 20-endpoint cap is a count-then-insert without an org lock, so two concurrent creates
+  at 19 could both pass; acceptable as a soft limit, could take `OrgRepo.lock` later if it matters.

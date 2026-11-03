@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793682816-3287
+> P06-T04b: webhook delivery code shared in va_events.webhook_{signing,schedule,delivery}; endpoint/delivery API in va_api.routers.webhook_endpoints + services.webhook_test_send; OutboxRepo outcomes only on delivering rows (DeliveryCancelledError); helpers named test_* get collected by pytest; api tests creating many resources hit frozen-clock rate limits -> seed rows directly; test_container asserts close order of every httpx client in build_container
+<!-- tags: webhooks, api, testing | created: 2026-11-03 -->
+
 ### mem-1793673488-d9e9
 > P06-T02: webhook outbox va_events.DbWebhookRouter (route/route_many, caller session = outbox) + pure webhook_routing.plan_deliveries + webhook_payloads (live_body/batch_body/envelope_body/strip_phi/iso_ms); WEBHOOK_KEY in catalog; org webhook_format picks per-call format; Call(metadata=...) silently sets declarative MetaData attr -> use metadata_=
 <!-- tags: events, webhooks, testing | created: 2026-11-03 -->

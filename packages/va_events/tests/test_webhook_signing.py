@@ -7,7 +7,7 @@ import hmac
 
 import pytest
 
-from va_webhooks.signing import request_headers, signature_headers
+from va_events.webhook_signing import request_headers, signature_headers
 
 SECRET = "whsec_test"  # noqa: S105 - fixed test vector
 BODY = b'{"a":1}'

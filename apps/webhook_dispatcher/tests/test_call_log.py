@@ -10,8 +10,8 @@ import pytest
 
 from va_common.time import FrozenClock
 from va_events import EventType
+from va_events.webhook_delivery import Outcome, Outgoing, SendResult, blocked, decide
 from va_webhooks.call_log import attempt_event, attempt_message, human_delay
-from va_webhooks.delivery import Outcome, Outgoing, SendResult, blocked, decide
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
 

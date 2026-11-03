@@ -353,8 +353,8 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 > `http_status` (other non-2xx, code in `last_status_code`), `gone` (410 → `dead` at once), `timeout`, `connection`,
 > `blocked_destination:<reason>` (reasons of the guard above; `scheme` → `dead` at once since the URL never changes,
 > `host`/`address`/`resolution` retry because DNS may change), `endpoint_disabled` (row of a disabled endpoint →
-> `dead` without a request), `secret_unavailable` (retry). `last_response_ms` is set when a response arrived or the
-> timeout elapsed. (4) `http` is allowed in `local`/`test` or when the org setting `allow_insecure_webhooks` is true;
+> `dead` without a request), `secret_unavailable` (retry), plus `endpoint_deleted` (set by an endpoint delete, never by
+> an attempt; §10 Decision P06-T04b). `last_response_ms` is set when a response arrived or the timeout elapsed. (4) `http` is allowed in `local`/`test` or when the org setting `allow_insecure_webhooks` is true;
 > the URL is vetted before sending (`check_destination_url`, classifies the refusal) and again at connect time by the
 > pinning client of specs/28 §6.4 (`va_common.safe_http.safe_client`), so DNS rebinding cannot reach a blocked
 > address. (5) The body is `orjson.dumps(payload)`; the signed bytes are the sent bytes. `X-VA-Signature` carries one
@@ -413,6 +413,38 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 > `secret` `null` on an `Idempotency-Key` replay. Both need the `webhooks.secret` permission (owners, admins, API keys
 > with `*`; specs/04 §3.2) next to `webhooks:read` / `webhooks:write`. The `webhook.secret_rotate` audit row (resource
 > `org`) records last four characters and timestamps only.
+
+> Decision (2026-11-03): webhook endpoint and delivery management (P06-T04b). (1) Endpoint bodies forbid unknown
+> fields. `url`: absolute http(s), at most 2 048 characters, vetted on create and on a PATCH that sends it with the
+> Send Call rules (https unless `VA_ENV` local/test or the org's `allow_insecure_webhooks`; private targets only with
+> `WEBHOOK_ALLOW_PRIVATE`; refusal `WEBHOOK_URL_REJECTED` on field `url`). `description` at most 500 characters
+> (default `""`). `event_types` 1–100 unique entries, each `*`, an exact §2 event type, or `<prefix>.*` where some
+> §2 type starts with `<prefix>.` (else `INVALID_INPUT` on `event_types[i]`; default `["*"]`). `enabled` (default
+> true) and `phi_allowed` (default false; setting it true needs the `org.compliance` permission, else `FORBIDDEN`).
+> PATCH takes any subset; an explicit `null` is `INVALID_INPUT`; re-enabling an auto-disabled endpoint is allowed;
+> changing `url` leaves queued deliveries on the URL they were created for. An org has at most 20 endpoints
+> (`INVALID_INPUT` "An org can have at most 20 webhook endpoints."). The view is `{id, url, description, event_types,
+> enabled, phi_allowed, created_at, updated_at}`; the list is oldest first, unpaginated. Audit: `webhook_endpoint.create`
+> (after = view), `.update` (changed fields only; no row for a no-op), `.delete` (after `{cancelled_deliveries}`).
+> (2) DELETE runs in one tenant transaction: the endpoint's `pending`/`delivering` rows become `dead` with
+> `last_error = 'endpoint_deleted'`, then the endpoint row goes (its foreign key nulls `endpoint_id` on the rest).
+> The dispatcher records an attempt's outcome only on a row still `delivering`, so an attempt in flight during the
+> delete leaves the cancelled row as it is (log `webhook.delivery_cancelled`, no call log event, no metric).
+> (3) The test send (`{event_type?}`, a §2 type, default `call.completed`; also for disabled endpoints) sends one §7
+> envelope `{id: evt_<uuid7>, type, created_at, org_id, call_id: null, batch_id: null, conversation_id: null, data:
+> {test: true, message: "Test event from VoiceAgents."}}` signed with the org's active secrets through the dispatcher's
+> delivery code (10 s timeout). The URL is vetted first with the rules of (1) (refusal → error
+> `blocked_destination:<reason>`, no request) and again at connect time. No `webhook_deliveries` row, no retry, no
+> call event, no audit row. The response is always 200: `{event_id, event_type, succeeded, status_code, error,
+> response_ms}` with the §8 error codes. (4) `GET /v1/webhooks/deliveries` also filters by `endpoint_id`, orders newest
+> first with the specs/31 §2 cursor, and returns `{id, event_id, event_type, url, endpoint_id, format, status, attempts,
+> next_attempt_at, last_status_code, last_error, last_response_ms, call_id, batch_id, conversation_id, delivered_at,
+> created_at, updated_at}` (`next_attempt_at` only while `pending`; the payload is never returned). (5) Replay of a
+> `succeeded`/`failed`/`dead` row resets it in place (`pending`, `attempts = 0`, `next_attempt_at = now`, last
+> status/error/response time and `delivered_at` cleared): same row, event id, URL, and payload. Refusals: another
+> org's or absent row `NOT_FOUND`; a queued row `CONFLICT` "The delivery is already queued."; a row cancelled by an
+> endpoint delete `CONFLICT` "The delivery's endpoint was deleted."; a row of a disabled endpoint `CONFLICT` "Enable
+> the webhook endpoint before replaying its deliveries.". Audit `webhook_delivery.replay` (specs/04 §13).
 
 ## 11. Tests required
 

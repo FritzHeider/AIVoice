@@ -12,6 +12,8 @@ from cross_tenant import REGISTRY, FactoryContext
 from identity_db import unique_email
 from session_helpers import add_member, store_api_key, sub_account
 
+from va_common.ids import new_id
+from va_db.models import WebhookDelivery, WebhookEndpoint
 from va_db.repositories import InvitationRepo
 
 __all__ = ["REGISTRY"]
@@ -56,11 +58,46 @@ async def _call(context: FactoryContext) -> str:
     return str(call.call_id)
 
 
+# A closed port on an IP literal: no DNS, never leaves the host, and the owner's test send fails fast.
+_CLOSED_HOOK = "http://127.0.0.1:9/hook"
+
+
+async def _webhook_endpoint(context: FactoryContext) -> str:
+    """An enabled webhook endpoint of the tenant's org."""
+    org_id = context.tenant.org_id
+    async with context.identity.database.tenant_session(org_id) as session:
+        endpoint = WebhookEndpoint(org_id=org_id, url=_CLOSED_HOOK)
+        session.add(endpoint)
+        await session.flush()
+        return str(endpoint.id)
+
+
+async def _webhook_delivery(context: FactoryContext) -> str:
+    """A ``dead`` delivery of the tenant's org (no endpoint), so the owner's replay succeeds."""
+    org_id = context.tenant.org_id
+    async with context.identity.database.tenant_session(org_id) as session:
+        delivery = WebhookDelivery(
+            org_id=org_id,
+            event_id=f"evt_{new_id().hex}",
+            event_type="call.completed",
+            url=_CLOSED_HOOK,
+            payload={"status": "completed"},
+            status="dead",
+            attempts=9,
+            last_error="http_status",
+        )
+        session.add(delivery)
+        await session.flush()
+        return str(delivery.id)
+
+
 REGISTRY.register_resource_factory("user_id", _member)
 REGISTRY.register_resource_factory("invitation_id", _invitation)
 REGISTRY.register_resource_factory("key_id", _api_key)
 REGISTRY.register_resource_factory("org_id", _sub_account)
 REGISTRY.register_resource_factory("call_id", _call)
+REGISTRY.register_resource_factory("endpoint_id", _webhook_endpoint)
+REGISTRY.register_resource_factory("delivery_id", _webhook_delivery)
 # ``GET /v1/calls`` takes its filters as one query model, which the route walker sees as a required parameter;
 # the unfiltered listing must hold none of org A's calls.
 REGISTRY.register_request("calls_list", params={"limit": "1000"})

@@ -1,7 +1,9 @@
 """The webhook outbox poll and delivery bookkeeping (specs/03-data-model.md §2; specs/19 §8).
 
 The retry schedule and the dead-letter decision belong to the dispatcher; this repository only claims due
-rows and records each attempt's outcome.
+rows and records each attempt's outcome. An outcome is recorded only on a row that is still ``delivering``:
+a row cancelled meanwhile (endpoint deleted, specs/19 §10 Decision P06-T04b) raises
+:class:`DeliveryCancelledError` and keeps its state.
 """
 
 from __future__ import annotations
@@ -15,14 +17,22 @@ from typing import Any, Final
 from sqlalchemy import func, select, update
 
 from va_db.models import WebhookDelivery, WebhookEndpoint
-from va_db.repositories.base import NotFoundError, SystemRepository, require_positive
+from va_db.repositories.base import SystemRepository, require_positive
 
-__all__ = ["CLAIM_LIMIT", "DEFAULT_LEASE", "OutboxBacklog", "OutboxRepo"]
+__all__ = ["CLAIM_LIMIT", "DEFAULT_LEASE", "DeliveryCancelledError", "OutboxBacklog", "OutboxRepo"]
 
 CLAIM_LIMIT: Final = 200
 DEFAULT_LEASE: Final = timedelta(minutes=5)
 
 _DUE_STATUSES: Final = ("pending", "delivering")
+
+
+class DeliveryCancelledError(Exception):
+    """The attempt's row is no longer ``delivering`` (cancelled by an endpoint delete, or gone)."""
+
+    def __init__(self, delivery_id: uuid.UUID) -> None:
+        super().__init__(f"webhook delivery {delivery_id} is no longer delivering")
+        self.delivery_id = delivery_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,14 +101,14 @@ class OutboxRepo(SystemRepository):
     async def _finish(self, delivery_id: uuid.UUID, values: dict[str, Any]) -> WebhookDelivery:
         statement = (
             update(WebhookDelivery)
-            .where(WebhookDelivery.id == delivery_id)
+            .where(WebhookDelivery.id == delivery_id, WebhookDelivery.status == "delivering")
             .values(attempts=WebhookDelivery.attempts + 1, **values)
             .returning(WebhookDelivery)
             .execution_options(populate_existing=True, synchronize_session=False)
         )
         delivery = await self.session.scalar(statement)
         if delivery is None:
-            raise NotFoundError(WebhookDelivery.__tablename__)
+            raise DeliveryCancelledError(delivery_id)
         return delivery
 
     async def mark_succeeded(

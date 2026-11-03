@@ -42,6 +42,7 @@ from va_db.repositories import (
     PURGE_RULES,
     BalanceDrift,
     BillingReconcileRepo,
+    DeliveryCancelledError,
     NewTelnyxEvent,
     NotFoundError,
     OutboxRepo,
@@ -373,8 +374,14 @@ async def test_concurrent_claims_skip_locked_rows(
 
 
 async def test_attempt_outcomes_are_recorded(database: Database, org: uuid.UUID) -> None:
-    retried, succeeded = await _deliveries(
-        database, org, [{"status": "delivering"}, {"status": "delivering", "last_error": "timeout"}]
+    retried, failed, succeeded = await _deliveries(
+        database,
+        org,
+        [
+            {"status": "delivering"},
+            {"status": "delivering", "attempts": 1},
+            {"status": "delivering", "last_error": "timeout"},
+        ],
     )
     async with database.system_session() as session:
         repo = OutboxRepo(session)
@@ -391,7 +398,7 @@ async def test_attempt_outcomes_are_recorded(database: Database, org: uuid.UUID)
             _NOW + timedelta(seconds=10),
         )
         assert (first.last_status_code, first.last_error, first.last_response_ms) == (None, "timeout", None)
-        dead = await repo.mark_dead(retried, status_code=410, error="gone", response_ms=35)
+        dead = await repo.mark_dead(failed, status_code=410, error="gone", response_ms=35)
         assert (
             dead.status,
             dead.attempts,
@@ -413,13 +420,32 @@ async def test_attempt_outcomes_are_recorded(database: Database, org: uuid.UUID)
             None,
         )
         assert (done.last_status_code, done.last_response_ms) == (204, 120)
+
+
+@pytest.mark.parametrize("status", ["pending", "succeeded", "failed", "dead", None])
+async def test_outcomes_need_a_delivering_row(database: Database, org: uuid.UUID, status: str | None) -> None:
+    """A row cancelled (or otherwise moved on) while its attempt ran keeps its state; absent rows too."""
+    if status is None:
+        target = new_id()
+    else:
+        (target,) = await _deliveries(
+            database, org, [{"status": status, "last_error": "endpoint_deleted", "attempts": 3}]
+        )
+    async with database.system_session() as session:
+        repo = OutboxRepo(session)
         for outcome in (
-            repo.mark_succeeded(new_id(), now=_NOW, status_code=200, response_ms=1),
-            repo.schedule_retry(new_id(), next_attempt_at=_NOW, status_code=500, error="e", response_ms=1),
-            repo.mark_dead(new_id(), status_code=500, error="e", response_ms=1),
+            repo.mark_succeeded(target, now=_NOW, status_code=200, response_ms=1),
+            repo.schedule_retry(target, next_attempt_at=_NOW, status_code=500, error="e", response_ms=1),
+            repo.mark_dead(target, status_code=500, error="e", response_ms=1),
         ):
-            with pytest.raises(NotFoundError, match="webhook_deliveries not found"):
+            with pytest.raises(DeliveryCancelledError) as caught:
                 await outcome
+            assert caught.value.delivery_id == target
+    if status is not None:
+        async with database.system_session() as session:
+            row = await session.get(WebhookDelivery, target)
+            assert row is not None
+            assert (row.status, row.attempts, row.last_error) == (status, 3, "endpoint_deleted")
 
 
 async def test_backlog_counts_due_rows_and_the_oldest(database: Database, org: uuid.UUID) -> None:

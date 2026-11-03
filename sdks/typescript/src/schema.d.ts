@@ -645,6 +645,114 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/webhooks/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Webhooks Deliveries List
+         * @description The org's webhook deliveries (per-call webhooks and endpoints), newest first, without payloads.
+         */
+        get: operations["webhooks_deliveries_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/webhooks/deliveries/{delivery_id}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Webhooks Deliveries Replay
+         * @description Queue a finished delivery again: a new attempt series with the same event id, URL, and payload.
+         */
+        post: operations["webhooks_deliveries_replay"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/webhooks/endpoints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Webhooks Endpoints List
+         * @description Every webhook endpoint of the org, oldest first.
+         */
+        get: operations["webhooks_endpoints_list"];
+        put?: never;
+        /**
+         * Webhooks Endpoints Create
+         * @description Add an endpoint that receives the org's events (envelope format, specs/19 §7).
+         */
+        post: operations["webhooks_endpoints_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/webhooks/endpoints/{endpoint_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Webhooks Endpoints Delete
+         * @description Delete an endpoint; its pending deliveries are cancelled (`dead`, `endpoint_deleted`).
+         */
+        delete: operations["webhooks_endpoints_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Webhooks Endpoints Update
+         * @description Change any subset of an endpoint's fields; queued deliveries keep the URL they were created for.
+         */
+        patch: operations["webhooks_endpoints_update"];
+        trace?: never;
+    };
+    "/v1/webhooks/endpoints/{endpoint_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Webhooks Endpoints Test
+         * @description Send one synthetic signed event to the endpoint (also when disabled) and report what happened.
+         */
+        post: operations["webhooks_endpoints_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/webhooks/signing-secret": {
         parameters: {
             query?: never;
@@ -2482,6 +2590,85 @@ export interface components {
             errors?: null;
         };
         /**
+         * DataResponse[WebhookDeliveryView]
+         * @example {
+         *       "data": {
+         *         "attempts": 9,
+         *         "call_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcf",
+         *         "created_at": "2026-11-02T09:30:00Z",
+         *         "endpoint_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *         "event_id": "evt_0192f3a45b6c7d8e9f0123456789abcd",
+         *         "event_type": "call.completed",
+         *         "format": "envelope",
+         *         "id": "0192f3a4-5b6c-7d8e-9f01-23456789abce",
+         *         "last_error": "http_status",
+         *         "last_response_ms": 88,
+         *         "last_status_code": 500,
+         *         "status": "dead",
+         *         "updated_at": "2026-11-03T00:41:12Z",
+         *         "url": "https://hooks.acme.test/voiceagents"
+         *       }
+         *     }
+         */
+        DataResponse_WebhookDeliveryView_: {
+            data: components["schemas"]["WebhookDeliveryView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[WebhookEndpointDeleted]
+         * @example {
+         *       "data": {
+         *         "deleted": true
+         *       }
+         *     }
+         */
+        DataResponse_WebhookEndpointDeleted_: {
+            data: components["schemas"]["WebhookEndpointDeleted"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[WebhookEndpointView]
+         * @example {
+         *       "data": {
+         *         "created_at": "2026-11-03T09:30:00Z",
+         *         "description": "CRM sync",
+         *         "enabled": true,
+         *         "event_types": [
+         *           "call.completed",
+         *           "sms.*"
+         *         ],
+         *         "id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *         "phi_allowed": false,
+         *         "updated_at": "2026-11-03T09:30:00Z",
+         *         "url": "https://hooks.acme.test/voiceagents"
+         *       }
+         *     }
+         */
+        DataResponse_WebhookEndpointView_: {
+            data: components["schemas"]["WebhookEndpointView"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
+         * DataResponse[WebhookTestResult]
+         * @example {
+         *       "data": {
+         *         "event_id": "evt_0192f3a45b6c7d8e9f0123456789abcd",
+         *         "event_type": "call.completed",
+         *         "response_ms": 142,
+         *         "status_code": 200,
+         *         "succeeded": true
+         *       }
+         *     }
+         */
+        DataResponse_WebhookTestResult_: {
+            data: components["schemas"]["WebhookTestResult"];
+            /** Errors */
+            errors?: null;
+        };
+        /**
          * DataResponse[list[ApiKeyView]]
          * @example {
          *       "data": [
@@ -2553,6 +2740,33 @@ export interface components {
             /** Errors */
             errors?: null;
         };
+        /**
+         * DataResponse[list[WebhookEndpointView]]
+         * @example {
+         *       "data": [
+         *         {
+         *           "created_at": "2026-11-03T09:30:00Z",
+         *           "description": "CRM sync",
+         *           "enabled": true,
+         *           "event_types": [
+         *             "call.completed",
+         *             "sms.*"
+         *           ],
+         *           "id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *           "phi_allowed": false,
+         *           "updated_at": "2026-11-03T09:30:00Z",
+         *           "url": "https://hooks.acme.test/voiceagents"
+         *         }
+         *       ]
+         *     }
+         */
+        DataResponse_list_WebhookEndpointView__: {
+            /** Data */
+            data: components["schemas"]["WebhookEndpointView"][];
+            /** Errors */
+            errors?: null;
+        };
+        Description: string;
         /** DialingStrategy */
         DialingStrategy: {
             /** Pool Id */
@@ -2605,6 +2819,7 @@ export interface components {
             /** Url */
             url: string;
         };
+        EndpointUrl: string;
         /**
          * EngineSettings
          * @description Dialogue engine behaviour.
@@ -2738,6 +2953,7 @@ export interface components {
              */
             results: unknown[];
         };
+        EventTypes: string[];
         /**
          * ExperimentsSettings
          * @description Experiment arm assignment.
@@ -3768,6 +3984,40 @@ export interface components {
         PageResponse_AuditLogView_: {
             /** Data */
             data: components["schemas"]["AuditLogView"][];
+            /** Errors */
+            errors?: null;
+            pagination: components["schemas"]["Pagination"];
+        };
+        /**
+         * PageResponse[WebhookDeliveryView]
+         * @example {
+         *       "data": [
+         *         {
+         *           "attempts": 9,
+         *           "call_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcf",
+         *           "created_at": "2026-11-02T09:30:00Z",
+         *           "endpoint_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *           "event_id": "evt_0192f3a45b6c7d8e9f0123456789abcd",
+         *           "event_type": "call.completed",
+         *           "format": "envelope",
+         *           "id": "0192f3a4-5b6c-7d8e-9f01-23456789abce",
+         *           "last_error": "http_status",
+         *           "last_response_ms": 88,
+         *           "last_status_code": 500,
+         *           "status": "dead",
+         *           "updated_at": "2026-11-03T00:41:12Z",
+         *           "url": "https://hooks.acme.test/voiceagents"
+         *         }
+         *       ],
+         *       "pagination": {
+         *         "has_more": true,
+         *         "next_cursor": "MjAyNi0xMC0yOVQxNDowMzoxMS4wMDAwMDArMDA6MDB8MDE5MmY0YjEtN2EyYy03ZDNlLTlmNDAtNWE2YjdjOGQ5ZTBm"
+         *       }
+         *     }
+         */
+        PageResponse_WebhookDeliveryView_: {
+            /** Data */
+            data: components["schemas"]["WebhookDeliveryView"][];
             /** Errors */
             errors?: null;
             pagination: components["schemas"]["Pagination"];
@@ -4998,6 +5248,246 @@ export interface components {
              * @default 45
              */
             timeout_s: number;
+        };
+        /**
+         * WebhookDeliveryView
+         * @description One outbox row: an event sent (or to be sent) to one URL.
+         * @example {
+         *       "attempts": 9,
+         *       "call_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcf",
+         *       "created_at": "2026-11-02T09:30:00Z",
+         *       "endpoint_id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *       "event_id": "evt_0192f3a45b6c7d8e9f0123456789abcd",
+         *       "event_type": "call.completed",
+         *       "format": "envelope",
+         *       "id": "0192f3a4-5b6c-7d8e-9f01-23456789abce",
+         *       "last_error": "http_status",
+         *       "last_response_ms": 88,
+         *       "last_status_code": 500,
+         *       "status": "dead",
+         *       "updated_at": "2026-11-03T00:41:12Z",
+         *       "url": "https://hooks.acme.test/voiceagents"
+         *     }
+         */
+        WebhookDeliveryView: {
+            /** Attempts */
+            attempts: number;
+            /** Batch Id */
+            batch_id: string | null;
+            /** Call Id */
+            call_id: string | null;
+            /** Conversation Id */
+            conversation_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Delivered At */
+            delivered_at: string | null;
+            /** Endpoint Id */
+            endpoint_id: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Event Type */
+            event_type: string;
+            /**
+             * Format
+             * @enum {string}
+             */
+            format: "bland" | "envelope";
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Last Error */
+            last_error: string | null;
+            /** Last Response Ms */
+            last_response_ms: number | null;
+            /** Last Status Code */
+            last_status_code: number | null;
+            /**
+             * Next Attempt At
+             * @description When the next attempt is due; only while `pending`.
+             */
+            next_attempt_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "delivering" | "succeeded" | "failed" | "dead";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Url */
+            url: string;
+        };
+        /**
+         * WebhookEndpointCreate
+         * @description A new org webhook endpoint.
+         * @example {
+         *       "description": "CRM sync",
+         *       "event_types": [
+         *         "call.completed",
+         *         "sms.*"
+         *       ],
+         *       "url": "https://hooks.acme.test/voiceagents"
+         *     }
+         */
+        WebhookEndpointCreate: {
+            /**
+             * @description Free text shown in the dashboard.
+             * @default
+             */
+            description: components["schemas"]["Description"];
+            /**
+             * Enabled
+             * @description Disabled endpoints receive no deliveries.
+             * @default true
+             */
+            enabled: boolean;
+            /** @description `*`, exact event types, or `<prefix>.*` globs (default every event). */
+            event_types?: components["schemas"]["EventTypes"];
+            /**
+             * Phi Allowed
+             * @description Under HIPAA mode only flagged endpoints get transcripts (needs `org.compliance`).
+             * @default false
+             */
+            phi_allowed: boolean;
+            /** @description Absolute http(s) URL; https outside dev unless insecure is allowed. */
+            url: components["schemas"]["EndpointUrl"];
+        };
+        /**
+         * WebhookEndpointDeleted
+         * @description The endpoint is gone; its queued deliveries were cancelled.
+         * @example {
+         *       "deleted": true
+         *     }
+         */
+        WebhookEndpointDeleted: {
+            /** Deleted */
+            deleted: boolean;
+        };
+        /**
+         * WebhookEndpointPatch
+         * @description Any subset of an endpoint's fields; fields left out keep their value.
+         * @example {
+         *       "enabled": false
+         *     }
+         */
+        WebhookEndpointPatch: {
+            /** @default  */
+            description: components["schemas"]["Description"];
+            /**
+             * Enabled
+             * @description Re-enabling an auto-disabled endpoint is allowed.
+             * @default true
+             */
+            enabled: boolean;
+            event_types?: components["schemas"]["EventTypes"];
+            /**
+             * Phi Allowed
+             * @default false
+             */
+            phi_allowed: boolean;
+            /**
+             * @description New URL; deliveries already queued keep the old one.
+             * @default
+             */
+            url: components["schemas"]["EndpointUrl"];
+        };
+        /**
+         * WebhookEndpointView
+         * @description An org webhook endpoint.
+         * @example {
+         *       "created_at": "2026-11-03T09:30:00Z",
+         *       "description": "CRM sync",
+         *       "enabled": true,
+         *       "event_types": [
+         *         "call.completed",
+         *         "sms.*"
+         *       ],
+         *       "id": "0192f3a4-5b6c-7d8e-9f01-23456789abcd",
+         *       "phi_allowed": false,
+         *       "updated_at": "2026-11-03T09:30:00Z",
+         *       "url": "https://hooks.acme.test/voiceagents"
+         *     }
+         */
+        WebhookEndpointView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Event Types */
+            event_types: string[];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Phi Allowed */
+            phi_allowed: boolean;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Url */
+            url: string;
+        };
+        /**
+         * WebhookTestRequest
+         * @description Which event type the synthetic test event claims to be.
+         * @example {
+         *       "event_type": "call.completed"
+         *     }
+         */
+        WebhookTestRequest: {
+            /**
+             * Event Type
+             * @description A catalog event type (default `call.completed`).
+             * @default call.completed
+             */
+            event_type: string;
+        };
+        /**
+         * WebhookTestResult
+         * @description The outcome of the single, unrecorded test delivery.
+         * @example {
+         *       "event_id": "evt_0192f3a45b6c7d8e9f0123456789abcd",
+         *       "event_type": "call.completed",
+         *       "response_ms": 142,
+         *       "status_code": 200,
+         *       "succeeded": true
+         *     }
+         */
+        WebhookTestResult: {
+            /**
+             * Error
+             * @description Delivery error code (specs/19 §8), `null` on success.
+             */
+            error: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Event Type */
+            event_type: string;
+            /** Response Ms */
+            response_ms: number | null;
+            /**
+             * Status Code
+             * @description HTTP status of the response, when one arrived.
+             */
+            status_code: number | null;
+            /** Succeeded */
+            succeeded: boolean;
         };
         /** @enum {string} */
         Weekday: "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -6531,6 +7021,296 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    webhooks_deliveries_list: {
+        parameters: {
+            query?: {
+                /** @description `pagination.next_cursor` of the previous page. */
+                cursor?: string | null;
+                /** @description Page size, 1-100. */
+                limit?: number;
+                /** @description Only this status (`dead` = the dead-letter view). */
+                status?: ("pending" | "delivering" | "succeeded" | "failed" | "dead") | null;
+                /** @description Only this event type, e.g. `call.completed`. */
+                event_type?: string | null;
+                /** @description Only deliveries about this call. */
+                call_id?: string | null;
+                /** @description Only deliveries to this endpoint. */
+                endpoint_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PageResponse_WebhookDeliveryView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_deliveries_replay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                delivery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_WebhookDeliveryView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_endpoints_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_list_WebhookEndpointView__"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_endpoints_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookEndpointCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_WebhookEndpointView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_endpoints_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                endpoint_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_WebhookEndpointDeleted_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_endpoints_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                endpoint_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookEndpointPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_WebhookEndpointView_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    webhooks_endpoints_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                endpoint_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["WebhookTestRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataResponse_WebhookTestResult_"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };

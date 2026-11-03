@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -13,12 +14,13 @@ from pg_container import running_postgres
 from service_helpers import isolate_env, settings_of
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_rows import OrgFactory, open_database
 
 import va_db.models  # noqa: F401  (registers every table on Base.metadata)
 from va_common.settings import DatabaseSettings
 from va_db.base import Base
 from va_db.engine import create_engine
-from va_db.session import configure_database
+from va_db.session import Database, configure_database
 
 
 @pytest.fixture(autouse=True)
@@ -67,3 +69,16 @@ async def identity_db(migrated_url: str) -> AsyncIterator[IdentityDb]:
     """A migrated database with an envelope (random local master key) and an org provisioner."""
     async with open_identity_db(migrated_url) as db:
         yield db
+
+
+@pytest.fixture
+async def tenant_db(migrated_url: str) -> AsyncIterator[Database]:
+    """A :class:`Database` on the module's migrated database (``va_app`` and ``va_system`` pools)."""
+    async with open_database(migrated_url) as db:
+        yield db
+
+
+@pytest.fixture
+async def fresh_org(tenant_db: Database) -> uuid.UUID:
+    """A fresh org on ``tenant_db`` (other tests' rows stay invisible to it)."""
+    return await OrgFactory(tenant_db).create()

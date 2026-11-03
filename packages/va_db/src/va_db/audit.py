@@ -118,6 +118,7 @@ AUDIT_ACTIONS: Final = frozenset(
         "webhook_endpoint.create",
         "webhook_endpoint.update",
         "webhook_endpoint.delete",
+        "webhook_delivery.replay",
         "webhook.secret_rotate",
         "dnc.add",
         "dnc.remove",

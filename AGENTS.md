@@ -1624,3 +1624,14 @@ Grafana 3001
   `GET /v1/webhooks/signing-secret` and `POST .../rotate` live on `routers/webhooks.webhooks_router` (in `ROUTERS`;
   P06-T04b adds the endpoint routes there). The dispatcher's `SigningSecrets` caches no longer than the previous
   secret's expiry. Dispatcher tests: `dispatch_rig(...).envelope` for rotating a rig org.
+- 2026-11-03 (P06-T04b): webhook delivery code shared by the dispatcher and the api lives in `va_events`
+  (`webhook_signing`, `webhook_schedule`, `webhook_delivery.Deliverer/Outgoing/SendResult/decide`); the real-socket test
+  receiver moved to `packages/va_events/tests/support/webhook_receiver.py`. Endpoint/delivery routes are
+  `va_api/routers/webhook_endpoints.py` (side-effect import in `main.py`, on `webhooks_router`) over tenant
+  `va_db.repositories.WebhookEndpointRepo`/`WebhookDeliveryRepo`; the test send is
+  `va_api.services.webhook_test_send.send_test_event` with the container's `webhook_deliverer` (`SessionContainer`
+  builds one over `host_resolver` when the app opens it). `OutboxRepo` records outcomes only on `delivering` rows
+  (`DeliveryCancelledError` otherwise), so tests must claim (or seed `delivering`) before `mark_*`. Endpoint URL checks:
+  `webhook_policy.check_webhook_url(url, org=, settings=, field=, resolver=)`. Never name a test helper `test_*`
+  (pytest collects it) and never name a src class `Test*` (an imported one is collected too). A test creating more
+  than a handful of resources through the api hits the plan's frozen-clock rate limit (429): seed rows directly.
