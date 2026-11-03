@@ -1,8 +1,8 @@
 # Loop Summary
 
-**Status:** Stopped: max runtime exceeded
-**Iterations:** 63
-**Duration:** 12h 10m 30s
+**Status:** Completed successfully
+**Iterations:** 6
+**Duration:** 2h 21m 8s
 
 ## Tasks
 
@@ -14,4 +14,4 @@ _No events recorded._
 
 ## Final Commit
 
-7e25f70: feat(api): active calls, recording links, transcript downloads, and call event pages
+96110e6: docs(readme): mark phase 05 complete after exit gate
