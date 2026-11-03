@@ -1046,3 +1046,125 @@ background with heartbeat Monitor (truncate log first); jscpd; radon. No call-fl
 - Checked against specs/19 §9 (+ Decision), specs/05 §2 row (calls:read), specs/04 scope table, specs/03 §11 key row.
   Token stored only as sha256; uvicorn access_log=False so the `?token=` query never hits logs. Refusals before
   accept via denial response; tail aclose in finally; SSE frames unchanged (T06a tests green).
+
+## Plan P06-T06c — Org event stream
+Spec: specs/19 §9 (third bullet), specs/26 §4 (`va webhooks listen`), specs/25 (dashboard live list `types=call.*`).
+Reuse: `va_api.sse` (frames, `EventStreamResponse`), `webhook_routing.matches`, `webhook_payloads.content_body/
+envelope_body/strip_phi`, the LiveHub subscription/overflow pattern.
+
+### Decisions (add `> Decision (2026-11-03): org event stream (P06-T06c).` under specs/19 §9 after the T06b one)
+1. `GET /v1/events/stream?types=<comma-separated globs>` on a new envelope router `events_router`
+   (`routers/events.py`, prefix `/v1/events`, tag `Events`, in `main.ROUTERS`), `operation_id="events_stream"`,
+   `require_scope("webhooks:read")` for both auth kinds (API key; dashboard session through the §3.2 matrix row
+   "Webhook endpoints / deliveries / replay", i.e. every role except billing). Scope = `ctx.org_id` (a parent acting on
+   a sub-account sees the sub-account; never descendants). GET → no audit marker needed.
+2. `types`: optional, default `*`. Split on `,`, strip, drop empties; each pattern must match `^[a-z0-9_.*]{1,64}$`,
+   at most 20 patterns, else `INVALID_INPUT` field `types` "types must be a comma-separated list of event type
+   patterns such as call.*" (checked before streaming). Matching = `webhook_routing.matches` (`fnmatchcase`, same as
+   org endpoints). `INTERNAL_TYPES` are never sent, even for `*`.
+3. Source = pod-wide `va_events.StreamTailHub(redis, clock, *, block_ms=1000, queue_size=1000)` (new module
+   `va_events/stream_tail.py`; container `stream_tail` built next to `live_hub`, `aclose` on exit; SessionContainer
+   builds one on SystemClock like `live_hub`). ONE reader task per process, started by the first subscriber and ending
+   when the last leaves: `XREAD COUNT 500 BLOCK block_ms STREAMS events:calls events:sms events:widget events:billing
+   events:system <ids>` with ids starting at `$`... NOTE `$` must be resolved once at reader start (first XREAD with `$`
+   for all keys, then carry the returned/last ids; use `XINFO STREAM`-free approach: on start read each key's last id
+   with `XREVRANGE key + - COUNT 1` → id or `0-0`, then XREAD from those ids — avoids missing entries between loop
+   iterations that `$` would cause). block_ms 1000 < socket timeout 5 s. Decoding: `va_events.model.decode`;
+   undecodable payloads are skipped and logged `events.stream_tail_poison` (stream + entry id). Dispatch: subscribers
+   indexed by `org_id`; a subscription has a predicate (types) evaluated in the reader, so only wanted events are
+   queued. Full queue (1 000) → subscription closed `overflow`; Redis error → every subscription closed `lost`, reader
+   ends, next subscribe restarts it. After an empty read the reader yields (`await asyncio.sleep(0)`; fakeredis
+   returns immediately from blocking reads). `subscribe(org_id, predicate) -> TailSubscription` is synchronous-ish
+   (no Redis confirmation needed; async for the lock), raises `StreamTailError` after `aclose`.
+   Refactor to avoid duplication: move the queue/close logic of `LiveSubscription` into a generic
+   `va_events.subscription.Subscription[T]` (`next`, `deliver`, `close`, `closed_reason`, `CloseReason`,
+   `SubscriptionClosedError`); `LiveSubscription(Subscription[bytes])` keeps `channel` and `LiveSubscriptionClosedError`
+   stays exported as an alias of the shared error (T06a/T06b tests must pass unchanged).
+4. No replay and no resume: events published before the subscription are not sent; `Last-Event-ID` is ignored
+   (document: clients re-read state with `GET /v1/calls/active`). Frames: `retry: 3000`, then per event
+   `id: <evt_…>` (event id string; `sse_frame` gains an overload / new `sse_text_frame(event_id: str, ...)` — keep the
+   int path byte-identical), `event: <type>`, `data: <§7 envelope JSON>`; `: ping` after 15 s without a frame.
+5. Body = exactly what an org endpoint receives (§3 Decision rule 6): `envelope_body(event, content_body(event,
+   metadata=, batch=))`; call metadata from `calls.metadata` cached per stream (LRU 1 024 calls; a missing call →
+   `{}`), batch facts read per `batch.*` event with `batch_id` (no cache, counts change). DB reads go through
+   `tenant_session(ctx.org_id)`; add public `va_events.webhook_router.call_metadata(session, org_id, call_id)` and
+   `batch_facts(session, org_id, batch_id)` (thin wrappers over the existing `_call`/`_batch`). An org with
+   `hipaa_mode` (read once at open via `org_settings_of(request).get(org_id)`) gets `strip_phi(event.type, content)`
+   before the envelope (the stream is never `phi_allowed`). A DB failure while rendering one event logs
+   `events.org_stream_render_failed` and sends the event with `data = event.data` stripped per hipaa? → simpler:
+   skip that event (log type + id) and continue.
+6. Ends when: client disconnects, subscription `overflow`/`lost`/`closed`, or 4 h (`MAX_STREAM_S`, reuse the
+   call_tail constant). Log `events.org_stream_closed` (org_id, reason, frames). Headers/content type as the call SSE.
+   Hub-subscribe failure (after aclose) → `SERVICE_UNAVAILABLE` before streaming.
+
+### Files
+- NEW `packages/va_events/src/va_events/subscription.py`; modify `live_hub.py` (use it); NEW `stream_tail.py`
+  (`StreamTailHub`, `TailSubscription`, `StreamTailError`, `BLOCK_MS`, `QUEUE_SIZE`); export in `va_events/__init__.py`.
+- `packages/va_events/src/va_events/webhook_router.py`: public `call_metadata`, `batch_facts`.
+- NEW `apps/api/src/va_api/services/org_stream.py`: `parse_types(value) -> tuple[str, ...]`, `OrgStreamDeps(database,
+  stream_tail, org_settings, clock)` + `org_stream_deps_of(request)`, `open_org_stream(deps, ctx, types) -> OrgStream`,
+  `OrgStream.frames()` / `aclose()`; `MetadataCache` (OrderedDict LRU).
+- NEW `apps/api/src/va_api/routers/events.py`; `main.py` ROUTERS; `va_api/container.py` `stream_tail`.
+- `va_api/sse.py`: frame with a string id.
+- tests support: `SessionContainer.stream_tail`; `cross_tenant_factories.py`: `REGISTRY.register_request("events_stream",
+  params={"types": "BAD!"})` + `register_owner_status("events_stream", 400)` (an unbounded stream must not be
+  probed through ASGITransport, which buffers); `test_openapi.STREAM_OPERATIONS` += `events_stream`.
+- Specs: 19 §9 Decision; specs/03 §11 nothing new (reads existing streams). AGENTS.md bullet.
+- `make openapi` + both `gen:api`.
+
+### Tests
+- `packages/va_events/tests/test_subscription.py` (moved/generic queue semantics if not already covered by
+  test_live_hub — keep live hub tests green).
+- `packages/va_events/tests/test_stream_tail.py` (fakeredis, publisher_rig-style XADD via `EventPublisher.broadcast`
+  or raw XADD): event of org A reaches A's subscriber only; predicate filters; entries XADDed before subscribe not
+  delivered, after delivered in XADD order across streams sharing one key; two subscribers same org both get it;
+  overflow closes with `overflow` (queue_size=2); poison entry skipped + logged; Redis error (`server.connected =
+  False`) closes all with `lost` and a later subscribe restarts the reader; last unsubscribe stops the reader
+  (`reader_running` property false); aclose closes `closed` and later subscribe raises.
+- `apps/api/tests/test_org_stream.py` (unit, fakes/ManualClock): `parse_types` cases (default `*`, spaces, empties,
+  bad chars, >20, too long → INVALID_INPUT field `types`); frames for call.turn (envelope + §5 body with metadata,
+  metadata loaded once for two events of one call), call.completed (data = Call Object), batch.* (batch body from
+  row), sms.* (event data), internal `billing.usage` never sent even for `*`, hipaa org strips `data.text`
+  (call.turn) / transcripts (call.completed); heartbeat after 15 s; 4 h close; overflow ends stream with reason.
+- `apps/api/tests/test_org_stream_http.py` (module Postgres + real uvicorn `service_helpers.serving`, httpx stream):
+  API key with `webhooks:read` gets 200 `text/event-stream`, first frame `retry`, then a published event of its org;
+  other org's event not received (publish B then A, first frame is A's); `types=call.*` skips `sms.*`; key without
+  `webhooks:read` → 403; dashboard session (owner) works; billing-role session → 403; bad `types` → 400 INVALID_INPUT;
+  disconnect releases the subscription (hub subscriber count back to 0, waited on an event, no sleeps).
+- Existing: test_live_hub, test_call_stream, test_transcript_ws, cross-tenant suite, test_openapi, test_audit_markers.
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest packages/va_events apps/api -q`; `make openapi` + both gen:api + `make test-ts`; full `make test` in
+background with heartbeat Monitor (truncate log first); jscpd; radon. No call-flow change → no e2e.
+
+### Risks
+- `XREAD BLOCK` holds one pooled connection per process while subscribers exist; block 1 s < 5 s socket timeout.
+- fakeredis blocking reads return at once → reader must yield after empty reads, or tests starve the loop.
+- Rendering per event hits Postgres for uncached calls; LRU keeps it to once per call per stream.
+- Cross-tenant suite must not try to stream (owner control = 400 on bad types).
+
+## Build P06-T06c (builder notes)
+- `va_events.subscription.Subscription[T]` (generic bounded queue, `SubscriptionClosedError`, `CloseReason`);
+  `LiveSubscription` subclasses it, `LiveSubscriptionClosedError` = alias (T06a/b tests unchanged, green).
+- `va_events.stream_tail.StreamTailHub(redis, *, block_ms, queue_size)`: start ids via XREVRANGE COUNT 1 per
+  stream inside the first subscribe (so nothing after subscribe returns is missed), one XREAD loop, org+predicate
+  dispatch, poison skip+log, Redis error → all `lost` + reader ends, last unsubscribe cancels the reader. Dropped
+  the planned `clock` param (unused).
+- `webhook_router.call_metadata` / `batch_facts` public wrappers.
+- api: `services/org_stream.py` (parse_types, MetadataCache LRU, open_org_stream, OrgStream), `routers/events.py`
+  (tag `Webhooks`: `va_api.openapi.TAG_NAMES` only allows specs/26 tags), container + SessionContainer
+  `stream_tail`, `sse_frame` accepts str ids (int path byte-identical). Cross-tenant owner control = bad types → 400.
+- Tests: test_stream_tail.py, test_org_stream.py, test_events_stream_http.py; `FrameReader`/`started`/`next_frame`
+  moved into live_stream_helpers (call stream tests use them; jscpd 0 clones).
+- Spec 19 §9 Decision P06-T06c; AGENTS.md bullet; openapi + both schema.d.ts regenerated.
+- Full make test: 11195 passed, 1 failed (test_envelopes: `/v1/events*` missing from the family table) → added
+  `/v1/events*` envelope family to `va_api.envelopes` + specs/31 list + Decision; family count 33. Re-ran
+  `pytest apps/api` → 1538 passed. Coverage 99.04 %. jscpd 0 clones; radon avg A (2.32); pip-audit clean, pnpm
+  audit 3 moderate (no high).
+
+## Review P06-T06c — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11197 passed, 7 skipped (99.04 %); test-ts pass; openapi drift current.
+- Checked against specs/19 §9 third bullet (+ Decision), specs/26 §4 `va webhooks listen`, specs/31 envelope family list.
+  Reader holds one pooled connection (BLOCK 1 s < 5 s socket timeout); subscription released via on_close/finally;
+  cross-tenant owner control fails fast with bad types.

@@ -72,7 +72,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
-from va_events import EventPublisher, LiveHub
+from va_events import EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -172,6 +172,7 @@ class SessionContainer(AuthContainer):
     object_store: ObjectStore = field(init=False)
     webhook_deliverer: Deliverer = field(init=False)
     live_hub: LiveHub = field(init=False)
+    stream_tail: StreamTailHub = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -193,6 +194,7 @@ class SessionContainer(AuthContainer):
         self.object_store = self.presigner.store()
         # Confirmation waits run on the wall clock: the frozen container clock would time them out at once.
         self.live_hub = LiveHub(self.redis, SystemClock())
+        self.stream_tail = StreamTailHub(self.redis)
 
     @asynccontextmanager
     async def __call__(self, settings: object) -> AsyncIterator[Self]:
@@ -214,7 +216,9 @@ class SessionContainer(AuthContainer):
                 yield opened
             finally:
                 await self.live_hub.aclose()
+                await self.stream_tail.aclose()
                 self.live_hub = LiveHub(self.redis, SystemClock())
+                self.stream_tail = StreamTailHub(self.redis)
 
     @property
     def authenticator(self) -> ApiKeyAuthenticator:

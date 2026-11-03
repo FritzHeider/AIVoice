@@ -15,7 +15,7 @@ import pytest
 from call_helpers import bearer
 from clock_helpers import ManualClock
 from identity_db import IdentityDb
-from live_stream_helpers import ReleaseWatch, partition_clock, publish_event, streamed_call
+from live_stream_helpers import ReleaseWatch, next_frame, partition_clock, publish_event, streamed_call
 from service_helpers import serving
 from session_helpers import SessionContainer, error_of, session_app, session_client
 
@@ -112,16 +112,6 @@ async def test_errors_are_answered_before_the_stream_starts(
     assert streaming.live_hub.subscribed_channels == frozenset()
 
 
-async def _next_frame(chunks: AsyncIterator[bytes], buffer: bytearray) -> bytes:
-    async with asyncio.timeout(WAIT_S):
-        while b"\n\n" not in buffer:
-            buffer.extend(await anext(chunks))
-    end = buffer.index(b"\n\n") + 2
-    frame = bytes(buffer[:end])
-    del buffer[:end]
-    return frame
-
-
 async def test_live_frames_arrive_on_an_open_socket_and_disconnect_releases_the_subscription(
     streaming: SessionContainer, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -135,10 +125,10 @@ async def test_live_frames_arrive_on_an_open_socket_and_disconnect_releases_the_
             assert response.headers["content-type"] == "text/event-stream; charset=utf-8"
             chunks = response.aiter_bytes()
             buffer = bytearray()
-            assert await _next_frame(chunks, buffer) == b"retry: 3000\n\n"
-            assert (await _next_frame(chunks, buffer)).startswith(b"id: 1\nevent: call.started\n")
+            assert await next_frame(chunks, buffer) == b"retry: 3000\n\n"
+            assert (await next_frame(chunks, buffer)).startswith(b"id: 1\nevent: call.started\n")
             live = await publish_event(streaming, org_id, call_id, EventType.CALL_LATENCY)
-            assert (await _next_frame(chunks, buffer)).startswith(
+            assert (await next_frame(chunks, buffer)).startswith(
                 f"id: {live.seq}\nevent: call.latency\n".encode()
             )
             assert streaming.live_hub.subscribers(call_live_channel(call_id)) == 1

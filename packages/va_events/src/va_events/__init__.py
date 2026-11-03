@@ -31,6 +31,8 @@ from va_events.dead_letter import DeadLetter
 from va_events.live_hub import LiveHub, LiveHubError, LiveSubscription, LiveSubscriptionClosedError
 from va_events.model import DomainEvent, EventFields, decode, encode, event_uuid, is_call_event, new_event
 from va_events.publisher import EventPublisher, EventPublishError, WebhookRouter
+from va_events.stream_tail import StreamTailError, StreamTailHub, TailSubscription
+from va_events.subscription import Subscription, SubscriptionClosedError
 from va_events.usage import UsageEventData, usage_event
 from va_events.webhook_payloads import (
     BatchFacts,
@@ -74,6 +76,11 @@ __all__ = [
     "Stream",
     "StreamConsumer",
     "StreamEntry",
+    "StreamTailError",
+    "StreamTailHub",
+    "Subscription",
+    "SubscriptionClosedError",
+    "TailSubscription",
     "UsageEventData",
     "WebhookRouter",
     "__version__",

@@ -41,6 +41,7 @@ from va_api.routers.audit_logs import audit_logs_router
 from va_api.routers.auth import internal_auth_router
 from va_api.routers.calls import calls_router
 from va_api.routers.e2e_seed import internal_test_router
+from va_api.routers.events import events_router
 from va_api.routers.health import probe_router, public_router
 from va_api.routers.org import me_router  # also registers GET/PATCH /v1/org on org_router
 from va_api.routers.org_sso import org_router
@@ -81,6 +82,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     agent_onboarding_router,
     audit_logs_router,
     webhooks_router,
+    events_router,
     internal_auth_router,
     internal_test_router,
     probe_router,

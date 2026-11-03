@@ -4,10 +4,9 @@ P06-T06a): replay order, the replay/tail boundary, gap recovery, ``Last-Event-ID
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Unpack
@@ -18,6 +17,7 @@ import pytest
 from call_input_rows import make_ctx
 from call_rows import seed_call
 from clock_helpers import ManualClock
+from live_stream_helpers import FrameReader, started
 from service_helpers import json_log_stream, log_events
 from tenant_rows import open_database
 
@@ -60,6 +60,17 @@ class Frame:
     id: int
     event: str | None
     data: dict[str, Any]
+
+
+class Reader(FrameReader):
+    """A :class:`FrameReader` that parses call stream frames."""
+
+    async def frame(self) -> Frame:
+        return parse(await self.raw())
+
+
+def reading(stream: CallStream) -> AbstractAsyncContextManager[Reader]:
+    return started(Reader(stream.frames()))
 
 
 def parse(raw: bytes) -> Frame:
@@ -136,57 +147,6 @@ async def stream_rig(migrated_url: str, *, queue_size: int = 1000) -> AsyncItera
 async def rig(migrated_url: str) -> AsyncIterator[Rig]:
     async with stream_rig(migrated_url) as opened:
         yield opened
-
-
-class Reader:
-    """Reads one stream's frames; the retry preamble is checked and skipped on open."""
-
-    def __init__(self, stream: CallStream) -> None:
-        self.stream = stream
-        self.frames = stream.frames()
-        self.pending: asyncio.Future[bytes] | None = None
-
-    async def start(self) -> None:
-        assert await self.raw() == b"retry: 3000\n\n"
-
-    def ask(self) -> asyncio.Future[bytes]:
-        if self.pending is None:
-            self.pending = asyncio.ensure_future(anext(self.frames))
-        return self.pending
-
-    async def raw(self) -> bytes:
-        future = self.ask()
-        async with asyncio.timeout(WAIT_S):
-            value = await future
-        self.pending = None
-        return value
-
-    async def frame(self) -> Frame:
-        return parse(await self.raw())
-
-    async def ended(self) -> bool:
-        try:
-            await self.raw()
-        except StopAsyncIteration:
-            return True
-        return False
-
-    async def aclose(self) -> None:
-        if self.pending is not None:
-            self.pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
-                await self.pending
-        await self.frames.aclose()
-
-
-@asynccontextmanager
-async def reading(stream: CallStream) -> AsyncIterator[Reader]:
-    reader = Reader(stream)
-    await reader.start()
-    try:
-        yield reader
-    finally:
-        await reader.aclose()
 
 
 async def test_replay_sends_stored_events_in_seq_order_with_bland_live_bodies(rig: Rig) -> None:
@@ -373,7 +333,7 @@ async def test_an_overflowing_subscription_ends_the_stream(migrated_url: str) ->
     stream_log = json_log_stream()
     async with stream_rig(migrated_url, queue_size=2) as rig:
         stream = await rig.open()
-        reader = Reader(stream)
+        reader = Reader(stream.frames())
         events = [await rig.stored() for _ in range(3)]
         await rig.live(*events)
         # One connection reads in order: once the probe message arrived, the three events were dispatched.

@@ -42,7 +42,7 @@
   - Deliverables: `POST /v1/calls/{id}/transcript/token` (60 s, single call scope), `WS /v1/calls/{id}/transcript/ws?token=` (replayed turns then live `call.turn` / `call.post_transfer_transcript`)
   - Acceptance: tests for token expiry, wrong-call and wrong-org tokens, replay + live order.
 
-- [ ] P06-T06c Org event stream
+- [x] P06-T06c Org event stream — `GET /v1/events/stream` (webhooks:read, types globs, webhook-envelope bodies, hipaa strip) over pod-wide `va_events.StreamTailHub` + generic `Subscription[T]`; make test 11197 passed, 7 skipped, 99.04 %; lint/typecheck/placeholders pass; test-ts pass; openapi drift clean
   - Spec refs: specs/19-events-and-webhooks.md §9; specs/26-sdks-cli-mcp-docs.md (`va webhooks listen`)
   - Depends on: P06-T06a
   - Deliverables: `GET /v1/events/stream?types=` SSE scoped to the org (dashboard session or API key with `webhooks:read`), pod-wide stream tail hub, type pattern filter, internal types never sent

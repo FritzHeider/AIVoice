@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections import deque
 from typing import Any, Final, Literal
 
 from redis.asyncio import Redis
@@ -28,6 +27,7 @@ from redis.exceptions import RedisError
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_common.waits import wait_until_set
+from va_events.subscription import CloseReason, Subscription, SubscriptionClosedError
 
 __all__ = [
     "CONFIRM_TIMEOUT_S",
@@ -44,9 +44,10 @@ QUEUE_SIZE: Final = 1_000
 READ_TIMEOUT_S: Final = 5.0
 """Socket read timeout of one ``get_message`` (an idle wait: the reader simply reads again)."""
 
-CloseReason = Literal["overflow", "lost", "closed"]
-
 _log = get_logger(__name__)
+
+LiveSubscriptionClosedError = SubscriptionClosedError
+"""The shared :class:`~va_events.subscription.SubscriptionClosedError` under its live-hub name."""
 
 
 class LiveHubError(Exception):
@@ -57,57 +58,12 @@ class LiveHubError(Exception):
         self.reason = reason
 
 
-class LiveSubscriptionClosedError(Exception):
-    """The subscription ended (``reason``: ``overflow``, ``lost``, or ``closed``)."""
-
-    def __init__(self, reason: CloseReason) -> None:
-        super().__init__(f"live subscription closed: {reason}")
-        self.reason: CloseReason = reason
-
-
-class LiveSubscription:
+class LiveSubscription(Subscription[bytes]):
     """One subscriber's queue of messages from :attr:`channel`; read it with :meth:`next`."""
 
     def __init__(self, channel: str, queue_size: int) -> None:
+        super().__init__(queue_size)
         self.channel = channel
-        self._queue_size = queue_size
-        self._messages: deque[bytes] = deque()
-        self._ready = asyncio.Event()
-        self._closed: CloseReason | None = None
-
-    @property
-    def closed_reason(self) -> CloseReason | None:
-        """Why the subscription ended; ``None`` while open."""
-        return self._closed
-
-    async def next(self) -> bytes:
-        """The next message; raises :class:`LiveSubscriptionClosedError` once the queue is empty and it ended.
-
-        Messages queued before an ``overflow``/``lost`` close are still returned first.
-        """
-        while not self._messages:
-            if self._closed is not None:
-                raise LiveSubscriptionClosedError(self._closed)
-            self._ready.clear()
-            await self._ready.wait()
-        return self._messages.popleft()
-
-    def deliver(self, message: bytes) -> None:
-        """Queue ``message``; a full queue closes the subscription with ``overflow``."""
-        if self._closed is not None:
-            return
-        if len(self._messages) >= self._queue_size:
-            self._messages.clear()
-            self.close("overflow")
-            return
-        self._messages.append(message)
-        self._ready.set()
-
-    def close(self, reason: CloseReason) -> None:
-        """End the subscription (the first reason wins)."""
-        if self._closed is None:
-            self._closed = reason
-        self._ready.set()
 
 
 def _text(value: Any) -> str:

@@ -476,6 +476,29 @@ For `call.completed` the `data` is the Call Object; for live call events `data` 
 > (the server's WebSocket pings keep the connection alive). Log `calls.transcript_ws_closed` (`call_id`,
 > `reason`, `messages`).
 
+> Decision (2026-11-03): org event stream (P06-T06c). `GET /v1/events/stream?types=<comma-separated globs>` (envelope
+> family, tag `Webhooks`) needs `webhooks:read` for both API keys and dashboard sessions (specs/04 §3.2 row "Webhook
+> endpoints / deliveries / replay": every role but `billing`) and streams `ctx.org_id` only (a parent acting on a
+> sub-account sees the sub-account, never descendants). `types` defaults to `*`; it is split on `,`, parts are
+> stripped and blanks dropped; each pattern must match `^[a-z0-9_.*]{1,64}$` and there may be at most 20, else
+> `INVALID_INPUT` on field `types` "types must be a comma-separated list of event type patterns such as call.*".
+> Matching is the endpoint glob rule (`fnmatchcase`); internal types (`billing.usage`) are never sent, even for `*`.
+> Checks run before the stream starts: `types`, then the subscription (`SERVICE_UNAVAILABLE`). The source is one
+> pod-wide reader per api process (`va_events.StreamTailHub`): the first subscriber reads each of the five streams'
+> last entry id and starts one `XREAD COUNT 500 BLOCK 1000` loop over all of them from there; events are filtered by
+> org and pattern in the reader and queued per subscriber (1 000 queued → the stream ends `overflow`; a Redis error
+> ends every stream `lost`; the last subscriber stops the reader; undecodable entries are skipped and logged
+> `events.stream_tail_poison`). There is no replay and no resume: events added before the subscription are not
+> sent and `Last-Event-ID` is ignored (clients re-read state, e.g. `GET /v1/calls/active`). Frames: `retry: 3000`
+> first, then `id: <evt_… event id>`, `event: <type>`, `data: <JSON>` where the data is exactly what an org webhook
+> endpoint receives (§3 Decision rule 6: the §7 envelope around the Call Object, the §5 body with the call's
+> `metadata` — read once per stream per call, `{}` for an unknown call —, the §6 body from the current batch row,
+> or the event `data`); an org with `hipaa_mode` gets `strip_phi` bodies (the stream is never `phi_allowed`). An
+> event whose call/batch facts cannot be read is skipped and logged `events.org_stream_render_failed`. `: ping`
+> follows 15 s without a frame; the stream ends after 4 h, on `overflow`/`lost`, or when the client disconnects
+> (the subscription is released however the response ends). Log `events.org_stream_closed` (`org_id`, `reason`,
+> `frames`).
+
 ## 10. Webhook endpoint management API
 
 | Method | Path | Body / query | Response |

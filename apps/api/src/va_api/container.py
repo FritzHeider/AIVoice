@@ -42,7 +42,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
-from va_events import EventPublisher, LiveHub
+from va_events import EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -85,6 +85,7 @@ class Container:
     object_store: ObjectStore
     webhook_deliverer: Deliverer
     live_hub: LiveHub
+    stream_tail: StreamTailHub
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -152,6 +153,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         stack.push_async_callback(webhook_http.aclose)
         live_hub = LiveHub(redis, clock)
         stack.push_async_callback(live_hub.aclose)
+        stream_tail = StreamTailHub(redis)
+        stack.push_async_callback(stream_tail.aclose)
         webhook_timeouts = Timeouts(batch_s=TEST_SEND_TIMEOUT_S, default_s=TEST_SEND_TIMEOUT_S)
         yield Container(
             settings=settings,
@@ -186,4 +189,5 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             object_store=object_store,
             webhook_deliverer=Deliverer(webhook_http, clock=clock, timeouts=webhook_timeouts),
             live_hub=live_hub,
+            stream_tail=stream_tail,
         )

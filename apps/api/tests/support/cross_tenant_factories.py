@@ -112,3 +112,7 @@ REGISTRY.register_owner_status("calls_recording", 404)
 # once while org B still gets ``CALL_NOT_FOUND``.
 REGISTRY.register_request("calls_events_stream", headers={"Last-Event-ID": "not-a-seq"})
 REGISTRY.register_owner_status("calls_events_stream", 400)
+# An unbounded stream never ends through ASGITransport (it buffers the body): the owner control sends a
+# malformed filter, which is checked after authentication and the scope.
+REGISTRY.register_request("events_stream", params={"types": "BAD!"})
+REGISTRY.register_owner_status("events_stream", 400)

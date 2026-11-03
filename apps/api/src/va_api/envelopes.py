@@ -58,6 +58,7 @@ FAMILIES: Final[tuple[tuple[str, Envelope], ...]] = (
     ("/v1/citation_schemas*", Envelope.ENVELOPE),
     ("/v1/evals*", Envelope.ENVELOPE),
     ("/v1/webhooks*", Envelope.ENVELOPE),
+    ("/v1/events*", Envelope.ENVELOPE),
     ("/v1/dispositions*", Envelope.ENVELOPE),
     ("/v1/usage*", Envelope.ENVELOPE),
     ("/v1/billing*", Envelope.ENVELOPE),

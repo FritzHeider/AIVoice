@@ -45,7 +45,7 @@ INTERNAL_PATHS = {
 }
 E2E_SEED_MARKER = "e2e seed (VA_ENV local/test only)"
 REDIRECT_OPERATIONS = {"auth_sso_start", "auth_sso_callback"}
-STREAM_OPERATIONS = {"calls_events_stream"}
+STREAM_OPERATIONS = {"calls_events_stream", "events_stream"}
 OPERATION_ID = re.compile(r"^[a-z]+(_[a-z0-9]+)+$")
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head", "trace"}
 

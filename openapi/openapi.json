@@ -10259,6 +10259,71 @@
         "x-scope": "calls:read"
       }
     },
+    "/v1/events/stream": {
+      "get": {
+        "description": "The org's new events as Server-Sent Events, filtered by `types`; after a reconnect, re-read current\nstate (for example `GET /v1/calls/active`).",
+        "operationId": "events_stream",
+        "parameters": [
+          {
+            "description": "Comma-separated event type globs (default `*`), e.g. `call.*,sms.received`.",
+            "in": "query",
+            "name": "types",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 1400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated event type globs (default `*`), e.g. `call.*,sms.received`.",
+              "title": "Types"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-Sent Events: `id: <event id>`, `event: <type>`, `data: <webhook envelope JSON>` (the body an org webhook endpoint receives); `: ping` comments every 15 s. New events only: no replay, `Last-Event-ID` is ignored."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Events Stream",
+        "tags": [
+          "Webhooks"
+        ],
+        "x-envelope": "envelope",
+        "x-scope": "webhooks:read"
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health_get",

@@ -358,6 +358,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/events/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Events Stream
+         * @description The org's new events as Server-Sent Events, filtered by `types`; after a reconnect, re-read current
+         *     state (for example `GET /v1/calls/active`).
+         */
+        get: operations["events_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/health": {
         parameters: {
             query?: never;
@@ -6423,6 +6444,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    events_stream: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated event type globs (default `*`), e.g. `call.*,sms.received`. */
+                types?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-Sent Events: `id: <event id>`, `event: <type>`, `data: <webhook envelope JSON>` (the body an org webhook endpoint receives); `: ping` comments every 15 s. New events only: no replay, `Last-Event-ID` is ignored. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };

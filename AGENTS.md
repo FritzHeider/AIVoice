@@ -1671,3 +1671,14 @@ Grafana 3001
   `service_helpers.serving(app)` + `websockets.asyncio.client.connect`; a refused handshake raises
   `websockets.exceptions.InvalidStatus` (`.response.status_code`, `.response.body`). A client's close races the
   server's cleanup: sync on a wrapped module `_log` (see `_ClosedLog` in `test_transcript_ws.py`), not on the close.
+- 2026-11-03 (P06-T06c): org event SSE = `GET /v1/events/stream` (`routers/events.py`, tag `Webhooks`) over
+  `va_api.services.org_stream` (`parse_types`, `open_org_stream(OrgStreamDeps, ctx, types)`, `OrgStream.frames()`;
+  bodies = `content_body` + `envelope_body` (+ `strip_phi` for hipaa orgs), metadata via
+  `va_events.webhook_router.call_metadata`/`batch_facts`) and the pod-wide `va_events.StreamTailHub(redis)` (one
+  XREAD loop over the five streams, started by the first subscribe, stopped by the last unsubscribe; container
+  `stream_tail`, also on `SessionContainer`). The bounded subscriber queue is the generic
+  `va_events.Subscription[T]` (`SubscriptionClosedError`; `LiveSubscriptionClosedError` is an alias). Tests:
+  `live_stream_helpers.FrameReader` + `started(reader)` read raw SSE frames of any stream; to know a hub reader
+  dispatched earlier entries, subscribe a probe org and wait for a marker event (the reader is sequential).
+  Unbounded streams in the cross-tenant suite need an owner control that fails fast (`register_request(...,
+  params={"types": "BAD!"})` + `register_owner_status(op, 400)`). OpenAPI tags must be one of `va_api.openapi.TAG_NAMES`.

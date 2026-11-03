@@ -25,10 +25,11 @@ HEARTBEAT_FRAME: Final = b": ping\n\n"
 EVENT_STREAM_HEADERS: Final[Mapping[str, str]] = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
 
 
-def sse_frame(seq: int, event_type: str | None, body: Mapping[str, JsonValue]) -> bytes:
-    """One frame; without ``event_type`` the ``event:`` line is left out (EventSource type ``message``)."""
+def sse_frame(seq: int | str, event_type: str | None, body: Mapping[str, JsonValue]) -> bytes:
+    """One frame with id ``seq`` (a call event's seq, or an event id string on the org stream); without
+    ``event_type`` the ``event:`` line is left out (EventSource type ``message``)."""
     event_line = b"" if event_type is None else b"event: " + event_type.encode() + b"\n"
-    return b"id: %d\n" % seq + event_line + b"data: " + dumps(dict(body)) + b"\n\n"
+    return b"id: " + str(seq).encode() + b"\n" + event_line + b"data: " + dumps(dict(body)) + b"\n\n"
 
 
 def retry_frame(milliseconds: int) -> bytes:

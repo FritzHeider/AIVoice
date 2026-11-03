@@ -40,7 +40,7 @@ from va_events.webhook_routing import (
     render_deliveries,
 )
 
-__all__ = ["DbWebhookRouter"]
+__all__ = ["DbWebhookRouter", "batch_facts", "call_metadata"]
 
 
 class DbWebhookRouter:
@@ -64,6 +64,20 @@ class DbWebhookRouter:
         for org_id, org_events in by_org.items():
             async with self._database.tenant_session(org_id) as own:
                 await _route_all(own, org_events)
+
+
+async def call_metadata(
+    session: AsyncSession, org_id: uuid.UUID, call_id: uuid.UUID
+) -> Mapping[str, JsonValue] | None:
+    """The ``metadata`` of the org's call; ``None`` when there is no such call."""
+    facts = await _call(session, org_id, call_id)
+    return None if facts is None else facts.metadata
+
+
+async def batch_facts(session: AsyncSession, org_id: uuid.UUID, batch_id: uuid.UUID) -> BatchFacts | None:
+    """The webhook facts of the org's batch; ``None`` when there is no such batch."""
+    found = await _batch(session, org_id, batch_id)
+    return None if found is None else found[0]
 
 
 async def _route_all(session: AsyncSession, events: Iterable[DomainEvent]) -> None:
