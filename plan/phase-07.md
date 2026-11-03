@@ -24,7 +24,7 @@
   - Deliverables: `Router.choose(...)` with examples and alternatives, `Extractor.extract(...)` typed coercion, `LoopCondition.score(...)` with threshold
   - Acceptance: FakeLLM-driven tests including malformed outputs and repair.
 
-- [ ] P07-T05 Global nodes and return stack
+- [x] P07-T05 Global nodes and return stack — va_engine.navigation Navigator (global push/auto-return/forwarding/stack cap, never-raise problems), EngineState v3 NodeFrame.kind + v2 upgrader + frozen v3 fixture, Decision under specs/11 §4; make test 11712 passed, navigation.py 100 %
   - Spec refs: specs/11-pathways-engine.md (global nodes, forwarding)
   - Depends on: P07-T04
   - Deliverables: global check precedence, return-to-previous behaviour, forwarding to node or pathway

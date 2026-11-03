@@ -1,0 +1,104 @@
+{
+  "schema_version": 3,
+  "runner": "pathway",
+  "pathway_id": "0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2e",
+  "pathway_version": 4,
+  "current_node_id": "collect_date",
+  "return_stack": [
+    {
+      "kind": "global",
+      "pathway_id": "0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2e",
+      "version": 4,
+      "node_id": "greeting"
+    },
+    { "kind": "transfer_pathway", "pathway_id": null, "version": null, "node_id": "faq" }
+  ],
+  "visit_counts": { "greeting": 1, "faq": 2, "collect_date": 1 },
+  "variables": {
+    "party_size": 4,
+    "name": "Ada",
+    "vip": true,
+    "notes": null,
+    "dates": ["2026-11-07", "2026-11-08"],
+    "address": { "city": "Oakland", "zip": "94607" }
+  },
+  "history": [
+    {
+      "role": "system",
+      "content": "call started",
+      "node_id": null,
+      "interrupted": false,
+      "tool_call_id": null,
+      "tool_name": null,
+      "at_ms": 0
+    },
+    {
+      "role": "assistant",
+      "content": "Hi, thanks for calling Luigi's.",
+      "node_id": "greeting",
+      "interrupted": true,
+      "tool_call_id": null,
+      "tool_name": null,
+      "at_ms": 420
+    },
+    {
+      "role": "user",
+      "content": "I'd like a table for four.",
+      "node_id": "greeting",
+      "interrupted": false,
+      "tool_call_id": null,
+      "tool_name": null,
+      "at_ms": 2350
+    },
+    {
+      "role": "tool",
+      "content": "{\"available\":true}",
+      "node_id": "faq",
+      "interrupted": false,
+      "tool_call_id": "call_1",
+      "tool_name": "check_tables",
+      "at_ms": 3100
+    }
+  ],
+  "history_summary": "user: earlier question",
+  "wait_reprompts": 1,
+  "turn_index": 3,
+  "ended": false,
+  "end_reason": null,
+  "graph_stack_versions": { "0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2e": 4 },
+  "pending_actions": [
+    {
+      "kind": "say",
+      "after_mark": null,
+      "text": "One moment please.",
+      "mark": "seg-7",
+      "interruptible": false
+    },
+    { "kind": "send_dtmf", "after_mark": "seg-7", "digits": "1#", "duration_ms": 200 },
+    { "kind": "set_variables", "after_mark": null, "variables": { "confirmed": true, "count": 2 } },
+    {
+      "kind": "send_sms",
+      "after_mark": null,
+      "to": "+14155550100",
+      "from": "+16285550199",
+      "body": "Your table is booked."
+    },
+    {
+      "kind": "switch_graph",
+      "after_mark": null,
+      "pathway_id": "0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2e",
+      "version": 2,
+      "node_id": "start"
+    },
+    { "kind": "human_takeover", "after_mark": null },
+    {
+      "kind": "transfer",
+      "after_mark": "seg-8",
+      "mode": "cold",
+      "target": "+14155550111",
+      "caller_id_mode": "agent_number"
+    },
+    { "kind": "end_call", "after_mark": "seg-9", "reason": "agent_ended", "ended_by": "agent" }
+  ],
+  "wait_armed_at_ms": 3100
+}

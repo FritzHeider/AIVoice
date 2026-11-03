@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793718805-5413
+> P07-T05: va_engine.navigation Navigator (apply RouteDecision / finish_node / enter, Transition speaks/over_limit/problem, never raises for broken targets); EngineState v3 NodeFrame.kind required, v2 upgrader derives kind from pathway id; service_helpers.json_log_stream returns a stream (not a context manager), filter log_events(stream) by event
+<!-- tags: engine, pathways, testing | created: 2026-11-03 -->
+
 ### mem-1793715505-4859
 > P07-T04: decision calls va_engine.router/loop_condition/extraction over va_engine.decisions.StructuredPort, dynamic LRU schemas in decision_schemas (never registered), prompts via va_llm.prompts.render_prompt; tests ScriptedPort validates against real schema; jscpd ignore markers need a reason suffix or ruff ERA001 flags them
 <!-- tags: engine, pathways, testing | created: 2026-11-03 -->

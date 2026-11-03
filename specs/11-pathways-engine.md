@@ -294,6 +294,37 @@ After a global node finishes its response: if `enableForwarding` → jump to `fo
 (next user turn is evaluated against the popped node's edges); prompt context includes
 `{{prevNodePrompt}}` = popped node's prompt so the LLM can resume naturally.
 
+> Decision (2026-11-03): global nodes and return stack (P07-T05). `va_engine.navigation.Navigator(state,
+> ActiveGraph(pathway_id, version, graph), loader=PathwayLoader | None)` moves the state; it emits no events and
+> calls no LLM. `apply(RouteDecision)` and `finish_node()` return a `Transition` (`kind` stay|enter|global|return|
+> forward, `speaks`, `visits`, `over_limit`, `pathway_changed`, `problem`).
+> 1. Return frames carry `kind: "global" | "transfer_pathway"` (EngineState schema version 3, §9). Entering a global
+>    node from the router pushes `NodeFrame(kind="global", pathway_id, version, node_id=current)` of the active graph.
+>    The §5.2 global check runs only when the current node is not global and the graph has another global node, so
+>    globals never nest directly; "nested" means a global triggered from a node reached after an earlier global.
+> 2. After a node executed: `enableForwarding` with a `forwardingNode` (any node type) forwards — a node id inside
+>    the active graph, or `{pathway_id, version, node_id}` loaded through the `PathwayLoader` (`node_id` null = the
+>    target's start node; the state's pathway id/version switch, variables are kept, `graph_stack_versions` is
+>    untouched). Forwarding out of a global node discards its global frame (no return). Otherwise a global node with
+>    `enableGlobalAutoReturn` pops the top frame when it is a global frame of the active pathway and makes its node
+>    current without re-speaking it and without a visit; a global node without such a frame (reached by an edge)
+>    stays. Otherwise the conversation stays on the node.
+> 3. Leaving a global node by an edge or the fallback edge (auto-return off) discards its global frame. A
+>    `transfer_pathway` frame is never popped by the auto-return.
+> 4. Entering a node (edge, fallback, global, forward) increments `visit_counts[node_id]`; `over_limit` = visits >
+>    `maxVisits` (the turn orchestration applies loop protection). Returning never counts.
+> 5. `{{prevNodePrompt}}` while a global node runs = the prompt (else text, else `""`) of the node in the top global
+>    frame when that frame belongs to the active pathway; `None` otherwise.
+> 6. The return stack holds at most 16 frames; a push beyond drops the bottom frame (`engine.return_stack_trimmed`).
+> 7. Broken targets never raise: a route target or forward id not in the graph, a target pathway without the node /
+>    start node, a loader failure (`PathwayUnavailableError`, logged `engine.pathway_load_failed`), or a missing
+>    return target → stay on the current node with `problem` = `target_missing` | `forward_target_missing` |
+>    `pathway_unavailable` | `return_target_missing`, logged `engine.navigation_failed` with the reason; the popped
+>    frame of a missing return target is dropped, a failed forward keeps the global frame.
+> 8. State upgrade 2 → 3: each v2 frame gets `kind = "global"` when its `pathway_id` equals the state's
+>    `pathway_id` (both may be null), else `"transfer_pathway"`; a v2 frame that already carries `kind` is rejected
+>    (`EngineStateError` `newer_field`). Frozen fixture `packages/va_engine/tests/fixtures/engine_state/v3.json`.
+
 ## 5. Per-turn algorithm (pathway mode)
 
 Triggered by `engine.on_user_turn(UserTurn(text, words, started_ms, ended_ms, language))` after EOT
@@ -578,6 +609,7 @@ filter     := "default:" quoted | "upper" | "lower" | "title" | "json" | "phone_
 
 ```python
 class NodeFrame(BaseModel):
+    kind: Literal["global", "transfer_pathway"]
     pathway_id: UUID | None
     version: int | None
     node_id: str
@@ -595,7 +627,7 @@ PendingAction = (PendingSay | PendingDtmf | PendingTransfer | PendingEndCall | P
                  | PendingSwitchGraph | PendingHumanTakeover)   # discriminated by `kind`; each has `after_mark`
 
 class EngineState(BaseModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     runner: Literal["task", "pathway"]
     pathway_id: UUID | None
     pathway_version: int | None

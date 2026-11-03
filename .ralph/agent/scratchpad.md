@@ -562,3 +562,134 @@ handlers N/A), `uv run python scripts/check_spec_refs.py`, then `make test` in b
 ## Review P07-T04 rework (approved)
 - Finding 1 fixed: 5 000-digit strings → REJECTED/None, huge spoken scales → None, 1e300 → REJECTED (verified by hand).
 - make lint/typecheck/placeholders pass, check_spec_refs 0, make test exit 0 (11654 passed, 7 skipped, 99.06%).
+
+## Plan P07-T05 — Global nodes and return stack (specs/11 §2, §3.1, §4 "Global" row + paragraph, §5.2, §9)
+
+Scope: pure navigation over `EngineState` (no events, no LLM — the router already scores globals, P07-T04).
+T08 (turn orchestration) will call this; T07's Transfer Pathway reuses the pathway switch + loader port.
+
+### Spec decisions (append `> Decision (2026-11-03): global nodes and return stack (P07-T05).` under the §4
+"After a global node finishes…" paragraph in specs/11, and update the §9 `NodeFrame` block with `kind`)
+1. Frames carry `kind: "global" | "transfer_pathway"`. Entering a global node from the router (`RouteDecision.kind ==
+   "global"`) pushes `NodeFrame(kind="global", pathway_id=state.pathway_id, version=state.pathway_version,
+   node_id=current)`. The global check (§5.2) runs only when the current node is not global and the graph has a
+   global node other than the current one (same rule as `Router._global_candidates`) — so globals never nest
+   directly; "nested" = a global triggered from a node reached after an earlier global (forward/return/edge).
+2. After a node executed (`finish_node`): `enableForwarding` with a `forwardingNode` (ANY node type, §3.1) →
+   forward: a string id jumps inside the current graph; an object `{pathway_id, version, node_id}` switches graph via
+   the `PathwayLoader` port (current pathway/version replaced, `node_id` null → target start node, variables kept,
+   `graph_stack_versions` untouched). Forwarding out of a global node discards that node's global frame (no return).
+   Else, for a global node with `enableGlobalAutoReturn` (default true) → pop the top frame (must be kind global;
+   otherwise no return) and make the popped node current WITHOUT re-speaking and without a visit increment.
+   Else stay on the node.
+3. Leaving a global node by an edge/fallback route (auto-return off) discards its global frame (top frame, kind
+   global). Leaving it by a new global is impossible (rule 1).
+4. Entering a node (edge, fallback, global, forward) increments `visit_counts[node_id]` and reports
+   `over_limit = visits > node.maxVisits` (T08 applies loop protection). Returning never counts.
+5. `prevNodePrompt` while a global node executes = the top global frame's node `prompt` (else `text`, else "") when
+   the frame belongs to the current pathway; `None` otherwise (T08 puts it into the template scope / §5.7).
+6. Stack depth cap `MAX_RETURN_STACK = 16`: pushing beyond drops the bottom frame (log `engine.return_stack_trimmed`).
+7. Broken targets never raise out of a turn: a forward id not in the graph, a frame node missing after a pop, or a
+   loader failure (`PathwayUnavailableError`) → stay on the current node (`Transition.kind="stay"`, `problem` =
+   `forward_target_missing` | `return_target_missing` | `pathway_unavailable`), logged `engine.navigation_failed`
+   with the reason, frame still dropped for a missing return target.
+
+### State schema v3 (`packages/va_engine/src/va_engine/models/state.py`)
+- `NodeFrame.kind: Literal["global", "transfer_pathway"]` (required). `CURRENT_SCHEMA_VERSION = 3`,
+  `schema_version: Literal[3] = 3`. Upgrader `_upgrade_v2`: each `return_stack` frame gets `kind` =
+  `"transfer_pathway"` when its `pathway_id` differs from the state's `pathway_id`, else `"global"`; a v2 frame that
+  already has `kind` → `EngineStateError("newer_field", version=2, field="return_stack.kind")`. `_UPGRADERS = {1:
+  _upgrade_v1, 2: _upgrade_v2}` (chain 1→2→3; v1 frames get kinds too through the chain). Don't mutate input.
+- New frozen fixture `packages/va_engine/tests/fixtures/engine_state/v3.json` (copy v2.json content + kinds, include
+  one frame of each kind); v1/v2 fixtures stay untouched. Update `test_state.py`: current version 3, v3 fixture
+  canonical test, v2 fixture upgrades (frames kinds derived), v2 doc with `kind` rejected, existing v1 tests keep
+  passing (adjust asserts expecting `== 2`). Update spec §9 block (`schema_version: Literal[3] = 3`, NodeFrame kind)
+  and AGENTS-style note in the Decision.
+- grep other users of `NodeFrame(`/`schema_version` (task_runner, media, tests) and update constructors.
+
+### New module `packages/va_engine/src/va_engine/navigation.py`
+```python
+MAX_RETURN_STACK: Final = 16
+class PathwayUnavailableError(Exception): reason: str
+@dataclass(frozen=True, slots=True)
+class ActiveGraph: pathway_id: UUID | None; version: int | None; graph: PathwayGraph
+class PathwayLoader(Protocol):
+    async def load(self, pathway_id: str, version: PathwayVersionRef) -> ActiveGraph  # raises PathwayUnavailableError
+TransitionKind = Literal["stay", "enter", "global", "return", "forward"]
+@dataclass(frozen=True, slots=True)
+class Transition:
+    kind: TransitionKind; from_node: str; to_node: str
+    pathway_changed: bool = False; visits: int = 0; max_visits: int | None = None
+    problem: str | None = None
+    @property over_limit -> bool   # max_visits is not None and visits > max_visits
+    @property speaks -> bool       # kind in {"enter", "global", "forward"} (return/stay: no re-speak)
+class Navigator:
+    def __init__(self, state: EngineState, active: ActiveGraph, *, loader: PathwayLoader | None = None)
+    state, active, graph (property), node (current PathwayNode; raises LookupError only if state is corrupt —
+      constructor validates current node exists, else ValueError)
+    def global_check_enabled(self) -> bool
+    def apply(self, decision: RouteDecision) -> Transition      # stay/edge/fallback/global (rules 1, 3, 4)
+    async def finish_node(self) -> Transition                  # rule 2 (+5 problems → rule 7)
+    def prev_node_prompt(self) -> str | None                   # rule 5
+    def enter(self, node_id: str) -> Transition                # used by apply/forward; T07/T08 reuse
+```
+`apply` checks `decision.from_node == state.current_node_id` (ValueError otherwise — programming error).
+Pathway switch helper `_switch(active: ActiveGraph, node_id: str | None)` sets `state.pathway_id/pathway_version/
+current_node_id`; target start node = `graph.start_nodes()[0]` (none → problem `forward_target_missing`).
+Logging via `va_common.logging.get_logger`; never log conversation text.
+
+### Tests
+- `packages/va_engine/tests/support/navigation_helpers.py`: `MemoryLoader(graphs: dict[(pathway_id, version_ref)
+  → ActiveGraph], fail=set())` recording `loads`; `nav_state(current, pathway_id=P1, version=1)`;
+  `global_graph()` builder (start "greet" → "order" → "confirm"; globals "hours" (auto-return), "human"
+  (auto-return false, edge → "goodbye"), "menu" (enableForwarding → "order"), "other_pathway" (forwardingNode
+  object to pathway P2)); `route(node, kind, to)` making `RouteDecision`s.
+- `packages/va_engine/tests/test_navigation.py` (unit): global entry pushes kind-global frame with pathway/version;
+  visits/over_limit; global check disabled on a global node / graph with only the current global / no globals;
+  auto-return pops and `speaks` False, visit count unchanged; auto-return off → stays, then edge route drops frame;
+  fallback route from global drops frame; forwarding by id from global drops frame and enters target (speaks);
+  forwarding from a non-global node; forwarding to pathway object loads via loader (version ref passed through,
+  node_id None → start), state pathway fields switched, variables kept; loader failure / missing forward id /
+  missing pop target → stay with `problem` and no raise; top frame of kind transfer_pathway is never popped by
+  auto-return; stack cap 16 drops bottom; `prev_node_prompt` prompt/text/""/None; `apply` with mismatched
+  from_node raises; Navigator with unknown current node raises ValueError.
+- `packages/va_engine/tests/test_global_scenarios.py` (acceptance "nested global triggers"): drive Router (real,
+  `decision_helpers.ScriptedPort` scripted `select_path` outputs) + Navigator over multi-turn scenarios:
+  (a) greet → "what are your hours?" → global hours (≥6 beats local) → auto-return to greet (stack empty), next turn
+  routes greet's edge; (b) nested: greet → global `menu` forwards to order (frame dropped) → from order a global
+  `hours` triggers → returns to order (not greet), stack depth trace asserted each step; (c) global tie with
+  local edge → global wins; global score 5 → local edge; (d) global `human` without auto-return, then edge route
+  away clears the stack, then a second global from the new node returns there; (e) forward to another pathway then
+  a global of the NEW graph triggers and returns inside it (frame pathway = P2). Assert router requests offered
+  `global:` options only when `global_check_enabled()`. Round-trip the state through `dump_engine_state`/
+  `load_engine_state` between turns (proves frames serialize).
+- Coverage of navigation.py ≥ 95 %.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run pytest packages/va_engine -q`, `uv run python
+scripts/check_spec_refs.py`, then `make test` in background (PATH=/home/ralph/.local/bin:$PATH; truncate
+logs/make_test.log first; Monitor heartbeat). radon avg < 10, jscpd 0, pip-audit for build.done. No e2e.
+AGENTS.md: one dated bullet (navigation module, NodeFrame.kind v3, loader port, fixture v3).
+
+### Risks
+- Other code constructing `NodeFrame` without `kind` or asserting schema_version 2 (grep repo, incl. apps/ and
+  fixtures used by media/api) — fix all.
+- Spec §9 code block may be drift-checked by a test; update block and test consistently.
+- Keep Navigator free of router imports beyond `RouteDecision` type (no cycle: router doesn't import navigation).
+
+## Build P07-T05 (done)
+- New `va_engine.navigation` (Navigator/ActiveGraph/PathwayLoader/PathwayUnavailableError/Transition, MAX_RETURN_STACK 16);
+  EngineState v3 (`NodeFrame.kind` required, `_upgrade_v2` derives kind by pathway id match, case-insensitive text);
+  fixture v3.json; spec §4 Decision P07-T05 (8 rules) + §9 block updated; AGENTS.md bullet.
+- Deviation from plan: extra problem `target_missing` (route/enter target not in graph, drafts can have them);
+  failed forward keeps the global frame; loader failures also log `engine.pathway_load_failed` with reason.
+- Tests: test_navigation.py (unit, 100 % navigation.py), test_global_scenarios.py (real Router + ScriptedPort, state
+  round-trip per turn), test_state.py v3 updates.
+- Gates: fmt/lint/typecheck/placeholders pass, spec_refs 0, va_engine 647 passed, radon avg A 2.5, jscpd 0,
+  pip-audit clean, pnpm 3 moderate (none high).
+- make test exit 0 (11712 passed, 7 skipped, 99.06% cov). No e2e (navigation not wired into a call flow yet).
+
+## Review P07-T05 (approved)
+- Re-ran: make lint/typecheck/placeholders pass, check_spec_refs 0, make test exit 0 (11712 passed, 7 skipped, 99.06 %,
+  navigation.py 100 %). Diff checked against specs/11 §3.1/§4/§5.2/§9 and the P07-T05 Decision: frame push/pop, forward
+  frame discard, transfer_pathway frames never auto-popped, visit counting, v2→v3 upgrader (no input mutation).

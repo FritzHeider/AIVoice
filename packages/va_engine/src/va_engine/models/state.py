@@ -6,7 +6,8 @@ step (one upgrader per version in ``_UPGRADERS``) and rejects a missing, non-int
 version with :class:`EngineStateError`; unknown fields still raise :class:`pydantic.ValidationError`. Adding a
 field means bumping :data:`CURRENT_SCHEMA_VERSION`, adding one upgrader, and committing a frozen
 ``packages/va_engine/tests/fixtures/engine_state/vN.json`` that must keep loading forever (specs/11 §9
-Decision P07-T03).
+Decision P07-T03). Version 3 adds :attr:`NodeFrame.kind`; the 2 → 3 upgrader derives it from the frame's
+pathway (specs/11 §4 Decision P07-T05).
 
 :meth:`EngineState.add_turn` keeps ``history`` at :data:`HISTORY_CAP` turns: the oldest turns move into
 ``history_summary`` as ``role: content`` lines, and the summary keeps only its last
@@ -30,6 +31,7 @@ __all__ = [
     "TERMINAL_ACTION_KINDS",
     "EngineState",
     "EngineStateError",
+    "FrameKind",
     "NodeFrame",
     "PendingAction",
     "PendingDtmf",
@@ -45,7 +47,7 @@ __all__ = [
     "load_engine_state",
 ]
 
-CURRENT_SCHEMA_VERSION: Final = 2
+CURRENT_SCHEMA_VERSION: Final = 3
 HISTORY_CAP: Final = 200
 HISTORY_SUMMARY_MAX_CHARS: Final = 4000
 TERMINAL_ACTION_KINDS: Final = frozenset({"transfer", "end_call"})
@@ -73,11 +75,15 @@ class EngineStateError(ValueError):
         self.version = version
 
 
+FrameKind = Literal["global", "transfer_pathway"]
+
+
 class NodeFrame(BaseModel):
-    """A return address on the transfer-pathway stack."""
+    """A return address on the return stack: pushed by a global node or a Transfer Pathway node."""
 
     model_config = _STRICT
 
+    kind: FrameKind
     pathway_id: UUID | None
     version: int | None
     node_id: str
@@ -208,7 +214,7 @@ class EngineState(BaseModel):
 
     model_config = _STRICT
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     runner: Literal["task", "pathway"]
     pathway_id: UUID | None
     pathway_version: int | None
@@ -258,7 +264,32 @@ def _upgrade_v1(raw: dict[str, object]) -> dict[str, object]:
     return {**raw, "schema_version": 2, "pending_actions": [], "wait_armed_at_ms": None}
 
 
-_UPGRADERS: Final[Mapping[int, Callable[[dict[str, object]], dict[str, object]]]] = {1: _upgrade_v1}
+def _id_text(value: object) -> str | None:
+    return None if value is None else str(value).lower()
+
+
+def _frame_kind(frame: object, pathway_id: object) -> object:
+    if not isinstance(frame, Mapping):
+        return frame
+    if "kind" in frame:
+        raise EngineStateError("newer_field", version=2, field="return_stack.kind")
+    same = _id_text(frame.get("pathway_id")) == _id_text(pathway_id)
+    kind = "global" if same else "transfer_pathway"
+    return {"kind": kind, **frame}
+
+
+def _upgrade_v2(raw: dict[str, object]) -> dict[str, object]:
+    stack = raw.get("return_stack")
+    upgraded: dict[str, object] = {**raw, "schema_version": 3}
+    if isinstance(stack, list):
+        upgraded["return_stack"] = [_frame_kind(frame, raw.get("pathway_id")) for frame in stack]
+    return upgraded
+
+
+_UPGRADERS: Final[Mapping[int, Callable[[dict[str, object]], dict[str, object]]]] = {
+    1: _upgrade_v1,
+    2: _upgrade_v2,
+}
 
 
 def dump_engine_state(state: EngineState) -> str:

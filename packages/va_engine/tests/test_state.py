@@ -1,4 +1,4 @@
-"""`EngineState` versioning, pending actions, history cap (specs/11 §9 Decisions P05-T09a, P07-T03)."""
+"""`EngineState` versioning, pending actions, history cap (specs/11 §9 P05-T09a, P07-T03; §4 P07-T05)."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def test_round_trip() -> None:
         pathway_id=pathway,
         pathway_version=3,
         current_node_id="n2",
-        return_stack=[NodeFrame(pathway_id=pathway, version=3, node_id="n1")],
+        return_stack=[NodeFrame(kind="global", pathway_id=pathway, version=3, node_id="n1")],
         visit_counts={"n1": 2},
         variables={"name": "Al", "nested": {"a": [1, None, True]}},
         history=[
@@ -88,7 +88,7 @@ def test_round_trip() -> None:
 def test_defaults() -> None:
     state = _state()
 
-    assert state.schema_version == CURRENT_SCHEMA_VERSION == 2
+    assert state.schema_version == CURRENT_SCHEMA_VERSION == 3
     assert (state.pending_actions, state.wait_armed_at_ms) == ([], None)
     assert (state.return_stack, state.visit_counts, state.variables, state.history) == ([], {}, {}, [])
     assert (state.history_summary, state.wait_reprompts, state.turn_index, state.ended, state.end_reason) == (
@@ -157,16 +157,20 @@ def test_v1_fixture_upgrades() -> None:
     assert state.schema_version == CURRENT_SCHEMA_VERSION
     assert (state.pending_actions, state.wait_armed_at_ms) == ([], None)
     dumped = orjson.loads(dump_engine_state(state))
-    assert {key: value for key, value in dumped.items() if key in raw and key != "schema_version"} == {
-        key: value for key, value in raw.items() if key != "schema_version"
+    unchanged = {"schema_version", "return_stack"}
+    assert {key: value for key, value in dumped.items() if key in raw and key not in unchanged} == {
+        key: value for key, value in raw.items() if key not in unchanged
     }
-    assert state.return_stack[0] == NodeFrame(pathway_id=PATHWAY, version=4, node_id="greeting")
+    assert state.return_stack == [
+        NodeFrame(kind="global", pathway_id=PATHWAY, version=4, node_id="greeting"),
+        NodeFrame(kind="transfer_pathway", pathway_id=None, version=None, node_id="faq"),
+    ]
     assert state.history[1].interrupted is True
     assert load_engine_state(dump_engine_state(state)) == state
 
 
-def test_v2_fixture_is_canonical() -> None:
-    text = _fixture_text(2)
+def test_v3_fixture_is_canonical() -> None:
+    text = _fixture_text(3)
 
     state = load_engine_state(text)
 
@@ -182,13 +186,76 @@ def test_v2_fixture_is_canonical() -> None:
         "end_call",
     ]
     assert state.wait_armed_at_ms == 3100
+    assert [frame.kind for frame in state.return_stack] == ["global", "transfer_pathway"]
 
 
-def test_v1_fixture_matches_v2_fixture_except_new_fields() -> None:
+def test_v2_fixture_upgrades_frames_with_derived_kinds() -> None:
+    upgraded = load_engine_state(_fixture_text(2))
+
+    assert upgraded == load_engine_state(_fixture_text(3))
+
+
+def test_v1_fixture_matches_v3_fixture_except_v2_fields() -> None:
     upgraded = load_engine_state(_fixture_text(1))
-    current = load_engine_state(_fixture_text(2))
+    current = load_engine_state(_fixture_text(3))
 
     assert upgraded == current.model_copy(update={"pending_actions": [], "wait_armed_at_ms": None})
+
+
+@pytest.mark.parametrize(
+    ("state_pathway", "frame_pathway", "kind"),
+    [
+        (str(PATHWAY), str(PATHWAY), "global"),
+        (str(PATHWAY), str(PATHWAY).upper(), "global"),
+        (None, None, "global"),
+        (str(PATHWAY), None, "transfer_pathway"),
+        (None, str(PATHWAY), "transfer_pathway"),
+        (str(PATHWAY), "0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2f", "transfer_pathway"),
+    ],
+)
+def test_v2_frame_kind_comes_from_the_frame_pathway(
+    state_pathway: str | None, frame_pathway: str | None, kind: str
+) -> None:
+    raw = orjson.loads(_fixture_text(2))
+    raw["pathway_id"] = state_pathway
+    raw["return_stack"] = [{"pathway_id": frame_pathway, "version": None, "node_id": "a"}]
+
+    state = load_engine_state(raw)
+
+    assert [frame.kind for frame in state.return_stack] == [kind]
+
+
+def test_v2_without_return_stack_upgrades() -> None:
+    raw = orjson.loads(_fixture_text(2))
+    del raw["return_stack"]
+
+    assert load_engine_state(raw).return_stack == []
+
+
+def test_v2_with_frame_kind_is_rejected() -> None:
+    raw = orjson.loads(_fixture_text(2))
+    raw["return_stack"][0]["kind"] = "global"
+
+    with pytest.raises(EngineStateError, match=r"return_stack\.kind") as caught:
+        load_engine_state(raw)
+
+    assert caught.value.version == 2
+
+
+def test_v2_malformed_stack_is_left_to_validation() -> None:
+    raw = orjson.loads(_fixture_text(2))
+    raw["return_stack"] = ["greeting"]
+
+    with pytest.raises(ValidationError, match="return_stack"):
+        load_engine_state(raw)
+
+
+def test_frame_kind_is_required() -> None:
+    raw = orjson.loads(_fixture_text(3))
+    del raw["return_stack"][0]["kind"]
+
+    with pytest.raises(ValidationError, match="kind"):
+        load_engine_state(raw)
 
 
 PENDING: list[PendingAction] = [
@@ -230,16 +297,17 @@ def test_sms_from_alias() -> None:
     assert load_engine_state(raw) == state
 
 
-def test_load_does_not_mutate_input() -> None:
-    raw = orjson.loads(_fixture_text(1))
-    before = orjson.loads(_fixture_text(1))
+@pytest.mark.parametrize("version", [1, 2])
+def test_load_does_not_mutate_input(version: int) -> None:
+    raw = orjson.loads(_fixture_text(version))
+    before = orjson.loads(_fixture_text(version))
 
     load_engine_state(raw)
 
     assert raw == before
 
 
-@pytest.mark.parametrize("version", [0, -1, 3, "1", 2.0, True, None])
+@pytest.mark.parametrize("version", [0, -1, 4, "1", 2.0, True, None])
 def test_rejects_bad_versions(version: object) -> None:
     raw = orjson.loads(dump_engine_state(_state()))
     raw["schema_version"] = version
@@ -358,7 +426,11 @@ _states = st.builds(
     current_node_id=_ids,
     return_stack=st.lists(
         st.builds(
-            NodeFrame, pathway_id=st.none() | st.uuids(), version=st.none() | st.integers(1, 9), node_id=_ids
+            NodeFrame,
+            kind=st.sampled_from(["global", "transfer_pathway"]),
+            pathway_id=st.none() | st.uuids(),
+            version=st.none() | st.integers(1, 9),
+            node_id=_ids,
         ),
         max_size=3,
     ),

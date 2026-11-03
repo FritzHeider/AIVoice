@@ -1737,3 +1737,12 @@ Grafana 3001
   `va_engine.decision_schemas` (LRU-cached dynamic classes, never registered). Tests: `tests/support/decision_helpers.
   ScriptedPort` (validates scripted outputs against the real schema, advances its clock 0.25 s per call), `inputs`,
   `unavailable()`, `invalid(name)`; FakeLLM contract tests in `test_decisions_sim.py` use `task_helpers.served()`.
+- 2026-11-03 (P07-T05): global nodes / return stack / forwarding = `va_engine.navigation.Navigator(state,
+  ActiveGraph(pathway_id, version, graph), loader=PathwayLoader)` (`apply(RouteDecision)`, `await finish_node()`,
+  `enter(node_id, kind=)`, `global_check_enabled()` → router `include_globals`, `prev_node_prompt()`); it returns a
+  `Transition` (`speaks`, `over_limit`, `problem`) and never raises for broken targets (rules: specs/11 §4 Decision
+  P07-T05). EngineState is schema version 3: `NodeFrame.kind` (`global` | `transfer_pathway`) is required, the 2 → 3
+  upgrader derives it, frozen fixture `fixtures/engine_state/v3.json`. Tests: `tests/support/navigation_helpers.py`
+  (`global_graph()`, `other_graph()`, `MemoryLoader.with_other()`, `nav_state`, `active`, `route`); multi-turn
+  router + navigator scenarios in `tests/test_global_scenarios.py`. `service_helpers.json_log_stream()` returns a
+  stream (not a context manager); filter `log_events(stream)` by `event`.
