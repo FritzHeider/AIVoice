@@ -187,3 +187,15 @@ def test_hipaa_strips_transcripts_unless_the_endpoint_allows_phi() -> None:
     untouched = plan_deliveries(completed, facts)
     assert untouched[0].payload == CALL_OBJECT
     assert untouched[2].payload["data"] == CALL_OBJECT
+
+
+@pytest.mark.parametrize("patterns", [("*",), ("billing.*",), ("billing.usage",)])
+def test_internal_types_reach_no_webhook(patterns: tuple[str, ...]) -> None:
+    call = CallFacts(webhook=CALL_URL, webhook_events=frozenset({"call"}), metadata={})
+    facts = RoutingFacts(call=call, endpoints=(_endpoint(*patterns),))
+    assert plan_deliveries(event(EventType.BILLING_USAGE, call_id=CALL), facts) == []
+
+
+def test_other_billing_events_still_reach_a_star_endpoint() -> None:
+    facts = RoutingFacts(endpoints=(_endpoint("*"),))
+    assert _urls(plan_deliveries(event(EventType.BILLING_LOW_BALANCE), facts)) == [(ENDPOINT_URL, "envelope")]

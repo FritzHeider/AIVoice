@@ -3,7 +3,11 @@
 
 :class:`TurnRecorder` is the call's :class:`~va_voice.pipeline.PipelineObserver`. Its callbacks are sync: turn
 rows go to the write-behind :class:`TurnSink` at once, events are published in callback order by one chain of
-background tasks (:meth:`TurnRecorder.drain` waits for it). A publish failure is logged
+background tasks (:meth:`TurnRecorder.drain` waits for it). The assistant ``call.turn`` event is held back
+until the next callback: when that is the reply's latency report (``on_latency``, which the pipeline sends
+after the reply's last agent turn) the event carries ``data.latency`` (the measured ``call_turns.latency``
+values) and is published before the ``call.latency`` events; any other callback or :meth:`TurnRecorder.drain`
+publishes it as is (specs/19 §1 Decision P06-T05). A publish failure is logged
 ``media.event_publish_failed`` (event type and error type, never turn text) and never reaches the pipeline.
 
 Times: ``start_ms``/``end_ms`` are relative to the call's answer time: ``pipeline_ms - origin_ms +
@@ -77,6 +81,7 @@ class TurnRecorder:
         self._clock = clock
         self._offset_ms = max(answered_offset_ms, 0.0) - origin_ms
         self._tail: asyncio.Task[None] | None = None
+        self._held: DomainEvent | None = None
 
     def on_user_turn(self, turn: UserTurn) -> None:
         if turn.supersedes is not None:
@@ -86,7 +91,7 @@ class TurnRecorder:
                 turn.index, "user", turn.text, turn.start_ms, turn.end_ms, language_code=turn.language_code
             )
         )
-        self._turn_event(turn.index, "user", turn.text, interrupted=False)
+        self._enqueue(self._turn_event(turn.index, "user", turn.text, interrupted=False))
 
     def on_agent_turn(self, turn: AgentTurn) -> None:
         self._turns.add(
@@ -100,7 +105,8 @@ class TurnRecorder:
                 interrupted=turn.interrupted,
             )
         )
-        self._turn_event(turn.index, "assistant", turn.text, interrupted=turn.interrupted)
+        self._release_held()
+        self._held = self._turn_event(turn.index, "assistant", turn.text, interrupted=turn.interrupted)
 
     def on_latency(self, report: TurnReport) -> None:
         values = report.latency.as_dict()
@@ -109,6 +115,12 @@ class TurnRecorder:
             self._turns.add(
                 LatencyMerge(context.org_id, context.call_id, report.turn_index, "user", dict(values))
             )
+        held, self._held = self._held, None
+        if held is not None:
+            if values:
+                latency: dict[str, JsonValue] = dict(values)
+                held = held.model_copy(update={"data": {**held.data, "latency": latency}})
+            self._enqueue(held)
         for item in report.events:
             data: dict[str, JsonValue] = dict(item.data)
             self._publish(EventType.CALL_LATENCY, item.message, data)
@@ -125,7 +137,8 @@ class TurnRecorder:
         self._publish(EventType.CALL_INTERRUPT, message, data)
 
     async def drain(self) -> None:
-        """Wait until every event queued so far was published (or failed)."""
+        """Release a held assistant turn, then wait until every queued event was published (or failed)."""
+        self._release_held()
         tail = self._tail
         if tail is not None:
             await asyncio.wait({tail})
@@ -162,7 +175,7 @@ class TurnRecorder:
     def _delete(self, index: int) -> TurnDelete:
         return TurnDelete(self._context.org_id, self._context.call_id, index, "user")
 
-    def _turn_event(self, index: int, role: CallTurnRole, text: str, *, interrupted: bool) -> None:
+    def _turn_event(self, index: int, role: CallTurnRole, text: str, *, interrupted: bool) -> DomainEvent:
         data: dict[str, JsonValue] = {
             "turn_index": index,
             "role": role,
@@ -170,10 +183,10 @@ class TurnRecorder:
             "node_id": None,
             "interrupted": interrupted,
         }
-        self._publish(EventType.CALL_TURN, text[:EVENT_MESSAGE_CHARS], data)
+        return self._event(EventType.CALL_TURN, text[:EVENT_MESSAGE_CHARS], data)
 
-    def _publish(self, event_type: EventType, message: str, data: dict[str, JsonValue]) -> None:
-        event = new_event(
+    def _event(self, event_type: EventType, message: str, data: dict[str, JsonValue]) -> DomainEvent:
+        return new_event(
             event_type,
             org_id=self._context.org_id,
             clock=self._clock,
@@ -181,6 +194,19 @@ class TurnRecorder:
             message=message,
             data=data,
         )
+
+    def _publish(self, event_type: EventType, message: str, data: dict[str, JsonValue]) -> None:
+        self._enqueue(self._event(event_type, message, data))
+
+    def _release_held(self) -> None:
+        held, self._held = self._held, None
+        if held is not None:
+            self._enqueue(held)
+
+    def _enqueue(self, event: DomainEvent) -> None:
+        """Queue ``event`` behind every earlier one (a held assistant turn is released first)."""
+        if self._held is not None and event is not self._held:
+            self._release_held()
         previous = self._tail
         self._tail = asyncio.get_running_loop().create_task(
             self._publish_after(previous, event), name="call-event-publish"

@@ -11,10 +11,21 @@ from typing import Final
 
 from va_events.catalog import Stream
 
-__all__ = ["CALL_SEQ_TTL_S", "STREAM_MAXLEN", "call_live_channel", "call_seq_key", "stream_key"]
+__all__ = [
+    "CALL_SEQ_TTL_S",
+    "DEAD_STREAM_KEY",
+    "DEAD_STREAM_MAXLEN",
+    "STREAM_MAXLEN",
+    "call_live_channel",
+    "call_seq_key",
+    "stream_key",
+]
 
 CALL_SEQ_TTL_S: Final = 172_800
 STREAM_MAXLEN: Final = 1_000_000
+DEAD_STREAM_KEY: Final = "events:dead"
+"""Entries a consumer could not decode, map, or insert (stream, entry id, reason, raw payload)."""
+DEAD_STREAM_MAXLEN: Final = 100_000
 
 
 def call_seq_key(call_id: uuid.UUID) -> str:

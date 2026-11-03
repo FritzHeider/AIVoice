@@ -17,7 +17,7 @@ from typing import Final, Literal
 from pydantic import JsonValue
 
 from va_db.models import WebhookFormat
-from va_events.catalog import ALWAYS_CALL_WEBHOOK, WEBHOOK_KEY, EventType
+from va_events.catalog import ALWAYS_CALL_WEBHOOK, INTERNAL_TYPES, WEBHOOK_KEY, EventType
 from va_events.model import DomainEvent
 from va_events.webhook_payloads import BatchFacts, Body, content_body, envelope_body, strip_phi
 
@@ -161,7 +161,9 @@ def _widget_target(event: DomainEvent, facts: RoutingFacts) -> Target | None:
 
 
 def plan_targets(event: DomainEvent, facts: RoutingFacts) -> list[Target]:
-    """Every destination of ``event``, in routing order, one per URL."""
+    """Every destination of ``event``, in routing order, one per URL (none for :data:`INTERNAL_TYPES`)."""
+    if event.type in INTERNAL_TYPES:
+        return []
     candidates: list[Target | None] = [
         _call_target(event, facts),
         _batch_target(event, facts),

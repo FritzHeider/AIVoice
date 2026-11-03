@@ -73,6 +73,47 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 >     The Send Call dispatch sequences before its commit, inserts the row in the same transaction, and broadcasts after
 >     the commit (best effort).
 
+> Decision (2026-11-03): events sink (P06-T05). `apps/events_sink` is the ClickHouse consumer (specs/03 §12).
+> 1. One consumer group `events-sink` over all five streams; consumer name = the pod (`POD_ID`, else the host name).
+>    One `StreamSink` task per stream, started after the `clickhouse_schema` bootstrap; the ClickHouse client comes
+>    from the same connect function (transient connect errors retried with the 0.5 s → 5 s backoff).
+> 2. A stream sink first re-reads the entries pending on its own consumer name (`XREADGROUP ... 0`, batch by batch,
+>    `StreamConsumer.read_own_pending`), so a restarted pod does not wait for the 60 s claim, then reads with
+>    `StreamConsumer.read` (stale entries of other pods first). A batch is flushed at 1 000 entries, when 1 s (injected
+>    clock) has passed since its first entry, or when a blocking read for the rest of that window returns nothing.
+>    Entries are acknowledged only after every insert of the batch succeeded (at-least-once: a crash between insert and
+>    ack, or a retried insert after a lost reply, can duplicate rows; `calls_fact` is a `ReplacingMergeTree`, the
+>    other tables accept duplicates; no insert dedup token).
+> 3. Mapping (pure, `va_events_sink.rows`): `va.call_events` gets every event with a Postgres `call_events` row
+>    (`row_for`), `data` as JSON text; `va.call_turns` gets `call.turn` events (`text_len` = characters, `node_id`
+>    `""` when null, latency columns from the optional `data.latency`, else NULL; negative values stored as 0);
+>    `va.calls_fact` gets `call.completed` (the Call Object): `runner_type` = `agent` if `agent_id`, else `persona` if
+>    `persona_id`, else `pathway` if `pathway_id`, else `task`; `status` is the Bland form; `experiment_arm_id` NULL
+>    (the Call Object carries only the arm label); seconds = minutes × 60 (3 decimals); `price_micros` = dollars ×
+>    10^6 rounded; `ended_at` = `end_at`; empty strings for null low-cardinality strings. `va.usage_events_raw` gets
+>    the new internal type `billing.usage` (`va_events.usage_event(UsageEventData, org_id=, clock=)`; the phase-15
+>    `events:billing` mirror of specs/24 §4 step 4 produces it). `INTERNAL_TYPES` (`billing.usage`) are never routed
+>    to any webhook, not even a `*` endpoint. Malformed data of a mapped type is parked as `unmappable:<table>:<why>`.
+> 4. Assistant turn latency: the pipeline reports a reply's latency after its last agent turn, so the media
+>    `TurnRecorder` holds the assistant `call.turn` event until the next callback; the reply's latency report attaches
+>    `data.latency` (the merged `call_turns.latency` values) and publishes it before the `call.latency` events, any
+>    other callback (user turn, next agent turn, interrupt) or the call-end drain publishes it unchanged. ClickHouse
+>    user rows carry NULL latency (analytics reads `role = 'assistant'`); Postgres still merges latency into the user
+>    row.
+> 5. Failures: transient insert errors (`OperationalError`, `OSError`) retry the same table after 0.5 s doubling to
+>    5 s until it succeeds, nothing acknowledged meanwhile. Rejected data (other ClickHouse errors, `ValueError`,
+>    `TypeError`, `OverflowError` from the driver) switches the remaining tables of the batch to per-event inserts;
+>    an event whose own insert is rejected is parked `insert_failed:<table>`. Parking = `XADD events:dead MAXLEN ~
+>    100000 * stream <events:x> entry_id <id> reason <reason> payload <bytes>` before the ack; a `StreamConsumer`
+>    built with `dead_letter=` also parks undecodable payloads (`undecodable`). A Redis error (including a failed
+>    park) drops the in-memory batch (entries stay pending), backs off 0.5 s → 5 s, and restarts at step 2.
+>    `va_events_sink_errors_total{table}` counts failed inserts, `va_events_sink_inserted_total{table}` inserted rows.
+> 6. `va_events_sink_lag_seconds{stream}` is refreshed after every read cycle: the age (clock wall time minus the
+>    entry id's ms) of the older of the group's oldest pending entry (`XPENDING` summary) and the first entry after
+>    the group's last-delivered id (`XINFO GROUPS` + `XRANGE`), 0 when neither exists.
+> 7. Shutdown cancels the stream tasks; an unflushed in-memory batch is dropped and its entries stay pending for
+>    the next start (own-pending re-read) or another pod (`XAUTOCLAIM` after 60 s).
+
 ## 2. Event type catalog (complete)
 
 | Type | Category | Emitted by | When | Webhook `webhook_events` key |
@@ -86,7 +127,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | `call.amd` | voicemail | edge | AMD result (data.result: human_residence/human_business/machine/silence/fax_detected) | `call` |
 | `call.voicemail` | voicemail | media | voicemail detected and action taken (data.action) | `call` |
 | `call.started` | call | media | pipeline attached and first audio sent or greeting awaited | `call` |
-| `call.turn` | call | media | a turn finalized (data: role, text, node_id, interrupted) | `call` |
+| `call.turn` | call | media | a turn finalized (data: turn_index, role, text, node_id, interrupted; assistant turns may add `latency`, the reply's measured `call_turns.latency` values, §1 Decision P06-T05) | `call` |
 | `call.interrupt` | interrupt | media | barge-in honored (data: played_chars, total_chars) | `call` |
 | `call.latency` | latency | media | per turn; message like `"E2E: 742ms"` and data `{eot_ms, stt_final_ms, llm_ttft_ms, tts_ttfa_ms, e2e_ms}`; additionally one event per stage with Bland-style messages `"STT: 63ms"`, `"LLM: 266ms"`, `"TTS: 218ms"` | `latency` |
 | `call.route` | route | media | pathway edge chosen (data: from_node, to_node, label, alternatives[{label, score}], global:bool) | `call` |
@@ -113,6 +154,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | `conversation.created`, `conversation.message`, `conversation.closed`, `conversation.human_takeover` | — | worker/api | SMS + widget conversations | conversation/widget `webhook` |
 | `widget.message` | — | media/api | widget message exchanged | widget `webhook_url` |
 | `billing.low_balance`, `billing.recharged`, `billing.payment_failed` | — | worker | credits | org endpoints |
+| `billing.usage` | — | worker | a `usage_events` row was posted (data: meter, quantity, amount_micros, cost_micros, reference_type, reference_id, occurred_at, idempotency_key; internal, ClickHouse mirror) | — (never delivered) |
 | `number.purchased`, `number.released`, `number.order_failed` | — | worker | number orders | org endpoints |
 | `tendlc.brand_status`, `tendlc.campaign_status` | — | worker | 10DLC registration status changes | org endpoints |
 | `call.retranscription_ready` | call | worker | batch re-transcription merged into turns | `call` |

@@ -24,7 +24,7 @@
   - Deliverables: endpoints CRUD (URL vetted, deleting an endpoint cancels its pending deliveries), test send (synthetic signed event through the shared SSRF-safe sender, returns the delivery result), deliveries list/filter (cursor, limit ≤ 100), replay (new attempt series, same event id)
   - Acceptance: API tests incl. RBAC and cross-tenant registration with the P02-T15 suite.
 
-- [ ] P06-T05 Events sink to ClickHouse
+- [x] P06-T05 Events sink to ClickHouse — consumer group `events-sink` per stream (1 000 rows / 1 s batches, ack after insert), pure mapping to call_events/call_turns/calls_fact/usage_events_raw, transient retry + per-event fallback, `events:dead` parking, lag gauge; testcontainers Redis + ClickHouse integration test; make test 11100 passed / 7 skipped, lint/typecheck/placeholders pass, jscpd 0, radon 2.39
   - Spec refs: specs/19-events-and-webhooks.md (consumers); specs/03-data-model.md (ClickHouse schema)
   - Depends on: P03-T17, P01-T12
   - Deliverables: `apps/events_sink` consumer group, batching (1 000 rows / 1 s), mapping to `call_events`, `call_turns`, `calls_fact`, `usage_events_raw`, retry with poison-message parking stream `events:dead`

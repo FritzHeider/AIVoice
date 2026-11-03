@@ -4,7 +4,11 @@
 :meth:`read` first claims entries other consumers left pending longer than ``min_idle_ms`` (60 s) with
 ``XAUTOCLAIM``, then reads new ones. Callers :meth:`ack` after processing. A payload that is not a
 :class:`DomainEvent` is acknowledged, logged ``events.stream_poison`` (entry id and stream only), and skipped;
-entries deleted from the stream while pending (reported by ``XAUTOCLAIM``) are acknowledged away.
+with a ``dead_letter`` it is first parked in ``events:dead`` with reason ``undecodable`` (a parking failure
+propagates and leaves the entry pending). Entries deleted from the stream while pending (reported by
+``XAUTOCLAIM``, or returned without fields by :meth:`read_own_pending`) are acknowledged away.
+:meth:`read_own_pending` re-reads the entries delivered to this consumer name but never acknowledged (a
+restarted pod picks up its own work at once instead of waiting for the 60 s claim).
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from redis.exceptions import ResponseError
 
 from va_common.logging import get_logger
 from va_events.catalog import Stream
+from va_events.dead_letter import DeadLetter
 from va_events.keys import stream_key
 from va_events.model import DomainEvent, decode
 from va_events.publisher import PAYLOAD_FIELD
@@ -29,6 +34,8 @@ DEFAULT_MIN_IDLE_MS: Final = 60_000
 DEFAULT_COUNT: Final = 100
 DEFAULT_BLOCK_MS: Final = 1_000
 _START: Final = "0-0"
+_OWN_PENDING: Final = "0"
+UNDECODABLE: Final = "undecodable"
 
 _log = get_logger(__name__)
 
@@ -48,11 +55,24 @@ def _text(value: bytes | str) -> str:
 class StreamConsumer:
     """One consumer of a consumer group on an ``events:<stream>`` stream."""
 
-    def __init__(self, redis: Redis, stream: Stream, group: str, consumer: str) -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        stream: Stream,
+        group: str,
+        consumer: str,
+        *,
+        dead_letter: DeadLetter | None = None,
+    ) -> None:
         self._redis = redis
         self._key = stream_key(stream)
         self._group = group
         self._consumer = consumer
+        self._dead_letter = dead_letter
+
+    @property
+    def group(self) -> str:
+        return self._group
 
     @property
     def key(self) -> str:
@@ -109,6 +129,19 @@ class StreamConsumer:
             return []
         return await self._decode(reply[0][1])
 
+    async def read_own_pending(self, *, count: int = DEFAULT_COUNT) -> list[StreamEntry]:
+        """Up to ``count`` entries already delivered to this consumer and not acknowledged (no blocking)."""
+        reply: Any = await self._redis.xreadgroup(
+            self._group, self._consumer, {self._key: _OWN_PENDING}, count=count
+        )
+        if not reply:
+            return []
+        raw_entries = reply[0][1]
+        deleted = [_text(raw_id) for raw_id, fields in raw_entries if fields is None]
+        if deleted:
+            await self.ack(deleted)
+        return await self._decode([entry for entry in raw_entries if entry[1] is not None])
+
     async def ack(self, entry_ids: Sequence[str]) -> int:
         """Acknowledge processed entries; returns how many were pending."""
         if not entry_ids:
@@ -120,8 +153,11 @@ class StreamConsumer:
         poison: list[str] = []
         for raw_id, fields in raw_entries:
             entry_id = _text(raw_id)
-            event = _parse(fields)
+            payload = _payload(fields)
+            event = _parse(payload)
             if event is None:
+                if self._dead_letter is not None:
+                    await self._dead_letter.park(self._key, entry_id, payload or b"", UNDECODABLE)
                 poison.append(entry_id)
                 _log.warning("events.stream_poison", stream=self._key, entry_id=entry_id)
             else:
@@ -131,11 +167,17 @@ class StreamConsumer:
         return entries
 
 
-def _parse(fields: dict[Any, Any] | None) -> DomainEvent | None:
+def _payload(fields: dict[Any, Any] | None) -> bytes | None:
     fields = fields or {}
     payload = fields.get(PAYLOAD_FIELD.encode())
     if payload is None:  # a client built with decode_responses=True returns str field names
         payload = fields.get(PAYLOAD_FIELD)
+    if payload is None:
+        return None
+    return payload.encode() if isinstance(payload, str) else bytes(payload)
+
+
+def _parse(payload: bytes | None) -> DomainEvent | None:
     if payload is None:
         return None
     try:

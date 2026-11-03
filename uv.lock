@@ -2962,6 +2962,7 @@ source = { editable = "apps/events_sink" }
 dependencies = [
     { name = "starlette" },
     { name = "va-common" },
+    { name = "va-domain" },
     { name = "va-events" },
 ]
 
@@ -2969,6 +2970,7 @@ dependencies = [
 requires-dist = [
     { name = "starlette", specifier = ">=1.0" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-events", editable = "packages/va_events" },
 ]
 

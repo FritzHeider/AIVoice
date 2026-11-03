@@ -218,6 +218,81 @@ async def test_an_unmeasured_turn_writes_no_latency() -> None:
     assert (turns.ops, events.events) == ([], [])
 
 
+def agent_turn(index: int, text: str, *, interrupted: bool = False) -> AgentTurn:
+    return AgentTurn(
+        index=index,
+        text=text,
+        text_spoken=text,
+        interrupted=interrupted,
+        started_ms=ORIGIN_MS + 3000,
+        ended_ms=ORIGIN_MS + 3900,
+    )
+
+
+async def test_the_reply_latency_rides_on_the_assistant_turn_event() -> None:
+    rec, _, events = recorder(call_context(uuid.uuid4()))
+    latency = TurnLatency(eot_ms=300, stt_final_ms=63, llm_ttft_ms=266, tts_ttfa_ms=218, e2e_ms=742)
+    rec.on_user_turn(user_turn(1, "Hi", 0.0, 500.0))
+    rec.on_agent_turn(agent_turn(2, "Hello there"))
+    rec.on_latency(TurnReport(latency, latency_events(latency, 1), 1))
+    await rec.drain()
+    assert [(e.type, e.data.get("role")) for e in events.events] == [
+        (EventType.CALL_TURN, "user"),
+        (EventType.CALL_TURN, "assistant"),
+        (EventType.CALL_LATENCY, None),
+        (EventType.CALL_LATENCY, None),
+        (EventType.CALL_LATENCY, None),
+        (EventType.CALL_LATENCY, None),
+    ]
+    assert "latency" not in events.events[0].data
+    assert events.events[1].data["latency"] == latency.as_dict()
+    assert events.events[1].data["text"] == "Hello there"
+
+
+async def test_an_unmeasured_reply_publishes_the_assistant_turn_without_latency() -> None:
+    rec, _, events = recorder(call_context(uuid.uuid4()))
+    rec.on_agent_turn(agent_turn(1, "Hello"))
+    rec.on_latency(TurnReport(TurnLatency(), [], 0))
+    await rec.drain()
+    (event,) = events.events
+    assert "latency" not in event.data
+
+
+@pytest.mark.parametrize("next_callback", ["user_turn", "agent_turn", "interrupt", "drain"])
+async def test_any_other_callback_releases_the_held_assistant_turn_first(next_callback: str) -> None:
+    rec, _, events = recorder(call_context(uuid.uuid4()))
+    rec.on_agent_turn(agent_turn(1, "First"))
+    if next_callback == "drain":
+        await rec.drain()
+    elif next_callback == "user_turn":
+        rec.on_user_turn(user_turn(2, "Next", 0.0, 1.0))
+    elif next_callback == "agent_turn":
+        rec.on_agent_turn(agent_turn(2, "Second"))
+    elif next_callback == "interrupt":
+        rec.on_interrupt(interrupt(1))
+    latency = TurnLatency(e2e_ms=700)
+    rec.on_latency(TurnReport(latency, latency_events(latency, 1), 1))
+    await rec.drain()
+    first = events.events[0]
+    assert (first.type, first.data["text"]) == (EventType.CALL_TURN, "First")
+    assert "latency" not in first.data
+    if next_callback == "agent_turn":
+        assert events.events[1].data["latency"] == {"e2e_ms": 700}
+
+
+async def test_held_assistant_turns_keep_gap_free_seqs_in_order() -> None:
+    publisher = publisher_rig(router=False)
+    rec, _, _ = recorder(call_context(uuid.uuid4()), events=publisher.publisher)
+    latency = TurnLatency(e2e_ms=640)
+    rec.on_user_turn(user_turn(1, "Hi", 0.0, 1.0))
+    rec.on_agent_turn(agent_turn(2, "Hello"))
+    rec.on_latency(TurnReport(latency, latency_events(latency, 1), 1))
+    await rec.drain()
+    rows = [row for batch in publisher.writer.batches for row in batch]
+    assert [(row.seq, row.category) for row in rows] == [(1, "call"), (2, "call"), (3, "latency")]
+    assert rows[1].data["latency"] == {"e2e_ms": 640}
+
+
 async def test_interrupt_event_carries_the_played_share() -> None:
     rec, turns, events = recorder(call_context(uuid.uuid4()))
     rec.on_interrupt(interrupt())

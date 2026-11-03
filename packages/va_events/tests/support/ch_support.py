@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -13,7 +14,9 @@ from va_events.clickhouse.schema import RECORD_SQL, split_statements
 __all__ = [
     "SPEC_03",
     "FakeClickHouse",
+    "FakeInsert",
     "FakeRows",
+    "InsertRejecter",
     "normalise",
     "spec_columns",
     "spec_statements",
@@ -66,13 +69,58 @@ class FakeRows:
     result_rows: Sequence[Sequence[Any]]
 
 
+@dataclass(frozen=True)
+class FakeInsert:
+    table: str
+    rows: list[tuple[Any, ...]]
+    column_names: tuple[str, ...]
+    database: str | None
+
+
+type InsertRejecter = Callable[[str, Sequence[Sequence[Any]]], BaseException | None]
+
+
 @dataclass
 class FakeClickHouse:
-    """Records commands and queries; serves ``schema_migrations`` rows from ``recorded`` (version -> sum)."""
+    """Records commands, queries, and inserts; serves ``schema_migrations`` rows from ``recorded``.
+
+    ``insert`` raises the queued ``insert_failures`` one per call, then whatever ``reject(table, rows)``
+    returns (``None`` = accepted, recorded in ``inserts`` and signalled through ``inserted``).
+    """
 
     recorded: dict[str, str] = field(default_factory=dict)
     commands: list[tuple[str, dict[str, Any] | None]] = field(default_factory=list)
     queries: list[str | None] = field(default_factory=list)
+    inserts: list[FakeInsert] = field(default_factory=list)
+    insert_failures: list[BaseException] = field(default_factory=list)
+    reject: InsertRejecter | None = None
+    attempts: int = 0
+    inserted: asyncio.Event = field(default_factory=asyncio.Event)
+
+    # jscpd:ignore-start  (signature of va_events_sink.writer.ClickHouseInserts)
+    async def insert(
+        self,
+        table: str | None = None,
+        data: Sequence[Sequence[Any]] | None = None,
+        column_names: str | Sequence[str] | None = "*",
+        database: str | None = None,
+    ) -> object:
+        # jscpd:ignore-end  (the signature mirrors va_events_sink.writer.ClickHouseInserts)
+        assert table is not None
+        rows = [tuple(row) for row in data or []]
+        self.attempts += 1
+        if self.insert_failures:
+            raise self.insert_failures.pop(0)
+        if self.reject is not None and (error := self.reject(table, rows)) is not None:
+            raise error
+        names = (column_names,) if isinstance(column_names, str) else tuple(column_names or ())
+        self.inserts.append(FakeInsert(table, rows, names, database))
+        self.inserted.set()
+        return None
+
+    def rows_of(self, table: str) -> list[tuple[Any, ...]]:
+        """Every accepted row of ``table``, in insert order."""
+        return [row for insert in self.inserts if insert.table == table for row in insert.rows]
 
     async def command(self, cmd: str, parameters: dict[str, Any] | None = None) -> object:
         self.commands.append((cmd, parameters))

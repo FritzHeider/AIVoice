@@ -79,6 +79,7 @@ def sink_app(connect: Any, stop: StopController | None = None) -> Any:
         schema_connect=connect,
         clock=RecordingClock(),
         stop=stop,
+        sink=None,
     )
 
 

@@ -19,6 +19,7 @@ from va_events.call_messages import QUEUED_MESSAGE, SCHEDULED_MESSAGE
 from va_events.catalog import (
     ALWAYS_CALL_WEBHOOK,
     DEFAULT_CATEGORY,
+    INTERNAL_TYPES,
     STREAMS,
     WEBHOOK_KEY,
     EventType,
@@ -26,8 +27,10 @@ from va_events.catalog import (
     stream_for,
 )
 from va_events.consumer import StreamConsumer, StreamEntry
+from va_events.dead_letter import DeadLetter
 from va_events.model import DomainEvent, EventFields, decode, encode, event_uuid, is_call_event, new_event
 from va_events.publisher import EventPublisher, EventPublishError, WebhookRouter
+from va_events.usage import UsageEventData, usage_event
 from va_events.webhook_payloads import BatchFacts, batch_body, envelope_body, iso_ms, live_body, strip_phi
 from va_events.webhook_router import DbWebhookRouter
 
@@ -35,6 +38,7 @@ __all__ = [
     "ALWAYS_CALL_WEBHOOK",
     "DEFAULT_CATEGORY",
     "ENDED_MESSAGE",
+    "INTERNAL_TYPES",
     "QUEUED_MESSAGE",
     "SCHEDULED_MESSAGE",
     "STREAMS",
@@ -47,6 +51,7 @@ __all__ = [
     "CallEventWriter",
     "DbCallEventWriter",
     "DbWebhookRouter",
+    "DeadLetter",
     "DirectCallEventWriter",
     "DomainEvent",
     "EventFields",
@@ -56,6 +61,7 @@ __all__ = [
     "Stream",
     "StreamConsumer",
     "StreamEntry",
+    "UsageEventData",
     "WebhookRouter",
     "__version__",
     "batch_body",
@@ -72,6 +78,7 @@ __all__ = [
     "row_for",
     "stream_for",
     "strip_phi",
+    "usage_event",
 ]
 
 __version__ = version("va-events")

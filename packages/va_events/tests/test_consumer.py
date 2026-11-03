@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 from event_helpers import PublisherRig, event, publisher_rig
 from fakeredis import FakeAsyncRedis
 from service_helpers import json_log_stream, log_events
 
-from va_events import EventType, StreamConsumer
-from va_events.keys import stream_key
+from va_events import DeadLetter, EventType, StreamConsumer
+from va_events.consumer import UNDECODABLE
+from va_events.keys import DEAD_STREAM_KEY, stream_key
 
 
 def _text(value: bytes | str) -> str:
@@ -142,3 +144,68 @@ async def test_an_unrelated_group_error_propagates(rig: PublisherRig) -> None:
     await rig.redis.set("events:sms", "not a stream")
     with pytest.raises(Exception, match="WRONGTYPE"):
         await _consumer(rig, "pod-a", "sms").ensure_group()
+
+
+async def _dead_entries(rig: PublisherRig) -> list[dict[str, str | bytes]]:
+    entries: Any = await rig.redis.xrange(DEAD_STREAM_KEY)
+    return [{_text(k): v for k, v in fields.items()} for _, fields in entries]
+
+
+async def test_with_a_dead_letter_poison_is_parked_before_the_ack(rig: PublisherRig) -> None:
+    consumer = StreamConsumer(rig.redis, "calls", "worker", "pod-a", dead_letter=DeadLetter(rig.redis))
+    await consumer.ensure_group()
+    bad_json = _text(await rig.redis.xadd(consumer.key, {"payload": b"not json"}))
+    no_payload = _text(await rig.redis.xadd(consumer.key, {"other": b"x"}))
+    assert await consumer.read(block_ms=1) == []
+    assert await _pending(rig) == 0
+    parked = await _dead_entries(rig)
+    assert [(_text(p["entry_id"]), p["payload"]) for p in parked] == [
+        (bad_json, b"not json"),
+        (no_payload, b""),
+    ]
+    assert all((_text(p["stream"]), _text(p["reason"])) == ("events:calls", UNDECODABLE) for p in parked)
+
+
+async def test_a_failed_park_leaves_the_poison_pending(rig: PublisherRig) -> None:
+    class BrokenDeadLetter(DeadLetter):
+        async def park(self, *args: object, **kwargs: object) -> str:
+            raise ConnectionError(len(args) + len(kwargs))
+
+    consumer = StreamConsumer(rig.redis, "calls", "worker", "pod-a", dead_letter=BrokenDeadLetter(rig.redis))
+    await consumer.ensure_group()
+    await rig.redis.xadd(consumer.key, {"payload": b"{}"})
+    with pytest.raises(ConnectionError):
+        await consumer.read(block_ms=1)
+    assert await _pending(rig) == 1
+
+
+async def test_dead_letter_trims_approximately(rig: PublisherRig) -> None:
+    dead = DeadLetter(rig.redis, key="events:dead-test", maxlen=1)
+    assert dead.key == "events:dead-test"
+    first = await dead.park("events:calls", "1-0", b"a", "undecodable")
+    await dead.park("events:calls", "2-0", b"b", "undecodable")
+    assert first.count("-") == 1
+    assert await rig.redis.xlen("events:dead-test") >= 1
+
+
+async def test_read_own_pending_returns_this_consumers_unacked_entries(rig: PublisherRig) -> None:
+    pod_a, pod_b = _consumer(rig, "pod-a"), _consumer(rig, "pod-b")
+    await pod_a.ensure_group()
+    published = [await rig.publisher.publish(event(EventType.CALL_QUEUED)) for _ in range(3)]
+    taken = await pod_a.read(block_ms=1)
+    assert await pod_b.read_own_pending() == []
+    again = await pod_a.read_own_pending(count=2)
+    assert [entry.event for entry in again] == published[:2]
+    await pod_a.ack([entry.entry_id for entry in taken])
+    assert await pod_a.read_own_pending() == []
+
+
+async def test_read_own_pending_acks_entries_deleted_meanwhile(rig: PublisherRig) -> None:
+    consumer = _consumer(rig, "pod-a")
+    await consumer.ensure_group()
+    await rig.publisher.publish(event(EventType.CALL_QUEUED))
+    kept = await rig.publisher.publish(event(EventType.CALL_DIALING))
+    first, _ = await consumer.read(block_ms=1)
+    await rig.redis.xdel(consumer.key, first.entry_id)
+    assert [entry.event for entry in await consumer.read_own_pending()] == [kept]
+    assert await _pending(rig) == 1

@@ -616,3 +616,169 @@ jscpd (new api tests tend to clone helpers: reuse `call_helpers`/`session_helper
   (122); openapi drift current; jscpd 0 clones.
 - Note (non-blocking): the 20-endpoint cap is a count-then-insert without an org lock, so two concurrent creates
   at 19 could both pass; acceptable as a soft limit, could take `OrgRepo.lock` later if it matters.
+
+## Plan P06-T05 — Events sink to ClickHouse
+
+### Decisions (add `> Decision (2026-11-03): events sink (P06-T05).` under specs/19 §1 after the P03-T17 decision; cross-ref from specs/03 §12)
+1. One consumer group `events-sink` over all five streams (`va_events.catalog.STREAMS`), consumer name =
+   `va_common.tracing.resolve_pod()` (POD_ID or host name). One `StreamConsumer` + loop task per stream (supervised).
+2. Batching per stream: read with `count = 1000 - pending`, block for the rest of the 1 s window (min 1 ms); flush when
+   1 000 entries are pending or 1 s (injected `Clock`) passed since the first pending entry; ack only after every
+   table insert of the batch succeeded (at-least-once; a crash between insert and ack can duplicate rows in the
+   MergeTree tables — `calls_fact` is ReplacingMergeTree so it self-heals; documented, no dedup token).
+3. Mapping (pure, `va_events_sink.rows`):
+   - `va.call_events`: every event with `call_id`, `seq`, and a category (`event.category` or `DEFAULT_CATEGORY`)
+     → `(org_id, call_id, seq, category, level, message, data=orjson text of data, created_at=occurred_at)`.
+     Call events without seq or category produce no row (same rule as Postgres `row_for`; reuse `va_events.call_events.row_for`
+     if it fits, else mirror it).
+   - `va.call_turns`: `call.turn` events → `(org_id, call_id, turn_index, role, node_id or "", text_len=len(text),
+     interrupted 0/1, eot_ms, stt_final_ms, llm_ttft_ms, tts_ttfa_ms, e2e_ms, route_ms, tool_ms, created_at)`; latency
+     columns come from `data["latency"]` (object with the `METRIC_KEYS` subset) when present, else NULL.
+   - `va.calls_fact`: `call.completed` (data = Call Object) → parse with `va_domain.call_object.CallObject`
+     (check its model_config; if extra keys are rejected that is fine because the data IS a dumped CallObject,
+     `by_alias=True` → validate with `by_alias`/`populate_by_name` as the model allows). direction, status (Bland form, as
+     analytics expects `completed`), answered_by or "", runner_type = agent if agent_id, persona if persona_id,
+     pathway if pathway_id, else task; pathway_id, agent_id, experiment_arm_id NULL (the Call Object carries the arm
+     label only), batch_id, disposition_tag or "", end_reason or "", connected_seconds = round(call_length*60, 3),
+     transfer_seconds = round(transfer_duration*60, 3), price_micros = round(price*1_000_000), created_at, ended_at=end_at.
+   - `va.usage_events_raw`: NEW type `billing.usage` (stream `billing`, category —, webhook key —) whose data is
+     `va_events.usage.UsageEventData` (meter, quantity: Decimal-as-string/number → float, amount_micros, cost_micros,
+     reference_type, reference_id, occurred_at, idempotency_key); builder `usage_event(row_values, *, org_id, clock)`.
+     Producer = the phase-15 `events:billing` mirror (specs/24 §4 step 4 stays deferred; update the P05-T18a
+     decision text to name `billing.usage` as the contract). Never routed to webhooks: add `INTERNAL_TYPES =
+     frozenset({EventType.BILLING_USAGE})` to `va_events.catalog` and make `webhook_routing.plan_deliveries` return
+     [] for them (org endpoints with `*` must not get it). Add the §2 catalog row:
+     `| billing.usage | — | worker | a usage_events row was posted (data: meter, quantity, amount_micros, cost_micros, reference_type, reference_id, occurred_at, idempotency_key; internal, ClickHouse mirror) | — (never delivered) |`
+     (check `test_catalog` parsing of the last column; it must map to None). Run `make openapi` + both gen:api in case
+     an EventType enum appears in openapi.
+   - Malformed data of a mapped type (missing/wrong-typed keys, CallObject validation error) → `RowError` → the
+     entry is parked (below), never blocks the batch.
+4. Assistant turn latency: the per-reply latency report arrives at the END of the reply (`CallPipeline._reply`
+   finally → `on_latency`), after the agent turn callback. `va_media.turns.TurnRecorder` holds the most recent
+   assistant `call.turn` event (not yet published) and publishes it: (a) on `on_latency` with
+   `data["latency"] = report.latency.as_dict()` attached when non-empty (then the latency events follow), or (b)
+   unattached as soon as any other callback (user turn, next agent turn, interrupt) or `drain()` happens. Order in the
+   chain stays callback order otherwise. Document under specs/19 §2 (call.turn data gains optional `latency` on
+   assistant turns) — analytics `/v1/analytics/latency` reads `role='assistant'` rows (specs/27 §7), so latency lives
+   on the assistant row. User rows carry NULL latency in ClickHouse (Postgres keeps merging into the user row as today).
+5. Failures:
+   - Insert errors that are transient (`clickhouse_connect...OperationalError`, `OSError`): keep the batch, retry after
+     0.5 s doubling to 5 s on the clock, `va_events_sink_errors_total{table}` +1 per failed table insert, log
+     `events_sink.insert_retry` (table, rows, attempt, error type). No ack until success.
+   - Non-transient insert errors (`DatabaseError` not `OperationalError`, `ValueError`/`TypeError` from the driver):
+     fall back to inserting each event's rows alone; an event whose insert still fails non-transiently is parked
+     with reason `insert_failed:<table>`; then ack the batch.
+   - Parking = `XADD events:dead MAXLEN ~ 100000 * stream <events:x> entry_id <id> reason <reason> payload <bytes>`
+     then ack. `StreamConsumer` gets an optional `dead_letter: DeadLetter | None` (new `va_events.dead_letter.DeadLetter(redis)`
+     with `park(stream_key, entry_id, payload, reason)`); with it set, undecodable payloads (today: ack + log only) are
+     parked with reason `undecodable` before the ack (raw payload bytes, or empty when the field is missing).
+     Without it behaviour is unchanged (existing tests). Key constant `DEAD_STREAM_KEY = "events:dead"` in
+     `va_events.keys`; add the row to specs/03 §11 (`events:dead` | stream (MAXLEN ~ 100 000) | — | entries the events
+     sink could not map or insert). If XADD to dead fails (Redis down) the entry is NOT acked (re-read later).
+6. Lag gauge `va_events_sink_lag_seconds{stream}`: refreshed after every read/flush cycle: age (clock wall now − ms of
+   the entry id) of the oldest of {group's oldest pending entry (`XPENDING` summary min id), first undelivered entry
+   (`XRANGE (<last-delivered-id> + COUNT 1`, last-delivered from `XINFO GROUPS`)}; 0 when neither exists. Put the pure
+   id→ms/age calculation in a function with unit tests. `va_events_sink_inserted_total{table}` += rows per successful insert.
+7. Startup order: the sink task waits for `SchemaState.wait()`, then opens a client via the same `SchemaConnect`
+   (retrying transient connect errors with the bootstrap backoff), `ensure_group()` per stream, then runs the stream
+   loops. Shutdown (supervisor cancel): stop reading, try a final flush bounded by nothing extra (cancellation just
+   drops the in-memory batch — entries remain pending and are re-read via XAUTOCLAIM / own pending; document).
+   Simplest correct restart behaviour: on start each stream loop first re-reads its OWN pending entries
+   (`XREADGROUP ... 0`) before `>` so a restarted pod with the same name does not wait 60 s. Add
+   `StreamConsumer.read_own_pending(count)` for that.
+
+### Files
+- `packages/va_events/src/va_events/catalog.py`: `BILLING_USAGE = "billing.usage"`, `INTERNAL_TYPES`, `__all__`.
+- `packages/va_events/src/va_events/usage.py` (NEW): `UsageEventData` (pydantic, frozen, extra forbid; `quantity: Decimal`),
+  `usage_event(data: UsageEventData, *, org_id, clock) -> DomainEvent` (no call_id, so no seq/live/row), export in `__init__`.
+- `packages/va_events/src/va_events/webhook_routing.py`: early `return []` for `INTERNAL_TYPES`.
+- `packages/va_events/src/va_events/keys.py`: `DEAD_STREAM_KEY`; `dead_letter.py` (NEW) `DeadLetter`.
+- `packages/va_events/src/va_events/consumer.py`: `dead_letter=` param, `read_own_pending`, parking of poison.
+- `apps/events_sink/src/va_events_sink/rows.py` (NEW, pure): `TABLE_COLUMNS: Final[dict[str, tuple[str, ...]]]` (§12
+  column order), `TableRows` (dict table → list[tuple]), `rows_for_event(event) -> TableRows` raising `RowError(reason)`.
+- `apps/events_sink/src/va_events_sink/writer.py` (NEW): `ClickHouseInserts` protocol (`insert(table, data,
+  column_names=..., database="va")` = clickhouse-connect `AsyncClient.insert` signature subset), `insert_rows(client,
+  rows, metrics)`; transient/fatal classification helpers.
+- `apps/events_sink/src/va_events_sink/lag.py` (NEW): `entry_ms(entry_id)`, `lag_seconds(oldest_ids, now)`, `stream_lag(redis, key, group, now)`.
+- `apps/events_sink/src/va_events_sink/sink.py` (NEW): `SinkConfig(batch_rows=1000, batch_interval_s=1.0, group="events-sink",
+  consumer=..., streams=STREAMS)`, `StreamSink` (one stream: read → batch → map → insert → ack/park), `run_sink(redis,
+  connect, schema, *, clock, metrics, config)`.
+- `apps/events_sink/src/va_events_sink/main.py`: supervisor starts `"events_sink"` task after schema; `create_app` seam
+  `sink: SinkFactory | None` (default builds from `container.redis` (container must expose `redis` — make
+  `build_container` keep the client: `deps.redis(settings)` returns it; check how other services expose it on the
+  container, e.g. `Dependencies` attribute or a small dataclass) and the schema connect); tests that use
+  `FakeContainer` pass `sink=None`. `SchemaConnect` type widened to a client protocol with both `command/query` and `insert`.
+  Update module docstrings ("The stream consumer comes with the analytics work" is now false).
+- `apps/media_worker/src/va_media/turns.py`: hold/attach assistant turn latency (Decision 4).
+- specs: 19 §1 Decision, §2 row + call.turn note; 03 §11 row + §12 cross-ref; 24 §4 P05-T18a decision text; AGENTS.md bullet.
+
+### Tests
+- `apps/events_sink/tests/test_rows.py`: call_events row for a call event (data JSON text, seq, category default and
+  override), no row without seq / without category / without call_id; call.turn user row (NULL latency, node "" for
+  null, text_len), assistant row with latency subset; malformed call.turn (missing turn_index, role not str) → RowError;
+  call.completed with a real dumped CallObject (build from `CallObject` example / va_domain test fixture) → calls_fact
+  values incl. runner_type precedence (parametrize agent/persona/pathway/task), seconds/micros conversion;
+  invalid Call Object → RowError; billing.usage row; non-mapped system event → empty. Column tuple order equals
+  `ch_support.spec_columns()` for each table.
+- `packages/va_events/tests/test_usage.py`, routing test: `billing.usage` with a `*` endpoint plans nothing;
+  catalog test passes with the new row.
+- `packages/va_events/tests/test_consumer.py`: with `dead_letter`, a bad payload lands in `events:dead` with
+  stream/entry_id/reason/payload and is acked; dead-letter XADD failure leaves it pending; `read_own_pending` returns
+  entries delivered but unacked to this consumer.
+- `apps/events_sink/tests/test_sink.py` (fakeredis + a `FakeInserts` recording client, ManualClock): flush at 1 000
+  entries without waiting; flush after 1 s with fewer; ack only after insert; transient failure → retry with backoff
+  (0.5, 1.0 …) then success, errors_total incremented, nothing acked in between; non-transient batch failure →
+  per-event fallback parks only the bad event (reason `insert_failed:call_turns`) and inserts the rest; RowError →
+  parked `unmappable:<reason>`; inserted_total per table; restart re-reads own pending; lag gauge values.
+- `apps/events_sink/tests/test_lag.py` pure id/age math.
+- `apps/events_sink/tests/test_events_sink.py`: existing probe tests with `sink=None`; one lifespan test where the
+  default sink factory runs over fakeredis + FakeConnect client and inserts a published event.
+- `apps/events_sink/tests/test_sink_integration.py` (`@pytest.mark.integration`, docker probe skip): testcontainers
+  Redis (`testcontainers.community.redis`? check availability; else reuse existing redis container helper used by
+  `test_events_redis_integration.py`) + ClickHouse 24.8 container (one module, one test): apply migrations, publish
+  via real `EventPublisher` a call.turn (assistant with latency), a call.latency, a call.completed CallObject, a
+  billing.usage, and one poison payload; run the sink until rows appear (poll ClickHouse with a bounded loop on the
+  clock-free condition — query counts, no sleeps beyond the loop's await of the sink flush event; expose a
+  `flushed` asyncio.Event/counter on StreamSink for tests); assert row values in all four tables and the poison in
+  `events:dead`, and XPENDING 0.
+- `apps/media_worker/tests/test_turns.py` (existing module): assistant turn event published with `latency` when
+  `on_latency` follows; published without latency when a user turn / drain comes first; order of events.
+  Runtime sim / e2e assertions that read call.turn data must still pass.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+`uv run pytest packages/va_events apps/events_sink apps/media_worker packages/va_db -q`; `make openapi` (+gen:api if drift);
+full `make test` in background with heartbeat Monitor (truncate log first); `make check`; jscpd; radon.
+No e2e needed (no call-flow behaviour change beyond event data), but the media TurnRecorder change touches call
+events — run `uv run pytest apps/media_worker -q` fully.
+
+### Risks
+- clickhouse-connect `AsyncClient.insert` signature: `insert(table, data, column_names='*', database='', ...)`;
+  UUID/Nullable/DateTime64 conversions — pass `uuid.UUID`, `datetime` (aware UTC), `None`; integration test proves it.
+- fakeredis `XINFO GROUPS` / `XPENDING` summary support (used for lag) — verify early; fall back to `xpending_range`.
+- Holding the assistant event reorders it after `call.latency` events; check e2e/runtime tests that assert event order
+  (`tests_e2e` outbound_basic assertions on event sequence, `test_runtime_sim`) — grep for `call.turn` order asserts.
+- Testcontainers boot time under xdist: one test per module.
+
+## Build P06-T05 (builder notes)
+- va_events: `BILLING_USAGE` + `INTERNAL_TYPES` (plan_targets returns [] for them), `usage.py` (`UsageEventData`,
+  `usage_event`), `dead_letter.py` (`DeadLetter.park`), keys `DEAD_STREAM_KEY`/`DEAD_STREAM_MAXLEN`,
+  `StreamConsumer(dead_letter=)` parks `undecodable` before ack + `read_own_pending()` (deleted entries acked away).
+- events_sink: `rows.py` (pure mapping, `RowError`), `writer.py` (`insert_table`, `is_transient`, `is_rejected`,
+  `ClickHouseInserts`), `lag.py`, `sink.py` (`StreamSink.cycle/run`, `build_sinks`, `run_sink`), container now
+  `SinkContainer(dependencies, redis)`, `create_app(sink=default_sink|None)`; va-domain dependency added.
+- Transient insert retries only the failing table (tables already inserted in the batch are not re-sent); rejected
+  table → per-event inserts for the remaining tables only.
+- Redis errors in the loop (incl. failed park) → drop batch, backoff, restart with own-pending re-read.
+- fakeredis blocking XREADGROUP returns [] immediately → sink yields once after an empty read (else loop starves).
+- media TurnRecorder holds the assistant call.turn; on_latency attaches `data.latency`.
+- Specs: 19 §1 Decision P06-T05 + §2 rows (call.turn note, billing.usage), 03 §11 `events:dead` row + §12 pointer,
+  24 P05-T18a text. AGENTS.md bullet. openapi: no drift.
+- Integration test (real Redis + ClickHouse 24.8) passes locally (~7 s).
+
+## Review P06-T05 — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11100 passed, 7 skipped (coverage gate passed); jscpd 0 clones; radon avg 2.39.
+- Diff checked against specs/03 §11/§12 (column order, types: UInt32 latencies clamped ≥ 0, Nullable UUIDs), specs/27 metric names, specs/19 §1 Decision + §2 rows.
+- Non-blocking notes: `_recover` stops when a whole own-pending batch is poison/deleted even if more own entries remain
+  (those fall back to XAUTOCLAIM after 60 s); a dead-letter park failure midway through `_decode` can park earlier
+  entries twice on re-read. Both acceptable for at-least-once.

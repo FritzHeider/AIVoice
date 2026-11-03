@@ -17,6 +17,7 @@ from va_db.models import CallEventCategory
 __all__ = [
     "ALWAYS_CALL_WEBHOOK",
     "DEFAULT_CATEGORY",
+    "INTERNAL_TYPES",
     "STREAMS",
     "WEBHOOK_KEY",
     "CallEventCategory",
@@ -82,6 +83,7 @@ class EventType(StrEnum):
     BILLING_LOW_BALANCE = "billing.low_balance"
     BILLING_RECHARGED = "billing.recharged"
     BILLING_PAYMENT_FAILED = "billing.payment_failed"
+    BILLING_USAGE = "billing.usage"
     NUMBER_PURCHASED = "number.purchased"
     NUMBER_RELEASED = "number.released"
     NUMBER_ORDER_FAILED = "number.order_failed"
@@ -181,6 +183,9 @@ WEBHOOK_KEY: Final[Mapping[EventType, str | None]] = MappingProxyType(
 
 ALWAYS_CALL_WEBHOOK: Final[frozenset[EventType]] = frozenset({EventType.CALL_COMPLETED})
 """Types every per-call ``webhook`` receives whatever its ``webhook_events`` (the Call Object, §3 rule 1)."""
+
+INTERNAL_TYPES: Final[frozenset[EventType]] = frozenset({EventType.BILLING_USAGE})
+"""Types that only internal consumers read (the events sink): never routed to any webhook, not even ``*``."""
 
 _STREAM_BY_PREFIX: Final[Mapping[str, Stream]] = MappingProxyType(
     {

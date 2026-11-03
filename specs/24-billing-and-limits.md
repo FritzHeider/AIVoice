@@ -95,7 +95,8 @@ Rounding: amount = `round_half_up(quantity × unit_price_per_unit)` computed in 
 > serialise. Without a valid `calls.config.pricing` snapshot the org's current plan + overrides price the call
 > (`billing.pricing_snapshot_missing` is logged; `SERVICE_UNAVAILABLE` when the plan row is missing too); a
 > non-terminal call raises `CallNotEndedError`. Deferred to phase 15: COGS (`cost_micros` stays 0), the
-> `stt_seconds`/`tts_characters` meters, the `events:billing` mirror (step 4), auto-recharge and `billing.low_balance`
+> `stt_seconds`/`tts_characters` meters, the `events:billing` mirror (step 4; its event is `billing.usage` with
+> `va_events.UsageEventData`, read by the events sink into `va.usage_events_raw`, specs/19 §1 Decision P06-T05), auto-recharge and `billing.low_balance`
 > (step 5), and `bill_to_parent`.
 
 ## 5. Credit holds

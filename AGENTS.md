@@ -1635,3 +1635,15 @@ Grafana 3001
   `webhook_policy.check_webhook_url(url, org=, settings=, field=, resolver=)`. Never name a test helper `test_*`
   (pytest collects it) and never name a src class `Test*` (an imported one is collected too). A test creating more
   than a handful of resources through the api hits the plan's frozen-clock rate limit (429): seed rows directly.
+- 2026-11-03 (P06-T05): events sink = `va_events_sink.sink` (`run_sink(redis, connect, schema, clock=, metrics=,
+  config=SinkConfig(...), started=)`, one `StreamSink` per stream: `cycle()` test seam, `wait_flushes(n)`), pure
+  mapping `va_events_sink.rows.rows_for_event` (`TABLE_COLUMNS` = specs/03 §12 order, `RowError.reason`), inserts
+  `writer.insert_table` (+ `is_transient`/`is_rejected`), lag `va_events_sink.lag`; parking `va_events.DeadLetter`
+  (`events:dead`), `StreamConsumer(..., dead_letter=)` + `read_own_pending()`; internal type `billing.usage`
+  (`va_events.usage_event(UsageEventData, ...)`, `INTERNAL_TYPES` never routed). Rules: specs/19 §1 Decision
+  P06-T05. `create_app(sink=None)` disables the consumer (tests with `FakeContainer`, which has no `redis`).
+  Gotcha: fakeredis returns `[]` at once from a blocking `XREADGROUP` (it never waits), so a read loop that does not
+  yield starves the event loop; the sink yields once after an empty read. `XPENDING` on a missing group raises
+  `NOGROUP`. `ch_support.FakeClickHouse` now records `insert`s (`insert_failures`, `reject(table, rows)`,
+  `rows_of(table)`, `inserted` event). The media `TurnRecorder` holds the assistant `call.turn` until the next
+  callback so the reply's latency rides on it as `data.latency`.

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793685779-173d
+> P06-T05: events sink va_events_sink.sink (StreamSink.cycle/run, run_sink, build_sinks) + pure rows.rows_for_event + DeadLetter(events:dead) + StreamConsumer read_own_pending/dead_letter; billing.usage internal type (INTERNAL_TYPES never routed); fakeredis blocking XREADGROUP returns [] immediately -> read loops must yield; XPENDING on missing group raises NOGROUP; media TurnRecorder holds assistant call.turn to attach data.latency
+<!-- tags: events, clickhouse, testing | created: 2026-11-03 -->
+
 ### mem-1793682816-3287
 > P06-T04b: webhook delivery code shared in va_events.webhook_{signing,schedule,delivery}; endpoint/delivery API in va_api.routers.webhook_endpoints + services.webhook_test_send; OutboxRepo outcomes only on delivering rows (DeliveryCancelledError); helpers named test_* get collected by pytest; api tests creating many resources hit frozen-clock rate limits -> seed rows directly; test_container asserts close order of every httpx client in build_container
 <!-- tags: webhooks, api, testing | created: 2026-11-03 -->

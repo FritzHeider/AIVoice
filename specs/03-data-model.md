@@ -1476,6 +1476,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:carrier` | pub/sub channel | — | Carrier events to owner |
 | `call:{id}:live` | pub/sub channel | — | Live events for dashboard/API SSE listeners |
 | `events:calls`, `events:sms`, `events:widget`, `events:billing`, `events:system` | streams (MAXLEN ~ 1 000 000) | — | Event bus |
+| `events:dead` | stream (MAXLEN ~ 100 000; fields `stream`, `entry_id`, `reason`, `payload`) | — | Entries the events sink could not decode, map, or insert (specs/19 §1 Decision P06-T05) |
 | `rl:key:{api_key_id}:{bucket}` | hash (`tokens`, `ts`) | 2 × fill time | Request rate limiting per API key (specs/04 §11; `bucket` = `default`, `calls_send`) |
 | `rl:user:{user_id}:{bucket}` | hash (`tokens`, `ts`) | 2 × fill time | Request rate limiting per session principal (specs/04 §11) |
 | `cap:org:{org_id}:daily:{yyyymmdd}` | counter | 48 h | Daily call cap |
@@ -1555,7 +1556,8 @@ CREATE TABLE IF NOT EXISTS va.eval_metrics (
 ```
 
 ClickHouse DDL lives in `packages/va_events/src/va_events/clickhouse/migrations/*.sql` and is applied by
-`events-sink` at startup (idempotent `CREATE ... IF NOT EXISTS`).
+`events-sink` at startup (idempotent `CREATE ... IF NOT EXISTS`). The rows come from the event streams; the mapping of events onto
+`call_events`, `call_turns`, `calls_fact`, and `usage_events_raw` is specs/19-events-and-webhooks.md §1 Decision P06-T05.
 
 > Decision (2026-10-27): migrations are `NNNN_name.sql` files; `0001_init.sql` is `CREATE DATABASE IF NOT EXISTS va`
 > followed by the five tables above verbatim (a unit test compares them with this section). The ClickHouse HTTP
