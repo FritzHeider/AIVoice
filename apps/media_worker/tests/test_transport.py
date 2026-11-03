@@ -20,7 +20,7 @@ from media_helpers import (
 from service_helpers import json_log_stream, log_events
 
 from va_media.session import StreamStart
-from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError, leg_format
+from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError, leg_format, stream_format
 from va_telnyx.media import MediaFormat
 from va_voice.audio.formats import L16_16000, ULAW_8000
 from va_voice.pipeline.protocols import InboundAudio, InboundDtmf, MarkEcho, TransportEvent
@@ -49,6 +49,13 @@ def sent(socket: FakeSocket) -> list[dict[str, object]]:
 )
 def test_leg_format_of_supported_streams(encoding: str, rate: int, expected: object) -> None:
     assert leg_format(start_of(encoding, rate).media_format) == expected
+
+
+@pytest.mark.parametrize(
+    ("encoding", "rate", "expected"), [("PCMU", 8000, "PCMU/8000"), ("L16", 16000, "L16/16000")]
+)
+def test_stream_format_names_encoding_and_rate(encoding: str, rate: int, expected: str) -> None:
+    assert stream_format(start_of(encoding, rate).media_format) == expected
 
 
 @pytest.mark.parametrize(

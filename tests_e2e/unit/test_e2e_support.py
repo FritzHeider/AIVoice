@@ -13,7 +13,9 @@ import yaml
 from e2e_assertions import (
     alternating_roles,
     evaluate,
+    event_order_failures,
     event_present,
+    event_types,
     latency_summaries,
     nearest_rank,
     turn_overheads,
@@ -78,6 +80,54 @@ def test_alternating_roles() -> None:
     assert alternating_roles([turn("assistant", "a"), turn("agent-action", "x"), turn("user", "b")])
     assert not alternating_roles([turn("assistant", "a"), turn("assistant", "b")])
     assert alternating_roles([])
+
+
+def test_typed_items_are_recognised_by_their_type() -> None:
+    typed = [{**event("call", "Answered"), "type": "call.answered"}, {**COMPLETED, "type": "call.completed"}]
+    assert event_present("call.answered", typed) is True
+    assert event_present("call.transferred", typed) is False
+    assert event_types(typed) == ["call.answered", "call.completed"]
+    assert event_types([event("call", "old row")]) == [None]
+
+
+REAL_ORDER = [
+    "call.queued",
+    "call.dialing",
+    "call.ringing",
+    "call.started",
+    "call.answered",
+    "call.turn",
+    "call.turn",
+    "call.latency",
+    "call.latency",
+    "call.turn",
+    "call.ended",
+    "call.recording_ready",
+    "call.completed",
+]
+
+
+def test_a_real_event_order_passes() -> None:
+    assert event_order_failures(REAL_ORDER) == []
+
+
+def test_event_order_failures_name_every_problem() -> None:
+    ended_early = [*REAL_ORDER[:9], "call.ended", "call.turn", "call.recording_ready", "call.completed"]
+    assert event_order_failures(ended_early) == ["a turn/latency event follows 'call.ended'"]
+    completed_early = [*REAL_ORDER[:-3], "call.completed", "call.ended", "call.recording_ready"]
+    assert event_order_failures(completed_early) == [
+        "last event is 'call.recording_ready', not 'call.completed'",
+        "'call.completed' precedes 'call.recording_ready'",
+    ]
+    turn_first = ["call.queued", "call.turn", *[t for t in REAL_ORDER[1:] if t != "call.queued"]]
+    assert event_order_failures(turn_first) == ["a turn/latency event precedes 'call.started'"]
+    missing = [t for t in REAL_ORDER if t not in {"call.started", "call.recording_ready"}]
+    assert event_order_failures(missing) == ["missing 'call.recording_ready'", "missing 'call.started'"]
+    assert event_order_failures(["call.dialing", None]) == [
+        *(f"missing {name!r}" for name in sorted(set(REAL_ORDER) - {"call.dialing"})),
+        "first event is 'call.dialing', not 'call.queued'",
+        "last event is None, not 'call.completed'",
+    ]
 
 
 def test_event_presence_by_message_or_unique_category() -> None:

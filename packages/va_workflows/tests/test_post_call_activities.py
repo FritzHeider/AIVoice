@@ -13,17 +13,20 @@ from typing import Any
 import pytest
 from call_rows import SeededCall, load_call, seed_leg
 from recording_rig import BUCKET, PRESIGN_HOST, MemoryS3
-from sqlalchemy import update
+from resolved_configs import resolved_config
+from sqlalchemy import select, update
 from telephony_rig import Rig, call_event_rows, rig
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from va_common.metrics import Service, build_metrics, new_registry
 from va_common.storage import RecordingStorage
-from va_db.models import Call
+from va_db.models import Call, WebhookDelivery
 from va_db.repositories import NewTelnyxEvent, TelnyxEventRepo
 from va_db.session import Database
+from va_events import DomainEvent, EventType
 from va_workflows.activities.errors import CALL_NOT_ENDED, CALL_NOT_FOUND
+from va_workflows.activities.events import call_event, persist_events
 from va_workflows.activities.inputs import CallActivityInput
 from va_workflows.activities.post_call import RECORDING_MISSING_CODE, PostCallActivities
 from va_workflows.activities.post_call_inputs import PostCallStepInput
@@ -324,3 +327,59 @@ async def test_completion_of_an_unknown_call_is_not_found(r: Rig) -> None:
         _activities(r).emit_completed, CallActivityInput(call_id=uuid.uuid4(), org_id=uuid.uuid4())
     )
     assert error.type == CALL_NOT_FOUND
+
+
+# webhook outbox (specs/19 §1 step 5, Decision P06-T07)
+
+
+async def _deliveries(database: Database, call: SeededCall) -> list[WebhookDelivery]:
+    async with database.tenant_session(call.org_id) as session:
+        rows = await session.scalars(select(WebhookDelivery).where(WebhookDelivery.call_id == call.call_id))
+        return list(rows.all())
+
+
+async def test_the_completed_event_reaches_the_call_webhook_with_the_call_object(r: Rig) -> None:
+    url = f"https://calls-{secrets.token_hex(4)}.hooks.test/done"
+    config = {**resolved_config("01_task_basic.json"), "webhook": url}
+    call = await _connected(r, config=config)
+    activities = _activities(r)
+
+    await _run(activities.finalize_billing, _input(call))
+    await _run(activities.emit_completed, _input(call))
+
+    [delivery] = await _deliveries(r.database, call)
+    [completed] = [row for row in await call_event_rows(r.database, call) if row.message == "Call completed."]
+    assert (delivery.event_id, delivery.event_type, delivery.url, delivery.format) == (
+        f"evt_{completed.id.hex}",
+        "call.completed",
+        url,
+        "bland",
+    )
+    assert delivery.payload == completed.data
+    assert delivery.payload["call_id"] == str(call.call_id)
+
+
+class _AbortError(Exception):
+    """Raised inside the transaction to roll it back."""
+
+
+async def test_persisted_events_roll_back_with_their_deliveries(r: Rig) -> None:
+    url = f"https://calls-{secrets.token_hex(4)}.hooks.test/done"
+    call = await r.seed("in_progress", config={**resolved_config("01_task_basic.json"), "webhook": url})
+
+    def ended() -> DomainEvent:
+        return call_event(
+            r.clock, call.org_id, call.call_id, EventType.CALL_COMPLETED, message="Call completed.", data={}
+        )
+
+    with pytest.raises(_AbortError):
+        async with r.database.tenant_session(call.org_id) as session:
+            await persist_events(session, r.publisher, [ended()])
+            raise _AbortError
+    assert await call_event_rows(r.database, call) == []
+    assert await _deliveries(r.database, call) == []
+
+    async with r.database.tenant_session(call.org_id) as session:
+        [committed] = await persist_events(session, r.publisher, [ended()])
+    [delivery] = await _deliveries(r.database, call)
+    assert delivery.event_id == committed.id

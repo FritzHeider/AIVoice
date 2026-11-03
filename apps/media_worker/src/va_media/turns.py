@@ -7,7 +7,8 @@ background tasks (:meth:`TurnRecorder.drain` waits for it). The assistant ``call
 until the next callback: when that is the reply's latency report (``on_latency``, which the pipeline sends
 after the reply's last agent turn) the event carries ``data.latency`` (the measured ``call_turns.latency``
 values) and is published before the ``call.latency`` events; any other callback or :meth:`TurnRecorder.drain`
-publishes it as is (specs/19 §1 Decision P06-T05). A publish failure is logged
+publishes it as is (specs/19 §1 Decision P06-T05). :meth:`TurnRecorder.started` publishes ``call.started``
+once, before the pipeline runs (specs/07 §3 step 7; specs/19 §1 Decision P06-T07). A publish failure is logged
 ``media.event_publish_failed`` (event type and error type, never turn text) and never reaches the pipeline.
 
 Times: ``start_ms``/``end_ms`` are relative to the call's answer time: ``pipeline_ms - origin_ms +
@@ -36,6 +37,7 @@ from va_voice.pipeline import AgentTurn, InterruptRecord, UserTurn
 
 __all__ = [
     "EVENT_MESSAGE_CHARS",
+    "STARTED_MESSAGE",
     "CallFlusher",
     "CallPersistence",
     "EventSink",
@@ -43,6 +45,9 @@ __all__ = [
     "TurnSink",
     "TurnStore",
 ]
+
+STARTED_MESSAGE: Final = "Call started"
+"""The ``call.started`` message."""
 
 EVENT_MESSAGE_CHARS: Final = 200
 """``call.turn`` messages carry the turn text cut to this many characters (the full text is in ``data``)."""
@@ -82,6 +87,16 @@ class TurnRecorder:
         self._offset_ms = max(answered_offset_ms, 0.0) - origin_ms
         self._tail: asyncio.Task[None] | None = None
         self._held: DomainEvent | None = None
+        self._started = False
+
+    def started(self, media_format: str) -> None:
+        """Publish ``call.started`` (``{direction, media_format}``, e.g. ``"PCMU/8000"``); later calls do
+        nothing."""
+        if self._started:
+            return
+        self._started = True
+        data: dict[str, JsonValue] = {"direction": self._context.direction, "media_format": media_format}
+        self._publish(EventType.CALL_STARTED, STARTED_MESSAGE, data)
 
     def on_user_turn(self, turn: UserTurn) -> None:
         if turn.supersedes is not None:

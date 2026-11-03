@@ -14,6 +14,7 @@ seq order, so consumers order call events by ``seq``.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Protocol
 
 from redis.asyncio import Redis
@@ -34,6 +35,8 @@ class WebhookRouter(Protocol):
     """Turns an event into ``webhook_deliveries`` rows (implemented by the webhook phase)."""
 
     async def route(self, event: DomainEvent, *, session: AsyncSession | None) -> None: ...
+
+    async def route_many(self, events: Sequence[DomainEvent], *, session: AsyncSession | None) -> None: ...
 
 
 class EventPublishError(Exception):
@@ -77,6 +80,15 @@ class EventPublisher:
         if deliver_webhooks and self._router is not None:
             await self._router.route(event, session=session)
         return event
+
+    async def route(self, events: Sequence[DomainEvent], *, session: AsyncSession | None) -> None:
+        """Route already sequenced events to the webhook router (in ``session``'s transaction when given).
+
+        For callers that sequence and insert the ``call_events`` rows themselves (specs/19 §1 Decision
+        P06-T07); a no-op without a router. Router errors propagate, so the caller's transaction rolls back.
+        """
+        if self._router is not None and events:
+            await self._router.route_many(events, session=session)
 
     async def sequence(self, event: DomainEvent) -> DomainEvent:
         """``event`` with its per-call ``seq`` assigned (non-call events are returned unchanged).

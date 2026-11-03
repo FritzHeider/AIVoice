@@ -32,7 +32,7 @@ from va_domain.org import OrgSettings
 from va_edge.accept import AcceptSettings, InboundAccept
 from va_edge.processor import StoredEvent
 from va_edge.routing import InboundRouter
-from va_events import EventPublisher
+from va_events import DbWebhookRouter, EventPublisher
 from va_telnyx import TelnyxClientFactory
 
 __all__ = [
@@ -202,7 +202,7 @@ async def accept_rig(
             CallContextStore(redis),
             starter,
             telnyx(rig) if telnyx is not None else rig.factory,
-            publisher=EventPublisher(rig.redis, call_events=None),
+            publisher=EventPublisher(rig.redis, call_events=None, router=DbWebhookRouter(database)),
             settings=AcceptSettings(
                 media_public_host=MEDIA_HOST,
                 media_ws_scheme="ws",

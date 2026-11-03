@@ -370,6 +370,7 @@ async def _with_events(container: SessionContainer) -> SeededOrg:
                 level="warning" if category == "tool" else "info",
                 message=f"event {seq}",
                 data={"seq": seq},
+                event_type=None if seq == 2 else f"call.{category}",
             )
             for seq, category in enumerate(CATEGORIES, start=1)
         )
@@ -392,11 +393,13 @@ async def test_events_page_by_seq(container: SessionContainer, client: httpx.Asy
     event = first["events"][0]
     assert {k: v for k, v in event.items() if k != "created_at"} == {
         "seq": 1,
+        "type": "call.queue",
         "category": "queue",
         "level": "info",
         "message": "event 1",
         "data": {"seq": 1},
     }
+    assert [e["type"] for e in first["events"]] == ["call.queue", None, "call.latency"]
     second = await _events(client, org, after_seq=3, limit=3)
     third = await _events(client, org, after_seq=second["next_after_seq"], limit=3)
     assert [e["seq"] for e in second["events"]] == [4, 5, 6]

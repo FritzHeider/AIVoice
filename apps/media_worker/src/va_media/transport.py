@@ -46,6 +46,7 @@ __all__ = [
     "TransportStats",
     "UnsupportedMediaFormatError",
     "leg_format",
+    "stream_format",
 ]
 
 INBOUND_TRACK: Final = "inbound"
@@ -62,6 +63,11 @@ _OUR_BUGS: Final = frozenset({MediaErrorCode.MALFORMED_FRAME, MediaErrorCode.INV
 
 class UnsupportedMediaFormatError(ValueError):
     """The stream's ``media_format`` is neither PCMU 8 kHz nor L16 16 kHz mono."""
+
+
+def stream_format(media_format: MediaFormat) -> str:
+    """The stream's format as ``ENCODING/RATE`` (``"PCMU/8000"``, ``"L16/16000"``)."""
+    return f"{media_format.encoding}/{media_format.sample_rate}"
 
 
 def leg_format(media_format: MediaFormat) -> AudioFormat:

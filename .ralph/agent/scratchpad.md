@@ -1168,3 +1168,129 @@ background with heartbeat Monitor (truncate log first); jscpd; radon. No call-fl
 - Checked against specs/19 §9 third bullet (+ Decision), specs/26 §4 `va webhooks listen`, specs/31 envelope family list.
   Reader holds one pooled connection (BLOCK 1 s < 5 s socket timeout); subscription released via on_close/finally;
   cross-tenant owner control fails fast with bad types.
+
+## Plan P06-T07 — Retrofit phase-05 emitters and latency events
+Spec: specs/19 §1 step 5 (+ P03-T17 Decision rule 7), §2 table, §3 (+ P06-T02 Decision); specs/07 §3 step 7
+(`call.started`); specs/05 event log (line ~728). Survey findings: NO publisher is built with a router today
+(api container, worker `WorkerActivities.build`, edge `carrier_handlers`, media `open_persistence` all pass none), so
+no call event ever produces `webhook_deliveries` rows; per-turn `call.latency` (`E2E:` + `STT:`/`LLM:`/`TTS:` stage
+events) already exist (`va_voice.latency.latency_events`, `TurnRecorder.on_latency`) — keep, only cover them in the
+routing + e2e asserts; `call.started` is in the catalog but never emitted; the event log API has no type field.
+
+### Decisions (add `> Decision (2026-11-03): emitter retrofit (P06-T07).` under specs/19 §1 after the P06-T05 one)
+1. Routing per producer, always atomic with the event's `call_events` row:
+   - api (`call.queued/scheduled`, stop's `call.ended`/errors…): `persist_event` routes in the caller's tenant session.
+   - worker activities (`call.dialing`, `dispatch_blocked`, `ended`, `error`, `recording_ready`, `completed`,
+     retry child `scheduled`): `persist_events` routes in the same session as the status change.
+   - edge inbound accept (`call.ringing` inbound, failure `call.ended`): `_persist_event` routes in its session;
+     edge carrier events (published after the state-change commit, row via `DirectCallEventWriter`): the publisher's
+     router in its own `tenant_session` (`publish(..., session=None)`), like the row today.
+   - media worker (buffered): the `call_events` flush routes the flushed rows' events in the same per-org transaction
+     (§1 step 5 "batched with the call_events flush"); a routing failure fails that org's flush and the rows are
+     re-queued (idempotent: rows ON CONFLICT DO NOTHING, deliveries ON CONFLICT (event_id, url) DO NOTHING).
+     The event is rebuilt from the row (`event_of(row)`: id `evt_<row.id.hex>`, type `row.event_type`, org/call,
+     `occurred_at = created_at`, category, level, message, data, seq); media events carry no batch/conversation/widget
+     id. Rows without `event_type` are not routed (logged `events.call_event_not_routed`).
+   - dispatcher: never routes (`call.webhook_delivery` would loop through `*` endpoints); stays `router=None`.
+2. `call.started` (media, category `call`): emitted once per primary session after the vendors opened and before the
+   pipeline runs (specs/07 §3 step 7), message `"Call started"`, data `{direction, media_format}` (`"PCMU/8000"` or
+   `"L16/16000"` style from the stream's `MediaFormat`, use whatever string the transport already logs). `started_at`
+   is not written by the media worker: the edge sets it on `call.answered` (outbound) and accept (inbound).
+3. Event log items (`GET /v1/calls/{id}/events`) gain `type` (the event type, `call_events.event_type`; `null` for rows
+   written before migration 0007). Update specs/05 line ~728 body + Decision line, openapi, gen:api.
+
+### Files
+- `packages/va_events/src/va_events/publisher.py`: `WebhookRouter` protocol gains `route_many(events, *, session)`;
+  new `EventPublisher.route(events: Sequence[DomainEvent], *, session: AsyncSession | None) -> None` (no-op without a
+  router; router errors propagate) — for callers that sequence + insert rows themselves.
+- `packages/va_events/src/va_events/call_events.py`: `event_of(row) -> DomainEvent | None`; `DbCallEventWriter(database,
+  *, router: WebhookRouter | None = None)` — `_insert` does `insert_rows` then `router.route_many([...], session=)`.
+  Export `event_of` in `__init__`.
+- `packages/va_workflows/src/va_workflows/activities/events.py`: `persist_events` calls
+  `await publisher.route(sequenced, session=session)` after `insert_rows` (router errors propagate → activity retry;
+  the DB transaction rolls back).
+- `apps/worker/src/va_worker/activities.py`: `EventPublisher(redis, call_events=None, router=DbWebhookRouter(database))`.
+- `apps/api/src/va_api/services/call_event_rows.py`: `persist_event` routes; `apps/api/src/va_api/container.py`:
+  publisher with `router=DbWebhookRouter(database)`; `apps/api/tests/support/session_helpers.py` SessionContainer
+  publisher gets a router when it has an identity database (the router never touches its own database when a
+  session is passed; check `__post_init__` order).
+- `apps/telephony_edge/src/va_edge/main.py`: publisher `router=DbWebhookRouter(database)`; `accept.py`
+  `_persist_event` calls `self._publisher.route([sequenced], session=session)`.
+- `apps/media_worker/src/va_media/runtime.py` `open_persistence`: `CallEventBuffer(DbCallEventWriter(database,
+  router=DbWebhookRouter(database)), ...)`; in `_converse` call `recorder.started(transport.fmt / session.start)` right
+  before `pipeline.run()` (after maintenance/monitor wiring). `apps/media_worker/src/va_media/turns.py`:
+  `TurnRecorder.started(direction, media_format)` publishes `call.started` through the ordered chain (first event of
+  the recorder, before any turn).
+- `apps/api/src/va_api/routers/calls_detail_schemas.py` `CallEventItem.type: str | None` (+ example);
+  `services/call_artifacts.py` fills it from `row.event_type`. `make openapi`, both gen:api.
+- `tests_e2e/test_outbound_basic.py` + pure helper `tests_e2e/support/e2e_assertions.py`
+  `event_types(events)` / `check_event_order(types)`: assert present ⊇ {call.queued, call.dialing, call.ringing,
+  call.answered, call.started, call.turn, call.latency, call.ended, call.recording_ready, call.completed}; ordering only
+  where causal: `call.queued` first; `call.started` before every `call.turn`/`call.latency`; every turn/latency before
+  `call.ended`; `call.ended` < `call.recording_ready` < `call.completed`; `call.completed` last. (dialing/ringing/
+  answered/started may race between services — not ordered.) Unit tests in `tests_e2e/unit/`.
+- Specs 19 §1 Decision, 05 event log, 07 §3 step 7 note (Decision ref). AGENTS.md bullet.
+
+### Tests
+- `packages/va_events/tests/test_publisher.py`: `route` no-op without router; passes session + events to a
+  `RecordingRouter` (extend it with `route_many`).
+- `packages/va_events/tests/test_call_events*.py`: `event_of` round trip (`event_of(row_for(e)) == e` for a sequenced
+  call event); `None` for `event_type=None`. DB test: `DbCallEventWriter(db, router=DbWebhookRouter(db))` with a call
+  whose config has `webhook` + `webhook_events: ["latency"]` → `call.latency` row + one `bland-live` delivery; router
+  raising → no row and no delivery for that org, `CallEventWriteError` lists the rows; other org still written.
+- `packages/va_workflows/tests/`: `persist_events` routes in-session: seed call with `webhook`, run inside a session
+  that raises after `persist_events` → neither `call_events` row nor delivery (rollback proof); committed → delivery
+  row for `call.completed` (format `bland`, payload = Call Object data). Activity-level: post-call `call.completed`
+  and telephony `call.dialing` with `webhook_events=["call"]` produce deliveries (use existing rigs; worker publisher
+  needs the router — rigs build their own publisher: add `router=DbWebhookRouter(database)` there).
+- `apps/api/tests`: dispatch with `webhook` + `webhook_events:["queue"]` → `call.queued` delivery row in the same
+  transaction; without `queue` in webhook_events → none; `persist_event` rollback proof (raise after it inside
+  `tenant_session` → no row, no delivery). Event log response includes `type`.
+- `apps/telephony_edge/tests`: inbound accept with an org endpoint `call.*` → `call.ringing` delivery; carrier
+  `call.answered` with per-call webhook + `webhook_events:["call"]` → delivery row.
+- `apps/media_worker/tests`: `TurnRecorder.started` publishes `call.started` first (unit, fake sink); runtime sim
+  (`rig(persistence=...)` + seeded call with `webhook` + `webhook_events:["call","latency"]`) → after the call,
+  `webhook_deliveries` holds `call.started`, `call.turn`, `call.latency` rows (bland-live) and NO `call.interrupt`.
+- `tests_e2e/unit/test_e2e_assertions.py`: `check_event_order` accepts a real order, rejects ended-before-turn,
+  completed-not-last, missing types.
+- Existing suites: test_catalog, test_webhook_router, dispatcher, call stream tests (SSE frames unchanged),
+  `test_openapi`, cross-tenant.
+
+### Gates
+`export PATH=/home/ssm-user/.local/bin:/home/ralph/.local/bin:$PATH`; `make fmt lint typecheck placeholders`;
+targeted pytest (va_events, va_workflows, apps/api, apps/telephony_edge, apps/media_worker, apps/worker, tests_e2e/unit);
+`make openapi` + both gen:api + `make test-ts`; full `make test` in background with heartbeat Monitor (truncate log);
+jscpd; radon; touches the call flow → `make e2e` (at least outbound_basic, then the full run) on the EC2 runner/stack.
+
+### Risks
+- Media flush now does extra reads per org per flush (call facts + endpoints): route_many caches policy per org but
+  reads call facts per event; if it shows in the 50-call capacity e2e, cache `CallFacts` per call inside one
+  `_route_all` (dict by call_id) — do it anyway, cheap.
+- A deterministic router bug would re-queue the org's rows forever: log once per failure (existing warning) — acceptable.
+- SessionContainer router: api tests that dispatch without DB must still work (route only runs with a session).
+- e2e ordering across services: only causal constraints asserted (see above).
+
+## Build P06-T07 (builder notes)
+- va_events: `WebhookRouter.route_many` in the protocol; `EventPublisher.route(events, session=)` (no-op without
+  router); `event_of(row)` (call_events.py, exported); `DbCallEventWriter(database, router=)` routes in the per-org
+  insert transaction (failure → that org's rows unwritten, re-queued).
+- Producers: api `persist_event`, worker `persist_events`, edge accept `_persist_event` call `publisher.route` in-session;
+  api container / worker `WorkerActivities.build` / edge `carrier_handlers` publishers get `router=DbWebhookRouter(db)`;
+  media `open_persistence` buffer writer gets the router (publisher none); dispatcher untouched.
+- `call.started`: `TurnRecorder.started(media_format)` (once, `STARTED_MESSAGE`), called by `CallRuntime._converse`
+  right before `pipeline.run()`; `va_media.transport.stream_format` → "PCMU/8000".
+- Event log `type` field (CallEventItem, call_artifacts), specs/05 §7.9 Decision; openapi + both schema.d.ts regenerated.
+- e2e: `event_types`, `event_order_failures`, `REQUIRED_CALL_EVENTS` in e2e_assertions; `event_present` uses `type`;
+  outbound_basic asserts the order. Unit tests in tests_e2e/unit/test_e2e_support.py.
+- Tests added: test_call_events.py (event_of), test_publisher route, test_call_events_db routing writer + failing org,
+  api test_calls_send (queued delivery / routing failure rollback), test_calls_artifacts type, workflows post-call
+  completed delivery + persist_events rollback + dial webhook_events, edge carrier answered delivery + accept
+  ringing/ended deliveries, media test_turns started, test_transport stream_format, runtime sim deliveries.
+- Specs: 19 §1 Decision P06-T07, 07 §3 step 7 note, 05 §7.9 Decision. AGENTS.md bullet.
+- Gates: fmt/lint/typecheck/placeholders pass; make test 11224 passed, 7 skipped, 99.04 %; jscpd 0 clones; radon A
+  (2.58); pip-audit clean; pnpm audit 3 moderate (no high). e2e: see below.
+- make e2e: 16 passed (outbound_basic with the event order check, concurrent_calls, all flows) in 338 s, exit 0.
+
+## Review P06-T07 — approved
+- Gates re-run: lint/typecheck/placeholders pass; make test 11224 passed, 7 skipped (99 %); test-ts pass; make e2e 16 passed (342 s).
+- Checked against specs/19 §1 step 5 + Decision P06-T07, §2 catalog, specs/05 §7.9, specs/07 §3 step 7. Routing in-session for api/worker/edge accept; media routes in the per-org flush; dispatcher unrouted. Rollback proofs for api dispatch, persist_events, media writer.

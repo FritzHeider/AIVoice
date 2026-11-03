@@ -26,7 +26,7 @@ from va_db.call_context import CallContextStore
 from va_db.org_settings import OrgSettingsReader
 from va_db.session import Database
 from va_domain.post_call import postcall_task_queue
-from va_events import EventPublisher
+from va_events import DbWebhookRouter, EventPublisher
 from va_telnyx import TelnyxClientFactory
 from va_worker.task_queues import TaskQueueRegistration
 from va_workflows.activities.call_context import CallContextActivities
@@ -73,7 +73,7 @@ class WorkerActivities:
         postcall_step_ms: Histogram | None = None,
     ) -> WorkerActivities:
         limiter = CallLimiter(redis, clock=clock)
-        publisher = EventPublisher(redis, call_events=None)
+        publisher = EventPublisher(redis, call_events=None, router=DbWebhookRouter(database))
         recording = (
             None
             if storage is None

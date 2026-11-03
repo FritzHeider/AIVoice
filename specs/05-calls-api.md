@@ -725,13 +725,17 @@ anything else → string; unknowable → `null`.
 ### 7.9 `GET /v1/calls/{call_id}/events`
 
 Query `after_seq` (default 0), `limit` ≤ 1 000, `category` (comma list). Response
-`{"status":"success","events":[{seq, category, level, message, data, created_at}], "next_after_seq": n | null}`.
+`{"status":"success","events":[{seq, type, category, level, message, data, created_at}], "next_after_seq": n | null}`.
 
 > Decision (2026-11-02): event pages (P05-T16b). `after_seq` ≥ 0 (default 0); `limit` 1-1 000, default 100;
 > `category` is a comma list of specs/03 `call_events.category` values (blanks ignored, duplicates collapsed,
 > an unknown name → `400 INVALID_INPUT` field `category`). Events come ordered by `seq`; `next_after_seq` is
 > the last returned `seq` when more events exist, else `null`. The call's ownership is checked first
 > (`404 CALL_NOT_FOUND`).
+
+> Decision (2026-11-03): event log types (P06-T07). Every event item carries `type`, the specs/19 §2 event type
+> of the row (`call_events.event_type`, e.g. `call.started`); it is `null` for rows written before migration
+> 0007 added the column.
 
 ### 7.10 `POST /v1/calls/{call_id}/control`
 

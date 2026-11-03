@@ -206,3 +206,23 @@ async def test_broadcast_failure_raises_at_the_stream_step(rig: PublisherRig) ->
     with pytest.raises(EventPublishError) as caught:
         await rig.publisher.broadcast(sequenced)
     assert caught.value.step == "stream"
+
+
+async def test_route_hands_sequenced_events_and_the_session_to_the_router(rig: PublisherRig) -> None:
+    session = object()
+    events = [
+        await rig.publisher.sequence(event(EventType.CALL_QUEUED, call_id=uuid.uuid4())) for _ in range(2)
+    ]
+    await rig.publisher.route(events, session=session)  # type: ignore[arg-type]
+    assert rig.router.routed == [(events[0], session), (events[1], session)]
+    await rig.publisher.route([], session=None)
+    assert len(rig.router.routed) == 2
+    assert await rig.redis.xlen(stream_key("calls")) == 0
+
+
+async def test_route_without_a_router_is_a_no_op() -> None:
+    rig = publisher_rig(router=False)
+    publisher = EventPublisher(rig.redis, call_events=None)
+    queued = event(EventType.CALL_QUEUED, call_id=uuid.uuid4()).model_copy(update={"seq": 1})
+    await publisher.route([queued], session=None)
+    assert rig.router.routed == []

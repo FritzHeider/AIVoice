@@ -89,7 +89,7 @@ from va_elevenlabs import (
 from va_engine.opener import phrase_voice
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import DialogueSource, TaskBrain
-from va_events import CallEventBuffer, DbCallEventWriter, EventPublisher
+from va_events import CallEventBuffer, DbCallEventWriter, DbWebhookRouter, EventPublisher
 from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
 from va_llm.providers import platform_provider
 from va_llm.tokens import TokenCounter, default_counter
@@ -111,7 +111,7 @@ from va_media.runtime_config import (
 from va_media.session import CallSession, SessionBody, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.transfer import ColdTransfer, DbTransferStatus
-from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
+from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError, stream_format
 from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
@@ -343,6 +343,8 @@ class CallRuntime:
                 _start_monitor(stack, monitor, watch, pipeline)
             watcher = asyncio.create_task(watch.run(), name="carrier-watch")
             stack.push_async_callback(_stop_task, watcher, "media.carrier_watch_failed")
+            if recorder is not None:
+                recorder.started(stream_format(session.start.media_format))
             result = await pipeline.run()
         return session_end(result)
 
@@ -563,8 +565,11 @@ async def open_persistence(
     database: Database, redis: Redis, *, clock: Clock
 ) -> AsyncIterator[CallPersistence]:
     """The per-process ``call_events`` buffer, event publisher and turn writer, their flush loops running
-    until exit; on exit both loops stop and what is pending is written (failures logged)."""
-    rows = CallEventBuffer(DbCallEventWriter(database), clock=clock)
+    until exit; on exit both loops stop and what is pending is written (failures logged).
+
+    The buffer's writer routes the flushed rows' events to the webhook outbox in the same per-org
+    transaction (specs/19 §1 step 5, Decision P06-T07), so the publisher itself has no router."""
+    rows = CallEventBuffer(DbCallEventWriter(database, router=DbWebhookRouter(database)), clock=clock)
     turns = TurnWriter(database, clock=clock)
     loops = [
         asyncio.create_task(rows.run(), name="call-events-flush"),

@@ -112,6 +112,10 @@ class RecordingRouter:
     async def route(self, event: DomainEvent, *, session: AsyncSession | None) -> None:
         self.routed.append((event, session))
 
+    async def route_many(self, events: Sequence[DomainEvent], *, session: AsyncSession | None) -> None:
+        for event in events:
+            await self.route(event, session=session)
+
 
 @dataclass
 class PublisherRig:

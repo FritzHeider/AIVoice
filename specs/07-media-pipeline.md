@@ -49,6 +49,8 @@ Readiness fails when draining, when active calls ≥ 90 % of `MEDIA_MAX_CALLS_PE
 6. Subscribe to `call:{id}:control` and `call:{id}:carrier`; read `call:{id}:carrier_state` for state that arrived
    before subscription (answered, amd).
 7. Emit `call.started`; transition handled by the edge (answered) — the worker only sets `started_at` if null.
+   (Decision P06-T07 under specs/19 §1: `call.started` carries `{direction, media_format}` and is emitted right
+   before the pipeline runs; the edge always sets `started_at` first, so the media worker writes nothing.)
 8. Start greeting logic (§11).
 
 > Decision (2026-11-02): media WS attach (P05-T07a).

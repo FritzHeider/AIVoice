@@ -5,9 +5,11 @@ for one call: the Call Object (``GET /v1/calls/{id}``), the call's event log (``
 and the FakeTelnyx timeline (``GET /sim/telnyx/calls/{ccid}/timeline``). It returns one message per failed
 check (empty = all passed), so a test reports every failure at once.
 
-Until the webhook dispatcher exists (phase 06), ``webhook_events`` is checked against the event log: event
-rows carry ``category``/``message``/``data`` but no type, so a type is recognised by its message when it has a
-fixed one (:data:`EVENT_MESSAGES`), else by its category when no other event type shares that category.
+``webhook_events`` is checked against the event log: items carry their ``type`` (specs/05 §7.9 Decision
+P06-T07); rows written before ``call_events.event_type`` existed have ``type: null`` and are recognised by
+their message when it is fixed (:data:`EVENT_MESSAGES`), else by their category when no other event type
+shares it.
+:func:`event_order_failures` checks the causal order of a completed call's event types.
 """
 
 from __future__ import annotations
@@ -27,10 +29,13 @@ from va_workflows.activities.post_call import COMPLETED_MESSAGE
 __all__ = [
     "ANSWERED_BY",
     "EVENT_MESSAGES",
+    "REQUIRED_CALL_EVENTS",
     "TurnOverhead",
     "alternating_roles",
     "evaluate",
+    "event_order_failures",
     "event_present",
+    "event_types",
     "latency_summaries",
     "nearest_rank",
     "turn_overheads",
@@ -45,6 +50,22 @@ EVENT_MESSAGES: Final[Mapping[str, str]] = {
     EventType.CALL_VOICEMAIL.value: VOICEMAIL_MESSAGE,
     EventType.CALL_TRANSFER_STARTED.value: TRANSFER_STARTED_MESSAGE,
 }
+# Event types every connected, completed outbound call logs (specs/19 §2, Decision P06-T07).
+REQUIRED_CALL_EVENTS: Final = frozenset(
+    {
+        "call.queued",
+        "call.dialing",
+        "call.ringing",
+        "call.answered",
+        "call.started",
+        "call.turn",
+        "call.latency",
+        "call.ended",
+        "call.recording_ready",
+        "call.completed",
+    }
+)
+_CONVERSATION_EVENTS: Final = frozenset({"call.turn", "call.latency"})
 _LATENCY_CATEGORY: Final = "latency"
 _SUMMARY_PREFIX: Final = "E2E:"
 _VENDOR_KEYS: Final = ("eot_ms", "stt_final_ms", "llm_ttft_ms", "tts_ttfa_ms")
@@ -67,8 +88,49 @@ def alternating_roles(transcripts: Sequence[Mapping[str, Any]]) -> bool:
     return all(first != second for first, second in itertools.pairwise(roles))
 
 
+def event_types(events: Sequence[Mapping[str, Any]]) -> list[str | None]:
+    """The ``type`` of each event log item, in log (``seq``) order."""
+    return [event.get("type") for event in events]
+
+
+def _positions(types: Sequence[str | None], event_type: str) -> list[int]:
+    return [index for index, found in enumerate(types) if found == event_type]
+
+
+def event_order_failures(
+    types: Sequence[str | None], required: Iterable[str] = REQUIRED_CALL_EVENTS
+) -> list[str]:
+    """Missing ``required`` types and causal order violations of a completed call's event types.
+
+    Only causal orderings are checked (services race otherwise): ``call.queued`` first; ``call.started``
+    before every turn/latency event; every turn/latency event before ``call.ended``; ``call.ended`` <
+    ``call.recording_ready`` < ``call.completed``; ``call.completed`` last.
+    """
+    failures = [f"missing {name!r}" for name in sorted(set(required) - set(types))]
+    if types and types[0] != "call.queued":
+        failures.append(f"first event is {types[0]!r}, not 'call.queued'")
+    if types and types[-1] != "call.completed":
+        failures.append(f"last event is {types[-1]!r}, not 'call.completed'")
+    conversation = [i for i, found in enumerate(types) if found in _CONVERSATION_EVENTS]
+    started, ended = _positions(types, "call.started"), _positions(types, "call.ended")
+    if started and conversation and min(conversation) < started[0]:
+        failures.append("a turn/latency event precedes 'call.started'")
+    if ended and conversation and max(conversation) > ended[0]:
+        failures.append("a turn/latency event follows 'call.ended'")
+    chain = ("call.ended", "call.recording_ready", "call.completed")
+    for earlier, later in itertools.pairwise(chain):
+        first, second = _positions(types, earlier), _positions(types, later)
+        if first and second and first[0] > second[0]:
+            failures.append(f"{later!r} precedes {earlier!r}")
+    return failures
+
+
 def event_present(event_type: str, events: Sequence[Mapping[str, Any]]) -> bool | None:
     """Whether an event of ``event_type`` is in the log; ``None`` when rows cannot identify that type."""
+    if any(event.get("type") == event_type for event in events):
+        return True
+    if events and all(event.get("type") is not None for event in events):
+        return False
     message = EVENT_MESSAGES.get(event_type)
     if message is not None:
         return any(event["message"] == message for event in events)

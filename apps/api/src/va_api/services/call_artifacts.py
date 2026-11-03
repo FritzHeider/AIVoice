@@ -207,6 +207,7 @@ async def call_events(
         events = [
             CallEventItem(
                 seq=row.seq,
+                type=row.event_type,
                 category=row.category,
                 level=row.level,
                 message=row.message,

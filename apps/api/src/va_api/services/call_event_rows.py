@@ -1,8 +1,8 @@
 """Call events written by the api in its own transaction (specs/05 §5 Decision P05-T05b).
 
-:func:`persist_event` assigns the event's ``seq`` in Redis and writes its ``call_events`` row in the caller's
-transaction; after the commit :func:`broadcast_event` sends it to the stream and the live channel (best
-effort: the row is durable).
+:func:`persist_event` assigns the event's ``seq`` in Redis, writes its ``call_events`` row, and routes it
+to the webhook outbox (specs/19 §1 Decision P06-T07) in the caller's transaction; after the commit
+:func:`broadcast_event` sends it to the stream and the live channel (best effort: the row is durable).
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ async def persist_event(session: AsyncSession, publisher: EventPublisher, event:
         raise AppError("SERVICE_UNAVAILABLE", EVENTS_UNAVAILABLE_MESSAGE) from exc
     row = row_for(sequenced)
     await insert_rows(session, [] if row is None else [row])
+    await publisher.route([sequenced], session=session)
     return sequenced
 
 

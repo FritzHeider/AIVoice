@@ -31,10 +31,10 @@ from va_api.services.call_starter import CallStartError
 from va_billing import keys
 from va_billing.dispatch import load_billing_org
 from va_common.time import FrozenClock
-from va_db.models import Call, CallEvent, CallStatus, CreditHold, DncEntry
+from va_db.models import Call, CallEvent, CallStatus, CreditHold, DncEntry, WebhookDelivery
 from va_db.repositories import CallRepo
 from va_domain.call_workflow import CallWorkflowInput
-from va_events import EventPublisher, EventPublishError
+from va_events import DbWebhookRouter, EventPublisher, EventPublishError
 from va_events.keys import stream_key
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
@@ -61,6 +61,11 @@ async def calls_of(container: SessionContainer, org_id: uuid.UUID) -> list[Call]
 async def events_of(container: SessionContainer, org_id: uuid.UUID) -> list[CallEvent]:
     async with container.database.tenant_session(org_id) as session:
         return list((await session.scalars(select(CallEvent).order_by(CallEvent.seq))).all())
+
+
+async def deliveries_of(container: SessionContainer, org_id: uuid.UUID) -> list[WebhookDelivery]:
+    async with container.database.tenant_session(org_id) as session:
+        return list((await session.scalars(select(WebhookDelivery))).all())
 
 
 async def holds_of(container: SessionContainer, org_id: uuid.UUID) -> list[CreditHold]:
@@ -143,6 +148,43 @@ async def test_the_pricing_snapshot_is_stored_in_the_config(
     async with container.database.tenant_session(org.org_id) as session:
         billing = await load_billing_org(session, org.org_id)
     assert call.config["pricing"] == billing.pricing.snapshot()
+
+
+@pytest.mark.parametrize("webhook_events", [["queue", "call"], ["call"]])
+async def test_the_queued_event_reaches_the_call_webhook_in_the_dispatch_transaction(
+    client: httpx.AsyncClient, container: SessionContainer, org: CallableOrg, webhook_events: list[str]
+) -> None:
+    url = "https://hooks.bellapasta.test/calls"
+    response = await send_call(client, org.key, task_body(org, webhook=url, webhook_events=webhook_events))
+    assert response.status_code == 200, response.text
+    [event] = await events_of(container, org.org_id)
+    deliveries = await deliveries_of(container, org.org_id)
+    if "queue" not in webhook_events:
+        assert deliveries == []
+        return
+    [delivery] = deliveries
+    assert (delivery.event_id, delivery.event_type, delivery.url, delivery.format) == (
+        f"evt_{event.id.hex}",
+        "call.queued",
+        url,
+        "bland",
+    )
+    assert (delivery.call_id, delivery.status) == (event.call_id, "pending")
+    assert delivery.payload["category"] == "queue"
+
+
+async def test_a_routing_failure_rolls_the_dispatch_back(
+    client: httpx.AsyncClient, container: SessionContainer, org: CallableOrg, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def refuse(_self: DbWebhookRouter, events: Any, *, session: Any = None) -> None:
+        raise ConnectionError
+
+    monkeypatch.setattr(DbWebhookRouter, "route_many", refuse)
+    body = task_body(org, webhook="https://hooks.bellapasta.test/calls", webhook_events=["queue"])
+    response = await send_call(client, org.key, body)
+    assert response.status_code == 500
+    await assert_nothing_dispatched(container, org)
+    assert await deliveries_of(container, org.org_id) == []
 
 
 async def test_a_scheduled_call_is_scheduled_without_hold_or_counters(

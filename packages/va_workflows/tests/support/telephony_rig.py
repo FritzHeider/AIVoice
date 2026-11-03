@@ -30,7 +30,7 @@ from va_billing.limits import CallLimiter
 from va_common.time import Clock, SystemClock
 from va_db.models import CallEvent, CallStatus, TelnyxAccount
 from va_db.session import Database
-from va_events import EventPublisher
+from va_events import DbWebhookRouter, EventPublisher
 from va_sim.clock import RealtimeClock
 from va_sim.server import simulator_routes
 from va_sim.settings import WebhookDefaults
@@ -310,7 +310,7 @@ async def rig(
                 raw=raw,
                 factory=factory,
                 limiter=CallLimiter(redis, clock=clock),
-                publisher=EventPublisher(redis, call_events=None),
+                publisher=EventPublisher(redis, call_events=None, router=DbWebhookRouter(database)),
                 settings=DialSettings.for_env(
                     "test",
                     call_control_app_id=app_id,

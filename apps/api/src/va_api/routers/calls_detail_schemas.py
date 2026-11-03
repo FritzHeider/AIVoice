@@ -167,6 +167,7 @@ class CallEventsQuery(BaseModel):
 
 _EVENT_EXAMPLE: Final[dict[str, JsonValue]] = {
     "seq": 3,
+    "type": "call.answered",
     "category": "call",
     "level": "info",
     "message": "answered",
@@ -181,6 +182,9 @@ class CallEventItem(BaseModel):
     model_config = _examples(_EVENT_EXAMPLE)
 
     seq: int = Field(description="Per-call sequence number.")
+    type: str | None = Field(
+        description="Event type (`call.turn`, ...); null for rows older than the column."
+    )
     category: str = Field(description="Event category.")
     level: Literal["debug", "info", "warning", "error"] = Field(description="Severity.")
     message: str = Field(description="Short event name.")

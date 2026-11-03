@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793695766-e1de
+> P06-T07: producers route webhooks atomically with call_events rows via EventPublisher.route(sequenced, session=) after insert_rows; media routes in DbCallEventWriter(database, router=) flush using va_events.event_of(row); WebhookRouter fakes need route_many; TurnRecorder.started publishes call.started first (category call) so filter turns by event_type; event log items carry type
+<!-- tags: events, webhooks, testing | created: 2026-11-03 -->
+
 ### mem-1793688514-633a
 > P06-T06a: call SSE = va_api.services.call_stream (open_call_stream checks+subscribes, CallStream.frames replay->tail, SeqOrder gap hold) + va_api.sse.EventStreamResponse(frames,on_close) (Starlette never closes abandoned body iterators; Response subclass needs status_code init param or FastAPI openapi crashes UnboundLocalError) + va_events.LiveHub pod-wide pubsub fan-out; SessionContainer hub on SystemClock (FrozenClock times out confirmations); ASGITransport buffers body -> live streams tested via service_helpers.serving; cross_tenant register_request(headers=)
 <!-- tags: api, events, testing | created: 2026-11-03 -->

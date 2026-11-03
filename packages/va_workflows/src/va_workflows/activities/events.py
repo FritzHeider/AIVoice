@@ -1,7 +1,8 @@
 """Call events of the activities: written with the state change they describe, broadcast after the commit.
 
-:func:`persist_events` assigns each event's per-call ``seq`` in Redis and writes its ``call_events`` row in
-the caller's open transaction; a Redis failure raises a retryable ``EventsUnavailable`` so the whole
+:func:`persist_events` assigns each event's per-call ``seq`` in Redis, writes its ``call_events`` row, and
+routes it to the webhook outbox (the publisher's router, specs/19 §1 Decision P06-T07) in the caller's open
+transaction; a Redis failure raises a retryable ``EventsUnavailable`` so the whole
 transaction (status change included) rolls back and the activity retry repeats it. :func:`broadcast_events`
 sends the committed events to the stream and live channel; best effort, because the rows are durable.
 """
@@ -40,7 +41,7 @@ _log = get_logger(__name__)
 async def persist_events(
     session: AsyncSession, publisher: EventPublisher, events: Sequence[DomainEvent]
 ) -> list[DomainEvent]:
-    """The sequenced events, their rows inserted in ``session``'s transaction (in order)."""
+    """The sequenced events, their rows inserted and deliveries routed in ``session``'s transaction."""
     sequenced: list[DomainEvent] = []
     for event in events:
         try:
@@ -49,6 +50,7 @@ async def persist_events(
             _log.warning("calls.event_sequence_failed", event_type=event.type.value)
             raise retryable(EVENTS_UNAVAILABLE_MESSAGE, EVENTS_UNAVAILABLE) from exc
     await insert_rows(session, [row for event in sequenced if (row := row_for(event)) is not None])
+    await publisher.route(sequenced, session=session)
     return sequenced
 
 

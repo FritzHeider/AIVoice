@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import Any, Final
 
 import pytest
-from e2e_assertions import alternating_roles, latency_summaries, nearest_rank, turn_overheads
+from e2e_assertions import (
+    alternating_roles,
+    event_order_failures,
+    event_types,
+    latency_summaries,
+    nearest_rank,
+    turn_overheads,
+)
 from e2e_harness import FinishedCall, Harness, wav_channels
 
 from va_domain.call_object import CallObject
@@ -54,3 +61,5 @@ async def test_outbound_basic(harness: Harness) -> None:
     channels, frames = wav_channels(await harness.recording_wav(finished.call["recording_url"]))
     assert (channels, frames > 0) == (2, True)
     check_latency(finished)
+    types = event_types(finished.events)
+    assert not event_order_failures(types), (event_order_failures(types), types)

@@ -36,7 +36,7 @@ import va_media.runtime
 from va_billing.keys import concurrency_key
 from va_common.metrics import ServiceMetrics
 from va_common.time import SystemClock, utcnow
-from va_db.models import Call, CallEvent, Message
+from va_db.models import Call, CallEvent, Message, WebhookDelivery
 from va_db.repositories import CallTurnRepo
 from va_db.session import Database
 from va_domain.carrier import carrier_state_key
@@ -396,8 +396,10 @@ async def test_without_a_cached_opener_it_goes_through_the_socket(*, broken: boo
 
 @pytest.mark.integration
 async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url: str) -> None:
+    webhook = "https://calls.hooks.test/live"
+    config = {**resolved_config(), "webhook": webhook, "webhook_events": ["call", "latency"]}
     async with open_database(media_db_url) as database:
-        call = await seed_call(database, status="in_progress", config=resolved_config())
+        call = await seed_call(database, status="in_progress", config=config)
         async with (
             open_persistence(database, fakeredis.FakeAsyncRedis(), clock=SystemClock()) as persistence,
             rig(persistence=persistence) as r,
@@ -423,6 +425,11 @@ async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url:
                         select(CallEvent).where(CallEvent.call_id == call.call_id).order_by(CallEvent.seq)
                     )
                 )
+                deliveries = list(
+                    await session.scalars(
+                        select(WebhookDelivery).where(WebhookDelivery.call_id == call.call_id)
+                    )
+                )
     assert [(t.turn_index, t.role) for t in turns] == [(0, "assistant"), (1, "user"), (2, "assistant")]
     assert turns[0].text_ == OPENER
     assert "book a table" in turns[1].text_.lower()
@@ -432,11 +439,21 @@ async def test_a_conversation_leaves_ordered_turns_and_call_events(media_db_url:
     assert turns[0].start_ms <= turns[1].start_ms <= turns[2].start_ms
     assert [e.seq for e in events] == list(range(1, len(events) + 1))
     assert all(e.org_id == call.org_id for e in events)
-    turn_events = [(e.data["turn_index"], e.data["role"]) for e in events if e.category == "call"]
+    assert (events[0].event_type, events[0].message) == ("call.started", "Call started")
+    assert events[0].data == {"direction": "outbound", "media_format": "PCMU/8000"}
+    turn_events = [(e.data["turn_index"], e.data["role"]) for e in events if e.event_type == "call.turn"]
     assert turn_events == [(0, "assistant"), (1, "user"), (2, "assistant")]
     latency = [e for e in events if e.category == "latency"]
     assert latency
     assert {e.data["turn_index"] for e in latency} == {1}
+    # Every flushed row was routed in its flush transaction (specs/19 §1 step 5, Decision P06-T07).
+    routed = {e.event_type for e in events} - {"call.interrupt"}
+    assert {d.event_type for d in deliveries} == routed
+    assert {"call.started", "call.turn", "call.latency"} <= routed
+    assert {(d.url, d.format) for d in deliveries} == {(webhook, "bland")}
+    assert sorted(d.event_id for d in deliveries) == sorted(
+        f"evt_{e.id.hex}" for e in events if e.event_type in routed
+    )
 
 
 @asynccontextmanager

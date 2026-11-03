@@ -46,6 +46,7 @@ from va_edge.settings import EdgeSettings
 from va_edge.signals import TemporalCarrierSignaller
 from va_events.call_events import DbCallEventWriter, DirectCallEventWriter
 from va_events.publisher import EventPublisher
+from va_events.webhook_router import DbWebhookRouter
 from va_telnyx.signatures import load_public_key
 
 __all__ = [
@@ -120,7 +121,9 @@ def carrier_handlers(
     :func:`default_acceptor`, :data:`NO_ACCEPTOR` routes without one."""
     database = container.database
     publisher = EventPublisher(
-        container.redis, call_events=DirectCallEventWriter(DbCallEventWriter(database))
+        container.redis,
+        call_events=DirectCallEventWriter(DbCallEventWriter(database)),
+        router=DbWebhookRouter(database),
     )
     chosen: InboundAcceptor | None
     if acceptor is None:

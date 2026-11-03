@@ -24,7 +24,7 @@ from structlog.testing import capture_logs
 
 from va_common.metrics import Service, build_metrics
 from va_common.time import SystemClock
-from va_db.models import CallEvent, TelnyxEvent
+from va_db.models import CallEvent, TelnyxEvent, WebhookDelivery
 from va_db.session import Database
 from va_domain.carrier import CarrierEvent, carrier_channel, carrier_state_key, owner_key
 from va_edge.carrier import CarrierEventHandler
@@ -33,6 +33,7 @@ from va_events.call_events import DbCallEventWriter, DirectCallEventWriter
 from va_events.keys import stream_key
 from va_events.model import decode
 from va_events.publisher import EventPublisher
+from va_events.webhook_router import DbWebhookRouter
 from va_telnyx.client_state import ClientState, encode
 from va_telnyx.voice_events import CallInitiated
 from va_telnyx.webhooks import EventPayload
@@ -81,7 +82,11 @@ class Rig:
 def make_rig(database: Database, *, inbound: RecordingRouter | None = None) -> Rig:
     bus_server = FakeServer()
     redis = FakeAsyncRedis(server=bus_server)
-    publisher = EventPublisher(redis, call_events=DirectCallEventWriter(DbCallEventWriter(database)))
+    publisher = EventPublisher(
+        redis,
+        call_events=DirectCallEventWriter(DbCallEventWriter(database)),
+        router=DbWebhookRouter(database),
+    )
     signaller = RecordingSignaller()
     metrics = build_metrics(Service.TELEPHONY_EDGE)
     handler = CarrierEventHandler(
@@ -196,6 +201,28 @@ async def test_outbound_call_lifecycle(database: Database, rig: Rig) -> None:
     )
     assert channel[0].payload["call_control_id"] == leg_id
     assert [event.type for event in rig.signaller.signals] == ["call.answered", "call.hangup"]
+
+
+@pytest.mark.parametrize(("webhook_events", "delivered"), [(["call"], ["call.answered"]), (["queue"], [])])
+async def test_carrier_events_honor_the_calls_webhook_events(
+    database: Database, rig: Rig, webhook_events: list[str], delivered: list[str]
+) -> None:
+    url = f"https://calls-{secrets.token_hex(4)}.hooks.test/live"
+    call = await seed_call(
+        database, status="ringing", config={"webhook": url, "webhook_events": webhook_events}
+    )
+    await rig.process(body("call.answered", ccid(), call=call), attributed=call)
+    async with database.tenant_session(call.org_id) as session:
+        rows = (
+            await session.execute(
+                select(WebhookDelivery.event_type, WebhookDelivery.url, WebhookDelivery.payload).where(
+                    WebhookDelivery.call_id == call.call_id
+                )
+            )
+        ).all()
+    assert [(event_type, found) for event_type, found, _ in rows] == [(t, url) for t in delivered]
+    for _, _, payload in rows:
+        assert (payload["call_id"], payload["category"]) == (str(call.call_id), "call")
 
 
 async def test_busy_before_answer(database: Database, rig: Rig) -> None:

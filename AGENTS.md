@@ -1682,3 +1682,12 @@ Grafana 3001
   dispatched earlier entries, subscribe a probe org and wait for a marker event (the reader is sequential).
   Unbounded streams in the cross-tenant suite need an owner control that fails fast (`register_request(...,
   params={"types": "BAD!"})` + `register_owner_status(op, 400)`). OpenAPI tags must be one of `va_api.openapi.TAG_NAMES`.
+- 2026-11-03 (P06-T07): every call-event producer routes webhooks atomically with its `call_events` row: callers that
+  insert rows themselves call `EventPublisher.route(sequenced, session=session)` after `insert_rows` (api
+  `persist_event`, worker `persist_events`, edge accept `_persist_event`); the media worker routes in the buffer
+  flush (`DbCallEventWriter(database, router=DbWebhookRouter(database))`, events rebuilt by `va_events.event_of(row)`).
+  Publishers of api/worker/edge (and the `SessionContainer`, `telephony_rig`, `accept_rig`, carrier test rigs) carry
+  `router=DbWebhookRouter(database)`; the dispatcher and the media publisher never get one. `WebhookRouter` fakes
+  must implement `route_many`. The media `TurnRecorder.started(media_format)` publishes `call.started` first, so
+  call event filters by category `call` also see it: filter turns by `event_type == "call.turn"`. Event log items
+  (`GET /v1/calls/{id}/events`) carry `type`; e2e `event_order_failures(event_types(events))` checks the causal order.

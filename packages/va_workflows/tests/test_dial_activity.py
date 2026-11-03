@@ -16,7 +16,7 @@ from call_rows import SeededCall, load_call, seed_leg
 from compliance_rows import add_dnc
 from resolved_configs import resolved_config
 from service_helpers import json_log_stream, log_events
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from telephony_rig import (
     CALLEE,
     CALLER,
@@ -39,7 +39,7 @@ from va_common.ids import new_id
 from va_common.stream_tokens import verify_stream_token
 from va_common.time import SystemClock
 from va_db.call_states import TERMINAL_STATUSES
-from va_db.models import CallLeg, CallStatus, TelnyxAccount
+from va_db.models import CallLeg, CallStatus, TelnyxAccount, WebhookDelivery
 from va_db.repositories import CallLegRepo, CallRepo, CallTransitionError
 from va_db.session import Database
 from va_events import DomainEvent, EventPublisher, EventPublishError, EventType, stream_for
@@ -149,6 +149,25 @@ async def test_a_queued_call_is_dialled_with_the_exact_body(r: Rig) -> None:
     )
     assert await _events(r, call) == [("call", "info", {"call_control_id": ccid})]
     assert await r.redis.xlen(stream_key(stream_for(EventType.CALL_DIALING))) == 1
+
+
+@pytest.mark.parametrize(("webhook_events", "delivered"), [(["call"], ["call.dialing"]), (["latency"], [])])
+async def test_the_dialing_event_honors_the_calls_webhook_events(
+    r: Rig, webhook_events: list[str], delivered: list[str]
+) -> None:
+    url = f"https://calls-{secrets.token_hex(4)}.hooks.test/live"
+    config = {**resolved_config("01_task_basic.json"), "webhook": url, "webhook_events": webhook_events}
+    call = await r.seed("queued", config=config)
+
+    await _dial(r.telephony(), call)
+
+    async with r.database.tenant_session(call.org_id) as session:
+        rows = await session.execute(
+            select(WebhookDelivery.event_type, WebhookDelivery.url, WebhookDelivery.format).where(
+                WebhookDelivery.call_id == call.call_id
+            )
+        )
+        assert [(event_type, found) for event_type, found, _ in rows] == [(t, url) for t in delivered]
 
 
 async def _leg_id(r: Rig, call: SeededCall) -> uuid.UUID:

@@ -12,6 +12,7 @@ from va_events.call_events import (
     CallEventWriter,
     DbCallEventWriter,
     DirectCallEventWriter,
+    event_of,
     insert_rows,
     row_for,
 )
@@ -89,6 +90,7 @@ __all__ = [
     "decode",
     "encode",
     "envelope_body",
+    "event_of",
     "event_uuid",
     "insert_rows",
     "is_call_event",

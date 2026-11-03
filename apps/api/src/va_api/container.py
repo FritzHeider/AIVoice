@@ -42,7 +42,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
-from va_events import EventPublisher, LiveHub, StreamTailHub
+from va_events import DbWebhookRouter, EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -182,7 +182,7 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             agent_requests=AgentRequestStore(redis, clock),
             onboarding_limiter=OnboardingLimiter(redis),
             call_limiter=CallLimiter(redis, clock=clock),
-            event_publisher=EventPublisher(redis, call_events=None),
+            event_publisher=EventPublisher(redis, call_events=None, router=DbWebhookRouter(database)),
             call_starter=TemporalCallStarter(temporal, settings.temporal_task_queue),
             call_canceller=TemporalCallCanceller(temporal),
             host_resolver=system_resolver,

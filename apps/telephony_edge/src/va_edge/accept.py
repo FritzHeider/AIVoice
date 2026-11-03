@@ -301,10 +301,12 @@ class InboundAccept:
         return _Persisted(config=config, context=context, event=event)
 
     async def _persist_event(self, session: AsyncSession, event: DomainEvent) -> DomainEvent:
-        """Sequence ``event`` (Redis) and write its ``call_events`` row in ``session``'s transaction."""
+        """Sequence ``event`` (Redis), write its ``call_events`` row and route its webhook deliveries in
+        ``session``'s transaction."""
         sequenced = await self._publisher.sequence(event)
         row = row_for(sequenced)
         await insert_rows(session, [] if row is None else [row])
+        await self._publisher.route([sequenced], session=session)
         return sequenced
 
     async def _broadcast(self, event: DomainEvent) -> None:

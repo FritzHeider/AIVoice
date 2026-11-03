@@ -975,7 +975,8 @@
             },
             "level": "info",
             "message": "answered",
-            "seq": 3
+            "seq": 3,
+            "type": "call.answered"
           }
         ],
         "properties": {
@@ -1016,10 +1017,23 @@
             "description": "Per-call sequence number.",
             "title": "Seq",
             "type": "integer"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Event type (`call.turn`, ...); null for rows older than the column.",
+            "title": "Type"
           }
         },
         "required": [
           "seq",
+          "type",
           "category",
           "level",
           "message",
@@ -1042,7 +1056,8 @@
                 },
                 "level": "info",
                 "message": "answered",
-                "seq": 3
+                "seq": 3,
+                "type": "call.answered"
               }
             ],
             "status": "success"

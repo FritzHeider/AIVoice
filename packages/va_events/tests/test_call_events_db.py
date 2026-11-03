@@ -4,30 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import secrets
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
+from call_rows import seed_call
 from clock_helpers import ManualClock
 from event_helpers import publisher_rig, row
 from migration_helpers import query
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from tenant_rows import OrgFactory
 
 from va_common.time import SystemClock
-from va_db.models import CallEvent
+from va_db.models import CallEvent, WebhookDelivery
 from va_db.session import Database
 from va_events import (
     CallEventBuffer,
     CallEventRow,
     CallEventWriteError,
     DbCallEventWriter,
+    DbWebhookRouter,
+    DomainEvent,
     EventType,
     event_uuid,
     insert_rows,
     live_body,
     new_event,
     row_body,
+    row_for,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
@@ -156,3 +163,77 @@ async def test_insert_rows_rolls_back_with_the_callers_transaction(database: Dat
             await insert_rows(session, _rows_of(org, uuid.uuid4(), 1))
             raise AbortError
     assert await _rows(database, org) == []
+
+
+async def _delivered_types(database: Database, org_id: uuid.UUID) -> list[str]:
+    async with database.tenant_session(org_id) as session:
+        rows = await session.execute(
+            select(WebhookDelivery.event_type, WebhookDelivery.format)
+            .where(WebhookDelivery.org_id == org_id)
+            .order_by(WebhookDelivery.event_type)
+        )
+        return [f"{event_type}/{fmt}" for event_type, fmt in rows]
+
+
+def _call_event(event_type: EventType, org_id: uuid.UUID, call_id: uuid.UUID, seq: int) -> CallEventRow:
+    published = new_event(
+        event_type, org_id=org_id, clock=SystemClock(), call_id=call_id, message="E2E: 700ms"
+    ).model_copy(update={"seq": seq})
+    stored = row_for(published)
+    assert stored is not None
+    return stored
+
+
+async def test_a_routing_writer_puts_the_rows_events_in_the_webhook_outbox(database: Database) -> None:
+    url = f"https://call-{secrets.token_hex(4)}.hooks.test/in"
+    call = await seed_call(database, config={"webhook": url, "webhook_events": ["latency"]})
+    rows = [
+        _call_event(EventType.CALL_LATENCY, call.org_id, call.call_id, 1),
+        _call_event(EventType.CALL_TURN, call.org_id, call.call_id, 2),
+        dataclasses.replace(row(call.call_id, 3, org_id=call.org_id), created_at=SystemClock().now()),
+    ]
+    writer = DbCallEventWriter(database, router=DbWebhookRouter(database))
+
+    await writer.write(rows)
+    await writer.write(rows)
+
+    assert len(await _rows(database, call.org_id)) == 3
+    assert await _delivered_types(database, call.org_id) == ["call.latency/bland"]
+
+
+class _RouterDownError(RuntimeError):
+    """The failing router's error."""
+
+
+class _FailingRouter:
+    """Routes one org's events and fails for another."""
+
+    def __init__(self, inner: DbWebhookRouter, failing_org: uuid.UUID) -> None:
+        self._inner = inner
+        self._failing_org = failing_org
+
+    async def route(self, event: DomainEvent, *, session: AsyncSession | None) -> None:
+        await self.route_many([event], session=session)
+
+    async def route_many(self, events: Sequence[DomainEvent], *, session: AsyncSession | None) -> None:
+        if any(event.org_id == self._failing_org for event in events):
+            raise _RouterDownError
+        await self._inner.route_many(events, session=session)
+
+
+async def test_a_routing_failure_leaves_neither_row_nor_delivery_of_that_org(database: Database) -> None:
+    url = f"https://call-{secrets.token_hex(4)}.hooks.test/in"
+    good = await seed_call(database, config={"webhook": url, "webhook_events": ["latency"]})
+    bad = await seed_call(database, config={"webhook": url, "webhook_events": ["latency"]})
+    bad_row = _call_event(EventType.CALL_LATENCY, bad.org_id, bad.call_id, 1)
+    good_row = _call_event(EventType.CALL_LATENCY, good.org_id, good.call_id, 1)
+    writer = DbCallEventWriter(database, router=_FailingRouter(DbWebhookRouter(database), bad.org_id))
+
+    with pytest.raises(CallEventWriteError) as raised:
+        await writer.write([bad_row, good_row])
+
+    assert raised.value.unwritten == (bad_row,)
+    assert await _rows(database, bad.org_id) == []
+    assert await _delivered_types(database, bad.org_id) == []
+    assert [r.id for r in await _rows(database, good.org_id)] == [good_row.id]
+    assert await _delivered_types(database, good.org_id) == ["call.latency/bland"]

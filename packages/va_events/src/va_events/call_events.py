@@ -10,7 +10,10 @@ insert is idempotent (``ON CONFLICT DO NOTHING`` on the ``(created_at, id)`` key
 duplicates or wedges, and an org whose transaction fails does not stop the others: the writer tries every
 org and then raises :class:`CallEventWriteError` naming only the rows that were not written.
 The media worker buffers rows in :class:`va_events.buffer.CallEventBuffer`; every other service hands
-them to a :class:`DirectCallEventWriter`, which writes each row at once.
+them to a :class:`DirectCallEventWriter`, which writes each row at once. With a ``router``,
+:class:`DbCallEventWriter` also routes the rows' events (rebuilt by :func:`event_of`) to the webhook outbox
+in the same per-org transaction (specs/19 §1 step 5, Decision P06-T07): a routing failure fails that org's
+rows, and the retry is harmless (deliveries are ``ON CONFLICT (event_id, url) DO NOTHING``).
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import JsonValue
 from sqlalchemy.dialects.postgresql import insert
@@ -28,8 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from va_common.logging import get_logger
 from va_db.models import CallEvent, CallEventCategory, CallEventLevel
 from va_db.session import Database
-from va_events.catalog import DEFAULT_CATEGORY
+from va_events.catalog import DEFAULT_CATEGORY, EventType
 from va_events.model import DomainEvent, event_uuid
+
+if TYPE_CHECKING:
+    from va_events.publisher import WebhookRouter
 
 __all__ = [
     "CallEventRow",
@@ -38,6 +44,7 @@ __all__ = [
     "CallEventWriter",
     "DbCallEventWriter",
     "DirectCallEventWriter",
+    "event_of",
     "insert_rows",
     "row_for",
 ]
@@ -83,6 +90,34 @@ def row_for(event: DomainEvent) -> CallEventRow | None:
     )
 
 
+def event_of(row: CallEventRow) -> DomainEvent | None:
+    """The call event a row was written from; ``None`` for rows without (a known) ``event_type``.
+
+    The rebuilt event carries what the row stores: id ``evt_<row.id hex>``, ``occurred_at`` =
+    ``created_at``, category, level, message, data, and seq (no batch, conversation, or widget id).
+    """
+    if row.event_type is None:
+        _log.debug("events.call_event_not_routed", reason="no_event_type", call_id=str(row.call_id))
+        return None
+    try:
+        event_type = EventType(row.event_type)
+    except ValueError:
+        _log.warning("events.call_event_not_routed", reason="unknown_event_type", event_type=row.event_type)
+        return None
+    return DomainEvent(
+        id=f"evt_{row.id.hex}",
+        type=event_type,
+        org_id=row.org_id,
+        occurred_at=row.created_at,
+        call_id=row.call_id,
+        category=row.category,
+        level=row.level,
+        message=row.message,
+        data=dict(row.data),
+        seq=row.seq,
+    )
+
+
 async def insert_rows(session: AsyncSession, rows: Sequence[CallEventRow]) -> None:
     """Insert ``rows`` in the caller's transaction; rows already stored are skipped (idempotent)."""
     if not rows:
@@ -124,11 +159,13 @@ class DbCallEventWriter:
 
     Already stored rows are skipped (``ON CONFLICT DO NOTHING``). Every org is attempted; if any org's
     transaction fails, :class:`CallEventWriteError` carries that org's rows (a COMMIT whose reply was lost is
-    reported as unwritten too, and the idempotent retry makes that harmless).
+    reported as unwritten too, and the idempotent retry makes that harmless). With a ``router`` the rows'
+    events are routed to the webhook outbox in the same transaction.
     """
 
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, *, router: WebhookRouter | None = None) -> None:
         self._database = database
+        self._router = router
 
     async def write(self, rows: Sequence[CallEventRow]) -> None:
         by_org: dict[uuid.UUID, list[CallEventRow]] = {}
@@ -155,6 +192,10 @@ class DbCallEventWriter:
     async def _insert(self, org_id: uuid.UUID, rows: Sequence[CallEventRow]) -> None:
         async with self._database.tenant_session(org_id) as session:
             await insert_rows(session, rows)
+            if self._router is not None:
+                events = [event for row in rows if (event := event_of(row)) is not None]
+                if events:
+                    await self._router.route_many(events, session=session)
 
 
 class DirectCallEventWriter:

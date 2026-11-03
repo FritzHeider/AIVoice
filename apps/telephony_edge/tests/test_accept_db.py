@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import secrets
 import uuid
 from collections.abc import MutableMapping
 from datetime import UTC, datetime
@@ -20,11 +21,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from accept_helpers import MEDIA_HOST, AcceptRig, GatedClock, accept_rig, answer_failing_factory, broken_redis
 from routing_helpers import CALLER, FALLBACK, random_number
+from sqlalchemy import select
 from structlog.testing import capture_logs
 
 from va_billing import keys
+from va_common.ids import new_id
 from va_common.stream_tokens import verify_stream_token
 from va_db.call_context import CallContextStore
+from va_db.models import WebhookDelivery, WebhookEndpoint
 from va_db.repositories import CallRepo
 from va_db.session import Database
 from va_domain.call_workflow import CallWorkflowInput
@@ -119,6 +123,51 @@ async def test_an_accepted_call_is_created_started_and_answered(database: Databa
         assert await r.rig.redis.zscore(keys.concurrency_key(org), str(call.id)) is not None
         assert r.rig.counted("answered") == 1
         assert r.answered() == 1
+
+
+async def _org_endpoint(database: Database, org_id: uuid.UUID) -> str:
+    url = f"https://org-{secrets.token_hex(4)}.hooks.test/events"
+    async with database.tenant_session(org_id) as session:
+        session.add(WebhookEndpoint(id=new_id(), org_id=org_id, url=url, event_types=["call.*"]))
+    return url
+
+
+async def _delivered(database: Database, org_id: uuid.UUID) -> list[tuple[str, str, str]]:
+    async with database.tenant_session(org_id) as session:
+        rows = await session.execute(
+            select(WebhookDelivery.event_type, WebhookDelivery.url, WebhookDelivery.format).order_by(
+                WebhookDelivery.created_at, WebhookDelivery.event_type
+            )
+        )
+        return [(event_type, url, fmt) for event_type, url, fmt in rows]
+
+
+async def test_the_ringing_event_reaches_the_orgs_endpoints(database: Database) -> None:
+    async with accept_rig(database) as r:
+        org = await r.org()
+        url = await _org_endpoint(database, org)
+        _, event = await r.rig.ring(await r.rig.number(org, {"prompt": PROMPT}))
+        assert (await r.route(event)).process_error is None
+        [call] = await r.calls(org)
+        [ringing] = await r.events(org, call.id)
+        assert await _delivered(database, org) == [("call.ringing", url, "envelope")]
+        async with database.tenant_session(org) as session:
+            delivery = await session.scalar(select(WebhookDelivery))
+        assert delivery is not None
+        assert (delivery.event_id, delivery.call_id) == (f"evt_{ringing.id.hex}", call.id)
+
+
+async def test_a_failed_accept_delivers_ringing_and_ended(database: Database) -> None:
+    async with accept_rig(database) as r:
+        r.starter.error = ConnectionError("temporal down")
+        org = await r.org()
+        url = await _org_endpoint(database, org)
+        _, event = await r.rig.ring(await r.rig.number(org, {"prompt": PROMPT}))
+        assert (await r.route(event)).process_error == "accept_failed"
+        assert sorted(await _delivered(database, org)) == [
+            ("call.ended", url, "envelope"),
+            ("call.ringing", url, "envelope"),
+        ]
 
 
 async def test_the_caller_contact_is_reused_and_anonymous_callers_get_none(database: Database) -> None:

@@ -17,7 +17,7 @@ from va_common.time import FrozenClock
 from va_db.call_turns import CallTurnRow, LatencyMerge, TurnDelete, TurnOp
 from va_domain.call_context import CallContext
 from va_events import DomainEvent, EventType
-from va_media.turns import EVENT_MESSAGE_CHARS, CallPersistence, TurnRecorder
+from va_media.turns import EVENT_MESSAGE_CHARS, STARTED_MESSAGE, CallPersistence, TurnRecorder
 from va_voice.latency import LatencyEvent, TurnLatency, TurnReport, latency_events
 from va_voice.pipeline import AgentTurn, InterruptRecord, UserTurn
 
@@ -115,6 +115,26 @@ async def test_user_turn_row_and_event_are_relative_to_the_answer() -> None:
         "node_id": None,
         "interrupted": False,
     }
+
+
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+async def test_started_publishes_call_started_once_before_any_turn(direction: str) -> None:
+    context = call_context(uuid.uuid4(), direction=direction)  # type: ignore[arg-type]
+    rec, turns, events = recorder(context)
+    rec.started("PCMU/8000")
+    rec.on_user_turn(user_turn(1, "Hello", 0, 500))
+    rec.started("PCMU/8000")
+    await rec.drain()
+    started, turn = events.events
+    assert (started.type, started.org_id, started.call_id) == (
+        EventType.CALL_STARTED,
+        context.org_id,
+        context.call_id,
+    )
+    assert (started.message, started.category) == (STARTED_MESSAGE, None)
+    assert started.data == {"direction": direction, "media_format": "PCMU/8000"}
+    assert turn.type is EventType.CALL_TURN
+    assert len(turns.ops) == 1
 
 
 async def test_times_before_the_answer_clamp_to_zero() -> None:

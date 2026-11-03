@@ -1411,7 +1411,8 @@ export interface components {
          *       },
          *       "level": "info",
          *       "message": "answered",
-         *       "seq": 3
+         *       "seq": 3,
+         *       "type": "call.answered"
          *     }
          */
         CallEventItem: {
@@ -1449,6 +1450,11 @@ export interface components {
              * @description Per-call sequence number.
              */
             seq: number;
+            /**
+             * Type
+             * @description Event type (`call.turn`, ...); null for rows older than the column.
+             */
+            type: string | null;
         };
         /**
          * CallEventsResponse
@@ -1463,7 +1469,8 @@ export interface components {
          *           },
          *           "level": "info",
          *           "message": "answered",
-         *           "seq": 3
+         *           "seq": 3,
+         *           "type": "call.answered"
          *         }
          *       ],
          *       "status": "success"

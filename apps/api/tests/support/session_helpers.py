@@ -72,7 +72,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import ApiKeyRecord, IdentityRepo, MembershipRepo, NewUser, grant_credits
 from va_db.session import Database
-from va_events import EventPublisher, LiveHub, StreamTailHub
+from va_events import DbWebhookRouter, EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 
@@ -190,7 +190,9 @@ class SessionContainer(AuthContainer):
         self.agent_requests = AgentRequestStore(self.redis, self.clock)
         self.onboarding_limiter = OnboardingLimiter(self.redis)
         self.call_limiter = CallLimiter(self.redis, clock=self.clock)
-        self.event_publisher = EventPublisher(self.redis, call_events=None)
+        self.event_publisher = EventPublisher(
+            self.redis, call_events=None, router=DbWebhookRouter(self.database)
+        )
         self.object_store = self.presigner.store()
         # Confirmation waits run on the wall clock: the frozen container clock would time them out at once.
         self.live_hub = LiveHub(self.redis, SystemClock())

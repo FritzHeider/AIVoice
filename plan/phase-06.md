@@ -48,7 +48,7 @@
   - Deliverables: `GET /v1/events/stream?types=` SSE scoped to the org (dashboard session or API key with `webhooks:read`), pod-wide stream tail hub, type pattern filter, internal types never sent
   - Acceptance: tests for org scoping, type filtering, auth variants.
 
-- [ ] P06-T07 Retrofit phase-05 emitters and latency events
+- [x] P06-T07 Retrofit phase-05 emitters and latency events — api/worker/edge/media route webhooks atomically with call_events rows (rollback tests), call.started emitted, event log `type`; make test 11224 passed (99 %), test-ts pass, make e2e 16 passed incl. outbound_basic event order
   - Spec refs: specs/19-events-and-webhooks.md (event type catalog: call.latency messages); specs/07-media-pipeline.md (latency tracing)
   - Depends on: P06-T02
   - Deliverables: all call lifecycle emitters use the publisher; per-turn `call.latency` events with Bland-style stage messages; `webhook_events` filtering honored

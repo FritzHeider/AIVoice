@@ -114,6 +114,29 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 > 7. Shutdown cancels the stream tasks; an unflushed in-memory batch is dropped and its entries stay pending for
 >    the next start (own-pending re-read) or another pod (`XAUTOCLAIM` after 60 s).
 
+> Decision (2026-11-03): emitter retrofit (P06-T07). Every call-event producer routes through
+> `va_events.DbWebhookRouter`, always atomic with the event's `call_events` row:
+> 1. api (`call.queued`/`call.scheduled`, stop's events), worker activities (`call.dialing`,
+>    `call.dispatch_blocked`, `call.ended`, `call.error`, `call.recording_ready`, `call.completed`, the retry
+>    child's `call.scheduled`) and the edge inbound accept (`call.ringing`, the failure `call.ended`) sequence the
+>    event, insert its row, and call `EventPublisher.route(events, session=)` in the same transaction as the status
+>    change (router errors propagate: the transaction rolls back, the activity/handler retries). Edge carrier events
+>    are published after the state-change commit (row via `DirectCallEventWriter`); the publisher's router then
+>    routes them in its own `tenant_session` (`publish(..., session=None)`).
+> 2. The media worker's buffered rows are routed by `DbCallEventWriter(database, router=)` in the same per-org
+>    transaction as the `call_events` flush (§1 step 5 "batched with the call_events flush"); a routing failure
+>    fails that org's flush and re-queues its rows (rows `ON CONFLICT DO NOTHING`, deliveries
+>    `ON CONFLICT (event_id, url) DO NOTHING`, so the retry is harmless). The event is rebuilt from the row
+>    (`va_events.event_of`: id `evt_<row id hex>`, type `event_type`, `occurred_at` = `created_at`, category, level,
+>    message, data, seq; no batch/conversation/widget id); rows without a known `event_type` are not routed
+>    (`events.call_event_not_routed`). The media publisher itself has no router.
+> 3. The webhook dispatcher never routes (its `call.webhook_delivery` would loop through `*` endpoints).
+> 4. `call.started` (media, category `call`, message `Call started`, data `{direction, media_format}` with
+>    `media_format` = `ENCODING/RATE` of the stream, e.g. `PCMU/8000`) is published once per call by the turn
+>    recorder after the vendors opened and right before the pipeline runs, so it precedes every `call.turn` and
+>    `call.latency` of the call. The media worker does not write `started_at`: the edge sets it on `call.answered`
+>    (outbound) and at the inbound accept.
+
 ## 2. Event type catalog (complete)
 
 | Type | Category | Emitted by | When | Webhook `webhook_events` key |
