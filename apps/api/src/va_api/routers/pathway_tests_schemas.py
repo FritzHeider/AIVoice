@@ -298,6 +298,10 @@ class RunListItem(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+    publish: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="The publish a regression run belongs to and its outcome (specs/12 §4).",
+    )
 
 
 class RunDetail(RunListItem):
@@ -319,6 +323,7 @@ def _run_fields(row: PathwayTestRun) -> dict[str, Any]:
         "started_at": row.started_at,
         "finished_at": row.finished_at,
         "created_at": row.created_at,
+        "publish": row.publish,
     }
 
 

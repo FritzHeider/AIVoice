@@ -39,6 +39,7 @@ POSTCALL_ACTIVITIES = [
     "run_pathway_simulation",
     "record_pathway_simulation_error",
     "finish_pathway_test_run",
+    "settle_regression_publish",
 ]
 
 

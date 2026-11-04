@@ -149,7 +149,7 @@
   - Acceptance: settings defaults/round trip/validation/no-op/permissions/tenant isolation; publish behaviour
     unchanged (existing version tests green).
 
-- [ ] P07-T11e2 Async regression runs and worker-completed publish
+- [x] P07-T11e2 Async regression runs and worker-completed publish — reviewer re-ran: make test 12504 passed/7 skipped, coverage 99.09 %; lint/typecheck/placeholders/test-ts 0; openapi drift clean; jscpd 0 clones; spec refs 0; migration 0008 + settle DB/workflow/api tests
   - Spec refs: specs/12-pathways-api.md §4 publish step 2 (async case, `pending_regression`), §9
   - Depends on: P07-T11e1, P07-T11d
   - Deliverables: publish with regression enabled starts a `kind='regression'` run through `PathwayTestWorkflow`

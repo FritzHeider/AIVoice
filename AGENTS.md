@@ -1893,3 +1893,12 @@ Grafana 3001
   parse+dump hash). Publishing (freeze, pin, fork, `pathway.publish` audit) is `va_db.pathway_publish.apply_publish`
   (+ `pinned_number`), shared by the api and, from P07-T11e2, the worker; callers validate, lock, and invalidate the
   cache. Rows written in one transaction share `now()`: never assert audit row order inside one transaction.
+- 2026-11-04 (P07-T11e2): publishing with regression = `va_api.services.pathway_publish.publish_pathway(PublishDeps,
+  ctx, pathway_id, PublishRequest)` (`pathway_versions` no longer publishes; its `existing_version` is public);
+  run starts share `pathway_test_runs.launch_run(..., unavailable_raises=)`. A blocking run carries
+  `va_domain.pathway_tests.RegressionPublish` (with `PublishActor`) in `PathwayTestWorkflowInput.publish`; the
+  workflow's `settle_regression_publish` activity calls `va_db.pathway_publish.settle_regression_publish` (run lock,
+  graph-hash guard, idempotent) and the stored record shape is `publish_record(...)`. `pathway_test_runs.publish`
+  (migration 0008, head now `0008`): never pass `None` for a JSONB column you want SQL NULL — SQLAlchemy stores
+  JSON `null`; omit the key. `pathway_rows.GRAPH` (va_db tests support) has `graph_hash = "0" * 64`: use another
+  value for a deliberately wrong hash. Spec: specs/12 §4 Decision P07-T11e2.

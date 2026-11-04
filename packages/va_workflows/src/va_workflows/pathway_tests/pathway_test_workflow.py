@@ -1,5 +1,5 @@
-"""``PathwayTestWorkflow``: one unit-test or simulation run of a pathway version (specs/12-pathways-api.md
-§8 and §9; Decisions P07-T11c and P07-T11d).
+"""``PathwayTestWorkflow``: one unit-test, simulation, or regression run of a pathway version
+(specs/12-pathways-api.md §4, §8, and §9; Decisions P07-T11c, P07-T11d, and P07-T11e2).
 
 Started by the api (``POST /v1/pathway/{pathway_id}/tests/run`` or ``.../simulations``) with id
 ``pathway-test-run-<run_id>`` on the post-call queue. ``begin_pathway_test_run`` moves the run to
@@ -8,7 +8,9 @@ its own ``run_pathway_unit_test`` activity, a simulation run every conversation 
 ``run_pathway_simulation`` activity, at most ``RUN_CONCURRENCY`` (8) at once; an item activity that fails
 after its retries is stored as an ``error`` item (``runner_error``) by ``record_pathway_test_error`` /
 ``record_pathway_simulation_error``. ``finish_pathway_test_run`` orders the results and sets the final
-status.
+status. A blocking regression run (``publish`` set) then runs ``settle_regression_publish``, which publishes
+the version only when the run passed and the graph is unchanged; a settle that fails after its retries leaves
+the publish ``pending`` (result ``publish="unsettled"``).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         RUN_CONCURRENCY,
         FinishedRunStatus,
         PathwayTestWorkflowInput,
+        RegressionPublish,
         SimulationJob,
     )
     from va_workflows.activities.pathway_tests_inputs import (
@@ -39,6 +42,8 @@ with workflow.unsafe.imports_passed_through():
         FinishInput,
         FinishResult,
         RunRef,
+        SettleInput,
+        SettleResult,
         SimulationErrorInput,
         SimulationInput,
         UnitTestErrorInput,
@@ -51,13 +56,15 @@ __all__ = ["PathwayTestRunResult", "PathwayTestWorkflow"]
 class PathwayTestRunResult(BaseModel):
     """What the run did: ``started`` false when the run row was gone or finished before it began; ``status``
     the final status (``None`` when not started or the finish found the run gone); outcomes by test or
-    simulation id."""
+    simulation id; ``publish`` the settled publish outcome of a blocking regression run (``unsettled`` when
+    the settle failed, ``None`` without a settle)."""
 
     model_config = ConfigDict(frozen=True)
 
     started: bool
     status: FinishedRunStatus | None = None
     outcomes: dict[str, str] = Field(default_factory=dict)
+    publish: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -111,7 +118,33 @@ class PathwayTestWorkflow:
             retry_policy=BOOKKEEPING_RETRY,
             result_type=FinishResult,
         )
-        return PathwayTestRunResult(started=True, status=finished.status, outcomes=dict(self._outcomes))
+        publish = None
+        if start.publish is not None and finished.status is not None:
+            publish = await self._settle(start, start.publish)
+        return PathwayTestRunResult(
+            started=True, status=finished.status, outcomes=dict(self._outcomes), publish=publish
+        )
+
+    @staticmethod
+    async def _settle(start: PathwayTestWorkflowInput, intent: RegressionPublish) -> str | None:
+        """Settle the run's publish; ``unsettled`` when the activity failed after its retries."""
+        try:
+            settled: SettleResult = await workflow.execute_activity(
+                "settle_regression_publish",
+                SettleInput(
+                    run_id=start.run_id,
+                    org_id=start.org_id,
+                    pathway_id=start.pathway_id,
+                    publish=intent,
+                ),
+                start_to_close_timeout=BOOKKEEPING_TIMEOUT,
+                retry_policy=BOOKKEEPING_RETRY,
+                result_type=SettleResult,
+            )
+        except ActivityError:
+            workflow.logger.warning("pathway_publish.unsettled")
+            return "unsettled"
+        return settled.outcome
 
     @staticmethod
     def _unit_item(start: PathwayTestWorkflowInput, test_id: uuid.UUID) -> _Item:

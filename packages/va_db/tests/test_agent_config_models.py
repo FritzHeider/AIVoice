@@ -91,7 +91,7 @@ _SPEC_COLUMNS: dict[str, str] = {
     ),
     "pathway_test_runs": (
         "id org_id pathway_id version_number kind status results started_at? finished_at? "
-        "created_at updated_at"
+        "created_at updated_at publish?"
     ),
     "personas": (
         "id org_id name description production_version? draft_version latest_version deleted_at? "

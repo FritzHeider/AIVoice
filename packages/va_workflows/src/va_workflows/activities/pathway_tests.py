@@ -1,5 +1,6 @@
-"""``PathwayTestWorkflow`` activities: run bookkeeping and one unit test or one simulated conversation per
-activity (specs/12-pathways-api.md §8 and §9, Decisions P07-T11c and P07-T11d).
+"""``PathwayTestWorkflow`` activities: run bookkeeping, one unit test or one simulated conversation per
+activity, and the publish a blocking regression run settles (specs/12-pathways-api.md §4, §8, and §9,
+Decisions P07-T11c, P07-T11d, and P07-T11e2).
 
 Each test or simulation activity writes its own result item into the run row (locked ``FOR UPDATE``, an item
 with the same test or simulation id replaced) and returns only the item's status, so large results never
@@ -13,11 +14,14 @@ import asyncio
 from collections.abc import Callable
 from typing import Literal, cast
 
+from redis.asyncio import Redis
 from temporalio import activity
 
 from va_common.logging import bound_context, get_logger
 from va_common.time import Clock
 from va_db.org_settings import OrgSettingsReader
+from va_db.pathway_cache import invalidate_pathway_cache
+from va_db.pathway_publish import settle_regression_publish
 from va_db.repositories import PathwayRunRepo
 from va_db.repositories.pathway_tests import result_key
 from va_db.session import Database
@@ -30,6 +34,8 @@ from va_workflows.activities.pathway_tests_inputs import (
     FinishInput,
     FinishResult,
     RunRef,
+    SettleInput,
+    SettleResult,
     SimulationErrorInput,
     SimulationInput,
     UnitTestErrorInput,
@@ -43,18 +49,21 @@ _log = get_logger(__name__)
 
 
 class PathwayTestActivities:
-    """The six activities of ``PathwayTestWorkflow`` (registered on the post-call queue)."""
+    """The seven activities of ``PathwayTestWorkflow`` (registered on the post-call queue); ``redis`` holds
+    the resolved pathway cache a settled publish invalidates (``None``: no cache to invalidate)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only collaborators
         self,
         *,
         database: Database,
         org_settings: OrgSettingsReader,
         text: TextDeps,
         clock: Clock,
+        redis: Redis | None = None,
         counter_factory: Callable[[], TokenCounter] = default_counter,
     ) -> None:
         self._database = database
+        self._redis = redis
         self._org_settings = org_settings
         self._text = text
         self._clock = clock
@@ -144,3 +153,26 @@ class PathwayTestActivities:
             )
         _log.info("pathway_test_run.finished", run_id=str(request.run_id), status=status, items=len(order))
         return FinishResult(status=status)
+
+    @activity.defn(name="settle_regression_publish")
+    async def settle_regression_publish(self, request: SettleInput) -> SettleResult:
+        """Publish the version when the finished run passed and its graph is unchanged; record the outcome on
+        the run and invalidate the environment's resolved pathway cache after a publish."""
+        intent = request.publish
+        async with self._database.tenant_session(request.org_id) as session:
+            settled = await settle_regression_publish(
+                session, request.org_id, request.run_id, intent, now=self._clock.now()
+            )
+        if settled is None:
+            _log.info("pathway_publish.settle_skipped", run_id=str(request.run_id))
+            return SettleResult(outcome=None)
+        if settled.outcome == "published" and self._redis is not None:
+            await invalidate_pathway_cache(self._redis, request.pathway_id, [intent.environment])
+        _log.info(
+            "pathway_publish.settled",
+            run_id=str(request.run_id),
+            outcome=settled.outcome,
+            environment=intent.environment,
+            version=intent.version_number,
+        )
+        return SettleResult(outcome=settled.outcome)

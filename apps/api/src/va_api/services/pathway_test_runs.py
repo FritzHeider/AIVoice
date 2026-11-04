@@ -41,6 +41,7 @@ __all__ = [
     "PathwayTestStarter",
     "RunStartError",
     "TemporalPathwayTestStarter",
+    "launch_run",
     "start_simulation_run",
     "start_unit_run",
 ]
@@ -111,21 +112,26 @@ async def _selected_tests(
     return ids
 
 
-async def _launch(
+async def launch_run(  # noqa: PLR0913 - the committed run, its start, collaborators, and the failure mode
     database: Database,
     starter: PathwayTestStarter,
     clock: Clock,
     run: PathwayTestRun,
     start: PathwayTestWorkflowInput,
-) -> None:
-    """Start the committed ``run``'s workflow; a failed start marks the run ``error`` and answers 503."""
+    *,
+    unavailable_raises: bool = True,
+) -> bool:
+    """Start the committed ``run``'s workflow; a failed start marks the run ``error`` and answers 503 (with
+    ``unavailable_raises`` false it returns false instead)."""
     try:
         await starter.start(start)
     except RunStartError as exc:
         _log.warning("pathway_test_run.start_failed", run_id=str(run.id), error=type(exc.__cause__).__name__)
         async with database.tenant_session(start.org_id) as session:
             await PathwayRunRepo(session, start.org_id).fail(run.id, clock.now())
-        raise AppError("SERVICE_UNAVAILABLE", RUNS_UNAVAILABLE_MESSAGE) from exc
+        if unavailable_raises:
+            raise AppError("SERVICE_UNAVAILABLE", RUNS_UNAVAILABLE_MESSAGE) from exc
+        return False
     _log.info(
         "pathway_test_run.started",
         run_id=str(run.id),
@@ -133,6 +139,7 @@ async def _launch(
         items=len(start.test_ids) + len(start.simulations),
         version=run.version_number,
     )
+    return True
 
 
 def _start_input(run: PathwayTestRun, ctx: RequestContext, **work: object) -> PathwayTestWorkflowInput:
@@ -165,7 +172,7 @@ async def start_unit_run(  # noqa: PLR0913 - the request's run, its version and 
         run = await PathwayRunRepo(session, ctx.org_id).add(
             pathway.id, version_number=stored.version_number, kind="unit"
         )
-    await _launch(database, starter, clock, run, _start_input(run, ctx, kind="unit", test_ids=tuple(ids)))
+    await launch_run(database, starter, clock, run, _start_input(run, ctx, kind="unit", test_ids=tuple(ids)))
     return run
 
 
@@ -188,5 +195,7 @@ async def start_simulation_run(  # noqa: PLR0913 - the request's run, its versio
             pathway.id, version_number=stored.version_number, kind="simulation"
         )
     jobs = simulation_jobs(scenarios, runs_per_scenario)
-    await _launch(database, starter, clock, run, _start_input(run, ctx, kind="simulation", simulations=jobs))
+    await launch_run(
+        database, starter, clock, run, _start_input(run, ctx, kind="simulation", simulations=jobs)
+    )
     return run

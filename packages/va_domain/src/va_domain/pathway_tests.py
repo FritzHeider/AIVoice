@@ -35,12 +35,17 @@ __all__ = [
     "RUN_CONCURRENCY",
     "FinishedRunStatus",
     "PathwayTestWorkflowInput",
+    "PublishActor",
+    "PublishOutcome",
+    "RegressionPublish",
     "RegressionSettings",
     "RunKind",
     "Scenario",
     "SimulationJob",
     "load_regression",
     "pathway_test_workflow_id",
+    "regression_enabled",
+    "regression_jobs",
     "regression_summary",
     "run_status",
     "simulation_jobs",
@@ -66,10 +71,14 @@ MAX_REGRESSION_SCENARIOS: Final = 20
 REGRESSION_KEY: Final = "regression"
 """The draft ``global_config`` key holding the regression settings (specs/12 §9)."""
 
-type RunKind = Literal["unit", "simulation"]
-"""The run kinds ``PathwayTestWorkflow`` executes (``regression`` runs are unit or simulation runs too)."""
+type RunKind = Literal["unit", "simulation", "regression"]
+"""The run kinds ``PathwayTestWorkflow`` executes (a ``regression`` run holds unit tests, simulations, or
+both)."""
 
 type FinishedRunStatus = Literal["passed", "failed", "error"]
+
+type PublishOutcome = Literal["pending", "published", "blocked", "stale", "version_unavailable"]
+"""What became of the publish attached to a regression run (specs/12 §4; Decision P07-T11e2)."""
 
 
 def pathway_test_workflow_id(run_id: uuid.UUID) -> str:
@@ -116,9 +125,38 @@ def simulation_jobs(scenarios: Iterable[Scenario], runs_per_scenario: int) -> tu
     )
 
 
+class PublishActor(BaseModel):
+    """Who asked for a publish (the ``va_db.audit.AuditActor`` fields): the worker writes the
+    ``pathway.publish`` audit row in their name. Carried only in the workflow input, never in the run row."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    org_id: uuid.UUID
+    actor_type: Literal["user", "api_key", "system"]
+    actor_id: uuid.UUID | None
+    ip: str | None = None
+    user_agent: str | None = None
+    acting_parent_org_id: uuid.UUID | None = None
+    platform_admin: bool = False
+
+
+class RegressionPublish(BaseModel):
+    """The publish a blocking regression run completes when it passes: the version, its environment, the
+    ``graph_hash`` the api validated (a version whose graph changed since is not published), and who asked."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    environment: Literal["production", "staging"]
+    version_number: int = Field(ge=1)
+    graph_hash: str
+    published_by: uuid.UUID | None = None
+    actor: PublishActor
+
+
 class PathwayTestWorkflowInput(BaseModel):
     """One run: its row, the pathway version every test or conversation loads, and its work in result order
-    (``test_ids`` for a unit run, ``simulations`` for a simulation run)."""
+    (``test_ids`` for a unit run, ``simulations`` for a simulation run, either or both for a regression run;
+    ``publish`` only on a blocking regression run)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -129,6 +167,7 @@ class PathwayTestWorkflowInput(BaseModel):
     kind: RunKind = "unit"
     test_ids: tuple[uuid.UUID, ...] = Field(default=(), max_length=MAX_RUN_TESTS)
     simulations: tuple[SimulationJob, ...] = Field(default=(), max_length=MAX_SIMULATIONS)
+    publish: RegressionPublish | None = None
 
     @model_validator(mode="after")
     def _work_matches_kind(self) -> PathwayTestWorkflowInput:
@@ -137,6 +176,12 @@ class PathwayTestWorkflowInput(BaseModel):
             raise ValueError(msg)
         if self.kind == "simulation" and (not self.simulations or self.test_ids):
             msg = "a simulation run needs simulations and no test_ids"
+            raise ValueError(msg)
+        if self.kind == "regression" and not (self.test_ids or self.simulations):
+            msg = "a regression run needs test_ids or simulations"
+            raise ValueError(msg)
+        if self.publish is not None and self.kind != "regression":
+            msg = "only a regression run completes a publish"
             raise ValueError(msg)
         return self
 
@@ -195,3 +240,16 @@ def regression_summary(settings: RegressionSettings) -> dict[str, bool | int]:
         "include_simulations": settings.include_simulations,
         "scenarios": len(settings.scenarios),
     }
+
+
+def regression_enabled(run_regression: bool | None, settings: RegressionSettings) -> bool:
+    """Whether a publish runs the regression suite: the request asked for it, or the suite opted in with
+    ``run_on_publish`` (a request's explicit ``false`` never skips a suite that opted in)."""
+    return run_regression is True or settings.run_on_publish
+
+
+def regression_jobs(settings: RegressionSettings) -> tuple[SimulationJob, ...]:
+    """The suite's simulations: one conversation per scenario with ``include_simulations``, else none."""
+    if not settings.include_simulations:
+        return ()
+    return simulation_jobs(settings.scenarios, 1)

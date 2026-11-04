@@ -7717,7 +7717,7 @@
                 "type": "null"
               }
             ],
-            "description": "Run the pathway's unit tests before publishing (specs/12 §4 step 2).",
+            "description": "Run the regression suite before publishing (specs/12 §4 step 2); false never skips a suite whose run_on_publish is set.",
             "title": "Run Regression"
           },
           "version_number": {
@@ -7738,13 +7738,21 @@
         "type": "object"
       },
       "Published": {
-        "description": "``POST /v1/pathway/{pathway_id}/publish`` result.",
+        "description": "``POST /v1/pathway/{pathway_id}/publish`` result: ``success`` when the version is published, or\n``pending_regression`` while a blocking regression run gates it (``published_version`` null until the\nworker publishes; specs/12 §4 Decision P07-T11e2).",
         "examples": [
           {
             "draft_version": 5,
             "environment": "production",
             "published_version": 4,
-            "status": "success"
+            "status": "success",
+            "version_number": 4
+          },
+          {
+            "draft_version": 4,
+            "environment": "production",
+            "run_id": "0193a2b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+            "status": "pending_regression",
+            "version_number": 4
           }
         ],
         "properties": {
@@ -7761,19 +7769,49 @@
             "type": "string"
           },
           "published_version": {
-            "title": "Published Version",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The published version; null while pending.",
+            "title": "Published Version"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The regression run started by this publish.",
+            "title": "Run Id"
           },
           "status": {
-            "const": "success",
             "default": "success",
+            "enum": [
+              "success",
+              "pending_regression"
+            ],
             "title": "Status",
             "type": "string"
+          },
+          "version_number": {
+            "description": "The version published, or to publish once the run passes.",
+            "title": "Version Number",
+            "type": "integer"
           }
         },
         "required": [
           "published_version",
           "environment",
+          "version_number",
           "draft_version"
         ],
         "title": "Published",
@@ -8270,6 +8308,21 @@
             "title": "Pathway Id",
             "type": "string"
           },
+          "publish": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The publish a regression run belongs to and its outcome (specs/12 §4).",
+            "title": "Publish"
+          },
           "results": {
             "items": {
               "$ref": "#/components/schemas/JsonValue"
@@ -8438,6 +8491,21 @@
             "format": "uuid",
             "title": "Pathway Id",
             "type": "string"
+          },
+          "publish": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The publish a regression run belongs to and its outcome (specs/12 §4).",
+            "title": "Publish"
           },
           "run_id": {
             "format": "uuid",
@@ -15937,7 +16005,7 @@
     },
     "/v1/pathway/{pathway_id}/publish": {
       "post": {
-        "description": "Validate a version in publish mode and pin it to production or staging.",
+        "description": "Validate a version in publish mode and pin it to production or staging, gated by the regression suite\nwhen it runs (``pending_regression``: the worker publishes once the run passes).",
         "operationId": "pathways_publish",
         "parameters": [
           {

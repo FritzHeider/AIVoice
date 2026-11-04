@@ -77,7 +77,9 @@ async def test_version_lifecycle_keeps_one_draft(api: Api, identity: IdentityDb)
         "status": "success",
         "published_version": 2,
         "environment": "production",
+        "version_number": 2,
         "draft_version": 3,
+        "run_id": None,
     }
     await assert_one_draft(api, identity, pathway_id)
     await api.update(pathway_id, nodes=[start(text="Hello v3")])
@@ -130,7 +132,9 @@ async def test_publishing_a_saved_version_forks_nothing_and_keeps_the_first_publ
         "status": "success",
         "published_version": 1,
         "environment": "staging",
+        "version_number": 1,
         "draft_version": 2,
+        "run_id": None,
     }
     (row,) = [row for row in await version_rows(identity, pathway_id) if row.version_number == 1]
     published_at = row.published_at

@@ -136,25 +136,46 @@ class PublishBody(BaseModel):
     )
     environment: PinEnvironment = Field(default="production", description="Environment pin to move.")
     run_regression: bool | None = Field(
-        default=None, description="Run the pathway's unit tests before publishing (specs/12 §4 step 2)."
+        default=None,
+        description="Run the regression suite before publishing (specs/12 §4 step 2); false never skips a "
+        "suite whose run_on_publish is set.",
     )
 
 
 class Published(BaseModel):
-    """``POST /v1/pathway/{pathway_id}/publish`` result."""
+    """``POST /v1/pathway/{pathway_id}/publish`` result: ``success`` when the version is published, or
+    ``pending_regression`` while a blocking regression run gates it (``published_version`` null until the
+    worker publishes; specs/12 §4 Decision P07-T11e2)."""
 
     model_config = ConfigDict(
         json_schema_extra={
             "examples": [
-                {"status": "success", "published_version": 4, "environment": "production", "draft_version": 5}
+                {
+                    "status": "success",
+                    "published_version": 4,
+                    "environment": "production",
+                    "version_number": 4,
+                    "draft_version": 5,
+                    "run_id": None,
+                },
+                {
+                    "status": "pending_regression",
+                    "published_version": None,
+                    "environment": "production",
+                    "version_number": 4,
+                    "draft_version": 4,
+                    "run_id": "0193a2b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+                },
             ]
         }
     )
 
-    status: Literal["success"] = "success"
-    published_version: int
+    status: Literal["success", "pending_regression"] = "success"
+    published_version: int | None = Field(description="The published version; null while pending.")
     environment: PinEnvironment
+    version_number: int = Field(description="The version published, or to publish once the run passes.")
     draft_version: int
+    run_id: uuid.UUID | None = Field(default=None, description="The regression run started by this publish.")
 
 
 class Promoted(BaseModel):

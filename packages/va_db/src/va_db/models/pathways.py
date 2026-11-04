@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Literal, get_args
 
 from sqlalchemy import CheckConstraint, Index, Integer, Text, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from va_db.base import Base, IdMixin, SoftDeleteMixin, TimestampMixin
@@ -131,6 +132,9 @@ class PathwayTestRun(IdMixin, TimestampMixin, Base):
     results: Mapped[list[Any]] = jsonb_column("[]")
     started_at: Mapped[datetime | None] = mapped_column(tz())
     finished_at: Mapped[datetime | None] = mapped_column(tz())
+    # The publish a regression run belongs to (NULL for other runs). Migration 0008 appended it, so it sorts
+    # after the TimestampMixin columns like the database column (specs/12 §4 Decision P07-T11e2).
+    publish: Mapped[Any | None] = mapped_column(JSONB, nullable=True, sort_order=1)
 
 
 Index("pathway_test_runs_pathway_idx", PathwayTestRun.pathway_id, PathwayTestRun.created_at.desc())

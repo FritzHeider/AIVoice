@@ -16,11 +16,15 @@ from va_domain.pathway_tests import (
     MAX_SIMULATIONS,
     REGRESSION_KEY,
     PathwayTestWorkflowInput,
+    PublishActor,
+    RegressionPublish,
     RegressionSettings,
     Scenario,
     SimulationJob,
     load_regression,
     pathway_test_workflow_id,
+    regression_enabled,
+    regression_jobs,
     regression_summary,
     run_status,
     simulation_jobs,
@@ -197,3 +201,66 @@ def test_with_regression_copies_and_round_trips() -> None:
         "include_simulations": True,
         "scenarios": 1,
     }
+
+
+def _intent() -> RegressionPublish:
+    return RegressionPublish(
+        environment="staging",
+        version_number=3,
+        graph_hash="h" * 64,
+        published_by=RUN,
+        actor=PublishActor(org_id=RUN, actor_type="api_key", actor_id=RUN, ip="203.0.113.7"),
+    )
+
+
+def test_a_regression_run_holds_tests_simulations_and_a_publish_intent() -> None:
+    start = _start(kind="regression", test_ids=[RUN], simulations=[_job(1)], publish=_intent())
+    assert (start.test_ids, len(start.simulations), start.publish) == ((RUN,), 1, _intent())
+    assert PathwayTestWorkflowInput.model_validate(start.model_dump(mode="json")) == start
+    assert _start(kind="regression", simulations=[_job(1)]).publish is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"kind": "regression"},
+        {"kind": "unit", "test_ids": [RUN], "publish": "intent"},
+        {"kind": "simulation", "simulations": [_job(1)], "publish": "intent"},
+    ],
+    ids=["regression_without_work", "unit_with_publish", "simulation_with_publish"],
+)
+def test_only_a_regression_run_with_work_is_accepted(fields: dict[str, object]) -> None:
+    if fields.get("publish") == "intent":
+        fields = {**fields, "publish": _intent()}
+    with pytest.raises(ValidationError):
+        _start(**fields)
+
+
+def test_the_publish_intent_rejects_unknown_keys() -> None:
+    raw = {**_intent().model_dump(mode="json"), "extra": 1}
+    with pytest.raises(ValidationError):
+        RegressionPublish.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    ("run_regression", "run_on_publish", "expected"),
+    [
+        (None, False, False),
+        (False, False, False),
+        (True, False, True),
+        (None, True, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_regression_enabled(run_regression: bool | None, run_on_publish: bool, expected: bool) -> None:
+    settings = RegressionSettings(run_on_publish=run_on_publish)
+    assert regression_enabled(run_regression, settings) is expected
+
+
+def test_regression_jobs_play_each_scenario_once_only_with_simulations() -> None:
+    scenarios = (scenario("A"), scenario("B"))
+    assert regression_jobs(RegressionSettings(scenarios=scenarios)) == ()
+    jobs = regression_jobs(RegressionSettings(include_simulations=True, scenarios=scenarios))
+    assert [(job.simulation_id, job.scenario.name) for job in jobs] == [("1-1", "A"), ("2-1", "B")]
+    assert regression_jobs(RegressionSettings(include_simulations=True)) == ()

@@ -637,7 +637,8 @@ CREATE TABLE pathway_test_runs (
   started_at      timestamptz,
   finished_at     timestamptz,
   created_at      timestamptz NOT NULL DEFAULT now(),
-  updated_at      timestamptz NOT NULL DEFAULT now()
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  publish         jsonb       -- regression runs started by a publish (specs/12 §4 Decision P07-T11e2)
 );
 CREATE INDEX pathway_test_runs_pathway_idx ON pathway_test_runs(pathway_id, created_at DESC);
 CREATE INDEX pathway_test_runs_org_idx ON pathway_test_runs(org_id);

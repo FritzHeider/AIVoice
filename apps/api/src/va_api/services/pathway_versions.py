@@ -1,11 +1,11 @@
-"""Pathway versions: list, save, publish, promote, revert (specs/12-pathways-api.md §4).
+"""Pathway versions: list, save, promote, revert (specs/12-pathways-api.md §4; publishing lives in
+:mod:`va_api.services.pathway_publish`).
 
 Rules: specs/12 §4 Decision P07-T09b.
 
 Every function runs in the caller's ``tenant_session`` and, when it changes anything, takes the pathway row
 lock first, so exactly one ``draft`` row exists and ``draft_version == latest_version`` after every operation.
-Publishing validates the version in publish mode (one ``INVALID_INPUT`` item per error, as for drafts). Cache
-invalidation is the router's job: it runs after the transaction commits.
+Cache invalidation is the router's job: it runs after the transaction commits.
 """
 
 from __future__ import annotations
@@ -16,32 +16,27 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.audit import actor_of, audit
-from va_api.auth.api_keys import creating_user_id
+from va_api.audit import audit
 from va_api.auth.context import RequestContext
 from va_api.services.pathways import (
     VERSION_NOT_FOUND_MESSAGE,
     GraphInput,
     check_graph,
-    reject_errors,
 )
 from va_common.errors import AppError
 from va_db.models import Pathway, PathwayVersion
-from va_db.pathway_publish import apply_publish, pinned_number
-from va_db.repositories import PathwayGraphJson, PathwayRepo, PinEnvironment
+from va_db.repositories import PathwayGraphJson, PathwayRepo
 from va_engine.validation import ValidationReport
 
 __all__ = [
     "NO_STAGING_MESSAGE",
     "PromoteOutcome",
-    "PublishOutcome",
     "RevertOutcome",
     "SaveOutcome",
+    "existing_version",
     "get_version",
     "list_versions",
-    "pinned_number",
     "promote_staging",
-    "publish_version",
     "revert_draft",
     "save_version",
 ]
@@ -55,15 +50,6 @@ class SaveOutcome:
     """The saved version number and the new draft's."""
 
     saved_version: int
-    draft_version: int
-
-
-@dataclass(frozen=True, slots=True)
-class PublishOutcome:
-    """The published version, its environment, and the draft afterwards."""
-
-    published_version: int
-    environment: PinEnvironment
     draft_version: int
 
 
@@ -83,7 +69,8 @@ class RevertOutcome:
     report: ValidationReport
 
 
-async def _existing(repo: PathwayRepo, pathway: Pathway, number: int) -> PathwayVersion:
+async def existing_version(repo: PathwayRepo, pathway: Pathway, number: int) -> PathwayVersion:
+    """Version ``number`` of ``pathway``; else ``PATHWAY_VERSION_NOT_FOUND`` (field ``version_number``)."""
     version = await repo.version(pathway, number)
     if version is None:
         raise AppError("PATHWAY_VERSION_NOT_FOUND", VERSION_NOT_FOUND_MESSAGE, field=_VERSION_FIELD)
@@ -105,7 +92,7 @@ async def get_version(
     """The pathway and version ``number``; ``PATHWAY_VERSION_NOT_FOUND`` when it does not exist."""
     repo = PathwayRepo(session, ctx.org_id)
     pathway = await repo.get(pathway_id)
-    return pathway, await _existing(repo, pathway, number)
+    return pathway, await existing_version(repo, pathway, number)
 
 
 async def save_version(
@@ -120,40 +107,6 @@ async def save_version(
     after = {"version_number": draft.version_number, "name": draft.name, "graph_hash": draft.graph_hash}
     await audit(session, ctx, "pathway.version_save", "pathway", pathway.id, after=after)
     return SaveOutcome(saved_version=draft.version_number, draft_version=new_draft.version_number)
-
-
-async def publish_version(  # noqa: PLR0913 - keyword-only body fields and URL policy
-    session: AsyncSession,
-    ctx: RequestContext,
-    pathway_id: uuid.UUID,
-    *,
-    version_number: int | None,
-    environment: PinEnvironment,
-    allow_http: bool,
-) -> PublishOutcome:
-    """Validate in publish mode, mark ``published``, pin, and fork a new draft when publishing the draft."""
-    repo = PathwayRepo(session, ctx.org_id)
-    pathway = await repo.get(pathway_id, lock=True)
-    number = pathway.draft_version if version_number is None else version_number
-    version = await _existing(repo, pathway, number)
-    checked = await check_graph(
-        repo, GraphInput.of(version), pathway_id=pathway.id, mode="publish", allow_http=allow_http
-    )
-    reject_errors(checked)
-    result = await apply_publish(
-        session,
-        repo,
-        pathway,
-        version,
-        environment=environment,
-        published_by=await creating_user_id(ctx, session),
-        actor=actor_of(ctx),
-    )
-    return PublishOutcome(
-        published_version=result.published_version,
-        environment=result.environment,
-        draft_version=result.draft_version,
-    )
 
 
 async def promote_staging(
@@ -187,7 +140,7 @@ async def revert_draft(
     """Replace the draft graph with a copy of version ``number`` (the draft keeps its number and name)."""
     repo = PathwayRepo(session, ctx.org_id)
     pathway = await repo.get(pathway_id, lock=True)
-    source = await _existing(repo, pathway, number)
+    source = await existing_version(repo, pathway, number)
     draft = await repo.draft(pathway)
     checked = await check_graph(
         repo, GraphInput.of(source), pathway_id=pathway.id, mode="save", allow_http=allow_http

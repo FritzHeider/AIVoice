@@ -120,7 +120,11 @@ class WorkerActivities:
             pathway_tests=None
             if text is None
             else PathwayTestActivities(
-                database=database, org_settings=OrgSettingsReader(database, redis), text=text, clock=clock
+                database=database,
+                org_settings=OrgSettingsReader(database, redis),
+                text=text,
+                clock=clock,
+                redis=redis,
             ),
         )
 
@@ -160,6 +164,7 @@ class WorkerActivities:
                     tests.run_pathway_simulation,
                     tests.record_pathway_simulation_error,
                     tests.finish_pathway_test_run,
+                    tests.settle_regression_publish,
                 )
             )
         return tuple(activities)

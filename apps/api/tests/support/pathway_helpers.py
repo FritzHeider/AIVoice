@@ -113,6 +113,14 @@ def run_of(response: httpx.Response) -> dict[str, Any]:
     return run
 
 
+async def add_unit_test(api: Api, pathway_id: str, body: dict[str, Any]) -> str:
+    """Create a unit test of the pathway through the api; returns its id."""
+    response = await api.client.post(f"{BASE}/{pathway_id}/tests", json=body, headers=api.headers)
+    assert response.status_code == 200, response.text
+    test_id: str = response.json()["test"]["test_id"]
+    return test_id
+
+
 async def add(identity: IdentityDb, org_id: uuid.UUID, *rows: Any) -> None:
     async with identity.database.tenant_session(org_id) as session:
         for row in rows:

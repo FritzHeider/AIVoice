@@ -213,6 +213,45 @@ Request `{"name": "Copy of …", "version": "production"}` → new pathway with 
 > 9. Audit action names: `pathway.version_save` (the §11 `pathway.version.save`, renamed to the two-part form of
 >    the specs/04 §13 list) and `pathway.revert`.
 
+> Decision (2026-11-04): asynchronous regression on publish (P07-T11e2). Supersedes P07-T09b item 4's "no tests
+> run"; P07-T11e3 adds the synchronous path (≤ 20 unit tests, no simulations, 409) in front of this one.
+> 1. Regression runs when the request sets `run_regression: true` or the draft's suite settings (§9) have
+>    `run_on_publish`; an explicit `false` never skips a suite that opted in. The suite settings are always read
+>    from the current draft's `global_config.regression`, whichever version is published.
+> 2. Step 1 validation comes first (400 before any run). The suite is every unit test of the pathway, oldest first,
+>    plus, with `include_simulations`, one conversation per scenario (`simulation_id` `"<i>-1"`). More than 500
+>    tests → 400 `INVALID_INPUT` field `run_regression` "The regression suite holds more than 500 unit tests.". An
+>    empty suite publishes at once without a run.
+> 3. `block_publish_on_failure: true`: one transaction inserts a `pathway_test_runs` row `kind: "regression"`,
+>    `status: "queued"`, `version_number` = the version to publish, and `publish` = `{block: true, environment,
+>    version_number, graph_hash, outcome: "pending"}`; after the commit `PathwayTestWorkflow` starts with the
+>    publish intent (environment, version, the validated `graph_hash`, `published_by`, and the audit actor; the
+>    actor travels only in the workflow input, never in the row). Response 200 `{"status":"pending_regression",
+>    "published_version":null,"environment","version_number","draft_version","run_id"}`; nothing is published or
+>    invalidated. A failed start marks the run `error` and answers 503 `SERVICE_UNAVAILABLE` (nothing published).
+> 4. `block_publish_on_failure: false`: the version is published now (step 3) and the regression run (its
+>    `version_number` = the published version, `publish` = `{block: false, ..., outcome: "published",
+>    published_version, draft_version}`) is inserted in the same transaction; the workflow starts without a
+>    publish intent and only reports. A failed start marks the run `error`, is logged, and the response is still
+>    200 `success` (the publish committed).
+> 5. Every publish response carries `status` (`success` | `pending_regression`), `published_version` (null while
+>    pending), `environment`, `version_number` (published, or to publish), `draft_version`, and `run_id` (the
+>    regression run, null without one). Run reads (`GET .../runs`, `.../runs/{run_id}`) add `publish` (null for
+>    runs without one).
+> 6. After `finish_pathway_test_run` returned a final status, a blocking run executes activity
+>    `settle_regression_publish` (bookkeeping timeout and retries). In one transaction it locks the run row; a
+>    `publish.outcome` other than `pending` is returned unchanged (a retry never publishes twice), a run still
+>    queued/running stays `pending`. Otherwise: status other than `passed` → `blocked`; pathway gone or
+>    soft-deleted, or the version missing → `version_unavailable`; the version's `graph_hash` differs from the
+>    validated one (the draft was edited during the run) → `stale`; else step 3 runs with the requester as
+>    `published_by` and audit actor → `published` (+ `published_version`, `draft_version`). The outcome and
+>    `settled_at` are written into `publish` in the same transaction; after a publish the worker deletes
+>    `pathway:{id}:v:{env}`. No re-validation in the worker (the graph is hash-identical to the validated one).
+>    A run that never began, whose finish found the row gone, or whose settle failed after its retries (workflow
+>    result `publish: "unsettled"`) keeps `outcome: "pending"`. Concurrent pending publishes settle
+>    independently; the last one to commit holds the pin.
+> 7. Storage: `pathway_test_runs.publish jsonb` (migration 0008, appended last; NULL for runs of other kinds).
+
 ## 5. Import / export
 
 - Export: `GET /v1/pathway/{id}/export?version=` →

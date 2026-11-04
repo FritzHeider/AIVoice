@@ -984,7 +984,8 @@ export interface paths {
         put?: never;
         /**
          * Pathways Publish
-         * @description Validate a version in publish mode and pin it to production or staging.
+         * @description Validate a version in publish mode and pin it to production or staging, gated by the regression suite
+         *     when it runs (``pending_regression``: the worker publishes once the run passes).
          */
         post: operations["pathways_publish"];
         delete?: never;
@@ -5908,7 +5909,7 @@ export interface components {
             environment: "production" | "staging";
             /**
              * Run Regression
-             * @description Run the pathway's unit tests before publishing (specs/12 §4 step 2).
+             * @description Run the regression suite before publishing (specs/12 §4 step 2); false never skips a suite whose run_on_publish is set.
              */
             run_regression?: boolean | null;
             /**
@@ -5919,12 +5920,22 @@ export interface components {
         };
         /**
          * Published
-         * @description ``POST /v1/pathway/{pathway_id}/publish`` result.
+         * @description ``POST /v1/pathway/{pathway_id}/publish`` result: ``success`` when the version is published, or
+         *     ``pending_regression`` while a blocking regression run gates it (``published_version`` null until the
+         *     worker publishes; specs/12 §4 Decision P07-T11e2).
          * @example {
          *       "draft_version": 5,
          *       "environment": "production",
          *       "published_version": 4,
-         *       "status": "success"
+         *       "status": "success",
+         *       "version_number": 4
+         *     }
+         * @example {
+         *       "draft_version": 4,
+         *       "environment": "production",
+         *       "run_id": "0193a2b4-5c6d-7e8f-9a0b-1c2d3e4f5a6b",
+         *       "status": "pending_regression",
+         *       "version_number": 4
          *     }
          */
         Published: {
@@ -5935,14 +5946,27 @@ export interface components {
              * @enum {string}
              */
             environment: "production" | "staging";
-            /** Published Version */
-            published_version: number;
+            /**
+             * Published Version
+             * @description The published version; null while pending.
+             */
+            published_version: number | null;
+            /**
+             * Run Id
+             * @description The regression run started by this publish.
+             */
+            run_id?: string | null;
             /**
              * Status
              * @default success
-             * @constant
+             * @enum {string}
              */
-            status: "success";
+            status: "success" | "pending_regression";
+            /**
+             * Version Number
+             * @description The version published, or to publish once the run passes.
+             */
+            version_number: number;
         };
         /**
          * RecordingResponse
@@ -6286,6 +6310,13 @@ export interface components {
              * Format: uuid
              */
             pathway_id: string;
+            /**
+             * Publish
+             * @description The publish a regression run belongs to and its outcome (specs/12 §4).
+             */
+            publish?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
             /** Results */
             results: components["schemas"]["JsonValue"][];
             /**
@@ -6382,6 +6413,13 @@ export interface components {
              * Format: uuid
              */
             pathway_id: string;
+            /**
+             * Publish
+             * @description The publish a regression run belongs to and its outcome (specs/12 §4).
+             */
+            publish?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
             /**
              * Run Id
              * Format: uuid

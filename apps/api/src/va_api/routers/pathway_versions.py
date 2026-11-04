@@ -4,7 +4,8 @@ Rules: specs/12 §4 Decision P07-T09b. The routes attach to :data:`va_api.router
 (``va_api.main`` imports this module for that side effect). Reads need ``pathways:read``; saving a version
 needs an editing role; publish, promote, and revert need ``pathways.publish`` for session principals
 (:func:`~va_api.auth.pathway_roles.require_pathway_publisher`). The resolved graph cache
-``pathway:{id}:v:{env}`` is invalidated after the transaction commits.
+``pathway:{id}:v:{env}`` is invalidated after the transaction commits (a ``pending_regression`` publish is
+invalidated by the worker when it completes; Decision P07-T11e2).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from va_api.audit import audited
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
 from va_api.auth.pathway_roles import PUBLISH_PERMISSION, require_pathway_editor, require_pathway_publisher
-from va_api.auth.session_auth import database_of, redis_of, settings_of
+from va_api.auth.session_auth import clock_of, database_of, redis_of, settings_of
 from va_api.routers.pathway_versions_schemas import (
     PathwayVersions,
     Promoted,
@@ -32,11 +33,12 @@ from va_api.routers.pathway_versions_schemas import (
 )
 from va_api.routers.pathways import pathways_router
 from va_api.routers.pathways_schemas import PathwayDetail, pathway_detail, validation_view
+from va_api.services.pathway_publish import PublishDeps, PublishRequest, publish_pathway
+from va_api.services.pathway_test_runs import PathwayTestStarter
 from va_api.services.pathway_versions import (
     get_version,
     list_versions,
     promote_staging,
-    publish_version,
     revert_draft,
     save_version,
 )
@@ -110,22 +112,30 @@ async def pathways_version_save(
 async def pathways_publish(
     pathway_id: uuid.UUID, request: Request, ctx: WritePathways, body: PublishBody | None = None
 ) -> Published:
-    """Validate a version in publish mode and pin it to production or staging."""
+    """Validate a version in publish mode and pin it to production or staging, gated by the regression suite
+    when it runs (``pending_regression``: the worker publishes once the run passes)."""
     payload = body if body is not None else PublishBody()
-    async with database_of(request).tenant_session(ctx.org_id) as session:
-        outcome = await publish_version(
-            session,
-            ctx,
-            pathway_id,
+    starter: PathwayTestStarter = request.app.state.container.pathway_test_starter
+    outcome = await publish_pathway(
+        PublishDeps(database=database_of(request), starter=starter, clock=clock_of(request)),
+        ctx,
+        pathway_id,
+        PublishRequest(
             version_number=payload.version_number,
             environment=payload.environment,
+            run_regression=payload.run_regression,
             allow_http=insecure_urls_allowed(settings_of(request).va_env),
-        )
-    await invalidate_pathway_cache(redis_of(request), pathway_id, [outcome.environment])
+        ),
+    )
+    if outcome.status == "success":
+        await invalidate_pathway_cache(redis_of(request), pathway_id, [outcome.environment])
     return Published(
+        status=outcome.status,
         published_version=outcome.published_version,
         environment=outcome.environment,
+        version_number=outcome.version_number,
         draft_version=outcome.draft_version,
+        run_id=outcome.run_id,
     )
 
 

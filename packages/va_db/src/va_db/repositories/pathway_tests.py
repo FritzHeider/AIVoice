@@ -144,18 +144,32 @@ class PathwayRunRepo:
         return run
 
     async def add(
-        self, pathway_id: uuid.UUID, *, version_number: int, kind: PathwayTestRunKind
+        self,
+        pathway_id: uuid.UUID,
+        *,
+        version_number: int,
+        kind: PathwayTestRunKind,
+        publish: Mapping[str, Any] | None = None,
     ) -> PathwayTestRun:
-        """Insert a ``queued`` run of the pathway version with no results."""
-        return await self._rows.create(
-            {
-                "pathway_id": pathway_id,
-                "version_number": version_number,
-                "kind": kind,
-                "status": "queued",
-                "results": [],
-            }
-        )
+        """Insert a ``queued`` run of the pathway version with no results (``publish``: the publish record of
+        a regression run)."""
+        values: dict[str, Any] = {
+            "pathway_id": pathway_id,
+            "version_number": version_number,
+            "kind": kind,
+            "status": "queued",
+            "results": [],
+        }
+        if publish is not None:
+            # Omitted otherwise: Python ``None`` on a JSONB column is stored as JSON ``null``, not SQL NULL.
+            values["publish"] = dict(publish)
+        return await self._rows.create(values)
+
+    async def set_publish(self, run: PathwayTestRun, publish: Mapping[str, Any]) -> None:
+        """Replace the publish record of ``run``."""
+        # A new dict object: SQLAlchemy does not track in-place changes of a JSONB value.
+        run.publish = dict(publish)
+        await self.session.flush()
 
     async def lock(self, run_id: uuid.UUID) -> PathwayTestRun | None:
         """The run row locked ``FOR UPDATE`` (``None`` when absent)."""

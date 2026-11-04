@@ -14,7 +14,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict
 from temporalio.common import RetryPolicy
 
-from va_domain.pathway_tests import FinishedRunStatus, SimulationJob
+from va_domain.pathway_tests import FinishedRunStatus, PublishOutcome, RegressionPublish, SimulationJob
 
 __all__ = [
     "BOOKKEEPING_RETRY",
@@ -25,6 +25,8 @@ __all__ = [
     "FinishInput",
     "FinishResult",
     "RunRef",
+    "SettleInput",
+    "SettleResult",
     "SimulationErrorInput",
     "SimulationInput",
     "UnitTestErrorInput",
@@ -45,7 +47,7 @@ TEST_RETRY: Final = RetryPolicy(
 )
 BOOKKEEPING_TIMEOUT: Final = timedelta(seconds=30)
 """``begin_pathway_test_run``, ``record_pathway_test_error``, ``record_pathway_simulation_error``,
-``finish_pathway_test_run``."""
+``finish_pathway_test_run``, ``settle_regression_publish``."""
 BOOKKEEPING_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -110,3 +112,16 @@ class FinishResult(_Model):
     """The final status; ``None`` when the run row is gone or was already finished."""
 
     status: FinishedRunStatus | None
+
+
+class SettleInput(RunRef):
+    """The finished blocking regression run whose publish to settle."""
+
+    pathway_id: uuid.UUID
+    publish: RegressionPublish
+
+
+class SettleResult(_Model):
+    """The publish outcome; ``None`` when the run row is gone."""
+
+    outcome: PublishOutcome | None

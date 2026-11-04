@@ -9,7 +9,7 @@ from typing import Any, Final
 import httpx
 import pytest
 from identity_db import IdentityDb
-from pathway_helpers import BASE, Api, run_of, star_api
+from pathway_helpers import BASE, Api, add_unit_test, run_of, star_api
 from session_helpers import SessionContainer, error_of
 from sqlalchemy import select
 
@@ -29,12 +29,7 @@ class Runs:
         self.base = f"{BASE}/{pathway_id}"
 
     async def add_test(self, name: str = "Routes") -> str:
-        response = await self.api.client.post(
-            f"{self.base}/tests", json={**TEST, "name": name}, headers=self.api.headers
-        )
-        assert response.status_code == 200, response.text
-        test_id: str = response.json()["test"]["test_id"]
-        return test_id
+        return await add_unit_test(self.api, self.pathway_id, {**TEST, "name": name})
 
     async def start(
         self, body: dict[str, Any] | None = None, headers: dict[str, str] | None = None
@@ -77,7 +72,8 @@ async def test_a_run_of_every_test_starts_queued_on_the_draft(
     )
     assert [str(test_id) for test_id in started.test_ids] == [first, second]
     assert started.workflow_id() == f"pathway-test-run-{run['run_id']}"
-    assert (await runs.read(run["run_id"]))["status"] == "queued"
+    read = await runs.read(run["run_id"])
+    assert (read["status"], read["publish"], started.publish) == ("queued", None, None)
 
 
 async def test_given_ids_run_in_order_without_duplicates_on_a_version_number(
