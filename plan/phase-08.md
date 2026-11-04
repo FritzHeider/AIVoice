@@ -1,5 +1,15 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [ ] P08-T00 Fix flaky e2e interruptibility_levels[1] (carried over from phase 07)
+  - Spec refs: specs/07-media-pipeline.md §7 (interruptibility levels); specs/30-testing-and-evals.md §5 (e2e flows)
+  - Depends on: none
+  - Deliverables: root cause of `tests_e2e/test_interruptibility_levels.py` case [1] failing 2/4 standalone runs on
+    2026-11-04 (clear ~1183 ms after voice onset vs `min_speech_ms` 1200; suspect onset reference = utterance
+    `start_ms` + `MARKER_MS` vs Silero onset timing). Fix the cause (measurement reference or pipeline speech_ms), no
+    retries/sleeps. Also check the single `amd_ivr_mode` missing-second-DTMF-digit flake after a cold rebuild.
+  - Acceptance: case [1] passes 10/10 standalone runs (`uv run pytest tests_e2e -m e2e -k interruptibility_levels`);
+    `make e2e` passes.
+
 - [ ] P08-T01 Tools API with secret headers
   - Spec refs: specs/13-tools-and-dynamic-data.md (Tools API, secret headers)
   - Depends on: P07-T07, P02-T11
