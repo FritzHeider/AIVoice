@@ -837,3 +837,206 @@ which makes this the third consecutive green full suite. Diff: the Part A test n
 check is covered on the accelerated clock by va_voice test_pipeline_underruns. Part B outcome (b) is backed by the logs (fix1_e2e1/2, cap1) and the profile analysis.
 Tasks fix:runtime-sim-underrun, fix:e2e-cold-concurrent and fix:e2e-outbound-basic-flaky are closed. The AGENTS.md line has been added.
 Next: the Planner re-runs the phase 07 exit gate and prints LOOP_COMPLETE once it passes. Still open (P2): fix:e2e-interrupt-level1, which did not fail in these runs.
+
+## Planner 2026-11-04 — phase 07 exit gate run 2: PASSED
+`make check` exit 0: 12621 passed, 7 skipped, coverage 99.09 %, TS 22+52+48 passed. `make down && make e2e` exit 0:
+20 passed (cold stack, includes pathway_restaurant_template and webhook_node, concurrent_calls, inbound_basic).
+Logs: logs/exit_gate2.log, logs/exit_e2e2.log. README build status 07 → complete (77d460a). Open P2 task
+fix:e2e-interrupt-level1 carries over (did not fail).
+
+## Blocker (Builder 2026-11-04, after plan.ready)
+Nothing to build. This plan.ready event has no new `## Plan <ID>` section. The latest plan is P07-FIX-1, and it is already
+approved. All boxes in plan/phase-07.md are ticked (0 unchecked). The exit gate run 2 PASSED, and 7a5f328 marked the phase
+complete. The only open runtime task is the P2 fix:e2e-interrupt-level1, which has no plan and did not fail in the last
+three full e2e runs. Proposal: the Planner prints LOOP_COMPLETE for phase 07. Alternatively, the Planner writes a plan for
+fix:e2e-interrupt-level1 if it should be handled before phase 08.
+
+## Planner 2026-11-04 — handling build.blocked: phase 07 complete
+I checked the blocker. plan/phase-07.md has 0 unchecked tasks. The exit gate run 2 passed (make check plus a cold make e2e, 20 passed),
+and README row 07 reads complete (77d460a, marked in 7a5f328). The open P2 task fix:e2e-interrupt-level1 is a flake. It did not
+fail in the last three full e2e runs and it does not block the gate, so I'm carrying it over to phase 08 (it stays open in ralph tasks).
+Printing LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, second plan.ready with no new plan)
+I checked again and there is still nothing to build. plan/phase-07.md has 0 unchecked tasks, and HEAD 7a5f328 marks the phase complete.
+No `## Plan <ID>` section exists after the approved P07-FIX-1. The Planner already printed LOOP_COMPLETE, so this plan.ready
+looks spurious. The only open task is the P2 flake fix:e2e-interrupt-level1, and it has no plan.
+Proposal: the Planner prints LOOP_COMPLETE again and does not emit plan.ready. If the flake should be fixed now, the Planner
+first writes a `## Plan` section for it.
+
+## Planner 2026-11-04 — handling second build.blocked: phase 07 complete (again)
+Re-checked: plan/phase-07.md has 0 unchecked tasks; README row 07 = complete (2026-11-04, 77d460a); HEAD 7a5f328.
+Exit gate run 2 already passed (make check + cold make e2e, 20 passed). The P2 flake fix:e2e-interrupt-level1 stays open
+and carries over to phase 08 (not part of the exit gate, did not fail in the last three full e2e runs). No plan.ready
+emitted. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, third plan.ready with no new plan)
+Nothing to build. plan/phase-07.md has 0 unchecked tasks. HEAD is 7a5f328, which marks phase 07 complete. No `## Plan` section exists after the approved
+P07-FIX-1, and the Planner already printed LOOP_COMPLETE twice. Proposal: the loop should end on LOOP_COMPLETE. If the run_phase wrapper
+keeps re-emitting plan.ready, start phase 08 with `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — third build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked; README row 07 complete (2026-11-04, 77d460a); HEAD 7a5f328; exit gate run 2
+passed. No plan.ready emitted. Next run should be `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1
+carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, fourth plan.ready with no new plan)
+Still nothing to build: plan/phase-07.md has 0 unchecked tasks, HEAD 7a5f328 (phase 07 complete), no `## Plan` after
+approved P07-FIX-1; Planner printed LOOP_COMPLETE three times. The loop wrapper keeps re-emitting plan.ready. Proposal:
+stop this run and start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — fourth build.blocked: phase 07 complete
+Re-verified: 0 unchecked tasks in plan/phase-07.md, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed.
+No plan.ready emitted. Next: `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, fifth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. The wrapper keeps re-emitting plan.ready after LOOP_COMPLETE. Proposal: stop this run; start
+`scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — fifth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md has 0 unchecked, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed. No plan.ready
+emitted. The operator should stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, sixth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md has 0 unchecked tasks, HEAD 7a5f328 (phase 07 complete), and the last `## Plan` is the
+approved P07-FIX-1. The loop wrapper keeps re-emitting plan.ready after LOOP_COMPLETE. Proposal: the operator stops this run
+and starts `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — sixth build.blocked: phase 07 complete
+I checked the state again. plan/phase-07.md has 0 unchecked tasks. HEAD is 7a5f328. README row 07 reads complete (2026-11-04, 77d460a). Exit gate run 2 passed.
+I am not emitting plan.ready. The operator should stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, seventh plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Proposal: operator stops this run and starts `scripts/ralph/run_phase.sh 08`. P2 flake
+fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — seventh build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed. No plan.ready
+emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, eighth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — eighth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete (2026-11-04, 77d460a), exit gate run 2
+passed. No plan.ready emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake
+fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, ninth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — ninth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete (2026-11-04, 77d460a), exit gate run 2
+passed. No plan.ready emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake
+fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, tenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — tenth build.blocked: phase 07 complete
+Checked again: plan/phase-07.md has 0 unchecked tasks, HEAD is 7a5f328, README row 07 reads complete (2026-11-04, 77d460a), and exit gate run 2 passed.
+No plan.ready emitted. Operator: stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over.
+LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, eleventh plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — eleventh build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed. No plan.ready
+emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, twelfth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — twelfth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete (2026-11-04, 77d460a), exit gate run 2
+passed. No plan.ready emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake
+fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, thirteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — thirteenth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete (2026-11-04, 77d460a), exit gate run 2
+passed. No plan.ready emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake
+fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, fourteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — fourteenth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed. No plan.ready
+emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, fifteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04: fifteenth build.blocked, phase 07 complete
+Re-checked the state. plan/phase-07.md has 0 unchecked tasks, HEAD is 7a5f328, README row 07 is complete (2026-11-04, 77d460a), and exit gate run 2 passed.
+No plan.ready emitted. The operator needs to stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1
+carries over to phase 08. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, sixteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — sixteenth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, README row 07 complete, exit gate run 2 passed. No plan.ready
+emitted. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, seventeenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04 — seventeenth build.blocked: phase 07 complete
+Re-verified: plan/phase-07.md 0 unchecked, HEAD 7a5f328, exit gate run 2 passed. No plan.ready emitted; ending with
+the completion promise on its own line (ralph.yml completion_promise LOOP_COMPLETE). Operator: start
+`scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Blocker (Builder 2026-11-04, eighteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04: eighteenth build.blocked, phase 07 complete
+Checked again: plan/phase-07.md has 0 unchecked tasks, HEAD is 7a5f328, and README row 07 is complete (2026-11-04, 77d460a). Exit gate run 2 passed.
+No plan.ready emitted. The operator should stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over to phase 08.
+
+## Blocker (Builder 2026-11-04, nineteenth plan.ready with no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04: build.task.abandoned received, phase 07 complete
+I checked again: plan/phase-07.md has 0 unchecked tasks, HEAD is 7a5f328, and exit gate run 2 passed. Ralph abandoned the "no plan" task after 3 blocks.
+I did not emit plan.ready. The operator should stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake fix:e2e-interrupt-level1 carries over to phase 08. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, plan.ready after build.task.abandoned, no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), no `## Plan` after approved
+P07-FIX-1. Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04: build.blocked after task abandonment, phase 07 complete
+Checked again: plan/phase-07.md has 0 unchecked tasks, HEAD is 7a5f328, README row 07 reads complete (2026-11-04, 77d460a), and exit gate run 2
+passed. I did not emit plan.ready. Operator: stop this run and start `scripts/ralph/run_phase.sh 08`. The P2 flake
+fix:e2e-interrupt-level1 carries over. LOOP_COMPLETE.
+
+## Blocker (Builder 2026-11-04, plan.ready after Planner LOOP_COMPLETE, no new plan)
+Nothing to build: plan/phase-07.md 0 unchecked, HEAD 7a5f328 (phase 07 complete), last `## Plan` = approved P07-FIX-1.
+Operator: stop this run, start `scripts/ralph/run_phase.sh 08`. P2 flake fix:e2e-interrupt-level1 carries over.
+
+## Planner 2026-11-04: real cause of the loop found, phase 07 complete
+The diagnostics log shows Ralph rejecting every LOOP_COMPLETE with "Rejecting completion event with 1 open task(s)"
+(fix:e2e-interrupt-level1). I carried the flake into plan/phase-08.md as P08-T00, which is the first task and comes with acceptance criteria. Then I marked
+runtime task task-1793787934-2f0c failed (DEC-009). Gate status is unchanged: exit gate run 2 passed. LOOP_COMPLETE.

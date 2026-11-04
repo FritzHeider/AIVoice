@@ -129,3 +129,12 @@ Template:
 - Reasoning: security spec owns the token; 10 min still covers ring time and a Telnyx WS reconnect at the end of the call; shorter replay window
 - Reversibility: high (one constant)
 - Timestamp (UTC ISO 8601): 2026-11-01T00:00:00Z
+
+## DEC-009
+- **Decision:** How to end phase 07 while runtime task fix:e2e-interrupt-level1 (P2 e2e flake) is open; Ralph rejects LOOP_COMPLETE with open tasks (diagnostics log: "Rejecting completion event with 1 open task(s)").
+- **Chosen Option:** Carry the flake into plan/phase-08.md as P08-T00 (first task, explicit acceptance), mark the runtime task failed with that note, print LOOP_COMPLETE.
+- **Confidence:** 75
+- **Alternatives Considered:** Fix it inside phase 07 as P07-FIX-2 (exit gate already passed twice without it; adds iterations to a finished phase); closing the task unverified (dishonest).
+- **Reasoning:** Phase 07 exit gate passed; the flake is tracked in the next phase's checklist so the Planner fixes it first.
+- **Reversibility:** Yes: `ralph tools task reopen task-1793787934-2f0c` and remove P08-T00.
+- **Timestamp:** 2026-11-04T15:30:00Z
