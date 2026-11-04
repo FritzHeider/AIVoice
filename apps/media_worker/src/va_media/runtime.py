@@ -90,8 +90,8 @@ from va_engine.opener import phrase_voice
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import DialogueSource, TaskBrain
 from va_events import CallEventBuffer, DbCallEventWriter, DbWebhookRouter, EventPublisher
-from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
-from va_llm.providers import platform_provider
+from va_llm import LlmMetrics
+from va_llm.platform import platform_gateway
 from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
@@ -609,12 +609,13 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
         envelope = Envelope(kms, OrgDataKeyStore(database))
         http = http_client(settings, timeout=LLM_HTTP_TIMEOUT)
         stack.push_async_callback(http.aclose)
-        gateway = LlmGateway(
-            ProviderRegistry(platform_provider(settings), OrgProviderStore(database, envelope, clock=clock)),
-            http,
+        gateway = platform_gateway(
+            settings,
+            database=database,
+            envelope=envelope,
+            http=http,
             clock=clock,
             metrics=LlmMetrics(metrics.registry, metrics),
-            costs=CostTable(load_costs(settings.llm_model_costs_json)),
         )
         telnyx_pool = telnyx_http(settings)
         stack.push_async_callback(telnyx_pool.aclose)

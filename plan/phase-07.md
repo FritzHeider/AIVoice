@@ -117,7 +117,7 @@
     `GET /runs`, `GET /runs/{run_id}`), tenant repos, audit `pathway_test.*`, cross-tenant factories
   - Acceptance: CRUD + from_call history/node construction + tenant isolation + permissions matrix tests.
 
-- [ ] P07-T11c `POST /tests/run` and `PathwayTestWorkflow`
+- [x] P07-T11c `POST /tests/run` and `PathwayTestWorkflow` — run endpoint + PathwayTestWorkflow/activities on the post-call queue, va_pathways.runs, shared va_llm.platform gateway, specs/12 §8 Decision; review: make test 12382 passed/7 skipped (99% cov), lint/typecheck/placeholders/test-ts pass, openapi drift + spec refs clean, jscpd 0 clones
   - Spec refs: specs/12-pathways-api.md §8 (run, concurrency 8, queue va-postcall); specs/01-architecture.md (worker)
   - Depends on: P07-T11b
   - Deliverables: run endpoint creating `pathway_test_runs(kind='unit')`, `PathwayTestWorkflow` + activities in

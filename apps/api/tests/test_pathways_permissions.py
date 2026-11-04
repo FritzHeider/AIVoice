@@ -278,7 +278,8 @@ _UNIT_TEST: Final = {"name": "Greets", "node_id": "start", "user_message": "Hi"}
 async def test_unit_test_role_matrix(
     role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
 ) -> None:
-    """Analysts manage unit tests (specs/04 §3.2 row "Pathway tests / simulations"; Decision P07-T11b)."""
+    """Analysts manage and run unit tests (specs/04 §3.2 row "Pathway tests / simulations"; Decisions
+    P07-T11b, P07-T11c)."""
     member = await signed_in(client, identity, container, role)
     pathway = await seed_pathway(identity, member.org.id)
     base = f"{BASE}/{pathway.id}"
@@ -289,8 +290,14 @@ async def test_unit_test_role_matrix(
     created = await client.post(f"{base}/tests", json=_UNIT_TEST, headers=headers)
     if role not in TESTERS:
         assert error_of(created)[:2] == (403, "FORBIDDEN")
+        assert error_of(await client.post(f"{base}/tests/run", json={}, headers=headers))[:2] == (
+            403,
+            "FORBIDDEN",
+        )
         return
     assert created.status_code == 200, created.text
+    run = await client.post(f"{base}/tests/run", json={}, headers=headers)
+    assert (run.status_code, run.json()["run"]["status"]) == (200, "queued"), run.text
     test_url = f"{base}/tests/{created.json()['test']['test_id']}"
     patched = await client.patch(test_url, json={"name": "Greets back"}, headers=headers)
     deleted = await client.delete(test_url, headers=headers)

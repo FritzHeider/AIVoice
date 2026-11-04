@@ -1867,3 +1867,12 @@ Grafana 3001
   test-file helper class `Tests` with `__init__` fails collection under `filterwarnings=error`): the schemas are
   `UnitTest*`. Cross-tenant factories `test_id`/`run_id` read `context.params["pathway_id"]` (the pathway created to
   their left). `session_helpers.error_of` returns `(status, code, field)`, not the message.
+- 2026-11-04 (P07-T11c): unit test runs = `POST /v1/pathway/{id}/tests/run` (`va_api.services.pathway_test_runs.
+  start_unit_run`, container `pathway_test_starter`; tests: `SessionContainer.pathway_test_starter` =
+  `call_fakes.FakePathwayTestStarter` `.started`/`.fail`) → `PathwayTestWorkflow` (`va_workflows.pathway_tests`,
+  contract `va_domain.pathway_tests`) on the post-call queue with `va_workflows.activities.pathway_tests.
+  PathwayTestActivities` (each test activity upserts its own result via `PathwayRunRepo.put_result`; rules: specs/12
+  §8 Decision P07-T11c). Stored-test runner: `va_pathways.runs.run_stored_test` (`insecure_urls_allowed` moved
+  there). Every LLM gateway is built by `va_llm.platform.platform_gateway` (api, media, worker); the worker now has
+  `LlmSettings` + `WebhookSafetySettings` and its container opens two more HTTP clients (LLM + tools). DB seeding of
+  the bella_pasta graph/tests for other packages: `pathways_helpers.store_bella_pasta` / `store_unit_test`.

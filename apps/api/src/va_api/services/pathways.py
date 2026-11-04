@@ -27,7 +27,6 @@ from va_api.auth.context import RequestContext
 from va_api.auth.pathway_roles import FORCE_DELETE_MESSAGE, can_force_delete
 from va_common.errors import AppError, MultiAppError
 from va_common.ids import PublicPrefix, to_public
-from va_common.settings import Environment
 from va_db.models import Pathway, PathwayVersion
 from va_db.repositories import PathwayGraphJson, PathwayReference, PathwayRepo
 from va_engine.models import PathwayGraph, dump_graph, graph_hash, load_graph, schema_field
@@ -39,6 +38,7 @@ from va_engine.validation import (
     validate_graph,
     validation_report,
 )
+from va_pathways.runs import insecure_urls_allowed
 
 __all__ = [
     "DEFAULT_START_NODE",
@@ -76,7 +76,6 @@ IN_USE_MESSAGE: Final = "Pathway is in use."
 VERSION_NOT_FOUND_MESSAGE: Final = "Pathway version not found."
 INVALID_VERSION_MESSAGE: Final = "version must be a positive integer, 'draft', 'production', or 'staging'."
 
-_INSECURE_ENVS: Final = frozenset({Environment.LOCAL, Environment.TEST})
 
 type VersionSelector = int | Literal["draft", "production", "staging"]
 
@@ -140,11 +139,6 @@ class DraftUpdate:
         if "folder_id" in self.fields_set:
             values["folder_id"] = self.folder_id
         return values
-
-
-def insecure_urls_allowed(va_env: Environment) -> bool:
-    """``http`` and private webhook URLs pass validation only in ``local``/``test``."""
-    return va_env in _INSECURE_ENVS
 
 
 def parse_graph(nodes: Sequence[Any], edges: Sequence[Any], global_config: Mapping[str, Any]) -> PathwayGraph:

@@ -18,7 +18,7 @@ import httpx
 import pytest
 from api_helpers import make_settings
 from auth_helpers import AuthContainer
-from call_fakes import FakeCallCanceller, FakeCallStarter, FakePresigner, FakeResolver
+from call_fakes import FakeCallCanceller, FakeCallStarter, FakePathwayTestStarter, FakePresigner, FakeResolver
 from docker_probe import docker_available
 from fastapi import APIRouter, Depends, FastAPI, Request
 from identity_db import IdentityDb, unique_email
@@ -174,6 +174,7 @@ class SessionContainer(AuthContainer):
     event_publisher: EventPublisher = field(init=False)
     call_starter: FakeCallStarter = field(default_factory=FakeCallStarter)
     call_canceller: FakeCallCanceller = field(default_factory=FakeCallCanceller)
+    pathway_test_starter: FakePathwayTestStarter = field(default_factory=FakePathwayTestStarter)
     host_resolver: FakeResolver = field(default_factory=FakeResolver)
     presigner: FakePresigner = field(default_factory=FakePresigner)
     object_store: ObjectStore = field(init=False)

@@ -10306,6 +10306,61 @@
         "title": "UnitTestOne",
         "type": "object"
       },
+      "UnitTestRunRequest": {
+        "additionalProperties": false,
+        "description": "``POST /v1/pathway/{pathway_id}/tests/run``: the version to test and the tests (null = all).",
+        "examples": [
+          {
+            "version": "draft"
+          },
+          {
+            "test_ids": [
+              "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+            ],
+            "version": 3
+          }
+        ],
+        "properties": {
+          "test_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tests to run in this order (duplicates ignored); null runs every test, oldest first.",
+            "title": "Test Ids"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "draft",
+                  "production",
+                  "staging"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "draft",
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "title": "Version"
+          }
+        },
+        "title": "UnitTestRunRequest",
+        "type": "object"
+      },
       "UnitTestUpdate": {
         "description": "``PATCH /v1/pathway/{pathway_id}/tests/{test_id}``: sent non-null fields replace the stored ones.",
         "examples": [
@@ -16119,6 +16174,73 @@
         "x-audit": [
           "pathway_test.create"
         ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/tests/run": {
+      "post": {
+        "description": "Run unit tests (all, or the given ids) on a version; the run starts ``queued`` and is read through\n``GET /runs/{run_id}``.",
+        "operationId": "pathways_tests_run",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnitTestRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests Run",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "test runs are recorded as pathway_test_runs rows",
         "x-envelope": "legacy",
         "x-scope": "pathways:write"
       }

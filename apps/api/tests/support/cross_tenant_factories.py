@@ -216,6 +216,9 @@ REGISTRY.register_resource_factory("run_id", _test_run)
 # The from_call example names a call that exists nowhere: the owner's control is ``404 CALL_NOT_FOUND``, while
 # org B is refused at the pathway (``404 NOT_FOUND``) before any call is read.
 REGISTRY.register_owner_status("pathways_tests_from_call", 404)
+# The factory pathway has no unit tests: the owner's run control is ``400 INVALID_INPUT`` ("There are no unit
+# tests to run."), while org B is refused at the pathway (``404 NOT_FOUND``); no workflow starts for either.
+REGISTRY.register_owner_status("pathways_tests_run", 400)
 # The factory chat has ended, so the owner's send control is ``409 CONFLICT`` (no model call) while org B gets
 # ``NOT_FOUND``.
 REGISTRY.register_request("pathways_chat_send", json={"message": "Hi"})

@@ -33,6 +33,10 @@ POSTCALL_ACTIVITIES = [
     "finalize_billing",
     "emit_completed",
     "store_recording",
+    "begin_pathway_test_run",
+    "run_pathway_unit_test",
+    "record_pathway_test_error",
+    "finish_pathway_test_run",
 ]
 
 
@@ -90,6 +94,17 @@ async def test_post_call_steps_observe_into_the_given_registry() -> None:
         assert post_call._step_ms is metrics.histogram("va_postcall_duration_ms")
 
 
+async def test_pathway_test_runs_get_the_text_dependencies() -> None:
+    metrics = build_metrics(Service.WORKER, new_registry(process_collectors=False))
+    async with build_container(dialing_settings(**UNREACHABLE), metrics) as container:
+        tests = container.activities.pathway_tests
+        assert tests is not None
+        assert tests._text.allow_http
+        assert tests._text.tools_http is not None
+    exposed = {family.name for family in metrics.registry.collect()}
+    assert "va_llm_request_duration_ms" in exposed
+
+
 async def test_recordings_go_to_the_configured_bucket_with_sse_per_kms_provider() -> None:
     settings = dialing_settings(**UNREACHABLE, s3_bucket_recordings="rec-bucket")
     async with build_container(settings) as container:
@@ -112,7 +127,8 @@ async def test_container_closes_what_it_opened(monkeypatch: pytest.MonkeyPatch) 
     closed = track_closes(monkeypatch)
     async with build_container(dialing_settings(**UNREACHABLE)):
         assert closed == []
-    assert sorted(closed) == ["engine", "engine", "engine", "http", "http", "redis"]
+    # Telnyx, ElevenLabs, LLM, and the guarded tool client.
+    assert sorted(closed) == ["engine", "engine", "engine", "http", "http", "http", "http", "redis"]
 
 
 async def test_the_telnyx_pool_uses_the_spec_timeouts() -> None:
@@ -144,4 +160,4 @@ async def test_the_elevenlabs_client_uses_its_socket_bound(monkeypatch: pytest.M
 
     monkeypatch.setattr(worker_main, "http_client", recording)
     async with build_container(dialing_settings(**UNREACHABLE)):
-        assert timeouts == [worker_main.ELEVENLABS_HTTP_TIMEOUT]
+        assert timeouts == [worker_main.ELEVENLABS_HTTP_TIMEOUT, worker_main.LLM_HTTP_TIMEOUT]

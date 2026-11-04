@@ -1097,6 +1097,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/{pathway_id}/tests/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Tests Run
+         * @description Run unit tests (all, or the given ids) on a version; the run starts ``queued`` and is read through
+         *     ``GET /runs/{run_id}``.
+         */
+        post: operations["pathways_tests_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}/tests/{test_id}": {
         parameters: {
             query?: never;
@@ -7304,6 +7325,32 @@ export interface components {
             test: components["schemas"]["UnitTestView"];
         };
         /**
+         * UnitTestRunRequest
+         * @description ``POST /v1/pathway/{pathway_id}/tests/run``: the version to test and the tests (null = all).
+         * @example {
+         *       "version": "draft"
+         *     }
+         * @example {
+         *       "test_ids": [
+         *         "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+         *       ],
+         *       "version": 3
+         *     }
+         */
+        UnitTestRunRequest: {
+            /**
+             * Test Ids
+             * @description Tests to run in this order (duplicates ignored); null runs every test, oldest first.
+             */
+            test_ids?: string[] | null;
+            /**
+             * Version
+             * @description Version number, `draft` (default), `production`, or `staging`.
+             * @default draft
+             */
+            version: number | ("draft" | "production" | "staging");
+        };
+        /**
          * UnitTestUpdate
          * @description ``PATCH /v1/pathway/{pathway_id}/tests/{test_id}``: sent non-null fields replace the stored ones.
          * @example {
@@ -10602,6 +10649,50 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UnitTestOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnitTestRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOne"];
                 };
             };
             /** @description Invalid input */

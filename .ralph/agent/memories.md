@@ -506,6 +506,10 @@
 
 ## Fixes
 
+### mem-1793756551-21d0
+> failure: cmd=make test, exit=2, error=INTERNALERROR worker crash: apps/media_worker/tests/test_runtime_sim.py::test_wait_for_greeting_holds_the_opener_until_the_callee_speaks hit pytest-timeout 60s and the hypothesis makereport hook raised PluggyTeardownRaisedWarning (aborts the xdist session); module passes alone (31 passed). next=re-run make test; load-related
+<!-- tags: testing, media | created: 2026-11-04 -->
+
 ### mem-1793747646-e8bf
 > fix: xdist 'worker crashed ... Not properly terminated' in make test = kernel OOM kill (read via: docker run --rm --privileged --net=none redis:7-alpine dmesg | grep -i 'killed process'). Cause: FakeTelnyx recorded leg on accelerated clock jumps to 4 h time limit and encodes ~460 MB WAV (test_accept_db recording test). Fix: routing rig ring/place(time_limit_s=30). Find RSS hogs with a -p plugin logging /proc/self/statm per test
 <!-- tags: testing, sim, edge | created: 2026-11-03 -->

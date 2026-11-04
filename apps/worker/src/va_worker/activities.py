@@ -6,7 +6,9 @@ write their ``call_events`` rows in their own transactions, so it has no sink), 
 store. The shared Telnyx HTTP pool and client factory come from :mod:`va_telnyx.settings`; the opener
 pre-render (specs/07 §11 Decision P05-T10d) shares the process's phrase cache. The post-call queue runs
 ``PostCallWorkflow`` with its activities (specs/18 §1 Decision P05-T18b); ``store_recording`` (specs/06 §11
-Decision P05-T14) is polled there when object storage is configured.
+Decision P05-T14) is polled there when object storage is configured, and ``PathwayTestWorkflow`` with its
+activities (specs/12 §8 Decision P07-T11c) when the text-run dependencies (LLM gateway, tool HTTP client)
+are given.
 """
 
 from __future__ import annotations
@@ -27,12 +29,14 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.session import Database
 from va_domain.post_call import postcall_task_queue
 from va_events import DbWebhookRouter, EventPublisher
+from va_pathways.conversation import TextDeps
 from va_telnyx import TelnyxClientFactory
 from va_worker.task_queues import TaskQueueRegistration
 from va_workflows.activities.call_context import CallContextActivities
 from va_workflows.activities.call_end import CallEndActivities
 from va_workflows.activities.dial_request import DialSettings
 from va_workflows.activities.liveness import CallLivenessActivities
+from va_workflows.activities.pathway_tests import PathwayTestActivities
 from va_workflows.activities.post_call import PostCallActivities
 from va_workflows.activities.prerender import OpenerPrerender
 from va_workflows.activities.recording import RecordingActivities
@@ -58,6 +62,7 @@ class WorkerActivities:
     retry: RetryActivities
     post_call: PostCallActivities
     recording: RecordingActivities | None = None
+    pathway_tests: PathwayTestActivities | None = None
 
     @classmethod
     def build(  # noqa: PLR0913 - the process's shared collaborators, keyword-only
@@ -71,6 +76,7 @@ class WorkerActivities:
         prerender: OpenerPrerender | None = None,
         storage: RecordingStorage | None = None,
         postcall_step_ms: Histogram | None = None,
+        text: TextDeps | None = None,
     ) -> WorkerActivities:
         limiter = CallLimiter(redis, clock=clock)
         publisher = EventPublisher(redis, call_events=None, router=DbWebhookRouter(database))
@@ -111,6 +117,11 @@ class WorkerActivities:
                 step_ms=postcall_step_ms,
             ),
             recording=recording,
+            pathway_tests=None
+            if text is None
+            else PathwayTestActivities(
+                database=database, org_settings=OrgSettingsReader(database, redis), text=text, clock=clock
+            ),
         )
 
     def main_queue(self) -> tuple[Callable[..., Any], ...]:
@@ -126,24 +137,37 @@ class WorkerActivities:
         )
 
     def postcall_queue(self) -> tuple[Callable[..., Any], ...]:
-        """The ``PostCallWorkflow`` activities (``store_recording`` when storage is configured)."""
+        """The ``PostCallWorkflow`` activities (``store_recording`` when storage is configured) and the
+        ``PathwayTestWorkflow`` activities (when the text-run dependencies are configured)."""
         post_call = self.post_call
-        activities: tuple[Callable[..., Any], ...] = (
+        activities: list[Callable[..., Any]] = [
             post_call.finalize_call_record,
             post_call.find_saved_recording,
             post_call.report_recording_missing,
             post_call.mark_postcall_step,
             post_call.finalize_billing,
             post_call.emit_completed,
-        )
-        return activities if self.recording is None else (*activities, self.recording.store_recording)
+        ]
+        if self.recording is not None:
+            activities.append(self.recording.store_recording)
+        tests = self.pathway_tests
+        if tests is not None:
+            activities.extend(
+                (
+                    tests.begin_pathway_test_run,
+                    tests.run_pathway_unit_test,
+                    tests.record_pathway_test_error,
+                    tests.finish_pathway_test_run,
+                )
+            )
+        return tuple(activities)
 
 
 def main_registrations(
     settings: TemporalSettings, activities: WorkerActivities
 ) -> tuple[TaskQueueRegistration, ...]:
-    """``CallWorkflow`` and its activities on ``TEMPORAL_TASK_QUEUE``, ``PostCallWorkflow`` and its
-    activities on the post-call queue."""
+    """``CallWorkflow`` and its activities on ``TEMPORAL_TASK_QUEUE``, ``PostCallWorkflow`` and
+    ``PathwayTestWorkflow`` with their activities on the post-call queue."""
     return (
         TaskQueueRegistration(settings.temporal_task_queue, CALL_WORKFLOWS, activities.main_queue()),
         TaskQueueRegistration(

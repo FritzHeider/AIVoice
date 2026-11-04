@@ -1,6 +1,6 @@
 """Request and response bodies of the pathway unit tests and runs API (specs/12-pathways-api.md §8; legacy).
 
-Rules: specs/12 §8 Decision P07-T11b items 4, 7, and 8.
+Rules: specs/12 §8 Decision P07-T11b items 4, 6, and 7; the run request: Decision P07-T11c.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from va_api.routers.pathways_schemas import Name
 from va_db.models import PathwayTestRun, PathwayTestRunKind, PathwayTestRunStatus, PathwayUnitTest
+from va_domain.pathway_tests import MAX_RUN_TESTS
 from va_pathways.unit_tests import MAX_VARIATIONS, Expected
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "UnitTestFromCall",
     "UnitTestList",
     "UnitTestOne",
+    "UnitTestRunRequest",
     "UnitTestUpdate",
     "UnitTestView",
     "run_detail",
@@ -341,3 +343,26 @@ class RunOne(BaseModel):
 
     status: Literal["success"] = "success"
     run: RunDetail
+
+
+class UnitTestRunRequest(BaseModel):
+    """``POST /v1/pathway/{pathway_id}/tests/run``: the version to test and the tests (null = all)."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"version": "draft", "test_ids": None},
+                {"version": 3, "test_ids": ["0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"]},
+            ]
+        },
+    )
+
+    version: Annotated[int, Field(ge=1)] | Literal["draft", "production", "staging"] = Field(
+        default="draft", description="Version number, `draft` (default), `production`, or `staging`."
+    )
+    test_ids: list[uuid.UUID] | None = Field(
+        default=None,
+        max_length=MAX_RUN_TESTS,
+        description="Tests to run in this order (duplicates ignored); null runs every test, oldest first.",
+    )

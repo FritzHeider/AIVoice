@@ -12,8 +12,10 @@ from dns_fakes import MappedResolver
 
 from va_api.services.call_starter import CallStartError
 from va_api.services.call_stop import CallCancelError
+from va_api.services.pathway_test_runs import RunStartError
 from va_common.storage import ObjectStore
 from va_domain.call_workflow import CallWorkflowInput
+from va_domain.pathway_tests import PathwayTestWorkflowInput
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
@@ -42,6 +44,19 @@ class FakeCallStarter:
         if self.fail is not None:
             raise self.fail
         self.started.append(call)
+
+
+@dataclass
+class FakePathwayTestStarter:
+    """Records every run start; raises ``fail`` (when set) instead of starting."""
+
+    started: list[PathwayTestWorkflowInput] = field(default_factory=list)
+    fail: RunStartError | None = None
+
+    async def start(self, run: PathwayTestWorkflowInput) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.started.append(run)
 
 
 @dataclass

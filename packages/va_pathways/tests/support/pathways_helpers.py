@@ -21,8 +21,11 @@ from llm_helpers import add_rules, realtime_llm_state
 from navigation_helpers import MemoryLoader
 
 from va_common.time import SystemClock
+from va_db.repositories import PathwayRepo, PathwayTestRepo
+from va_db.repositories.pathways import PathwayGraphJson
+from va_db.session import Database
 from va_domain.org import OrgSettings
-from va_engine.models import load_graph
+from va_engine.models import dump_graph, graph_hash, load_graph
 from va_engine.navigation import ActiveGraph
 from va_llm.tokens import default_counter
 from va_pathways.conversation import TextDeps
@@ -36,6 +39,8 @@ __all__ = [
     "TextRig",
     "bella_pasta",
     "spec",
+    "store_bella_pasta",
+    "store_unit_test",
     "text_rig",
 ]
 
@@ -89,6 +94,39 @@ def spec(user_message: str = "I want to order some food", **fields: Any) -> Unit
         **fields,
     }
     return UnitTestSpec.model_validate(body)
+
+
+async def store_bella_pasta(database: Database, org_id: uuid.UUID) -> uuid.UUID:
+    """A pathway of ``org_id`` whose version 1 (the draft) is :func:`bella_pasta`."""
+    graph = dump_graph(bella_pasta().graph)
+    stored = PathwayGraphJson(
+        nodes=list(graph["nodes"]),
+        edges=list(graph["edges"]),
+        global_config=dict(graph["global_config"]),
+        graph_hash=graph_hash(graph),
+    )
+    async with database.tenant_session(org_id) as session:
+        pathway, _ = await PathwayRepo(session, org_id).create(
+            name="Bella Pasta", description="", folder_id=None, graph=stored
+        )
+        return pathway.id
+
+
+async def store_unit_test(
+    database: Database, org_id: uuid.UUID, pathway_id: uuid.UUID, **values: Any
+) -> uuid.UUID:
+    """A stored unit test at ``greet`` that expects the ``order`` route (``values`` override columns)."""
+    row = {
+        "name": "Routes to order",
+        "node_id": "greet",
+        "history": [{"role": "assistant", "content": GREETING}],
+        "user_message": "I want to order some food",
+        "expected": {"route_to_node_id": "order"},
+        "simulated_variations": 0,
+        **values,
+    }
+    async with database.tenant_session(org_id) as session:
+        return (await PathwayTestRepo(session, org_id).add(pathway_id, row)).id
 
 
 class LlmControl:

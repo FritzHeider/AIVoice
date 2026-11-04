@@ -9,11 +9,12 @@ from __future__ import annotations
 from typing import Final
 
 from va_workflows.calls import CallWorkflow
+from va_workflows.pathway_tests import PathwayTestWorkflow
 from va_workflows.post_call import PostCallWorkflow
 
 __all__ = ["CALL_WORKFLOWS", "POSTCALL_WORKFLOWS"]
 
 CALL_WORKFLOWS: Final[tuple[type, ...]] = (CallWorkflow,)
 """The main queue (``TEMPORAL_TASK_QUEUE``)."""
-POSTCALL_WORKFLOWS: Final[tuple[type, ...]] = (PostCallWorkflow,)
-"""The post-call queue (specs/18 §1)."""
+POSTCALL_WORKFLOWS: Final[tuple[type, ...]] = (PostCallWorkflow, PathwayTestWorkflow)
+"""The post-call queue (specs/18 §1; pathway unit-test runs, specs/12 §8)."""

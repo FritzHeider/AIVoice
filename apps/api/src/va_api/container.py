@@ -26,6 +26,7 @@ from va_api.rate_limit import RateLimiter
 from va_api.services.call_starter import CallStarter, TemporalCallStarter
 from va_api.services.call_stop import CallCanceller, TemporalCallCanceller
 from va_api.services.pathway_chat import CHAT_LLM_TIMEOUT
+from va_api.services.pathway_test_runs import PathwayTestStarter, TemporalPathwayTestStarter
 from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
@@ -45,11 +46,12 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.provisioning import OrgProvisioner
 from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
+from va_domain.post_call import postcall_task_queue
 from va_events import DbWebhookRouter, EventPublisher, LiveHub, StreamTailHub
 from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
-from va_llm import CostTable, LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry, load_costs
-from va_llm.providers import platform_provider
+from va_llm import LlmGateway, LlmMetrics
+from va_llm.platform import platform_gateway
 from va_tools.http import tools_client
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
@@ -86,6 +88,7 @@ class Container:
     call_limiter: CallLimiter
     event_publisher: EventPublisher
     call_starter: CallStarter
+    pathway_test_starter: PathwayTestStarter
     call_canceller: CallCanceller
     host_resolver: HostResolver
     object_store: ObjectStore
@@ -116,7 +119,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     the OIDC discovery client (its own ``httpx.AsyncClient``, no redirects, 5 s timeout), and the OIDC login
     state store, the cached org settings reader, the agent onboarding request store and limiter, and the
     Send Call pieces: the dispatch limiter, the event publisher (``call_events`` rows are written by the
-    caller's transaction, so it has no sink), the ``CallWorkflow`` starter, and the system DNS resolver for
+    caller's transaction, so it has no sink), the ``CallWorkflow`` starter (and the ``PathwayTestWorkflow``
+    starter on the post-call queue), and the system DNS resolver for
     webhook checks, the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt), the
     live event hub (one pub/sub connection for every SSE client), and the pathway test chat's LLM gateway
     (platform provider plus org overrides; its metrics stay on a private registry: the api exports no LLM
@@ -167,12 +171,13 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
         stack.push_async_callback(stream_tail.aclose)
         llm_http = http_client(settings, timeout=CHAT_LLM_TIMEOUT)
         stack.push_async_callback(llm_http.aclose)
-        llm_gateway = LlmGateway(
-            ProviderRegistry(platform_provider(settings), OrgProviderStore(database, envelope, clock=clock)),
-            llm_http,
+        llm_gateway = platform_gateway(
+            settings,
+            database=database,
+            envelope=envelope,
+            http=llm_http,
             clock=clock,
             metrics=LlmMetrics(CollectorRegistry()),
-            costs=CostTable(load_costs(settings.llm_model_costs_json)),
         )
         tools_http = tools_client(settings, resolver=system_resolver)
         stack.push_async_callback(tools_http.aclose)
@@ -205,6 +210,9 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             call_limiter=CallLimiter(redis, clock=clock),
             event_publisher=EventPublisher(redis, call_events=None, router=DbWebhookRouter(database)),
             call_starter=TemporalCallStarter(temporal, settings.temporal_task_queue),
+            pathway_test_starter=TemporalPathwayTestStarter(
+                temporal, postcall_task_queue(settings.temporal_task_queue)
+            ),
             call_canceller=TemporalCallCanceller(temporal),
             host_resolver=system_resolver,
             object_store=object_store,

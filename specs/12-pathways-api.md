@@ -443,6 +443,38 @@ Result item:
 >    pathway node."); `expected` = the body's, else `{"route_to_node_id": <node of the first later assistant turn
 >    with one>}`, else `{}`; `source_call_id` = the call.
 
+> Decision (2026-11-04): unit test runs (P07-T11c).
+> 1. Body `{"version": "draft"|"production"|"staging"|int ≥ 1 (default "draft"), "test_ids": [uuid] | null}`
+>    (other keys rejected). The version resolves at request time to a number like every version selector (unset
+>    pin / missing number → 404 `PATHWAY_VERSION_NOT_FOUND` field `version`); the run stores `version_number` and
+>    every test loads that number when it starts.
+> 2. `test_ids` null → every test of the pathway, oldest first (`created_at, id`); a list → those tests in order,
+>    duplicates dropped, at most 500 (pydantic `max_length`). An id that is not a test of this pathway → 404
+>    "Pathway test not found.". No tests (empty list, or a pathway without tests) → 400 `INVALID_INPUT` field
+>    `test_ids` "There are no unit tests to run."; more than 500 stored tests without ids → 400 field `test_ids`
+>    "Select at most 500 tests.". Permission `pathways:write` with no editing-role guard (analysts run tests, like
+>    Decision P07-T11b item 1); no audit row (the run row is the record). `Idempotency-Key` replays the same run.
+> 3. The request inserts `pathway_test_runs(kind='unit', status='queued', results=[])`, commits, then starts
+>    `PathwayTestWorkflow` id `pathway-test-run-<run_id>` on the post-call queue (`REJECT_DUPLICATE`; an existing
+>    workflow counts as started). A failed start sets the run `error` with `finished_at` and answers 503
+>    `SERVICE_UNAVAILABLE` "Test runs are unavailable; try again."; success answers 200
+>    `{"status":"success","run":<run detail>}` (status `queued`).
+> 4. Workflow: `begin_pathway_test_run` (queued → running + `started_at`; a run that is gone or finished ends the
+>    workflow), one `run_pathway_unit_test` activity per test with at most 8 in flight, then
+>    `finish_pathway_test_run`. Each test activity writes its result item into `results` itself (row locked
+>    `FOR UPDATE`, an item of the same `test_id` replaced, so a retry never duplicates) and returns only the
+>    status. The finish orders `results` by the run's test order and sets `status` (`failed` when any item
+>    failed, else `error` when any item errored or a test has no item, else `passed`) and `finished_at`.
+> 5. Per-test problems are items, never workflow failures: `{"test_id", "name", "passed": false, "status":
+>    "error", "cases": [], "duration_ms": 0, "error": …}` with `test_not_found` (deleted since the run started;
+>    `name` null), `version_unavailable` (pathway deleted or version no longer loads), `invalid_test` (the stored
+>    row no longer validates), or `runner_error` (the activity failed after its retries; recorded by
+>    `record_pathway_test_error`, which keeps an item an earlier attempt already stored). Timeouts: test activity
+>    30 min start-to-close, 3 attempts (5 s initial, ×2); bookkeeping activities 30 s, 5 attempts.
+> 6. The worker builds the text-run dependencies like the api test chat: the `LLM_*` platform gateway with org
+>    providers (`va_llm.platform.platform_gateway`; `va_llm_*` metrics on the worker's probe registry) and the
+>    guarded tool HTTP client (`WEBHOOK_ALLOW_PRIVATE`); `http://` webhook URLs run only in `local`/`test`.
+
 ## 9. Simulations and regression
 
 `POST /v1/pathway/{id}/simulations`:

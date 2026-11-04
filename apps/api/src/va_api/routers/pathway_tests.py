@@ -3,7 +3,8 @@
 Rules: specs/12 §8 Decision P07-T11b. The routes attach to :data:`va_api.routers.pathways.pathways_router`
 (``va_api.main`` imports this module for that side effect). Reads need ``pathways:read``; writes need
 ``pathways:write`` with no editing-role guard: specs/04 §3.2 lets analysts manage pathway tests. The literal
-``/tests/from_call`` route is declared before ``/tests/{test_id}``.
+``/tests/from_call`` and ``/tests/run`` routes are declared before ``/tests/{test_id}``. Runs: Decision
+P07-T11c.
 """
 
 from __future__ import annotations
@@ -13,10 +14,10 @@ from typing import Annotated, Final
 
 from fastapi import Depends, Query, Request
 
-from va_api.audit import audited
+from va_api.audit import audit_exempt, audited
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
-from va_api.auth.session_auth import database_of
+from va_api.auth.session_auth import clock_of, database_of
 from va_api.routers.pathway_tests_schemas import (
     RunList,
     RunOne,
@@ -25,12 +26,14 @@ from va_api.routers.pathway_tests_schemas import (
     UnitTestFromCall,
     UnitTestList,
     UnitTestOne,
+    UnitTestRunRequest,
     UnitTestUpdate,
     run_detail,
     run_item,
     unit_test_view,
 )
 from va_api.routers.pathways import DEFAULT_LIST_LIMIT, pathways_router
+from va_api.services.pathway_test_runs import PathwayTestStarter, start_unit_run
 from va_api.services.pathway_tests import (
     TEST_DELETED_MESSAGE,
     capture_from_call,
@@ -52,6 +55,7 @@ __all__ = [
     "pathways_tests_from_call",
     "pathways_tests_get",
     "pathways_tests_list",
+    "pathways_tests_run",
     "pathways_tests_update",
 ]
 
@@ -120,6 +124,29 @@ async def pathways_tests_from_call(
             simulated_variations=body.simulated_variations,
         )
         return UnitTestOne(test=unit_test_view(test))
+
+
+@pathways_router.post(
+    "/{pathway_id}/tests/run",
+    operation_id="pathways_tests_run",
+    openapi_extra={**_WRITE, **audit_exempt("test runs are recorded as pathway_test_runs rows")},
+)
+async def pathways_tests_run(
+    pathway_id: uuid.UUID, body: UnitTestRunRequest, request: Request, ctx: WritePathways
+) -> RunOne:
+    """Run unit tests (all, or the given ids) on a version; the run starts ``queued`` and is read through
+    ``GET /runs/{run_id}``."""
+    starter: PathwayTestStarter = request.app.state.container.pathway_test_starter
+    run = await start_unit_run(
+        database_of(request),
+        starter,
+        clock_of(request),
+        ctx,
+        pathway_id,
+        version=body.version,
+        test_ids=body.test_ids,
+    )
+    return RunOne(run=run_detail(run))
 
 
 @pathways_router.get("/{pathway_id}/tests/{test_id}", operation_id="pathways_tests_get", openapi_extra=_READ)

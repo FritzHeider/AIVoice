@@ -20,10 +20,11 @@ from starlette.applications import Starlette
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from va_common.checks import Dependencies, TemporalConnector, open_dependencies
-from va_common.crypto import open_kms_provider
+from va_common.crypto import Envelope, KmsProvider, open_kms_provider
 from va_common.health import CheckFn
 from va_common.http import http_client
 from va_common.metrics import Service, ServiceMetrics, build_metrics
+from va_common.net import system_resolver
 from va_common.service import (
     ProbeState,
     StopController,
@@ -37,10 +38,16 @@ from va_common.service import (
 from va_common.storage import RecordingStorage, open_object_store, sse_for
 from va_common.time import SystemClock
 from va_db.org_settings import OrgSettingsReader
+from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 from va_db.telnyx_keys import TelnyxKeyResolver
 from va_elevenlabs import ElevenLabsRest
+from va_llm import LlmMetrics
+from va_llm.platform import platform_gateway
+from va_pathways.conversation import TextDeps
+from va_pathways.runs import insecure_urls_allowed
 from va_telnyx.settings import telnyx_factory, telnyx_http
+from va_tools.http import tools_client
 from va_voice.phrase_cache import PhraseCache
 from va_worker import __version__
 from va_worker.activities import WorkerActivities, main_registrations
@@ -49,11 +56,21 @@ from va_worker.settings import WorkerSettings
 from va_worker.task_queues import TaskQueueRegistration
 from va_workflows.activities.prerender import OpenerPrerender
 
-__all__ = ["ELEVENLABS_HTTP_TIMEOUT", "METRICS_PORT", "Container", "build_container", "create_app", "main"]
+__all__ = [
+    "ELEVENLABS_HTTP_TIMEOUT",
+    "LLM_HTTP_TIMEOUT",
+    "METRICS_PORT",
+    "Container",
+    "build_container",
+    "create_app",
+    "main",
+]
 
 METRICS_PORT: Final = 9300
 ELEVENLABS_HTTP_TIMEOUT: Final = httpx.Timeout(15.0, connect=2.0)
 """Socket bound of the ElevenLabs REST client; each operation's own deadline (specs/15 §7) is shorter."""
+LLM_HTTP_TIMEOUT: Final = httpx.Timeout(30.0, connect=2.0)
+"""Socket bound of the LLM client of pathway test runs; the gateway's per-call deadlines are shorter."""
 
 
 class WorkerDependencies(Protocol):
@@ -88,7 +105,8 @@ async def build_container(
 ) -> AsyncIterator[Container]:
     """Postgres engine, Redis client, Temporal connector (pydantic converter), the database, the envelope,
     the Telnyx client factory (BYO keys through :class:`TelnyxKeyResolver`), the opener pre-render (ElevenLabs
-    REST + phrase cache + org settings reader), the object store (recordings), and the activity instances;
+    REST + phrase cache + org settings reader), the object store (recordings), the pathway test runs' text
+    dependencies (LLM gateway with org providers, guarded tool HTTP client), and the activity instances;
     ``metrics`` is the registry the probes serve (a fresh one when ``None``).
 
     No network I/O until used. ``RuntimeError`` before anything is opened when ``STREAM_TOKEN_SECRET`` or
@@ -121,6 +139,9 @@ async def build_container(
             prerender=await stack.enter_async_context(_opener_prerender(settings, database, redis, clock)),
             storage=RecordingStorage(store, settings.s3_bucket_recordings, sse_for(settings)),
             postcall_step_ms=service_metrics.histogram("va_postcall_duration_ms"),
+            text=await stack.enter_async_context(
+                _text_deps(settings, database, kms_provider, clock, service_metrics)
+            ),
         )
         yield Container(
             temporal=temporal,
@@ -151,6 +172,37 @@ async def _opener_prerender(
     finally:
         await cache.aclose()
         await http.aclose()
+
+
+@asynccontextmanager
+async def _text_deps(
+    settings: WorkerSettings,
+    database: Database,
+    kms_provider: KmsProvider,
+    clock: SystemClock,
+    metrics: ServiceMetrics,
+) -> AsyncIterator[TextDeps]:
+    """The LLM gateway (``va_llm_*`` metrics on the probe registry) and the guarded tool HTTP client the
+    pathway unit-test runs use (both HTTP clients are closed on exit)."""
+    async with AsyncExitStack() as stack:
+        llm_http = http_client(settings, timeout=LLM_HTTP_TIMEOUT)
+        stack.push_async_callback(llm_http.aclose)
+        gateway = platform_gateway(
+            settings,
+            database=database,
+            envelope=Envelope(kms_provider, OrgDataKeyStore(database)),
+            http=llm_http,
+            clock=clock,
+            metrics=LlmMetrics(metrics.registry),
+        )
+        tools_http = tools_client(settings, resolver=system_resolver)
+        stack.push_async_callback(tools_http.aclose)
+        yield TextDeps(
+            gateway=gateway,
+            tools_http=tools_http,
+            clock=clock,
+            allow_http=insecure_urls_allowed(settings.va_env),
+        )
 
 
 def create_app(  # noqa: PLR0913 - keyword-only test seams
