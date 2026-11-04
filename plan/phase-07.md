@@ -96,7 +96,7 @@
   - Deliverables: chat session create/send/reset, expanded per-turn logs in responses
   - Acceptance: multi-turn chat test reproduces expected routes.
 
-- [ ] P07-T11 Unit tests, simulations, regression on publish (split into P07-T11a–e below)
+- [x] P07-T11 Unit tests, simulations, regression on publish (split into P07-T11a–e below; all ticked: 3f02357)
   - Spec refs: specs/12-pathways-api.md (unit tests, simulation runs, regression suite on publish)
   - Depends on: P07-T10
   - Deliverables: unit test CRUD + run (variations, grading goal), LLM-as-caller simulation runner, `PathwayTestWorkflow`, publish gate `block_publish_on_failure`
@@ -131,7 +131,7 @@
     transcripts), `POST /v1/pathway/{id}/simulations`, `kind='simulation'` runs through `PathwayTestWorkflow`
   - Acceptance: scripted FakeLLM simulations pass/fail/error; hangup and max_turns stop the run.
 
-- [ ] P07-T11e Regression settings and publish gate (split into P07-T11e1–e3 below)
+- [x] P07-T11e Regression settings and publish gate (split into P07-T11e1–e3 below; all ticked: 3f02357)
   - Spec refs: specs/12-pathways-api.md §4 publish step 2, §9 regression, §13
   - Depends on: P07-T11c
   - Deliverables: `GET/PUT /regression` (draft `global_config.regression`), publish runs ≤ 20 tests synchronously
@@ -167,11 +167,43 @@
     `tests_e2e/test_pathway_regression_gate.py` where a broken draft's publish is blocked and a fixed one publishes
   - Acceptance: api tests pass/fail/timeout; `make e2e` flow green.
 
-- [ ] P07-T12 Pathway runner integration in calls
+- [ ] P07-T12 Pathway runner integration in calls (split into P07-T12a–c below)
   - Spec refs: specs/05-calls-api.md (runner selection: pathway_id/pathway_version); specs/11-pathways-engine.md (voice integration)
   - Depends on: P07-T08, P05-T09
   - Deliverables: `PathwayBrain` implementing the pipeline Brain protocol, CallContext loading of pinned version, start node prefetch, call events emission, final variables persisted to `calls.variables`
   - Acceptance: e2e pathway_restaurant_template and webhook_node pass.
+
+- [x] P07-T12a `PathwayBrain`: PathwayEngine as the pipeline Brain — PathwayBrain + pathway_call, Brain-owned no-input wait (BrainTiming.no_input_timeout_ms); make test 12545 passed 7 skipped (99 %), lint/typecheck/placeholders/spec refs 0, jscpd 0, radon 2.14
+  - Spec refs: specs/07 §16 (Brain contract), specs/11 §4 (Wait for Response, terminal actions), §7, §10
+  - Depends on: P07-T08b
+  - Deliverables: `va_engine.pathway_brain.PathwayBrain` mapping engine actions onto Brain outputs (Say/SayStream →
+    SpeakStatic/SpeakText, EndCallAction → EndCall, TransferAction → TransferRequest, SendDtmfAction → PressButton),
+    barge-in closing the engine generator + `on_interrupted`, Wait for Response timer through a per-node
+    `BrainTiming.no_input_timeout_ms` the pipeline honours (Brain-owned reprompts), node timing, `on_transfer_failed`,
+    state callback after every turn, `aclose`; `va_engine.pathway_call.pathway_facts(context, org)`
+  - Acceptance: unit tests over a real `PathwayEngine` (engine_helpers) and a pipeline-harness conversation through a
+    pathway (route, end call after final line, barge-in truncation, wait timeout reprompt); pipeline tests for the
+    per-node no-input timeout.
+
+- [ ] P07-T12b Media runtime runs pathway calls
+  - Spec refs: specs/07 §16, specs/11 §9 (`call:{id}:engine`, final variables), §12, specs/19 §2 (`call.route`,
+    `call.extraction`, `call.loop_condition`, `call.webhook_node`, `call.sms_sent`), specs/01 §2.1 step 2
+  - Depends on: P07-T12a
+  - Deliverables: `CallRuntime` builds a `PathwayBrain` for `runner_type == "pathway"` (graph of the exact
+    `pathway_version` via `va_pathways.loader.DbPathwayLoader` with a per-process cache, ports: decider, dialogue,
+    lines, HTTP over the tools client, voice SMS over va_telnyx messaging, loader for Transfer Pathway), engine
+    events published as call events with `turn_index` (so `pathway_logs` builds), `call:{id}:engine` snapshots
+    (2 h), final variables merged into `calls.variables` by the end routine; start node opener pre-rendered at
+    prefetch when the start node has static text; a graph that cannot be loaded ends the call `error`
+  - Acceptance: runtime sim tests (FakeTelnyx + FakeElevenLabs + FakeLLM + media DB) for a pathway call: route
+    events, webhook node to a receiver, End Call, variables persisted, Call Object `pathway_logs`.
+
+- [ ] P07-T12c e2e flows pathway_restaurant_template and webhook_node
+  - Spec refs: specs/30 §5 rows `pathway_restaurant_template`, `webhook_node`
+  - Depends on: P07-T12b
+  - Deliverables: `tests_e2e/test_pathway_restaurant_template.py`, `tests_e2e/test_webhook_node.py` (pathway JSON
+    seeded through the pathways API, scenarios + FakeLLM rules, the e2e receiver), harness helpers
+  - Acceptance: `make e2e` passes including both flows.
 
 ## Phase exit gate
 `make check && make e2e` pass.

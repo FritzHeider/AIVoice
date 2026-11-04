@@ -1912,3 +1912,12 @@ Grafana 3001
   `monkeypatch.setattr(pathway_publish, "SYNC_MAX_TESTS", 0)`. Shared publish test helper: `support/publish_helpers.Gate`
   / `gate_of`. A pathway draft update that sends `global_config` replaces the suite settings stored there.
 
+- 2026-11-04 (P07-T12a): pathway calls on voice = `va_engine.pathway_brain.PathwayBrain(engine, clock=, on_state=)`
+  (the pipeline Brain over `PathwayEngine`; action mapping in specs/11 §10 Decision P07-T12a: End Call →
+  `EndCall(None, "agent_hangup")`, transfers → `TransferRequest`, DTMF → `PressButton`, `Wait` → node wait) plus
+  `va_engine.pathway_call.pathway_facts(context, now=)` / `start_state(active, context)`. A Brain owns its node's
+  no-input wait through `BrainTiming.no_input_timeout_ms` (`NoInputTimer.arm(now, timeout_ms=)` → expiry `"brain"`:
+  `Brain.on_no_input` only, no reprompt count, no goodbye; specs/07 §12 Decision). `PathwayEngine.note_assistant`
+  records a line the consumer spoke itself. Tests: `packages/va_engine/tests/test_pathway_brain.py` (engine_rig +
+  a `drain` that reads streams like the pipeline) and `test_pathway_brain_pipeline.py` (static-text graphs on the
+  harness's accelerated clock; KeyedPort scripts the routes, no FakeLLM needed).

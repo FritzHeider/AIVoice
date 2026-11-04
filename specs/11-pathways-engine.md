@@ -873,6 +873,30 @@ class EngineIO(Protocol):
     def now_ms(self) -> int: ...
 ```
 
+> Decision (2026-11-04): voice Brain adapter (P07-T12a). On voice calls the media pipeline is the `EngineIO`:
+> `va_engine.pathway_brain.PathwayBrain(engine, clock=, on_state=)` adapts `PathwayEngine` to the narrower
+> pipeline Brain contract of specs/07 §16. `start(greeting)` → `engine.start`, `on_user_turn` →
+> `engine.handle_user_turn`, `on_no_input` → `engine.on_wait_timeout` while a Wait for Response wait is armed
+> (else an empty stream: the pipeline's own reprompt), `on_interrupted` → `engine.on_interrupted`. The pipeline
+> already resumes a reply only after its speech played and closes it on a barge-in (which closes the engine
+> generator), so `wait_playback` is implicit and `after_mark` needs no handling. Action mapping: `Say` →
+> `SpeakStatic`, `SayStream` → `SpeakText` (`interruptible` `None` = the call level, i.e. interruptible; the
+> pipeline marks the LLM request when it starts reading the tokens); `EndCallAction` →
+> `EndCall(final_text=None, reason="agent_hangup")` (the final line was already yielded; the engine reason is
+> logged and stays in `EngineState.end_reason`); `TransferAction` → `TransferRequest(target)` (warm transfers
+> run cold until phase 12, logged `pathway_brain.warm_transfer_as_cold`); `SendDtmfAction` →
+> `PressButton(digits)`; `Wait(seconds)` arms the node wait reported as `BrainTiming.no_input_timeout_ms`
+> (specs/07 §12 Decision P07-T12a); `SwitchGraph` (applied inside the engine) and `HumanTakeover` (text only)
+> are logged `pathway_brain.action_ignored`. Any user turn (speech or keypad) disarms the wait; the engine re-arms
+> it with a new `Wait`. `timing()` reports the current node's `interruptibility` (`block_interruptions` → 0) and
+> `resumption_speed`. `on_transfer_failed(spoken)` records the spoken line as an assistant turn
+> (`PathwayEngine.note_assistant`). `on_state(state)` runs after every finished or closed engine generator, a
+> truncation, a transfer-failure note, and `aclose()` (background extractions settle for at most 2 s, then the
+> engine closes). `va_engine.pathway_call.pathway_facts(context, now=)` builds the `ConversationFacts` of a call
+> (`transfer_list` empty: ignored for pathways, specs/05 §3) and `start_state(active, context)` the first state
+> (the call's `start_node_id` when the graph has it, else the start node, logged; seeded with
+> `CallContext.variables`).
+
 ## 11. Validation (save draft = warnings allowed; publish = errors block)
 
 | Rule | Code | Message | Save | Publish |

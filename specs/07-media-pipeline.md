@@ -653,6 +653,13 @@ org setting `call_defaults.no_input_timeout_ms`, range 3 000–30 000). On expir
    `end_reason='no_input_timeout'`.
 Any user speech resets the count.
 
+> Decision (2026-11-04): Brain-owned waits (P07-T12a). `BrainTiming.no_input_timeout_ms` (default `None`) lets
+> the Brain own the wait of its current node (a pathway Wait for Response node, specs/11 §10 Decision P07-T12a).
+> While it is set the timer runs that long instead of `no_input_timeout_ms`, and an expiry goes straight to
+> `Brain.on_no_input`: no fallback reprompt when the stream is empty, no count toward `max_reprompts`, never the
+> goodbye (the node's `maxReprompts`/`onTimeout` decide). It is logged `pipeline_no_input_brain`. The timing is
+> re-read after every reply, so the configured policy returns as soon as the Brain stops waiting.
+
 ## 13. DTMF input
 
 - `ignore_button_press=true` → drop all DTMF.

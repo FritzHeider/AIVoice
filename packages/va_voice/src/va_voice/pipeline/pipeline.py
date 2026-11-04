@@ -22,7 +22,9 @@
   disarmed by any caller speech or digit. On expiry it queues a reprompt (``Brain.on_no_input``; an empty
   stream speaks the node's ``no_input_prompt`` or ``config.no_input_prompt``) while fewer than
   ``max_reprompts`` were spoken since the last user turn, else ``EndCall(no_input_goodbye,
-  "no_input_timeout")``.
+  "no_input_timeout")``. A Brain whose ``timing().no_input_timeout_ms`` is set owns the wait (Decision
+  P07-T12a): the timer runs that long and its expiry runs ``Brain.on_no_input`` as it is (no fallback
+  reprompt, not counted toward ``max_reprompts``, never the goodbye).
 - ``ivr`` (``ivr_mode`` only): ends the pipeline with ``ivr_dead_end`` (silently: the reply in progress is
   cut off) when ``ivr_dead_end_s`` pass from the opener without progress (:class:`IvrProgress`: a delivered
   turn with new text, or a telephony action).
@@ -144,7 +146,9 @@ class _SayJob:
 
 @dataclass(frozen=True, slots=True)
 class _NoInputJob:
-    """Speak a reprompt (§12)."""
+    """Speak a reprompt (§12); ``brain_owned``: the Brain's own wait expired (its outputs only)."""
+
+    brain_owned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -708,7 +712,8 @@ class CallPipeline:
         elif isinstance(job, _SayJob):
             await self._run_reply(_single(SpeakStatic(job.text, interruptible=True)), None, None)
         elif isinstance(job, _NoInputJob):
-            await self._run_reply(self._no_input_outputs(), None, None)
+            outputs = self._brain.on_no_input() if job.brain_owned else self._no_input_outputs()
+            await self._run_reply(outputs, None, None)
         else:
             goodbye = EndCall(self._config.no_input_goodbye, "no_input_timeout")
             await self._run_reply(_single(goodbye), None, None)
@@ -950,7 +955,7 @@ class CallPipeline:
         )
 
     def _arm_no_input(self) -> None:
-        if self._idle() and self._no_input.arm(self._now_ms()):
+        if self._idle() and self._no_input.arm(self._now_ms(), timeout_ms=self._timing.no_input_timeout_ms):
             self._silence_wake.set()
 
     def _disarm_no_input(self) -> None:
@@ -969,7 +974,10 @@ class CallPipeline:
             self._no_input.disarm()
             return
         action = self._no_input.expire()
-        if action == "reprompt":
+        if action == "brain":
+            _log.info("pipeline_no_input_brain")
+            self._jobs.put_nowait(_NoInputJob(brain_owned=True))
+        elif action == "reprompt":
             self._stats.no_input_reprompts += 1
             _log.info("pipeline_no_input_reprompt", reprompts=self._no_input.reprompts)
             self._jobs.put_nowait(_NoInputJob())

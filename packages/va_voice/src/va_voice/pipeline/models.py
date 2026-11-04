@@ -91,12 +91,18 @@ type BrainOutput = SpeakText | SpeakStatic | EndCall | BrainAction
 
 @dataclass(frozen=True, slots=True)
 class BrainTiming:
-    """Timing settings of the Brain's current node (§6, §7, §12)."""
+    """Timing settings of the Brain's current node (§6, §7, §12).
+
+    ``no_input_timeout_ms``: the Brain's own wait (a pathway Wait for Response node, Decision P07-T12a). When
+    set the no-input timer uses it instead of ``no_input_timeout_ms`` of the config, and its expiry goes to
+    ``Brain.on_no_input`` without counting toward ``max_reprompts`` (no default reprompt, no goodbye).
+    """
 
     interruptibility: int | None = None
     resumption_speed: ResumptionSpeed = 2
     collecting_number: bool = False
     no_input_prompt: str | None = None
+    no_input_timeout_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

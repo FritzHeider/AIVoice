@@ -21,6 +21,11 @@ def deadline(timer: NoInputTimer) -> float | None:
     return timer.deadline_ms
 
 
+def brain_owned(timer: NoInputTimer) -> bool:
+    """``brain_owned`` through a call (same reason)."""
+    return timer.brain_owned
+
+
 def test_no_input_timer_arms_once_and_never_extends() -> None:
     timer = NoInputTimer(3000, 2)
     assert deadline(timer) is None
@@ -46,6 +51,32 @@ def test_no_input_timer_reprompts_up_to_the_maximum_then_says_goodbye() -> None:
     assert timer.reprompts == 2
     timer.reset()
     assert (timer.reprompts, timer.expire()) == (0, "reprompt")
+
+
+def test_brain_owned_wait_uses_its_timeout_and_counts_nothing() -> None:
+    timer = NoInputTimer(3000, 1)
+    assert timer.arm(100.0, timeout_ms=5000)
+    assert brain_owned(timer)
+    assert deadline(timer) == 5100.0
+    actions = [timer.expire()]
+    assert not brain_owned(timer)
+    for _ in range(3):
+        timer.arm(0.0, timeout_ms=1000)
+        actions.append(timer.expire())
+    assert actions == ["brain"] * 4
+    assert timer.reprompts == 0
+    # The configured timeout and the reprompt policy come back once the Brain stops owning the wait.
+    assert timer.arm(0.0)
+    assert (deadline(timer), brain_owned(timer), timer.expire()) == (3000.0, False, "reprompt")
+
+
+def test_brain_owned_wait_disarmed_is_not_brain_owned() -> None:
+    timer = NoInputTimer(3000, 1)
+    timer.arm(0.0, timeout_ms=1000)
+    assert timer.disarm()
+    assert not brain_owned(timer)
+    with pytest.raises(ValueError, match="timeout_ms"):
+        timer.arm(0.0, timeout_ms=0)
 
 
 def test_no_input_timer_without_reprompts_says_goodbye_at_once() -> None:

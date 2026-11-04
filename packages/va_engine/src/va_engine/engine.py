@@ -327,6 +327,11 @@ class PathwayEngine:
         record.content = spoken_text if spoken_text.strip() else INTERRUPTION_MARK
         record.interrupted = True
 
+    def note_assistant(self, text: str) -> None:
+        """Record a line the consumer spoke on its own (a failed transfer's message): the history, the log
+        book, and a later barge-in trim see it like an engine line."""
+        self._remember(text.strip())
+
     async def settle_background(self) -> None:
         """Wait until the running background extractions merged their values (before persisting state)."""
         while self._background:

@@ -208,3 +208,152 @@ passed 7 skipped (99 %), e2e test_pathway_regression_gate passed on the running 
 P07-T11e3 items 1-6 (sync only for blocking, no sims, ≤ 20; run begun in publish tx; shielded conclude on
 cancel; 409 details run_id/outcome; cache untouched on conflict). Reviewer removed the unused
 `PublishDeps.sync_timeout_s` field (dead code; tests monkeypatch SYNC_TIMEOUT_S); both publish modules re-run: 22 passed.
+
+## Planner 2026-11-04 (after P07-T11e3 approval)
+Ticked parents P07-T11e and P07-T11 (all subtasks done). P07-T12 is too big for one builder pass (adapter + media
+runtime/persistence + two e2e flows), so it is split in plan/phase-07.md into T12a (PathwayBrain adapter, pure,
+va_engine + small va_voice pipeline change), T12b (media runtime wiring, events, engine snapshots, variables,
+prefetch opener), T12c (the two e2e flows).
+
+## Plan P07-T12a — `PathwayBrain`: PathwayEngine as the pipeline Brain
+
+Specs: specs/07 §16 (Brain contract + Decision P04-T12a), specs/11 §4 rows (Wait for Response, End Call, Transfer
+Call, Press Button), §7 (terminal actions after the preceding line played), §10 (EngineIO). Engine contract
+(engine.py docstring): resume a generator only after the yielded speech played; on barge-in close it, then
+`on_interrupted(text)`. The pipeline already satisfies "resume after playback": `CallPipeline._handle_output`
+awaits `Speaker.speak` to completion before pulling the next output, and closes the outputs generator
+(`_close(outputs)`) when the reply is cancelled, then calls `brain.on_interrupted`.
+
+### Spec Decision to add (specs/11 §10, "> Decision (2026-11-04): voice Brain adapter (P07-T12a)")
+- `va_engine.pathway_brain.PathwayBrain(engine, *, clock, on_state=None)` adapts `PathwayEngine` to the
+  `va_voice.pipeline.Brain` protocol (the narrower §16 contract): `start(greeting)` → `engine.start(greeting)`,
+  `on_user_turn` → `engine.handle_user_turn`, `on_no_input` → `engine.on_wait_timeout` while a Wait for Response
+  timer is armed (else an empty stream = the pipeline's own reprompt), `on_interrupted` → `engine.on_interrupted`.
+- Action mapping: `Say` → `SpeakStatic(text, interruptible=action.interruptible is not False)`; `SayStream` →
+  `SpeakText(tokens, interruptible=...)` (`llm_request_ms` = clock monotonic ms when the stream was yielded);
+  `EndCallAction` → `EndCall(final_text=None, reason="agent_hangup")` (the final line was already yielded as
+  Say/SayStream and played; `reason` stays the pipeline's `agent_hangup` so `session_end` maps it unchanged; the
+  engine reason goes to the log); `TransferAction` (cold, or warm until phase 12 → logged
+  `pathway_brain.warm_transfer_as_cold`) → `va_engine.models.results.TransferRequest(target=action.target)`;
+  `SendDtmfAction` → `PressButton(digits)`; `Wait(seconds)` → arms the node timer (no output);
+  `SwitchGraph`/`HumanTakeover` never reach a voice consumer (the engine applies the first, text channels only
+  get the second) → logged `pathway_brain.action_ignored`, nothing yielded.
+- Wait for Response on voice: `BrainTiming.no_input_timeout_ms: int | None` (new field, default None). While a
+  `Wait` is armed `timing()` returns `seconds * 1000`; the pipeline arms its no-input timer with that timeout
+  instead of `config.no_input_timeout_ms` and such expiries are Brain-owned: they do not count toward
+  `max_reprompts` and never produce the pipeline's `no_input_goodbye` (the node's `maxReprompts`/`onTimeout` decide,
+  inside `on_wait_timeout`). Any user turn (speech or DTMF) disarms the Brain's wait (the engine re-arms through a
+  new `Wait` action); the brain also disarms when `on_wait_timeout` yields no `Wait` again.
+- Timing of the current node: `interruptibility` = node `interruptibility` (None when unset), `resumption_speed` =
+  node `resumption_speed`, `collecting_number` False, `no_input_prompt` None. (Read through
+  `engine.navigator.node`; `block_interruptions` maps to interruptibility 0 if that is how `effective_level`
+  treats "block" — check `va_voice.interrupt.effective_level` and use its `block_interruptions` semantics: the
+  pipeline config carries call-level block; for a node with `block_interruptions: true` report
+  `interruptibility=0`.)
+- `on_transfer_failed(spoken)`: appends an assistant `TurnRecord` (node = current) via `engine.state.add_turn`
+  so later decisions know (same role as TaskBrain's).
+- `on_state(state)` (sync callback) runs after every completed or closed engine generator (start, user turn, wait
+  timeout); T12b stores the snapshot. `aclose()` = `settle_background()` bounded by 2 s on the clock
+  (`va_common.waits.within`), then `engine.aclose()`; `state`, `variables` (copy of `state.variables`) and
+  `pathway_logs()` properties for T12b.
+
+### Files
+- NEW `packages/va_engine/src/va_engine/pathway_brain.py`: `PathwayBrain` as above (`__all__`). Implementation:
+  one private async generator `_relay(actions: AsyncGenerator[Action]) -> AsyncGenerator[BrainOutput]` used by all
+  three entry points, wrapping the engine generator in `contextlib.aclosing` so closing the brain generator closes
+  the engine's (barge-in), and calling `on_state` in `finally`. `start`/`on_user_turn`/`on_no_input` return
+  `AsyncGenerator[BrainOutput]`. Disarm the wait at the start of `on_user_turn` and `on_no_input`.
+- NEW `packages/va_engine/src/va_engine/pathway_call.py`: `pathway_facts(context: CallContext, org: OrgSettings,
+  *, now: datetime) -> ConversationFacts` (org_id, call_id, channel "voice", request_data = config.request_data,
+  builtins = `call_builtins(context, now=now)` (check its signature in builtins.py:63), timezone = config timezone
+  (fallback "UTC"; look how TaskBrain/voice_inputs pick it), transfer_list = {} (pathways ignore it, specs/05)).
+  Also `start_state(active: ActiveGraph, start_node_id: str | None) -> EngineState` = `new_pathway_state(active)`
+  then, if `start_node_id` names another node of the graph, move `current_node_id` there with visit_counts
+  {start_node_id: 1} (the api already validated it exists; an unknown id falls back to the start node + log).
+- `packages/va_voice/src/va_voice/pipeline/models.py`: `BrainTiming.no_input_timeout_ms: int | None = None`.
+- `packages/va_voice/src/va_voice/pipeline/silence.py`: `NoInputTimer.arm(now_ms, *, timeout_ms=None)` uses the
+  override; a flag `brain_owned` on the armed deadline so `expire`/the pipeline's decision skips the reprompt
+  counting and the goodbye for brain-owned expiries. Keep existing behaviour identical when `timeout_ms` is None.
+- `packages/va_voice/src/va_voice/pipeline/pipeline.py`: `_arm_no_input()` passes
+  `self._timing.no_input_timeout_ms` (the cached Brain timing, re-read in `_apply_timing`); on a brain-owned
+  expiry queue `_NoInputJob` whose outputs are `brain.on_no_input()` directly (no fallback reprompt text when the
+  stream is empty, no goodbye). Update the module docstring lines 20-25.
+- `packages/va_engine/src/va_engine/__init__.py`: only if it re-exports runners (check; keep import-free style
+  of the package as it is).
+- `specs/11-pathways-engine.md` §10 Decision; `specs/07-media-pipeline.md` §12 one-line Decision note for the
+  Brain-owned no-input timeout (specs/07 §12 is the no-input section; verify the number with grep).
+- AGENTS.md line (P07-T12a): where PathwayBrain lives, the action mapping, `BrainTiming.no_input_timeout_ms`, test
+  helpers.
+
+### Tests
+- NEW `packages/va_engine/tests/test_pathway_brain.py` (real `PathwayEngine` from
+  `engine_helpers.engine_rig(graph, ...)`, wrap `rig.engine` in `PathwayBrain(rig.engine, clock=rig.clock,
+  on_state=states.append)`; graphs from `graph_helpers` `node`/`edge`/`start`/`graph`):
+  - `test_static_start_node_speaks_static`: start node with `text` → one `SpeakStatic` with the rendered text,
+    `on_state` called once.
+  - `test_dialogue_reply_is_speak_text`: Default node without text → `SpeakText` whose tokens are the FakeSource
+    reply; history records it after the tokens are read.
+  - `test_end_call_node_yields_final_line_then_end_call`: route to an End Call node with `text` → `[SpeakStatic(line),
+    EndCall(final_text=None, reason="agent_hangup")]`.
+  - `test_transfer_node_yields_transfer_request` (target E.164) and warm → same + log event.
+  - `test_press_button_yields_press_button`.
+  - `test_wait_for_response_arms_the_timer`: Wait node waitSeconds 5 → `timing().no_input_timeout_ms == 5000`;
+    `on_no_input()` → reprompt text as SpeakStatic; after maxReprompts the onTimeout action (end_call →
+    EndCall); a user turn disarms (`timing().no_input_timeout_ms is None` once the engine moved to a non-wait node).
+  - `test_no_input_without_wait_is_empty`.
+  - `test_closing_mid_stream_closes_the_engine_and_truncates`: take the first output (SpeakText) of a user turn,
+    read part of the tokens, `aclose()` the brain generator, `await brain.on_interrupted("Hel—")` → the engine's
+    last assistant TurnRecord content `"Hel—"` and interrupted True; `on_state` called.
+  - `test_node_timing_reflects_the_current_node` (interruptibility, resumption_speed, block_interruptions → 0).
+  - `test_transfer_failed_note_is_recorded`.
+  - `test_aclose_settles_and_closes` (FakeSource closed / speculation closed).
+  - `test_pathway_facts_and_start_state` (va_domain `resolved_configs.resolved_config()` context; start_node_id
+    override + unknown id fallback).
+- NEW `packages/va_engine/tests/test_pathway_brain_pipeline.py`: `pipeline_harness.harness(engine=PathwayBrain(...),
+  clock=RealtimeClock(), config=PipelineConfig(no_input_timeout_ms=30_000))` (see AGENTS P05-T09c note: wait on
+  `h.observer.user_turns`, barge-in needs ≥ 900 ms caller speech at default level): (1) greet → caller speaks →
+  router (KeyedPort route answer) → End Call line plays → pipeline result `agent_hangup`, transport saw the
+  final line's audio before ending; (2) a Wait for Response node with waitSeconds 1: no caller speech → engine
+  reprompt spoken (not the pipeline's default reprompt), then onTimeout end_call ends the call; (3) barge-in during
+  a long SpeakText → engine history holds the truncated text. Use `FakeTts`/`FakeStt` from pipeline_fakes; the
+  KeyedPort/FakeSource from engine_helpers (FakeSource replies need `hanging`-like long text for the barge-in; if
+  FakeSource cannot pace tokens, use a static long `text` node — SpeakStatic barge-in truncation also goes
+  through `on_interrupted`).
+- `packages/va_voice/tests/pipeline/…` (find the existing no-input tests: `grep -rn no_input packages/va_voice/tests`):
+  add `test_brain_owned_no_input_timeout_uses_node_seconds` (ScriptedBrain timing with no_input_timeout_ms=2000 →
+  `brain.no_input` logged at ~2 s, not at config timeout), `test_brain_owned_expiry_never_says_goodbye` (more
+  expiries than max_reprompts → no EndCall `no_input_timeout`), and NoInputTimer unit tests for the override. The
+  ScriptedBrain may need a `timing` knob (add `timings=` to pipeline_fakes.ScriptedBrain if absent).
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones), `uvx radon cc -s -a` on changed src, `make test` in background with a Monitor heartbeat (~25 min;
+truncate the log first; OOM → `PYTEST_ADDOPTS="-n 6"`). No openapi change. No e2e (no call flow is wired yet;
+T12b/T12c bring it).
+
+### Risks
+- Brain-owned no-input must not change task-mode behaviour: every existing silence test must pass unchanged.
+- `EndCall` reason: keep `agent_hangup` (check `va_media.runtime_config.session_end` mapping and what
+  `END_CALL_REASON` TaskBrain uses for its end_call tool; use the same constant).
+- Engine generators must always be closed (aclosing) or speculation/background tasks leak ("Task was destroyed"
+  warnings are errors under filterwarnings).
+- `llm_request_ms` semantics: look at how TaskBrain fills it (latency tracer mark) and copy.
+
+## Build P07-T12a (2026-11-04)
+- NEW `va_engine.pathway_brain.PathwayBrain` (relay over aclosing engine generators, action mapping, node wait →
+  `BrainTiming.no_input_timeout_ms`, timing from node model_options, on_transfer_failed via new
+  `PathwayEngine.note_assistant`, on_state after every generator/truncation/note/aclose, aclose settles ≤ 2 s).
+  `llm_request_ms` left None (pipeline marks on first read = same instant as the yield).
+- NEW `va_engine.pathway_call` (`pathway_facts(context, now=)` — dropped the unused `org` arg from the plan;
+  `start_state(active, context)` seeds context.variables + start_node_id fallback).
+- va_voice: `BrainTiming.no_input_timeout_ms`, `NoInputTimer.arm(..., timeout_ms=)` / `brain_owned` / expiry
+  `"brain"`, pipeline `_NoInputJob(brain_owned=True)` runs `brain.on_no_input()` raw; log `pipeline_no_input_brain`.
+- Spec Decisions: specs/11 §10 P07-T12a, specs/07 §12 P07-T12a. AGENTS line.
+- Tests: test_pathway_brain.py (22, 98 % of pathway_brain, 100 % pathway_call), test_pathway_brain_pipeline.py (3,
+  accelerated clock), va_voice silence (+2 pipeline, +2 unit). Every existing va_voice/va_engine test passes.
+
+## Review P07-T12a (2026-11-04) — approved
+Re-ran: lint/typecheck/placeholders 0, spec refs 0, jscpd 0 clones, radon avg 2.14 on changed src, make test 12545
+passed 7 skipped exit 0. Diff matches Decision P07-T12a (specs/11 §10, specs/07 §12): action mapping, engine
+generators closed via aclosing, timing re-read after each reply so Brain-owned wait arms only after playback,
+expiry "brain" uncounted, configured policy returns when the wait clears. No findings.

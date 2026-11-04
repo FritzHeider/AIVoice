@@ -171,3 +171,48 @@ async def test_the_configured_timeout_is_used(timeout_ms: int) -> None:
         await h.until(lambda: h.brain.no_input_calls == 1, timeout_s=60.0)
         elapsed = h.now_ms() - h.observer.agent_turns[0].ended_ms
     assert timeout_ms <= elapsed <= timeout_ms + WINDOW_MS
+
+
+BRAIN_WAIT_MS = 1000
+
+
+async def test_a_brain_owned_wait_uses_the_node_timeout_and_never_says_goodbye() -> None:
+    brain = ScriptedBrain(
+        opener=[SpeakStatic("Hi.")],
+        no_input=[[SpeakStatic("Are you there?")], [], [EndCall("Bye.", "wait_timeout")]],
+        timing=BrainTiming(no_input_timeout_ms=BRAIN_WAIT_MS),
+    )
+    stream = json_log_stream()
+    config = PipelineConfig(no_input_timeout_ms=TIMEOUT_MS, max_reprompts=1)
+    async with harness(config=config, brain=brain) as h:
+        result = await h.result()
+    # Three expiries (more than max_reprompts) reach the Brain; an empty answer speaks nothing.
+    assert texts(h) == ["Hi.", "Are you there?", "Bye."]
+    assert (result.end_reason, result.stats.no_input_reprompts, h.brain.no_input_calls) == (
+        "wait_timeout",
+        0,
+        3,
+    )
+    turns = h.observer.agent_turns
+    first, second, third = times(h, "brain.no_input")
+    assert BRAIN_WAIT_MS <= first - turns[0].ended_ms <= BRAIN_WAIT_MS + WINDOW_MS
+    assert BRAIN_WAIT_MS <= second - turns[1].ended_ms <= BRAIN_WAIT_MS + WINDOW_MS
+    assert BRAIN_WAIT_MS <= third - second <= BRAIN_WAIT_MS + WINDOW_MS
+    events = [e["event"] for e in log_events(stream) if e["event"].startswith("pipeline_no_input")]
+    assert events == ["pipeline_no_input_brain"] * 3
+
+
+async def test_the_configured_policy_returns_when_the_brain_stops_waiting() -> None:
+    brain = ScriptedBrain(opener=[SpeakStatic("Hi.")], no_input=[[SpeakStatic("Still there?")]])
+    config = PipelineConfig(no_input_timeout_ms=TIMEOUT_MS, max_reprompts=0)
+    async with harness(config=config, brain=brain) as h:
+        brain.timing_value = BrainTiming(no_input_timeout_ms=BRAIN_WAIT_MS)
+        await h.until(lambda: h.brain.no_input_calls == 1)
+        # The node moved on: the next reply re-reads a timing without a wait.
+        brain.timing_value = BrainTiming()
+        result = await h.result()
+    assert texts(h) == ["Hi.", "Still there?", DEFAULT_NO_INPUT_GOODBYE]
+    turns = h.observer.agent_turns
+    assert BRAIN_WAIT_MS <= times(h, "brain.no_input")[0] - turns[0].ended_ms <= BRAIN_WAIT_MS + WINDOW_MS
+    assert TIMEOUT_MS <= turns[2].started_ms - turns[1].ended_ms <= TIMEOUT_MS + WINDOW_MS
+    assert result.end_reason == "no_input_timeout"
