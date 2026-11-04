@@ -4,12 +4,20 @@ agent's audio (specs/07 §7 table, ``va_voice.interrupt.LEVEL_RULES``; Decision 
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Final
 
 import pytest
 from e2e_harness import FinishedCall, Harness
 from e2e_texts import LONG_FIRST_SENTENCE, TASK
-from e2e_timing import Window, clears_in, interrupt_events, utterance_window
+from e2e_timing import (
+    ONSET_TOLERANCE_MS,
+    Window,
+    clears_in,
+    decision_speech_ms,
+    interrupt_events,
+    utterance_window,
+)
 
 from va_sim.audio import MARKER_MS
 from va_voice.interrupt import ALWAYS, BLOCK, LEVEL_RULES, InterruptLevel
@@ -31,11 +39,21 @@ def windows(finished: FinishedCall) -> tuple[Window, Window, dict[str, Any], dic
     return utterance_window(backchannel, TAIL_MS), utterance_window(sentence, TAIL_MS), backchannel, sentence
 
 
-def check_interrupted_after(clears: list[int], utterance: dict[str, Any], level: InterruptLevel) -> None:
-    """Exactly one clear for the utterance, no earlier than the level's speech minimum after voice onset."""
+def check_interrupted_after(
+    clears: list[int], utterance: dict[str, Any], level: InterruptLevel, interrupt: Mapping[str, Any]
+) -> None:
+    """Exactly one clear for the utterance, decided on at least the level's speech minimum.
+
+    The policy's own measure (``call.interrupt`` ``speech_ms``) must reach the minimum; the sim clear is
+    checked against voice onset with :data:`ONSET_TOLERANCE_MS`, because Silero's ``speech_start`` is the
+    start of a 32 ms window that may begin before the onset (Decision P08-T00 under specs/30 §5).
+    """
+    minimum = LEVEL_RULES[level].min_speech_ms
     assert len(clears) == 1, (level, clears, utterance)
+    assert interrupt["data"]["level"] == level, interrupt
+    assert decision_speech_ms(interrupt) >= minimum, (level, interrupt)
     onset = utterance["start_ms"] + MARKER_MS
-    assert clears[0] - onset >= LEVEL_RULES[level].min_speech_ms, (level, clears, utterance)
+    assert clears[0] - onset >= minimum - ONSET_TOLERANCE_MS, (level, clears, utterance, interrupt)
 
 
 @pytest.mark.parametrize("level", LEVELS)
@@ -63,11 +81,11 @@ async def test_interruptibility_levels(harness: Harness, level: InterruptLevel) 
         assert interrupts == [], interrupts
         assert interrupted_turns == [], interrupted_turns
         return
-    check_interrupted_after(sentence_clears, sentence, level)
     if level == ALWAYS:
-        check_interrupted_after(backchannel_clears, backchannel, level)
         assert len(interrupts) == 2, interrupts
+        check_interrupted_after(backchannel_clears, backchannel, level, interrupts[0])
     else:
         assert backchannel_clears == [], (level, timeline)
         assert len(interrupts) == 1, interrupts
+    check_interrupted_after(sentence_clears, sentence, level, interrupts[-1])
     assert len(interrupted_turns) == len(interrupts), interrupted_turns

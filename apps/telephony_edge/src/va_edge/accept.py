@@ -173,6 +173,9 @@ class AcceptSettings:
 class _Progress:
     committed: bool = False
     workflow_started: bool = False
+    stages_ms: dict[str, float] = field(default_factory=dict)
+    """Elapsed clock time per step (``route`` = from the router's receipt to the accept), logged with the
+    answer so a slow ring-to-answer names its step."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,19 +213,41 @@ class InboundAccept:
         progress = _Progress()
         try:
             finished = await within(self._steps(call, progress), self._clock, ACCEPT_BUDGET_S)
-        except Exception:
+        except Exception as exc:
+            self._log_unfinished(call, progress, type(exc).__name__)
             await self._cleanup(call, progress)
             raise
         if not finished:
+            self._log_unfinished(call, progress, "timeout")
             await self._cleanup(call, progress)
             msg = f"the inbound accept did not finish within {ACCEPT_BUDGET_S} s"
             raise InboundAcceptTimeoutError(msg)
 
+    def _log_unfinished(self, call: InboundCall, progress: _Progress, reason: str) -> None:
+        """Name the steps a timed-out or failed accept finished (the router logs the failure itself)."""
+        _log.warning(
+            "telnyx.inbound_accept_stages",
+            call_id=str(call.call_id),
+            org_id=str(call.number.org_id),
+            reason=reason,
+            stages_ms=dict(progress.stages_ms),
+            last_stage=next(reversed(progress.stages_ms), None),
+            elapsed_ms=round((self._clock.monotonic() - call.received_monotonic) * 1000, 1),
+        )
+
+    def _stage(self, progress: _Progress, name: str, since: float) -> float:
+        now = self._clock.monotonic()
+        progress.stages_ms[name] = round((now - since) * 1000, 1)
+        return now
+
     async def _steps(self, call: InboundCall, progress: _Progress) -> None:
+        mark = self._stage(progress, "route", call.received_monotonic)
         persisted = await self._persist(call)
         progress.committed = True
+        mark = self._stage(progress, "persist", mark)
         await self._broadcast(persisted.event)
         await self._save_context(persisted.context)
+        mark = self._stage(progress, "context", mark)
         await self._starter.start(
             CallWorkflowInput(
                 call_id=call.call_id,
@@ -232,7 +257,8 @@ class InboundAccept:
             )
         )
         progress.workflow_started = True
-        await self._answer(call, persisted.config)
+        mark = self._stage(progress, "start", mark)
+        await self._answer(call, persisted.config, progress, mark)
 
     async def _persist(self, call: InboundCall) -> _Persisted:
         """Resolve and write the call in one tenant transaction (nothing is written when resolution fails)."""
@@ -326,7 +352,9 @@ class InboundAccept:
         if not saved:
             _log.warning("telnyx.inbound_context_skipped", reason="timeout")
 
-    async def _answer(self, call: InboundCall, config: SendCallConfig) -> None:
+    async def _answer(
+        self, call: InboundCall, config: SendCallConfig, progress: _Progress, since: float
+    ) -> None:
         settings = self._settings
         now = self._clock.now()
         token = mint_stream_token(
@@ -349,6 +377,7 @@ class InboundAccept:
         except CallAlreadyEnded:
             _log.info("telnyx.inbound_caller_gone_before_answer", call_id=str(call.call_id))
             return
+        self._stage(progress, "answer", since)
         ring_to_answer_ms = (self._clock.monotonic() - call.received_monotonic) * 1000
         self._answer_ms.observe(ring_to_answer_ms)
         _log.info(
@@ -356,6 +385,7 @@ class InboundAccept:
             call_id=str(call.call_id),
             org_id=str(call.number.org_id),
             ring_to_answer_ms=round(ring_to_answer_ms, 1),
+            stages_ms=dict(progress.stages_ms),
         )
 
     async def _cleanup(self, call: InboundCall, progress: _Progress) -> None:

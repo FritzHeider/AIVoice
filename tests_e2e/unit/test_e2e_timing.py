@@ -8,9 +8,11 @@ from typing import Any
 import pytest
 from e2e_timing import (
     INTERRUPT_CATEGORY,
+    ONSET_TOLERANCE_MS,
     Window,
     assistant_before,
     clears_in,
+    decision_speech_ms,
     first_clear_after,
     interrupt_events,
     utterance_window,
@@ -18,6 +20,7 @@ from e2e_timing import (
 )
 
 from va_events import DEFAULT_CATEGORY
+from va_voice.vad import START_WINDOWS, WINDOW_MS
 
 TIMELINE = {"clears": [900, 2_000, 2_450, 5_000]}
 
@@ -80,3 +83,17 @@ def test_whole_word_prefix_stops_at_the_last_complete_word() -> None:
     assert whole_word_prefix(text, 16) == 12
     assert whole_word_prefix(text, 17) == 17
     assert whole_word_prefix(text, 40) == 17
+
+
+def test_the_onset_tolerance_is_one_vad_window() -> None:
+    assert ONSET_TOLERANCE_MS == 32
+    assert ONSET_TOLERANCE_MS == WINDOW_MS
+    assert ONSET_TOLERANCE_MS < START_WINDOWS * WINDOW_MS
+
+
+def test_decision_speech_ms_reads_the_interrupt_row() -> None:
+    assert decision_speech_ms({"data": {"speech_ms": 1_204, "level": 1}}) == 1_204
+    with pytest.raises(AssertionError, match="speech_ms"):
+        decision_speech_ms({"data": {"reaction_ms": 1_210}})
+    with pytest.raises(AssertionError, match="speech_ms"):
+        decision_speech_ms({"data": {"speech_ms": "1204"}})

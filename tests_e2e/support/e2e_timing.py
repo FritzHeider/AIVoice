@@ -12,12 +12,15 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from va_events import DEFAULT_CATEGORY, EventType
+from va_voice.vad import WINDOW_MS
 
 __all__ = [
     "INTERRUPT_CATEGORY",
+    "ONSET_TOLERANCE_MS",
     "Window",
     "assistant_before",
     "clears_in",
+    "decision_speech_ms",
     "first_clear_after",
     "interrupt_events",
     "utterance_window",
@@ -25,6 +28,10 @@ __all__ = [
 ]
 
 INTERRUPT_CATEGORY: Final = DEFAULT_CATEGORY[EventType.CALL_INTERRUPT]
+# Silero stamps ``speech_start`` at the start of the first 32 ms window that holds voice. The window grid is
+# the stream's, not the utterance's, so that window may begin up to one window before the caller's voice onset
+# (Decision P08-T00 under specs/30 §5): a sim-side "clear after onset" check allows this much.
+ONSET_TOLERANCE_MS: Final = int(WINDOW_MS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +67,14 @@ def first_clear_after(timeline: Mapping[str, Any], at_ms: int) -> int | None:
 def interrupt_events(events: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     """The ``call.interrupt`` rows of an event log (the only event type of their category)."""
     return [event for event in events if event["category"] == INTERRUPT_CATEGORY]
+
+
+def decision_speech_ms(event: Mapping[str, Any]) -> int:
+    """The caller speech (ms, pipeline timeline) the interruption policy counted when it decided to clear,
+    from a ``call.interrupt`` row (``data.speech_ms``)."""
+    value = event["data"].get("speech_ms")
+    assert isinstance(value, int), f"call.interrupt without an integer speech_ms: {event!r}"
+    return value
 
 
 def assistant_before(messages: Sequence[Mapping[str, Any]], user_text: str) -> str | None:

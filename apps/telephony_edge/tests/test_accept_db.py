@@ -125,6 +125,66 @@ async def test_an_accepted_call_is_created_started_and_answered(database: Databa
         assert r.answered() == 1
 
 
+async def test_the_answer_log_names_the_time_of_every_step(database: Database) -> None:
+    async with accept_rig(database) as r:
+        org = await r.org()
+        to = await r.rig.number(org, {"prompt": PROMPT})
+        _ccid, event = await r.rig.ring(to)
+
+        with capture_logs() as logs:
+            assert (await r.route(event)).process_error is None
+
+        [answered] = [log for log in logs if log["event"] == "telnyx.inbound_answered"]
+        stages = answered["stages_ms"]
+        assert list(stages) == ["route", "persist", "context", "start", "answer"]
+        assert all(value >= 0 for value in stages.values())
+        # The steps run back to back from the router's receipt, so together they are the ring-to-answer time.
+        assert sum(stages.values()) == pytest.approx(answered["ring_to_answer_ms"], abs=1.0)
+        assert [log for log in logs if log["event"] == "telnyx.inbound_accept_stages"] == []
+
+
+def _stages_log(logs: list[MutableMapping[str, Any]]) -> MutableMapping[str, Any]:
+    [stages] = [log for log in logs if log["event"] == "telnyx.inbound_accept_stages"]
+    # Logged before the cleanup and before the router's own failure log.
+    events = [log["event"] for log in logs]
+    assert events.index("telnyx.inbound_accept_stages") < events.index("telnyx.inbound_accept_failed")
+    return stages
+
+
+async def test_a_timed_out_accept_logs_the_stages_it_finished(database: Database) -> None:
+    clock = GatedClock()
+    async with accept_rig(database, clock=clock) as r:
+        r.starter.hang = True
+        org = await r.org()
+        _ccid, event = await r.rig.ring(await r.rig.number(org, {"prompt": PROMPT}))
+        with capture_logs() as logs:
+            routing = asyncio.ensure_future(r.route(event))
+            await r.starter.entered.wait()
+            clock.fire(ACCEPT_BUDGET_S)
+            assert (await routing).process_error == "accept_failed"
+
+        stages = _stages_log(logs)
+        assert stages["reason"] == "timeout"
+        assert stages["org_id"] == str(org)
+        assert list(stages["stages_ms"]) == ["route", "persist", "context"]
+        assert stages["last_stage"] == "context"
+        assert stages["elapsed_ms"] >= sum(stages["stages_ms"].values()) - 1.0
+
+
+async def test_a_failed_answer_logs_the_stages_it_finished(database: Database) -> None:
+    async with accept_rig(database, telnyx=answer_failing_factory) as r:
+        org = await r.org()
+        _ccid, event = await r.rig.ring(await r.rig.number(org, {"prompt": PROMPT}))
+        with capture_logs() as logs:
+            assert (await r.route(event)).process_error == "accept_failed"
+
+        stages = _stages_log(logs)
+        [failed] = [log for log in logs if log["event"] == "telnyx.inbound_accept_failed"]
+        assert stages["reason"] == failed["error_type"]
+        assert list(stages["stages_ms"]) == ["route", "persist", "context", "start"]
+        assert stages["last_stage"] == "start"
+
+
 async def _org_endpoint(database: Database, org_id: uuid.UUID) -> str:
     url = f"https://org-{secrets.token_hex(4)}.hooks.test/events"
     async with database.tenant_session(org_id) as session:

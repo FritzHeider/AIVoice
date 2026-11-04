@@ -507,7 +507,12 @@ Ring-to-answer target: ≤ 800 ms from `call.initiated` receipt to `answer` requ
 > accept + cleanup + refusal), the default stays 2 s. A redelivered `call.initiated` after the accept resolves to
 > the primary leg through the carrier handler (no second call or answer). Ring-to-answer is measured from the
 > router's start to the `answer` response (`va_inbound_answer_ms`, specs/27 §3.2; logged as `ring_to_answer_ms`
-> in `telnyx.inbound_answered`). The edge mixes in `StreamTokenSettings` and the platform model ids
+> in `telnyx.inbound_answered`, together with `stages_ms`: the clock time of `route` (number lookup, routing
+> facts, slot), `persist`, `context` (event broadcast + context save), `start` (workflow), and `answer`, which add
+> up to `ring_to_answer_ms`; Decision 2026-11-04, P08-T00: a slow answer must name its step). A timed-out or
+> failed accept logs the stages it finished before its cleanup as `telnyx.inbound_accept_stages` (`reason` =
+> `timeout` or the exception type, `stages_ms`, `last_stage`, `elapsed_ms`); the router keeps owning
+> `telnyx.inbound_accept_failed`. The edge mixes in `StreamTokenSettings` and the platform model ids
 > (`LLM_DIALOGUE_MODEL`/`LLM_ROUTER_MODEL` scoped to the edge); the lifespan refuses to start without
 > `STREAM_TOKEN_SECRET` when it builds the default acceptor.
 

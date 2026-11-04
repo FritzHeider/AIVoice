@@ -328,6 +328,9 @@ async def test_interrupt_event_carries_the_played_share() -> None:
         "total_chars": 42,
         "played_ms": 1211,
         "reaction_ms": 540,
+        "speech_ms": 500,
+        "clear_delay_ms": 40,
+        "level": 2,
     }
     assert event.message == "Interrupted after 18 of 42 characters"
 

@@ -1954,3 +1954,12 @@ Grafana 3001
   (WS sends). The sim logs only sparsely (gaps of tens of seconds are normal), so a quiet sim log is not evidence of
   a stalled loop. Check `sim.telnyx_media_connect_failed` and the media worker's STT/TTS connect timeouts instead.
   For a cold e2e run, `make down && make e2e` (plain `make e2e` reuses running containers when images are unchanged).
+- 2026-11-04 (P08-T00): never compare a sim-side clear with the caller's voice onset (`start_ms` + `MARKER_MS`)
+  exactly: Silero's `speech_start` is the start of a 32 ms window on the stream's grid and may precede the onset by
+  up to one window. Assert the policy on `call.interrupt` `data.speech_ms` (also `clear_delay_ms`, `level`) and allow
+  `e2e_timing.ONSET_TOLERANCE_MS` on the sim side (specs/30 §5 Decision P08-T00).
+- 2026-11-04 (P08-T00): a slow inbound answer: read `telnyx.inbound_answered` in the edge log; `ring_to_answer_ms`
+  starts at the router (queue wait excluded) and `stages_ms` splits it into route/persist/context/start/answer. A timed-out/failed accept logs
+  `telnyx.inbound_accept_stages` (`reason`, `stages_ms`, `last_stage`) before the router's `inbound_accept_failed`.
+  Edge handler timeouts plus Postgres `canceling statement ... while inserting index tuple in relation "call_legs"`
+  mean whole-stack contention (e.g. right after `make test`), not one slow step: rerun before blaming code.

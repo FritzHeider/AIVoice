@@ -418,7 +418,7 @@ is concatenated to the previous user turn text (`"{prev} {new}"`) before re-runn
 > merged); a failed org's ops are re-queued in order, at most 10 000 ops kept (oldest dropped,
 > `media.turns_dropped`). Events: `call.turn` (message = text cut to 200 characters, data `{turn_index, role,
 > text, node_id: null, interrupted}`), `call.interrupt` (data `{turn_index, played_chars, total_chars,
-> played_ms, reaction_ms}`, message `"Interrupted after {played} of {total} characters"`), and every
+> played_ms, reaction_ms, speech_ms, clear_delay_ms, level}` (the last three since P08-T00), message `"Interrupted after {played} of {total} characters"`), and every
 > `TurnReport.events` item as `call.latency`, published in callback order by one chain of background tasks
 > through the per-process `EventPublisher` whose `call_events` sink is the per-process `CallEventBuffer`; a
 > publish failure is logged `media.event_publish_failed` (types only, never text) and never ends the call. When

@@ -138,3 +138,12 @@ Template:
 - **Reasoning:** Phase 07 exit gate passed; the flake is tracked in the next phase's checklist so the Planner fixes it first.
 - **Reversibility:** Yes: `ralph tools task reopen task-1793787934-2f0c` and remove P08-T00.
 - **Timestamp:** 2026-11-04T15:30:00Z
+
+## DEC-010
+- Decision: How to resolve the P08-T00 build.blocked (make e2e capacity flow fails, pre-existing at HEAD)
+- Chosen Option: Insert P08-FIX-3 (50-call underruns + overhead p50 margin) directly after P08-T00; scope P08-T00's `make e2e` acceptance to all flows except `-m capacity`, and send P08-T00 back to Builder/Reviewer for approval on its own acceptance
+- Confidence: 85
+- Alternatives Considered: split P08-T00 (nothing left to split); put P08-FIX-3 first (would have to commit around the uncommitted P08-T00 tree)
+- Reasoning: Builder showed with images rebuilt at HEAD that 3/8 capacity runs fail (underruns 14/3/1) without the P08-T00 diff; the failure is unrelated to the interrupt-data/accept-log change and needs its own root-cause task (MASTER_PROMPT §7 target)
+- Reversibility: High (plan text only)
+- Timestamp: 2026-11-04T00:00:00Z

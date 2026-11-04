@@ -764,6 +764,10 @@
 
 ## Context
 
+### mem-1793815410-464f
+> P08-T00 rejection: inbound_basic 1343ms after concurrent_calls was inside the call.initiated handler (ring_to_answer_ms measured from router start), not processor shard queue; not reproduced in 12 runs (30-86ms). telnyx.inbound_answered now logs stages_ms (route/persist/context/start/answer). Under 50-call start the edge's outbound call_legs upsert can block >5s on the unique index behind the worker's uncommitted dial transaction (pg log 'while inserting index tuple')
+<!-- tags: e2e, edge, performance | created: 2026-11-04 -->
+
 ### mem-1793802837-c82c
 > P07-FIX-1: sim stall at 50-call start did not reproduce (cap + 2 make e2e incl cold make down; 0 connect_failed). py-spy on sim: _render_all synthesis ~4% GIL, tick_loop WS sends dominate. Sim logs are sparse (tens-of-seconds gaps normal) so log silence != loop stall. Cold e2e = make down && make e2e
 <!-- tags: e2e, sim, performance | created: 2026-11-04 -->

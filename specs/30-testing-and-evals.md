@@ -1410,6 +1410,27 @@ delays is covered by Temporal time-skipping integration tests.)
 > The call ends `worker_crash` (`call_ended_by` `ERROR`, specs/05 §9), the platform side sends the `hangup`, and
 > post-call processing completes with the transcripts written before the kill.
 
+> Decision (2026-11-04): interruptibility onset reference (P08-T00). `interruptibility_levels` level 1 failed 2 of 4
+> standalone runs with the sim `clear` 1 183 ms after voice onset (`start_ms` + `MARKER_MS`) against a 1 200 ms
+> minimum. The pipeline was right: Silero stamps `speech_start` at the start of the first 32 ms window
+> (`va_voice.vad.WINDOW_MS`) that holds voice, and that window grid is the stream's, not the utterance's, so the
+> stamp lands anywhere from about one window before the onset to a few ms after it (measured on the docker stack
+> over 10 runs of all levels: sim `clear` − onset − policy speech between −21 and +12 ms). `call.interrupt` therefore also carries `speech_ms` (caller speech the policy
+> counted at the decision, `at_ms − speech_start_ms`), `clear_delay_ms` and `level` (specs/19 §2), and the flow
+> asserts (1) `speech_ms` ≥ the level's `min_speech_ms` (the policy itself), (2) `level` equals the call's level, and
+> (3) sim `clear` − onset ≥ `min_speech_ms` − `ONSET_TOLERANCE_MS` (`tests_e2e/support/e2e_timing.py`, one VAD
+> window = 32 ms). Measured `speech_ms`: level 1 1 208-1 211, level 2 502-511, level 3 409-443, level 4 152-154 ms; 10/10 runs passed.
+
+> Decision (2026-11-04): inbound answer bound after the 50-call flow (P08-T00). One review `make e2e` run failed
+> `inbound_basic` with 1 343 ms from `call.initiated` to `answered` (bound 1 s) right after `concurrent_calls`; the
+> edge logged `ring_to_answer_ms=1430` measured from the router's start, so the time went inside the
+> `call.initiated` handler, not in the processor queue. The same run's edge also timed out `call.initiated`
+> handlers (5 s) at the 50-call start with Postgres cancelling `call_legs` inserts blocked on the unique index, a
+> window of whole-stack slowdown right after the reviewer's `make test`. It did not recur: 3 + 8 standalone
+> `concurrent_calls` → `inbound_basic` pairs and full `make e2e` runs answered in 30-86 ms. The 1 s bound stays
+> (it is this section's acceptance), and `telnyx.inbound_answered` now logs `stages_ms` (route, persist, context,
+> start, answer; specs/06 §7) so a recurrence names the slow step instead of a guess.
+
 > Decision (2026-11-03): webhooks e2e flow (P06-T08). (1) Receiver: `tests_e2e/support/e2e_receiver.py` (the
 > `tests_e2e/receiver.py` of §3.5 and Decision P05-T17b (3)), a Starlette app served by real uvicorn in the pytest
 > process (fixture `receiver` → `ServedReceiver(receiver, url)`), bound on `E2E_RECEIVER_BIND` (default `0.0.0.0`),

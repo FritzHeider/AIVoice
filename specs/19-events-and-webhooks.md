@@ -151,7 +151,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | `call.voicemail` | voicemail | media | voicemail detected and action taken (data.action) | `call` |
 | `call.started` | call | media | pipeline attached and first audio sent or greeting awaited | `call` |
 | `call.turn` | call | media | a turn finalized (data: turn_index, role, text, node_id, interrupted; assistant turns may add `latency`, the reply's measured `call_turns.latency` values, §1 Decision P06-T05) | `call` |
-| `call.interrupt` | interrupt | media | barge-in honored (data: played_chars, total_chars) | `call` |
+| `call.interrupt` | interrupt | media | barge-in honored (data: turn_index, played_chars, total_chars, played_ms, reaction_ms, speech_ms = the caller's speech counted by the policy at the decision, clear_delay_ms, level; specs/30 §5 Decision P08-T00) | `call` |
 | `call.latency` | latency | media | per turn; message like `"E2E: 742ms"` and data `{eot_ms, stt_final_ms, llm_ttft_ms, tts_ttfa_ms, e2e_ms}`; additionally one event per stage with Bland-style messages `"STT: 63ms"`, `"LLM: 266ms"`, `"TTS: 218ms"` | `latency` |
 | `call.route` | route | media | pathway edge chosen (data: from_node, to_node, label, alternatives[{label, score}], global:bool) | `call` |
 | `call.extraction` | extraction | media | variables extracted (data: variables) | `call` |

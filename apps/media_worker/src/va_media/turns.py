@@ -177,6 +177,9 @@ class TurnRecorder:
             "total_chars": record.total_chars,
             "played_ms": round(record.played_ms),
             "reaction_ms": round(record.reaction_ms),
+            "speech_ms": round(record.at_ms - record.speech_start_ms),
+            "clear_delay_ms": round(record.clear_delay_ms),
+            "level": record.level,
         }
         message = f"Interrupted after {record.played_chars} of {record.total_chars} characters"
         self._publish(EventType.CALL_INTERRUPT, message, data)
