@@ -361,6 +361,7 @@ class CallRuntime:
             )
             transport.on_rate_limited = pipeline.speaker.outbound.rate_limited
             _bind_transfer(actions, pipeline, brain, org.transfer_failed_message)
+            stack.callback(_unwire, transport, actions, watch, monitor)
             maintenance = maintenance_takeover(context)
             if maintenance is not None:
                 pipeline.take_over(maintenance)
@@ -601,6 +602,25 @@ def _bind_transfer(
             _log.info("media.transfer_failed_message_dropped")
 
     actions.bind(on_transferred=transferred, on_transfer_failed=transfer_failed)
+
+
+def _unwire(
+    transport: TelnyxMediaTransport,
+    actions: MediaActions,
+    watch: CarrierWatch,
+    monitor: VoicemailMonitor | None,
+) -> None:
+    """Drop the callbacks wired between the call's parts once everything else on the stack has run.
+
+    Each points back into the pipeline (its outbound clock, takeover, say), so left in place a finished call
+    would be a set of reference cycles freed only by the cyclic collector, in one long pause of the media loop
+    for every leg still talking (specs/07 §9 Decision P08-FIX-3).
+    """
+    transport.on_rate_limited = None
+    actions.unbind()
+    watch.on_verdict = None
+    if monitor is not None:
+        monitor.unbind()
 
 
 def _observer(recorder: TurnRecorder | None, monitor: VoicemailMonitor | None) -> PipelineObserver:

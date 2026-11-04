@@ -1963,3 +1963,18 @@ Grafana 3001
   `telnyx.inbound_accept_stages` (`reason`, `stages_ms`, `last_stage`) before the router's `inbound_accept_failed`.
   Edge handler timeouts plus Postgres `canceling statement ... while inserting index tuple in relation "call_legs"`
   mean whole-stack contention (e.g. right after `make test`), not one slow step: rerun before blaming code.
+- 2026-11-04 (P08-FIX-3): attribute media-loop stalls before guessing. `outbound.underrun` (media log, warning) names
+  each underrun's cause: `wake_late_ms` ≈ 60+ with `prev_send_await_ms` ≈ 0 = event-loop stall; a large
+  `prev_send_await_ms` = WS backpressure. `gc_pause` logs collector passes ≥ 10 ms (`generation`, `collected`) in
+  the media worker and the sim runner (both call `va_common.gc_tuning.tune_gc(thresholds)` before serving).
+  Collect both after a capacity run with `docker logs --since <ts> voiceagents-media-1 | grep -E
+  'outbound.underrun|gc_pause'` (and `voiceagents-sim-1` for sim stalls, which inflate measured overhead). Per-call parts must not form reference cycles (a finished call is then freed
+  by refcounting, never by a 40-120 ms collector pass): never hand a part a bound method of its owner (pass a
+  clock/event/counter-only function or a `functools.partial` over the data), unwire runtime callbacks on the call's
+  exit stack, drop finished tasks from owner lists (their `CancelledError` traceback holds `self`), and clear the
+  frames of caught control-flow exception tracebacks. Guard it with `packages/va_common/tests/gc_cycles.py`
+  (`unreachable_after()` + `cycles_through(garbage, names)` for objects that should be gone,
+  `live_cycles_through(root, names)` for a finished object a harness still holds). To find cycles ad hoc, run a
+  runtime-sim call under `unreachable_after()` and print `cycles_through` for the `va_*` classes in the garbage.
+  Note: `insert(Model)` executed with a list of dicts is the ORM bulk path (attribute names, so `text_` not
+  `text`); `insert(cast("Table", Model.__table__))` keeps Core column names.

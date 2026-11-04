@@ -17,7 +17,6 @@ refuses to start without ``TELNYX_PUBLIC_KEY`` (``local`` falls back to the simu
 
 from __future__ import annotations
 
-import gc
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -30,6 +29,8 @@ from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
+from va_common.gc_tuning import GcPauseLog
+from va_common.gc_tuning import tune_gc as tune_collector
 from va_common.health import CheckFn
 from va_common.ids import new_id
 from va_common.logging import get_logger
@@ -82,8 +83,8 @@ __all__ = [
 ]
 
 DEFAULT_PORT: Final = 8200
-GC_THRESHOLDS: Final = (50_000, 20, 20)
-"""Collector thresholds of a serving media worker (generation 0, 1, 2)."""
+GC_THRESHOLDS: Final = (10_000, 5, 50)
+"""Collector thresholds of a serving media worker (generation 0, 1, 2; specs/07 §9 Decision P08-FIX-3)."""
 DEFAULT_MODELS_DIR: Final = Path("models")
 DRAIN_END_GRACE_S: Final = 10.0
 """How long the drain waits for sessions ended at the drain timeout to finish their cleanup."""
@@ -340,17 +341,16 @@ async def drain(app: Starlette) -> None:
         _log.error("media.drain_unfinished", sessions=len(media.sessions))
 
 
-def tune_gc() -> None:
-    """Keep the cyclic collector out of the media loop's way (specs/07 §21 Decision P05-T17e2).
+def tune_gc() -> GcPauseLog:
+    """Keep the cyclic collector out of the media loop's way (specs/07 §21 Decision P05-T17e2, §9 Decision
+    P08-FIX-3): :func:`va_common.gc_tuning.tune_gc` with :data:`GC_THRESHOLDS`.
 
-    Everything allocated at startup (modules, settings, the app) moves to the permanent generation, so no
-    later collection walks it, and generation 0 collects every :data:`GC_THRESHOLDS` allocations instead of
-    700: per-frame objects are freed by reference counting, and fewer, smaller collections do not stall the
-    20 ms send loops of 50 calls.
+    Startup objects move to the permanent generation, so no later collection walks them. Generation 0 collects
+    every 10 000 net allocations instead of 700: per-frame objects are freed by reference counting, and a pass
+    stays short (a 50 000 threshold let one pass walk and free ~50 000 objects, 40-75 ms, which underran every
+    speaking leg); generation 1 is walked after five generation-0 passes, so it stays small too.
     """
-    gc.collect()
-    gc.freeze()
-    gc.set_threshold(*GC_THRESHOLDS)
+    return tune_collector(GC_THRESHOLDS)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

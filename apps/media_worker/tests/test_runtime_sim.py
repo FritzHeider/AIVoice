@@ -20,6 +20,7 @@ import httpx
 import numpy as np
 import pytest
 from call_rows import SeededCall, load_call, seed_call
+from gc_cycles import cycles_through, unreachable_after
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from resolved_configs import resolved_config
@@ -910,3 +911,53 @@ async def test_interruptibility_levels_decide_which_caller_speech_interrupts(
     assert len(media_logs(stream, "pipeline_barge_in")) == barge_ins
     [closed] = media_logs(stream, "media.transport_closed")
     assert (closed["clears"] > 0) is (barge_ins > 0)
+
+
+# A finished call leaves none of its parts on a reference cycle (specs/07 §9 Decision P08-FIX-3): whatever
+# sits on a cycle is freed only by the cyclic collector, whose pass blocks the media loop for every leg on the
+# pod (50 calls ending together made 40-120 ms passes and platform underruns).
+
+CALL_PARTS = (
+    "CallPipeline",
+    "Speaker",
+    "OutboundAudio",
+    "InboundPath",
+    "TelnyxMediaTransport",
+    "TaskBrain",
+    "MissingVariables",
+    "TtsSocket",
+    "ElevenLabsRealtimeStt",
+    "CarrierWatch",
+    "VoicemailMonitor",
+    "MediaActions",
+    "GreetingGate",
+    "CallSession",
+    "TurnRecorder",
+    "_PipelineEnded",
+)
+
+
+async def test_an_agent_ended_call_leaves_no_part_on_a_cycle() -> None:
+    async with rig() as r:
+        await add_rules(
+            r.llm,
+            "rules:\n  - id: bye\n    match: {last_user_regex: 'bye'}\n"
+            "    respond: {tool_calls: [{name: end_call,\n"
+            "      arguments: {reason: done, final_message: 'Goodbye now.'}}]}\n",
+        )
+        r.scenario("wait_agent_speech: {}", "say: {text: that is all thanks bye}", "expect_hangup: {}")
+        with unreachable_after() as garbage:
+            async with r.call():
+                end = await r.body.end()
+        assert end == SessionEnd("ended", "agent_end_call", "agent")
+        assert cycles_through(garbage, CALL_PARTS) == {}
+
+
+async def test_a_carrier_hangup_leaves_no_part_on_a_cycle() -> None:
+    async with rig() as r:
+        r.scenario("wait_agent_speech: {}", "hangup: {}")
+        with unreachable_after() as garbage:
+            async with r.call():
+                end = await r.body.end()
+        assert end == STREAM_CLOSED
+        assert cycles_through(garbage, CALL_PARTS) == {}

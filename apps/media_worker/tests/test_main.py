@@ -37,11 +37,15 @@ def test_main_parses_args_and_serves_with_drain(monkeypatch: pytest.MonkeyPatch)
 
 def test_tune_gc_freezes_startup_objects_and_raises_the_thresholds() -> None:
     thresholds = gc.get_threshold()
+    pauses = None
     try:
-        media_main.tune_gc()
+        pauses = media_main.tune_gc()
         assert gc.get_threshold() == media_main.GC_THRESHOLDS
         assert gc.get_freeze_count() > 0
+        assert pauses._callback in gc.callbacks
     finally:
+        if pauses is not None:
+            pauses.uninstall()
         gc.unfreeze()
         gc.set_threshold(*thresholds)
 

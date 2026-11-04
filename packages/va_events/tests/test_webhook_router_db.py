@@ -17,7 +17,7 @@ from tenant_rows import OrgFactory
 from va_common.ids import new_id
 from va_db.models import Batch, Conversation, WebhookDelivery, WebhookEndpoint, Widget
 from va_db.session import Database
-from va_events import DbWebhookRouter, EventPublisher, EventType, live_body
+from va_events import DbWebhookRouter, EventPublisher, EventType, live_body, webhook_router
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(240)]
 
@@ -99,6 +99,39 @@ async def test_live_events_honor_webhook_events_and_carry_call_metadata(database
     (row,) = await _deliveries(database, call.org_id)
     assert (row.event_id, row.format) == (latency.id, "bland")
     assert row.payload == live_body(latency, {"crm": "7"})
+
+
+async def test_a_batch_reads_each_call_and_the_org_endpoints_once(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    call_url, endpoint_url = _url("call"), _url("org")
+    call = await seed_call(database, config={"webhook": call_url, "webhook_events": ["latency"]})
+    other = await seed_call(database, org_id=call.org_id, config={"webhook": call_url})
+    await _endpoint(database, call.org_id, endpoint_url, event_types=["call.latency"])
+    reads: list[str] = []
+    original_call, original_endpoints = webhook_router._call, webhook_router._endpoints
+
+    async def counted_call(session: Any, org_id: uuid.UUID, call_id: uuid.UUID) -> Any:
+        reads.append(f"call:{call_id}")
+        return await original_call(session, org_id, call_id)
+
+    async def counted_endpoints(session: Any, org_id: uuid.UUID) -> Any:
+        reads.append("endpoints")
+        return await original_endpoints(session, org_id)
+
+    monkeypatch.setattr(webhook_router, "_call", counted_call)
+    monkeypatch.setattr(webhook_router, "_endpoints", counted_endpoints)
+    events = [
+        event(EventType.CALL_LATENCY, org_id=call.org_id, call_id=call.call_id, message=f"E2E: {n}ms")
+        for n in range(3)
+    ] + [event(EventType.CALL_LATENCY, org_id=call.org_id, call_id=other.call_id, message="E2E: 1ms")]
+
+    await DbWebhookRouter(database).route_many(events)
+
+    assert sorted(reads) == sorted([f"call:{call.call_id}", f"call:{other.call_id}", "endpoints"])
+    rows = await _deliveries(database, call.org_id)
+    by_event = {(row.event_id, row.url) for row in rows}
+    assert by_event == {(e.id, call_url) for e in events[:3]} | {(e.id, endpoint_url) for e in events}
 
 
 async def test_routing_the_same_event_twice_keeps_one_row_per_url(database: Database) -> None:

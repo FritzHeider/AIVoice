@@ -204,6 +204,10 @@ class VoicemailMonitor:
         """Set the pipeline's :meth:`~va_voice.pipeline.CallPipeline.take_over` (built after the monitor)."""
         self._pipeline_takeover = pipeline_takeover
 
+    def unbind(self) -> None:
+        """Forget the pipeline's takeover (the call is over; it holds the pipeline)."""
+        self._pipeline_takeover = None
+
     def _take_over(self, takeover: Takeover) -> bool:
         if self._pipeline_takeover is None:
             _log.error("media.voicemail_unbound", reason=takeover.reason)

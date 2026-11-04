@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 
 from va_common.time import Clock
 
@@ -44,10 +44,16 @@ def crash_of(task: asyncio.Task[None]) -> BaseException | None:
     return task.exception()
 
 
-async def stop_tasks(tasks: Sequence[asyncio.Task[None]]) -> None:
-    """Cancel and await ``tasks`` except the calling task."""
+async def stop_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    """Cancel and await ``tasks`` except the calling task, then remove them from ``tasks``.
+
+    A finished task keeps its exception, whose traceback holds the frames (and ``self``) of the coroutine:
+    left in the owner's list it would form a reference cycle that only the cyclic collector frees (specs/07 §9
+    Decision P08-FIX-3).
+    """
     current = asyncio.current_task()
     others = [task for task in tasks if task is not current]
     for task in others:
         task.cancel()
     await asyncio.gather(*others, return_exceptions=True)
+    tasks[:] = [task for task in tasks if task is current]

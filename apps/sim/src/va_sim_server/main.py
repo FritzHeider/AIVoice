@@ -9,6 +9,9 @@ public key is written to ``.sim/telnyx_public_key`` (MASTER_PROMPT §9) so local
 webhooks. With ``SIM_STATE_REDIS_URL`` set the state's control plane (scenarios, latencies, reset + seed,
 utterances) is shared with every other sim process on that Redis and a subscriber task follows its changes
 (specs/30 §3 Decision P03-T15c). ``SIM_WORKERS`` other than 1 is refused (exit 2) until the load-test phase.
+The served runner tunes its cyclic collector like the media worker (:data:`GC_THRESHOLDS`, specs/07 §9
+Decision P08-FIX-3): with default thresholds its full passes over 50 calls' state took 85-105 ms, stalling
+every scripted caller and the timing of every agent frame the platform's overhead is measured with.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
+from va_common.gc_tuning import tune_gc
 from va_common.health import CheckFn
 from va_common.logging import get_logger
 from va_common.metrics import new_registry
@@ -53,6 +57,7 @@ from va_sim_server import __version__
 __all__ = [
     "BASE_PORT",
     "EXIT_UNSUPPORTED",
+    "GC_THRESHOLDS",
     "SIMULATORS",
     "SimContainer",
     "build_container",
@@ -64,6 +69,8 @@ __all__ = [
 ]
 
 EXIT_UNSUPPORTED: Final = 2
+GC_THRESHOLDS: Final = (10_000, 5, 50)
+"""Collector thresholds of the served simulator runner (generation 0, 1, 2)."""
 _WORKERS_UNSUPPORTED: Final = "SIM_WORKERS > 1 is not supported yet (specs/30 §3 Decision P03-T15c)"
 
 _log: Final = get_logger(__name__)
@@ -167,6 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     async def serve_all() -> None:
         await run(settings, stop=StopController(), host=bind.host, ports=ports_from(bind.port))
 
+    tune_gc(GC_THRESHOLDS)
     return run_main(serve_all, loop_factory=uvloop.new_event_loop)
 
 

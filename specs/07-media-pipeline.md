@@ -487,6 +487,46 @@ Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms 
 > `Speaker(on_underrun=)` / `CallPipeline(on_underrun=)` report each one, and the media runtime increments
 > `va_audio_underruns_total` from that hook. The `pipeline_ended` log carries `outbound_frames`, `late_frames`,
 > `max_lateness_ms`, and `underruns`.
+>
+> Decision (2026-11-04) P08-FIX-3: underrun attribution and the cyclic collector. Every underrun is logged as
+> `outbound.underrun` (warning) before the frame goes out, with `behind_ms` (now minus the instant Telnyx's buffer
+> ran dry, `FramePacer.drained_at_ms`), `since_prev_send_ms`, `prev_send_await_ms` (duration of the previous
+> `send_audio` await: transport backpressure), `wake_late_ms` (how far past its due time the loop woke from its
+> pacing sleep: an event-loop stall; `null` when no sleep preceded the frame), and `queued_frames`. The media worker
+> and the simulator runner log each cyclic-collector pass of 10 ms or more as `gc_pause` (`generation`,
+> `duration_ms`, `collected`, `uncollectable`; `va_common.gc_tuning.GcPauseLog` on `gc.callbacks`, installed by
+> `va_common.gc_tuning.tune_gc(thresholds)`, which also collects and freezes startup objects). With them, the 50-call capacity
+> flow (specs/30 §6) attributed every underrun to one synchronized stall of the media loop (`wake_late_ms` 60-80,
+> `prev_send_await_ms` 0.1, dozens of legs at the same instant) that coincided with a collector pass: generation-0
+> passes of 40-75 ms freeing 16 000-54 000 objects. Root cause: every finished call was a set of reference cycles
+> (parts holding bound-method callbacks of their owner, the vendor sockets' finished tasks whose `CancelledError`
+> tracebacks hold `self`, the pipeline's end signal whose traceback holds the reply task that raised it, and
+> CPython 3.12.7's `TaskGroup.__aexit__` group-in-its-own-traceback cycle), so whole call graphs (~1 000 objects
+> each) waited for the collector, and the 50 000 gen-0 threshold of P05-T17e2 let one pass walk and free them all
+> at once. Rules: (1) a callback handed to a per-call part never captures the part's owner (`CallPipeline` passes a
+> clock-only `now_ms`, a `_TurnCounter.next`, a stats/latency `partial`; `Speaker` passes a waker over its event;
+> `TaskBrain` a module-level template sink); (2) the media runtime unwires what it binds between parts
+> (`transport.on_rate_limited`, `MediaActions.unbind()`, `CarrierWatch.on_verdict`, `VoicemailMonitor.unbind()`)
+> as the call's exit stack finishes; (3) `va_elevenlabs.ws_tasks.stop_tasks` removes the stopped tasks from the
+> owner's list; (4) `CallPipeline.run` clears the finished frames of the end signal's tracebacks
+> (`traceback.clear_frames`). The va_voice and runtime-sim tests assert that no call part lies on a reference cycle
+> after the call (`gc_cycles` test helper). The hot per-event SQL of the media flush is built once at import
+> (`DbWebhookRouter` statements with bound parameters, call facts and endpoints read once per batch;
+> `CallTurnRepo.upsert_many` one prebuilt upsert executed with many parameter sets), which removed SQLAlchemy
+> statement garbage. Collector thresholds are `(10_000, 5, 50)`: gen-0 passes stay ≤ 17 ms, gen-1 passes walk at
+> most five gen-0 batches (≤ 33 ms measured), and full passes (30-50 ms with 50 live calls, ~100 000 tracked
+> objects) stay rare. The simulator runner (`va_sim_server.main.GC_THRESHOLDS`, same values) gets the same tuning:
+> with default thresholds its full passes over 50 calls' state took 85-105 ms (~175 000 objects), stalling every
+> scripted caller, FakeLLM's token pacing and the arrival times of agent frames, all of which count as platform
+> overhead in the flow's measurement. What still reaches the collector is library-internal (httpx/h11 connection graphs of idle
+> connections the server closed, uvicorn's upgrade-protocol objects, redis-py handshake tracebacks), ≈ 200 objects
+> per call. Measured on the 8 vCPU dev host, `uv run pytest tests_e2e -m capacity -s` (50 calls): before, 3 of 8 runs
+> with 1-33 underruns and overhead p50 125-147 ms; after (10 consecutive runs on a freshly rebuilt stack), 0
+> underruns in every run, overhead p50 101-137 ms (p95 168-216 ms), loop lag p99 ≤ 25 ms, longest collector pass
+> 34 ms in the media worker and 31 ms in the simulator. Overhead by caller turn stays highest on the first turn (≈ 130-170 ms, all 50 callers speak
+> within a few ms of each other): the media-internal share of a turn is prompt assembly 6-10 ms, first clause after
+> the first LLM token 9-80 ms (FakeLLM token pacing under the burst), pacing 10 ms; the rest (≈ 55-65 ms) is outside
+> the media pipeline (simulator transport and timing).
 
 ## 10. Audio conditioning
 
@@ -1065,7 +1105,7 @@ calls; event loop lag p99 ≤ 10 ms (`va_event_loop_lag_ms`).
 > Decision (2026-11-03) P05-T17e2: single-pod capacity (specs/30 §6). The media worker (and the simulator runner)
 > run on uvloop as §1 states (`serve(..., loop_factory=uvloop.new_event_loop)`; the other services keep the asyncio
 > loop). `va_media.main.tune_gc()` runs `gc.collect()`, `gc.freeze()` and `gc.set_threshold(50_000, 20, 20)` before
-> serving: startup objects never get walked again and per-frame garbage (freed by reference counting) no longer
+> serving (thresholds now `(10_000, 5, 50)`, §9 Decision P08-FIX-3): startup objects never get walked again and per-frame garbage (freed by reference counting) no longer
 > triggers a gen-0 pass every 700 allocations. VAD inference does use the `MEDIA_VAD_THREADS` pool (§5.3 Decisions
 > P04-T03 and P05-T17e2), superseding §1's "runs inline". Measured with `make e2e-capacity` on the 8 vCPU dev host:
 > 50 calls, none dropped, 50 attached at once, 0 underruns, overhead p50/p95 82–87/110–137 ms, loop lag p99

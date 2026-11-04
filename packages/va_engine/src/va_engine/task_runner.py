@@ -18,6 +18,7 @@ import contextlib
 import dataclasses
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Final
 
 import orjson
@@ -168,7 +169,7 @@ class TaskBrain:
         opener = config.first_sentence
         self._opener = parse_field(opener, "first_sentence") if opener and opener.strip() else None
         self._opener_text = _prerendered(context)
-        self._missing = MissingVariables(sink=self._missing_variable)
+        self._missing = MissingVariables(sink=partial(_log_missing_variable, str(context.call_id)))
         self._started = clock.monotonic()
         self._messages: list[ChatMessage] = []
         self._state = EngineState(
@@ -490,5 +491,7 @@ class TaskBrain:
             self._spoken = None
             self._spoken_record = None
 
-    def _missing_variable(self, path: str) -> None:
-        _log.info("template_variable_missing", path=path, call_id=str(self._context.call_id))
+
+def _log_missing_variable(call_id: str, path: str) -> None:
+    """The template sink (a function, not a bound method: the brain is freed without the cyclic collector)."""
+    _log.info("template_variable_missing", path=path, call_id=call_id)

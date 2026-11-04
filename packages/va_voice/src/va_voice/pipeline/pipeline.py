@@ -57,8 +57,10 @@ records and latency reports go to the :class:`PipelineObserver`, telephony actio
 from __future__ import annotations
 
 import asyncio
+import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Final
 
 from va_common.logging import get_logger
@@ -199,8 +201,12 @@ class CallPipeline:
         self._before_opener = before_opener
         self._stats = PipelineStats()
         self._endpointer = Endpointer()
+        # Callbacks handed to owned parts never capture ``self``: a part pointing back at the pipeline
+        # would make every finished call a reference cycle that only the cyclic collector frees, in one
+        # long pause on the media loop (specs/07 §9 Decision P08-FIX-3).
+        self._turns = _TurnCounter()
         self._inbound = InboundPath(
-            self._config, stt=stt, vad=vad, now_ms=self._now_ms, reorder_observer=reorder_observer
+            self._config, stt=stt, vad=vad, now_ms=_clock_ms(clock), reorder_observer=reorder_observer
         )
         self._speaker = Speaker(
             transport=transport,
@@ -210,7 +216,7 @@ class CallPipeline:
             applier=PronunciationApplier(self._config.pronunciation),
             observer=observer,
             stats=self._stats,
-            next_index=self._next_index,
+            next_index=self._turns.next,
             context_ids=context_ids,
             phrases=phrases,
             on_underrun=on_underrun,
@@ -231,7 +237,6 @@ class CallPipeline:
         self._opened = False
         self._commit: asyncio.Future[SttEventLike] | None = None
         self._turn_start_ms: float | None = None
-        self._turn_index = 0
         self._started = False
         self._start_ms = 0.0
         self._closing = False
@@ -241,7 +246,7 @@ class CallPipeline:
         self._reply_resume = False
         self._action: asyncio.Task[None] | None = None
         self._timing = BrainTiming()
-        self._monitor = BargeInMonitor(on_unhonored=self._on_unhonored)
+        self._monitor = BargeInMonitor(on_unhonored=partial(_count_unhonored, self._stats, self._latency))
         self._held: UserTurn | None = None
         self._pending_resume: str | None = None
         self._end_reason: str | None = None
@@ -299,8 +304,8 @@ class CallPipeline:
             async with asyncio.TaskGroup() as group:
                 for name, work in self._tasks():
                     group.create_task(self._guarded(name, work), name=f"pipeline-{name}")
-        except* _PipelineEnded:
-            pass
+        except* _PipelineEnded as ended:
+            _clear_frames(ended)
         finally:
             await self._abandon_action()
         reason = self._end_reason if self._end_reason is not None else "error"
@@ -308,13 +313,13 @@ class CallPipeline:
         _log.info(
             "pipeline_ended",
             end_reason=reason,
-            turns=self._turn_index,
+            turns=self._turns.value,
             outbound_frames=outbound.frames_sent,
             late_frames=outbound.late_frames,
             max_lateness_ms=round(outbound.max_lateness_ms, 1),
             underruns=outbound.underruns,
         )
-        return PipelineResult(reason, self._turn_index, self._stats, self._error)
+        return PipelineResult(reason, self._turns.value, self._stats, self._error)
 
     def _tasks(self) -> list[tuple[str, Coroutine[Any, Any, None]]]:
         tasks: list[tuple[str, Coroutine[Any, Any, None]]] = [
@@ -497,11 +502,6 @@ class CallPipeline:
             total_chars=record.total_chars,
         )
 
-    def _on_unhonored(self) -> None:
-        """Caller speech overlapped playback and ended (or outlived it) without interrupting."""
-        self._stats.unhonored_barge_ins += 1
-        self._latency.barge_in(honored=False)
-
     async def _cancel_reply(self) -> None:
         """Cancel the running reply task and wait for it (closes the Brain stream and the LLM tokens)."""
         task = self._reply_task
@@ -541,7 +541,7 @@ class CallPipeline:
         if self._pending_resume is not None and blank:
             self._false_barge_in()
             return
-        index = self._next_index()
+        index = self._turns.next()
         timer = self._latency.start_turn(index)
         timer.mark(TurnMark.USER_SPEECH_START, start)
         timer.mark(TurnMark.USER_SPEECH_END, eot.last_voiced_end_ms)
@@ -1036,7 +1036,7 @@ class CallPipeline:
     async def _route_dtmf(self, sequence: DtmfSequence) -> None:
         """A finished keypad sequence becomes a user turn (no latency timer, never a backchannel)."""
         turn = UserTurn(
-            index=self._next_index(),
+            index=self._turns.next(),
             text=sequence.text,
             start_ms=sequence.first_ms,
             end_ms=sequence.last_ms,
@@ -1066,13 +1066,50 @@ class CallPipeline:
     def _default_mixer(self) -> FrameMixer:
         return FrameMixer(self._config.tts_format, wire_byte_order=self._config.wire_byte_order)
 
-    def _next_index(self) -> int:
-        index = self._turn_index
-        self._turn_index += 1
-        return index
-
     def _now_ms(self) -> float:
         return self._clock.monotonic() * _MS_PER_SECOND
+
+
+def _clear_frames(group: BaseExceptionGroup[_PipelineEnded]) -> None:
+    """Drop the locals of the finished frames in the end signal's tracebacks.
+
+    Those frames hold the reply task whose exception is the signal itself, and CPython 3.12's
+    ``TaskGroup.__aexit__`` keeps the group it raises in a local of a frame on the group's own traceback: both
+    reference cycles would keep the whole call alive until the cyclic collector runs (specs/07 §9 Decision
+    P08-FIX-3). The pipeline never reads those tracebacks.
+    """
+    traceback.clear_frames(group.__traceback__)
+    for signal in group.exceptions:
+        traceback.clear_frames(signal.__traceback__)
+
+
+class _TurnCounter:
+    """The pipeline's turn indexes (user and agent turns share one sequence)."""
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
+
+    def next(self) -> int:
+        index = self.value
+        self.value += 1
+        return index
+
+
+def _clock_ms(clock: Clock) -> Callable[[], float]:
+    """``clock``'s monotonic time in ms (a function that holds the clock only)."""
+
+    def now_ms() -> float:
+        return clock.monotonic() * _MS_PER_SECOND
+
+    return now_ms
+
+
+def _count_unhonored(stats: PipelineStats, latency: LatencyTracer) -> None:
+    """Caller speech overlapped playback and ended (or outlived it) without interrupting."""
+    stats.unhonored_barge_ins += 1
+    latency.barge_in(honored=False)
 
 
 def _user_turn(index: int, eot: EndOfTurn, start_ms: float, committed: SttEventLike | None) -> UserTurn:

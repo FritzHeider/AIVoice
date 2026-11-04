@@ -62,6 +62,11 @@ class MediaActions:
         self._on_transferred = on_transferred
         self._on_transfer_failed = on_transfer_failed
 
+    def unbind(self) -> None:
+        """Forget the outcome callbacks (the call is over; they hold the pipeline)."""
+        self._on_transferred = None
+        self._on_transfer_failed = None
+
     @property
     def presses(self) -> int:
         """``press_button`` actions handled so far (sent or failed)."""

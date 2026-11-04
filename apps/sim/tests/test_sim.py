@@ -206,8 +206,11 @@ def test_main_runs_with_base_port(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run(settings: SimSettings, **kwargs: Any) -> None:
         seen.append({"settings": settings, "loop": type(asyncio.get_running_loop()).__module__, **kwargs})
 
+    tuned: list[tuple[int, int, int]] = []
     monkeypatch.setattr(sim_main, "run", fake_run)
+    monkeypatch.setattr(sim_main, "tune_gc", tuned.append)
     assert sim_main.main(["--port", "19100", "--host", "127.0.0.1"]) == 0
+    assert tuned == [sim_main.GC_THRESHOLDS]
     [call] = seen
     assert call["loop"] == "uvloop"
     assert call["host"] == "127.0.0.1"

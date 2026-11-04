@@ -30,7 +30,7 @@
     and are fixed by P08-FIX-3; an `accept_rig` + `GatedClock.fire(ACCEPT_BUDGET_S)` test asserts the failure log names the
     last finished stage; append `2026-11-04-p08-t00-accept-stages.md` to `.ralph/review-inbox/DONE` on approval.
 
-- [ ] P08-FIX-3 50-call capacity on one media worker: platform underruns and overhead p50 margin
+- [x] P08-FIX-3 50-call capacity on one media worker: platform underruns and overhead p50 margin — root cause: finished calls were reference cycles freed in 40-75 ms gen-0 GC passes (plus default-GC sim stalls); callbacks no longer capture owners, runtime unwires, tracebacks cleared, prebuilt flush SQL, GC (10_000, 5, 50) in media + sim, `outbound.underrun`/`gc_pause` attribution logs; 10/10 capacity runs 0 underruns p50 101-137 ms, review 4/4 runs 0 underruns p50 115-128 ms; make test 12661 passed / 7 skipped (cov 99 %), lint/typecheck/placeholders exit 0, make e2e 20 passed
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P05-T17e underruns), §20; specs/30-testing-and-evals.md §5
     (concurrent_calls flow); specs/00-overview.md §5; MASTER_PROMPT §7 ("50 concurrent simulated calls per media-worker
     pod without underruns", overhead ≤ 150 ms p50)

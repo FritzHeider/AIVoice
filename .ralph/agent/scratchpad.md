@@ -138,3 +138,105 @@ Rejected because the claimed `make e2e` gate does not pass (acceptance: "`make e
 - Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12646 passed, 7 skipped).
 - Diff matches specs/06 §7, specs/07 §17, specs/19 §2, specs/30 §5 Decisions; plan wording fixed. Capacity flake is
   pre-existing at HEAD → P08-FIX-3 (next). Inbox notes accept-stages + plan-wording appended to DONE.
+
+## Planner 2026-11-04 — after P08-T00 approval
+- P08-T00 is ticked and committed (6a90594). Inbox: every note except `recording-copy-lock-busy-budget.md` is in DONE.
+  That note is already covered by P08-FIX-2. Next unticked task in the checklist: P08-FIX-3 (depends on P08-T00).
+
+## Plan P08-FIX-3 (50-call capacity: underruns + overhead p50 margin)
+Goal: `uv run pytest tests_e2e -m capacity -s` passes 10/10 on a freshly rebuilt stack, with 0 underruns and
+overhead p50 ≤ 140 ms in every run. Do not loosen asserts, retry, lower the count, or change LEAD_FRAMES/the
+underrun definition (specs/07 §9 Decision P05-T17e).
+
+### Facts
+- Underrun = `OutboundAudio._send_frame` (packages/va_voice/src/va_voice/outbound.py ~l.440) sends a speech frame
+  while `FramePacer.drained(now)` holds and the previous frame was speech of the same utterance. The media send loop
+  of that leg was > 60 ms (lead 3) behind schedule. Counted in the media worker (`va_audio_underruns_total`).
+- At HEAD it fails 3 of 8 runs with 14/3/1 underruns. Passing runs have p50 131-146 ms (logs/head_cap_*.log,
+  logs/head_capacity.log). The last decision with measured numbers, specs/07 §21 P05-T17e2, reported p50 82-87 ms and
+  0 underruns. Overhead has crept up since then (phases 06-07 added webhook routing in the media event flush, the
+  TurnRecorder hold of `call.turn`, `call.interrupt` data, the pathway runtime, the engine state saver).
+  Bisect-style attribution is useful here.
+
+### Step 1: instrumentation (production, keep it)
+- `OutboundAudio`: on each underrun, pass details to the hook, or log `outbound.underrun` at warning with
+  `behind_ms` (now − the pacer's drained-at time), `since_prev_send_ms`, `send_await_ms` (how long the previous
+  `await self._sink.send_audio` took) and `utterance turn`. Keep the existing `on_underrun: Callable[[], None]`
+  signature (runtime metric) unless a richer type is needed. If you change it, update Speaker/CallPipeline/runtime
+  and the harness `on_underrun` tests. Bind call_id through the logging context (already bound in the runtime).
+- This attributes each underrun to one of: (a) a loop stall (the sleep overslept: large gap between the wake and
+  the due time), (b) a slow `send_audio` await (WS backpressure from the sim's reader, i.e. the sim did not drain),
+  or (c) the queue was empty, then refilled mid-utterance without an idle frame. Case (c) would be a definition bug:
+  TTS starvation must not count. Check whether a starved stretch with no background (`static` bed is on by default,
+  so idle frames are sent) can still count.
+- Unit tests in packages/va_voice/tests/test_outbound.py (ManualClock): a stalled loop reports behind_ms ≥ the
+  stall; a slow sink send reports send_await_ms; no log without an underrun.
+
+### Step 2: measure (stack rebuilt with the instrumentation: `scripts/dev_up.sh e2e`)
+- Run `-m capacity -s` about 5 times. Collect `outbound.underrun` lines from `docker logs voiceagents-media-1`,
+  and loop lag from the report table.
+- Profile one run each of the media worker and the sim with py-spy `--nonblocking --gil -f raw` (AGENTS.md command
+  row). Aggregate by leaf and inclusive frame. Look for synchronous work > 20 ms on the media loop. Suspects, most
+  likely first:
+  1. Call start or end bursts on the loop: 50 attaches/ends at once, each doing CPU work inline. Examples: context
+     JSON parse, `fit_voice_system`/tiktoken counting, prompt assembly, `build_pathway_logs`, the end routine's
+     event flush with `DbWebhookRouter.route_many` + payload building (orjson of Call Objects), `TurnRecorder`
+     event encoding. Fix: move bulky CPU work to `asyncio.to_thread` (MASTER_PROMPT §4.7), or yield between items
+     of large batches (`await asyncio.sleep(0)` inside per-row loops of the flush).
+  2. WS send backpressure: the media `send_audio` awaits a drain while the sim's `MediaSession._tick_loop` is busy
+     (the sim is the main CPU consumer per P07-FIX-1). If `send_await_ms` explains the underruns, fix it in the sim:
+     reader not starved, receiving decoupled from the tick loop. Sending is fire-and-forget in the real Telnyx, so a
+     sim that stops reading is a test-harness artefact we own.
+  3. GC: check `gc.callbacks` timing or py-spy samples in `gc_collect`; tune if gen2 collections hit.
+  4. Per-frame overhead: 2 500 timer wakeups/s. Only if 1-3 don't explain it, consider a pod-wide 20 ms outbound
+     ticker. It is a large change and would need a specs/07 §9 Decision.
+- For the overhead p50 (target ≤ 140 ms), split sim v2v minus `e2e_ms` ("outside") from `e2e_ms` minus vendor
+  stages ("inside") using `call.latency` rows (AGENTS.md P05-T17e2). Compare with the P05-T17e2 numbers to find
+  which stage grew.
+
+### Step 3: fix + record
+- Fix the attributed causes in code (media and/or sim) with unit tests that fail before the fix. Examples: a test
+  that the flush yields between rows, a test that the CPU step runs in a thread (patch `asyncio.to_thread`), and a
+  sim test that a slow tick does not block reads.
+- specs/07 §9: add `> Decision (2026-11-04) P08-FIX-3:` with the root cause, the measured before/after numbers
+  (underruns, p50, loop lag p99), and the new `outbound.underrun` log fields. Add an AGENTS.md dated line with the
+  attribution method.
+
+### Gates
+1. Focused: `uv run pytest packages/va_voice apps/media_worker -q` (plus `packages/va_sim` if the sim changed).
+2. `make check`. Run it in the background with a heartbeat Monitor, PATH += /home/ralph/.local/bin, ~25 min.
+   Do not run e2e at the same time (contention).
+3. `scripts/dev_up.sh e2e` (rebuild), then 10 consecutive runs of `uv run pytest tests_e2e -m capacity -s -q`,
+   logs in `logs/fix3_cap_N.log`. Record underruns and p50 for each run. All runs must pass with p50 ≤ 140.
+4. `make e2e` (all flows incl. capacity).
+
+### Risks
+- Variance: take numbers only from unprofiled runs (py-spy without --nonblocking inflates them).
+- `make test` just before e2e causes contention. Sequence the gates.
+- If the root cause turns out to be host noise not attributable to code after 3 genuine attempts, emit build.blocked
+  with the data. Do not tweak thresholds.
+
+## Build P08-FIX-3 (2026-11-04)
+Attribution (instrumented, kept): `outbound.underrun` (behind_ms, since_prev_send_ms, prev_send_await_ms,
+wake_late_ms, queued_frames) + `gc_pause` (va_common.gc_tuning.GcPauseLog). Every underrun = synchronized media-loop
+stall (wake_late 60-80 ms, send await 0.1 ms, dozens of legs at once) coinciding with a GC pass: gen0 40-75 ms
+freeing 16k-54k objects (threshold 50k from P05-T17e2).
+Root cause: each finished call was a set of reference cycles (~1000 objects): bound-method callbacks between parts
+(InboundPath.now_ms, Speaker.next_index, BargeInMonitor.on_unhonored -> pipeline; OutboundAudio.on_finished ->
+Speaker; MissingVariables sink -> TaskBrain; transport.on_rate_limited, MediaActions closures, CarrierWatch ->
+VoicemailMonitor -> pipeline.take_over), vendor sockets keeping finished tasks (CancelledError tb -> self),
+_PipelineEnded traceback holding _run_reply's task, CPython 3.12.7 TaskGroup.__aexit__ `me` cycle.
+Fixes: no owner-capturing callbacks (pipeline/speaker/task_runner), runtime `_unwire` on exit stack,
+`stop_tasks` empties the list, `_clear_frames` in CallPipeline.run; webhook router prebuilt statements + per-batch
+lookups; CallTurnRepo prebuilt upsert executemany; GC thresholds (10_000, 5, 50).
+Second finding: the SIM runner had default GC -> full passes 85-105 ms (~175k objects) -> inflated overhead
+(cold run p50 152-153). Moved tuning to va_common.gc_tuning.tune_gc, sim calls it with the same thresholds.
+Tests: packages/va_common/tests/gc_cycles.py helper; va_voice test_pipeline_teardown (live cycles, fail pre-fix),
+runtime sim no_part_on_a_cycle x2 (fail pre-fix), test_gc_tuning, test_ws_tasks, router batch test, outbound log tests.
+Runs before the sim fix (fresh rebuild, 10 runs): underruns 0 x10; p50 153 (cold run 1), 101-137 others.
+
+## Review P08-FIX-3 (2026-11-04) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12661 passed, 7 skipped, cov 99 %);
+  focused new tests 51 + router/turn DB tests 26 passed. Builder `make e2e` finished 20 passed exit 0 (incl. capacity).
+- My own 4 capacity runs on the running stack: 0 underruns each, overhead p50 128/124/122/115 ms (≤ 140).
+- Diff matches specs/07 §9 Decision P08-FIX-3; Core inserts use column names (`text`), no owner-capturing callbacks left.

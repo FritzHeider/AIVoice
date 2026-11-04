@@ -7,6 +7,11 @@ batch, conversation, and widget are read only for events that can reach them, an
 at least one delivery is planned (from ``orgs.settings`` in the same session; ``OrgSettingsReader`` would
 open a second pool session). Inserts are ``ON CONFLICT (event_id, url) DO NOTHING``, so routing an event
 twice is harmless.
+
+The media worker routes every buffered call event of a flush through here, so the per-event work stays small
+(specs/07 §9 Decision P08-FIX-3): a batch reads each call's facts and each org's endpoints once, and the hot
+lookups are statements built once at import with bound parameters (building a statement per event made
+cyclic garbage that lengthened the collector's pauses on the media loop).
 """
 
 from __future__ import annotations
@@ -14,10 +19,10 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import Table, bindparam, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,25 +85,71 @@ async def batch_facts(session: AsyncSession, org_id: uuid.UUID, batch_id: uuid.U
     return None if found is None else found[0]
 
 
+_CALL_FACTS = select(
+    Call.config["webhook"].astext,
+    Call.config["webhook_events"],
+    Call.metadata_,
+).where(Call.org_id == bindparam("org_id"), Call.id == bindparam("call_id"))
+
+_ENDPOINTS = (
+    select(WebhookEndpoint.id, WebhookEndpoint.url, WebhookEndpoint.event_types, WebhookEndpoint.phi_allowed)
+    .where(WebhookEndpoint.org_id == bindparam("org_id"), WebhookEndpoint.enabled.is_(True))
+    .order_by(WebhookEndpoint.created_at, WebhookEndpoint.id)
+)
+
+_ORG_SETTINGS = select(Org.settings).where(Org.id == bindparam("org_id"))
+
+_INSERT_DELIVERIES = insert(cast("Table", WebhookDelivery.__table__)).on_conflict_do_nothing(
+    index_elements=["event_id", "url"]
+)
+
+
+class _BatchLookups:
+    """Call facts and endpoints read once per batch (they do not change inside the caller's transaction)."""
+
+    __slots__ = ("calls", "endpoints", "policies", "session")
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.calls: dict[tuple[uuid.UUID, uuid.UUID], CallFacts | None] = {}
+        self.endpoints: dict[uuid.UUID, tuple[EndpointTarget, ...]] = {}
+        self.policies: dict[uuid.UUID, DeliveryPolicy] = {}
+
+    async def call(self, org_id: uuid.UUID, call_id: uuid.UUID) -> CallFacts | None:
+        key = (org_id, call_id)
+        if key not in self.calls:
+            self.calls[key] = await _call(self.session, org_id, call_id)
+        return self.calls[key]
+
+    async def org_endpoints(self, org_id: uuid.UUID) -> tuple[EndpointTarget, ...]:
+        found = self.endpoints.get(org_id)
+        if found is None:
+            found = self.endpoints[org_id] = await _endpoints(self.session, org_id)
+        return found
+
+    async def policy(self, org_id: uuid.UUID) -> DeliveryPolicy:
+        found = self.policies.get(org_id)
+        if found is None:
+            found = self.policies[org_id] = await _policy(self.session, org_id)
+        return found
+
+
 async def _route_all(session: AsyncSession, events: Iterable[DomainEvent]) -> None:
-    policies: dict[uuid.UUID, DeliveryPolicy] = {}
+    lookups = _BatchLookups(session)
     for event in events:
-        facts = await _facts(session, event)
+        facts = await _facts(lookups, event)
         targets = plan_targets(event, facts)
         if not targets:
             continue
-        policy = policies.get(event.org_id)
-        if policy is None:
-            policy = await _policy(session, event.org_id)
-            policies[event.org_id] = policy
+        policy = await lookups.policy(event.org_id)
         await _insert(session, event, render_deliveries(event, targets, facts, policy))
 
 
-async def _facts(session: AsyncSession, event: DomainEvent) -> RoutingFacts:
-    org_id = event.org_id
+async def _facts(lookups: _BatchLookups, event: DomainEvent) -> RoutingFacts:
+    session, org_id = lookups.session, event.org_id
     batch = await _batch(session, org_id, event.batch_id) if event.batch_id and reaches_batch(event) else None
     return RoutingFacts(
-        call=await _call(session, org_id, event.call_id) if event.call_id is not None else None,
+        call=await lookups.call(org_id, event.call_id) if event.call_id is not None else None,
         batch=batch[0] if batch is not None else None,
         batch_url=batch[1] if batch is not None else None,
         conversation_url=(
@@ -111,7 +162,7 @@ async def _facts(session: AsyncSession, event: DomainEvent) -> RoutingFacts:
             if event.widget_id and reaches_widget(event)
             else None
         ),
-        endpoints=await _endpoints(session, org_id),
+        endpoints=await lookups.org_endpoints(org_id),
     )
 
 
@@ -126,15 +177,7 @@ def _webhook_events(value: Any) -> frozenset[str]:
 
 
 async def _call(session: AsyncSession, org_id: uuid.UUID, call_id: uuid.UUID) -> CallFacts | None:
-    row = (
-        await session.execute(
-            select(
-                Call.config["webhook"].astext,
-                Call.config["webhook_events"],
-                Call.metadata_,
-            ).where(Call.org_id == org_id, Call.id == call_id)
-        )
-    ).first()
+    row = (await session.execute(_CALL_FACTS, {"org_id": org_id, "call_id": call_id})).first()
     if row is None:
         return None
     webhook, webhook_events, metadata = row
@@ -184,13 +227,7 @@ async def _widget_url(session: AsyncSession, org_id: uuid.UUID, widget_id: uuid.
 
 
 async def _endpoints(session: AsyncSession, org_id: uuid.UUID) -> tuple[EndpointTarget, ...]:
-    rows = await session.execute(
-        select(
-            WebhookEndpoint.id, WebhookEndpoint.url, WebhookEndpoint.event_types, WebhookEndpoint.phi_allowed
-        )
-        .where(WebhookEndpoint.org_id == org_id, WebhookEndpoint.enabled.is_(True))
-        .order_by(WebhookEndpoint.created_at, WebhookEndpoint.id)
-    )
+    rows = await session.execute(_ENDPOINTS, {"org_id": org_id})
     return tuple(
         EndpointTarget(id=endpoint_id, url=url, event_types=tuple(event_types), phi_allowed=phi_allowed)
         for endpoint_id, url, event_types, phi_allowed in rows
@@ -198,7 +235,7 @@ async def _endpoints(session: AsyncSession, org_id: uuid.UUID) -> tuple[Endpoint
 
 
 async def _policy(session: AsyncSession, org_id: uuid.UUID) -> DeliveryPolicy:
-    stored = await session.scalar(select(Org.settings).where(Org.id == org_id))
+    stored = await session.scalar(_ORG_SETTINGS, {"org_id": org_id})
     settings = load_settings(stored or {})
     return DeliveryPolicy(hipaa=settings.hipaa_mode, call_format=settings.webhook_format)
 
@@ -221,5 +258,5 @@ async def _insert(session: AsyncSession, event: DomainEvent, planned: Sequence[P
         }
         for delivery in planned
     ]
-    statement = insert(WebhookDelivery).values(rows)
-    await session.execute(statement.on_conflict_do_nothing(index_elements=["event_id", "url"]))
+    if rows:
+        await session.execute(_INSERT_DELIVERIES, rows)

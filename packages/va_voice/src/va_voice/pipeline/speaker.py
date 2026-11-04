@@ -131,7 +131,7 @@ class Speaker:
         self._phrases = phrases
         self._wake = asyncio.Event()
         self._outbound = OutboundAudio(
-            transport, mixer, clock=clock, on_finished=self._on_finished, on_underrun=on_underrun
+            transport, mixer, clock=clock, on_finished=_waker(self._wake), on_underrun=on_underrun
         )
         self._active: _Utterance | None = None
         self._reply_audio = False
@@ -406,11 +406,6 @@ class Speaker:
         if utterance.timer is not None and first is not None:
             utterance.timer.mark(TurnMark.FIRST_AUDIO_OUT, first)
 
-    def _on_finished(self, tracker: PlaybackTracker) -> None:
-        """The outbound clock finished ``tracker``: re-check playback completion."""
-        del tracker
-        self._wake.set()
-
     def _now_ms(self) -> float:
         return self._clock.monotonic() * _MS_PER_SECOND
 
@@ -420,3 +415,14 @@ async def _close_tokens(tokens: AsyncIterable[str]) -> None:
     aclose: Callable[[], Coroutine[Any, Any, None]] | None = getattr(tokens, "aclose", None)
     if aclose is not None:
         await aclose()
+
+
+def _waker(wake: asyncio.Event) -> Callable[[PlaybackTracker], None]:
+    """The outbound clock's ``on_finished``: a finished tracker re-checks playback completion. It holds the
+    event only, never the speaker (no reference cycle, specs/07 §9 Decision P08-FIX-3)."""
+
+    def finished(tracker: PlaybackTracker) -> None:
+        del tracker
+        wake.set()
+
+    return finished

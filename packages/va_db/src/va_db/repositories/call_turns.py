@@ -4,6 +4,10 @@ P05-T11a).
 Rows are keyed by ``(call_id, turn_index, role)``. :meth:`CallTurnRepo.upsert_many` is idempotent: a re-sent
 row overwrites the stored values and merges ``latency`` (``stored || sent``, so a latency merged before a
 re-sent row survives). Run inside ``tenant_session(org_id)`` (RLS).
+
+The upsert is one statement built at import and executed with many parameter sets: building it per batch (a
+fresh ``excluded`` alias of every column and a multi-row VALUES that never hits the compiled cache) made
+cyclic garbage on the media loop (specs/07 §9 Decision P08-FIX-3).
 """
 
 from __future__ import annotations
@@ -11,9 +15,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import BindParameter, bindparam, delete, select, update
+from sqlalchemy import BindParameter, Table, bindparam, delete, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +40,18 @@ _UPDATED_COLUMNS = (
 )
 
 
+def _upsert_statement() -> Any:
+    table = cast("Table", CallTurn.__table__)
+    statement = insert(table)
+    excluded = statement.excluded
+    updates: dict[str, Any] = {name: excluded[name] for name in _UPDATED_COLUMNS}
+    updates["latency"] = table.c.latency.op("||")(excluded.latency)
+    return statement.on_conflict_do_update(index_elements=["call_id", "turn_index", "role"], set_=updates)
+
+
+_UPSERT = _upsert_statement()
+
+
 class CallTurnRepo:
     """The ``call_turns`` rows of one org."""
 
@@ -51,14 +67,7 @@ class CallTurnRepo:
         unique = _collapse(rows)
         if not unique:
             return 0
-        values = [self._values(row) for row in unique]
-        statement = insert(CallTurn).values(values)
-        excluded = statement.excluded
-        updates: dict[str, Any] = {name: excluded[name] for name in _UPDATED_COLUMNS}
-        updates["latency"] = CallTurn.latency.op("||")(excluded.latency)
-        await self.session.execute(
-            statement.on_conflict_do_update(index_elements=["call_id", "turn_index", "role"], set_=updates)
-        )
+        await self.session.execute(_UPSERT, [self._values(row) for row in unique])
         return len(unique)
 
     async def merge_latency(
