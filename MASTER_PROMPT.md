@@ -131,3 +131,12 @@ older text. Resolve the conflict in writing in the same commit.
 ---
 
 <!-- The phase-specific prompt (prompts/phase-NN.md) is appended below by scripts/ralph/run_phase.sh -->
+
+## 11. Review inbox (maintainer findings)
+
+Maintainers drop review findings into `.ralph/review-inbox/*.md` on this runner (git-ignored, never committed;
+attached patches sit next to the note). The Planner checks the inbox at the start of every activation, before
+picking the next unticked task: for each note not yet listed in `.ralph/review-inbox/DONE`, insert a FIX task
+(`P<NN>-FIX-<n> <title> — see .ralph/review-inbox/<file>`) at the top of the current phase checklist, plan it as
+usual, and append the file name to `DONE` once the Reviewer approves the fix. Findings marked "blocker" must be
+fixed; others may be closed with a written reason in the task's evidence. Never edit or delete inbox notes.
