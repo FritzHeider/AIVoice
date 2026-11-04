@@ -14,6 +14,7 @@ from tenant_rows import OrgFactory, open_database
 
 from va_db.models import PathwayTestRun, PathwayTestRunKind
 from va_db.repositories import NotFoundError, PathwayRepo, PathwayRunRepo, PathwayTestRepo
+from va_db.repositories.pathway_tests import result_key
 from va_db.session import Database
 
 pytestmark = pytest.mark.integration
@@ -186,3 +187,30 @@ async def test_a_missing_result_makes_the_run_an_error_and_a_failed_start_marks_
         assert (never.status, never.finished_at, never.started_at) == ("error", NOW, None)
     async with database.tenant_session(other) as session:
         assert await PathwayRunRepo(session, other).lock(never.id) is None
+
+
+def _simulation(simulation_id: str, status: str, **extra: object) -> dict[str, object]:
+    return {"simulation_id": simulation_id, "status": status, **extra}
+
+
+async def test_simulation_results_are_keyed_by_simulation_id(database: Database) -> None:
+    org_id = await OrgFactory(database).create()
+    orders = await pathway(database, org_id)
+    async with database.tenant_session(org_id) as session:
+        repo = PathwayRunRepo(session, org_id)
+        added = await repo.add(orders, version_number=1, kind="simulation")
+        assert await repo.put_result(added.id, _simulation("1-2", "passed", attempt=1))
+        assert await repo.put_result(added.id, _simulation("1-2", "failed", attempt=2))
+        assert await repo.put_result(added.id, _simulation("1-1", "error"), replace=False)
+        assert await repo.put_result(added.id, _simulation("1-1", "passed"), replace=False)
+        assert await repo.finish(added.id, ["1-1", "1-2", "2-1"], NOW) == "failed"
+    async with database.tenant_session(org_id) as session:
+        done = await PathwayRunRepo(session, org_id).get(orders, added.id)
+        assert done.results == [_simulation("1-1", "error"), _simulation("1-2", "failed", attempt=2)]
+
+
+def test_result_keys() -> None:
+    assert result_key({"test_id": "t", "simulation_id": "1-1"}) == "t"
+    assert result_key({"simulation_id": "2-3"}) == "2-3"
+    assert result_key({"status": "passed"}) is None
+    assert result_key("not an item") is None

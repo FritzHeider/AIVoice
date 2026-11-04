@@ -1876,3 +1876,13 @@ Grafana 3001
   there). Every LLM gateway is built by `va_llm.platform.platform_gateway` (api, media, worker); the worker now has
   `LlmSettings` + `WebhookSafetySettings` and its container opens two more HTTP clients (LLM + tools). DB seeding of
   the bella_pasta graph/tests for other packages: `pathways_helpers.store_bella_pasta` / `store_unit_test`.
+- 2026-11-04 (P07-T11d): simulations = `POST /v1/pathway/{id}/simulations` (`services.pathway_test_runs.
+  start_simulation_run`, schemas `ScenarioBody`/`SimulationRunRequest`) → `PathwayTestWorkflow` with
+  `PathwayTestWorkflowInput(kind="simulation", simulations=va_domain.pathway_tests.simulation_jobs(...))` →
+  activity `run_pathway_simulation` (`va_pathways.runs.run_stored_simulation` → `va_pathways.simulations.
+  run_simulation`, caller model + `[HANGUP]` + `grading.grade_conversation`); run results are keyed by
+  `va_db.repositories.pathway_tests.result_key` (`test_id` else `simulation_id`). Rules: specs/12 §9 Decision
+  P07-T11d. FakeLLM caller scripting: rules matching `system_contains: ['[HANGUP]']` with `call_index` n (counted
+  per rule and conversation id, only over caller requests) and a higher `priority`; an unscripted caller gets
+  FakeLLM's default `Okay. You said: …` and never hangs up. Tests: `pathways_helpers.job(simulation_id, **scenario)`
+  and `TextRig.simulate(job, active=)`.

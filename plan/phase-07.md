@@ -124,7 +124,7 @@
     va_workflows, worker registration on va-postcall, run status queued→running→passed/failed/error
   - Acceptance: workflow tests (time skipping) for passed/failed/error runs; api test starts the workflow.
 
-- [ ] P07-T11d Simulations (LLM-as-caller)
+- [x] P07-T11d Simulations (LLM-as-caller) — `POST /v1/pathway/{id}/simulations` → PathwayTestWorkflow kind simulation (run_pathway_simulation per conversation, ≤ 8 in flight), va_pathways.simulations caller model + `[HANGUP]` + goal grading with final variables; Decision P07-T11d (specs/12 §9); review: lint/typecheck/placeholders pass, make test 12369 passed (5 failed + 60 errors = load timeouts in untouched edge/sim/media/transcript modules, 95/95 pass alone), coverage 96.11%, targeted 195 passed, test-ts pass, openapi drift current, spec refs 0, jscpd 0 clones
   - Spec refs: specs/12-pathways-api.md §9 (simulations)
   - Depends on: P07-T11c
   - Deliverables: simulation runner in va_pathways (caller LLM persona, `[HANGUP]`, max_turns, goal grading,

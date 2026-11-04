@@ -36,6 +36,8 @@ POSTCALL_ACTIVITIES = [
     "begin_pathway_test_run",
     "run_pathway_unit_test",
     "record_pathway_test_error",
+    "run_pathway_simulation",
+    "record_pathway_simulation_error",
     "finish_pathway_test_run",
 ]
 

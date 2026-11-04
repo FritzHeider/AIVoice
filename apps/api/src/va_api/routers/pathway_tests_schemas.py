@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from va_api.routers.pathways_schemas import Name
 from va_db.models import PathwayTestRun, PathwayTestRunKind, PathwayTestRunStatus, PathwayUnitTest
-from va_domain.pathway_tests import MAX_RUN_TESTS
+from va_domain.pathway_tests import MAX_RUN_TESTS, MAX_RUNS_PER_SCENARIO, MAX_SCENARIOS, Scenario
 from va_pathways.unit_tests import MAX_VARIATIONS, Expected
 
 __all__ = [
@@ -28,6 +28,8 @@ __all__ = [
     "RunListItem",
     "RunOne",
     "RunSummary",
+    "ScenarioBody",
+    "SimulationRunRequest",
     "UnitTestCreate",
     "UnitTestDeleted",
     "UnitTestFromCall",
@@ -87,6 +89,14 @@ _RESULT: Final[dict[str, JsonValue]] = {
     "passed": True,
     "cases": [],
     "duration_ms": 4120,
+}
+
+_SCENARIO: Final[dict[str, JsonValue]] = {
+    "name": "Impatient caller",
+    "persona": ("You are an impatient customer who wants a large pizza delivered fast and interrupts often."),
+    "goal": "Order placed with address captured",
+    "max_turns": 20,
+    "request_data": {},
 }
 
 Content = Annotated[str, StringConstraints(max_length=MAX_CONTENT_LENGTH)]
@@ -345,6 +355,12 @@ class RunOne(BaseModel):
     run: RunDetail
 
 
+RunVersion = Annotated[
+    Annotated[int, Field(ge=1)] | Literal["draft", "production", "staging"],
+    Field(description="Version number, `draft` (default), `production`, or `staging`."),
+]
+
+
 class UnitTestRunRequest(BaseModel):
     """``POST /v1/pathway/{pathway_id}/tests/run``: the version to test and the tests (null = all)."""
 
@@ -358,11 +374,39 @@ class UnitTestRunRequest(BaseModel):
         },
     )
 
-    version: Annotated[int, Field(ge=1)] | Literal["draft", "production", "staging"] = Field(
-        default="draft", description="Version number, `draft` (default), `production`, or `staging`."
-    )
+    version: RunVersion = "draft"
     test_ids: list[uuid.UUID] | None = Field(
         default=None,
         max_length=MAX_RUN_TESTS,
         description="Tests to run in this order (duplicates ignored); null runs every test, oldest first.",
     )
+
+
+class ScenarioBody(Scenario):
+    """One simulated caller: ``persona`` (the caller model's instructions), ``goal`` (graded against the
+    transcript and the final variables), ``max_turns`` (1-50 caller lines, default 20) and the
+    ``request_data`` the pathway sees."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [_SCENARIO]})
+
+
+class SimulationRunRequest(BaseModel):
+    """``POST /v1/pathway/{pathway_id}/simulations``: the version to simulate, the scenarios, and how many
+    conversations each scenario runs."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"version": "draft", "scenarios": [_SCENARIO], "runs_per_scenario": 3}]
+        },
+    )
+
+    version: RunVersion = "draft"
+    scenarios: list[ScenarioBody] = Field(min_length=1, max_length=MAX_SCENARIOS)
+    runs_per_scenario: int = Field(
+        default=1, ge=1, le=MAX_RUNS_PER_SCENARIO, description="Conversations per scenario (1-10)."
+    )
+
+    def domain_scenarios(self) -> list[Scenario]:
+        """The scenarios as the workflow's domain models."""
+        return [Scenario.model_validate(scenario.model_dump()) for scenario in self.scenarios]

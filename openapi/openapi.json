@@ -8432,6 +8432,60 @@
         "title": "RunSummary",
         "type": "object"
       },
+      "ScenarioBody": {
+        "additionalProperties": false,
+        "description": "One simulated caller: ``persona`` (the caller model's instructions), ``goal`` (graded against the\ntranscript and the final variables), ``max_turns`` (1-50 caller lines, default 20) and the\n``request_data`` the pathway sees.",
+        "examples": [
+          {
+            "goal": "Order placed with address captured",
+            "max_turns": 20,
+            "name": "Impatient caller",
+            "persona": "You are an impatient customer who wants a large pizza delivered fast and interrupts often.",
+            "request_data": {}
+          }
+        ],
+        "properties": {
+          "goal": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "max_turns": {
+            "default": 20,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Max Turns",
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "persona": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Persona",
+            "type": "string"
+          },
+          "request_data": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Request Data",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "persona",
+          "goal"
+        ],
+        "title": "ScenarioBody",
+        "type": "object"
+      },
       "SendCallRequest": {
         "description": "The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.",
         "examples": [
@@ -9255,6 +9309,68 @@
           "created_at"
         ],
         "title": "SigningSecretView",
+        "type": "object"
+      },
+      "SimulationRunRequest": {
+        "additionalProperties": false,
+        "description": "``POST /v1/pathway/{pathway_id}/simulations``: the version to simulate, the scenarios, and how many\nconversations each scenario runs.",
+        "examples": [
+          {
+            "runs_per_scenario": 3,
+            "scenarios": [
+              {
+                "goal": "Order placed with address captured",
+                "max_turns": 20,
+                "name": "Impatient caller",
+                "persona": "You are an impatient customer who wants a large pizza delivered fast and interrupts often.",
+                "request_data": {}
+              }
+            ],
+            "version": "draft"
+          }
+        ],
+        "properties": {
+          "runs_per_scenario": {
+            "default": 1,
+            "description": "Conversations per scenario (1-10).",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Runs Per Scenario",
+            "type": "integer"
+          },
+          "scenarios": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioBody"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Scenarios",
+            "type": "array"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "enum": [
+                  "draft",
+                  "production",
+                  "staging"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "draft",
+            "description": "Version number, `draft` (default), `production`, or `staging`.",
+            "title": "Version"
+          }
+        },
+        "required": [
+          "scenarios"
+        ],
+        "title": "SimulationRunRequest",
         "type": "object"
       },
       "SmsSettings": {
@@ -15952,6 +16068,73 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/{pathway_id}/simulations": {
+      "post": {
+        "description": "Simulate callers: an LLM plays each scenario's persona against a version ``runs_per_scenario`` times\nand every conversation is graded against the scenario's goal; the run starts ``queued`` and is read\nthrough ``GET /runs/{run_id}``.",
+        "operationId": "pathways_simulations_create",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Simulations Create",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit-exempt": "simulation runs are recorded as pathway_test_runs rows",
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
       }
     },
     "/v1/pathway/{pathway_id}/tests": {

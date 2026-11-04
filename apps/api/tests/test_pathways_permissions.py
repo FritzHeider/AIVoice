@@ -272,14 +272,15 @@ async def test_chat_needs_pathways_write(
 
 TESTERS: Final[frozenset[MemberRole]] = frozenset({"owner", "admin", "developer", "analyst"})
 _UNIT_TEST: Final = {"name": "Greets", "node_id": "start", "user_message": "Hi"}
+_SIMULATION: Final = {"scenarios": [{"name": "Caller", "persona": "You call.", "goal": "Greeted"}]}
 
 
 @pytest.mark.parametrize("role", ROLES)
 async def test_unit_test_role_matrix(
     role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
 ) -> None:
-    """Analysts manage and run unit tests (specs/04 §3.2 row "Pathway tests / simulations"; Decisions
-    P07-T11b, P07-T11c)."""
+    """Analysts manage and run unit tests and simulations (specs/04 §3.2 row "Pathway tests / simulations";
+    Decisions P07-T11b, P07-T11c, P07-T11d)."""
     member = await signed_in(client, identity, container, role)
     pathway = await seed_pathway(identity, member.org.id)
     base = f"{BASE}/{pathway.id}"
@@ -294,10 +295,14 @@ async def test_unit_test_role_matrix(
             403,
             "FORBIDDEN",
         )
+        simulated = await client.post(f"{base}/simulations", json=_SIMULATION, headers=headers)
+        assert error_of(simulated)[:2] == (403, "FORBIDDEN")
         return
     assert created.status_code == 200, created.text
     run = await client.post(f"{base}/tests/run", json={}, headers=headers)
     assert (run.status_code, run.json()["run"]["status"]) == (200, "queued"), run.text
+    simulation = await client.post(f"{base}/simulations", json=_SIMULATION, headers=headers)
+    assert (simulation.status_code, simulation.json()["run"]["kind"]) == (200, "simulation"), simulation.text
     test_url = f"{base}/tests/{created.json()['test']['test_id']}"
     patched = await client.patch(test_url, json={"name": "Greets back"}, headers=headers)
     deleted = await client.delete(test_url, headers=headers)

@@ -1,9 +1,10 @@
-"""``PathwayTestWorkflow`` activities: run bookkeeping and one unit test per activity
-(specs/12-pathways-api.md §8, Decision P07-T11c).
+"""``PathwayTestWorkflow`` activities: run bookkeeping and one unit test or one simulated conversation per
+activity (specs/12-pathways-api.md §8 and §9, Decisions P07-T11c and P07-T11d).
 
-Each test activity writes its own result item into the run row (locked ``FOR UPDATE``, an item of the same
-test replaced) and returns only the item's status, so large results never enter the workflow history. The
-test runs with no database session open (the pool is small; a test may take minutes).
+Each test or simulation activity writes its own result item into the run row (locked ``FOR UPDATE``, an item
+with the same test or simulation id replaced) and returns only the item's status, so large results never
+enter the workflow history. The work runs with no database session open (the pool is small; a test or
+conversation may take minutes).
 """
 
 from __future__ import annotations
@@ -18,15 +19,19 @@ from va_common.logging import bound_context, get_logger
 from va_common.time import Clock
 from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import PathwayRunRepo
+from va_db.repositories.pathway_tests import result_key
 from va_db.session import Database
 from va_llm.tokens import TokenCounter, default_counter
 from va_pathways.conversation import TextDeps
 from va_pathways.recording import Item
-from va_pathways.runs import StoredTest, error_item, run_stored_test
+from va_pathways.runs import StoredSimulation, StoredTest, error_item, run_stored_simulation, run_stored_test
+from va_pathways.simulations import simulation_error_item
 from va_workflows.activities.pathway_tests_inputs import (
     FinishInput,
     FinishResult,
     RunRef,
+    SimulationErrorInput,
+    SimulationInput,
     UnitTestErrorInput,
     UnitTestInput,
     UnitTestOutcome,
@@ -38,7 +43,7 @@ _log = get_logger(__name__)
 
 
 class PathwayTestActivities:
-    """The four activities of ``PathwayTestWorkflow`` (registered on the post-call queue)."""
+    """The six activities of ``PathwayTestWorkflow`` (registered on the post-call queue)."""
 
     def __init__(
         self,
@@ -95,24 +100,47 @@ class PathwayTestActivities:
             # A result an earlier attempt stored before failing wins over the error.
             return await self._store(request, error_item(request.test_id, None, request.error), replace=False)
 
-    async def _store(
-        self, request: UnitTestInput | UnitTestErrorInput, item: Item, *, replace: bool = True
-    ) -> UnitTestOutcome:
+    @activity.defn(name="run_pathway_simulation")
+    async def run_pathway_simulation(self, request: SimulationInput) -> UnitTestOutcome:
+        """Run one simulated conversation and store its result item; returns the item's status."""
+        with bound_context(org_id=str(request.org_id), run_id=str(request.run_id)):
+            item = await run_stored_simulation(
+                self._text,
+                self._database,
+                self._org_settings,
+                StoredSimulation(
+                    org_id=request.org_id,
+                    pathway_id=request.pathway_id,
+                    version_number=request.version_number,
+                    job=request.job,
+                ),
+                counter=await self._token_counter(),
+            )
+            return await self._store(request, item)
+
+    @activity.defn(name="record_pathway_simulation_error")
+    async def record_pathway_simulation_error(self, request: SimulationErrorInput) -> UnitTestOutcome:
+        """Store an ``error`` item for a conversation whose activity failed after its retries."""
+        with bound_context(org_id=str(request.org_id), run_id=str(request.run_id)):
+            item = simulation_error_item(request.job, request.error)
+            return await self._store(request, item, replace=False)
+
+    async def _store(self, request: RunRef, item: Item, *, replace: bool = True) -> UnitTestOutcome:
         async with self._database.tenant_session(request.org_id) as session:
             repo = PathwayRunRepo(session, request.org_id)
             stored = await repo.put_result(request.run_id, item, replace=replace)
         if not stored:
-            _log.info("pathway_test_run.result_dropped", test_id=str(request.test_id))
+            _log.info("pathway_test_run.result_dropped", item_key=result_key(item))
             return "skipped"
         return cast("Literal['passed', 'failed', 'error']", item["status"])
 
     @activity.defn(name="finish_pathway_test_run")
     async def finish_pathway_test_run(self, request: FinishInput) -> FinishResult:
         """Order the results, set the final status and ``finished_at``."""
-        order = [str(test_id) for test_id in request.test_ids]
+        order = [str(test_id) for test_id in request.test_ids] + list(request.simulation_ids)
         async with self._database.tenant_session(request.org_id) as session:
             status = await PathwayRunRepo(session, request.org_id).finish(
                 request.run_id, order, self._clock.now()
             )
-        _log.info("pathway_test_run.finished", run_id=str(request.run_id), status=status, tests=len(order))
+        _log.info("pathway_test_run.finished", run_id=str(request.run_id), status=status, items=len(order))
         return FinishResult(status=status)

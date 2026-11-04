@@ -1,5 +1,5 @@
 """Inputs, results, timeouts, and retry policies of the ``PathwayTestWorkflow`` activities
-(specs/12-pathways-api.md §8, Decision P07-T11c).
+(specs/12-pathways-api.md §8 and §9, Decisions P07-T11c and P07-T11d).
 
 Workflows import this module to schedule the activities, so it imports only pydantic, the Temporal
 ``RetryPolicy``, and the import-free domain models.
@@ -14,16 +14,19 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict
 from temporalio.common import RetryPolicy
 
-from va_domain.pathway_tests import FinishedRunStatus
+from va_domain.pathway_tests import FinishedRunStatus, SimulationJob
 
 __all__ = [
     "BOOKKEEPING_RETRY",
     "BOOKKEEPING_TIMEOUT",
+    "SIMULATION_TIMEOUT",
     "TEST_RETRY",
     "TEST_TIMEOUT",
     "FinishInput",
     "FinishResult",
     "RunRef",
+    "SimulationErrorInput",
+    "SimulationInput",
     "UnitTestErrorInput",
     "UnitTestInput",
     "UnitTestOutcome",
@@ -31,6 +34,9 @@ __all__ = [
 
 TEST_TIMEOUT: Final = timedelta(minutes=30)
 """``run_pathway_unit_test``: 21 cases of at most 60 s each, the variations call, and grading."""
+SIMULATION_TIMEOUT: Final = timedelta(minutes=60)
+"""``run_pathway_simulation``: up to 50 caller turns of at most 60 s of engine time each, plus the caller
+model and grading."""
 TEST_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=5),
     backoff_coefficient=2.0,
@@ -38,7 +44,8 @@ TEST_RETRY: Final = RetryPolicy(
     maximum_attempts=3,
 )
 BOOKKEEPING_TIMEOUT: Final = timedelta(seconds=30)
-"""``begin_pathway_test_run``, ``record_pathway_test_error``, ``finish_pathway_test_run``."""
+"""``begin_pathway_test_run``, ``record_pathway_test_error``, ``record_pathway_simulation_error``,
+``finish_pathway_test_run``."""
 BOOKKEEPING_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -47,7 +54,8 @@ BOOKKEEPING_RETRY: Final = RetryPolicy(
 )
 
 type UnitTestOutcome = Literal["passed", "failed", "error", "skipped"]
-"""A test's result status; ``skipped`` when the run row is gone or finished (nothing was stored)."""
+"""A test's or simulation's result status; ``skipped`` when the run row is gone or finished (nothing was
+stored)."""
 
 
 class _Model(BaseModel):
@@ -76,10 +84,26 @@ class UnitTestErrorInput(RunRef):
     error: Literal["runner_error"] = "runner_error"
 
 
-class FinishInput(RunRef):
-    """The run's tests in result order."""
+class SimulationInput(RunRef):
+    """One conversation of a simulation run against the run's pathway version."""
 
-    test_ids: tuple[uuid.UUID, ...]
+    pathway_id: uuid.UUID
+    version_number: int
+    job: SimulationJob
+
+
+class SimulationErrorInput(RunRef):
+    """A conversation whose activity failed after its retries: stored as an ``error`` item with ``error``."""
+
+    job: SimulationJob
+    error: Literal["runner_error"] = "runner_error"
+
+
+class FinishInput(RunRef):
+    """The run's work in result order: test ids, then simulation ids."""
+
+    test_ids: tuple[uuid.UUID, ...] = ()
+    simulation_ids: tuple[str, ...] = ()
 
 
 class FinishResult(_Model):

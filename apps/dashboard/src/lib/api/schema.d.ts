@@ -1053,6 +1053,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/{pathway_id}/simulations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Simulations Create
+         * @description Simulate callers: an LLM plays each scenario's persona against a version ``runs_per_scenario`` times
+         *     and every conversation is graded against the scenario's goal; the run starts ``queued`` and is read
+         *     through ``GET /runs/{run_id}``.
+         */
+        post: operations["pathways_simulations_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}/tests": {
         parameters: {
             query?: never;
@@ -6303,6 +6325,36 @@ export interface components {
             total: number;
         };
         /**
+         * ScenarioBody
+         * @description One simulated caller: ``persona`` (the caller model's instructions), ``goal`` (graded against the
+         *     transcript and the final variables), ``max_turns`` (1-50 caller lines, default 20) and the
+         *     ``request_data`` the pathway sees.
+         * @example {
+         *       "goal": "Order placed with address captured",
+         *       "max_turns": 20,
+         *       "name": "Impatient caller",
+         *       "persona": "You are an impatient customer who wants a large pizza delivered fast and interrupts often.",
+         *       "request_data": {}
+         *     }
+         */
+        ScenarioBody: {
+            /** Goal */
+            goal: string;
+            /**
+             * Max Turns
+             * @default 20
+             */
+            max_turns: number;
+            /** Name */
+            name: string;
+            /** Persona */
+            persona: string;
+            /** Request Data */
+            request_data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
+        /**
          * SendCallRequest
          * @description The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.
          * @example {
@@ -6638,6 +6690,40 @@ export interface components {
              * @description Last four characters of the current secret.
              */
             secret_last4: string;
+        };
+        /**
+         * SimulationRunRequest
+         * @description ``POST /v1/pathway/{pathway_id}/simulations``: the version to simulate, the scenarios, and how many
+         *     conversations each scenario runs.
+         * @example {
+         *       "runs_per_scenario": 3,
+         *       "scenarios": [
+         *         {
+         *           "goal": "Order placed with address captured",
+         *           "max_turns": 20,
+         *           "name": "Impatient caller",
+         *           "persona": "You are an impatient customer who wants a large pizza delivered fast and interrupts often.",
+         *           "request_data": {}
+         *         }
+         *       ],
+         *       "version": "draft"
+         *     }
+         */
+        SimulationRunRequest: {
+            /**
+             * Runs Per Scenario
+             * @description Conversations per scenario (1-10).
+             * @default 1
+             */
+            runs_per_scenario: number;
+            /** Scenarios */
+            scenarios: components["schemas"]["ScenarioBody"][];
+            /**
+             * Version
+             * @description Version number, `draft` (default), `production`, or `staging`.
+             * @default draft
+             */
+            version: number | ("draft" | "production" | "staging");
         };
         /**
          * SmsSettings
@@ -10508,6 +10594,50 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_simulations_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SimulationRunRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

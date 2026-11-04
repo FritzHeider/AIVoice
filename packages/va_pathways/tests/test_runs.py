@@ -1,5 +1,6 @@
-"""``run_stored_test``: a stored unit test against a stored pathway version, and the error items for data that
-disappeared (specs/12 §8; Decision P07-T11c)."""
+"""``run_stored_test`` / ``run_stored_simulation``: a stored unit test or a simulation against a stored
+pathway version, and the error items for data that disappeared (specs/12 §8, §9; Decisions P07-T11c and
+P07-T11d)."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
-from pathways_helpers import TextRig, store_bella_pasta, store_unit_test, text_rig
+from pathways_helpers import GREETING, TextRig, job, store_bella_pasta, store_unit_test, text_rig
 from tenant_rows import OrgFactory, open_database
 
 from va_common.settings import Environment
@@ -17,7 +18,15 @@ from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import PathwayTestRepo
 from va_db.session import Database
 from va_llm.tokens import default_counter
-from va_pathways.runs import StoredTest, error_item, insecure_urls_allowed, run_stored_test
+from va_pathways.runs import (
+    StoredSimulation,
+    StoredTest,
+    error_item,
+    insecure_urls_allowed,
+    run_stored_simulation,
+    run_stored_test,
+)
+from va_pathways.simulations import HANGUP_MARKER, simulation_error_item
 
 pytestmark = pytest.mark.integration
 
@@ -97,3 +106,29 @@ def test_error_items_and_insecure_environments() -> None:
         "error": "runner_error",
     }
     assert [env for env in Environment if insecure_urls_allowed(env)] == [Environment.LOCAL, Environment.TEST]
+
+
+async def test_a_simulation_runs_against_the_stored_version(rig: TextRig, database: Database) -> None:
+    org_id, other = await OrgFactory(database).create(), await OrgFactory(database).create()
+    pathway_id = await store_bella_pasta(database, org_id)
+    await rig.rules(
+        f"rules:\n  - id: caller\n    priority: 10\n    match: {{system_contains: ['{HANGUP_MARKER}']}}\n"
+        f"    respond:\n      content: 'No thanks. {HANGUP_MARKER}'\n"
+        "  - id: grade\n    match: {tool_name: grade}\n    respond:\n"
+        "      tool_calls: [{name: grade, arguments: {pass: true, rationale: ok}}]\n"
+    )
+    reader = OrgSettingsReader(database, FakeAsyncRedis())
+
+    async def simulate(org: uuid.UUID, version: int) -> Any:
+        stored = StoredSimulation(org_id=org, pathway_id=pathway_id, version_number=version, job=job("1-2"))
+        return await run_stored_simulation(rig.deps, database, reader, stored, counter=default_counter())
+
+    item = await simulate(org_id, 1)
+    assert (item["simulation_id"], item["status"], item["ended_by"]) == ("1-2", "passed", "hangup")
+    assert item["transcript"] == [
+        {"role": "assistant", "content": GREETING},
+        {"role": "user", "content": "No thanks."},
+    ]
+    unavailable = simulation_error_item(job("1-2"), "version_unavailable")
+    assert await simulate(org_id, 9) == unavailable
+    assert await simulate(other, 1) == unavailable

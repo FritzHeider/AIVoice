@@ -487,6 +487,48 @@ phone. Say "[HANGUP]" when you would hang up.`) converses with the engine in tex
 grader checks `goal` against the transcript + final variables. Results stored in `pathway_test_runs(kind='simulation')`
 with full transcripts.
 
+> Decision (2026-11-04): simulations (P07-T11d).
+> 1. Body `{"version": "draft"|"production"|"staging"|int ≥ 1 (default "draft"), "scenarios": [1-20 items],
+>    "runs_per_scenario": 1-10 (default 1)}`, other keys rejected. Scenario `{name 1-200, persona 1-4 000, goal
+>    1-2 000 (all three trimmed), max_turns 1-50 (default 20), request_data object (default {})}`, other keys
+>    rejected; violations are 400 `INVALID_INPUT` with the field path (`scenarios[0].max_turns`). The version
+>    resolves at request time like unit runs (Decision P07-T11c item 1). Permission `pathways:write` with no
+>    editing-role guard (analysts run simulations, specs/04 §3.2), no audit row, `Idempotency-Key` replays. The
+>    request inserts `pathway_test_runs(kind='simulation', status='queued')`, commits, and starts
+>    `PathwayTestWorkflow` exactly like a unit run (same id, queue, failure handling: run `error` + 503); answer
+>    200 `{"status":"success","run":<run detail>}`.
+> 2. Scenario i × run r (both 1-based) is one conversation with `simulation_id` `"<i>-<r>"`, in scenario order
+>    then run order; the workflow input carries `kind: "simulation"` and the jobs (at most 200: the 4 000-char
+>    personas stay far below Temporal's 2 MB payload limit). Each conversation is one `run_pathway_simulation`
+>    activity (60 min start-to-close, the unit-test retry policy), at most 8 in flight, storing its own item
+>    (replaced by `simulation_id`); a failure after the retries stores a `runner_error` item via
+>    `record_pathway_simulation_error`. The finish orders results by job order and sets the status as for
+>    unit runs.
+> 3. One conversation: a fresh engine state at the start node, `request_data` = the scenario's, the simulated
+>    caller/number of the test chat, and a new conversation id used as the call id of every LLM call of that
+>    conversation (the caller's included). The agent speaks first (`start`); then the caller model answers
+>    (call type `analysis`, temperature 0.7, max_tokens 256, system = persona + blank line + the suffix above,
+>    agent lines as `user` messages — `(silence)` for an agent turn that said nothing — and its own lines as
+>    `assistant`). A reply containing `[HANGUP]` (case-sensitive) ends the conversation (`ended_by: "hangup"`):
+>    the text before it, trimmed, is kept as the caller's last transcript line when non-blank and is never sent
+>    to the engine. Any other reply is one `handle_user_turn` (capped at 60 s like a unit-test case). The
+>    conversation also ends after the agent answered caller line `max_turns` (`max_turns`) or when the agent
+>    ended it (End Call, transfer: `agent_ended`).
+> 4. Grading (only when the conversation ran without error): one forced `grade` call (analysis model), messages
+>    = the transcript (`Caller:`/`Agent:` lines), `Final variables: <JSON, sorted keys>`, then `Given the full
+>    conversation and the final variables, did the conversation achieve this goal? Goal: "{goal}". Be strict.`
+>    with the goal substituted literally. Verdict pass → `passed`, fail → `failed`. Errors give `status:
+>    "error"`: `engine_error`, `turn_timeout`, `caller_unavailable`, `caller_invalid` (a blank reply without
+>    `[HANGUP]`) end the conversation with `ended_by: "error"`; `grading_unavailable` keeps the real `ended_by`;
+>    `version_unavailable` (the version no longer loads or has no start node) and `runner_error` are items of
+>    conversations that never ran.
+> 5. Result item: `{"simulation_id", "scenario" (name), "run", "goal", "passed", "status", "ended_by", "turns"
+>    (caller lines sent to the engine), "transcript": [{"role": "assistant"|"user", "content"}] (agent =
+>    assistant, caller = user, blank agent turns omitted), "variables" (final), "grading": {pass,
+>    rationale}|null, "actions" (simulated actions, chat shape), "duration_ms", "error"?}`; items of
+>    conversations that never ran have `turns` 0, empty `transcript`/`variables`/`actions`, `grading` null,
+>    `duration_ms` 0. The run summary counts `status` as for unit runs.
+
 Regression settings (`GET/PUT /regression`), stored in `pathways` draft `global_config.regression`:
 `{"run_on_publish": true, "block_publish_on_failure": true, "include_simulations": false}`.
 

@@ -3,16 +3,25 @@ route, variables, grading, variations, tool mocks, real webhooks, and every case
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 import orjson
 import pytest
-from pathways_helpers import GREETING, TextRig, bella_pasta, spec, text_rig
+from pathways_helpers import (
+    GREETING,
+    TextRig,
+    bella_pasta,
+    broken_user_turns,
+    grade_rule,
+    route_rule,
+    size_rule,
+    spec,
+    text_rig,
+)
 from webhook_receiver import Receiver, Reply, served_receiver
 
 from va_engine.engine import PathwayEngine
-from va_engine.models.results import Action, Wait
 from va_pathways import unit_tests
 from va_pathways.grading import GRADE_PROMPT
 
@@ -25,30 +34,8 @@ async def rig() -> AsyncIterator[TextRig]:
         yield running
 
 
-def _route_rule(path_id: str) -> str:
-    return (
-        "rules:\n  - id: route\n    match: {tool_name: select_path}\n    respond:\n"
-        f"      tool_calls: [{{name: select_path, arguments: {{path_id: {path_id}, confidence: 9,"
-        " alternatives: [], reason: scripted}}]\n"
-    )
-
-
-def _size_rule(size: str) -> str:
-    return (
-        "rules:\n  - id: size\n    match: {tool_name: extract_variables}\n    respond:\n"
-        f"      tool_calls: [{{name: extract_variables, arguments: {{pizza_size: {size}}}}}]\n"
-    )
-
-
-def _grade_rule(verdict: str, rationale: str) -> str:
-    return (
-        "rules:\n  - id: grade\n    match: {tool_name: grade}\n    respond:\n"
-        f"      tool_calls: [{{name: grade, arguments: {{pass: {verdict}, rationale: {rationale}}}}}]\n"
-    )
-
-
 async def test_route_and_variables_pass_with_case_insensitive_strings(rig: TextRig) -> None:
-    await rig.rules(_size_rule("LARGE"))
+    await rig.rules(size_rule("LARGE"))
     result = await rig.run(
         spec(expected={"route_to_node_id": "order", "variables": {"pizza_size": "large"}}),
         test_id="PT-1",
@@ -76,8 +63,8 @@ async def test_route_and_variables_pass_with_case_insensitive_strings(rig: TextR
 
 
 async def test_wrong_route_or_variable_fails_the_test(rig: TextRig) -> None:
-    await rig.rules(_route_rule("e_bye"))
-    await rig.rules(_size_rule("small"))
+    await rig.rules(route_rule("e_bye"))
+    await rig.rules(size_rule("small"))
     result = await rig.run(spec(expected={"route_to_node_id": "order"}))
     [case] = result.cases
     assert (result.status, result.passed, case.passed, case.route, case.error) == (
@@ -95,7 +82,7 @@ async def test_wrong_route_or_variable_fails_the_test(rig: TextRig) -> None:
 
 async def test_grading_goal_pass_and_fail(rig: TextRig) -> None:
     goal = 'Ask about toppings {"strictly"}.'
-    await rig.rules(_grade_rule("true", "Asked about toppings."))
+    await rig.rules(grade_rule("true", "Asked about toppings."))
     passed = await rig.run(spec(expected={"route_to_node_id": "order", "grading_goal": goal}))
     assert passed.status == "passed"
     assert dict(passed.cases[0].item())["grading"] == {"pass": True, "rationale": "Asked about toppings."}
@@ -111,7 +98,7 @@ async def test_grading_goal_pass_and_fail(rig: TextRig) -> None:
         "Agent: Great, what toppings would you like?"
     )
     assert prompt["content"] == GRADE_PROMPT.replace("{goal}", goal)
-    await rig.rules(_grade_rule("false", "Did not confirm the size."))
+    await rig.rules(grade_rule("false", "Did not confirm the size."))
     failed = await rig.run(spec(expected={"route_to_node_id": "order", "grading_goal": goal}))
     [case] = failed.cases
     assert (failed.status, case.passed, case.error) == ("failed", False, None)
@@ -226,12 +213,7 @@ async def test_turn_timeout_is_a_case_error(rig: TextRig, monkeypatch: pytest.Mo
 
 
 async def test_engine_failure_is_a_case_error(rig: TextRig, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def broken(self: PathwayEngine, turn: Any) -> AsyncGenerator[Action]:
-        if turn.text:
-            raise RuntimeError(turn.text)
-        yield Wait(seconds=1)
-
-    monkeypatch.setattr(PathwayEngine, "handle_user_turn", broken)
+    monkeypatch.setattr(PathwayEngine, "handle_user_turn", broken_user_turns)
     result = await rig.run(spec())
     assert (result.status, result.cases[0].error) == ("error", "engine_error")
 

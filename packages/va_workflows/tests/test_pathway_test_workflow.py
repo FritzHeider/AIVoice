@@ -1,5 +1,6 @@
-"""``PathwayTestWorkflow`` on the time-skipping server with fake activities: begin, at most 8 tests at once,
-runner errors recorded per test, finish in test order (specs/12 §8; Decision P07-T11c)."""
+"""``PathwayTestWorkflow`` on the time-skipping server with fake activities: begin, at most 8 tests or
+conversations at once, runner errors recorded per item, finish in result order (specs/12 §8, §9; Decisions
+P07-T11c and P07-T11d)."""
 
 from __future__ import annotations
 
@@ -17,11 +18,13 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 from workflow_rig import POSTCALL_QUEUE, workflow_env
 
-from va_domain.pathway_tests import RUN_CONCURRENCY, PathwayTestWorkflowInput
+from va_domain.pathway_tests import RUN_CONCURRENCY, PathwayTestWorkflowInput, Scenario, simulation_jobs
 from va_workflows.activities.pathway_tests_inputs import (
     FinishInput,
     FinishResult,
     RunRef,
+    SimulationErrorInput,
+    SimulationInput,
     UnitTestErrorInput,
     UnitTestInput,
     UnitTestOutcome,
@@ -34,11 +37,11 @@ pytestmark = pytest.mark.integration
 
 @dataclass
 class FakeTestActivities:
-    """The four activities by their production names; ``outcomes`` scripts a status (or an exception) per
-    test id (default ``passed``)."""
+    """The six activities by their production names; ``outcomes`` scripts a status (or an exception) per
+    test or simulation id (default ``passed``)."""
 
     begins: bool = True
-    outcomes: dict[uuid.UUID, UnitTestOutcome | Exception] = field(default_factory=dict)
+    outcomes: dict[uuid.UUID | str, UnitTestOutcome | Exception] = field(default_factory=dict)
     record_fails: bool = False
     calls: list[tuple[str, Any]] = field(default_factory=list)
     in_flight: int = 0
@@ -54,36 +57,53 @@ class FakeTestActivities:
         @activity.defn(name="run_pathway_unit_test")
         async def run_test(request: UnitTestInput) -> UnitTestOutcome:
             self.calls.append(("run", request.test_id))
-            self.in_flight += 1
-            self.max_in_flight = max(self.max_in_flight, self.in_flight)
-            if self.in_flight >= RUN_CONCURRENCY:
-                self.full.set()
-            try:
-                # Hold until the cap is reached (bounded: a run with fewer tests never fills it).
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self.full.wait(), timeout=0.5)
-                await asyncio.sleep(0.01)
-            finally:
-                self.in_flight -= 1
-            outcome = self.outcomes.get(request.test_id, "passed")
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
+            return await self._hold(request.test_id)
+
+        @activity.defn(name="run_pathway_simulation")
+        async def run_simulation(request: SimulationInput) -> UnitTestOutcome:
+            self.calls.append(("simulate", (request.job.simulation_id, request.version_number)))
+            return await self._hold(request.job.simulation_id)
 
         @activity.defn(name="record_pathway_test_error")
         async def record(request: UnitTestErrorInput) -> UnitTestOutcome:
             self.calls.append(("record", (request.test_id, request.error)))
-            if self.record_fails:
-                msg = "database down"
-                raise ApplicationError(msg, non_retryable=True)
-            return "error"
+            return self._recorded()
+
+        @activity.defn(name="record_pathway_simulation_error")
+        async def record_simulation(request: SimulationErrorInput) -> UnitTestOutcome:
+            self.calls.append(("record_simulation", (request.job.simulation_id, request.error)))
+            return self._recorded()
 
         @activity.defn(name="finish_pathway_test_run")
         async def finish(request: FinishInput) -> FinishResult:
+            self.calls.append(("finish_simulations", request.simulation_ids))
             self.calls.append(("finish", request.test_ids))
             return FinishResult(status="failed" if "failed" in self.outcomes.values() else "passed")
 
-        return [begin, run_test, record, finish]
+        return [begin, run_test, run_simulation, record, record_simulation, finish]
+
+    def _recorded(self) -> UnitTestOutcome:
+        if self.record_fails:
+            msg = "database down"
+            raise ApplicationError(msg, non_retryable=True)
+        return "error"
+
+    async def _hold(self, key: uuid.UUID | str) -> UnitTestOutcome:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        if self.in_flight >= RUN_CONCURRENCY:
+            self.full.set()
+        try:
+            # Hold until the cap is reached (bounded: a run with fewer items never fills it).
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.full.wait(), timeout=0.5)
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        outcome = self.outcomes.get(key, "passed")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
     def named(self, name: str) -> list[Any]:
         return [value for call, value in self.calls if call == name]
@@ -163,3 +183,42 @@ async def test_an_unrecordable_error_still_finishes_the_run(env: WorkflowEnviron
     result = await run(env, fakes, begin)
     assert result.outcomes == {str(begin.test_ids[0]): "unrecorded"}
     assert fakes.named("finish") == [begin.test_ids]
+
+
+def simulation_start(scenarios: int, runs: int) -> PathwayTestWorkflowInput:
+    scenario = Scenario(name="Caller", persona="You call.", goal="Done")
+    return PathwayTestWorkflowInput(
+        run_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        pathway_id=uuid.uuid4(),
+        version_number=4,
+        kind="simulation",
+        simulations=simulation_jobs([scenario] * scenarios, runs),
+    )
+
+
+async def test_a_simulation_run_runs_every_conversation_eight_at_once(env: WorkflowEnvironment) -> None:
+    fakes = FakeTestActivities()
+    begin = simulation_start(4, 3)
+    fakes.outcomes["2-2"] = "failed"
+    result = await run(env, fakes, begin)
+    ids = [job.simulation_id for job in begin.simulations]
+    assert (result.started, result.status) == (True, "failed")
+    assert sorted(fakes.named("simulate")) == sorted((simulation_id, 4) for simulation_id in ids)
+    assert fakes.named("run") == []
+    assert fakes.max_in_flight == RUN_CONCURRENCY
+    assert fakes.named("finish") == [()]
+    assert fakes.named("finish_simulations") == [tuple(ids)]
+    assert result.outcomes == {
+        simulation_id: "failed" if simulation_id == "2-2" else "passed" for simulation_id in ids
+    }
+
+
+async def test_a_failing_simulation_activity_is_recorded_as_a_runner_error(env: WorkflowEnvironment) -> None:
+    fakes = FakeTestActivities()
+    begin = simulation_start(1, 2)
+    fakes.outcomes["1-1"] = ApplicationError("caller model exploded", non_retryable=True)
+    result = await run(env, fakes, begin)
+    assert fakes.named("record_simulation") == [("1-1", "runner_error")]
+    assert fakes.named("record") == []
+    assert result.outcomes == {"1-1": "error", "1-2": "passed"}

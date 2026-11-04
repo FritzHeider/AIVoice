@@ -1,5 +1,5 @@
 """va_pathways test helpers: a text-run rig over FakeLLM and the unit-test graph (specs/12 §8 Decision
-P07-T11a).
+P07-T11a; simulations: specs/12 §9 Decision P07-T11d).
 
 :func:`text_rig` serves FakeLLM on a real socket behind a real :class:`~va_llm.LlmGateway` (manual clock: its
 deadlines never fire) and gives :class:`~va_pathways.conversation.TextDeps` on the wall clock (the turn cap)
@@ -9,7 +9,7 @@ with a plain tool HTTP client. :func:`bella_pasta` is the tested graph: FakeLLM 
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -25,11 +25,16 @@ from va_db.repositories import PathwayRepo, PathwayTestRepo
 from va_db.repositories.pathways import PathwayGraphJson
 from va_db.session import Database
 from va_domain.org import OrgSettings
+from va_domain.pathway_tests import Scenario, SimulationJob
+from va_engine.engine import PathwayEngine
 from va_engine.models import dump_graph, graph_hash, load_graph
+from va_engine.models.results import Action, Wait
 from va_engine.navigation import ActiveGraph
 from va_llm.tokens import default_counter
 from va_pathways.conversation import TextDeps
+from va_pathways.simulations import SimulationResult, run_simulation
 from va_pathways.unit_tests import UnitTestResult, UnitTestSpec, run_unit_test
+from va_voice.pipeline.models import UserTurn
 
 __all__ = [
     "GREETING",
@@ -38,6 +43,11 @@ __all__ = [
     "LlmControl",
     "TextRig",
     "bella_pasta",
+    "broken_user_turns",
+    "grade_rule",
+    "job",
+    "route_rule",
+    "size_rule",
     "spec",
     "store_bella_pasta",
     "store_unit_test",
@@ -94,6 +104,54 @@ def spec(user_message: str = "I want to order some food", **fields: Any) -> Unit
         **fields,
     }
     return UnitTestSpec.model_validate(body)
+
+
+def route_rule(path_id: str) -> str:
+    """FakeLLM: every route decision picks ``path_id``."""
+    return (
+        "rules:\n  - id: route\n    match: {tool_name: select_path}\n    respond:\n"
+        f"      tool_calls: [{{name: select_path, arguments: {{path_id: {path_id}, confidence: 9,"
+        " alternatives: [], reason: scripted}}]\n"
+    )
+
+
+def size_rule(size: str) -> str:
+    """FakeLLM: every extraction finds ``pizza_size``."""
+    return (
+        "rules:\n  - id: size\n    match: {tool_name: extract_variables}\n    respond:\n"
+        f"      tool_calls: [{{name: extract_variables, arguments: {{pizza_size: {size}}}}}]\n"
+    )
+
+
+def grade_rule(verdict: str, rationale: str) -> str:
+    """FakeLLM: every ``grade`` call answers ``verdict``."""
+    return (
+        "rules:\n  - id: grade\n    match: {tool_name: grade}\n    respond:\n"
+        f"      tool_calls: [{{name: grade, arguments: {{pass: {verdict}, rationale: {rationale}}}}}]\n"
+    )
+
+
+async def broken_user_turns(self: PathwayEngine, turn: UserTurn) -> AsyncGenerator[Action]:
+    """A ``PathwayEngine.handle_user_turn`` replacement that raises for any caller text."""
+    if turn.text:
+        raise RuntimeError(turn.text)
+    yield Wait(seconds=1)
+
+
+def job(simulation_id: str = "1-1", **fields: Any) -> SimulationJob:
+    """One conversation of a pizza-ordering scenario (``fields`` override scenario keys)."""
+    scenario = Scenario.model_validate(
+        {
+            "name": "Hungry caller",
+            "persona": "You are a hungry customer who wants a large pizza.",
+            "goal": "Pizza size captured",
+            **fields,
+        }
+    )
+    scenario_index, run_index = (int(part) for part in simulation_id.split("-"))
+    return SimulationJob(
+        simulation_id=simulation_id, scenario_index=scenario_index, run_index=run_index, scenario=scenario
+    )
 
 
 async def store_bella_pasta(database: Database, org_id: uuid.UUID) -> uuid.UUID:
@@ -160,6 +218,23 @@ class TextRig(LlmControl):
             self.deps,
             test,
             test_id=test_id,
+            org_id=ORG,
+            active=active if active is not None else bella_pasta(),
+            org=org,
+            loader=self.loader,
+            counter=default_counter(),
+        )
+
+    async def simulate(
+        self,
+        simulation: SimulationJob,
+        active: ActiveGraph | None = None,
+        *,
+        org: OrgSettings = NO_SPECULATION,
+    ) -> SimulationResult:
+        return await run_simulation(
+            self.deps,
+            simulation,
             org_id=ORG,
             active=active if active is not None else bella_pasta(),
             org=org,

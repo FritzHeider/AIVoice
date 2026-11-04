@@ -4,7 +4,7 @@ Rules: specs/12 §8 Decision P07-T11b. The routes attach to :data:`va_api.router
 (``va_api.main`` imports this module for that side effect). Reads need ``pathways:read``; writes need
 ``pathways:write`` with no editing-role guard: specs/04 §3.2 lets analysts manage pathway tests. The literal
 ``/tests/from_call`` and ``/tests/run`` routes are declared before ``/tests/{test_id}``. Runs: Decision
-P07-T11c.
+P07-T11c; simulations (specs/12 §9): Decision P07-T11d.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from va_api.auth.session_auth import clock_of, database_of
 from va_api.routers.pathway_tests_schemas import (
     RunList,
     RunOne,
+    SimulationRunRequest,
     UnitTestCreate,
     UnitTestDeleted,
     UnitTestFromCall,
@@ -33,7 +34,7 @@ from va_api.routers.pathway_tests_schemas import (
     unit_test_view,
 )
 from va_api.routers.pathways import DEFAULT_LIST_LIMIT, pathways_router
-from va_api.services.pathway_test_runs import PathwayTestStarter, start_unit_run
+from va_api.services.pathway_test_runs import PathwayTestStarter, start_simulation_run, start_unit_run
 from va_api.services.pathway_tests import (
     TEST_DELETED_MESSAGE,
     capture_from_call,
@@ -50,6 +51,7 @@ from va_db.models import PathwayTestRunKind
 __all__ = [
     "pathways_runs_get",
     "pathways_runs_list",
+    "pathways_simulations_create",
     "pathways_tests_create",
     "pathways_tests_delete",
     "pathways_tests_from_call",
@@ -209,3 +211,28 @@ async def pathways_runs_get(
     """One run of the pathway with its results."""
     async with database_of(request).tenant_session(ctx.org_id) as session:
         return RunOne(run=run_detail(await get_run(session, ctx, pathway_id, run_id)))
+
+
+@pathways_router.post(
+    "/{pathway_id}/simulations",
+    operation_id="pathways_simulations_create",
+    openapi_extra={**_WRITE, **audit_exempt("simulation runs are recorded as pathway_test_runs rows")},
+)
+async def pathways_simulations_create(
+    pathway_id: uuid.UUID, body: SimulationRunRequest, request: Request, ctx: WritePathways
+) -> RunOne:
+    """Simulate callers: an LLM plays each scenario's persona against a version ``runs_per_scenario`` times
+    and every conversation is graded against the scenario's goal; the run starts ``queued`` and is read
+    through ``GET /runs/{run_id}``."""
+    starter: PathwayTestStarter = request.app.state.container.pathway_test_starter
+    run = await start_simulation_run(
+        database_of(request),
+        starter,
+        clock_of(request),
+        ctx,
+        pathway_id,
+        version=body.version,
+        scenarios=body.domain_scenarios(),
+        runs_per_scenario=body.runs_per_scenario,
+    )
+    return RunOne(run=run_detail(run))

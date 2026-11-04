@@ -13,7 +13,7 @@ from session_helpers import SessionContainer, make_member, store_api_key
 from va_db.models import Pathway
 from va_db.repositories import PathwayGraphJson, PathwayRepo
 
-__all__ = ["BASE", "FOLDERS", "START_ONLY", "Api", "add", "seed_pathway", "star_api"]
+__all__ = ["BASE", "FOLDERS", "START_ONLY", "Api", "add", "run_of", "seed_pathway", "star_api"]
 
 BASE: Final = "/v1/pathway"
 FOLDERS: Final = f"{BASE}/folders"
@@ -104,6 +104,13 @@ class Api:
     async def move(self, folder_id: str, pathway_ids: Sequence[str]) -> httpx.Response:
         body = {"pathway_ids": list(pathway_ids)}
         return await self.client.post(f"{FOLDERS}/{folder_id}/move", json=body, headers=self.headers)
+
+
+def run_of(response: httpx.Response) -> dict[str, Any]:
+    """The ``run`` of a 200 run response (``POST /tests/run``, ``/simulations``, ``GET /runs/{id}``)."""
+    assert response.status_code == 200, response.text
+    run: dict[str, Any] = response.json()["run"]
+    return run
 
 
 async def add(identity: IdentityDb, org_id: uuid.UUID, *rows: Any) -> None:

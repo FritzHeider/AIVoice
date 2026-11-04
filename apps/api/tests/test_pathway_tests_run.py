@@ -9,7 +9,7 @@ from typing import Any, Final
 import httpx
 import pytest
 from identity_db import IdentityDb
-from pathway_helpers import BASE, Api, star_api
+from pathway_helpers import BASE, Api, run_of, star_api
 from session_helpers import SessionContainer, error_of
 from sqlalchemy import select
 
@@ -44,16 +44,10 @@ class Runs:
         )
 
     async def started(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        response = await self.start(body)
-        assert response.status_code == 200, response.text
-        run: dict[str, Any] = response.json()["run"]
-        return run
+        return run_of(await self.start(body))
 
     async def read(self, run_id: str) -> dict[str, Any]:
-        response = await self.api.client.get(f"{self.base}/runs/{run_id}", headers=self.api.headers)
-        assert response.status_code == 200, response.text
-        run: dict[str, Any] = response.json()["run"]
-        return run
+        return run_of(await self.api.client.get(f"{self.base}/runs/{run_id}", headers=self.api.headers))
 
 
 @pytest.fixture

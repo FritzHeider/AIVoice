@@ -157,6 +157,8 @@ class WorkerActivities:
                     tests.begin_pathway_test_run,
                     tests.run_pathway_unit_test,
                     tests.record_pathway_test_error,
+                    tests.run_pathway_simulation,
+                    tests.record_pathway_simulation_error,
                     tests.finish_pathway_test_run,
                 )
             )

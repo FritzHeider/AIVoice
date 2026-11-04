@@ -1,5 +1,5 @@
 """The ``PathwayTestWorkflow`` start contract shared by the api (starter) and the worker
-(specs/12-pathways-api.md §8; Decision P07-T11c there).
+(specs/12-pathways-api.md §8 and §9; Decisions P07-T11c and P07-T11d there).
 
 The api inserts a ``pathway_test_runs`` row and starts the workflow with id ``pathway-test-run-<run_id>`` on
 the post-call task queue (``va_domain.post_call.postcall_task_queue``). Workflow code imports this module, so
@@ -10,18 +10,27 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 
 __all__ = [
+    "DEFAULT_SIMULATION_TURNS",
+    "MAX_RUNS_PER_SCENARIO",
     "MAX_RUN_TESTS",
+    "MAX_SCENARIOS",
+    "MAX_SIMULATIONS",
+    "MAX_SIMULATION_TURNS",
     "PATHWAY_TEST_WORKFLOW_NAME",
     "RUN_CONCURRENCY",
     "FinishedRunStatus",
     "PathwayTestWorkflowInput",
+    "RunKind",
+    "Scenario",
+    "SimulationJob",
     "pathway_test_workflow_id",
     "run_status",
+    "simulation_jobs",
 ]
 
 PATHWAY_TEST_WORKFLOW_NAME: Final = "PathwayTestWorkflow"
@@ -29,6 +38,18 @@ RUN_CONCURRENCY: Final = 8
 """Tests of one run in flight at once (specs/12 §8)."""
 MAX_RUN_TESTS: Final = 500
 """Tests one run may hold."""
+MAX_SCENARIOS: Final = 20
+"""Scenarios one simulation request may hold."""
+MAX_RUNS_PER_SCENARIO: Final = 10
+"""Conversations per scenario."""
+MAX_SIMULATIONS: Final = MAX_SCENARIOS * MAX_RUNS_PER_SCENARIO
+"""Conversations one simulation run may hold."""
+MAX_SIMULATION_TURNS: Final = 50
+"""The highest ``max_turns`` of a scenario."""
+DEFAULT_SIMULATION_TURNS: Final = 20
+
+type RunKind = Literal["unit", "simulation"]
+"""The run kinds ``PathwayTestWorkflow`` executes (``regression`` runs are unit or simulation runs too)."""
 
 type FinishedRunStatus = Literal["passed", "failed", "error"]
 
@@ -38,8 +59,48 @@ def pathway_test_workflow_id(run_id: uuid.UUID) -> str:
     return f"pathway-test-run-{run_id}"
 
 
+class Scenario(BaseModel):
+    """One simulated caller: who they are (``persona``), what the conversation should achieve (``goal``), the
+    caller-turn cap, and the request data the pathway sees."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    persona: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    goal: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    max_turns: int = Field(default=DEFAULT_SIMULATION_TURNS, ge=1, le=MAX_SIMULATION_TURNS)
+    request_data: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class SimulationJob(BaseModel):
+    """One conversation of a simulation run: run ``run_index`` of scenario ``scenario_index`` (both
+    1-based); ``simulation_id`` is ``"<scenario_index>-<run_index>"``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    simulation_id: str
+    scenario_index: int = Field(ge=1)
+    run_index: int = Field(ge=1)
+    scenario: Scenario
+
+
+def simulation_jobs(scenarios: Iterable[Scenario], runs_per_scenario: int) -> tuple[SimulationJob, ...]:
+    """Every conversation of a simulation run in result order: scenario order, then run order."""
+    return tuple(
+        SimulationJob(
+            simulation_id=f"{scenario_index}-{run_index}",
+            scenario_index=scenario_index,
+            run_index=run_index,
+            scenario=scenario,
+        )
+        for scenario_index, scenario in enumerate(scenarios, start=1)
+        for run_index in range(1, runs_per_scenario + 1)
+    )
+
+
 class PathwayTestWorkflowInput(BaseModel):
-    """One unit run: its row, the pathway version every test loads, and the tests in result order."""
+    """One run: its row, the pathway version every test or conversation loads, and its work in result order
+    (``test_ids`` for a unit run, ``simulations`` for a simulation run)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -47,7 +108,19 @@ class PathwayTestWorkflowInput(BaseModel):
     org_id: uuid.UUID
     pathway_id: uuid.UUID
     version_number: int = Field(ge=1)
-    test_ids: tuple[uuid.UUID, ...] = Field(min_length=1, max_length=MAX_RUN_TESTS)
+    kind: RunKind = "unit"
+    test_ids: tuple[uuid.UUID, ...] = Field(default=(), max_length=MAX_RUN_TESTS)
+    simulations: tuple[SimulationJob, ...] = Field(default=(), max_length=MAX_SIMULATIONS)
+
+    @model_validator(mode="after")
+    def _work_matches_kind(self) -> PathwayTestWorkflowInput:
+        if self.kind == "unit" and (not self.test_ids or self.simulations):
+            msg = "a unit run needs test_ids and no simulations"
+            raise ValueError(msg)
+        if self.kind == "simulation" and (not self.simulations or self.test_ids):
+            msg = "a simulation run needs simulations and no test_ids"
+            raise ValueError(msg)
+        return self
 
     def workflow_id(self) -> str:
         return pathway_test_workflow_id(self.run_id)

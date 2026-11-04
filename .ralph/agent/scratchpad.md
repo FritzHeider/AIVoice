@@ -290,3 +290,167 @@ Approved. Re-ran: make lint/typecheck/placeholders pass; make test 12382 passed,
 flakes this run); make test-ts pass; openapi drift current; spec refs 0; jscpd 0 clones. Diff matches specs/12 §8
 (concurrency 8, post-call queue, queued→running→passed/failed/error) and Decision P07-T11c; every DB access in
 tenant_session; result items stored by activities with row lock, workflow history holds only statuses.
+
+## Plan P07-T11d — Simulations (LLM-as-caller)
+
+Spec: specs/12 §9 (simulations paragraph), §2 (`POST /v1/pathway/{pathway_id}/simulations`), §10 permissions
+(analysts allowed: specs/04 §3.2 "Pathway tests / simulations"), Decisions P07-T11a/b/c under §8. No migration
+(`pathway_test_runs.kind` already allows `simulation`). Reuses `PathwayTestWorkflow` (same id scheme, same queue,
+same starter) with a `kind` switch.
+
+### Decisions (new block under specs/12 §9: `> Decision (2026-11-04): simulations (P07-T11d).`)
+1. Body `{"version": "draft"|"production"|"staging"|int ≥ 1 (default draft), "scenarios": [1..20 items],
+   "runs_per_scenario": 1..10 (default 1)}`, other keys rejected. Scenario `{name 1-200, persona 1-4000,
+   goal 1-2000, max_turns 1..50 (default 20), request_data object (default {})}`, extra forbidden. Version resolves
+   at request time (`load_version`, as unit runs). Permission `pathways:write`, no editor guard, audit-exempt
+   (the run row is the record), `Idempotency-Key` replays. Inserts `pathway_test_runs(kind='simulation',
+   status='queued')`, commits, starts `PathwayTestWorkflow`; start failure → run `error` + 503 (same as unit runs).
+   Answer 200 `{"status":"success","run":<run detail>}`.
+2. Jobs: scenario i (1-based) × run r (1-based) → `simulation_id` `"<i>-<r>"`, scenario order then run order;
+   at most 8 in flight (RUN_CONCURRENCY). Results ordered by job order at the finish.
+3. One run: fresh state (`new_pathway_state`) at the start node, request data = scenario `request_data`,
+   simulated caller/number like the test chat (`TextSetup` defaults; `conversation_id` = new uuid per run, also the
+   `call_id` of every LLM call of the run incl. the caller's, so FakeLLM `call_index` counts per run). Agent
+   opens (`engine.start()`), then loop: caller LLM (call type `analysis`, temperature 0.7, max_tokens 256, system =
+   `persona + "\n\n" + CALLER_SUFFIX` where CALLER_SUFFIX = `Reply only with what you would say on the phone. Say
+   "[HANGUP]" when you would hang up.` verbatim; conversation from the caller's view: agent lines `user`, caller
+   lines `assistant`; an agent turn that said nothing is shown as `(silence)`). Reply containing `[HANGUP]`
+   (case-sensitive token): the text before it, stripped, is kept as the last caller line when non-blank and is
+   NOT sent to the engine; the run ends `ended_by: "hangup"`. Blank caller reply (no token) → sent as nothing?
+   No: a blank reply ends the run with `error: "caller_invalid"`. Otherwise the line is a `handle_user_turn`
+   (UserTurn index = state.turn_index + 1, start/end_ms = elapsed ms of the clock). Each engine run capped 60 s
+   (`CASE_TIMEOUT_S`). Stop after the agent's answer to caller turn `max_turns` (`ended_by: "max_turns"`) or when
+   the engine state ended (End Call / transfer terminal → `ended_by: "agent_ended"`).
+4. Grading (only when the conversation ran without error): one forced `grade` call (analysis, existing
+   `GradeVerdict`), messages = transcript (Caller/Agent lines) + `Final variables: <json sorted keys>` then
+   `SIMULATION_GRADE_PROMPT` = `Given the full conversation and the final variables, did the conversation achieve
+   this goal? Goal: "{goal}". Be strict.` (goal substituted literally). Status: verdict pass → `passed`, verdict
+   fail → `failed`; errors (`engine_error`, `turn_timeout`, `caller_unavailable`, `caller_invalid`,
+   `grading_unavailable`, `version_unavailable`, `runner_error`) → `error`.
+5. Result item: `{"simulation_id", "scenario", "run", "goal", "passed", "status", "ended_by":
+   "hangup"|"max_turns"|"agent_ended"|"error", "turns" (caller lines sent to the engine), "transcript": [{"role":
+   "assistant"|"user", "content"}] (agent = assistant, caller = user, in order, blank agent turns omitted),
+   "variables", "grading": {pass, rationale}|null, "actions" (simulated actions, chat shape), "duration_ms",
+   "error"?}`. Error items for runs that could not start: same keys with `transcript: []`, `turns: 0`,
+   `ended_by: "error"`, `variables: {}`, `grading: null`, `actions: []`, `duration_ms: 0`, `error`.
+   `run_summary` counts `status` as for unit runs.
+6. Workflow: `PathwayTestWorkflowInput` gains `kind: Literal["unit","simulation"] = "unit"` and
+   `simulations: tuple[SimulationJob, ...] = ()`; a model validator requires 1..500 `test_ids` and no simulations
+   for `unit`, 1..200 simulations and no test_ids for `simulation` (`test_ids` default `()`, drop field-level
+   min_length). Activity `run_pathway_simulation` (timeout 60 min start-to-close: 50 turns × (60 s + caller), retry
+   = TEST_RETRY) stores its item itself and returns the status; failure after retries →
+   `record_pathway_simulation_error` (replace=False, `runner_error`). `FinishInput` gains `simulation_ids:
+   tuple[str, ...] = ()`; order = test ids then simulation ids. Repo results are keyed by `test_id` or
+   `simulation_id` (`_item_key`).
+
+### Files
+- `packages/va_domain/src/va_domain/pathway_tests.py`: `MAX_SCENARIOS = 20`, `MAX_RUNS_PER_SCENARIO = 10`,
+  `MAX_SIMULATION_TURNS = 50`, `DEFAULT_SIMULATION_TURNS = 20`, `MAX_SIMULATIONS = 200`,
+  `RunKind = Literal["unit","simulation"]`, `class Scenario(BaseModel)` frozen extra=forbid (`name`, `persona`,
+  `goal`, `max_turns`, `request_data: dict[str, JsonValue]`; constraints as Decision 1), `class SimulationJob`
+  (`simulation_id: str`, `scenario_index: int ≥1`, `run_index: int ≥1`, `scenario: Scenario`),
+  `simulation_jobs(scenarios, runs_per_scenario) -> tuple[SimulationJob, ...]`, input changes (Decision 6).
+- `packages/va_db/src/va_db/repositories/pathway_tests.py`: `_item_key(item) -> str | None` (`test_id` else
+  `simulation_id`, as str); `put_result`/`finish` use it (behaviour for unit items unchanged).
+- `packages/va_pathways/src/va_pathways/grading.py`: `SIMULATION_GRADE_PROMPT`, `grade_conversation_messages(
+  transcript, variables, goal)`, `grade_conversation(port, *, org_id, transcript, variables, goal) ->
+  GradeVerdict | None` (share the try/except with `grade` via a private `_verdict(port, org_id, messages)`).
+- `packages/va_pathways/src/va_pathways/simulations.py` (new): `CALLER_SUFFIX`, `HANGUP_TOKEN = "[HANGUP]"`,
+  `SILENCE = "(silence)"`, `CALLER_TEMPERATURE = 0.7`, `CALLER_MAX_TOKENS = 256`, `EndedBy`, `SimulationError`
+  Literal, `caller_messages(persona, transcript) -> list[ChatMessage]`, `parse_caller_reply(content) ->
+  CallerReply(text: str, hangup: bool)` (pure), `@dataclass SimulationResult` with `.item()`,
+  `simulation_error_item(job, error) -> Item`, `async def run_simulation(deps, job: SimulationJob, *, org_id,
+  active, org, loader, counter) -> SimulationResult` (one `TextConversation` per engine run over the carried
+  state, collecting `recorder.actions` across runs; never raises for engine/model failures; catches `Exception`
+  from engine runs only, like `_converse`; `PathwayUnavailableError` from `new_pathway_state` (no start node) →
+  `version_unavailable`). Caller via `deps.gateway.complete(..., call_id=conversation_id)` catching
+  `LlmUnavailableError` → `caller_unavailable`. Keep functions small (radon < 10).
+- `packages/va_pathways/src/va_pathways/runs.py`: `StoredSimulation(org_id, pathway_id, version_number, job)`,
+  `run_stored_simulation(deps, database, org_settings, sim, *, counter) -> Item` (loader + org settings like
+  `run_stored_test`; extract a shared `_load_version(...)`/org helper to avoid duplication).
+- `packages/va_workflows/src/va_workflows/activities/pathway_tests_inputs.py`: `SIMULATION_TIMEOUT =
+  timedelta(minutes=60)`, `SimulationInput(RunRef)` (`pathway_id`, `version_number`, `job: SimulationJob`),
+  `SimulationErrorInput(RunRef)` (`job: SimulationJob`, `error: Literal["runner_error"]`), `FinishInput.
+  simulation_ids`.
+- `packages/va_workflows/src/va_workflows/activities/pathway_tests.py`: activities `run_pathway_simulation`,
+  `record_pathway_simulation_error`; `_store` keyed generically (log `item_key`).
+- `packages/va_workflows/src/va_workflows/pathway_tests/pathway_test_workflow.py`: branch on `start.kind`;
+  `_run_simulation(start, job, slots)` mirroring `_run_test`; outcomes keyed by simulation_id; finish passes
+  `simulation_ids`. Update module docstring.
+- `apps/worker/src/va_worker/activities.py`: `postcall_queue()` adds the two new activities.
+- API: `apps/api/src/va_api/routers/pathway_tests_schemas.py`: `ScenarioBody` (= domain `Scenario` with
+  OpenAPI examples/descriptions; may subclass it) and `SimulationRunRequest` (first example = the spec §9 body
+  with `"runs_per_scenario": 3`); `apps/api/src/va_api/services/pathway_test_runs.py`: refactor insert/start/fail
+  into `_launch(database, starter, clock, ctx, run, start_factory)` used by `start_unit_run` and new
+  `start_simulation_run(database, starter, clock, ctx, pathway_id, *, version, scenarios, runs_per_scenario)`;
+  route `POST /{pathway_id}/simulations` operation_id `pathways_simulations_create` in `routers/pathway_tests.py`
+  (`_WRITE` + `audit_exempt("simulation runs are recorded as pathway_test_runs rows")`). `make openapi` + both
+  `gen:api`.
+- Spec Decision block (specs/12 §9); AGENTS.md dated line.
+
+### Tests
+- `packages/va_domain/tests/test_pathway_tests.py`: `simulation_jobs` ids/order; input validator (unit needs
+  test_ids and no simulations; simulation needs jobs, no test_ids; bounds).
+- `packages/va_db/tests/test_pathway_test_repos.py`: put_result replaces by `simulation_id`; finish orders
+  simulation items and counts missing ones as error.
+- `packages/va_pathways/tests/test_simulations.py` (pure): `parse_caller_reply` (token mid/end/only/absent,
+  blank), `caller_messages` roles flip + silence + system suffix verbatim, `simulation_error_item` shape.
+- `packages/va_pathways/tests/test_simulations_sim.py` (FakeLLM via `text_rig()`, bella_pasta or a small graph):
+  caller hangs up after N turns → `hangup`, transcript order, goal passed → `passed`; grader says fail →
+  `failed`; caller never hangs up → stops at `max_turns` exactly (count caller turns sent / FakeLLM requests);
+  End Call node → `agent_ended`; caller LLM 400 error rule → `error` `caller_unavailable` (no grading request);
+  grader 400 → `grading_unavailable`; blank caller → `caller_invalid`; final variables passed to the grader
+  message (assert request body contains `Final variables:`). FakeLLM rules: caller rules `system_contains:
+  ["[HANGUP]"]` with `call_index`, grader `tool_name: grade`.
+- `packages/va_pathways/tests/test_runs.py`: `run_stored_simulation` on DB (`pathways_db_url`): item stored
+  shape; deleted pathway → `version_unavailable` error item.
+- `packages/va_workflows/tests/test_pathway_test_workflow.py`: simulation kind runs only simulation
+  activities, finish gets `simulation_ids` in job order, failed sim → failed, activity failure →
+  `record_pathway_simulation_error`, ≤ 8 concurrent.
+- `packages/va_workflows/tests/test_pathway_test_activities.py`: `run_pathway_simulation` on real rows stores an
+  item; retry replaces not duplicates.
+- `apps/worker/tests`: postcall_queue lists the 2 new activity names.
+- `apps/api/tests/test_pathway_simulations.py`: starts workflow with kind simulation + jobs `1-1..2-3` for 2
+  scenarios × 3 runs, version resolved; defaults (runs 1, max_turns 20, request_data {}); validation errors (0 or
+  21 scenarios, runs 11, max_turns 0/51, unknown key, blank persona) → 400 with field path; unset production pin →
+  PATHWAY_VERSION_NOT_FOUND; starter failure → 503 + run `error`; run readable via `GET /runs/{id}` with kind
+  simulation; `GET /runs?kind=simulation` lists it; idempotent replay same run; analyst 200 / viewer 403 (extend
+  `test_pathways_permissions.py`). Cross-tenant suite covers the route via the example body (owner 200).
+
+### Gates
+`make fmt lint typecheck placeholders`; targeted pytest `packages/va_domain packages/va_db packages/va_pathways
+packages/va_workflows apps/worker apps/api -n 8 -k "pathway or simulation"`; `make test` in background + Monitor
+heartbeat; `make test-ts`; openapi drift; spec refs; jscpd; radon. No e2e (no call/SMS flow).
+
+### Risks
+- jscpd: `run_pathway_simulation` vs `run_pathway_unit_test` and the workflow `_run_simulation` vs `_run_test`
+  look alike → factor a shared `_run_item(activity_name, input, timeout, on_error)` helper in the workflow.
+- FakeLLM dialogue rules for the agent must not match the caller (caller system prompt contains `[HANGUP]`; give
+  caller rules higher priority).
+- `TextConversation.run` acloses the engine every run: carry `conversation.state` into the next conversation
+  (same as the chat). `recorder.terminal` marks state ended.
+- Temporal payload: 200 jobs × persona (4000 chars) ≈ 1 MB worst case < 2 MB Temporal limit; OK, note in
+  Decision.
+
+## Build P07-T11d (2026-11-04)
+Implemented per plan. Deviations: `HANGUP_TOKEN` named `HANGUP_MARKER` (ruff S105); `run_simulation` always
+returns a `SimulationResult` (`error_result(job, error)` for no start node); `grading_unavailable` keeps the
+real `ended_by` (conversation errors use `ended_by: "error"`), recorded in the Decision; grading call carries
+the conversation id as `call_id`. Shared helpers to keep jscpd at 0: `pathways_helpers.route_rule/size_rule/
+grade_rule/broken_user_turns`, api `pathway_helpers.run_of`. Workflow item dispatch generalized via `_Item`
+(activity + error recorder per test/simulation). Spec Decision P07-T11d under specs/12 §9; AGENTS.md line.
+Gates: make fmt/lint/typecheck/placeholders pass; make test-ts pass (widget 22, dashboard 52, sdk 48); openapi
+drift current (openapi.json + both schema.d.ts regenerated); spec refs 0; jscpd 0 clones; radon avg A (2.92);
+pip-audit clean, pnpm audit no high (3 moderate). make test run 1: overloaded by concurrent runs (Docker read
+timeouts; all 118 affected tests passed alone). Run 2: 12430 passed, 4 failed, coverage 96.65%; the 4 failures
+(sim shared redis, media runtime_sim press_button + interruptibility[4-2], dispatcher two pods) are timing
+flakes in untouched modules, 6/6 passed alone. Targeted: va_pathways + api simulations/runs + workflow
+activities 97 passed. No e2e: no call/SMS flow touched.
+
+## Review P07-T11d (2026-11-04)
+Approved. Re-ran: make lint/typecheck/placeholders pass; make test-ts pass; openapi drift current; spec refs 0;
+jscpd 0 clones. make test: 12369 passed, 5 failed + 60 errors, all pytest-timeout/startup timeouts in untouched
+modules (edge DB fixture, sim shared redis, media runtime/transfer, api transcript ws) under load; all 95 pass
+alone; coverage 96.11%. Targeted pathway/simulation/workflow/api/cross-tenant tests 195 passed. Diff matches
+specs/12 §9 + Decision P07-T11d (body bounds, ids `<i>-<r>`, caller prompt suffix verbatim, grading prompt,
+item shape); all DB access in tenant_session; items stored by activities.

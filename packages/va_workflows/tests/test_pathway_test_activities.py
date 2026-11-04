@@ -1,5 +1,5 @@
-"""``PathwayTestActivities`` on Postgres with FakeLLM: begin, one stored result per test (a retry replaces
-it), runner errors, and the finish (specs/12 §8; Decision P07-T11c)."""
+"""``PathwayTestActivities`` on Postgres with FakeLLM: begin, one stored result per test or conversation (a
+retry replaces it), runner errors, and the finish (specs/12 §8, §9; Decisions P07-T11c and P07-T11d)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from fakeredis import FakeAsyncRedis
-from pathways_helpers import TextRig, store_bella_pasta, store_unit_test, text_rig
+from pathways_helpers import TextRig, job, store_bella_pasta, store_unit_test, text_rig
 from temporalio.testing import ActivityEnvironment
 from tenant_rows import OrgFactory
 
@@ -22,6 +22,8 @@ from va_workflows.activities.pathway_tests import PathwayTestActivities
 from va_workflows.activities.pathway_tests_inputs import (
     FinishInput,
     RunRef,
+    SimulationErrorInput,
+    SimulationInput,
     UnitTestErrorInput,
     UnitTestInput,
 )
@@ -101,3 +103,50 @@ async def test_a_run_begins_stores_each_result_once_and_finishes(database: Datab
     assert (
         await env.run(acts.finish_pathway_test_run, FinishInput(**ref.model_dump(), test_ids=()))
     ).status is None
+
+
+async def test_simulations_store_one_result_each_and_finish_in_job_order(
+    database: Database, rig: TextRig
+) -> None:
+    org_id = await OrgFactory(database).create()
+    pathway_id = await store_bella_pasta(database, org_id)
+    async with database.tenant_session(org_id) as session:
+        run = await PathwayRunRepo(session, org_id).add(pathway_id, version_number=1, kind="simulation")
+    await rig.rules(
+        "rules:\n  - id: caller\n    priority: 10\n    match: {system_contains: ['[HANGUP]']}\n"
+        "    respond:\n      content: 'Bye [HANGUP]'\n"
+        "  - id: grade\n    match: {tool_name: grade}\n    respond:\n"
+        "      tool_calls: [{name: grade, arguments: {pass: true, rationale: ok}}]\n"
+    )
+    acts = activities(database, rig, [])
+    env = ActivityEnvironment()
+    ref = RunRef(run_id=run.id, org_id=org_id)
+    assert await env.run(acts.begin_pathway_test_run, ref)
+    first, second = job("1-1"), job("1-2")
+
+    def sim_input(simulation: object) -> SimulationInput:
+        return SimulationInput.model_validate(
+            {**ref.model_dump(), "pathway_id": pathway_id, "version_number": 1, "job": simulation}
+        )
+
+    assert await env.run(acts.run_pathway_simulation, sim_input(second)) == "passed"
+    assert await env.run(acts.run_pathway_simulation, sim_input(second)) == "passed"
+    errored = SimulationErrorInput(**ref.model_dump(), job=second)
+    assert await env.run(acts.record_pathway_simulation_error, errored) == "error"
+    assert (
+        await env.run(
+            acts.record_pathway_simulation_error, SimulationErrorInput(**ref.model_dump(), job=first)
+        )
+        == "error"
+    )
+    finished = await env.run(
+        acts.finish_pathway_test_run, FinishInput(**ref.model_dump(), simulation_ids=("1-1", "1-2"))
+    )
+    assert finished.status == "error"
+    done = await stored_run(database, org_id, run.id)
+    assert [(item["simulation_id"], item["status"]) for item in done.results] == [
+        ("1-1", "error"),
+        ("1-2", "passed"),
+    ]
+    assert done.results[0]["error"] == "runner_error"
+    assert done.results[1]["ended_by"] == "hangup"

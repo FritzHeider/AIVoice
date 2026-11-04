@@ -1,10 +1,12 @@
 """Starting a pathway unit-test run (``POST /v1/pathway/{pathway_id}/tests/run``; specs/12-pathways-api.md
-§8, Decision P07-T11c).
+§8, Decision P07-T11c) or a simulation run (``POST /v1/pathway/{pathway_id}/simulations``; §9, Decision
+P07-T11d).
 
-The request resolves the version to a number, selects the tests (every test of the pathway oldest first, or
-the given ids in order without duplicates), inserts a ``queued`` ``pathway_test_runs`` row, commits, and then
-starts ``PathwayTestWorkflow`` on the post-call queue. When the start fails the run is marked ``error`` and
-the request answers ``SERVICE_UNAVAILABLE``.
+A unit run resolves the version to a number, selects the tests (every test of the pathway oldest first, or
+the given ids in order without duplicates); a simulation run resolves the version and expands the scenarios
+into conversations (:func:`va_domain.pathway_tests.simulation_jobs`). Both insert a ``queued``
+``pathway_test_runs`` row, commit, and then start ``PathwayTestWorkflow`` on the post-call queue. When the
+start fails the run is marked ``error`` and the request answers ``SERVICE_UNAVAILABLE``.
 """
 
 from __future__ import annotations
@@ -24,7 +26,13 @@ from va_db.repositories import PathwayRunRepo, PathwayTestRepo
 from va_db.repositories.base import NotFoundError
 from va_db.repositories.pathway_tests import TEST_RESOURCE
 from va_db.session import Database
-from va_domain.pathway_tests import MAX_RUN_TESTS, PATHWAY_TEST_WORKFLOW_NAME, PathwayTestWorkflowInput
+from va_domain.pathway_tests import (
+    MAX_RUN_TESTS,
+    PATHWAY_TEST_WORKFLOW_NAME,
+    PathwayTestWorkflowInput,
+    Scenario,
+    simulation_jobs,
+)
 
 __all__ = [
     "NO_TESTS_MESSAGE",
@@ -33,6 +41,7 @@ __all__ = [
     "PathwayTestStarter",
     "RunStartError",
     "TemporalPathwayTestStarter",
+    "start_simulation_run",
     "start_unit_run",
 ]
 
@@ -102,6 +111,43 @@ async def _selected_tests(
     return ids
 
 
+async def _launch(
+    database: Database,
+    starter: PathwayTestStarter,
+    clock: Clock,
+    run: PathwayTestRun,
+    start: PathwayTestWorkflowInput,
+) -> None:
+    """Start the committed ``run``'s workflow; a failed start marks the run ``error`` and answers 503."""
+    try:
+        await starter.start(start)
+    except RunStartError as exc:
+        _log.warning("pathway_test_run.start_failed", run_id=str(run.id), error=type(exc.__cause__).__name__)
+        async with database.tenant_session(start.org_id) as session:
+            await PathwayRunRepo(session, start.org_id).fail(run.id, clock.now())
+        raise AppError("SERVICE_UNAVAILABLE", RUNS_UNAVAILABLE_MESSAGE) from exc
+    _log.info(
+        "pathway_test_run.started",
+        run_id=str(run.id),
+        kind=start.kind,
+        items=len(start.test_ids) + len(start.simulations),
+        version=run.version_number,
+    )
+
+
+def _start_input(run: PathwayTestRun, ctx: RequestContext, **work: object) -> PathwayTestWorkflowInput:
+    """The workflow input of ``run`` with its ``kind`` and work (``test_ids`` or ``simulations``)."""
+    return PathwayTestWorkflowInput.model_validate(
+        {
+            "run_id": run.id,
+            "org_id": ctx.org_id,
+            "pathway_id": run.pathway_id,
+            "version_number": run.version_number,
+            **work,
+        }
+    )
+
+
 async def start_unit_run(  # noqa: PLR0913 - the request's run, its version and tests, and the collaborators
     database: Database,
     starter: PathwayTestStarter,
@@ -119,19 +165,28 @@ async def start_unit_run(  # noqa: PLR0913 - the request's run, its version and 
         run = await PathwayRunRepo(session, ctx.org_id).add(
             pathway.id, version_number=stored.version_number, kind="unit"
         )
-    start = PathwayTestWorkflowInput(
-        run_id=run.id,
-        org_id=ctx.org_id,
-        pathway_id=run.pathway_id,
-        version_number=run.version_number,
-        test_ids=tuple(ids),
-    )
-    try:
-        await starter.start(start)
-    except RunStartError as exc:
-        _log.warning("pathway_test_run.start_failed", run_id=str(run.id), error=type(exc.__cause__).__name__)
-        async with database.tenant_session(ctx.org_id) as session:
-            await PathwayRunRepo(session, ctx.org_id).fail(run.id, clock.now())
-        raise AppError("SERVICE_UNAVAILABLE", RUNS_UNAVAILABLE_MESSAGE) from exc
-    _log.info("pathway_test_run.started", run_id=str(run.id), tests=len(ids), version=run.version_number)
+    await _launch(database, starter, clock, run, _start_input(run, ctx, kind="unit", test_ids=tuple(ids)))
+    return run
+
+
+async def start_simulation_run(  # noqa: PLR0913 - the request's run, its version and scenarios, and the collaborators
+    database: Database,
+    starter: PathwayTestStarter,
+    clock: Clock,
+    ctx: RequestContext,
+    pathway_id: uuid.UUID,
+    *,
+    version: VersionSelector,
+    scenarios: Sequence[Scenario],
+    runs_per_scenario: int,
+) -> PathwayTestRun:
+    """Insert and start a simulation run (``runs_per_scenario`` conversations of every scenario); returns
+    the ``queued`` run row."""
+    async with database.tenant_session(ctx.org_id) as session:
+        pathway, stored = await load_version(session, ctx, pathway_id, version)
+        run = await PathwayRunRepo(session, ctx.org_id).add(
+            pathway.id, version_number=stored.version_number, kind="simulation"
+        )
+    jobs = simulation_jobs(scenarios, runs_per_scenario)
+    await _launch(database, starter, clock, run, _start_input(run, ctx, kind="simulation", simulations=jobs))
     return run

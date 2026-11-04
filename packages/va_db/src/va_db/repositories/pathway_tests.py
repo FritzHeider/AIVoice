@@ -22,7 +22,7 @@ from va_db.pagination import DEFAULT_PAGE_LIMIT, Page
 from va_db.repositories.base import NotFoundError, TenantRepository
 from va_domain.pathway_tests import FinishedRunStatus, run_status
 
-__all__ = ["RUN_RESOURCE", "TEST_RESOURCE", "PathwayRunRepo", "PathwayTestRepo"]
+__all__ = ["RUN_RESOURCE", "TEST_RESOURCE", "PathwayRunRepo", "PathwayTestRepo", "result_key"]
 
 _LIVE_RUN: Final = ("queued", "running")
 
@@ -30,6 +30,18 @@ TEST_RESOURCE: Final = "Pathway test"
 """The resource name of the unit test ``NOT_FOUND`` message ("Pathway test not found.")."""
 RUN_RESOURCE: Final = "Pathway test run"
 """The resource name of the run ``NOT_FOUND`` message ("Pathway test run not found.")."""
+
+
+def result_key(item: object) -> str | None:
+    """What identifies a result item within its run: the ``test_id`` of a unit-test item, else the
+    ``simulation_id`` of a simulation item (as text); ``None`` for anything else."""
+    if not isinstance(item, Mapping):
+        return None
+    for name in ("test_id", "simulation_id"):
+        value = item.get(name)
+        if value is not None:
+            return str(value)
+    return None
 
 
 class PathwayTestRepo:
@@ -166,18 +178,16 @@ class PathwayRunRepo:
         return True
 
     async def put_result(self, run_id: uuid.UUID, item: Mapping[str, Any], *, replace: bool = True) -> bool:
-        """Store one test's result item, replacing an earlier item of the same ``test_id`` (a retried test is
-        never listed twice; with ``replace=False`` an earlier item is kept instead); false when the run is
-        gone or already finished."""
+        """Store one test's or conversation's result item, replacing an earlier item of the same key
+        (:func:`result_key`; a retried test is never listed twice; with ``replace=False`` an earlier item is
+        kept instead); false when the run is gone or already finished."""
         run = await self.lock(run_id)
         if run is None or run.status not in _LIVE_RUN:
             return False
-        test_id = item.get("test_id")
-        if not replace and any(
-            isinstance(old, dict) and old.get("test_id") == test_id for old in run.results
-        ):
+        key = result_key(item)
+        if not replace and any(result_key(old) == key for old in run.results):
             return True
-        kept = [old for old in run.results if not (isinstance(old, dict) and old.get("test_id") == test_id)]
+        kept = [old for old in run.results if result_key(old) != key]
         # A new list object: SQLAlchemy does not track in-place changes of a JSONB value.
         run.results = [*kept, dict(item)]
         await self.session.flush()
@@ -186,18 +196,18 @@ class PathwayRunRepo:
     async def finish(
         self, run_id: uuid.UUID, order: Sequence[str], now: datetime
     ) -> FinishedRunStatus | None:
-        """Order the results by ``order`` (test ids; others last), set the final status (a test of ``order``
-        without a result counts as an error) and ``finished_at``; ``None`` when the run is gone or already
-        finished."""
+        """Order the results by ``order`` (result keys: test or simulation ids; others last), set the final
+        status (a key of ``order`` without a result counts as an error) and ``finished_at``; ``None`` when the
+        run is gone or already finished."""
         run = await self.lock(run_id)
         if run is None or run.status not in _LIVE_RUN:
             return None
         rank = {test_id: index for index, test_id in enumerate(order)}
         items = [item for item in run.results if isinstance(item, dict)]
-        results = sorted(items, key=lambda item: rank.get(str(item.get("test_id")), len(rank)))
+        results = sorted(items, key=lambda item: rank.get(result_key(item) or "", len(rank)))
         statuses: list[str | None] = [item.get("status") for item in results]
-        reported = {item.get("test_id") for item in results}
-        statuses.extend(None for test_id in order if test_id not in reported)
+        reported = {result_key(item) for item in results}
+        statuses.extend(None for key in order if key not in reported)
         status = run_status(statuses)
         run.results = results
         run.status = status
