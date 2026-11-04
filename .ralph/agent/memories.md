@@ -764,6 +764,10 @@
 
 ## Context
 
+### mem-1793802837-c82c
+> P07-FIX-1: sim stall at 50-call start did not reproduce (cap + 2 make e2e incl cold make down; 0 connect_failed). py-spy on sim: _render_all synthesis ~4% GIL, tick_loop WS sends dominate. Sim logs are sparse (tens-of-seconds gaps normal) so log silence != loop stall. Cold e2e = make down && make e2e
+<!-- tags: e2e, sim, performance | created: 2026-11-04 -->
+
 ### mem-1793661625-5011
 > P05-T17e1: capacity flow opt-in via pytest marker capacity (make e2e = -m 'e2e and not capacity', make e2e-capacity, E2E_CONCURRENT_CALLS 1..50). Baseline: 50 calls overhead p50 335 ms, 667 underruns, lag p99<=150; 10 calls p50 92 ms but still 2 underruns at lag<=5 ms -> underruns not purely CPU (check definition/sim drain in P05-T17e2)
 <!-- tags: e2e, performance, media | created: 2026-11-02 -->

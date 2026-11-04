@@ -716,3 +716,124 @@ failed once in that batch and passed 3/3 alone afterwards (no src change in this
 fix:e2e-outbound-basic-flaky. Diff checked: compose override + test_compose + specs/29 text in lockstep, specs/30
 Decision P07-T12c, receiver JSON replies unit-tested, rule-file invariant narrowed to decision tools only.
 Next: Planner runs the phase 07 exit gate (make check && make e2e).
+
+## Planner 2026-11-04 — phase 07 exit gate run 1: FAILED
+Ticked the parent P07-T12 (a–c done). Ran `make check` then `make e2e` (logs/exit_gate.log, logs/exit_e2e.log):
+- make check: 12620 passed, 1 failed, 7 skipped. The failure was `test_runtime_sim.py::test_caller_turn_is_answered_by_the_task_brain`,
+  where `va_audio_underruns_total` was 4 (expected 0). This is the known wall-clock flake (task fix:runtime-sim-underrun).
+- make e2e: 18 passed, 2 failed:
+  - concurrent_calls: 8/50 calls ended `error`. Worker logs show `hangup reason=stream_failed`. The sim logged
+    `sim.telnyx_media_connect_failed TimeoutError('timed out during opening handshake')` for exactly 8 streams at
+    13:49:17.7. Root cause: the SIM container logged NOTHING from 13:49:12.4 to 13:49:17.6 (its event loop was
+    blocked ~5 s while 50 calls started). In the same window the media worker's STT connects (2 s open timeout)
+    and TTS connects (5 s) to the sim timed out, and one sim webhook POST hit WriteTimeout. Prime suspect:
+    `CallerScript._prepare` runs `_render_all` (caller utterance synthesis) via `asyncio.to_thread` for every
+    call at once. 50 synth jobs in the default thread pool hold the GIL and starve the sim loop. The jobs are
+    likewise cold on a fresh container. (Not yet confirmed by profile.)
+  - inbound_basic (ran right after): answered 1455 ms after initiated (> 1000). Probably the same loaded-sim
+    window; re-check after the fix.
+
+## Plan P07-FIX-1 — make the phase 07 exit gate pass
+
+### Part A: deterministic underrun wiring test (closes fix:runtime-sim-underrun)
+`apps/media_worker/tests/test_runtime_sim.py::test_caller_turn_is_answered_by_the_task_brain` asserts zero underruns on
+a wall-clock realtime sim, which depends on CPU load (xdist). The test's real purpose is that the runtime wires the
+pipeline's `on_underrun` hook to `va_audio_underruns_total`. Change it to read `before = registry.get_sample_value(...)
+or 0.0` after the call, call `hooks[0]()`, and assert `== before + 1`. Do NOT assert an absolute zero there. Zero
+underruns under load is covered by the e2e capacity flow and the accelerated-clock pipeline tests (check that a
+harness test with `harness(on_underrun=...)` asserts no underruns on the AcceleratedClock; if none exists, add one in
+packages/va_voice/tests (a normal reply turn on the harness → on_underrun never called)).
+
+### Part B: sim event-loop stall when many calls start (closes fix:e2e-cold-concurrent)
+1. Measure first. `scripts/dev_up.sh e2e` (fresh rebuild), then py-spy on the sim container during
+   `uv run pytest tests_e2e -m capacity -s` (AGENTS.md "Profile a compose service", target `voiceagents-sim-1`,
+   `--nonblocking --gil`, ~15 s starting at dispatch). Confirm which frames hold the GIL during the stall
+   (expected: va_sim.audio synthesis under `caller_script._render_all`; other candidates: TTS `chunks`, STT
+   `feed`, first-use imports/caches).
+2. Fix in the sim (not by raising timeouts or adding retries in e2e). Preferred, if synthesis is the cause: render
+   caller clips in a `concurrent.futures.ProcessPoolExecutor` owned by `SimState` (`max_workers` from a new
+   `SimSettings.sim_render_processes`, default `min(4, os.cpu_count())`). Start it at app startup and shut it down
+   in the lifespan / `SimState.aclose`. Submit with `loop.run_in_executor(pool, _render_all, jobs)`. Jobs must be
+   picklable: `functools.partial` of module-level functions with plain args (check `_text_job` builds; replace
+   lambdas/bound methods). Keep `hold_clock`. Unit tests and the accelerated clock keep working: the in-process
+   fallback (`pool=None` → `asyncio.to_thread`) is the default for `build_state` in tests, and the served sim
+   (`apps/sim`) passes the pool. Alternative if profiling shows Python-level overhead dominates instead (e.g.
+   per-sample loops): vectorise that code with numpy, keeping the output byte-identical (the committed
+   `assets/audio` + marker decode tests guard it). New env var = specs/02 §6 table row + `.env.example` + the
+   `> Decision` note (specs/30 §3) in the same commit.
+3. Regression test (packages/va_sim/tests or apps/sim/tests): with the pool, rendering N=20 caller scripts'
+   jobs concurrently keeps the loop responsive. Measure the max gap of a 10 ms ticker task running alongside;
+   assert it is < 200 ms. Use a real thread/process pool, not wall sleeps for sync. If timing-sensitive under xdist,
+   assert instead that rendering happens in another process (`os.getpid()` of the job ≠ test pid) and that the
+   loop task completes ticks while a gate-blocked render is pending.
+4. Re-measure: rebuild the stack, run `make e2e` FIRST run (twice: rebuild → e2e, rebuild → e2e). Concurrent_calls
+   0 failed scenarios, inbound_basic answer ≤ 1000 ms. If inbound_basic still fails, diagnose it separately from
+   the timeline (edge `call.initiated` → answer command latency in edge logs).
+
+### Part C: outbound_basic flaky after pathway batch (fix:e2e-outbound-basic-flaky)
+It passed in this exit-gate run. If it does not reproduce in the two e2e runs above, record that in the task's
+description (`ralph tools task` reopen/close with the note) and leave it out of scope.
+
+### Gates
+make fmt lint typecheck placeholders, spec refs, `make test` (background + Monitor heartbeat), jscpd 0, radon,
+audits; `scripts/dev_up.sh e2e` + `make e2e` twice from a fresh rebuild. AGENTS.md learning line (P07-FIX-1).
+
+### Risks
+- ProcessPool + uvloop + fork in the sim container: use the `spawn` (or `forkserver`) context to avoid forking a
+  process that runs threads. Warm the pool at startup (submit a no-op per worker) so the first calls don't pay
+  the spawn/import cost.
+- `SimState` shared state (`SIM_STATE_REDIS_URL`) is unaffected: rendering is pure.
+- Do not change the synthesized bytes (marker decode in FakeElevenLabs STT depends on them).
+
+## Review P07-FIX-1 (2026-11-04) — rejected
+The build.done payload was empty, and the scratchpad has no `## Build P07-FIX-1` section. The diff touches only
+`apps/media_worker/tests/test_runtime_sim.py` (Part A) plus the plan and scratchpad.
+1. Evidence is missing. The payload has none of the required `tests:/lint:/typecheck:/audit:/coverage:/duplication:/complexity:`
+   strings, and no `make check` or `make e2e` result is recorded. The plan's acceptance requires `make check` green plus
+   `scripts/dev_up.sh e2e` followed by `make e2e` green on the FIRST run after a rebuild, twice.
+2. Part B was not delivered: no sim change, no regression test, no specs/30 §3 Decision. The logs show partial work.
+   `logs/fix1_cap1.log` is a capacity run after a rebuild (0 failed, overhead p50 93 ms). `logs/fix1_sub1.log` has 5 flows
+   passing. `logs/prof/sim_gil.txt` is a py-spy profile in which synthesis frames appear (28 lines match
+   `_render_all|synthes`). Pick one of two outcomes and record it with evidence:
+   (a) the stall reproduces or the profile confirms synthesis holds the GIL. Then implement the planned fix (process pool,
+       or byte-identical vectorisation) with the regression test.
+   (b) the stall no longer reproduces. Then write the profile analysis (top GIL frames during call start) into the
+       scratchpad, run the two full rebuild→`make e2e` cycles, and close or annotate fix:e2e-cold-concurrent with the result.
+3. Tasks fix:runtime-sim-underrun, fix:e2e-cold-concurrent and fix:e2e-outbound-basic-flaky are still open. Part A looks
+   correct. It is covered by `packages/va_voice/tests/pipeline/test_pipeline_underruns.py::test_on_time_playback_reports_no_underrun`.
+   Close fix:runtime-sim-underrun once `make test` passes. Part C needs its note.
+4. AGENTS.md has no P07-FIX-1 learning line. One is required if Part B finds something non-obvious, such as the
+   py-spy-on-sim procedure or the result.
+Tip: run `make test` / `make e2e` in the background with a Monitor heartbeat. The empty event looks like an
+inactivity-timeout kill (AGENTS.md P05-T10d).
+
+## Build P07-FIX-1 (2026-11-04, after review rejection)
+Part A: `test_caller_turn_is_answered_by_the_task_brain` now asserts that the hook increments the catalog counter by one
+(before + 1) and no longer asserts an absolute zero. On-time playback with zero underruns is covered by
+va_voice `test_pipeline_underruns.py::test_on_time_playback_reports_no_underrun` (accelerated clock).
+Part B outcome (b): the stall did not reproduce, and the profile does not support synthesis as the cause. No sim code change.
+- Profile `logs/prof/sim_gil.txt`: py-spy `--nonblocking --gil`, 40 s, running on the sim during a 50-call capacity run
+  after a rebuild. 1152 samples (412 errors). Main-thread idle (`Runner.run` leaf) = 228. Inclusive counts:
+  `MediaSession._tick_loop` 213, `_tick` 128, websockets send 82, `_receive_loop` 43, STT `SttStream.feed` 41,
+  caller synthesis `_render_all`/`synthesize_pcm16` 41 (~3.6 %), `ulaw_decode` 29. Synthesis is a minor GIL
+  holder spread over the start burst, not a multi-second blocker. The cost is the per-call 20 ms tick/WS send work.
+- The original "sim logged nothing for 5 s" was weak evidence. The sim logs sparsely: in the cycle-1 run, gaps between
+  consecutive sim log lines reached 111 s, 62 s, 38 s, and so on, with no failure. The real signals are
+  `sim.telnyx_media_connect_failed` and the media worker's connect timeouts. Each run below has 0 of them.
+- Runs: `logs/fix1_cap1.log` (capacity after rebuild: 50 calls, 0 failed, overhead p50 93 / p95 126 ms, 0 underruns,
+  loop lag p99 <= 25 ms); `logs/fix1_e2e1.log` (`make e2e`: 20 passed, exit 0); `logs/fix1_e2e2.log`
+  (`make down` then `make e2e`, fully cold stack, sim started 14:13:48: 20 passed, exit 0, including concurrent_calls
+  and inbound_basic). The exit-gate failure (8/50 media handshake timeouts) remains unexplained but did not recur in
+  3 runs. With no evidence for the planned process-pool change, I left it out.
+Part C: outbound_basic passed in the exit-gate run and in both cycles above (3/3 full suites), so it does not reproduce.
+Gates: make fmt 0; make check exit 0 (lint, typecheck "no issues in 1563 files", placeholders 0, 12621 passed /
+7 skipped, coverage 99.09 %, TS 22+52+48 passed, openapi drift current, spec refs 0); jscpd 0 clones; radon avg
+2.60; pip-audit no known vulns; pnpm audit 3 moderate (none high). AGENTS.md line P07-FIX-1 added.
+
+## Review P07-FIX-1 (2026-11-04) — approved
+Re-ran `make check`: exit 0. It covers lint, typecheck, placeholders (0), 12621 passed / 7 skipped, coverage 99.09 %, the TS tests, OpenAPI drift and spec refs (0).
+Re-ran a cold `make down && make e2e`: 20 passed, exit 0. That includes concurrent_calls, inbound_basic, pathway_restaurant_template and webhook_node,
+which makes this the third consecutive green full suite. Diff: the Part A test now asserts hook→counter wiring (before + 1), and the absolute-zero
+check is covered on the accelerated clock by va_voice test_pipeline_underruns. Part B outcome (b) is backed by the logs (fix1_e2e1/2, cap1) and the profile analysis.
+Tasks fix:runtime-sim-underrun, fix:e2e-cold-concurrent and fix:e2e-outbound-basic-flaky are closed. The AGENTS.md line has been added.
+Next: the Planner re-runs the phase 07 exit gate and prints LOOP_COMPLETE once it passes. Still open (P2): fix:e2e-interrupt-level1, which did not fail in these runs.

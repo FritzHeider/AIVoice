@@ -218,10 +218,12 @@ async def test_caller_turn_is_answered_by_the_task_brain(monkeypatch: pytest.Mon
         assert spoken(r.state) == [OPENER, "Sure, for how many people?"]
         assert r.metrics is not None
         registry = r.metrics.registry
-        assert registry.get_sample_value("va_audio_underruns_total") == 0
+        # The wall-clock sim may underrun under load; on-time playback reporting none is covered on the
+        # accelerated clock (va_voice test_pipeline_underruns). Here: the hook drives the catalog counter.
+        before = registry.get_sample_value("va_audio_underruns_total") or 0.0
         assert len(hooks) == 1
         hooks[0]()
-        assert registry.get_sample_value("va_audio_underruns_total") == 1
+        assert registry.get_sample_value("va_audio_underruns_total") == before + 1
 
 
 async def test_end_call_tool_ends_the_session_as_agent_end_call() -> None:

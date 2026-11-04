@@ -1943,3 +1943,9 @@ Grafana 3001
   has `extra_hosts` + `WEBHOOK_ALLOW_PRIVATE` in `docker-compose.e2e.yml` (Webhook nodes run there). Router/extraction
   prompts carry no scenario marker: script extraction with `match: {tool_name: extract_variables, last_user_regex:
   <phrase only this flow says>}`; routing comes from FakeLLM's edge-label word overlap.
+- 2026-11-04 (P07-FIX-1): profile the sim like the media worker (target `voiceagents-sim-1`, `py-spy record --nonblocking
+  --gil -f raw`, aggregate the raw stacks by leaf/inclusive frame). During a 50-call start, caller synthesis
+  (`caller_script._render_all`) held the GIL in only ~4 % of samples. The sim's main cost is `MediaSession._tick_loop`
+  (WS sends). The sim logs only sparsely (gaps of tens of seconds are normal), so a quiet sim log is not evidence of
+  a stalled loop. Check `sim.telnyx_media_connect_failed` and the media worker's STT/TTS connect timeouts instead.
+  For a cold e2e run, `make down && make e2e` (plain `make e2e` reuses running containers when images are unchanged).

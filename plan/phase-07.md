@@ -167,7 +167,7 @@
     `tests_e2e/test_pathway_regression_gate.py` where a broken draft's publish is blocked and a fixed one publishes
   - Acceptance: api tests pass/fail/timeout; `make e2e` flow green.
 
-- [ ] P07-T12 Pathway runner integration in calls (split into P07-T12a–c below)
+- [x] P07-T12 Pathway runner integration in calls (split into P07-T12a–c below) — done via P07-T12a, P07-T12b, P07-T12c
   - Spec refs: specs/05-calls-api.md (runner selection: pathway_id/pathway_version); specs/11-pathways-engine.md (voice integration)
   - Depends on: P07-T08, P05-T09
   - Deliverables: `PathwayBrain` implementing the pipeline Brain protocol, CallContext loading of pinned version, start node prefetch, call events emission, final variables persisted to `calls.variables`
@@ -204,6 +204,15 @@
   - Deliverables: `tests_e2e/test_pathway_restaurant_template.py`, `tests_e2e/test_webhook_node.py` (pathway JSON
     seeded through the pathways API, scenarios + FakeLLM rules, the e2e receiver), harness helpers
   - Acceptance: `make e2e` passes including both flows.
+
+- [x] P07-FIX-1: make exit gate pass (make check 12621 passed / 99.09 %; cold `make down && make e2e` 20 passed x3; sim stall not reproduced, py-spy shows synthesis ~4 % GIL; underrun test asserts hook wiring) — make check: 1 failed (test_runtime_sim::test_caller_turn_is_answered_by_the_task_brain, wall-clock `va_audio_underruns_total == 0` got 4 under xdist load); make e2e on the rebuilt stack: concurrent_calls 8/50 calls `end_reason error` (sim event loop stalled ~5 s at call start → media WS / STT / TTS handshakes timed out), inbound_basic answer 1455 ms > 1000 right after
+  - Spec refs: specs/30 §3 (simulators), specs/30 §5 (e2e flows), specs/07 §9 Decision P05-T17e (underruns)
+  - Depends on: P07-T12c
+  - Deliverables: deterministic runtime-sim underrun wiring test; the sim no longer blocks its event loop while many
+    calls start (cause measured with py-spy, fixed in the sim, regression test); e2e green on a freshly rebuilt stack
+  - Acceptance: `make check` passes; `scripts/dev_up.sh e2e` then `make e2e` passes on the FIRST run after the rebuild
+    (twice in a row); open tasks fix:runtime-sim-underrun, fix:e2e-cold-concurrent, fix:e2e-outbound-basic-flaky closed
+    with evidence (or the outbound_basic one left open with a written diagnosis if it does not reproduce).
 
 ## Phase exit gate
 `make check && make e2e` pass.
