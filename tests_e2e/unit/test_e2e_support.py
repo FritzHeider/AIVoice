@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import phonenumbers
 import pytest
@@ -233,6 +233,9 @@ def test_an_invalid_scenario_fails_with_its_position() -> None:
         prepare_scenario("id: x\n", name="broken", run="t", number="+14155550199")
 
 
+DECISION_TOOLS: Final = frozenset({"select_path", "score_condition", "extract_variables"})
+
+
 @pytest.mark.parametrize("path", RULE_FILES, ids=lambda path: path.stem)
 def test_every_rule_file_loads_once_substituted(path: Path) -> None:
     marker = scenario_marker("flow-ab12cd34")
@@ -241,7 +244,14 @@ def test_every_rule_file_loads_once_substituted(path: Path) -> None:
     rules = load_rules(text, source=path.name).rules
     assert rules
     assert all(rule.id.endswith("-ab12cd34") for rule in rules)
-    assert all(marker in rule.match.system_contains for rule in rules)
+    unscoped = [rule.id for rule in rules if marker not in rule.match.system_contains]
+    # Decision prompts carry no scenario marker (specs/30 §5 Decision P07-T12c): only rules keyed on a pathway
+    # decision tool may go without it.
+    assert all(
+        rule.match.tool_name in DECISION_TOOLS and rule.match.last_user_regex
+        for rule in rules
+        if rule.id in unscoped
+    ), unscoped
     assert yaml.safe_load(text)["rules"]
 
 

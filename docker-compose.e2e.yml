@@ -4,7 +4,8 @@
 # against wall time (Telnyx webhook and media WS signature tolerances, Temporal timers, 20 ms media pacing).
 # The e2e webhook receiver runs in the pytest process on the docker host (tests_e2e/support/e2e_receiver.py): the
 # api (Send Call / endpoint URL checks, endpoint test sends) and the webhook dispatcher reach it as
-# `host.docker.internal`, a private address, so the api pins WEBHOOK_ALLOW_PRIVATE as the dispatcher does.
+# `host.docker.internal`, a private address, so the api pins WEBHOOK_ALLOW_PRIVATE as the dispatcher does. Since
+# P07-T12c the media worker reaches it too: pathway Webhook nodes run in the media worker and post to the receiver.
 services:
   sim:
     environment:
@@ -17,3 +18,8 @@ services:
   webhooks:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  media:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      WEBHOOK_ALLOW_PRIVATE: "true"

@@ -1,0 +1,15 @@
+# Decision prompts (router, extraction) carry no scenario marker (specs/30 §5 Decision P07-T12c): the extraction
+# rule is keyed on the forced tool and the caller's name, which only this flow says.
+rules:
+  - id: pathway-restaurant-extract-{{run}}
+    priority: 10
+    match:
+      tool_name: extract_variables
+      last_user_regex: "(?i)marisol quintana"
+    respond:
+      tool_calls:
+        - name: extract_variables
+          arguments:
+            party_size: 4
+            time: "7pm"
+            name: "Marisol Quintana"

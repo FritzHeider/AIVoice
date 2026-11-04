@@ -1,0 +1,104 @@
+{
+  "nodes": [
+    {
+      "id": "greet",
+      "type": "Default",
+      "position": { "x": 0, "y": 0 },
+      "data": {
+        "name": "Greeting",
+        "isStart": true,
+        "text": "Thank you for calling Bella Pasta, this is Ava. How can I help you today?"
+      }
+    },
+    {
+      "id": "reserve",
+      "type": "Default",
+      "position": { "x": 0, "y": 240 },
+      "data": {
+        "name": "Take Reservation",
+        "text": "Of course. What name should I put the reservation under?",
+        "extractVars": [
+          {
+            "name": "party_size",
+            "type": "integer",
+            "description": "Number of guests",
+            "required": true
+          },
+          {
+            "name": "time",
+            "type": "string",
+            "description": "Reservation time as the caller said it, for example 7pm",
+            "required": true
+          },
+          {
+            "name": "name",
+            "type": "string",
+            "description": "Full name for the reservation",
+            "required": true
+          }
+        ],
+        "extractVarsMode": "before_response"
+      }
+    },
+    {
+      "id": "book",
+      "type": "Webhook",
+      "position": { "x": 0, "y": 480 },
+      "data": {
+        "name": "Book Table",
+        "webhook": {
+          "url": "https://reservations.bella-pasta.test/bookings",
+          "method": "POST",
+          "headers": { "Content-Type": "application/json" },
+          "body": { "party_size": "{{party_size}}", "time": "{{time}}", "name": "{{name}}" },
+          "timeoutMs": 5000,
+          "responseData": [
+            { "name": "status", "data": "$.status", "context": "Booking status" },
+            { "name": "ref", "data": "$.ref", "context": "Booking reference" }
+          ],
+          "routeOnStatus": {
+            "2xx": "goodbye",
+            "4xx": "goodbye",
+            "5xx": "goodbye",
+            "timeout": "goodbye"
+          }
+        }
+      }
+    },
+    {
+      "id": "goodbye",
+      "type": "End Call",
+      "position": { "x": 0, "y": 720 },
+      "data": {
+        "name": "Goodbye",
+        "endCall": {
+          "speech": "You are all set, {{name}}. Your table for {{party_size}} at {{time}} is booked. Goodbye!",
+          "speechMode": "static"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_reserve",
+      "source": "greet",
+      "target": "reserve",
+      "data": { "label": "Caller wants to book a table reservation" }
+    },
+    {
+      "id": "e_book",
+      "source": "reserve",
+      "target": "book",
+      "data": { "label": "Reservation details given", "alwaysPick": true }
+    },
+    {
+      "id": "e_bye",
+      "source": "greet",
+      "target": "goodbye",
+      "data": { "label": "Caller says goodbye" }
+    }
+  ],
+  "global_config": {
+    "globalPrompt": "You are Ava, the reservation assistant of Bella Pasta. Keep answers short and natural."
+  }
+}

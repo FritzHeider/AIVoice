@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793798181-1471
+> P07-T12c: pathway e2e flows use tests_e2e/pathways/*.json templates + with_webhook_url (validation refuses templated webhook hosts); media container needs extra_hosts+WEBHOOK_ALLOW_PRIVATE in docker-compose.e2e.yml for Webhook nodes; decision prompts carry no scenario marker -> extraction rules keyed on tool_name extract_variables + caller phrase (test_e2e_support allows unmarked rules only for decision tools); unrecorded calls need event_order_failures(types, REQUIRED_CALL_EVENTS - {call.recording_ready})
+<!-- tags: e2e, pathways, testing | created: 2026-11-04 -->
+
 ### mem-1793753822-cf55
 > P07-T11b: unit test CRUD/from_call/runs = routers/pathway_tests (UnitTest* schema names: src Test* classes get collected by pytest; test-file helper class named Tests with __init__ errors collection) + services/pathway_tests capture_turn + va_db PathwayTestRepo/PathwayRunRepo; analysts may write tests (no editor guard); session_helpers.error_of returns (status, code, field) not message; cross-tenant factories read context.params[pathway_id]
 <!-- tags: api, pathways, testing | created: 2026-11-04 -->

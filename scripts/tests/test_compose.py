@@ -238,6 +238,7 @@ def test_e2e_override_pins_the_realtime_sim_clock_and_the_receiver_host() -> Non
             "sim": {"environment": {"SIM_CLOCK": "realtime"}},
             "api": {"extra_hosts": host_gateway, "environment": {"WEBHOOK_ALLOW_PRIVATE": "true"}},
             "webhooks": {"extra_hosts": host_gateway},
+            "media": {"extra_hosts": host_gateway, "environment": {"WEBHOOK_ALLOW_PRIVATE": "true"}},
         }
     }
     assert SERVICES["sim"]["environment"]["SIM_CLOCK"] == "realtime"
@@ -678,6 +679,9 @@ def test_docker_compose_e2e_override_renders_the_e2e_stack() -> None:
     assert api["environment"]["DATABASE_URL"] == webhooks["DATABASE_URL"]
     assert api["extra_hosts"] == services["webhooks"]["extra_hosts"]
     assert set(api["extra_hosts"]) == {"host.docker.internal=host-gateway"}
+    media = services["media"]
+    assert media["extra_hosts"] == api["extra_hosts"]
+    assert media["environment"]["WEBHOOK_ALLOW_PRIVATE"] == "true"
 
 
 @needs_docker_cli

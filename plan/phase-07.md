@@ -198,7 +198,7 @@
   - Acceptance: runtime sim tests (FakeTelnyx + FakeElevenLabs + FakeLLM + media DB) for a pathway call: route
     events, webhook node to a receiver, End Call, variables persisted, Call Object `pathway_logs`.
 
-- [ ] P07-T12c e2e flows pathway_restaurant_template and webhook_node
+- [x] P07-T12c e2e flows pathway_restaurant_template and webhook_node — bundled template tests_e2e/pathways/restaurant_template.json + both flows green on the e2e stack; make test 12621 passed (99.09%), lint/typecheck/placeholders/spec refs pass, jscpd 0 clones
   - Spec refs: specs/30 §5 rows `pathway_restaurant_template`, `webhook_node`
   - Depends on: P07-T12b
   - Deliverables: `tests_e2e/test_pathway_restaurant_template.py`, `tests_e2e/test_webhook_node.py` (pathway JSON

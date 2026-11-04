@@ -298,7 +298,9 @@ creates roles `va_app` and `va_system` (password `va` locally) and database `tem
 >    timers on wall time. Since P06-T08 (specs/30 §5 Decision P06-T08) it also gives `api` and `webhooks`
 >    `extra_hosts: ["host.docker.internal:host-gateway"]` (the e2e webhook receiver runs in the pytest process on
 >    the docker host) and pins `WEBHOOK_ALLOW_PRIVATE: "true"` on `api` (the gateway address is private; the api
->    vets Send Call and endpoint URLs and sends endpoint test events); environment keys merge with the base.
+>    vets Send Call and endpoint URLs and sends endpoint test events); environment keys merge with the base. Since
+>    P07-T12c (specs/30 §5 Decision P07-T12c) `media` gets the same `extra_hosts` and `WEBHOOK_ALLOW_PRIVATE: "true"`:
+>    pathway Webhook nodes run in the media worker and post to the receiver.
 > 6. `scripts/dev_up.sh` starts in stages: dependencies (`up -d --wait --build`), one-shot jobs (`minio-init`), the sim
 >    key copy, then, when application services are selected, `scripts/telnyx_bootstrap.py --write-env` with
 >    `EDGE_PUBLIC_HOST=edge:8100` (FakeTelnyx forgets its resources on restart, and the app's webhook URL must be

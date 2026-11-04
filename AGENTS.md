@@ -1935,3 +1935,11 @@ Grafana 3001
   snapshot/end routine/events; FakeLLM routes by `system_contains: ['Current step: "<node name>"']`),
   `runtime_rig.sim_runtime(pathways=)`, `pathways_helpers.store_pathway(db, org, graph, name=)`,
   `engine_rig(facts=)`. A runtime pipeline end `agent_hangup` maps to `agent_end_call` before the end routine.
+- 2026-11-04 (P07-T12c): pathway e2e flows (specs/30 §5 Decision P07-T12c): bundled templates live in
+  `tests_e2e/pathways/*.json` (`e2e_pathways.load_template`, `with_webhook_url(graph, url)` because validation refuses
+  templated webhook hosts), `PathwayApi.published(name, graph)` (create with the graph's own `global_config` +
+  publish), `pathway_call(org, scenario, pathway_id)`, `run_pathway_call(...)`, `route_targets(events)`,
+  `webhook_node_data(events)`. Receiver `Reply(status, body)` answers JSON; `Received.json()`. The media container now
+  has `extra_hosts` + `WEBHOOK_ALLOW_PRIVATE` in `docker-compose.e2e.yml` (Webhook nodes run there). Router/extraction
+  prompts carry no scenario marker: script extraction with `match: {tool_name: extract_variables, last_user_regex:
+  <phrase only this flow says>}`; routing comes from FakeLLM's edge-label word overlap.

@@ -562,3 +562,157 @@ and got 1 under xdist CPU load (realtime sim). That assertion dates from P05-T17
 the test passes 3/3 alone. Logged as a fix task, not a blocker. e2e (`scripts/dev_up.sh e2e` + `-m "e2e or capacity"`):
 18 passed. Diff checked: exit-stack order (brain.aclose → saver flush → finish_call), drafts never cached,
 tenant_session for graph loads and the variables merge, PHI-free event messages, spec Decisions added.
+
+## Planner 2026-11-04 (after P07-T12b approval)
+Next unticked: P07-T12c (last task of phase 07; after it the Planner runs the phase exit gate).
+
+## Plan P07-T12c — e2e flows pathway_restaurant_template and webhook_node
+
+Facts verified by the planner:
+- No dashboard templates exist yet (`apps/dashboard/src/templates` arrives in phase 17, specs/25 §3), and the only
+  restaurant fixture (`packages/va_engine/tests/fixtures/bland/restaurant_ordering.json`) is an ordering flow with
+  KB/Custom Code nodes (phase 08). So the "bundled" reservation template is NEW and lives at
+  `tests_e2e/pathways/restaurant_template.json` (tests_e2e is not scanned by the placeholder gate, so `.test`
+  hosts are fine). Record that in the Decision.
+- Validation rejects a templated netloc in a webhook URL (`validation._webhook_url_ok`; warning on draft, error on
+  publish), so the test rewrites the Webhook node's `url` to the receiver URL before creating the pathway.
+- Router/extraction prompts (`va_llm/prompts/router.txt`, `extract.txt`) do NOT contain the call prompt, so a
+  `{{marker}}` cannot scope decision rules. Routing uses FakeLLM's label-word heuristic (`select_path` overlap)
+  or `alwaysPick`; extraction uses a FakeLLM rule `match: {tool_name: extract_variables, last_user_regex: <unique
+  name>}` (rule ids carry `{{run}}`). All agent lines are static text, so no dialogue LLM rule is needed.
+- The media worker runs Webhook nodes and must reach `host.docker.internal`: `docker-compose.e2e.yml` only gives
+  `api`/`webhooks` `extra_hosts`. VA_ENV in compose is local → `insecure_urls_allowed` → http allowed.
+- `WebhookReceiver` answers status only (`Reply(status)`); webhook_node needs a JSON body.
+- Event log items (`GET /v1/calls/{id}/events`) carry `type` and `data` (CallEventItem).
+
+### Files
+1. `docker-compose.e2e.yml`: add
+   ```yaml
+   media:
+     extra_hosts: ["host.docker.internal:host-gateway"]
+     environment:
+       WEBHOOK_ALLOW_PRIVATE: "true"
+   ```
+   and extend the header comment (media runs pathway Webhook nodes against the receiver). Update
+   `scripts/tests/test_compose.py` (expected override dict ~line 239, and the extra_hosts equality ~line 679) and the
+   specs/29 §2 e2e-override Decision text (one sentence, same commit).
+2. `tests_e2e/support/e2e_receiver.py`: `Reply(status: int = 200, body: JsonValue | None = None)`; `handle` answers
+   `JSONResponse(body, status_code=...)` when body is not None, else the plain `Response`. Starlette route stays
+   POST-only (webhook nodes POST). Add `Received.json()` helper (orjson/json loads of body) if convenient.
+   Unit test in `tests_e2e/unit/test_e2e_webhooks.py` (or test_e2e_support.py — wherever receiver tests live):
+   scripted JSON reply body + content-type, default reply unchanged.
+3. `tests_e2e/pathways/restaurant_template.json` (Bland camelCase, prettier-formatted, with `global_config`
+   `{"globalPrompt": "You are Ava, the reservation assistant of Bella Pasta."}`):
+   - `greet` Default, `isStart`, name "Greeting", text "Thank you for calling Bella Pasta, this is Ava. How can I
+     help you today?"
+   - `reserve` Default, name "Take Reservation", text "Of course. What name should I put the reservation under?",
+     `extractVars` party_size (integer, "Number of guests"), time (string, "Reservation time as the caller said
+     it, for example 7pm"), name (string, "Full name for the reservation"), all required, `extractVarsMode`
+     `before_response`.
+   - `book` Webhook, name "Book Table", `webhook`: method POST, url `https://reservations.bella-pasta.test/bookings`
+     (rewritten by the test), body `{"party_size": "{{party_size}}", "time": "{{time}}", "name": "{{name}}"}`,
+     `responseData` status `$.status`, ref `$.ref`, `routeOnStatus` `{"2xx": "goodbye", "4xx": "goodbye",
+     "5xx": "goodbye", "timeout": "goodbye"}` (no text/prompt → routes at once).
+   - `goodbye` End Call, name "Goodbye", `endCall.speech` "You are all set, {{name}}. Your table for {{party_size}}
+     at {{time}} is booked. Goodbye!", speechMode static.
+   - Edges: `e_reserve` greet→reserve label "Caller wants to book a table reservation"; `e_book` reserve→book with
+     `alwaysPick: true` (check the exact edge field name in `va_engine.models.graph` Edge data — `alwaysPick`);
+     `e_bye` greet→goodbye label "Caller says goodbye" (keeps the template realistic; unused).
+   Verify it with `validate_graph(mode="publish")` via a tests_e2e unit test (`tests_e2e/unit/test_e2e_pathways.py`:
+   load the JSON, apply the URL rewrite helper, `load_graph` + `validate_graph(..., mode="publish",
+   refs=None, allow_http=True)` → no errors; the rewrite touches only Webhook nodes).
+4. `tests_e2e/support/e2e_pathways.py` additions:
+   - `PATHWAYS_DIR`, `load_template(name) -> dict` (nodes/edges/global_config), `with_webhook_url(graph, url) ->
+     dict` (deep copy, replaces `data.webhook.url` of every Webhook node),
+     `webhook_graph(url) -> dict` for the webhook_node flow (below).
+   - `PathwayApi.create(name, graph)` must pass the graph's own `global_config` when present (today it forces `{}`).
+   - `PathwayApi.published(name, graph) -> str` = create + publish (asserts 200), returns pathway id.
+   - `route_targets(events) -> list[str]` = `data["to_node"]` (check the real key in `va_engine` route event
+     data, `handler_route_data`/router event) of `type == "call.route"` events in seq order.
+   - `pathway_call(harness/org, scenario, pathway_id, **extra) -> dict` body: `phone_number` scenario number,
+     `from` org number, `pathway_id`, `wait_for_greeting: false`, `record: false`.
+5. Scenarios (`tests_e2e/scenarios/`), `answer: {after_ms: 1500, result: answered, answered_by: human_residence}`,
+   `profile: fast` (or whatever the default fast profile is called; check other scenarios), steps with
+   `wait_agent_speech {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}` between `say`s, final
+   `expect_hangup: {by: agent, timeout_ms: 20000}`:
+   - `pathway_restaurant_template.yaml` + `rules/pathway_restaurant_template.yaml`: says "Hi, I would like to book
+     a table for 4 at 7pm." then "It is under Marisol Quintana." Rule `restaurant-extract-{{run}}` priority 10
+     `match: {tool_name: extract_variables, last_user_regex: "(?i)marisol quintana"}` → `tool_calls: [{name:
+     extract_variables, arguments: {party_size: 4, time: "7pm", name: "Marisol Quintana"}}]`. Assertions block:
+     call_status completed, answered_by human, end_reason agent_end_call (verify the real mapping from P07-T12b:
+     runtime `agent_hangup` → `agent_end_call`).
+   - `webhook_node.yaml` (no rules file): says "Yes, please confirm my booking." then "Great, thank you, goodbye."
+6. `tests_e2e/test_pathway_restaurant_template.py` (`pytestmark = [e2e, timeout(600)]`, fixtures `harness`,
+   `receiver`): org → `load_scenario("pathway_restaurant_template")` → template with url
+   `f"{receiver.url}/bookings/{harness.run_token}"` (path unique per run) → `published(...)` →
+   `send_call(pathway body)` → `wait_complete` → assert:
+   - scenario assertions via the harness evaluator (as other flows do);
+   - `route_targets(events) == ["reserve", "book", "goodbye"]` (adjust only if the engine also emits a route for
+     the start node; then pin the exact observed list including it — never loosen to a subset);
+   - Call Object `variables` ⊇ `{"party_size": 4, "time": "7pm", "name": "Marisol Quintana"}` (plus status/ref
+     from the receiver's default empty reply → none; the receiver answers JSON `{"status": "booked", "ref":
+     "R7"}` scripted for that path, so also `status`/`ref` present);
+   - receiver got exactly one POST at that path whose JSON body is `{"party_size": 4, "time": "7pm", "name":
+     "Marisol Quintana"}`;
+   - one `call.extraction` event and one `call.webhook_node` event (status_code 200, outcome ok);
+   - End Call speech played: `harness.tts_texts()` contains "You are all set, Marisol Quintana. Your table for 4
+     at 7pm is booked. Goodbye!" and the sim summary/timeline shows hangup by agent after it (scenario
+     `expect_hangup by agent` covers it).
+7. `tests_e2e/test_webhook_node.py`: graph from `webhook_graph(url)`:
+   - `start` Default isStart text "Hi, this is Ava from Bella Pasta. Shall I confirm your booking?"
+   - `confirm` Webhook name "Confirm Booking" POST `{url}`, body `{"call": "{{call_id}}"}` (check the built-in name
+     for the call id in `va_engine.builtins`; any built-in works), `responseData` status `$.status`, ref `$.ref`,
+     `text` "Your booking is {{status}}, reference {{ref}}." (no routeOnStatus → waits for the user after speaking).
+   - `bye` End Call speech "Goodbye!"
+   - edges start→confirm label "Caller wants the booking confirmed", confirm→bye label "Caller says goodbye".
+   Receiver scripted `Reply(200, {"status": "confirmed", "ref": "A1"})`. Assert: TTS texts contain "Your booking is
+   confirmed, reference A1." (the agent utterance right after the webhook — also check the assistant turn in the
+   Call Object transcripts follows the first user turn); `call.webhook_node` event data `status_code == 200`,
+   `outcome == "ok"`, `variables_set` ⊇ {status, ref}; route targets `["confirm", "bye"]`; receiver got one POST;
+   call completed, end_reason agent_end_call.
+   Shared assertions (ok/route_targets/webhook event lookup) go in e2e_pathways to keep jscpd at 0.
+8. specs/30 §5 Decision (2026-11-04) P07-T12c under the flows table: template location + URL rewrite, extraction
+   via FakeLLM rule keyed on tool name + caller phrase (decision prompts carry no scenario marker), routing via
+   label heuristic / alwaysPick, receiver JSON replies, media `extra_hosts`. AGENTS.md line (P07-T12c).
+
+### Tests / gates
+- `uv run pytest tests_e2e/unit scripts/tests/test_compose.py -q`.
+- `make fmt lint typecheck placeholders`, spec refs, jscpd 0 clones (tests_e2e is scanned), prettier on the JSON.
+- Rebuild stack `scripts/dev_up.sh e2e` (compose override changed → media must be recreated), then
+  `uv run pytest tests_e2e -m e2e -k "pathway_restaurant_template or webhook_node" -s`, then full
+  `make e2e` (this is the phase exit gate flow set anyway). `make test` in background with Monitor heartbeat.
+
+### Risks
+- Engine behaviour on entering `reserve` from greet: confirm it speaks reserve's text and waits (not alwaysPick
+  chaining immediately). If alwaysPick chains on entry, instead give `e_book` a label ("Caller gave the name for
+  the reservation") and add a `select_path` FakeLLM rule keyed on `last_user_regex: marisol quintana` that picks
+  `book` (check the select_path argument names in `va_engine.decision_schemas`).
+- Extraction runs on `reserve` with the whole history; the rule matches the latest caller line only.
+- `wait_for_greeting: false` is required, else the first caller line would be treated as the greeting.
+- FakeElevenLabs STT returns the scripted text; "7pm" may come back as "7 pm" or "7pm" — irrelevant because the
+  extraction rule fixes the values, but the label-overlap route on "book a table" must still hold.
+
+## Build P07-T12c (2026-11-04)
+Implemented per plan. Files: docker-compose.e2e.yml (media extra_hosts + WEBHOOK_ALLOW_PRIVATE), test_compose.py,
+specs/29 §2 Decision text, specs/30 §5 Decision P07-T12c, e2e_receiver `Reply(status, body)` + `Received.json()`,
+e2e_pathways (load_template, with_webhook_url, webhook_graph, pathway_call, route_targets, events_of,
+webhook_node_data, run_pathway_call, `ok`, PathwayApi.published; create keeps the graph's global_config),
+tests_e2e/pathways/restaurant_template.json, scenarios + rule, test_pathway_restaurant_template.py,
+test_webhook_node.py, unit tests test_e2e_pathways.py + JSON reply unit test. Observed route targets exactly
+reserve, book, goodbye (no route event for the start node). Restaurant flow passes record=false, so its order check
+drops call.recording_ready from the required set.
+Gates: fmt/lint/typecheck/placeholders 0, spec refs 0, jscpd 0 clones; both flows green on a rebuilt stack (45 s).
+make test: 12619 passed, 2 failed — (a) mine: test_e2e_support rule-file invariant required the scenario marker
+in every rule; narrowed to allow unmarked rules only when keyed on a decision tool + last_user_regex (fixed, tests_e2e/unit
+105 passed); (b) known flaky task-brain underrun test (existing task fix:runtime-sim-underrun), passes alone.
+Coverage 99%. make e2e (rebuild): 18 passed incl. pathway_restaurant_template + webhook_node, 2 failed
+(concurrent_calls api 500 tenant_session timeout under 50 pollers on the cold stack; inbound_basic FakeLLM default
+reply right after) — both passed on immediate rerun; logged as fix:e2e-cold-concurrent.
+
+## Review P07-T12c (2026-11-04) — approved
+Re-ran: lint, typecheck, placeholders, spec refs pass; jscpd 0 clones; make test 12621 passed, 7 skipped, 99.09%.
+e2e on the running stack: pathway_restaurant_template, webhook_node, pathway_regression_gate pass; outbound_basic
+failed once in that batch and passed 3/3 alone afterwards (no src change in this diff) → logged as
+fix:e2e-outbound-basic-flaky. Diff checked: compose override + test_compose + specs/29 text in lockstep, specs/30
+Decision P07-T12c, receiver JSON replies unit-tested, rule-file invariant narrowed to decision tools only.
+Next: Planner runs the phase 07 exit gate (make check && make e2e).

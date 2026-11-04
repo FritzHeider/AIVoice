@@ -8,10 +8,9 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-import httpx
 import pytest
 from e2e_harness import Harness
-from e2e_pathways import PathwayApi, ordering_graph
+from e2e_pathways import PathwayApi, ok, ordering_graph
 
 pytestmark = [pytest.mark.e2e, pytest.mark.timeout(600)]
 
@@ -22,14 +21,7 @@ ORDER_TEST: Final[dict[str, Any]] = {
     "expected": {"route_to_node_id": "order"},
     "simulated_variations": 0,
 }
-OK: Final = 200
 CONFLICT: Final = 409
-
-
-def ok(response: httpx.Response) -> dict[str, Any]:
-    assert response.status_code == OK, f"{response.status_code}: {response.text}"
-    body: dict[str, Any] = response.json()
-    return body
 
 
 async def production(pathways: PathwayApi, pathway_id: str) -> int | None:

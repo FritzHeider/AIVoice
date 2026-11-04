@@ -291,6 +291,19 @@ async def test_the_receiver_records_and_answers_scripted_replies() -> None:
     assert len(receiver.of("/org")) == 2
 
 
+async def test_a_scripted_reply_body_is_answered_as_json() -> None:
+    receiver = WebhookReceiver()
+    receiver.script("/bookings", Reply(201, {"status": "booked", "ref": "R7"}))
+    async with served_receiver(receiver, bind="127.0.0.1") as port, httpx.AsyncClient(timeout=5.0) as http:
+        url = f"http://127.0.0.1:{port}/bookings"
+        scripted = await http.post(url, json={"party_size": 4})
+        plain = await http.post(url, json={"party_size": 5})
+    assert (scripted.status_code, scripted.json()) == (201, {"status": "booked", "ref": "R7"})
+    assert scripted.headers["content-type"].startswith("application/json")
+    assert (plain.status_code, plain.content) == (200, b"")
+    assert [request.json() for request in receiver.of("/bookings")] == [{"party_size": 4}, {"party_size": 5}]
+
+
 async def test_wait_for_times_out_with_what_was_received() -> None:
     receiver = WebhookReceiver()
     with pytest.raises(AssertionError, match=r"not met within 0\.01 s"):

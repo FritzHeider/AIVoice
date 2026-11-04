@@ -1440,6 +1440,27 @@ delays is covered by Temporal time-skipping integration tests.)
 > (§5 body, `end_reason agent_end_call`) and one `call.completed` (data = the per-call Call Object), as §7
 > envelopes matching the request headers. `outbound_basic` keeps its event-log path.
 
+> Decision (2026-11-04): pathway e2e flows (P07-T12c). (1) Template: no dashboard templates exist before phase 17
+> (specs/25 §3), so the bundled restaurant reservation template is `tests_e2e/pathways/restaurant_template.json`
+> (Bland camelCase graph with `global_config`): Greeting → (label "Caller wants to book a table reservation") Take
+> Reservation (static text, `extractVars` `party_size` integer / `time` / `name`, all required, `before_response`) →
+> (`alwaysPick`) Book Table (Webhook POST of the three variables, `responseData` `status`/`ref`, `routeOnStatus`
+> every class → Goodbye) → Goodbye (End Call, static templated speech). Validation refuses a templated host in a
+> webhook URL, so the flow rewrites every Webhook node's `url` to the run's receiver path before creating the
+> pathway, then publishes it and sends `pathway_id` with `wait_for_greeting: false`. (2) FakeLLM: decision prompts
+> (router, extraction) carry neither the call prompt nor a scenario marker, so routing uses FakeLLM's edge-label
+> word heuristic (and `alwaysPick`), and extraction a rule matching `tool_name: extract_variables` plus a caller
+> phrase only that flow says (rule ids still carry `{{run}}`); every agent line is static text, so no dialogue rule
+> is needed. (3) Receiver: `Reply(status, body)` answers `body` as JSON (Webhook nodes read `responseData` from it).
+> Webhook nodes run in the media worker, so `docker-compose.e2e.yml` gives `media` the receiver's `extra_hosts` and
+> `WEBHOOK_ALLOW_PRIVATE: "true"` (specs/29 §2 Decision P05-T17a (5)). (4) Assertions: `pathway_restaurant_template`
+> = route targets exactly `reserve, book, goodbye`, one `call.extraction` at `reserve`, Call Object `variables` ⊇
+> `party_size 4, time "7pm", name` plus the receiver's `status`/`ref`, exactly one receiver POST whose JSON body is
+> the three typed values, one `call.webhook_node` (`ok`, 200, route `goodbye`), the templated End Call speech
+> synthesized and last in the transcript, agent hangup; `webhook_node` = one POST with the call id, the assistant
+> turn right after the first caller turn is "Your booking is confirmed, reference A1.", `call.webhook_node` `ok`
+> 200 with `variables_set` `status`/`ref`, route targets `confirm, bye`.
+
 ## 6. Load testing (`scripts/load/`)
 
 - **API load (k6)** `scripts/load/api.js`: stages ramp 0→200 VUs over 2 min, hold 5 min; mix: 40 % `GET /v1/calls`,

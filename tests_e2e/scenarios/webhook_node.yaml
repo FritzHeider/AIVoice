@@ -1,0 +1,21 @@
+id: webhook_node
+description: A pathway Webhook node posts to the receiver and speaks the values it extracted from the response.
+match:
+  to: "+14155550103"
+answer:
+  after_ms: 1500
+  result: answered
+  answered_by: human_residence
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Yes, please confirm my booking.", language: en}
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Great, thank you, goodbye."}
+  - expect_hangup: {by: agent, timeout_ms: 20000}
+profile: realistic
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: agent_end_call
+  min_turns: 5
+  transcript_contains: ["confirm my booking", "reference A1"]

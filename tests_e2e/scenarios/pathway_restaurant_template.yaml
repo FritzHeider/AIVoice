@@ -1,0 +1,22 @@
+id: pathway_restaurant_template
+description: A caller books a table through the bundled restaurant pathway; the Webhook node books it, End Call confirms.
+match:
+  to: "+14155550102"
+answer:
+  after_ms: 1500
+  result: answered
+  answered_by: human_residence
+llm_rules: [rules/pathway_restaurant_template.yaml]
+steps:
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "Hi, I would like to book a table for 4 at 7pm.", language: en}
+  - wait_agent_speech: {min_ms: 300, then_silence_ms: 700, timeout_ms: 8000}
+  - say: {text: "It is under Marisol Quintana."}
+  - expect_hangup: {by: agent, timeout_ms: 20000}
+profile: realistic
+assertions:
+  call_status: completed
+  answered_by: human
+  end_reason: agent_end_call
+  min_turns: 5
+  transcript_contains: ["book a table", "Marisol Quintana", "You are all set"]

@@ -3,7 +3,9 @@ that the stack's containers reach as ``http://{E2E_RECEIVER_HOST}:{port}`` (defa
 mapped to the docker host by ``extra_hosts`` in ``docker-compose.e2e.yml``).
 
 Requests are recorded with raw body, lower-cased headers, monotonic and wall receipt times, and the status
-they were answered with. Replies are scripted per path, optionally per event type (FIFO, then 200).
+they were answered with. Replies are scripted per path, optionally per event type (FIFO, then 200); a reply
+with a ``body`` answers it as JSON (pathway Webhook nodes read their ``responseData`` from it, Decision
+P07-T12c).
 Signature checks (:func:`signature_failures`) are independent of ``va_events.webhook_signing``: they
 recompute every HMAC here.
 """
@@ -13,17 +15,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 from service_helpers import serving
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 __all__ = [
@@ -60,7 +63,15 @@ DEFAULT_PUBLIC_HOST: Final = "host.docker.internal"
 
 @dataclass(frozen=True, slots=True)
 class Reply:
+    """A scripted answer: ``status`` and, when ``body`` is not ``None``, that body as JSON."""
+
     status: int = 200
+    body: Any = None
+
+    def response(self) -> Response:
+        if self.body is None:
+            return Response(status_code=self.status)
+        return JSONResponse(self.body, status_code=self.status)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +92,10 @@ class Received:
     @property
     def event_id(self) -> str:
         return self.headers.get(EVENT_ID_HEADER, "")
+
+    def json(self) -> Any:
+        """The body parsed as JSON."""
+        return json.loads(self.body)
 
 
 class WebhookReceiver:
@@ -130,7 +145,7 @@ class WebhookReceiver:
             Received(request.url.path, headers, body, time.monotonic(), time.time(), reply.status)
         )
         self.changed.set()
-        return Response(status_code=reply.status)
+        return reply.response()
 
 
 @dataclass(frozen=True, slots=True)
