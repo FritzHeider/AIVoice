@@ -5,6 +5,7 @@ Kept free of I/O imports so workflow modules can import the type names.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
 from temporalio.exceptions import ApplicationError
@@ -17,6 +18,7 @@ __all__ = [
     "EVENTS_UNAVAILABLE",
     "HANGUP_REJECTED",
     "INVALID_END_REASON",
+    "RECORDING_BUSY",
     "STATE_UNAVAILABLE",
     "STORAGE_UNAVAILABLE",
     "TELNYX_UNAVAILABLE",
@@ -38,6 +40,9 @@ HANGUP_REJECTED: Final = "HangupRejected"
 """Telnyx refused the hangup with an error other than "call already ended" (never retried)."""
 INVALID_END_REASON: Final = "InvalidEndReason"
 """The workflow asked for an end reason that cannot apply to the call's phase (never retried)."""
+RECORDING_BUSY: Final = "RecordingBusy"
+"""Another recording of the call is being copied (retried after the copy lock's remaining TTL; the next
+attempt usually finds the call's recording stored)."""
 STATE_UNAVAILABLE: Final = "StateUnavailable"
 """The call's Redis carrier state could not be read (retried)."""
 STORAGE_UNAVAILABLE: Final = "StorageUnavailable"
@@ -50,6 +55,9 @@ def call_not_found() -> ApplicationError:
     return ApplicationError("call not found", type=CALL_NOT_FOUND, non_retryable=True)
 
 
-def retryable(message: str, error_type: str) -> ApplicationError:
-    """A failure Temporal retries under the activity's retry policy."""
-    return ApplicationError(message, type=error_type)
+def retryable(
+    message: str, error_type: str, *, next_retry_delay: timedelta | None = None
+) -> ApplicationError:
+    """A failure Temporal retries under the activity's retry policy; ``next_retry_delay`` replaces the
+    policy's computed interval for the next attempt."""
+    return ApplicationError(message, type=error_type, next_retry_delay=next_retry_delay)

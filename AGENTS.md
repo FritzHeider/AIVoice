@@ -1466,7 +1466,12 @@ Grafana 3001
   RecordingActivities`, inputs in `recording_inputs`), polled on the post-call queue by an activities-only
   registration (`WorkerActivities.recording`, `postcall_queue()`). The edge also signals `postcall-<id>`
   `recording_saved` for `call.recording.saved`; `TelnyxClient.delete_recording(id)` (404 → False; FakeTelnyx
-  `DELETE /v2/recordings/{id}`). Tests: `packages/va_common/tests/minio_container.running_minio()` (bitnamilegacy
+  `DELETE /v2/recordings/{id}`) and `get_recording(id)` (fresh `download_urls`, used when a link 403/404s). Each
+  recording uploads to its own key `va_common.storage.recording_copy_key(org, call, created_at, owner)` (a losing
+  run deletes its object); `RecordingCopyLock` (`call:{<id>}:reccopy`, owner = recording identity) only saves
+  duplicate work, and `acquire` returns `CopyLockAttempt(taken, remaining_ms)` (busy retry delay = PTTL + 1 s). The
+  rig's `activities(..., copy_lock=)` takes a lock over your own fakeredis to assert on it; `MemoryS3.deleted`/
+  `fail_deletes`. Tests: `packages/va_common/tests/minio_container.running_minio()` (bitnamilegacy
   MinIO, random creds, `Minio.settings()`, `make_bucket`; one container per module) and
   `packages/va_workflows/tests/support/recording_rig.py` (`MemoryS3` fake client behind a real `ObjectStore`,
   `serve_recording(r, wav)` stores a FakeTelnyx WAV, `saved_input(call, id, **payload_fields)`, `wav_bytes`).

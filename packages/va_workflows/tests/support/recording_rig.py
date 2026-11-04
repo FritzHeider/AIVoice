@@ -21,7 +21,7 @@ from va_db.org_settings import OrgSettingsReader
 from va_domain.carrier import CarrierEvent
 from va_sim.wav import pcm16_wav
 from va_telnyx import TelnyxClientFactory
-from va_workflows.activities.recording import RecordingActivities
+from va_workflows.activities.recording import RecordingActivities, RecordingCopyLock
 from va_workflows.activities.recording_inputs import StoreRecordingInput
 
 if TYPE_CHECKING:
@@ -57,14 +57,17 @@ class StoredObject:
 
 @dataclass(slots=True)
 class MemoryS3:
-    """The S3 calls :class:`ObjectStore` makes, kept in memory; ``fail_uploads`` uploads raise first, and
-    ``before_upload`` runs inside the next upload (to change the database mid-copy)."""
+    """The S3 calls :class:`ObjectStore` makes, kept in memory; ``fail_uploads`` uploads raise first,
+    ``before_upload`` runs inside the next upload (to change the database mid-copy), ``deleted`` lists deleted
+    keys (``fail_deletes`` refuses them)."""
 
     objects: dict[tuple[str, str], StoredObject] = field(default_factory=dict)
     uploads: int = 0
     fail_uploads: int = 0
     fail_presign: bool = False
+    fail_deletes: bool = False
     before_upload: UploadHook | None = None
+    deleted: list[str] = field(default_factory=list)
 
     async def upload_file(
         self,
@@ -82,6 +85,13 @@ class MemoryS3:
         self.uploads += 1
         body = await asyncio.to_thread(Path(filename).read_bytes)
         self.objects[(bucket, key)] = StoredObject(body, dict(ExtraArgs or {}))
+
+    async def delete_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        if self.fail_deletes:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": "denied"}}, "DeleteObject")
+        self.deleted.append(Key)
+        self.objects.pop((Bucket, Key), None)
+        return {}
 
     async def generate_presigned_url(
         self,
@@ -154,6 +164,7 @@ def activities(  # noqa: PLR0913 - keyword-only test seams
     sse: ServerSideEncryption | None = None,
     tmp_dir: Path | None = None,
     max_download_bytes: int | None = None,
+    copy_lock: RecordingCopyLock | None = None,
 ) -> RecordingActivities:
     extra: dict[str, Any] = {} if max_download_bytes is None else {"max_download_bytes": max_download_bytes}
     return RecordingActivities(
@@ -164,6 +175,7 @@ def activities(  # noqa: PLR0913 - keyword-only test seams
         sse=sse,
         publisher=r.publisher,
         org_settings=OrgSettingsReader(r.database, FakeAsyncRedis()),
+        copy_lock=copy_lock or RecordingCopyLock(FakeAsyncRedis()),
         clock=r.clock,
         tmp_dir=tmp_dir,
         **extra,

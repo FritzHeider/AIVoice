@@ -25,7 +25,7 @@ from va_telnyx.factory import KeyResolver, TelnyxClientFactory, UnknownTelnyxAcc
 from va_telnyx.media import InboundMediaMessage, MediaFrame, MediaProtocolError, parse_media_message
 from va_telnyx.message_events import MessageEventPayload
 from va_telnyx.message_models import Message, MessageCreate, MessageRecipient
-from va_telnyx.messaging import MAX_DOWNLOAD_BYTES
+from va_telnyx.messaging import MAX_DOWNLOAD_BYTES, Recording, RecordingDownloadUrls
 from va_telnyx.metrics import TelnyxMetrics
 from va_telnyx.models import (
     AmdConfig,
@@ -96,6 +96,8 @@ __all__ = [
     "PhoneNumber",
     "PhoneNumberMessaging",
     "RateCategory",
+    "Recording",
+    "RecordingDownloadUrls",
     "RetryPolicy",
     "StreamParams",
     "TelnyxApiError",

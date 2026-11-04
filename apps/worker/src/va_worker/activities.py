@@ -39,7 +39,7 @@ from va_workflows.activities.liveness import CallLivenessActivities
 from va_workflows.activities.pathway_tests import PathwayTestActivities
 from va_workflows.activities.post_call import PostCallActivities
 from va_workflows.activities.prerender import OpenerPrerender
-from va_workflows.activities.recording import RecordingActivities
+from va_workflows.activities.recording import RecordingActivities, RecordingCopyLock
 from va_workflows.activities.retry import RetryActivities
 from va_workflows.activities.telephony import TelephonyActivities
 from va_workflows.registration import CALL_WORKFLOWS, POSTCALL_WORKFLOWS
@@ -91,6 +91,7 @@ class WorkerActivities:
                 sse=storage.sse,
                 publisher=publisher,
                 org_settings=OrgSettingsReader(database, redis),
+                copy_lock=RecordingCopyLock(redis),
                 clock=clock,
             )
         )

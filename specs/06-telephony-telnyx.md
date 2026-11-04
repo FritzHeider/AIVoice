@@ -68,6 +68,7 @@ class TelnyxClient:
 | `delete_phone_number(id)` | DELETE | `/phone_numbers/{id}` | — |
 | `send_message(...)` | POST | `/messages` | see `21-messaging-sms.md` §4 |
 | `download(url)` | GET | absolute presigned URL (no auth header) | recording download |
+| `get_recording(recording_id)` | GET | `/recordings/{recording_id}` | — (fresh `download_urls`; §11 Decision P05-T14 rule 7) |
 | `delete_recording(recording_id)` | DELETE | `/recordings/{recording_id}` | — (`404` → `False`: already gone; §11 Decision P05-T14) |
 
 Telephony credentials (WebRTC) are **not** used; web voice uses our own WebSocket audio transport (`22`).
@@ -661,8 +662,8 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
    `recording_urls.mp3`, `public_recording_urls.*`, `channels` (`single`/`dual`), `recording_started_at`,
    `recording_ended_at`, `recording_id` (optional). Missing URLs → `call.error` `recording_failed`.
 2. Download immediately (URLs are short-lived presigned links) with streaming to a temp file (max 2 GB).
-3. Upload to `s3://{S3_BUCKET_RECORDINGS}/{org_id}/{yyyy}/{mm}/{call_id}.wav` with SSE-KMS (AWS; see the Decision below
-   for MinIO), metadata `call_id`, `org_id`.
+3. Upload to `s3://{S3_BUCKET_RECORDINGS}/{org_id}/{yyyy}/{mm}/{call_id}.{h}.wav` (key per recording: Decision
+   P05-T14 rule 1) with SSE-KMS (AWS; see the Decision below for MinIO), metadata `call_id`, `org_id`.
 4. Compute duration from the WAV header (stdlib `wave`); set `calls.recording_s3_key`, `recording_duration_ms`; emit
    `call.recording_ready`.
 5. Post-call creates `mixed.wav`, `caller.wav`, `agent.wav` (left = caller/inbound, right = agent/outbound — verified
@@ -672,7 +673,11 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 > 1. Keys. The raw copy is `{org_id}/{yyyy}/{mm}/{call_id}.wav` in `S3_BUCKET_RECORDINGS` (specs/18 §1 step 3; `yyyy/mm` =
 >    UTC month of `calls.created_at`); every other per-call artifact lives under `{org_id}/{yyyy}/{mm}/{call_id}/`
 >    (`mixed.wav`, `caller.wav`, `agent.wav`, `transcript_retranscribed.json`). Builders: `va_common.storage.recording_key`
->    and `recording_variant_key`. This replaces the earlier `recordings/{org_id}/{call_id}/raw.wav` text.
+>    and `recording_variant_key`. This replaces the earlier `recordings/{org_id}/{call_id}/raw.wav` text. Amended
+>    2026-11-04 (P08-FIX-1): the copy of a carrier recording is `{org_id}/{yyyy}/{mm}/{call_id}.{h}.wav`, `h` = the
+>    first 16 hex digits of the SHA-256 of the recording's identity (the rule 4 lock owner `rec:<recording_id>` /
+>    `evt:<telnyx_event_id>`; builder `va_common.storage.recording_copy_key`). `calls.recording_s3_key` names it, and
+>    every reader takes the key from the row, never rebuilds it.
 > 2. Storage client. `va_common.storage.open_object_store(S3Settings)` (aiobotocore S3, timeouts 5 s connect / 60 s
 >    read, 3 standard retries, SigV4, path-style when `S3_ENDPOINT_URL` is set) yields an `ObjectStore` (`upload_file`
 >    multipart, `exists`, `delete`, `presign_get`). SSE: `KMS_PROVIDER=aws` → `aws:kms` with `AWS_KMS_KEY_ID`; the
@@ -693,12 +698,41 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 >    `invalid_payload`, `no_wav_url`, `download_failed` (a 4xx other than 429), `too_large`, `invalid_wav` return
 >    `failed` with `call.error` `{code: recording_failed, detail}` (level `warning`) and are not retried; a missing call
 >    returns `failed`/`call_not_found` without an event; 429/5xx/transport download failures (`TelnyxUnavailable`) and
->    object-store failures (`StorageUnavailable`) raise retryable errors.
+>    object-store failures (`StorageUnavailable`) raise retryable errors. Concurrency (amended 2026-11-02, review of
+>    P05-T14): a run takes the per-call copy lock `call:{id}:reccopy` (specs/03 §11; owner = `rec:<recording_id>`,
+>    else `evt:<telnyx_event_id>`; TTL = activity timeout + 1 min; `SET` if free or already held by the same owner,
+>    compare-and-delete release) after the first key check. A different owner gets the retryable `RecordingBusy`
+>    with `next_retry_delay` = the lock's remaining `PTTL` + 1 s (1 s without a TTL), so the 5 attempts outlast a live
+>    holder or a crashed one whose lock only expires with its TTL; the same owner (a redelivery or a crashed earlier
+>    attempt) proceeds, because it uploads the same bytes to the same key. Under the lock the key is read again (a
+>    previous holder may have just committed; this copy would be wasted work).
+>    Before recording `recording_failed` the key is read once more: when another copy stored the call's recording
+>    meanwhile (its carrier delete makes this run's download 404), the run returns `already_stored` and records
+>    nothing. Redis errors fail open: the copy proceeds without the lock (`recording.lock_unavailable`; an outage
+>    longer than the retry budget must not cost the copy); a failed release is logged and left to the TTL. Because
+>    every recording uploads to its own key (rule 1), the guarded `UPDATE` always names the bytes it describes: a run
+>    whose `UPDATE` finds another key set returns `already_stored` with the row's key and deletes its own
+>    just-uploaded object (a failed delete is logged as `recording.orphan_delete_failed`), unless the row's key equals
+>    its own (the same recording copied twice: that object is the stored one); it never deletes its carrier copy. The
+>    lock therefore only saves duplicate work and is not needed for correctness.
+> Decision (2026-11-04, P08-FIX-1): per-recording object keys and the lock-aware busy retry (rules 1 and 4) close
+>    the review findings that a fail-open copy of two recordings could leave the object holding the other run's bytes
+>    (and the winner then deleting its carrier copy), and that the ~30 s `RecordingBusy` retry budget ended long
+>    before a crashed holder's 6 min lock expired.
 > 5. Carrier copy. After the commit, when the org's `delete_carrier_recordings` (default true) holds and the event
 >    carries `recording_id`, the activity calls `DELETE /v2/recordings/{id}` with the call's account; a failure is logged
 >    (`recording.carrier_delete_failed`) and never fails the copy. An `already_stored` run deletes nothing (it may be a
->    second recording of the call). FakeTelnyx serves `DELETE /v2/recordings/{id}` (specs/30 §3.2).
+>    second recording of the call). FakeTelnyx serves `DELETE /v2/recordings/{id}` (specs/30 §3.2). A call stores one
+>    recording (the platform records once, from answer, on the primary leg); a later different recording is not
+>    copied, and its carrier copy is kept on purpose: a recording that was never copied is never deleted. The
+>    `recording.already_stored` log line carries its `recording_id`.
 > 6. Logs never contain the presigned URL (the `httpx` logger defaults to WARNING, specs/27 §1 Decision 2026-11-02).
+> 7. Expired links (amended 2026-11-02, review of P05-T14). The webhook's presigned links live a few minutes, and
+>    `PostCallWorkflow` may replay a stored event later (rule 3). A `403` or `404` download of an event that carries
+>    `recording_id` fetches `GET /v2/recordings/{id}` with the call's account (`TelnyxClient.get_recording`) and
+>    downloads its `download_urls.wav` once (`recording.url_refreshed`). 429/5xx/transport failures of the lookup are
+>    retryable (`TelnyxUnavailable`); a `404`, another 4xx, an unknown BYO account, a missing `wav` link, or a second
+>    `403`/`404` is `download_failed`. Without `recording_id` a `403`/`404` is `download_failed` with no lookup.
 
 ## 12. Bootstrap (`scripts/telnyx_bootstrap.py` and activity `BootstrapTelnyxAccount`)
 

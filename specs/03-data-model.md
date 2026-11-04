@@ -1474,6 +1474,7 @@ call (or org, or batch) map to the same slot and multi-key Lua scripts work. `va
 | `call:{id}:ctx` | string (JSON CallContext) | max_duration + 1 h | Prefetched context for media worker |
 | `call:{id}:owner` | string pod_id | 15 s (renewed) | Ownership lock |
 | `call:{id}:hb` | string ts | 10 s | Worker heartbeat |
+| `call:{id}:reccopy` | string (`rec:<recording_id>` or `evt:<telnyx_event_id>`) | 6 min (`store_recording` timeout + 1 min) | Recording copy lock (specs/06 §11 Decision P05-T14 rule 4) |
 | `call:{id}:carrier_state` | hash | 2 h | Latest carrier state (answered, amd_result, bridged…) |
 | `call:{id}:control` | pub/sub channel | — | Control messages to owner |
 | `call:{id}:control_ack:{msg_id}` | string `1` | 30 s | Owner handled the control message (specs/07 §17) |

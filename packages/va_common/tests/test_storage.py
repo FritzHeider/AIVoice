@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from va_common.storage import (
     ServerSideEncryption,
     _client_config,
     open_object_store,
+    recording_copy_key,
     recording_key,
     recording_variant_key,
     signed_recording_url,
@@ -76,6 +78,17 @@ def test_recording_key_uses_the_utc_month_of_created_at() -> None:
     created = datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=5)))  # 2026-10-31 20:30 UTC
     assert recording_key(ORG, CALL, created) == f"{ORG}/2026/10/{CALL}.wav"
     assert recording_key(ORG, CALL, datetime(2026, 3, 9, tzinfo=UTC)) == f"{ORG}/2026/03/{CALL}.wav"
+
+
+def test_copy_keys_are_per_recording_and_deterministic() -> None:
+    created = datetime(2026, 11, 1, 1, 30, tzinfo=timezone(timedelta(hours=5)))
+    first = recording_copy_key(ORG, CALL, created, "rec:a")
+    digest = hashlib.sha256(b"rec:a").hexdigest()[:16]
+    assert first == f"{ORG}/2026/10/{CALL}.{digest}.wav"
+    assert recording_copy_key(ORG, CALL, created, "rec:a") == first
+    assert recording_copy_key(ORG, CALL, created, "rec:b") != first
+    with pytest.raises(ValueError, match="timezone-aware"):
+        recording_copy_key(ORG, CALL, datetime(2026, 1, 1), "rec:a")  # noqa: DTZ001 - the refused input
 
 
 def test_variant_keys_sit_under_the_call_directory() -> None:

@@ -13,6 +13,7 @@ development MinIO has no KMS configured.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -44,6 +45,7 @@ __all__ = [
     "ServerSideEncryption",
     "SignedUrl",
     "open_object_store",
+    "recording_copy_key",
     "recording_key",
     "recording_variant_key",
     "signed_recording_url",
@@ -128,6 +130,13 @@ def _month_prefix(org_id: uuid.UUID, created_at: datetime) -> str:
 def recording_key(org_id: uuid.UUID, call_id: uuid.UUID, created_at: datetime) -> str:
     """``{org_id}/{yyyy}/{mm}/{call_id}.wav`` (UTC month of the call's ``created_at``)."""
     return f"{_month_prefix(org_id, created_at)}/{call_id}.wav"
+
+
+def recording_copy_key(org_id: uuid.UUID, call_id: uuid.UUID, created_at: datetime, recording: str) -> str:
+    """``{org_id}/{yyyy}/{mm}/{call_id}.{h}.wav``: the copy of one carrier recording, ``h`` = the first 16 hex
+    digits of the SHA-256 of the recording's identity, so two different recordings never share an object."""
+    digest = hashlib.sha256(recording.encode()).hexdigest()[:16]
+    return f"{_month_prefix(org_id, created_at)}/{call_id}.{digest}.wav"
 
 
 def recording_variant_key(

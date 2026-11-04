@@ -1,5 +1,16 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-1 Recording copy lock + expired-link refresh, with per-recording object keys and a lock-aware busy retry — see .ralph/review-inbox/2026-11-04-recording-copy.md and .ralph/review-inbox/2026-11-04-recording-copy-lock.md — maintainer patch landed; `recording_copy_key` per-recording S3 key (loser deletes its own object unless same key); `RecordingBusy` next_retry_delay = lock PTTL + 1 s; specs/06 §11 rules 1/4 + Decision P08-FIX-1; review make check exit=0 (12641 passed, 7 skipped, cov 99%)
+  - Spec refs: specs/06-telephony-telnyx.md §11 (Decision P05-T14 rules 1, 4, 5, 7); specs/03-data-model.md §11 (`call:{id}:reccopy`); specs/30-testing-and-evals.md §3.2
+  - Depends on: none
+  - Deliverables: land the maintainer patch `.ralph/review-inbox/2026-11-04-recording-copy.patch` (both notes carry the
+    same patch); fix finding 1 (blocker): upload to a recording-specific key, write that key in the guarded `UPDATE`,
+    delete the just-uploaded object when the `UPDATE` loses to a different key; fix finding 2: `RecordingBusy` carries
+    `next_retry_delay` = the lock's remaining PTTL so the retry budget covers a live or crashed holder.
+  - Acceptance: tests with two concurrent different recordings and a broken (Redis-down) lock assert the stored
+    object's bytes match the row and the loser's object is deleted; a foreign-owner lock test asserts the busy
+    error's `next_retry_delay` follows the lock TTL; spec rule 4 amended; `make check` passes.
+
 - [ ] P08-T00 Fix flaky e2e interruptibility_levels[1] (carried over from phase 07)
   - Spec refs: specs/07-media-pipeline.md §7 (interruptibility levels); specs/30-testing-and-evals.md §5 (e2e flows)
   - Depends on: none

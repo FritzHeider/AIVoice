@@ -19,7 +19,7 @@ from temporalio.testing import ActivityEnvironment
 from va_common.storage import PLAYBACK_URL_TTL_S, open_object_store, signed_url
 from va_db.org_settings import OrgSettingsReader
 from va_db.session import Database
-from va_workflows.activities.recording import RecordingActivities
+from va_workflows.activities.recording import RecordingActivities, RecordingCopyLock
 from va_workflows.activities.recording_inputs import StoreRecordingResult
 
 pytestmark = pytest.mark.integration
@@ -52,6 +52,7 @@ async def test_the_recording_lands_in_minio_with_its_metadata(r: Rig, minio: Min
             sse=None,
             publisher=r.publisher,
             org_settings=OrgSettingsReader(r.database, FakeAsyncRedis()),
+            copy_lock=RecordingCopyLock(FakeAsyncRedis()),
             clock=r.clock,
         )
         result: StoreRecordingResult = await ActivityEnvironment().run(
