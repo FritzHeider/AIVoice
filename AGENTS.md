@@ -1978,3 +1978,8 @@ Grafana 3001
   runtime-sim call under `unreachable_after()` and print `cycles_through` for the `va_*` classes in the garbage.
   Note: `insert(Model)` executed with a list of dicts is the ORM bulk path (attribute names, so `text_` not
   `text`); `insert(cast("Table", Model.__table__))` keeps Core column names.
+- 2026-11-04 (P08-FIX-2): Temporal honours an `ApplicationError(next_retry_delay=...)` beyond the policy's
+  `maximum_interval` (proved by `packages/va_workflows/tests/test_recording_busy_retry.py` with the
+  `support/busy_retry_stub.BusyRetryStub` workflow). Under the time-skipping server measure retry waits with
+  `workflow.now()` inside the workflow: `activity.info().current_attempt_scheduled_time` stays wall-clock (5 ms apart
+  for a skipped 5 min wait).

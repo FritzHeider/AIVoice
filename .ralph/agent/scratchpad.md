@@ -240,3 +240,67 @@ Runs before the sim fix (fresh rebuild, 10 runs): underruns 0 x10; p50 153 (cold
   focused new tests 51 + router/turn DB tests 26 passed. Builder `make e2e` finished 20 passed exit 0 (incl. capacity).
 - My own 4 capacity runs on the running stack: 0 underruns each, overhead p50 128/124/122/115 ms (≤ 140).
 - Diff matches specs/07 §9 Decision P08-FIX-3; Core inserts use column names (`text`), no owner-capturing callbacks left.
+
+## Planner 2026-11-04 — after P08-FIX-3 approval
+- Inbox: 7 notes reviewing the P08-FIX-3 WIP were not in DONE; their findings are still open at 2abf225 (gc_pause logged
+  inside the gc callback with a random call context; underrun log before the generation check / unthrottled / no
+  turn / stale `_due_ms` / mark await unattributed / backpressure vs loop lag; `_unwire` docstring; Decision numbers).
+  All non-blockers → inserted P08-FIX-4 (after P08-FIX-2, before P08-T01). Next unticked: P08-FIX-2.
+
+## Plan P08-FIX-2 (RecordingBusy retry budget vs copy lock hold)
+Context: the fix itself landed in P08-FIX-1 (`RecordingCopyLock.acquire` → `CopyLockAttempt.remaining_ms`;
+`RecordingActivities._lock` raises retryable `RecordingBusy` with `next_retry_delay = PTTL + BUSY_RETRY_MARGIN_MS`;
+`COPY_LOCK_TTL_MS` = STORE_RECORDING_TIMEOUT 5 min + 1 min). Existing test
+`test_a_different_recording_waits_for_the_running_copy` asserts one busy delay. Missing: the note's "holder keeps the
+lock beyond the retry budget" scenario and the budget arithmetic. No production change unless a test fails.
+
+### Tests (packages/va_workflows/tests/test_recording_activity.py, reuse `_call`, `_run`, `serve_recording`, `wav_bytes`,
+`saved_input`, `MemoryS3`, `RecordingCopyLock(FakeAsyncRedis())`)
+1. `test_a_long_running_holder_is_waited_out_and_its_copy_is_already_stored`:
+   holder acquires the lock as owner `rec:<holder>` and `await redis.pexpire(key, 300_000)` (≥ 300 s, beyond the old
+   ~30 s backoff budget of STORE_RECORDING_RETRY: 2+4+8+16 s). Attempt 1 of a different recording → ApplicationError
+   type RECORDING_BUSY, retryable, `next_retry_delay >= timedelta(milliseconds=pttl)` and > 30 s. Then the holder
+   "commits": `update(Call)...values(recording_s3_key=<holder key>)` in a tenant session + `lock.release(call_id,
+   owner)` (use whatever release API the class has). Attempt 2 (same input) → `StoreRecordingResult(status=
+   "already_stored", s3_key=<holder key>)`, `s3.uploads == 0`, no call_events rows, lock key gone afterwards.
+2. `test_busy_retries_fit_the_post_call_budget` (pure, no DB): worst case of a waiting run =
+   `(STORE_RECORDING_RETRY.maximum_attempts - 1)` busy delays of at most `COPY_LOCK_TTL_MS + BUSY_RETRY_MARGIN_MS`
+   plus one full `STORE_RECORDING_TIMEOUT` attempt (the last one does the copy) must be < `POSTCALL_BUDGET_S`
+   (va_domain.post_call). 4 × 361 s + 300 s = 1744 s < 1800 s. Also assert `COPY_LOCK_TTL_MS > STORE_RECORDING_TIMEOUT`
+   (a live holder never outlives its lock). If the arithmetic fails, that is a real defect: then shorten
+   COPY_LOCK_TTL / cap the busy delay, and update specs/06 §11 Decision P08-FIX-1 accordingly.
+3. Temporal check that `next_retry_delay` beats the policy's `maximum_interval=30s` (otherwise the whole fix is moot):
+   in `packages/va_workflows/tests/` with `workflow_rig.workflow_env()` (time skipping), a tiny test workflow +
+   activity named for the test that raises `ApplicationError(type=RECORDING_BUSY, next_retry_delay=timedelta(
+   minutes=5))` on attempt 1 and returns on attempt 2, executed with `retry_policy=STORE_RECORDING_RETRY`; assert
+   attempt 2's `activity.info().current_attempt_scheduled_time - attempt 1's started_time >= 5 min` (record from the
+   activity; time skipping makes it instant). Prefer reusing an existing workflow-level test pattern (look at
+   tests that use `workflow_env()` with real activities, e.g. test_post_call_workflow*). If the SDK caps the delay at
+   maximum_interval, give `store_recording` its own policy without a 30 s cap (maximum_interval ≥ COPY_LOCK_TTL) and
+   record it in specs/06 §11.
+
+### Gates
+- `uv run pytest packages/va_workflows -q -k "recording or busy"`, then `make check` (background + heartbeat Monitor,
+  PATH += /home/ralph/.local/bin, ~25 min). No e2e needed (no call-flow code change) unless production code changes.
+- Reviewer: tick P08-FIX-2, append `2026-11-04-recording-copy-lock-busy-budget.md` to `.ralph/review-inbox/DONE`,
+  commit `test(workflows): recording copy busy retry outlasts a long lock holder` + `Task: P08-FIX-2`.
+
+### Risks
+- FakeAsyncRedis PTTL after pexpire is fine; do not use real sleeps. The tests touch Postgres via the rig (SystemClock).
+- A test workflow defined inside a test module must be importable by the time-skipping worker sandbox: define it at
+  module level with `@workflow.defn(sandboxed=False)` or pass-through imports, like other rig workflows.
+
+## Build P08-FIX-2 (2026-11-04)
+- No production change needed. New tests `packages/va_workflows/tests/test_recording_busy_retry.py` (+ workflow stub
+  `tests/support/busy_retry_stub.py`): (1) a holder that keeps the lock 300 s → RECORDING_BUSY, retryable, delay ≥ PTTL
+  and > 30 s; holder commits + releases → retry `already_stored` with the holder's key, 0 uploads, no events, lock gone;
+  (2) budget arithmetic 4 × 361 s + 300 s = 1744 s < 1800 s and COPY_LOCK_TTL > STORE_RECORDING_TIMEOUT;
+  (3) Temporal time-skipping: next_retry_delay 5 min honoured past maximum_interval 30 s (workflow time ≥ 300 s;
+  control without delay waits 2-30 s). Note: activity.info().current_attempt_scheduled_time stays wall-clock under
+  time skipping, so the stub measures with workflow.now() (AGENTS.md line added).
+- Gates: make check exit 0 (12664 passed, 7 skipped, cov 99.07 %); pip-audit clean, pnpm audit 1 moderate (< high); radon avg 2.92 on new files; jscpd 3 clones all in pre-existing packages/va_voice/tests/test_outbound_audio.py (P08-FIX-3), none in new files.
+
+## Review P08-FIX-2 (2026-11-04) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0; new tests 3 passed; `make test`: 12663 passed, 7 skipped, cov 99 %,
+  1 failed = media runtime sim precall test (FakeLLM timeout → retry → 2 requests under load; 3/3 pass alone; unrelated
+  to this test-only diff) → logged as P08-FIX-5 (DEC-011). Inbox note appended to DONE.

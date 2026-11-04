@@ -147,3 +147,12 @@ Template:
 - Reasoning: Builder showed with images rebuilt at HEAD that 3/8 capacity runs fail (underruns 14/3/1) without the P08-T00 diff; the failure is unrelated to the interrupt-data/accept-log change and needs its own root-cause task (MASTER_PROMPT §7 target)
 - Reversibility: High (plan text only)
 - Timestamp: 2026-11-04T00:00:00Z
+
+## DEC-011
+- Decision: Approve P08-FIX-2 despite one failing test in the reviewer's `make test` run
+- Chosen Option: Approve; record the flake as P08-FIX-5
+- Confidence: 75
+- Alternatives Considered: reject and send the builder to fix an unrelated media test
+- Reasoning: the diff is test-only in va_workflows; the failure (`apps/media_worker/tests/test_runtime_sim.py::test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks`) came from a wall-clock FakeLLM timeout plus a gateway retry under xdist load. It passes 3/3 alone, and the builder's full run was green.
+- Reversibility: high
+- Timestamp: 2026-11-04T23:40:00Z

@@ -44,7 +44,7 @@
   - Acceptance: `uv run pytest tests_e2e -m capacity -s` passes 10/10 consecutive runs on a freshly rebuilt stack with
     0 underruns and overhead p50 ≤ 140 ms in every run (≥ 10 ms margin); `make check` and `make e2e` pass.
 
-- [ ] P08-FIX-2 RecordingBusy retry budget vs. copy lock hold — see .ralph/review-inbox/2026-11-04-recording-copy-lock-busy-budget.md
+- [x] P08-FIX-2 RecordingBusy retry budget vs. copy lock hold — see .ralph/review-inbox/2026-11-04-recording-copy-lock-busy-budget.md — no production change needed; `test_recording_busy_retry.py`: 300 s holder → RECORDING_BUSY delay ≥ PTTL (> 30 s) then `already_stored`, worst case 4 × 361 s + 300 s < 1800 s budget, Temporal time-skipping honours a 5 min `next_retry_delay` past `maximum_interval` 30 s; lint/typecheck/placeholders pass; make test 12663 passed, 1 unrelated load flake (P08-FIX-5), cov 99 %
   - Spec refs: specs/06-telephony-telnyx.md §11 (Decision P05-T14 rule 4, Decision P08-FIX-1); specs/18 §1
   - Depends on: P08-FIX-1
   - Deliverables: the finding's fix landed with P08-FIX-1 (`RecordingBusy` `next_retry_delay` = lock PTTL + 1 s; the
@@ -54,6 +54,32 @@
     key; and assert the worst case (4 delays × lock TTL 6 min) fits the PostCallWorkflow 30 min budget in a unit test of
     the constants. No production change unless the test fails.
   - Acceptance: test passes; `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
+
+- [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
+  - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
+  - Depends on: P08-FIX-3
+  - Deliverables (all non-blockers, still open in 2abf225): (1) `va_common.gc_tuning.GcPauseLog._callback` must not
+    log from inside the collector: record pauses allocation-light (bounded deque) and log from normal code, outside
+    any bound call context (no `call_id`/`org_id` on `gc_pause`); (2) `OutboundAudio` underrun log: build the fields
+    before the send, emit next to the counter after the generation check (no log without a count), add `turn`, reset
+    `_due_ms` on the idle `_wake.wait()` branch, attribute `send_mark`/controls await (`prev_controls_await_ms`), and
+    throttle (first underrun of a burst/utterance with fields, counts + max `wake_late_ms` in `pipeline_ended`);
+    (3) separate transport backpressure (socket send time inside the transport lock) from loop lag in the
+    attribution; (4) fix the `va_media.runtime._unwire` docstring (LIFO order) or register it first; (5) specs/07 §9
+    Decision P08-FIX-3 carries the measured before/after numbers itself.
+  - Acceptance: unit tests per item (context-free gc_pause, clear-during-held-send → no log and no count, held mark
+    → named in the log, throttled burst → one line + summary counts); `make check` passes; `uv run pytest tests_e2e
+    -m capacity -s` still 0 underruns, p50 ≤ 140 ms on 3 runs; append all seven note names to
+    `.ralph/review-inbox/DONE` on approval.
+
+- [ ] P08-FIX-5 Flaky `test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks` under full-suite load
+  - Spec refs: specs/30 §3.4, specs/10 §2
+  - Depends on: none
+  - Deliverables: in `make test` (P08-FIX-2 review run) the wall-clock FakeLLM opener request timed out once
+    (`llm.attempt_failed kind=timeout`), the gateway retried, and `[opener_request] = r.state.llm.requests` saw 2
+    requests (passes 3/3 alone). Make the assertion express the intent without depending on wall-clock latency (e.g.
+    assert on the first request of this call, or give the rig's gateway a load-independent deadline), not a retry.
+  - Acceptance: test robust to an LLM retry; `make check` passes.
 
 - [ ] P08-T01 Tools API with secret headers
   - Spec refs: specs/13-tools-and-dynamic-data.md (Tools API, secret headers)
