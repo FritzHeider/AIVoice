@@ -11,14 +11,20 @@ from pydantic import ValidationError
 
 from va_domain.pathway_tests import (
     DEFAULT_SIMULATION_TURNS,
+    MAX_REGRESSION_SCENARIOS,
     MAX_RUN_TESTS,
     MAX_SIMULATIONS,
+    REGRESSION_KEY,
     PathwayTestWorkflowInput,
+    RegressionSettings,
     Scenario,
     SimulationJob,
+    load_regression,
     pathway_test_workflow_id,
+    regression_summary,
     run_status,
     simulation_jobs,
+    with_regression,
 )
 
 RUN = uuid.UUID("0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90")
@@ -129,3 +135,65 @@ def _job(index: int) -> SimulationJob:
 def test_the_work_must_match_the_kind(fields: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         _start(**fields)
+
+
+_SCENARIO: dict[str, Any] = {"name": "Impatient", "persona": "In a hurry.", "goal": "Order placed"}
+
+
+def test_regression_defaults_run_nothing_on_publish() -> None:
+    settings = RegressionSettings()
+
+    assert settings.model_dump(mode="json") == {
+        "run_on_publish": False,
+        "block_publish_on_failure": True,
+        "include_simulations": False,
+        "scenarios": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"run_on_publish": True, "extra": 1},
+        {"scenarios": [_SCENARIO] * (MAX_REGRESSION_SCENARIOS + 1)},
+        {"scenarios": [{**_SCENARIO, "max_turns": 0}]},
+    ],
+)
+def test_regression_rejects_bad_settings(raw: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        RegressionSettings.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "global_config",
+    [{}, {REGRESSION_KEY: "x"}, {REGRESSION_KEY: {"run_on_publish": "maybe"}}, {REGRESSION_KEY: None}],
+)
+def test_load_regression_reads_missing_or_invalid_values_as_defaults(global_config: dict[str, Any]) -> None:
+    assert load_regression(global_config) == RegressionSettings()
+
+
+def test_load_regression_reads_a_stored_value() -> None:
+    stored = {"globalPrompt": "Be kind.", REGRESSION_KEY: {"run_on_publish": True, "scenarios": [_SCENARIO]}}
+
+    settings = load_regression(stored)
+
+    assert settings.run_on_publish is True
+    assert settings.block_publish_on_failure is True
+    assert [scenario.name for scenario in settings.scenarios] == ["Impatient"]
+
+
+def test_with_regression_copies_and_round_trips() -> None:
+    original: dict[str, Any] = {"globalPrompt": "Be kind."}
+    settings = RegressionSettings(include_simulations=True, scenarios=(Scenario.model_validate(_SCENARIO),))
+
+    updated = with_regression(original, settings)
+
+    assert original == {"globalPrompt": "Be kind."}
+    assert updated["globalPrompt"] == "Be kind."
+    assert load_regression(updated) == settings
+    assert regression_summary(settings) == {
+        "run_on_publish": False,
+        "block_publish_on_failure": True,
+        "include_simulations": True,
+        "scenarios": 1,
+    }

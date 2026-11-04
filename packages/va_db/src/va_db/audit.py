@@ -97,6 +97,7 @@ AUDIT_ACTIONS: Final = frozenset(
         "pathway.revert",
         "pathway.import",
         "pathway.duplicate",
+        "pathway.regression_update",
         "pathway_folder.create",
         "pathway_folder.update",
         "pathway_folder.delete",

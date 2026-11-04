@@ -307,3 +307,23 @@ async def test_unit_test_role_matrix(
     patched = await client.patch(test_url, json={"name": "Greets back"}, headers=headers)
     deleted = await client.delete(test_url, headers=headers)
     assert (patched.status_code, deleted.status_code) == (200, 200)
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_regression_role_matrix(
+    role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    """Readers read the regression settings; writing edits the draft, so only editors may (Decision
+    P07-T11e1)."""
+    member = await signed_in(client, identity, container, role)
+    pathway = await seed_pathway(identity, member.org.id)
+    url = f"{BASE}/{pathway.id}/regression"
+    assert_reads(role, [await client.get(url)])
+
+    written = await client.put(url, json={"run_on_publish": True}, headers=write_headers(client))
+    if role in EDITORS:
+        assert (written.status_code, written.json()["regression"]["run_on_publish"]) == (200, True), (
+            written.text
+        )
+    else:
+        assert error_of(written)[:2] == (403, "FORBIDDEN")

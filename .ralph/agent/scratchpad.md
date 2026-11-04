@@ -454,3 +454,125 @@ modules (edge DB fixture, sim shared redis, media runtime/transfer, api transcri
 alone; coverage 96.11%. Targeted pathway/simulation/workflow/api/cross-tenant tests 195 passed. Diff matches
 specs/12 §9 + Decision P07-T11d (body bounds, ids `<i>-<r>`, caller prompt suffix verbatim, grading prompt,
 item shape); all DB access in tenant_session; items stored by activities.
+
+## Plan P07-T11e1 — Regression settings API and shared publish core
+
+P07-T11e split into e1 (settings + publish core), e2 (async regression run via PathwayTestWorkflow, worker
+publishes on pass), e3 (synchronous ≤ 20 tests gate in the api + 409 + e2e). Rationale: each slice is complete
+on its own (e2 gates every regression publish asynchronously; e3 adds the synchronous fast path), no interim stub.
+e2 note: pathway_test_runs has no run-level metadata column; e2 needs a migration (e.g. `publish jsonb`) for the
+intent/outcome, and the intent carries the version's graph_hash + an AuditActor-shaped actor for the worker.
+
+### Decisions (new block under specs/12 §9: `> Decision (2026-11-04): regression settings (P07-T11e1).`)
+1. Settings model `{run_on_publish: bool = false, block_publish_on_failure: bool = true, include_simulations: bool
+   = false, scenarios: [Scenario] (0-20, the simulation scenario shape of Decision P07-T11d item 1; one
+   conversation each, used by P07-T11e2 when include_simulations)}`, other keys rejected. Defaults chosen so an
+   existing pathway's publish runs nothing until the suite opts in (spec example shows the opted-in shape).
+2. Stored under the draft's `global_config.regression` (save/fork/duplicate/export copy it with the graph; a draft
+   update that sends `global_config` replaces it, so clients keep the key; it changes `graph_hash`). Reads are
+   lenient: a missing or invalid stored value reads as the defaults (imported graphs may carry anything).
+3. `GET /v1/pathway/{id}/regression` (`pathways:read`) → `{"status":"success","regression":{...all four
+   keys...}}`. `PUT` (`pathways:write` + editing role, it edits the draft) body = the full settings (omitted keys
+   take the defaults) → same body plus `draft_version`, `graph_hash`. Pathway row lock first; storing the same
+   settings writes nothing (no audit). Audit `pathway.regression_update` (new two-part action in specs/04 §13 +
+   `AUDIT_ACTIONS`), before/after = `{run_on_publish, block_publish_on_failure, include_simulations, scenarios:
+   <count>, graph_hash}`.
+4. Publish core shared: `va_db.pathway_publish.apply_publish` performs §4 step 3 + audit (freeze `published`,
+   pin, fork a draft when the version was the draft, `pathway.publish` audit row) for the api now and the worker
+   in P07-T11e2. Validation and cache invalidation stay with the caller.
+
+### Files
+- `packages/va_domain/src/va_domain/pathway_tests.py`: `MAX_REGRESSION_SCENARIOS: Final = 20`;
+  `class RegressionSettings(BaseModel)` frozen, extra="forbid": fields above (`scenarios: tuple[Scenario, ...] =
+  Field(default=(), max_length=MAX_REGRESSION_SCENARIOS)`); `REGRESSION_KEY: Final = "regression"`;
+  `load_regression(global_config: Mapping[str, object]) -> RegressionSettings` (value under the key validated,
+  `ValidationError`/non-mapping → `RegressionSettings()`); `with_regression(global_config, settings) -> dict[str,
+  Any]` (copy + `settings.model_dump(mode="json")` under the key); `regression_summary(settings) -> dict` (audit
+  shape without graph_hash). Add to `__all__`.
+- `packages/va_db/src/va_db/pathway_publish.py` (new): `@dataclass(frozen=True, slots=True) PublishResult
+  (published_version: int, environment: PinEnvironment, draft_version: int, previous: int | None)`;
+  `async def apply_publish(session, repo: PathwayRepo, pathway: Pathway, version: PathwayVersion, *, environment,
+  published_by: uuid.UUID | None, actor: AuditActor) -> PublishResult` — body moved from
+  `va_api.services.pathway_versions.publish_version` (previous pin computed inside; `pinned_number` moves here too
+  and the api re-imports it), audit via `va_db.audit.record(session, actor, "pathway.publish", ...)` same
+  before/after. Pathway must already be locked by the caller (docstring).
+- `apps/api/src/va_api/services/pathway_versions.py`: `publish_version` = load/lock/validate then
+  `apply_publish(..., published_by=await creating_user_id(ctx, session), actor=actor_of(ctx))` (import
+  `actor_of` from `va_api.audit`); outcome built from `PublishResult` (keep `PublishOutcome` or alias it —
+  keep `PublishOutcome` for router stability).
+- `apps/api/src/va_api/services/pathway_regression.py` (new): `async def get_regression(session, ctx,
+  pathway_id) -> tuple[Pathway, PathwayVersion, RegressionSettings]` (draft, no lock);
+  `async def put_regression(session, ctx, pathway_id, settings) -> RegressionOutcome(draft, settings, changed)`
+  (lock, draft, `before = load_regression(draft.global_config)`; if the stored raw value already equals
+  `settings.model_dump(mode="json")` → unchanged; else `update_draft(pathway, draft, values={},
+  graph=PathwayGraphJson(nodes, edges, with_regression(...), graph_hash(load_graph(...)) )` — compute the hash
+  the same way the draft update path does (look at `services.pathways` draft update for the helper that builds
+  `PathwayGraphJson` from a `GraphInput`; reuse it, do not re-implement hashing) + audit
+  `pathway.regression_update`).
+- `apps/api/src/va_api/routers/pathway_regression_schemas.py` (new): `RegressionBody` (subclass or mirror of
+  `RegressionSettings` with OpenAPI example = spec §9 object + `"scenarios": []`; if subclassing a frozen domain
+  model is awkward use `RegressionSettings` directly as the body with `json_schema_extra` example via a thin
+  subclass), `RegressionView` (`status`, `regression`), `RegressionSaved` (adds `draft_version`, `graph_hash`),
+  both with examples.
+- `apps/api/src/va_api/routers/pathway_regression.py` (new, routes on `pathways_router`, side-effect import in
+  `va_api/main.py` like `pathway_versions`): `GET /{pathway_id}/regression` operation_id
+  `pathways_regression_get` (`x-scope pathways:read`); `PUT /{pathway_id}/regression` operation_id
+  `pathways_regression_put`, `dependencies=EDITOR`, `openapi_extra={"x-scope": "pathways:write",
+  **audited("pathway.regression_update")}`.
+- `packages/va_db/src/va_db/audit.py` `AUDIT_ACTIONS` + specs/04 §13 list: `pathway.regression_update`.
+- `make openapi` + `corepack pnpm --filter dashboard gen:api` + `corepack pnpm --filter @voiceagents/sdk gen:api`.
+- specs/12 §9 Decision block (above); AGENTS.md dated line.
+
+### Tests
+- `packages/va_domain/tests/test_pathway_tests.py`: defaults; unknown key rejected; 21 scenarios rejected;
+  `load_regression` on missing / non-dict / invalid / valid; `with_regression` does not mutate input.
+- `packages/va_db/tests/test_pathway_publish_db.py` (or extend the existing pathway repo DB test module): publish
+  draft forks a new draft and writes one `pathway.publish` audit row with before/after; publish saved version
+  does not fork; `published_at/by` only first time (existing behaviour, assert via the core).
+- `apps/api/tests/test_pathway_regression.py`: GET on a new pathway → defaults; PUT round trip (GET returns it,
+  draft `global_config.regression` holds it, graph_hash changed, response draft_version/graph_hash); PUT same
+  again → no second audit row, same graph_hash; PUT validation (unknown key, scenarios 21, scenario
+  `max_turns` 0 → 400 field `scenarios[0].max_turns`); omitted keys default; save version carries the setting
+  into the new draft (GET after `POST /version`); invalid stored value (seed draft global_config regression =
+  "x" via repo) reads as defaults; audit row `pathway.regression_update` before/after shape; other org → 404.
+- `apps/api/tests/test_pathways_permissions.py`: GET for viewer/analyst 200, billing 403; PUT analyst/viewer 403,
+  developer 200.
+- Existing `test_pathway_versions*.py` stay green (publish refactor).
+- Cross-tenant suite covers the two routes automatically (PUT body from the first example).
+
+### Gates
+`make fmt lint typecheck placeholders`; targeted `uv run pytest packages/va_domain packages/va_db apps/api -n 8
+-k "pathway or regression or audit or openapi or cross_tenant"`; `make test` in background with Monitor
+heartbeat; `make test-ts`; openapi drift; spec refs; jscpd; radon. No e2e (no call/SMS flow; e2e comes in e3).
+
+### Risks
+- `test_audit_unit` compares specs/04 §13 list with `AUDIT_ACTIONS` — edit both.
+- graph_hash recomputation must use the existing helper (draft update path) so hashes match export/import.
+- Moving `pinned_number`: grep importers (`routers`, `services.pathways` version selector) and keep a re-export
+  or update imports.
+
+## Build P07-T11e1 (2026-11-04)
+Implemented per plan. Deviations: `put_regression` hashes the stored draft JSON with
+`va_engine.models.graph.graph_hash` directly (no re-validation: a regression PUT must not fail on unrelated save-mode
+graph errors); test asserts it equals the parse+dump hash. `pinned_number` moved to `va_db.pathway_publish` (api
+re-imports). `get_regression` returns the settings only. Shared `pathway_rows.seed_orders_pathway` (va_db tests
+support) replaced a duplicate in va_pathways `test_loader.py` (jscpd 0). Spec: Decision P07-T11e1 under specs/12 §9,
+§11 audit list, specs/04 §13 list. Gates: fmt/lint/typecheck/placeholders pass; test-ts pass (22/52/48); openapi drift
+current; spec refs 0; jscpd 0; radon A (1.5); pip-audit clean; pnpm audit 3 moderate. make test run 1: gw0 OOM-killed
+(dmesg; e2e docker stack shares the 15 GB host) at 94% and syrupy's xdist merge warning then crashed session finish
+(exit 2, summary lost). Rerun with junitxml.
+Rerun (2026-11-04, after inactivity-timeout rejection with no findings): make test finished: 12379 passed, 8 failed,
+84 errors, coverage TOTAL 99% (combined), 3.5 h wall time because another session's pytest shared the host; every
+failure/error was a TimeoutError in untouched modules (edge/dispatcher DB fixtures, media runtime_sim, api
+org_members/transcript_ws, live gate). Re-ran all 18 affected modules + the T11e1 test modules alone: 360 passed,
+exit 0. make lint/typecheck/placeholders pass this iteration; radon A (1.375).
+Rerun 2 (2026-11-04, second empty review.rejected = inactivity timeout, no findings): lint/typecheck/placeholders
+exit 0; T11e1 modules (regression API, publish core DB, domain settings, permissions) 89 passed. Full make test
+evidence from the previous rerun stands (all failures load timeouts in untouched modules, 360/360 pass alone).
+
+## Review P07-T11e1 (2026-11-04)
+Approved. make lint/typecheck/placeholders pass; spec refs 0; openapi drift current; jscpd 0. First make test
+(-n auto) hung after a host OOM kill of an xdist worker (dmesg); killed it and re-ran the same command with -n 6:
+12462 passed, 7 skipped, coverage 99.08%, exit 0. Diff matches specs/12 §9 Decision P07-T11e1 (defaults, extra
+forbidden, lenient reads, lock + no-op, audit shape, editor guard) and §11/specs/04 §13 audit lists; publish
+refactor keeps behaviour (version tests green).

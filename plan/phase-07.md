@@ -131,13 +131,41 @@
     transcripts), `POST /v1/pathway/{id}/simulations`, `kind='simulation'` runs through `PathwayTestWorkflow`
   - Acceptance: scripted FakeLLM simulations pass/fail/error; hangup and max_turns stop the run.
 
-- [ ] P07-T11e Regression settings and publish gate
+- [ ] P07-T11e Regression settings and publish gate (split into P07-T11e1–e3 below)
   - Spec refs: specs/12-pathways-api.md §4 publish step 2, §9 regression, §13
   - Depends on: P07-T11c
   - Deliverables: `GET/PUT /regression` (draft `global_config.regression`), publish runs ≤ 20 tests synchronously
     (120 s) with `block_publish_on_failure` → 409 `details.run_id`, async `pending_regression` completed by the
     worker, optional simulations; e2e test where regression blocks a broken publish
   - Acceptance: publish blocked by failing regression; async regression completes publish; e2e gating test.
+
+- [x] P07-T11e1 Regression settings API and shared publish core — GET/PUT /v1/pathway/{id}/regression (draft global_config.regression, audit pathway.regression_update), va_db.pathway_publish.apply_publish shared by api publish; make test 12462 passed / 7 skipped, coverage 99.08%; lint/typecheck/placeholders/openapi drift/spec refs/jscpd 0 pass
+  - Spec refs: specs/12-pathways-api.md §9 (regression settings), §4 publish step 3-4, §11; specs/04 §13
+  - Depends on: P07-T11c
+  - Deliverables: `va_domain.pathway_tests.RegressionSettings` (+ lenient `load_regression`, `with_regression`),
+    `GET/PUT /v1/pathway/{id}/regression` stored in the draft `global_config.regression` (audit
+    `pathway.regression_update`), `va_db.pathway_publish.apply_publish` (freeze + pin + fork + audit) used by the
+    api publish so the worker can reuse it
+  - Acceptance: settings defaults/round trip/validation/no-op/permissions/tenant isolation; publish behaviour
+    unchanged (existing version tests green).
+
+- [ ] P07-T11e2 Async regression runs and worker-completed publish
+  - Spec refs: specs/12-pathways-api.md §4 publish step 2 (async case, `pending_regression`), §9
+  - Depends on: P07-T11e1, P07-T11d
+  - Deliverables: publish with regression enabled starts a `kind='regression'` run through `PathwayTestWorkflow`
+    (unit tests + the settings' simulations when `include_simulations`); `block_publish_on_failure` → response
+    `pending_regression` + `run_id`, the workflow publishes (graph-hash guarded) only when the run passes; not
+    blocking → publish now + `regression_run_id`; publish outcome recorded on the run
+  - Acceptance: workflow tests: passed run publishes, failed/error run does not, stale graph does not; api tests
+    for both blocking modes and start failure.
+
+- [ ] P07-T11e3 Synchronous regression gate and e2e
+  - Spec refs: specs/12-pathways-api.md §4 publish step 2 (≤ 20 tests synchronous, 120 s, 409), §12, §13
+  - Depends on: P07-T11e2
+  - Deliverables: ≤ 20 unit tests (no simulations) run in the api request (8 concurrent, 120 s cap) as a
+    `regression` run; failing run with blocking → 409 `CONFLICT` `details.run_id`; e2e flow
+    `tests_e2e/test_pathway_regression_gate.py` where a broken draft's publish is blocked and a fixed one publishes
+  - Acceptance: api tests pass/fail/timeout; `make e2e` flow green.
 
 - [ ] P07-T12 Pathway runner integration in calls
   - Spec refs: specs/05-calls-api.md (runner selection: pathway_id/pathway_version); specs/11-pathways-engine.md (voice integration)

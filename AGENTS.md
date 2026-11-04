@@ -1886,3 +1886,10 @@ Grafana 3001
   per rule and conversation id, only over caller requests) and a higher `priority`; an unscripted caller gets
   FakeLLM's default `Okay. You said: …` and never hangs up. Tests: `pathways_helpers.job(simulation_id, **scenario)`
   and `TextRig.simulate(job, active=)`.
+- 2026-11-04 (P07-T11e1): regression settings = `va_domain.pathway_tests.RegressionSettings` (`load_regression`
+  lenient, `with_regression`, `regression_summary`) stored in the draft `global_config.regression`, served by
+  `routers/pathway_regression.py` (side-effect import in `main.py`) over `services.pathway_regression` (the hash of a
+  stored draft JSON is `va_engine.models.graph.graph_hash({nodes, edges, global_config})`, equal to the
+  parse+dump hash). Publishing (freeze, pin, fork, `pathway.publish` audit) is `va_db.pathway_publish.apply_publish`
+  (+ `pinned_number`), shared by the api and, from P07-T11e2, the worker; callers validate, lock, and invalidate the
+  cache. Rows written in one transaction share `now()`: never assert audit row order inside one transaction.

@@ -9,28 +9,42 @@ it imports only pydantic.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterable
-from typing import Annotated, Final, Literal
+from collections.abc import Iterable, Mapping
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 __all__ = [
     "DEFAULT_SIMULATION_TURNS",
+    "MAX_REGRESSION_SCENARIOS",
     "MAX_RUNS_PER_SCENARIO",
     "MAX_RUN_TESTS",
     "MAX_SCENARIOS",
     "MAX_SIMULATIONS",
     "MAX_SIMULATION_TURNS",
     "PATHWAY_TEST_WORKFLOW_NAME",
+    "REGRESSION_KEY",
     "RUN_CONCURRENCY",
     "FinishedRunStatus",
     "PathwayTestWorkflowInput",
+    "RegressionSettings",
     "RunKind",
     "Scenario",
     "SimulationJob",
+    "load_regression",
     "pathway_test_workflow_id",
+    "regression_summary",
     "run_status",
     "simulation_jobs",
+    "with_regression",
 ]
 
 PATHWAY_TEST_WORKFLOW_NAME: Final = "PathwayTestWorkflow"
@@ -47,6 +61,10 @@ MAX_SIMULATIONS: Final = MAX_SCENARIOS * MAX_RUNS_PER_SCENARIO
 MAX_SIMULATION_TURNS: Final = 50
 """The highest ``max_turns`` of a scenario."""
 DEFAULT_SIMULATION_TURNS: Final = 20
+MAX_REGRESSION_SCENARIOS: Final = 20
+"""Scenarios a regression suite may hold."""
+REGRESSION_KEY: Final = "regression"
+"""The draft ``global_config`` key holding the regression settings (specs/12 §9)."""
 
 type RunKind = Literal["unit", "simulation"]
 """The run kinds ``PathwayTestWorkflow`` executes (``regression`` runs are unit or simulation runs too)."""
@@ -135,3 +153,45 @@ def run_status(statuses: Iterable[str | None]) -> FinishedRunStatus:
     if any(status != "passed" for status in seen):
         return "error"
     return "passed"
+
+
+class RegressionSettings(BaseModel):
+    """A pathway's regression suite settings (specs/12 §9; Decision P07-T11e1 there): whether a publish runs
+    the suite, whether a failing suite blocks it, whether the suite adds simulations, and the scenarios those
+    simulations play (one conversation each)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_on_publish: bool = False
+    block_publish_on_failure: bool = True
+    include_simulations: bool = False
+    scenarios: tuple[Scenario, ...] = Field(default=(), max_length=MAX_REGRESSION_SCENARIOS)
+
+
+def load_regression(global_config: Mapping[str, object]) -> RegressionSettings:
+    """The settings stored under ``global_config["regression"]``; a missing or invalid value reads as the
+    defaults (imported graphs may carry anything there)."""
+    stored = global_config.get(REGRESSION_KEY)
+    if not isinstance(stored, Mapping):
+        return RegressionSettings()
+    try:
+        return RegressionSettings.model_validate(stored)
+    except ValidationError:
+        return RegressionSettings()
+
+
+def with_regression(global_config: Mapping[str, Any], settings: RegressionSettings) -> dict[str, Any]:
+    """A copy of ``global_config`` with ``settings`` stored under the regression key."""
+    updated = dict(global_config)
+    updated[REGRESSION_KEY] = settings.model_dump(mode="json")
+    return updated
+
+
+def regression_summary(settings: RegressionSettings) -> dict[str, bool | int]:
+    """The audit shape of ``settings``: the three flags and the scenario count."""
+    return {
+        "run_on_publish": settings.run_on_publish,
+        "block_publish_on_failure": settings.block_publish_on_failure,
+        "include_simulations": settings.include_simulations,
+        "scenarios": len(settings.scenarios),
+    }

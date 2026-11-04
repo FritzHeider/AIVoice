@@ -6,13 +6,12 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from pathway_rows import GRAPH
+from pathway_rows import seed_orders_pathway
 from sqlalchemy import update
 from tenant_rows import OrgFactory, open_database
 
 from va_db.models import PathwayVersion
 from va_db.repositories import PathwayRepo
-from va_db.session import Database
 from va_engine.models.nodes import PathwayVersionRef
 from va_engine.navigation import PathwayUnavailableError
 from va_pathways.loader import DbPathwayLoader
@@ -26,19 +25,11 @@ async def _reason(loader: DbPathwayLoader, pathway_id: str, version: PathwayVers
     return refused.value.reason
 
 
-async def _seed(database: Database, org_id: uuid.UUID) -> uuid.UUID:
-    async with database.tenant_session(org_id) as session:
-        pathway, _ = await PathwayRepo(session, org_id).create(
-            name="Orders", description="", folder_id=None, graph=GRAPH
-        )
-        return pathway.id
-
-
 async def test_loads_pins_and_numbers_and_refuses_everything_else(pathways_db_url: str) -> None:
     async with open_database(pathways_db_url) as database:
         orgs = OrgFactory(database)
         org_id, other_org = await orgs.create(), await orgs.create()
-        pathway_id = await _seed(database, org_id)
+        pathway_id = await seed_orders_pathway(database, org_id)
         loader = DbPathwayLoader(database, org_id)
         by_number = await loader.load(str(pathway_id), 1)
         assert (by_number.pathway_id, by_number.version) == (pathway_id, 1)

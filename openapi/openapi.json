@@ -7866,6 +7866,150 @@
         "title": "RedactionSettings",
         "type": "object"
       },
+      "RegressionBody": {
+        "additionalProperties": false,
+        "description": "The regression suite settings: ``run_on_publish`` (a publish runs the suite),\n``block_publish_on_failure`` (a failing suite keeps the version unpublished), ``include_simulations`` (the\nsuite also plays ``scenarios``, one conversation each). Omitted keys take their defaults.",
+        "examples": [
+          {
+            "block_publish_on_failure": true,
+            "include_simulations": false,
+            "run_on_publish": true,
+            "scenarios": []
+          }
+        ],
+        "properties": {
+          "block_publish_on_failure": {
+            "default": true,
+            "title": "Block Publish On Failure",
+            "type": "boolean"
+          },
+          "include_simulations": {
+            "default": false,
+            "title": "Include Simulations",
+            "type": "boolean"
+          },
+          "run_on_publish": {
+            "default": false,
+            "title": "Run On Publish",
+            "type": "boolean"
+          },
+          "scenarios": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ScenarioBody"
+            },
+            "maxItems": 20,
+            "title": "Scenarios",
+            "type": "array"
+          }
+        },
+        "title": "RegressionBody",
+        "type": "object"
+      },
+      "RegressionSaved": {
+        "description": "``PUT /v1/pathway/{pathway_id}/regression``: the stored settings and the draft holding them.",
+        "examples": [
+          {
+            "draft_version": 5,
+            "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+            "regression": {
+              "block_publish_on_failure": true,
+              "include_simulations": false,
+              "run_on_publish": true,
+              "scenarios": []
+            },
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "draft_version": {
+            "title": "Draft Version",
+            "type": "integer"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "regression": {
+            "$ref": "#/components/schemas/RegressionSettings"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "regression",
+          "draft_version",
+          "graph_hash"
+        ],
+        "title": "RegressionSaved",
+        "type": "object"
+      },
+      "RegressionSettings": {
+        "additionalProperties": false,
+        "description": "A pathway's regression suite settings (specs/12 §9; Decision P07-T11e1 there): whether a publish runs\nthe suite, whether a failing suite blocks it, whether the suite adds simulations, and the scenarios those\nsimulations play (one conversation each).",
+        "properties": {
+          "block_publish_on_failure": {
+            "default": true,
+            "title": "Block Publish On Failure",
+            "type": "boolean"
+          },
+          "include_simulations": {
+            "default": false,
+            "title": "Include Simulations",
+            "type": "boolean"
+          },
+          "run_on_publish": {
+            "default": false,
+            "title": "Run On Publish",
+            "type": "boolean"
+          },
+          "scenarios": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Scenario"
+            },
+            "maxItems": 20,
+            "title": "Scenarios",
+            "type": "array"
+          }
+        },
+        "title": "RegressionSettings",
+        "type": "object"
+      },
+      "RegressionView": {
+        "description": "``GET /v1/pathway/{pathway_id}/regression``.",
+        "examples": [
+          {
+            "regression": {
+              "block_publish_on_failure": true,
+              "include_simulations": false,
+              "run_on_publish": true,
+              "scenarios": []
+            },
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "regression": {
+            "$ref": "#/components/schemas/RegressionSettings"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "regression"
+        ],
+        "title": "RegressionView",
+        "type": "object"
+      },
       "ResponseDataItem": {
         "additionalProperties": false,
         "description": "One variable extracted from a dynamic data response.",
@@ -8430,6 +8574,51 @@
           "error"
         ],
         "title": "RunSummary",
+        "type": "object"
+      },
+      "Scenario": {
+        "additionalProperties": false,
+        "description": "One simulated caller: who they are (``persona``), what the conversation should achieve (``goal``), the\ncaller-turn cap, and the request data the pathway sees.",
+        "properties": {
+          "goal": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "max_turns": {
+            "default": 20,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Max Turns",
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "persona": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Persona",
+            "type": "string"
+          },
+          "request_data": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Request Data",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "persona",
+          "goal"
+        ],
+        "title": "Scenario",
         "type": "object"
       },
       "ScenarioBody": {
@@ -15820,6 +16009,129 @@
         ],
         "x-envelope": "legacy",
         "x-permission": "pathways.publish",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/regression": {
+      "get": {
+        "description": "The regression suite settings stored in the pathway's draft.",
+        "operationId": "pathways_regression_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegressionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Regression Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "put": {
+        "description": "Replace the regression suite settings of the pathway's draft (omitted keys take their defaults).",
+        "operationId": "pathways_regression_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegressionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegressionSaved"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Regression Put",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway.regression_update"
+        ],
+        "x-envelope": "legacy",
         "x-scope": "pathways:write"
       }
     },

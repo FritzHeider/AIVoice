@@ -993,6 +993,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/{pathway_id}/regression": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Regression Get
+         * @description The regression suite settings stored in the pathway's draft.
+         */
+        get: operations["pathways_regression_get"];
+        /**
+         * Pathways Regression Put
+         * @description Replace the regression suite settings of the pathway's draft (omitted keys take their defaults).
+         */
+        put: operations["pathways_regression_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}/revert": {
         parameters: {
             query?: never;
@@ -5987,6 +6011,118 @@ export interface components {
             redact_llm_context: boolean;
         };
         /**
+         * RegressionBody
+         * @description The regression suite settings: ``run_on_publish`` (a publish runs the suite),
+         *     ``block_publish_on_failure`` (a failing suite keeps the version unpublished), ``include_simulations`` (the
+         *     suite also plays ``scenarios``, one conversation each). Omitted keys take their defaults.
+         * @example {
+         *       "block_publish_on_failure": true,
+         *       "include_simulations": false,
+         *       "run_on_publish": true,
+         *       "scenarios": []
+         *     }
+         */
+        RegressionBody: {
+            /**
+             * Block Publish On Failure
+             * @default true
+             */
+            block_publish_on_failure: boolean;
+            /**
+             * Include Simulations
+             * @default false
+             */
+            include_simulations: boolean;
+            /**
+             * Run On Publish
+             * @default false
+             */
+            run_on_publish: boolean;
+            /**
+             * Scenarios
+             * @default []
+             */
+            scenarios: components["schemas"]["ScenarioBody"][];
+        };
+        /**
+         * RegressionSaved
+         * @description ``PUT /v1/pathway/{pathway_id}/regression``: the stored settings and the draft holding them.
+         * @example {
+         *       "draft_version": 5,
+         *       "graph_hash": "4f1c2a9e0b7d3c5a8e6f1b2d4c9a7e3f5b8d1c6a2e9f4b7d0c3a5e8f1b2d4c6a",
+         *       "regression": {
+         *         "block_publish_on_failure": true,
+         *         "include_simulations": false,
+         *         "run_on_publish": true,
+         *         "scenarios": []
+         *       },
+         *       "status": "success"
+         *     }
+         */
+        RegressionSaved: {
+            /** Draft Version */
+            draft_version: number;
+            /** Graph Hash */
+            graph_hash: string;
+            regression: components["schemas"]["RegressionSettings"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * RegressionSettings
+         * @description A pathway's regression suite settings (specs/12 §9; Decision P07-T11e1 there): whether a publish runs
+         *     the suite, whether a failing suite blocks it, whether the suite adds simulations, and the scenarios those
+         *     simulations play (one conversation each).
+         */
+        RegressionSettings: {
+            /**
+             * Block Publish On Failure
+             * @default true
+             */
+            block_publish_on_failure: boolean;
+            /**
+             * Include Simulations
+             * @default false
+             */
+            include_simulations: boolean;
+            /**
+             * Run On Publish
+             * @default false
+             */
+            run_on_publish: boolean;
+            /**
+             * Scenarios
+             * @default []
+             */
+            scenarios: components["schemas"]["Scenario"][];
+        };
+        /**
+         * RegressionView
+         * @description ``GET /v1/pathway/{pathway_id}/regression``.
+         * @example {
+         *       "regression": {
+         *         "block_publish_on_failure": true,
+         *         "include_simulations": false,
+         *         "run_on_publish": true,
+         *         "scenarios": []
+         *       },
+         *       "status": "success"
+         *     }
+         */
+        RegressionView: {
+            regression: components["schemas"]["RegressionSettings"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
          * ResponseDataItem
          * @description One variable extracted from a dynamic data response.
          */
@@ -6323,6 +6459,28 @@ export interface components {
             passed: number;
             /** Total */
             total: number;
+        };
+        /**
+         * Scenario
+         * @description One simulated caller: who they are (``persona``), what the conversation should achieve (``goal``), the
+         *     caller-turn cap, and the request data the pathway sees.
+         */
+        Scenario: {
+            /** Goal */
+            goal: string;
+            /**
+             * Max Turns
+             * @default 20
+             */
+            max_turns: number;
+            /** Name */
+            name: string;
+            /** Persona */
+            persona: string;
+            /** Request Data */
+            request_data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
         };
         /**
          * ScenarioBody
@@ -10470,6 +10628,90 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Published"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_regression_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegressionView"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_regression_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegressionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegressionSaved"];
                 };
             };
             /** @description Invalid input */

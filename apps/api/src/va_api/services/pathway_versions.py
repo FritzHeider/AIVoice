@@ -16,7 +16,7 @@ from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from va_api.audit import audit
+from va_api.audit import actor_of, audit
 from va_api.auth.api_keys import creating_user_id
 from va_api.auth.context import RequestContext
 from va_api.services.pathways import (
@@ -27,6 +27,7 @@ from va_api.services.pathways import (
 )
 from va_common.errors import AppError
 from va_db.models import Pathway, PathwayVersion
+from va_db.pathway_publish import apply_publish, pinned_number
 from va_db.repositories import PathwayGraphJson, PathwayRepo, PinEnvironment
 from va_engine.validation import ValidationReport
 
@@ -80,11 +81,6 @@ class RevertOutcome:
 
     draft: PathwayVersion
     report: ValidationReport
-
-
-def pinned_number(pathway: Pathway, environment: PinEnvironment) -> int | None:
-    """The version number pinned to ``environment``."""
-    return pathway.production_version if environment == "production" else pathway.staging_version
 
 
 async def _existing(repo: PathwayRepo, pathway: Pathway, number: int) -> PathwayVersion:
@@ -144,25 +140,19 @@ async def publish_version(  # noqa: PLR0913 - keyword-only body fields and URL p
         repo, GraphInput.of(version), pathway_id=pathway.id, mode="publish", allow_http=allow_http
     )
     reject_errors(checked)
-    previous = pinned_number(pathway, environment)
-    was_draft = version.version_number == pathway.draft_version
-    await repo.freeze(version, status="published", published_by=await creating_user_id(ctx, session))
-    await repo.set_pin(pathway, environment, version.version_number)
-    if was_draft:
-        await repo.fork_draft(pathway, version)
-    await audit(
+    result = await apply_publish(
         session,
-        ctx,
-        "pathway.publish",
-        "pathway",
-        pathway.id,
-        before={"environment": environment, "version": previous},
-        after={"environment": environment, "version": version.version_number},
+        repo,
+        pathway,
+        version,
+        environment=environment,
+        published_by=await creating_user_id(ctx, session),
+        actor=actor_of(ctx),
     )
     return PublishOutcome(
-        published_version=version.version_number,
-        environment=environment,
-        draft_version=pathway.draft_version,
+        published_version=result.published_version,
+        environment=result.environment,
+        draft_version=result.draft_version,
     )
 
 

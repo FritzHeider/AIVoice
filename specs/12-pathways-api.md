@@ -532,6 +532,27 @@ with full transcripts.
 Regression settings (`GET/PUT /regression`), stored in `pathways` draft `global_config.regression`:
 `{"run_on_publish": true, "block_publish_on_failure": true, "include_simulations": false}`.
 
+> Decision (2026-11-04): regression settings (P07-T11e1).
+> 1. Settings `{run_on_publish: bool (default false), block_publish_on_failure: bool (default true),
+>    include_simulations: bool (default false), scenarios: [0-20 scenarios of the Decision P07-T11d item 1 shape]}`,
+>    other keys rejected (400 `INVALID_INPUT` with the field path, e.g. `scenarios[0].max_turns`). The defaults make
+>    an existing pathway's publish run nothing until the suite opts in (the example above is the opted-in shape).
+>    With `include_simulations` the suite plays each scenario once (P07-T11e2).
+> 2. Stored under the draft's `global_config.regression`: save, fork, duplicate, and export copy the settings with
+>    the graph; a draft update that sends `global_config` replaces the whole object, so clients keep the key. The
+>    key is part of `graph_hash`. Reads are lenient: a missing or invalid stored value reads as the defaults.
+> 3. `GET /v1/pathway/{id}/regression` (`pathways_regression_get`, `pathways:read`) answers
+>    `{"status":"success","regression":{all four keys}}`. `PUT` (`pathways_regression_put`, `pathways:write` plus an
+>    editing role for session principals: it edits the draft) takes the full settings (omitted keys take the
+>    defaults) and answers the same body plus `draft_version` and `graph_hash`. It takes the pathway row lock;
+>    storing the value already stored writes nothing. A change writes audit `pathway.regression_update` with
+>    before/after `{run_on_publish, block_publish_on_failure, include_simulations, scenarios: <count>,
+>    graph_hash}`. An absent or other-org pathway is 404 `NOT_FOUND`.
+> 4. §4 step 3 (mark `published`, pin, fork a draft when the published version was the draft, the
+>    `pathway.publish` audit row) is one shared routine, `va_db.pathway_publish.apply_publish`, used by the api and
+>    by the worker when an asynchronous regression run completes a publish (P07-T11e2). Validation and the
+>    resolved-graph cache invalidation stay with the caller.
+
 ## 10. Permissions
 
 | Action | owner | admin | developer | analyst | billing | viewer |
@@ -545,7 +566,8 @@ API keys: scope `pathways:read`, `pathways:write`, `pathways:publish`, or `*`.
 ## 11. Audit log entries
 `pathway.create`, `pathway.update` (changes: name/description + `graph_hash` before/after, not full graph),
 `pathway.delete`, `pathway.version_save` (Decision P07-T09b item 9), `pathway.publish` (version, environment), `pathway.promote`,
-`pathway.revert`, `pathway.import`, `pathway.duplicate`, `pathway.folder.*` (named `pathway_folder.*`, Decision
+`pathway.revert`, `pathway.import`, `pathway.duplicate`, `pathway.regression_update` (Decision P07-T11e1),
+`pathway.folder.*` (named `pathway_folder.*`, Decision
 P07-T09c item 6), `pathway.test.*`.
 
 ## 12. Tests required
