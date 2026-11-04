@@ -41,6 +41,7 @@ from va_api.auth.sso_state import SsoStateStore
 from va_api.auth.verification import ResendLimiter
 from va_api.envelopes import envelope_router
 from va_api.services.pathway_chat import CHAT_LLM_TIMEOUT
+from va_api.services.pathway_regression_sync import RegressionTestRunner, StoredTestRunner
 from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
@@ -79,6 +80,7 @@ from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 from va_llm import LlmGateway, LlmMetrics, OrgProviderStore, ProviderRegistry
 from va_llm.providers import platform_provider
+from va_pathways.conversation import TextDeps
 from va_tools.http import tools_client
 
 __all__ = [
@@ -183,6 +185,7 @@ class SessionContainer(AuthContainer):
     stream_tail: StreamTailHub = field(init=False)
     llm_gateway: LlmGateway = field(init=False)
     tools_http: httpx.AsyncClient = field(init=False)
+    pathway_test_runner: RegressionTestRunner = field(init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -235,6 +238,13 @@ class SessionContainer(AuthContainer):
                 llm_http,
                 clock=self.clock,
                 metrics=LlmMetrics(CollectorRegistry()),
+            )
+            self.pathway_test_runner = StoredTestRunner(
+                text=TextDeps(
+                    gateway=self.llm_gateway, tools_http=tools_http, clock=self.clock, allow_http=True
+                ),
+                database=self.database,
+                org_settings=self.org_settings,
             )
             self.webhook_deliverer = Deliverer(
                 webhook_http,

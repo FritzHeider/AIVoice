@@ -252,6 +252,35 @@ Request `{"name": "Copy of …", "version": "production"}` → new pathway with 
 >    independently; the last one to commit holds the pin.
 > 7. Storage: `pathway_test_runs.publish jsonb` (migration 0008, appended last; NULL for runs of other kinds).
 
+> Decision (2026-11-04): synchronous regression gate (P07-T11e3). Refines step 2 and Decision P07-T11e2.
+> 1. The synchronous path applies only to a blocking suite (`block_publish_on_failure: true`) with no simulation
+>    jobs and 1-20 unit tests. Blocking suites with simulations or more than 20 tests keep the P07-T11e2 async path
+>    (`pending_regression`); a non-blocking suite keeps publish-now plus an async reporting run (running it in the
+>    request would only delay a publish that happens anyway).
+> 2. The publish transaction (pathway row lock, publish-mode validation first) inserts the `regression` run with
+>    `publish` = `{block: true, ..., outcome: "pending"}` and moves it to `running` (`started_at` set) in the same
+>    transaction. No workflow starts.
+> 3. After the commit the api runs the tests in the request, at most 8 at once, oldest first, each through the same
+>    runner as the worker (`va_pathways.runs.run_stored_test`; no database session is held while a test runs) and
+>    stores each result item in the run row. An exception from one test becomes an `error` item `runner_error`
+>    (logged; no retries in the request). The whole suite is capped at 120 s of the injected clock; unfinished
+>    tests are cancelled and stored as `error` items `regression_timeout`. Then the run is finished (results in
+>    test order, status per §8).
+> 4. The publish settles exactly as in the worker (`va_db.pathway_publish.settle_regression_publish`, same intent):
+>    `published` answers 200 `{"status":"success","published_version","environment","version_number",
+>    "draft_version","run_id"}` and the environment's cache key is deleted. Any other outcome answers 409
+>    `CONFLICT` with `details` `{"run_id","outcome"}` and nothing is published or invalidated; messages: `blocked`
+>    "The regression run did not pass; the version was not published.", `stale` (draft edited during the run)
+>    "The pathway changed during the regression run; publish again.", `version_unavailable` (pathway or version
+>    gone; also a run row that disappeared) "The pathway version is no longer available.".
+> 5. A request cancelled mid-run (client disconnect) still closes the run in a shielded step: unfinished tests
+>    are cancelled, the run is finished (missing items count as errors) and its publish settles `blocked`; a run
+>    of this path is never left `running` with `outcome: "pending"`.
+> 6. Idempotency is unchanged (specs/04 §2.1): the 200 and the 409 are both stored and replayed for the same
+>    `Idempotency-Key` (publishing again after a fix needs a new key). The claim lock is 60 s, shorter than the
+>    120 s cap: a retry with the same key after 60 s while the first request still runs starts a second run;
+>    both settle independently under the pathway row lock (the last to publish holds the pin, as in P07-T11e2).
+
 ## 5. Import / export
 
 - Export: `GET /v1/pathway/{id}/export?version=` →

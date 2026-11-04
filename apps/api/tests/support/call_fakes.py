@@ -1,10 +1,13 @@
 """Fakes of the call container pieces: a recording ``CallWorkflow`` starter, a recording canceller, a DNS
-resolver, and an S3 client that presigns recording URLs and answers ``head_object``."""
+resolver, an S3 client that presigns recording URLs and answers ``head_object``, and a scripted runner of
+synchronous regression tests."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from uuid import UUID
 
 from botocore.exceptions import ClientError
@@ -16,6 +19,8 @@ from va_api.services.pathway_test_runs import RunStartError
 from va_common.storage import ObjectStore
 from va_domain.call_workflow import CallWorkflowInput
 from va_domain.pathway_tests import PathwayTestWorkflowInput
+from va_pathways.recording import Item
+from va_pathways.runs import StoredTest
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client
@@ -25,6 +30,7 @@ __all__ = [
     "PUBLIC_ADDRESS",
     "FakeCallCanceller",
     "FakeCallStarter",
+    "FakePathwayTestRunner",
     "FakePresigner",
     "FakeResolver",
 ]
@@ -57,6 +63,59 @@ class FakePathwayTestStarter:
         if self.fail is not None:
             raise self.fail
         self.started.append(run)
+
+
+type Script = Literal["passed", "failed", "error", "raise", "hang"]
+
+
+@dataclass
+class FakePathwayTestRunner:
+    """Answers each test by its script (``script[test_id]``, default ``passed``): an item of that status,
+    ``raise`` (a ``RuntimeError``), or ``hang`` (never returns). ``before`` runs once before the first test;
+    while ``gate`` is set to an unset event every test waits for it. Records the tests it ran and the most
+    tests in flight at once; ``started`` is set once a test began, ``saturated`` once ``saturate_at`` tests
+    are in flight together."""
+
+    script: dict[str, Script] = field(default_factory=dict)
+    before: Callable[[], Awaitable[None]] | None = None
+    gate: asyncio.Event | None = None
+    ran: list[str] = field(default_factory=list)
+    in_flight: int = 0
+    max_in_flight: int = 0
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    saturate_at: int | None = None
+    saturated: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def run(self, test: StoredTest) -> Item:
+        if self.before is not None:
+            before, self.before = self.before, None
+            await before()
+        test_id = str(test.test_id)
+        self.ran.append(test_id)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        self.started.set()
+        if self.saturate_at is not None and self.in_flight >= self.saturate_at:
+            self.saturated.set()
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            outcome = self.script.get(test_id, "passed")
+            if outcome == "hang":
+                await asyncio.Event().wait()
+            if outcome == "raise":
+                msg = "runner exploded"
+                raise RuntimeError(msg)
+        finally:
+            self.in_flight -= 1
+        return {
+            "test_id": test_id,
+            "name": None,
+            "passed": outcome == "passed",
+            "status": outcome,
+            "cases": [],
+            "duration_ms": 1,
+        }
 
 
 @dataclass

@@ -159,7 +159,7 @@
   - Acceptance: workflow tests: passed run publishes, failed/error run does not, stale graph does not; api tests
     for both blocking modes and start failure.
 
-- [ ] P07-T11e3 Synchronous regression gate and e2e
+- [x] P07-T11e3 Synchronous regression gate and e2e — ≤ 20-test blocking suites run in the publish request (8 at once, 120 s cap, shielded close + settle, 409 CONFLICT details.run_id); make test 12516 passed 7 skipped 99 %, lint/typecheck/placeholders 0, jscpd 0, drift clean, e2e pathway_regression_gate pass
   - Spec refs: specs/12-pathways-api.md §4 publish step 2 (≤ 20 tests synchronous, 120 s, 409), §12, §13
   - Depends on: P07-T11e2
   - Deliverables: ≤ 20 unit tests (no simulations) run in the api request (8 concurrent, 120 s cap) as a

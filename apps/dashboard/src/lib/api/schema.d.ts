@@ -985,7 +985,9 @@ export interface paths {
         /**
          * Pathways Publish
          * @description Validate a version in publish mode and pin it to production or staging, gated by the regression suite
-         *     when it runs (``pending_regression``: the worker publishes once the run passes).
+         *     when it runs: a blocking suite of at most 20 unit tests runs in the request (409 ``CONFLICT`` with
+         *     ``details.run_id`` when it does not pass), a larger one answers ``pending_regression`` and the worker
+         *     publishes once the run passes.
          */
         post: operations["pathways_publish"];
         delete?: never;

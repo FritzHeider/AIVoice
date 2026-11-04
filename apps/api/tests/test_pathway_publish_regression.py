@@ -1,75 +1,35 @@
 """``POST /v1/pathway/{id}/publish`` with the regression gate (specs/12 §4 step 2; Decision P07-T11e2): when
 the suite runs, a blocking suite answers ``pending_regression`` and leaves the publish to the worker, a
-reporting suite publishes at once next to its run, and start failures are handled per mode."""
+reporting suite publishes at once next to its run, and start failures are handled per mode. Blocking suites
+are forced onto the asynchronous path here (Decision P07-T11e3 runs small ones in the request)."""
 
 from __future__ import annotations
 
 import uuid
-from typing import Any, Final
 
 import httpx
 import pytest
 from identity_db import IdentityDb
-from pathway_helpers import BASE, Api, add_unit_test, run_of, star_api
-from session_helpers import SessionContainer, audit_rows, error_of
-from sqlalchemy import select
+from publish_helpers import SCENARIO, Gate, gate_of
+from session_helpers import SessionContainer, error_of
 
 from va_api.services import pathway_publish
 from va_api.services.pathway_publish import SUITE_TOO_LARGE_MESSAGE
 from va_api.services.pathway_test_runs import RunStartError
-from va_db.models import PathwayTestRun
 from va_db.pathway_cache import pathway_cache_key
 
 pytestmark = pytest.mark.integration
 
-TEST: Final[dict[str, Any]] = {"node_id": "start", "user_message": "Hello"}
-SCENARIO: Final[dict[str, Any]] = {"name": "Caller", "persona": "In a hurry.", "goal": "Order placed"}
 
-
-class Gate:
-    def __init__(self, api: Api, container: SessionContainer, identity: IdentityDb, pathway_id: str) -> None:
-        self.api = api
-        self.container = container
-        self.identity = identity
-        self.pathway_id = pathway_id
-        self.base = f"{BASE}/{pathway_id}"
-
-    async def add_test(self, name: str) -> str:
-        return await add_unit_test(self.api, self.pathway_id, {**TEST, "name": name})
-
-    async def settings(self, **body: Any) -> None:
-        response = await self.api.client.put(f"{self.base}/regression", json=body, headers=self.api.headers)
-        assert response.status_code == 200, response.text
-
-    async def publish(self, **body: Any) -> httpx.Response:
-        return await self.api.publish(self.pathway_id, **body)
-
-    async def run(self, run_id: str) -> dict[str, Any]:
-        return run_of(await self.api.client.get(f"{self.base}/runs/{run_id}", headers=self.api.headers))
-
-    async def production(self) -> int | None:
-        detail = (await self.api.get(self.pathway_id)).json()
-        versions = (await self.api.versions(self.pathway_id)).json()["versions"]
-        assert detail["pathway_id"] == self.pathway_id
-        pinned = [item["version_number"] for item in versions if item["is_production"]]
-        return pinned[0] if pinned else None
-
-    async def run_rows(self) -> list[PathwayTestRun]:
-        async with self.identity.database.tenant_session(self.api.org_id) as session:
-            return list(await session.scalars(select(PathwayTestRun)))
-
-    async def publish_audits(self) -> int:
-        return len(await audit_rows(self.identity, self.api.org_id, "pathway.publish"))
-
-    @property
-    def started(self) -> list[Any]:
-        return self.container.pathway_test_starter.started
+@pytest.fixture(autouse=True)
+def asynchronous_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every blocking suite here takes the asynchronous path (synchronous: test_pathway_publish_sync)."""
+    monkeypatch.setattr(pathway_publish, "SYNC_MAX_TESTS", 0)
 
 
 @pytest.fixture
 async def gate(client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer) -> Gate:
-    api = await star_api(client, identity, container)
-    return Gate(api, container, identity, await api.created())
+    return await gate_of(client, identity, container)
 
 
 async def test_without_regression_the_publish_runs_nothing(gate: Gate) -> None:

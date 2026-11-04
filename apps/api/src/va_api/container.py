@@ -26,7 +26,9 @@ from va_api.rate_limit import RateLimiter
 from va_api.services.call_starter import CallStarter, TemporalCallStarter
 from va_api.services.call_stop import CallCanceller, TemporalCallCanceller
 from va_api.services.pathway_chat import CHAT_LLM_TIMEOUT
+from va_api.services.pathway_regression_sync import RegressionTestRunner, StoredTestRunner
 from va_api.services.pathway_test_runs import PathwayTestStarter, TemporalPathwayTestStarter
+from va_api.services.pathways import insecure_urls_allowed
 from va_api.services.webhook_test_send import TEST_SEND_TIMEOUT_S
 from va_api.settings import ApiSettings
 from va_billing.limits import CallLimiter
@@ -52,6 +54,7 @@ from va_events.webhook_delivery import Deliverer
 from va_events.webhook_schedule import Timeouts
 from va_llm import LlmGateway, LlmMetrics
 from va_llm.platform import platform_gateway
+from va_pathways.conversation import TextDeps
 from va_tools.http import tools_client
 
 __all__ = ["Container", "ContainerFactory", "ReadinessSource", "build_container", "email_sender_for"]
@@ -97,6 +100,7 @@ class Container:
     stream_tail: StreamTailHub
     llm_gateway: LlmGateway
     tools_http: httpx.AsyncClient
+    pathway_test_runner: RegressionTestRunner
 
     def readiness_checks(self) -> Mapping[str, CheckFn]:
         """Postgres, Redis, Temporal (specs/27-observability.md §9)."""
@@ -124,7 +128,8 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
     webhook checks, the webhook test-send deliverer (an SSRF-pinning ``safe_client``, 10 s per attempt), the
     live event hub (one pub/sub connection for every SSE client), and the pathway test chat's LLM gateway
     (platform provider plus org overrides; its metrics stay on a private registry: the api exports no LLM
-    catalog) and the guarded HTTP client its webhook nodes run on (``va_tools.http.tools_client``).
+    catalog) and the guarded HTTP client its webhook nodes run on (``va_tools.http.tools_client``), both
+    shared with the runner of synchronous regression runs on publish.
 
     Everything opened is disposed on exit. ``RuntimeError`` when ``API_KEY_PEPPER`` or (for the local KMS
     provider) ``LOCAL_MASTER_KEY`` is not configured, before anything is opened.
@@ -221,4 +226,14 @@ async def build_container(settings: ApiSettings) -> AsyncIterator[Container]:
             stream_tail=stream_tail,
             llm_gateway=llm_gateway,
             tools_http=tools_http,
+            pathway_test_runner=StoredTestRunner(
+                text=TextDeps(
+                    gateway=llm_gateway,
+                    tools_http=tools_http,
+                    clock=clock,
+                    allow_http=insecure_urls_allowed(settings.va_env),
+                ),
+                database=database,
+                org_settings=org_settings,
+            ),
         )

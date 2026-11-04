@@ -1902,3 +1902,13 @@ Grafana 3001
   (migration 0008, head now `0008`): never pass `None` for a JSONB column you want SQL NULL — SQLAlchemy stores
   JSON `null`; omit the key. `pathway_rows.GRAPH` (va_db tests support) has `graph_hash = "0" * 64`: use another
   value for a deliberately wrong hash. Spec: specs/12 §4 Decision P07-T11e2.
+- 2026-11-04 (P07-T11e3): a blocking suite of ≤ 20 unit tests and no simulations runs inside the publish request
+  (`va_api.services.pathway_regression_sync`: `run_sync_suite` 8 at a time, 120 s on the container clock, shielded
+  close + settle; `conflict_for` → 409 `details.run_id`/`outcome`); the runner is `Container.pathway_test_runner`
+  (`StoredTestRunner` over the chat's `llm_gateway`/`tools_http`). Tests: replace it with
+  `call_fakes.FakePathwayTestRunner` (`script[test_id]` = passed/failed/error/raise/hang, `before`, `gate`,
+  `saturate_at`) AFTER the client opened the app (the lifespan builds the real one); use a `WallClock` container
+  (FrozenClock sleeps return at once, so the 120 s cap would fire). Async-path tests force it with
+  `monkeypatch.setattr(pathway_publish, "SYNC_MAX_TESTS", 0)`. Shared publish test helper: `support/publish_helpers.Gate`
+  / `gate_of`. A pathway draft update that sends `global_config` replaces the suite settings stored there.
+

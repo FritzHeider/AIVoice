@@ -34,6 +34,7 @@ from va_api.routers.pathway_versions_schemas import (
 from va_api.routers.pathways import pathways_router
 from va_api.routers.pathways_schemas import PathwayDetail, pathway_detail, validation_view
 from va_api.services.pathway_publish import PublishDeps, PublishRequest, publish_pathway
+from va_api.services.pathway_regression_sync import RegressionTestRunner
 from va_api.services.pathway_test_runs import PathwayTestStarter
 from va_api.services.pathway_versions import (
     get_version,
@@ -113,11 +114,15 @@ async def pathways_publish(
     pathway_id: uuid.UUID, request: Request, ctx: WritePathways, body: PublishBody | None = None
 ) -> Published:
     """Validate a version in publish mode and pin it to production or staging, gated by the regression suite
-    when it runs (``pending_regression``: the worker publishes once the run passes)."""
+    when it runs: a blocking suite of at most 20 unit tests runs in the request (409 ``CONFLICT`` with
+    ``details.run_id`` when it does not pass), a larger one answers ``pending_regression`` and the worker
+    publishes once the run passes."""
     payload = body if body is not None else PublishBody()
-    starter: PathwayTestStarter = request.app.state.container.pathway_test_starter
+    container = request.app.state.container
+    starter: PathwayTestStarter = container.pathway_test_starter
+    runner: RegressionTestRunner = container.pathway_test_runner
     outcome = await publish_pathway(
-        PublishDeps(database=database_of(request), starter=starter, clock=clock_of(request)),
+        PublishDeps(database=database_of(request), starter=starter, runner=runner, clock=clock_of(request)),
         ctx,
         pathway_id,
         PublishRequest(

@@ -5,10 +5,13 @@ Step 1 validates the version in publish mode (one ``INVALID_INPUT`` item per err
 when the request sets ``run_regression`` or the draft's suite settings opt in with ``run_on_publish``; the
 suite is every unit test of the pathway (oldest first, at most 500) plus, with ``include_simulations``, one
 conversation per scenario. An empty suite publishes at once. With ``block_publish_on_failure`` the request
-inserts a ``regression`` run whose publish record is ``pending``, starts ``PathwayTestWorkflow`` with the
-publish intent, and answers ``pending_regression``: the worker publishes when the run passes. Otherwise the
-version is published now and the regression run (publish record ``published``) only reports. Cache
-invalidation of a completed publish is the router's job.
+inserts a ``regression`` run whose publish record is ``pending``. A suite of at most 20 unit tests and no
+simulations runs in the request (Decision P07-T11e3, :mod:`va_api.services.pathway_regression_sync`): the
+run begins in the same transaction, and the settled outcome answers ``success`` or 409 ``CONFLICT``. A
+larger suite starts ``PathwayTestWorkflow`` with the publish intent and answers ``pending_regression``: the
+worker publishes when the run passes. Without ``block_publish_on_failure`` the version is published now and
+the regression run (publish record ``published``) only reports. Cache invalidation of a completed publish is
+the router's job.
 """
 
 from __future__ import annotations
@@ -23,6 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from va_api.audit import actor_of
 from va_api.auth.api_keys import creating_user_id
 from va_api.auth.context import RequestContext
+from va_api.services.pathway_regression_sync import (
+    SYNC_MAX_TESTS,
+    SYNC_TIMEOUT_S,
+    RegressionTestRunner,
+    SyncSuite,
+    conflict_for,
+    run_sync_suite,
+)
 from va_api.services.pathway_test_runs import PathwayTestStarter, launch_run
 from va_api.services.pathway_versions import existing_version
 from va_api.services.pathways import GraphInput, check_graph, reject_errors
@@ -58,6 +69,7 @@ class PublishDeps:
 
     database: Database
     starter: PathwayTestStarter
+    runner: RegressionTestRunner
     clock: Clock
 
 
@@ -91,14 +103,21 @@ class _Suite:
     simulations: tuple[SimulationJob, ...]
     block: bool
 
+    @property
+    def synchronous(self) -> bool:
+        """A blocking suite of at most ``SYNC_MAX_TESTS`` unit tests, no simulations: runs in the request."""
+        return self.block and not self.simulations and len(self.test_ids) <= SYNC_MAX_TESTS
+
 
 @dataclass(frozen=True, slots=True)
 class _Planned:
-    """What the transaction decided: the outcome and, with a regression run, its workflow input."""
+    """What the transaction decided: the outcome and, with a regression run, its workflow input or the suite
+    to run in the request."""
 
     outcome: PublishOutcome
     run: PathwayTestRun | None = None
     start: PathwayTestWorkflowInput | None = None
+    sync: SyncSuite | None = None
 
 
 async def _suite(
@@ -138,7 +157,7 @@ def _start(
 
 
 async def _plan(
-    session: AsyncSession, ctx: RequestContext, pathway_id: uuid.UUID, request: PublishRequest
+    session: AsyncSession, ctx: RequestContext, pathway_id: uuid.UUID, request: PublishRequest, clock: Clock
 ) -> _Planned:
     """Steps 1-3 in one transaction: validate, then publish now and/or insert the regression run."""
     repo = PathwayRepo(session, ctx.org_id)
@@ -177,6 +196,16 @@ async def _plan(
             published_version=None,
             run_id=run.id,
         )
+        if suite.synchronous:
+            await runs.begin(run.id, clock.now())
+            sync = SyncSuite(
+                org_id=ctx.org_id,
+                pathway_id=pathway.id,
+                run_id=run.id,
+                test_ids=suite.test_ids,
+                intent=intent,
+            )
+            return _Planned(pending, sync=sync)
         return _Planned(pending, run, _start(run, ctx, suite, intent))
     result = await apply_publish(
         session,
@@ -215,14 +244,31 @@ async def _plan(
 async def publish_pathway(
     deps: PublishDeps, ctx: RequestContext, pathway_id: uuid.UUID, request: PublishRequest
 ) -> PublishOutcome:
-    """Publish (or gate the publish of) a version; a blocking run whose workflow cannot start is marked
-    ``error`` and answers ``SERVICE_UNAVAILABLE`` (nothing published), a reporting run's failed start is only
-    logged (the publish already committed)."""
+    """Publish (or gate the publish of) a version; a synchronous run that does not publish answers 409
+    ``CONFLICT`` with ``details.run_id``, a blocking run whose workflow cannot start is marked ``error`` and
+    answers ``SERVICE_UNAVAILABLE`` (nothing published), a reporting run's failed start is only logged (the
+    publish already committed)."""
     async with deps.database.tenant_session(ctx.org_id) as session:
-        planned = await _plan(session, ctx, pathway_id, request)
+        planned = await _plan(session, ctx, pathway_id, request, deps.clock)
+    if planned.sync is not None:
+        return await _publish_in_request(deps, planned.outcome, planned.sync)
     if planned.run is not None and planned.start is not None:
         blocking = planned.start.publish is not None
         await launch_run(
             deps.database, deps.starter, deps.clock, planned.run, planned.start, unavailable_raises=blocking
         )
     return planned.outcome
+
+
+async def _publish_in_request(deps: PublishDeps, pending: PublishOutcome, sync: SyncSuite) -> PublishOutcome:
+    """Run the synchronous suite and answer its settled outcome."""
+    settled = await run_sync_suite(deps.database, deps.runner, deps.clock, sync, timeout_s=SYNC_TIMEOUT_S)
+    if settled.outcome != "published" or settled.published_version is None or settled.draft_version is None:
+        raise conflict_for(settled, sync.run_id)
+    return dataclasses.replace(
+        pending,
+        status="success",
+        version_number=settled.published_version,
+        published_version=settled.published_version,
+        draft_version=settled.draft_version,
+    )

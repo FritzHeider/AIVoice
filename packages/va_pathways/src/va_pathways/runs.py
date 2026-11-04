@@ -43,7 +43,9 @@ __all__ = [
     "run_stored_test",
 ]
 
-type RunError = Literal["test_not_found", "version_unavailable", "invalid_test", "runner_error"]
+type RunError = Literal[
+    "test_not_found", "version_unavailable", "invalid_test", "runner_error", "regression_timeout"
+]
 
 _INSECURE_ENVS: Final = frozenset({Environment.LOCAL, Environment.TEST})
 

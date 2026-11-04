@@ -506,6 +506,10 @@
 
 ## Fixes
 
+### mem-1793787934-5c75
+> e2e flakes 2026-11-04: interruptibility_levels[1] fails ~40% (barge clear 1183ms vs 1200 rule: assertion measures from utterance start+MARKER_MS but pipeline counts VAD speech_ms); amd_ivr_mode lost 2nd DTMF once on cold stack. Re-run alone as evidence; task fix:e2e-interrupt-level1
+<!-- tags: e2e, testing | created: 2026-11-04 -->
+
 ### mem-1793756551-21d0
 > failure: cmd=make test, exit=2, error=INTERNALERROR worker crash: apps/media_worker/tests/test_runtime_sim.py::test_wait_for_greeting_holds_the_opener_until_the_callee_speaks hit pytest-timeout 60s and the hypothesis makereport hook raised PluggyTeardownRaisedWarning (aborts the xdist session); module passes alone (31 passed). next=re-run make test; load-related
 <!-- tags: testing, media | created: 2026-11-04 -->
