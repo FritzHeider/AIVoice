@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793750810-7c1c
+> P07-T11a: va_pathways package = shared text runs (TextConversation/TextRecorder/DbPathwayLoader moved from api) + unit_tests.run_unit_test; GradeVerdict uses validation_alias/serialization_alias 'pass' (plain alias makes mypy demand keyword pass); FakeLLM error status 400 makes analysis calls unavailable instantly (5xx retries 2s/8s on gateway clock -> hangs on ManualClock); LlmControl mixin shared by api ChatStack and TextRig to keep jscpd 0
+<!-- tags: pathways, testing | created: 2026-11-04 -->
+
 ### mem-1793741280-f92b
 > P07-T10: pathway test chat = services/pathway_chat (ChatStore Redis pathway_chat:{id}+:lock, one PathwayEngine per request) + pathway_chat_run.ChatRecorder (events sink, HttpPort wrapper, simulated SmsPort); api container llm_gateway + tools_http; SessionContainer.clock is typed FrozenClock so chat tests use chat_helpers.WallClock (FrozenClock subclass over SystemClock) else gateway deadlines fire at once; +1555... numbers fail normalize_e164 (use +1415555xxxx)
 <!-- tags: api, pathways, testing | created: 2026-11-03 -->

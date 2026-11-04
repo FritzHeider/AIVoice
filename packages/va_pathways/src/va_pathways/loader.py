@@ -5,7 +5,7 @@ tenant session: ``production``/``staging`` resolve the pathway's pin, a number s
 pathway that is absent, deleted, of another org, or not a UUID, an unset pin, a missing version, and a stored
 graph that no longer parses are all :class:`~va_engine.navigation.PathwayUnavailableError` (the engine
 speaks its error phrase or stays; it never raises). Used by the pathway test chat (specs/12 §7 Decision
-P07-T10).
+P07-T10) and the unit-test runner (specs/12 §8 Decision P07-T11a).
 """
 
 from __future__ import annotations

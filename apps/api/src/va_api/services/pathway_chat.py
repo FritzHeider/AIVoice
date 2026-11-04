@@ -4,9 +4,9 @@ A chat is one Redis document ``pathway_chat:{chat_id}`` (:class:`ChatSession`, T
 write): the frozen graph of the version it started on, the request data, the simulated numbers, the engine
 state, and the state after each answered turn (``snapshots``, newest :data:`MAX_SNAPSHOTS`), which is what
 ``branch_from_turn`` forks from. Every request builds a :class:`~va_engine.engine.PathwayEngine` on the
-stored state on channel ``voice`` (the chat simulates a call), runs it through a
-:class:`~va_api.services.pathway_chat_run.ChatRecorder`, and stores the state it left. Webhook nodes call the
-customer's endpoint for real (``va_tools.http.HttpExecutor``); SMS, transfers, end call, press button and
+stored state through :class:`~va_pathways.conversation.TextConversation` (channel ``voice``, a
+:class:`~va_pathways.recording.TextRecorder` on its ports), and stores the state it left. Webhook nodes call
+the customer's endpoint for real (``va_tools.http.HttpExecutor``); SMS, transfers, end call, press button and
 human takeover are only recorded. A turn is capped at :data:`TURN_TIMEOUT_S` of the container clock.
 Concurrent sends to one chat are refused while ``pathway_chat:{chat_id}:lock`` is held.
 """
@@ -29,23 +29,16 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from va_api.auth.context import RequestContext
-from va_api.services.pathway_chat_run import ChatRecorder, Item
-from va_api.services.pathway_loader import DbPathwayLoader
 from va_api.services.pathways import VersionSelector, load_version
 from va_common.errors import AppError
 from va_common.ids import new_id
 from va_common.logging import get_logger
 from va_common.time import Clock
-from va_common.waits import within
 from va_db.org_settings import OrgSettingsReader
 from va_db.repositories import PathwayGraphJson
 from va_db.session import Database
 from va_domain.org import OrgSettings
-from va_engine.builtins import builtin_values
-from va_engine.dialogue import GatewayDialogue
-from va_engine.engine import ConversationFacts, EnginePorts, PathwayEngine, new_pathway_state
-from va_engine.engine_decide import Decider
-from va_engine.final_lines import GatewayLinePort
+from va_engine.engine import new_pathway_state
 from va_engine.models import (
     EngineState,
     PathwayGraph,
@@ -56,10 +49,17 @@ from va_engine.models import (
 )
 from va_engine.models.results import Action
 from va_engine.navigation import ActiveGraph
-from va_engine.prompt import DialogueSettings, PathwayPrompt
 from va_llm import LlmGateway
 from va_llm.tokens import TokenCounter, default_counter
-from va_tools.http import HttpExecutor
+from va_pathways.conversation import (
+    DEFAULT_SIMULATE_FROM,
+    DEFAULT_SIMULATE_TO,
+    TextConversation,
+    TextDeps,
+    TextSetup,
+)
+from va_pathways.loader import DbPathwayLoader
+from va_pathways.recording import Item
 from va_voice.pipeline.models import UserTurn
 
 __all__ = [
@@ -92,10 +92,6 @@ LOCK_TTL_S: Final = 120
 TURN_TIMEOUT_S: Final = 60.0
 MAX_SNAPSHOTS: Final = 50
 CHAT_LLM_TIMEOUT: Final = httpx.Timeout(30.0, connect=2.0)
-DEFAULT_SIMULATE_FROM: Final = "+14155550123"
-DEFAULT_SIMULATE_TO: Final = "+14155550100"
-CHAT_LANGUAGE: Final = "en-US"
-CHAT_TIMEZONE: Final = "UTC"
 NOT_FOUND_MESSAGE: Final = "Chat not found."
 ENDED_MESSAGE: Final = "This chat has ended."
 BUSY_MESSAGE: Final = "This chat is answering another message."
@@ -173,6 +169,12 @@ class ChatDeps:
     org_settings: OrgSettingsReader
     clock: Clock
     allow_http: bool
+
+    def text(self) -> TextDeps:
+        """The pieces a text run needs."""
+        return TextDeps(
+            gateway=self.gateway, tools_http=self.tools_http, clock=self.clock, allow_http=self.allow_http
+        )
 
 
 def _unavailable(exc: RedisError) -> AppError:
@@ -254,89 +256,47 @@ async def _org_settings(deps: ChatDeps, org_id: uuid.UUID) -> OrgSettings:
     return OrgSettings() if settings is None else settings
 
 
-class _Conversation:
-    """One request's engine over ``state`` with the recorder on every port."""
+def _conversation(  # noqa: PLR0913 - the request's chat, graph, state, org settings and dependencies
+    deps: ChatDeps,
+    chat_id: uuid.UUID,
+    session: ChatSession,
+    *,
+    graph: PathwayGraph,
+    state: EngineState,
+    org: OrgSettings,
+    counter: TokenCounter,
+) -> TextConversation:
+    setup = TextSetup(
+        conversation_id=chat_id,
+        org_id=session.org_id,
+        active=ActiveGraph(session.pathway_id, session.version, graph),
+        org=org,
+        loader=DbPathwayLoader(deps.database, session.org_id),
+        request_data=session.request_data,
+        simulate_from=session.simulate_from,
+        simulate_to=session.simulate_to,
+    )
+    return TextConversation(deps.text(), setup, state, counter=counter)
 
-    def __init__(  # noqa: PLR0913 - the request's chat, graph, state, org settings and dependencies
-        self,
-        deps: ChatDeps,
-        *,
-        chat_id: uuid.UUID,
-        session: ChatSession,
-        graph: PathwayGraph,
-        state: EngineState,
-        org: OrgSettings,
-        counter: TokenCounter,
-    ) -> None:
-        self.recorder = ChatRecorder(
-            HttpExecutor(deps.tools_http, clock=deps.clock, allow_http=deps.allow_http, call_id=str(chat_id))
-        )
-        self._deps = deps
-        settings = DialogueSettings(
-            org_id=session.org_id,
-            direction="inbound",
-            call_id=chat_id,
-            counterpart=session.simulate_from,
-            context_budget_tokens=org.llm.context_budget_tokens,
-            speculative=org.engine.speculative,
-        )
-        prompt = PathwayPrompt(settings, counter=counter, clock=deps.clock)
-        self.engine = PathwayEngine(
-            state,
-            ActiveGraph(session.pathway_id, session.version, graph),
-            ports=EnginePorts(
-                decider=Decider(deps.gateway, clock=deps.clock),
-                dialogue=GatewayDialogue(deps.gateway, prompt),
-                lines=GatewayLinePort(deps.gateway, org_id=session.org_id, call_id=chat_id),
-                events=self.recorder,
-                loader=DbPathwayLoader(deps.database, session.org_id),
-                http=self.recorder,
-                sms=self.recorder,
-            ),
-            facts=ConversationFacts(
-                org_id=session.org_id,
-                call_id=chat_id,
-                channel="voice",
-                request_data=session.request_data,
-                builtins=builtin_values(
-                    now=deps.clock.now(),
-                    timezone=CHAT_TIMEZONE,
-                    from_number=session.simulate_from,
-                    to_number=session.simulate_to,
-                    call_id=str(chat_id),
-                    voice_id=None,
-                    language=CHAT_LANGUAGE,
-                    inbound=True,
-                ),
-                timezone=CHAT_TIMEZONE,
-            ),
-            clock=deps.clock,
-        )
 
-    async def run(self, chat_id: uuid.UUID, actions: AsyncGenerator[Action]) -> None:
-        """Consume ``actions`` within the turn cap, then settle and close the engine."""
-        try:
-            finished = await within(self.recorder.consume(actions), self._deps.clock, TURN_TIMEOUT_S)
-            if not finished:
-                _log.warning("pathway_chat.turn_timeout", chat_id=str(chat_id))
-            await self.engine.settle_background()
-        finally:
-            await self.engine.aclose()
-        if self.recorder.terminal:
-            self.engine.state.ended = True
+async def _run(conversation: TextConversation, chat_id: uuid.UUID, actions: AsyncGenerator[Action]) -> None:
+    """Consume ``actions`` within the turn cap (logged when it fires)."""
+    if not await conversation.run(actions, timeout_s=TURN_TIMEOUT_S):
+        _log.warning("pathway_chat.turn_timeout", chat_id=str(chat_id))
 
-    def turn(self, chat_id: uuid.UUID) -> ChatTurn:
-        state = self.engine.state
-        recorder = self.recorder
-        return ChatTurn(
-            chat_id=chat_id,
-            assistant_messages=list(recorder.messages),
-            current_node_id=state.current_node_id,
-            variables=dict(state.variables),
-            actions=list(recorder.actions),
-            ended=state.ended,
-            logs=list(recorder.logs),
-        )
+
+def _turn(conversation: TextConversation, chat_id: uuid.UUID) -> ChatTurn:
+    state = conversation.state
+    recorder = conversation.recorder
+    return ChatTurn(
+        chat_id=chat_id,
+        assistant_messages=list(recorder.messages),
+        current_node_id=state.current_node_id,
+        variables=dict(state.variables),
+        actions=list(recorder.actions),
+        ended=state.ended,
+        logs=list(recorder.logs),
+    )
 
 
 def _start_state(start: ChatStart, active: ActiveGraph) -> EngineState:
@@ -379,19 +339,12 @@ async def create_chat(deps: ChatDeps, ctx: RequestContext, start: ChatStart) -> 
         state={},
         snapshots={},
     )
-    conversation = _Conversation(
-        deps,
-        chat_id=chat_id,
-        session=session,
-        graph=graph,
-        state=state,
-        org=org,
-        counter=await asyncio.to_thread(default_counter),
-    )
-    await conversation.run(chat_id, conversation.engine.start())
-    await _persist(ChatStore(deps.redis), chat_id, session, conversation.engine.state)
+    counter = await asyncio.to_thread(default_counter)
+    conversation = _conversation(deps, chat_id, session, graph=graph, state=state, org=org, counter=counter)
+    await _run(conversation, chat_id, conversation.engine.start())
+    await _persist(ChatStore(deps.redis), chat_id, session, conversation.state)
     _log.info("pathway_chat.created", chat_id=str(chat_id), pathway_id=str(pathway.id), version=number)
-    return conversation.turn(chat_id)
+    return _turn(conversation, chat_id)
 
 
 async def _persist(store: ChatStore, chat_id: uuid.UUID, session: ChatSession, state: EngineState) -> None:
@@ -424,22 +377,17 @@ async def send_message(
             raise AppError("CONFLICT", ENDED_MESSAGE)
         org = await _org_settings(deps, ctx.org_id)
         graph = await asyncio.to_thread(_graph_of, session)
-        conversation = _Conversation(
-            deps,
-            chat_id=target,
-            session=session,
-            graph=graph,
-            state=state,
-            org=org,
-            counter=await asyncio.to_thread(default_counter),
+        counter = await asyncio.to_thread(default_counter)
+        conversation = _conversation(
+            deps, target, session, graph=graph, state=state, org=org, counter=counter
         )
         elapsed_ms = max((deps.clock.now() - session.created_at).total_seconds() * 1000, 0.0)
         turn = UserTurn(index=state.turn_index + 1, text=message, start_ms=elapsed_ms, end_ms=elapsed_ms)
-        await conversation.run(target, conversation.engine.handle_user_turn(turn))
-        await _persist(store, target, session, conversation.engine.state)
+        await _run(conversation, target, conversation.engine.handle_user_turn(turn))
+        await _persist(store, target, session, conversation.state)
     if target != chat_id:
         _log.info("pathway_chat.branched", chat_id=str(chat_id), branch_id=str(target), turn=branch_from_turn)
-    return conversation.turn(target)
+    return _turn(conversation, target)
 
 
 async def delete_chat(deps: ChatDeps, ctx: RequestContext, chat_id: uuid.UUID) -> None:

@@ -1,0 +1,30 @@
+[project]
+name = "va-pathways"
+version = "0.1.0"
+description = "VoiceAgents pathway text runs shared by the api and the worker: test chat conversations and unit-test cases"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28",
+    "orjson>=3.13.0",
+    "pydantic>=2.9",
+    "va-common",
+    "va-db",
+    "va-domain",
+    "va-engine",
+    "va-llm",
+    "va-tools",
+    "va-voice",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+va-common = { workspace = true }
+va-db = { workspace = true }
+va-domain = { workspace = true }
+va-engine = { workspace = true }
+va-llm = { workspace = true }
+va-tools = { workspace = true }
+va-voice = { workspace = true }

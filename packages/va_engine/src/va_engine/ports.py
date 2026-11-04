@@ -47,7 +47,11 @@ _STATUS_CLASSES: Final[Mapping[int, StatusClass]] = {2: "2xx", 3: "3xx", 4: "4xx
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HttpCall:
-    """A fully rendered request; ``extract`` lists ``(variable name, JSONPath)`` pairs applied to the body."""
+    """A fully rendered request; ``extract`` lists ``(variable name, JSONPath)`` pairs applied to the body.
+
+    ``source_id`` names what sent it (the Webhook node id; tools use their ``TL-`` id): pathway unit tests
+    key their ``mock_tools`` on it (specs/12 §8 Decision P07-T11a).
+    """
 
     method: HttpMethod
     url: str
@@ -56,6 +60,7 @@ class HttpCall:
     timeout_ms: int = 10_000
     retries: int = 0
     extract: tuple[tuple[str, str], ...] = ()
+    source_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

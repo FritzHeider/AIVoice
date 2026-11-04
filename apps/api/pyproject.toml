@@ -24,6 +24,7 @@ dependencies = [
     "va-events",
     "va-llm",
     "va-tools",
+    "va-pathways",
 ]
 
 [build-system]
@@ -40,3 +41,4 @@ va-engine = { workspace = true }
 va-events = { workspace = true }
 va-llm = { workspace = true }
 va-tools = { workspace = true }
+va-pathways = { workspace = true }

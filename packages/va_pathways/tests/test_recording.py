@@ -1,35 +1,13 @@
-"""Pathway test chat pieces without the app: log/action mapping, excerpts, header masking, the simulated SMS
-port, action consumption, snapshot pruning, and the Redis store's failure answers (specs/12 §7 Decision
-P07-T10)."""
+"""The text-run recorder: log/action mapping, excerpts, header masking, the simulated SMS port, action
+consumption (specs/12 §7 Decision P07-T10), and unit-test tool mocks (specs/12 §8 Decision P07-T11a)."""
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
-from datetime import UTC, datetime
 
 import pytest
-from fakeredis import FakeAsyncRedis, FakeServer
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
-from va_api.services.pathway_chat import (
-    BUSY_MESSAGE,
-    CHAT_TTL_S,
-    MAX_SNAPSHOTS,
-    ChatSession,
-    ChatStore,
-    chat_key,
-    prune_snapshots,
-)
-from va_api.services.pathway_chat_run import (
-    EXCERPT_LIMIT,
-    ChatRecorder,
-    action_item,
-    excerpt,
-    log_item,
-    masked_headers,
-)
-from va_common.errors import AppError
 from va_engine.models.results import (
     Action,
     EndCallAction,
@@ -42,8 +20,16 @@ from va_engine.models.results import (
     Wait,
 )
 from va_engine.ports import HttpCall, HttpOutcome, SmsRequest
-
-ORG = uuid.UUID("0191f2a4-7c55-7a1e-9a10-5b2e4c8f1b01")
+from va_pathways.recording import (
+    EXCERPT_LIMIT,
+    MockResponse,
+    TextRecorder,
+    action_item,
+    excerpt,
+    log_item,
+    masked_headers,
+    mocked_outcome,
+)
 
 
 def test_log_items_of_every_shown_event() -> None:
@@ -192,7 +178,7 @@ class _Http:
 
 async def test_recorder_logs_tool_calls_and_simulates_sms() -> None:
     http = _Http(HttpOutcome(kind="timeout", attempts=2, duration_ms=10_000))
-    recorder = ChatRecorder(http)
+    recorder = TextRecorder(http)
     call = HttpCall(
         method="GET", url="https://user:pw@api.acme.test/x?token=abc", headers={"X-Token": "t"}, body=None
     )
@@ -234,7 +220,7 @@ async def _actions(*actions: Action) -> AsyncGenerator[Action]:
 
 
 async def test_consume_collects_speech_actions_and_terminal_state() -> None:
-    recorder = ChatRecorder(_Http(HttpOutcome(kind="ok", status=200)))
+    recorder = TextRecorder(_Http(HttpOutcome(kind="ok", status=200)))
     await recorder.consume(
         _actions(
             Say(text="  Hello there. ", mark="t0.1"),
@@ -252,61 +238,51 @@ async def test_consume_collects_speech_actions_and_terminal_state() -> None:
     assert recorder.terminal is True
 
 
-def test_snapshots_keep_the_newest_by_turn_number() -> None:
-    snapshots = {str(turn): {"turn_index": turn} for turn in range(MAX_SNAPSHOTS + 7)}
-    kept = prune_snapshots(snapshots)
-    assert list(kept) == [str(turn) for turn in range(7, MAX_SNAPSHOTS + 7)]
-    assert list(prune_snapshots({"10": {}, "9": {}, "2": {}}, limit=2)) == ["9", "10"]
-
-
-def _session(org_id: uuid.UUID = ORG) -> ChatSession:
-    return ChatSession(
-        org_id=org_id,
-        pathway_id=uuid.uuid4(),
-        version=1,
-        graph={"nodes": [], "edges": [], "global_config": {}},
-        request_data={},
-        simulate_from="+14155550123",
-        simulate_to="+14155550100",
-        created_at=datetime(2026, 11, 3, tzinfo=UTC),
-        state={},
-        snapshots={},
+async def test_mocked_sources_answer_without_the_executor() -> None:
+    http = _Http(HttpOutcome(kind="ok", status=200, body={"real": True}))
+    recorder = TextRecorder(
+        http,
+        mocks={
+            "hook": MockResponse(status=200, body={"eta": 25, "items": [{"id": 1}, {"id": 2}]}),
+            "TL-down": MockResponse(status=503, body="maintenance"),
+        },
+    )
+    hook = HttpCall(
+        method="POST",
+        url="https://api.acme.test/status",
+        headers={"Authorization": "Bearer x"},
+        body={"q": 1},
+        extract=(("eta", "$.eta"), ("ids", "$.items[*].id"), ("none", "$.missing")),
+        source_id="hook",
+    )
+    outcome = await recorder.execute(hook)
+    assert (outcome.kind, outcome.status, outcome.succeeded) == ("ok", 200, True)
+    assert dict(outcome.extracted) == {"eta": 25, "ids": [1, 2], "none": None}
+    down = await recorder.execute(HttpCall(method="GET", url="https://x.test", source_id="TL-down"))
+    assert (down.kind, down.status, down.body, dict(down.extracted)) == ("http_error", 503, "maintenance", {})
+    real = HttpCall(method="GET", url="https://x.test/real", source_id="other")
+    assert await recorder.execute(real) is http.outcome
+    assert await recorder.execute(HttpCall(method="GET", url="https://x.test/anon")) is http.outcome
+    assert [call.url for call in http.calls] == ["https://x.test/real", "https://x.test/anon"]
+    assert [item.get("mocked") for item in recorder.logs] == [True, True, None, None]
+    first = recorder.logs[0]
+    assert (first["request_headers"], first["response_body"], first["status"]) == (
+        {"Authorization": "***"},
+        '{"eta":25,"items":[{"id":1},{"id":2}]}',
+        200,
     )
 
 
-async def test_store_round_trip_ttl_org_check_and_lock() -> None:
-    redis = FakeAsyncRedis()
-    store = ChatStore(redis)
-    chat_id = uuid.uuid4()
-    await store.save(chat_id, _session())
-    assert await redis.ttl(chat_key(chat_id)) == CHAT_TTL_S
-    assert (await store.load(ORG, chat_id)).simulate_to == "+14155550100"
-    with pytest.raises(AppError) as foreign:
-        await store.load(uuid.uuid4(), chat_id)
-    assert foreign.value.code == "NOT_FOUND"
-    async with store.lock(chat_id):
-        with pytest.raises(AppError) as busy:
-            async with store.lock(chat_id):
-                pytest.fail("a second holder must be refused")
-        assert (busy.value.code, busy.value.message) == ("CONFLICT", BUSY_MESSAGE)
-    async with store.lock(chat_id):
-        assert await redis.exists(f"pathway_chat:{chat_id}:lock") == 1
-    assert await redis.exists(f"pathway_chat:{chat_id}:lock") == 0
-    await redis.aclose()
-
-
-async def test_store_answers_service_unavailable_when_redis_is_down() -> None:
-    server = FakeServer()
-    redis = FakeAsyncRedis(server=server)
-    store = ChatStore(redis)
-    chat_id = uuid.uuid4()
-    server.connected = False
-    for attempt in (store.load(ORG, chat_id), store.save(chat_id, _session())):
-        with pytest.raises(AppError) as down:
-            await attempt
-        assert down.value.code == "SERVICE_UNAVAILABLE"
-    with pytest.raises(AppError) as locked:
-        async with store.lock(chat_id):
-            pytest.fail("no lock without Redis")
-    assert locked.value.code == "SERVICE_UNAVAILABLE"
-    await redis.aclose()
+def test_mock_defaults_and_bounds() -> None:
+    empty = mocked_outcome(
+        HttpCall(method="GET", url="https://x.test", extract=(("a", "$.a"),)), MockResponse()
+    )
+    assert (empty.kind, empty.status, empty.body, dict(empty.extracted)) == ("ok", 200, None, {})
+    assert mocked_outcome(HttpCall(method="GET", url="https://x.test"), MockResponse(status=302)).kind == (
+        "http_error"
+    )
+    for status in (99, 600):
+        with pytest.raises(ValidationError):
+            MockResponse(status=status)
+    with pytest.raises(ValidationError):
+        MockResponse.model_validate({"status": 200, "headers": {}})

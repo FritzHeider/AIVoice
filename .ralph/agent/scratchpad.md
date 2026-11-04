@@ -2073,3 +2073,128 @@ heartbeat); `uvx radon cc -s -a`; `npx --yes jscpd@4 --silent` 0 clones; pip-aud
 - Re-ran: lint/typecheck/placeholders exit 0, make test 12284 passed 7 skipped (99 %), test-ts 22/52/48, spec refs 0.
 - Diff matches specs/12 §7 + Decision; reviewer fixed specs/02 §6 scope of LLM_ANALYSIS_MODEL/LLM_FALLBACK_MODEL
   (api now reads them through LlmSettings).
+
+## Plan split P07-T11 (planner, 2026-11-03)
+P07-T11 split into T11a (shared `va_pathways` package + unit-test case runner), T11b (unit test CRUD/from_call/runs
+read API), T11c (`POST /tests/run` + `PathwayTestWorkflow`), T11d (simulations), T11e (regression settings + publish
+gate + e2e). Reason: the runner must execute both in the worker (workflow, queue va-postcall) and in the api
+(synchronous publish regression ≤ 20 tests), so the engine text-run code that today lives in
+`va_api.services.pathway_chat` moves to a package both depend on (and the media worker in P07-T12 reuses the loader).
+
+## Plan P07-T11a — Shared pathway text-run package + unit-test case runner (specs/12 §7, §8; specs/10 §3)
+
+### Spec decision — append `> Decision (2026-11-03): unit-test case runner (P07-T11a).` at the end of specs/12 §8
+1. Execution lives in `packages/va_pathways` (shared by api and worker). One case = EngineState at `node_id`
+   (`visit_counts {node_id: 1}`, `turn_index` = number of history user messages) with `history` mapped to
+   `TurnRecord`s (`role` user|assistant only, `node_id` = the test node, `at_ms` 0,1,2…; other roles → 400 at
+   create time in T11b, and the runner treats them as a case `error`), plus `request_data` = `expected.request_data`
+   (optional object, default {}); then ONE `handle_user_turn` with the case input, consumed like the test chat
+   (simulated SMS/transfer/end call/press button; real webhooks unless mocked). Turn cap 60 s (same as chat).
+2. `expected.mock_tools`: keys match `HttpCall.source_id` — the webhook node id in this phase (`TL-…` tool ids
+   from phase 08 use the same field). Value `{status (100-599, default 200), body (any JSON, default null)}`;
+   2xx → `ok`, else `http_error`; JSONPath `extract` applies to the mocked body; the call is logged with
+   `mocked: true`. Unmocked calls go to the real executor.
+3. Assertions per case: `route` passes when `route_to_node_id` absent or equals the state's `current_node_id` after
+   the turn; `variables` passes when every expected key exists in the final variables and equals it (strings
+   compared `casefold()` after strip, other JSON values by equality; nested objects compared recursively with the
+   same rule); `grading` only when `grading_goal` is set: analysis gateway, forced function `grade` →
+   `{"pass": bool, "rationale": str}` with the spec prompt as the user message, the transcript (history + case
+   input + reply) as a preceding message, `temperature 0`. A case passes when all present assertions pass.
+4. Outcomes: case `passed` true/false; a case whose engine turn or grading call fails
+   (`LlmUnavailableError`, engine exception, timeout) is `passed: false` with `error: "<reason>"`
+   (`grading_unavailable`, `turn_timeout`, `engine_error`, `invalid_history`) — never raises. The test result adds
+   `status`: `passed` | `failed` | `error` (`error` when any case errored and none failed for an assertion; the
+   run row status of T11c derives from these).
+5. Variations: `simulated_variations` n > 0 → one analysis completion with the spec prompt (n and the message
+   substituted) asking for a JSON list; parse the first JSON array in the content (strings only, stripped,
+   non-blank, deduplicated, case-insensitive, excluding the original, first n kept). Fewer than n usable → the
+   variations obtained run and the result carries `variations_short: <missing count>`; an unavailable call → no
+   variation cases and `error: "variations_unavailable"` on the test (status `error` unless an assertion failed).
+   The original message is always case 0. Cases run sequentially within one test (engine per case); tests run
+   concurrently (T11c caps at 8).
+6. Result item exactly as spec + `status` (+ optional `error`, `variations_short`); case item adds `error` when set
+   and `actions` (simulated actions, same shape as chat) — extra keys only.
+
+### Files
+- New package `packages/va_pathways` (dist `va-pathways`; deps va-common, va-db, va-domain, va-engine, va-llm,
+  va-tools, pydantic, orjson). Add to root dev group + `[tool.uv.sources]`, mypy `mypy_path`/`files`, pytest
+  pythonpath for `packages/va_pathways/tests/support`; api pyproject gains `va-pathways` (and worker in T11c).
+  - `va_pathways/loader.py`: `DbPathwayLoader` MOVED from `apps/api/src/va_api/services/pathway_loader.py` (delete
+    that module; update imports + move `apps/api/tests/test_pathway_loader.py` to `packages/va_pathways/tests/`).
+  - `va_pathways/recording.py`: `TextRecorder` = today's `ChatRecorder` + `log_item`/`action_item`/`excerpt`/
+    `masked_headers`/`_tool_item`, moved from `va_api.services.pathway_chat_run` (delete that module; chat imports
+    from here) + optional `mocks: Mapping[str, MockResponse]` consulted in `execute` before the real executor.
+  - `va_pathways/conversation.py`: `TextConversation` = today's `_Conversation` generalised:
+    `TextConversation(deps: TextDeps, *, conversation_id, org_id, active: ActiveGraph, state, request_data,
+    simulate_from, simulate_to, org: OrgSettings, counter, mocks=None)` with `run(actions)` (turn cap
+    `TURN_TIMEOUT_S` 60, settle, aclose, terminal → ended) and properties `engine`, `recorder`. `TextDeps(database,
+    gateway, tools_http, clock, allow_http)` (frozen dataclass). Chat keeps `ChatDeps` (adds redis/org_settings)
+    and builds `TextDeps` from it. Constants `CHAT_TIMEZONE`/`CHAT_LANGUAGE` move here as `TEXT_TIMEZONE`/
+    `TEXT_LANGUAGE`; default simulate numbers too.
+  - `va_pathways/unit_tests.py`: `UnitTestSpec` (pydantic: name, node_id, history: list[HistoryMessage],
+    user_message, expected: `Expected`(route_to_node_id?, variables?, grading_goal?, request_data?, mock_tools?),
+    simulated_variations 0..20), `run_unit_test(deps, spec, *, test_id, org_id, active, org, counter) ->
+    UnitTestResult` (pydantic, `model_dump(mode="json")` = result item), pure `variables_match(expected, actual)`,
+    `route_matches`, `case_state(spec, active)`.
+  - `va_pathways/grading.py`: `grade(gateway, *, org_id, transcript, goal) -> Grading | GradingUnavailable`,
+    `GRADE_PROMPT` (spec text verbatim, drift-tested against specs/12 §8), `GradeVerdict` schema (field `pass_`
+    alias `pass`, `rationale`); function name literal `"grade"` (TOOL_NAMES has it; drift scanner).
+  - `va_pathways/variations.py`: `VARIATION_PROMPT` (spec text verbatim, drift-tested), `paraphrases(gateway, *,
+    org_id, message, n) -> Variations(texts, short, error)`, pure `parse_variations(content, original, n)`.
+- `packages/va_engine/src/va_engine/ports.py`: `HttpCall.source_id: str | None = None`; the webhook handler sets
+  it to the node id (update handler + its tests' expectations where HttpCall equality is asserted).
+- `apps/api/src/va_api/services/pathway_chat.py`: use `TextConversation`/`TextRecorder`/`DbPathwayLoader` from
+  va_pathways; behaviour and responses unchanged.
+- specs/12 §8 Decision; AGENTS.md bullet; `.jscpd.json` unchanged.
+
+### Tests
+- `packages/va_pathways/tests/`:
+  - `test_variables_match.py` (pure): subset, casefold+strip strings, nested, missing key, number vs string mismatch.
+  - `test_variations_parse.py` (pure): JSON array inside prose, non-strings dropped, dedupe incl. original,
+    truncation to n, short count, no array → short n.
+  - `test_prompt_drift.py`: GRADE_PROMPT and VARIATION_PROMPT equal the specs/12 §8 backtick texts.
+  - `test_recording.py`: the moved chat-run unit tests (move `apps/api/tests/test_pathway_chat_run.py` here) +
+    mocked tool call (`mocked: true`, extract applied, http_error for 500, real executor not called).
+  - `test_unit_tests_sim.py` (FakeLLM on a socket with a real `LlmGateway`, SystemClock — reuse the
+    `chat_helpers` pattern; put a `pathways_helpers.py` in `tests/support/`): restaurant-like graph via
+    `graph_helpers` — route pass, route fail (scripted `select_path` to another edge), variables pass with case
+    difference, variables fail, grading pass/fail (FakeLLM rule on `grade`), grading unavailable (fault) → `error`,
+    variations n=3 all pass → 4 cases, one variation failing → test fails, variations unavailable → error,
+    mock_tools on a webhook node (no receiver request; extracted variable asserted), unmocked webhook hits
+    `webhook_receiver.served_receiver`, turn timeout (monkeypatch TURN_TIMEOUT_S) → `turn_timeout` error,
+    bad history role → `invalid_history`.
+  - `test_loader.py` (moved DB test; needs a module Postgres like the api one — copy fixture pattern via
+    `pg_container`/`migration_helpers`).
+- api: test chat suites (`test_pathway_chat_api.py`, cross-tenant, permissions) pass unchanged; imports updated.
+- va_engine webhook handler test asserts `source_id == node id`.
+
+### Gates
+`export PATH=/home/ralph/.local/bin:$PATH`; `uv sync`; `make fmt lint typecheck placeholders`; targeted pytest
+(va_pathways, va_engine handlers, api chat); `uv run python scripts/check_spec_refs.py`; `make openapi` (no drift
+expected); `make test` in background with Monitor heartbeat (truncate `logs/make_test.log` first); radon; jscpd 0
+clones; pip-audit + pnpm audit. Coverage ≥ 85 % for the new package. No e2e (no call flow).
+
+### Risks
+- `grade` may get registered elsewhere later (evals) with another class → registry ValueError: keep the schema in
+  va_pathways only for now; the va_llm autouse `fresh_structured_registry` fixture exists only in va_llm tests —
+  va_pathways tests registering `grade` repeatedly across tests must use the same class (fine).
+- FakeLLM `grade` heuristic returns schema-conforming values; script verdicts with rules on function name.
+- Moving modules: grep for every import of `pathway_loader`/`pathway_chat_run` (api tests, cross-tenant factories).
+- Speculation consumes FakeLLM dialogue replies; set org `engine.speculative=false` in counting tests.
+
+## Build P07-T11a (done when make test passes)
+- New package packages/va_pathways (loader moved from api, recording = TextRecorder + MockResponse, conversation =
+  TextConversation/TextDeps/TextSetup, unit_tests, grading, variations). Chat uses TextConversation via
+  ChatDeps.text(); chat-store unit tests moved to apps/api/tests/test_pathway_chat_store.py.
+- HttpCall.source_id (webhook handler sets node id). Added `unknown_node` case error (version lacks node_id).
+- grade() reuses va_engine.decisions.StructuredPort (gateway default temperature 0); LlmControl mixin shared by
+  api ChatStack and TextRig (jscpd 0).
+- Spec: specs/12 §8 Decision P07-T11a. AGENTS.md bullet.
+- Gates so far: lint/typecheck/placeholders pass, spec refs 0, jscpd 0, openapi no drift, va_pathways cov 99%+,
+  targeted suites 1200 passed.
+- Final make test: 12329 passed, 7 skipped, coverage 99.08%, exit 0. radon A 2.71, pip-audit clean, pnpm 3 moderate (pre-existing).
+
+## Review P07-T11a (approved)
+- Re-ran: lint/typecheck/placeholders exit 0, spec refs 0, make test 12329 passed 7 skipped (99%) exit 0.
+- Diff matches specs/12 §8 + Decision P07-T11a (prompts drift-tested, status/error/variations_short, mock_tools by
+  HttpCall.source_id); chat behaviour unchanged.

@@ -174,6 +174,7 @@ def _call_of(ctx: TurnContext, config: WebhookConfig) -> HttpCall:
         timeout_ms=config.timeout_ms,
         retries=config.retries,
         extract=tuple((item.name, item.data) for item in config.response_data),
+        source_id=ctx.node.id,
     )
 
 

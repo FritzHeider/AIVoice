@@ -381,6 +381,37 @@ Result item:
  "variables":{…},"reply":"…","grading":{"pass":true,"rationale":"…"}}],"duration_ms":4120}
 ```
 
+> Decision (2026-11-03): unit-test case runner (P07-T11a).
+> 1. Execution lives in `packages/va_pathways` (shared by the api and the worker): `va_pathways.unit_tests.run_unit_test`
+>    over `va_pathways.conversation.TextConversation` (the test chat's engine run, also used by §7). One case = an
+>    EngineState at `node_id` (`visit_counts {node_id: 1}`, `turn_index` = number of `user` history messages) whose
+>    `history` holds the test's messages on that node (`at_ms` 0, 1, 2, …), `request_data` = optional
+>    `expected.request_data` (object, default `{}`), then ONE `handle_user_turn` with the case input, consumed like
+>    the test chat (SMS, transfer, end call, press button simulated; webhooks real unless mocked), capped at 60 s.
+> 2. `expected.mock_tools` keys match the request source: the Webhook node id in this phase (`TL-…` tool ids from
+>    phase 08 use the same `HttpCall.source_id`). Value `{status (100-599, default 200), body (any JSON, default
+>    null)}`; 2xx → `ok`, else `http_error`; the request's JSONPath `extract` reads the mocked body; the `tool` log
+>    item carries `mocked: true`. Unmocked requests go to the real executor.
+> 3. Assertions: `route` holds when `route_to_node_id` is absent or equals `current_node_id` after the turn;
+>    `variables` holds when every expected key exists and matches (strings equal after strip + casefold, objects
+>    recursively by the same subset rule, lists item by item, other values by equality, a boolean never equals a
+>    number); `grading` only with `grading_goal`: analysis model, forced `grade` → `{"pass", "rationale"}`,
+>    temperature 0, a `Conversation:` message (history, case input, reply as `Caller:`/`Agent:` lines) followed by
+>    the prompt above with the goal substituted literally.
+> 4. Nothing raises. A case that cannot be judged fails with `error`: `invalid_history` (a role other than
+>    `user`/`assistant`), `unknown_node` (`node_id` not in the version), `engine_error`, `turn_timeout`,
+>    `grading_unavailable` (route and variables are still reported). The result adds `status`: `failed` when any
+>    judged assertion did not hold, else `error` when any case (or the variations call) errored, else `passed`;
+>    `passed` = `status == "passed"`.
+> 5. Variations: one analysis completion with the prompt above (`{n}` substituted) as the system message and the
+>    caller message as the user message; the first JSON array in the answer is read; only non-blank strings count,
+>    stripped and deduplicated case-insensitively, the original excluded, the first n kept. Fewer than n →
+>    `variations_short: <missing>` on the result; an unavailable model → no variation cases and
+>    `error: "variations_unavailable"` on the result. The original message is always case 0; cases run
+>    sequentially, tests concurrently (the run caps at 8).
+> 6. Case items add `actions` (simulated actions, chat shape) and `error` when set; `grading` is `null` without a
+>    goal. Result items add `status`, plus `error` and `variations_short` when set.
+
 ## 9. Simulations and regression
 
 `POST /v1/pathway/{id}/simulations`:

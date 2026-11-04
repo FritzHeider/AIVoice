@@ -16,8 +16,8 @@ from typing import Any, Final
 
 import httpx
 from graph_helpers import edge, node, start
-from llm_client_helpers import served_requests
-from llm_helpers import add_rules, realtime_llm_state
+from llm_helpers import realtime_llm_state
+from pathways_helpers import LlmControl
 from session_helpers import SessionContainer, session_app, session_client
 
 from va_common.time import FrozenClock, SystemClock
@@ -64,17 +64,10 @@ class WallClock(FrozenClock):
 
 
 @dataclass(slots=True)
-class ChatStack:
+class ChatStack(LlmControl):
     client: httpx.AsyncClient
     llm: SimState
     control: httpx.AsyncClient
-
-    async def rules(self, yaml_text: str) -> None:
-        await add_rules(self.control, yaml_text)
-
-    async def requests(self) -> list[dict[str, Any]]:
-        """FakeLLM's request log."""
-        return await served_requests(self.control)
 
 
 @asynccontextmanager

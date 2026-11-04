@@ -1846,3 +1846,16 @@ Grafana 3001
   'killed process'`). A FakeTelnyx leg that records on the accelerated clock runs to its 4 h time limit whenever the
   loop waits on Postgres and then encodes a WAV of the whole virtual duration (~460 MB dual-channel): give recorded
   test legs a short limit (edge `RoutingRig.place/ring(..., time_limit_s=30)`).
+- 2026-11-03 (P07-T11a): pathway text runs live in `packages/va_pathways` (dist `va-pathways`; api depends on it, the
+  worker will in T11c; `__init__` imports nothing): `loader.DbPathwayLoader` (moved from the api),
+  `recording.TextRecorder` (+ `MockResponse`, `mocked_outcome`, `log_item`/`action_item`; was `ChatRecorder`),
+  `conversation.TextConversation(TextDeps(gateway, tools_http, clock, allow_http), TextSetup(conversation_id, org_id,
+  active, org, loader, request_data=, mocks=), state, counter=)` → `run(actions, timeout_s=) -> finished`, `reply()`;
+  `unit_tests.run_unit_test(deps, UnitTestSpec, test_id=, org_id=, active=, org=, loader=, counter=)` →
+  `UnitTestResult.item()`; `grading.grade` (registers `grade` → `GradeVerdict`, field `pass_` with validation/
+  serialization alias `pass`: plain `alias=` would make mypy demand the keyword `pass`), `variations.paraphrases`.
+  `HttpCall.source_id` = the Webhook node id (mock key). The chat keeps `ChatDeps.text()` and its own turn cap.
+  Tests: `tests/support/pathways_helpers.text_rig()` (FakeLLM socket + ManualClock gateway + wall-clock `TextDeps`),
+  `bella_pasta(hook_port)`, `spec(...)`; session fixture `pathways_db_url`. A FakeLLM rule `error: {status: 400}`
+  makes an analysis call unavailable at once (4xx is not retried; 5xx would wait 2 s/8 s on the gateway clock).
+  FakeLLM YAML rule values are YAML: unquoted trailing spaces are stripped.

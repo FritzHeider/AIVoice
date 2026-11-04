@@ -96,11 +96,48 @@
   - Deliverables: chat session create/send/reset, expanded per-turn logs in responses
   - Acceptance: multi-turn chat test reproduces expected routes.
 
-- [ ] P07-T11 Unit tests, simulations, regression on publish
+- [ ] P07-T11 Unit tests, simulations, regression on publish (split into P07-T11a–e below)
   - Spec refs: specs/12-pathways-api.md (unit tests, simulation runs, regression suite on publish)
   - Depends on: P07-T10
   - Deliverables: unit test CRUD + run (variations, grading goal), LLM-as-caller simulation runner, `PathwayTestWorkflow`, publish gate `block_publish_on_failure`
   - Acceptance: tests for pass/fail/error outcomes and publish blocking.
+
+- [x] P07-T11a Shared pathway text-run package and unit-test case runner — va_pathways (loader, TextRecorder + mock_tools, TextConversation, run_unit_test, grade, variations), chat refactored; make test 12329 passed 7 skipped (99%), lint/typecheck/placeholders/spec refs pass
+  - Spec refs: specs/12-pathways-api.md §7, §8 (per-test steps 1–3, result item); specs/10-llm-gateway.md §3 (`grade`)
+  - Depends on: P07-T10
+  - Deliverables: new `packages/va_pathways` (loader moved from the api, text-turn driver extracted from the test
+    chat, `run_unit_test` with mock_tools, route/variables/grading assertions, variations); chat refactored onto it
+  - Acceptance: pass/fail/error outcomes for route, variables (subset, case-insensitive), grading and variations
+    with scripted FakeLLM; test chat suite unchanged and green.
+
+- [ ] P07-T11b Unit test CRUD, from_call, runs read API
+  - Spec refs: specs/12-pathways-api.md §2, §8, §10, §11; specs/03-data-model.md (`pathway_unit_tests`, `pathway_test_runs`)
+  - Depends on: P07-T11a
+  - Deliverables: `routers/pathway_tests.py` (list/create/get/patch/delete tests, `POST /tests/from_call`,
+    `GET /runs`, `GET /runs/{run_id}`), tenant repos, audit `pathway_test.*`, cross-tenant factories
+  - Acceptance: CRUD + from_call history/node construction + tenant isolation + permissions matrix tests.
+
+- [ ] P07-T11c `POST /tests/run` and `PathwayTestWorkflow`
+  - Spec refs: specs/12-pathways-api.md §8 (run, concurrency 8, queue va-postcall); specs/01-architecture.md (worker)
+  - Depends on: P07-T11b
+  - Deliverables: run endpoint creating `pathway_test_runs(kind='unit')`, `PathwayTestWorkflow` + activities in
+    va_workflows, worker registration on va-postcall, run status queued→running→passed/failed/error
+  - Acceptance: workflow tests (time skipping) for passed/failed/error runs; api test starts the workflow.
+
+- [ ] P07-T11d Simulations (LLM-as-caller)
+  - Spec refs: specs/12-pathways-api.md §9 (simulations)
+  - Depends on: P07-T11c
+  - Deliverables: simulation runner in va_pathways (caller LLM persona, `[HANGUP]`, max_turns, goal grading,
+    transcripts), `POST /v1/pathway/{id}/simulations`, `kind='simulation'` runs through `PathwayTestWorkflow`
+  - Acceptance: scripted FakeLLM simulations pass/fail/error; hangup and max_turns stop the run.
+
+- [ ] P07-T11e Regression settings and publish gate
+  - Spec refs: specs/12-pathways-api.md §4 publish step 2, §9 regression, §13
+  - Depends on: P07-T11c
+  - Deliverables: `GET/PUT /regression` (draft `global_config.regression`), publish runs ≤ 20 tests synchronously
+    (120 s) with `block_publish_on_failure` → 409 `details.run_id`, async `pending_regression` completed by the
+    worker, optional simulations; e2e test where regression blocks a broken publish
+  - Acceptance: publish blocked by failing regression; async regression completes publish; e2e gating test.
 
 - [ ] P07-T12 Pathway runner integration in calls
   - Spec refs: specs/05-calls-api.md (runner selection: pathway_id/pathway_version); specs/11-pathways-engine.md (voice integration)

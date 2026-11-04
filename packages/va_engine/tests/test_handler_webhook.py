@@ -137,6 +137,7 @@ async def test_url_headers_and_body_are_rendered() -> None:
     assert call.body == {"count": 4, "label": "n=4", "nested": [True], "fixed": 3}
     assert (call.timeout_ms, call.retries) == (2500, 2)
     assert call.extract == (("status", "$.status"),)
+    assert call.source_id == ctx.node.id
 
 
 async def test_body_with_a_template_error_is_sent_raw_and_non_json_values_become_text() -> None:

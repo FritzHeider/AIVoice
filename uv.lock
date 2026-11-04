@@ -16,6 +16,7 @@ members = [
     "va-events-sink",
     "va-llm",
     "va-media-worker",
+    "va-pathways",
     "va-sim",
     "va-sim-server",
     "va-telephony-edge",
@@ -2698,6 +2699,7 @@ dependencies = [
     { name = "va-engine" },
     { name = "va-events" },
     { name = "va-llm" },
+    { name = "va-pathways" },
     { name = "va-tools" },
 ]
 
@@ -2722,6 +2724,7 @@ requires-dist = [
     { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-llm", editable = "packages/va_llm" },
+    { name = "va-pathways", editable = "packages/va_pathways" },
     { name = "va-tools", editable = "packages/va_tools" },
 ]
 
@@ -3063,6 +3066,37 @@ requires-dist = [
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-llm", editable = "packages/va_llm" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
+    { name = "va-voice", editable = "packages/va_voice" },
+]
+
+[[package]]
+name = "va-pathways"
+version = "0.1.0"
+source = { editable = "packages/va_pathways" }
+dependencies = [
+    { name = "httpx" },
+    { name = "orjson" },
+    { name = "pydantic" },
+    { name = "va-common" },
+    { name = "va-db" },
+    { name = "va-domain" },
+    { name = "va-engine" },
+    { name = "va-llm" },
+    { name = "va-tools" },
+    { name = "va-voice" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "orjson", specifier = ">=3.13.0" },
+    { name = "pydantic", specifier = ">=2.9" },
+    { name = "va-common", editable = "packages/va_common" },
+    { name = "va-db", editable = "packages/va_db" },
+    { name = "va-domain", editable = "packages/va_domain" },
+    { name = "va-engine", editable = "packages/va_engine" },
+    { name = "va-llm", editable = "packages/va_llm" },
+    { name = "va-tools", editable = "packages/va_tools" },
     { name = "va-voice", editable = "packages/va_voice" },
 ]
 
@@ -3412,6 +3446,7 @@ dev = [
     { name = "va-events-sink" },
     { name = "va-llm" },
     { name = "va-media-worker" },
+    { name = "va-pathways" },
     { name = "va-sim" },
     { name = "va-sim-server" },
     { name = "va-telephony-edge" },
@@ -3467,6 +3502,7 @@ dev = [
     { name = "va-events-sink", editable = "apps/events_sink" },
     { name = "va-llm", editable = "packages/va_llm" },
     { name = "va-media-worker", editable = "apps/media_worker" },
+    { name = "va-pathways", editable = "packages/va_pathways" },
     { name = "va-sim", editable = "packages/va_sim" },
     { name = "va-sim-server", editable = "apps/sim" },
     { name = "va-telephony-edge", editable = "apps/telephony_edge" },

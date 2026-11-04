@@ -1,11 +1,13 @@
-"""What one pathway test-chat turn produced (specs/12 §7; Decision P07-T10 under specs/12 §7).
+"""What one text run of a pathway produced (specs/12 §7 Decision P07-T10; specs/12 §8 Decision P07-T11a).
 
-A :class:`ChatRecorder` sits on every side of the engine for one request: it is the
-:class:`~va_engine.engine_events.EngineEvents` sink (decision and node events become ``logs`` items), it
+A :class:`TextRecorder` sits on every side of the engine for one test-chat request or unit-test case: it is
+the :class:`~va_engine.engine_events.EngineEvents` sink (decision and node events become ``logs`` items), it
 wraps the real :class:`~va_engine.ports.HttpPort` (each request adds a ``tool`` item with masked headers and
 body excerpts), it is the simulated :class:`~va_engine.ports.SmsPort` (nothing is sent; an ``sms`` action
-is recorded), and :meth:`ChatRecorder.consume` turns the engine's actions into ``assistant_messages`` and
-``actions``. Transfers, end call, press button and human takeover are never executed.
+is recorded), and :meth:`TextRecorder.consume` turns the engine's actions into ``assistant_messages`` and
+``actions``. Transfers, end call, press button and human takeover are never executed. A unit test's
+``mock_tools`` (:class:`MockResponse` by :attr:`~va_engine.ports.HttpCall.source_id`) answer matching requests
+instead of the executor; their ``tool`` items carry ``mocked: true``.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
-from pydantic import JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from va_common.json import dumps_str
 from va_common.masking import is_secret_key
@@ -33,18 +35,21 @@ from va_engine.models.results import (
     Wait,
     is_terminal,
 )
-from va_engine.ports import HttpCall, HttpOutcome, HttpPort, SmsOutcome, SmsRequest
+from va_engine.ports import HttpCall, HttpOutcome, HttpOutcomeKind, HttpPort, SmsOutcome, SmsRequest
+from va_tools.jsonpath import extract_all
 
 __all__ = [
     "EXCERPT_LIMIT",
     "MASK",
     "SIMULATED_MESSAGE_PREFIX",
-    "ChatRecorder",
     "Item",
+    "MockResponse",
+    "TextRecorder",
     "action_item",
     "excerpt",
     "log_item",
     "masked_headers",
+    "mocked_outcome",
 ]
 
 EXCERPT_LIMIT: Final = 2_000
@@ -53,6 +58,7 @@ SIMULATED_MESSAGE_PREFIX: Final = "sim-"
 _ELLIPSIS: Final = "…"
 _WEBHOOK_EVENT: Final = "call.webhook_node"
 _SMS_EVENT: Final = "call.sms_sent"
+_OK_STATUS_CLASS: Final = 2
 
 type Item = dict[str, JsonValue]
 
@@ -143,8 +149,24 @@ def action_item(action: Action) -> Item | None:  # noqa: PLR0911 - one return pe
     return None
 
 
-def _tool_item(call: HttpCall, outcome: HttpOutcome) -> Item:
-    return {
+class MockResponse(BaseModel):
+    """A unit test's canned answer for one request source (``expected.mock_tools`` value)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: int = Field(default=200, ge=100, le=599)
+    body: JsonValue = None
+
+
+def mocked_outcome(call: HttpCall, mock: MockResponse) -> HttpOutcome:
+    """The outcome ``mock`` gives ``call``: 2xx is ``ok``, else ``http_error``; ``extract`` reads the body."""
+    kind: HttpOutcomeKind = "ok" if mock.status // 100 == _OK_STATUS_CLASS else "http_error"
+    extracted = extract_all(mock.body, call.extract) if mock.body is not None else {}
+    return HttpOutcome(kind=kind, status=mock.status, body=mock.body, extracted=extracted)
+
+
+def _tool_item(call: HttpCall, outcome: HttpOutcome, *, mocked: bool) -> Item:
+    item: Item = {
         "type": "tool",
         "method": call.method,
         "url": redacted_url(call.url),
@@ -155,13 +177,18 @@ def _tool_item(call: HttpCall, outcome: HttpOutcome) -> Item:
         "ms": outcome.duration_ms,
         "outcome": outcome.kind,
     }
+    if mocked:
+        item["mocked"] = True
+    return item
 
 
 @dataclass(slots=True)
-class ChatRecorder:
-    """Collects one request's messages, actions and logs; ``http`` = the real executor."""
+class TextRecorder:
+    """Collects one run's messages, actions and logs; ``http`` = the real executor, ``mocks`` = canned
+    answers by request source."""
 
     http: HttpPort
+    mocks: Mapping[str, MockResponse] = field(default_factory=dict)
     messages: list[str] = field(default_factory=list)
     actions: list[Item] = field(default_factory=list)
     logs: list[Item] = field(default_factory=list)
@@ -174,9 +201,14 @@ class ChatRecorder:
             self.logs.append(item)
 
     async def execute(self, call: HttpCall) -> HttpOutcome:
-        """The real request (the executor never raises), recorded as a ``tool`` log item."""
-        outcome = await self.http.execute(call)
-        self.logs.append(_tool_item(call, outcome))
+        """The mocked answer of the call's source, else the real request (the executor never raises),
+        recorded as a ``tool`` log item."""
+        mock = None if call.source_id is None else self.mocks.get(call.source_id)
+        if mock is not None:
+            outcome = mocked_outcome(call, mock)
+        else:
+            outcome = await self.http.execute(call)
+        self.logs.append(_tool_item(call, outcome, mocked=mock is not None))
         return outcome
 
     async def send(self, request: SmsRequest) -> SmsOutcome:
