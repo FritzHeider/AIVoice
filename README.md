@@ -86,7 +86,7 @@ resumes from the first unticked task. Each phase is sized to finish within one R
 | 04 | Real-time media pipeline core | complete (2026-11-01, 7d78256) |
 | 05 | Telephony edge, call lifecycle, task-mode calling end to end | complete (2026-11-03, dabb7e0) |
 | 06 | Event bus, webhooks, live streams, analytics sink | complete (2026-11-03, 72b7ecb) |
-| 07 | Conversational Pathways engine, API, versions, testing | pending |
+| 07 | Conversational Pathways engine, API, versions, testing | complete (2026-11-04, 77d460a) |
 | 08 | Tools, dynamic data, custom code sandbox, knowledge bases | pending |
 | 09 | Voices, cloning, standalone TTS | pending |
 | 10 | Phone numbers, inbound config, pools, BYO Telnyx | pending |
