@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
-from sqlalchemy import func, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import bindparam, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from va_common.errors import AppError
@@ -113,6 +113,18 @@ class CallRepo:
             update(Call)
             .where(Call.org_id == self.org_id, Call.id == call_id, Call.status.in_(sorted(statuses)))
             .values(answered_by=value)
+            .returning(Call.id)
+            .execution_options(synchronize_session=False)
+        )
+        return await self.session.scalar(statement) is not None
+
+    async def merge_variables(self, call_id: uuid.UUID, variables: dict[str, Any]) -> bool:
+        """Merge ``variables`` into the call's ``variables`` (``stored || variables``: keys of ``variables``
+        win, other stored keys stay); ``False`` when the call is absent or another org's."""
+        statement = (
+            update(Call)
+            .where(Call.org_id == self.org_id, Call.id == call_id)
+            .values(variables=Call.variables.op("||")(bindparam("variables_patch", variables, type_=JSONB)))
             .returning(Call.id)
             .execution_options(synchronize_session=False)
         )

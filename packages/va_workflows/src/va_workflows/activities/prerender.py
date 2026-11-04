@@ -2,6 +2,11 @@
 
 :meth:`OpenerPrerender.opener_for` renders the templated ``first_sentence`` once (stored in
 ``CallContext.opener_text``; ``None`` with ``wait_for_greeting``, where the opener may answer the greeting).
+For a pathway call :meth:`OpenerPrerender.opener_for_call` takes the start node's static ``text`` instead
+(:func:`va_engine.pathway_call.opener_text` over the graph of the call's pinned version, read through a
+:class:`PathwayGraphSource`): the engine speaks the same rendered line at call time, so it plays from the
+cache (specs/11 §10 Decision P07-T12b). A graph that cannot be read is logged
+``call_context.pathway_opener_failed`` (reason only) and the call gets no pre-rendered opener.
 :meth:`OpenerPrerender.render` then, within :data:`PRERENDER_BUDGET_S`, stores the opener in the phrase cache
 for one hour and makes sure the voice's standard fillers are cached (30 days), both in the leg's TTS format
 under the pronounced text. Orgs with zero retention or HIPAA mode get nothing rendered (the REST endpoint has
@@ -23,7 +28,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from va_common.logging import get_logger
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
+from va_engine.navigation import ActiveGraph, PathwayUnavailableError
 from va_engine.opener import cache_text, phrase_format, phrase_voice, render_opener
+from va_engine.pathway_call import opener_text
 from va_voice.audio.formats import AudioFormat
 from va_voice.phrase_cache import (
     PER_CALL_TTL_S,
@@ -34,7 +41,14 @@ from va_voice.phrase_cache import (
     phrase_cache_key,
 )
 
-__all__ = ["PRERENDER_BUDGET_S", "OpenerPrerender", "OrgSettingsSource", "PrerenderResult", "SkipReason"]
+__all__ = [
+    "PRERENDER_BUDGET_S",
+    "OpenerPrerender",
+    "OrgSettingsSource",
+    "PathwayGraphSource",
+    "PrerenderResult",
+    "SkipReason",
+]
 
 PRERENDER_BUDGET_S: Final = 8.0
 """The whole pre-render (opener and fillers) gets this long; the activity's own timeout is 20 s."""
@@ -48,6 +62,12 @@ class OrgSettingsSource(Protocol):
     """Where org settings come from (:class:`va_db.org_settings.OrgSettingsReader` satisfies it)."""
 
     async def get(self, org_id: uuid.UUID) -> OrgSettings | None: ...
+
+
+class PathwayGraphSource(Protocol):
+    """Graphs of pinned pathway versions (:class:`va_pathways.call_graphs.CallGraphCache` satisfies it)."""
+
+    async def get(self, org_id: uuid.UUID, pathway_id: uuid.UUID, version: int) -> ActiveGraph: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +90,9 @@ class OpenerPrerender:
         org_settings: OrgSettingsSource,
         model_id: str,
         budget_s: float = PRERENDER_BUDGET_S,
+        graphs: PathwayGraphSource | None = None,
     ) -> None:
+        self._graphs = graphs
         self._cache = cache
         self._org_settings = org_settings
         self._model_id = model_id
@@ -86,6 +108,24 @@ class OpenerPrerender:
         if context.config.wait_for_greeting:
             return None
         return render_opener(context, now=now)
+
+    async def opener_for_call(self, context: CallContext, now: datetime) -> str | None:
+        """:meth:`opener_for`, or for a pathway call the start node's static line (``None`` without a graph
+        source, without a pinned version, or when the graph cannot be read)."""
+        config = context.config
+        if config.runner_type != "pathway":
+            return self.opener_for(context, now)
+        if self._graphs is None or config.pathway_id is None or config.pathway_version is None:
+            return None
+        try:
+            active = await self._graphs.get(context.org_id, config.pathway_id, config.pathway_version)
+        except PathwayUnavailableError as exc:
+            _log.warning("call_context.pathway_opener_failed", reason=exc.reason)
+            return None
+        except (SQLAlchemyError, OSError) as exc:
+            _log.warning("call_context.pathway_opener_failed", reason=type(exc).__name__)
+            return None
+        return opener_text(active, context, now=now)
 
     async def render(self, context: CallContext) -> PrerenderResult:
         """Cache ``context.opener_text`` (per call) and the standard fillers (shared); never raises."""

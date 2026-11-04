@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 from event_helpers import publisher_rig
 from media_helpers import call_context
+from pydantic import JsonValue
 from service_helpers import json_log_stream, log_events
 
 from va_common.time import FrozenClock
 from va_db.call_turns import CallTurnRow, LatencyMerge, TurnDelete, TurnOp
 from va_domain.call_context import CallContext
+from va_engine.pathway_brain import TurnTags
 from va_events import DomainEvent, EventType
 from va_media.turns import EVENT_MESSAGE_CHARS, STARTED_MESSAGE, CallPersistence, TurnRecorder
 from va_voice.latency import LatencyEvent, TurnLatency, TurnReport, latency_events
@@ -417,3 +419,64 @@ async def test_finish_call_without_an_event_buffer_flushes_turns_only() -> None:
     rec.on_agent_turn(AgentTurn(0, "Hi", "Hi", interrupted=False, started_ms=0.0, ended_ms=1.0))
     await persistence.finish_call(rec, context)
     assert turns.flushed == [context.call_id]
+
+
+class Tagger:
+    """A fixed pathway tagger: user turns are engine turn 1 at ``start``, agent turns engine turn 1 at
+    ``book``."""
+
+    def turn_tags(self, role: str) -> TurnTags | None:
+        if role == "user":
+            return TurnTags(1, "start", "Greeting")
+        return TurnTags(1, "book", "Book")
+
+
+async def test_a_tagger_names_the_engine_turn_and_node_of_each_row() -> None:
+    rec, turns, events = recorder(call_context(uuid.uuid4()))
+    rec.tagger = Tagger()
+    rec.on_user_turn(user_turn(1, "A table please", 1000, 1600))
+    rec.on_agent_turn(
+        AgentTurn(
+            index=2,
+            text="Sure.",
+            text_spoken="Sure.",
+            interrupted=False,
+            started_ms=ORIGIN_MS + 2000,
+            ended_ms=ORIGIN_MS + 2500,
+        )
+    )
+    await rec.drain()
+    rows = [op for op in turns.ops if isinstance(op, CallTurnRow)]
+    assert [(r.turn_index, r.pathway_turn, r.node_id, r.node_name) for r in rows] == [
+        (1, 1, "start", "Greeting"),
+        (2, 1, "book", "Book"),
+    ]
+    assert [event.data["node_id"] for event in events.events] == ["start", "book"]
+
+
+async def test_engine_events_are_published_in_order_after_a_held_assistant_turn() -> None:
+    stream = json_log_stream()
+    rec, _, events = recorder(call_context(uuid.uuid4()))
+    rec.on_agent_turn(
+        AgentTurn(
+            index=2,
+            text="Sure.",
+            text_spoken="Sure.",
+            interrupted=False,
+            started_ms=ORIGIN_MS,
+            ended_ms=ORIGIN_MS + 500,
+        )
+    )
+    route: dict[str, JsonValue] = {"turn_index": 1, "from_node": "start", "to_node": "book", "label": "Book"}
+    rec.engine_event("call.route", route)
+    rec.engine_event("call.webhook_node", {"turn_index": 1, "node_id": "hook", "status_code": 200})
+    rec.engine_event("call.unknown", {"turn_index": 1})
+    await rec.drain()
+    assert [(e.type, e.message) for e in events.events] == [
+        (EventType.CALL_TURN, "Sure."),
+        (EventType.CALL_ROUTE, "Pathway routed from node start to node book"),
+        (EventType.CALL_WEBHOOK_NODE, "Webhook node hook: status 200"),
+    ]
+    assert events.events[1].data == route
+    unknown = [e["event_type"] for e in log_events(stream) if e["event"] == "media.engine_event_unknown"]
+    assert unknown == ["call.unknown"]

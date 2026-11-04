@@ -141,3 +141,12 @@ async def test_a_row_of_another_org_is_refused(database: Database) -> None:
         repo = CallTurnRepo(session, uuid.uuid4())
         with pytest.raises(ValueError, match="another org"):
             await repo.upsert_many([_row(call, 1)])
+
+
+async def test_pathway_turn_is_written_and_updated(database: Database) -> None:
+    call = await seed_call(database, status="in_progress")
+    async with database.tenant_session(call.org_id) as session:
+        repo = CallTurnRepo(session, call.org_id)
+        await repo.upsert_many([_row(call, 2, "assistant", pathway_turn=1), _row(call, 3)])
+        await repo.upsert_many([_row(call, 3, pathway_turn=2)])
+    assert [(t.turn_index, t.pathway_turn) for t in await _turns(database, call)] == [(2, 1), (3, 2)]

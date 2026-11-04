@@ -182,3 +182,15 @@ async def test_active_ids_lists_stoppable_calls_oldest_first(database: Database)
     assert everything == [(first.call_id, "scheduled"), (live.call_id, "in_progress")]
     assert only_live == [(live.call_id, "in_progress")]
     assert none == []
+
+
+async def test_merge_variables_keeps_stored_keys_and_overwrites_sent_ones(database: Database) -> None:
+    seeded = await seed_call(database, status="in_progress", variables={"name": "Ann", "party": 2})
+    async with database.tenant_session(seeded.org_id) as session:
+        repo = CallRepo(session, seeded.org_id)
+        assert await repo.merge_variables(seeded.call_id, {"party": 4, "time": "7pm"})
+        assert not await repo.merge_variables(new_id(), {"x": 1})
+    async with database.tenant_session(new_id()) as session:
+        assert not await CallRepo(session, new_id()).merge_variables(seeded.call_id, {"x": 1})
+    call = await load_call(database, seeded)
+    assert call.variables == {"name": "Ann", "party": 4, "time": "7pm"}

@@ -357,3 +357,208 @@ Re-ran: lint/typecheck/placeholders 0, spec refs 0, jscpd 0 clones, radon avg 2.
 passed 7 skipped exit 0. Diff matches Decision P07-T12a (specs/11 §10, specs/07 §12): action mapping, engine
 generators closed via aclosing, timing re-read after each reply so Brain-owned wait arms only after playback,
 expiry "brain" uncounted, configured policy returns when the wait clears. No findings.
+
+## Plan P07-T12b — Media runtime runs pathway calls
+
+Specs: specs/07 §16, specs/11 §9 (`call:{id}:engine` 2 h, final variables → `calls.variables`), §12 + Decision
+P07-T08c, specs/19 §2 (`call.route`/`call.extraction`/`call.loop_condition`/`call.webhook_node`/`call.sms_sent`),
+specs/01 §2.1 step 2 (prefetch), specs/07 §11 step 5 (opener pre-render).
+
+### Key finding (drives a schema change)
+`call_turns.turn_index` is the PIPELINE counter (every user AND agent turn: opener 0, user 1, agent 2, …), but engine
+events carry the ENGINE `turn_index` (+1 per accepted caller turn; opener = 0; a superseding turn takes a new index).
+`va_db.call_object._pathway_logs` joins them by `turn_index`, so a stored pathway call would render wrong/empty
+`pathway_logs`, and one engine turn may produce several assistant rows (chained nodes) — the unique key
+(call_id, turn_index, role) forbids reusing turn_index. Decision: add `call_turns.pathway_turn integer` (nullable,
+engine turn index of pathway calls, NULL for other runners); the Call Object groups by `pathway_turn` when present,
+else `turn_index` (unchanged for task calls / existing tests).
+
+### Spec Decisions to add (same commit)
+- specs/11 §10 "> Decision (2026-11-04): pathway calls in the media runtime (P07-T12b)": runner selection, graph
+  cache (frozen versions only), ports, events, snapshots, variables, prefetch opener, load failure → `error`.
+- specs/11 §12: one-paragraph addendum to P07-T08c: rows carry `pathway_turn`; grouping rule above.
+- specs/03: `call_turns` DDL gains `pathway_turn integer` LISTED LAST (added by ALTER, attnum order —
+  `test_schema_matches_spec`); Redis key table (§11) gains `call:{<call_id>}:engine` (string, dump_engine_state JSON,
+  TTL 7200 s, written by media per turn). Migration `packages/va_db/src/va_db/migrations/versions/0009_call_turns_pathway_turn.py`
+  (upgrade ADD COLUMN, downgrade DROP COLUMN; head becomes 0009; check tests asserting head `0008` and update).
+
+### Files
+1. `packages/va_db/src/va_db/models/calls.py`: `CallTurn.pathway_turn: Mapped[int | None]` (Integer, nullable, last).
+   `packages/va_db/src/va_db/call_turns.py`: `CallTurnRow.pathway_turn: int | None = None`; `CallTurnRepo`
+   (va_db/repositories) writes it on insert/upsert. `va_db/call_object.py::_pathway_logs`: `LogTurn(turn_index=
+   turn.pathway_turn if turn.pathway_turn is not None else turn.turn_index, …)`; order turns by
+   (turn_index) as today (pipeline order = time order).
+2. NEW `packages/va_pathways/src/va_pathways/call_graphs.py`:
+   - `async def load_call_graph(database, org_id, pathway_id: uuid.UUID, version: int) -> tuple[ActiveGraph, bool]`
+     (bool = frozen, i.e. stored version status != "draft"; reuse `loader._graph_of`, raise
+     `PathwayUnavailableError("not_found"|"version_not_found"|"invalid_graph")` like `DbPathwayLoader`; the graph
+     parse in `asyncio.to_thread`). Factor the shared body out of `DbPathwayLoader.load` (no duplication: jscpd 0).
+   - `class CallGraphCache(database, *, max_entries=128)`: `async get(org_id, pathway_id, version) -> ActiveGraph`
+     (LRU `OrderedDict` keyed (org_id, pathway_id, version); caches only frozen versions — drafts are mutable;
+     concurrent misses of one key may both load: fine) and `loader(org_id) -> PathwayLoader` (an object whose
+     `load(pathway_id, ref)` resolves `production`/`staging` pins through `DbPathwayLoader` each time and numbers
+     through `get`).
+3. `packages/va_engine/src/va_engine/pathway_call.py` additions:
+   - `ENGINE_STATE_TTL_S: Final = 7200`, `engine_state_key(call_id) -> str` = `f"call:{{{call_id}}}:engine"`
+     (same hash-tag form as `CallContextStore`'s `call:{<id>}:ctx`; check its builder and mirror it).
+   - `opener_text(active, context, *, now) -> str | None`: the start node of `start_state(active, context)`; only a
+     Default node (`type == "Default"`, not global) with non-blank `text` → rendered exactly like
+     `handlers.base.speak_node` (same TemplateScope the engine builds for the node: find where `TurnContext.render`
+     gets its scope in engine.py and factor a pure `node_scope(state, facts, node)`-style function used by both, so
+     the text is byte-identical to the engine's `Say`). `None` otherwise / blank render. `context.config.
+     wait_for_greeting` → `None` (the greeting may change the first reply: same rule as `render_opener`).
+   - `PathwayBrain.turn_tags(role: Literal["user","assistant"]) -> TurnTags | None` (in pathway_brain.py; dataclass
+     `TurnTags(pathway_turn: int, node_id: str | None, node_name: str | None)`): `None` once the engine ended for
+     `user`; `user` → `state.turn_index + 1` and the current node (the pipeline's observer sees a routed user turn
+     BEFORE the brain accepts it; every routed turn — greeting, DTMF, superseding — is accepted next);
+     `assistant` → `state.turn_index` and the node of the last assistant `TurnRecord` in `state.history` (fallback
+     current node); node names via `engine.navigator.graph.node(id).data.name`.
+4. `apps/media_worker/src/va_media/turns.py`: `TurnRecorder(..., tagger: TurnTagger | None = None)` (Protocol with
+   `turn_tags(role)`); user/agent rows get `pathway_turn`/`node_id`/`node_name` from it, and the `call.turn` event
+   data `node_id` (today hard-coded `None`). New method `engine_event(event_type: str, data) -> None` publishing
+   through the same ordered chain (releasing a held assistant turn first, like other callbacks); unknown types (not
+   an `EventType` value) are logged `media.engine_event_unknown` and dropped. Messages: NEW
+   `va_media/pathway_events.py` `event_message(event_type, data) -> str` (fixed, PHI-free, e.g. `call.route` →
+   "Pathway routed to <to_node>"; `call.extraction` → "Variables extracted"; `call.loop_condition` → "Loop
+   condition scored"; `call.webhook_node` → "Webhook node executed"; `call.sms_sent` → "SMS sent"), node ids only.
+   `CallPersistence.recorder(..., tagger=)` passes it through.
+5. NEW `apps/media_worker/src/va_media/pathway_runtime.py`:
+   - `EngineStateSaver(redis, call_id, *, clock)` — `on_state(state)` sync: queues one ordered background SET
+     (`dump_engine_state`, EX `ENGINE_STATE_TTL_S`), latest wins; `aclose()` awaits the chain; RedisError logged
+     `media.engine_state_save_failed` (never raised).
+   - `RecorderEvents(recorder | None)` implementing `EngineEvents.emit` → `recorder.engine_event` (no recorder →
+     dropped).
+   - `CallSmsPort` implementing `va_engine.ports.SmsPort` for voice calls: refactor the send core out of
+     `va_media.voicemail_sms.VoicemailSms` (sender lookup `va_db.voicemail_sms.sms_sender` for `from_` or the
+     call's agent number, `queue_outbound_message`, Telnyx `send_message`, `record_sent`/`record_failed`) into a
+     shared helper both use; the SMS port does NOT publish `call.sms_sent` (the engine's report does), the voicemail
+     path keeps its event. Message id `uuid7` per request. Never raises → `SmsOutcome(sent=False, error=<reason>)`.
+   - `async def build_pathway_brain(context, org, *, graphs, gateway, counter, tools_http, allow_http, clock,
+     sms, events, on_state) -> PathwayBrain` (raises `PathwayUnavailableError`): `graphs.get(org_id, pathway_id,
+     pathway_version)` (both required for runner `pathway`; missing → `PathwayUnavailableError("not_found")`),
+     `start_state`, `DialogueSettings.for_call(context, org)`, `PathwayPrompt`, `EnginePorts(decider=Decider(gateway,
+     clock=), dialogue=GatewayDialogue(gateway, prompt), lines=GatewayLinePort(gateway, org_id=, call_id=),
+     events=events, loader=graphs.loader(org_id), http=HttpExecutor(tools_http, clock=, allow_http=,
+     call_id=str(call_id)), sms=sms)`, `facts=pathway_facts(context, now=clock.now())`.
+6. `apps/media_worker/src/va_media/runtime.py`:
+   - `CallRuntime.__init__(…, graphs: CallGraphCache | None = None, tools_http: httpx.AsyncClient | None = None)`.
+   - `__call__`: accept runner_type `task` and `pathway` (others still `media.runner_unsupported`); pathway without
+     `graphs`/`tools_http` → error end logged.
+   - `_converse`: brain = TaskBrain (task) or `await build_pathway_brain(...)` (pathway; `PathwayUnavailableError` →
+     log `media.pathway_unavailable` reason → `ERROR_END`). `stack.push_async_callback(brain.aclose)` for the
+     pathway brain and the saver's `aclose` (order: brain.aclose before saver flush, before persistence.finish_call
+     — mind AsyncExitStack LIFO). `_bind_transfer` typed against a small protocol (both brains have
+     `on_transfer_failed`). Recorder built with `tagger=brain` for pathway calls (recorder creation currently precedes
+     brain: reorder or set the tagger after construction — prefer building the brain first).
+   - Result: `session_end(result)`, then for pathway calls `dataclasses.replace(end, variables=brain.variables)`.
+   - `open_runtime`: `MediaSettings` mixes in `WebhookSafetySettings` (no new env var; already in specs/02 §6 for
+     api/worker — verify, and add `media` to that row's service list if the table lists services);
+     `tools_http = tools_client(settings)` closed on exit; `graphs = CallGraphCache(database)`;
+     `allow_http = va_pathways.runs.insecure_urls_allowed(settings.va_env)`; SMS port factory needs telnyx +
+     database + `settings.telnyx_messaging_profile_id` like VoicemailSms.
+   - Module docstring step list updated.
+7. `apps/media_worker/src/va_media/session.py`: `SessionEnd.variables: Mapping[str, JsonValue] | None = None`.
+   `apps/media_worker/src/va_media/call_end.py::_record`: when `end.variables` is non-empty, in the same transaction
+   as `record_answered_end`, `UPDATE calls SET variables = variables || :vars` (jsonb concat; a CallRepo method
+   `merge_variables(call_id, variables)` in va_db) — also when the stored reason wins. Thread `end` to `_record` as
+   needed.
+8. `apps/media_worker/pyproject.toml`: depend on `va-pathways` and `va-tools` (uv lock refresh: `uv lock`).
+9. Worker prefetch (opener): `packages/va_workflows/src/va_workflows/activities/prerender.py`:
+   `OpenerPrerender(…, graphs: PathwayGraphSource | None = None)` where the source is
+   `va_pathways.call_graphs.load_call_graph`-backed (protocol `async get(org_id, pathway_id, version) ->
+   ActiveGraph`; worker container passes a `CallGraphCache(database)`); new `async pathway_opener(context, now) ->
+   str | None` (`opener_text(...)`; any `PathwayUnavailableError`/`SQLAlchemyError` → None, logged
+   `prerender.pathway_opener_failed` reason). `call_context.py`: for `runner_type == "pathway"` set
+   `opener = await prerender.pathway_opener(context, now)` instead of `opener_for` — the stored
+   `CallContext.opener_text` then gets rendered/cached by the existing `render()`; the PathwayBrain never reads
+   `opener_text`, its start `Say` hits the phrase cache because the text is identical (pronounced via
+   `cache_text`). Update `va_engine.opener` docstring line 5 accordingly. Worker container: build the cache.
+10. AGENTS.md line (P07-T12b).
+
+### Tests
+- `packages/va_db/tests`: migration 0009 up/down (`migration_helpers`), schema/spec parity tests pass (DDL column
+  last), `CallTurnRepo` round-trips `pathway_turn`; `call_object` test: pathway turns grouped by `pathway_turn`
+  (two assistant rows with pipeline indices 2 and 3 sharing pathway_turn 1 → one log entry with joined text).
+- `packages/va_pathways/tests/test_call_graphs.py`: frozen version cached (second `get` issues no query — count via
+  a wrapped database or by deleting the row and still getting it), draft never cached (update draft nodes → next get
+  sees new graph), LRU eviction at max_entries, unknown/deleted/other-org/invalid → `PathwayUnavailableError`
+  reasons; `loader(org)` resolves production pin.
+- `packages/va_engine/tests/test_pathway_call.py` (or extend test_pathway_brain.py): `opener_text` equals the text
+  of the engine's first `Say` for the same graph/context/now (property-ish over a few templates incl. variables and
+  request_data); None for prompt-only start, non-Default start, wait_for_greeting, blank render; `engine_state_key`;
+  `turn_tags` for user/assistant across a routed turn and after end.
+- `apps/media_worker/tests/test_turns.py` (existing recorder tests): tagger fills rows + `call.turn` node_id;
+  `engine_event` ordered after held assistant turn; unknown type dropped.
+- `apps/media_worker/tests/test_pathway_runtime.py` (unit): `EngineStateSaver` writes latest state with TTL,
+  survives broken redis; `CallSmsPort` success / no sender / Telnyx error → outcomes (reuse voicemail SMS test
+  fakes/rows `sms_rows`); voicemail SMS tests still pass after the refactor.
+- `apps/media_worker/tests/test_call_end.py`: variables merged (existing keys kept, new ones overwrite) for an
+  ended pathway call; none → column untouched.
+- Runtime sim (acceptance) `apps/media_worker/tests/test_runtime_pathway_sim.py` using `runtime_rig.sim_runtime`
+  (+ `graphs=CallGraphCache(db)`, `tools_http`), `persistence=` + `media_db_url`, seeded org/pathway via
+  `pathways_helpers.store_bella_pasta` (va_pathways tests support; add the support dir to the media pytest
+  pythonpath/mypy_path if needed) or a small graph: start (static text) → caller says → FakeLLM router rule → Webhook
+  node to `webhook_receiver.served_receiver` (resolver/allow_private as in va_tools tests; WEBHOOK_ALLOW_PRIVATE true
+  for the rig) → End Call node with text. Assert: receiver got the request with rendered body; `call_events` has
+  `call.route` (+ `call.webhook_node`, `call.extraction` if the graph extracts) with `turn_index`; `call:{id}:engine`
+  in Redis with `ended` true; `calls.variables` contains extracted/webhook-set vars; `load_call_objects` →
+  `pathway_logs` equal to `brain.pathway_logs()` ignoring `created_at` (capture the brain via a recording
+  wrapper or compare against expected entries); end reason `agent_end_call` (check `session_end` mapping of
+  `agent_hangup`). Second test: missing pathway version → session end `error`, no TTS. Third: opener pre-render
+  path — phrase cached start text → `tts.started` has no context for the opener (FakeElevenLabs REST record).
+- Worker: `packages/va_workflows/tests` prerender test: pathway call context gets `opener_text` = start node text;
+  load failure → None + still saves context.
+
+### Gates
+`make fmt lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`, `npx --yes jscpd@4 --silent`
+(0 clones — the voicemail SMS refactor and loader factoring are the risk), `uvx radon cc -s -a` on changed src,
+`make openapi` drift check (Call Object unchanged → no drift expected), `make test` in background with Monitor
+heartbeat (~25 min; truncate log first; OOM → `PYTEST_ADDOPTS="-n 6"`). `make e2e` NOT required here (T12c adds the
+pathway flows) but this touches the call flow: run the existing `outbound_basic` flow on a rebuilt stack
+(`scripts/dev_up.sh e2e` then `uv run pytest tests_e2e -m e2e -k outbound_basic -s`) to prove task calls still work.
+
+### Risks
+- Turn-tag timing (observer before brain): verify with the runtime sim comparison of stored vs engine pathway_logs;
+  if a barge-in path tags the interrupted agent turn with the next index, adjust `turn_tags` (not the projection).
+- AsyncExitStack ordering: brain.aclose (settles background extractions which emit events) must run BEFORE
+  `persistence.finish_call` drains the recorder, and the saver flush after brain.aclose.
+- Webhook node on the sim rig needs private addresses allowed (`WEBHOOK_ALLOW_PRIVATE`/resolver), never real DNS.
+- Draft-version calls (test calls) must never be served stale from the per-process cache.
+- Media container now needs no new secrets; confirm `test_container`/lifespan tests close the new tools client.
+
+## Build P07-T12b (2026-11-04)
+
+Implemented per plan, with these deliberate deviations (recorded in the specs/11 §10 Decision P07-T12b):
+- Final variables do NOT travel in `SessionEnd`: a carrier hangup cancels the session body (no result), so the
+  end routine (`CallEnd._merge_variables`, step 2, before record) reads the `call:{id}:engine` snapshot written by
+  `EngineStateSaver` (flushed in the body's exit stack before the ender runs) and calls `CallRepo.merge_variables`.
+- Agent turn tags come from the line the brain last handed to the pipeline (`PathwayBrain._mark_spoken`), not the
+  last history record: a `SayStream` is recorded only after the pipeline resumes the generator.
+- `TurnRecorder.tagger` is a settable attribute (recorder and brain need each other); `build_pathway_brain` sets it.
+- The brain is built BEFORE vendor sockets open (unloadable version → ERROR_END, no TTS socket); the recorder's
+  `finish_call` is now registered first for all runners, then saver.aclose, then brain.aclose (LIFO exit order:
+  brain closes → snapshot flushed → events drained).
+- `PathwayTools` is a frozen dataclass (graphs, tools_http, allow_http) passed as `CallRuntime(pathways=)`.
+- Worker: `OpenerPrerender.opener_for_call` (async; pathway → `opener_text` over `CallGraphCache`), called by
+  `prefetch_call_context`.
+
+Gates so far: make fmt/lint/typecheck 0, placeholders 0, spec refs 0, openapi drift clean, jscpd 0 clones,
+radon avg 2.5 (max B 9 opener_text). Targeted suites green incl. the runtime sim acceptance
+(`test_runtime_pathway_sim.py`: 3 tests). Full `make test` running.
+
+Final gates (P07-T12b): first full `make test` run had 2 failures caused by this change, both fixed: the
+`call_turns` spec column list in `test_call_models.py` (+ `pathway_turn?`) and the old
+`test_non_task_runner_is_refused...` in test_runtime_sim (pathway is now supported). That test was split into a
+persona refusal test (no org read) and a pathway-without-PathwayTools test (`not_configured`). Rerun of
+`make test`: 12612 passed, 7 skipped, coverage 99.09%. pip-audit (workspace excluded) clean; pnpm audit 3
+moderate, 0 high. jscpd 0, radon avg 2.5. e2e: stack rebuilt with `scripts/dev_up.sh e2e`, then
+`pytest tests_e2e -m "e2e or capacity"`: 18 passed (outbound_basic, voicemail, transfer, barge-in, capacity,
+pathway_regression_gate, ...). Not committed: the Reviewer commits.
+
+## Review P07-T12b (2026-11-04) — approved
+Gates re-run: lint/typecheck/placeholders/spec refs pass, jscpd 0 clones. make test: 12611 passed, 1 failed —
+`test_runtime_sim.py::test_caller_turn_is_answered_by_the_task_brain` asserted `va_audio_underruns_total == 0`
+and got 1 under xdist CPU load (realtime sim). That assertion dates from P05-T17e1 and the task path did not change;
+the test passes 3/3 alone. Logged as a fix task, not a blocker. e2e (`scripts/dev_up.sh e2e` + `-m "e2e or capacity"`):
+18 passed. Diff checked: exit-stack order (brain.aclose → saver flush → finish_call), drafts never cached,
+tenant_session for graph loads and the variables merge, PHI-free event messages, spec Decisions added.

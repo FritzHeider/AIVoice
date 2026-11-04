@@ -14,16 +14,20 @@ alone, specs/06 §5 Decision P05-T02 item 7). Steps, in order:
    talking, so it neither records, hangs up, emits ``call.ended`` nor releases the slot (the edge records
    ``completed``/``transferred`` on the primary hangup, ``CallWorkflow`` releases the slot). Any other end
    keeps its reason and hangs up.
-2. **Record** the end on the ``calls`` row in one tenant transaction (answered calls only, through
+2. **Variables** of a pathway call: the final engine snapshot (``call:{id}:engine``, written by the runtime
+   before the session body returned) is read and its variables are merged into ``calls.variables``
+   (``stored || final``), whatever ends the call (specs/11 §9; specs/11 §10 Decision P07-T12b). A missing or
+   unreadable snapshot merges nothing.
+3. **Record** the end on the ``calls`` row in one tenant transaction (answered calls only, through
    :func:`va_db.call_end.record_answered_end`: a stored reason wins). A terminal call is left alone; an
    unanswered one is left to the workflow's cleanup.
-3. **Hang up** the primary leg (after the record, so the edge's hangup webhook finds ``end_reason`` set) with
+4. **Hang up** the primary leg (after the record, so the edge's hangup webhook finds ``end_reason`` set) with
    the workflow's ``command_id``, so Telnyx dedupes a second hangup.
    After a bridged transfer ``streaming_stop`` (``command_id("streaming_stop", call_id, "primary")``) goes
    out instead.
-4. **Events**: ``call.ended`` when this routine recorded the end, then the call's event rows are flushed.
-5. **Slot**: the org's concurrency slot is released (``ZREM``, idempotent), except after a transfer.
-6. **Signal** ``CallWorkflow.signal_pipeline_finished`` with the end reason.
+5. **Events**: ``call.ended`` when this routine recorded the end, then the call's event rows are flushed.
+6. **Slot**: the org's concurrency slot is released (``ZREM``, idempotent), except after a transfer.
+7. **Signal** ``CallWorkflow.signal_pipeline_finished`` with the end reason.
 
 Every step logs its failure (error types only, never transcript text or numbers) and the next step still runs.
 """
@@ -35,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
@@ -51,6 +56,8 @@ from va_db.repositories import CallLegRepo, CallRepo, CallTransitionError
 from va_db.session import Database
 from va_domain.call_context import CallContext
 from va_domain.call_workflow import PipelineFinished
+from va_engine.models import EngineStateError, load_engine_state
+from va_engine.pathway_call import engine_state_key
 from va_events import EventPublishError, call_ended_event
 from va_media.carrier_state import CarrierSnapshot, read_carrier_state
 from va_media.channels import CallFeed
@@ -163,6 +170,8 @@ class CallEnd:
         resolved = await self.resolve(session, end, state)
         reason = resolved.reason
         recorded: EndReason | None = None
+        if session.context.config.runner_type == "pathway":
+            await self._merge_variables(session.context)
         if resolved.record:
             recorded = await self._record(session, resolved, state)
         if resolved.hang_up:
@@ -219,10 +228,38 @@ class CallEnd:
         _log.warning("media.stream_lost", waited_s=STREAM_CLOSED_WAIT_S)
         return _STREAM_LOST
 
+    async def _merge_variables(self, context: CallContext) -> None:
+        """Step 2: the final engine snapshot's variables into ``calls.variables``."""
+        try:
+            stored = await self._redis.get(engine_state_key(context.call_id))
+        except (RedisError, OSError) as exc:
+            _log.warning("media.engine_state_unavailable", error_type=type(exc).__name__)
+            return
+        if stored is None:
+            _log.info("media.engine_state_missing")
+            return
+        try:
+            variables = load_engine_state(stored).variables
+        except EngineStateError as exc:
+            _log.warning("media.engine_state_unreadable", problem=exc.problem)
+            return
+        except ValidationError:
+            _log.warning("media.engine_state_unreadable", problem="invalid_fields")
+            return
+        if not variables:
+            return
+        try:
+            async with self._database.tenant_session(context.org_id) as db:
+                await CallRepo(db, context.org_id).merge_variables(context.call_id, dict(variables))
+        except (SQLAlchemyError, OSError) as exc:
+            _log.error("media.variables_merge_failed", error_type=type(exc).__name__)
+            return
+        _log.info("media.variables_merged", count=len(variables))
+
     async def _record(
         self, session: CallSession, resolved: ResolvedEnd, state: CarrierSnapshot
     ) -> EndReason | None:
-        """Step 2; the reason recorded, or ``None`` when nothing was written."""
+        """Step 3; the reason recorded, or ``None`` when nothing was written."""
         context = session.context
         try:
             async with self._database.tenant_session(context.org_id) as db:
@@ -258,7 +295,7 @@ class CallEnd:
         return self._clock.now()
 
     async def _hang_up(self, session: CallSession) -> None:
-        """Step 3; ``False`` from Telnyx (already ended) is fine."""
+        """Step 4; ``False`` from Telnyx (already ended) is fine."""
         client = await self._client(session, "media.hangup")
         if client is None:
             return
@@ -275,7 +312,7 @@ class CallEnd:
         _log.info("media.hangup_sent", result="sent" if sent else "already_ended")
 
     async def _stop_stream(self, session: CallSession) -> None:
-        """Step 3 after a bridged transfer: stop the primary leg's media stream (the call stays up)."""
+        """Step 4 after a bridged transfer: stop the primary leg's media stream (the call stays up)."""
         client = await self._client(session, "media.streaming_stop")
         if client is None:
             return

@@ -189,8 +189,10 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
     loader: PathwayLoader | None = None,
     state: EngineState | None = None,
     port: KeyedPort | None = None,
+    facts: ConversationFacts | None = None,
 ) -> Rig:
-    """An engine at the start of ``pathway`` (pathway :data:`PATHWAY_ID` v1) on a frozen clock."""
+    """An engine at the start of ``pathway`` (pathway :data:`PATHWAY_ID` v1) on a frozen clock (``facts``
+    replace the default restaurant facts)."""
     clock = FrozenClock(NOW)
     dialogue, source, _ = dialogue_rig(speculative=speculative)
     keyed = port if port is not None else KeyedPort()
@@ -209,7 +211,9 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
             http=http,
             sms=sms,
         ),
-        facts=ConversationFacts(
+        facts=facts
+        if facts is not None
+        else ConversationFacts(
             org_id=ORG_ID,
             call_id=CALL_ID,
             channel=channel,

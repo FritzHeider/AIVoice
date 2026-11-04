@@ -17,7 +17,7 @@ from task_helpers import task_context
 from va_engine.models import Action, EngineState, HumanTakeover, Say, SwitchGraph
 from va_engine.models.results import PressButton, TransferRequest
 from va_engine.navigation import ActiveGraph
-from va_engine.pathway_brain import PATHWAY_END_REASON, PathwayBrain
+from va_engine.pathway_brain import PATHWAY_END_REASON, PathwayBrain, TurnTags
 from va_engine.pathway_call import pathway_facts, start_state
 from va_voice.pipeline.models import BrainOutput, BrainTiming, EndCall, SpeakStatic, SpeakText, UserTurn
 
@@ -297,3 +297,24 @@ def test_start_state_honours_start_node_id(start_node_id: str | None, expected: 
     assert state.visit_counts == {expected: 1}
     assert state.variables == {"first_name": "Mike"}
     assert (state.pathway_id, state.pathway_version) == (PATHWAY_ID, 3)
+
+
+async def test_turn_tags_follow_engine_turns_and_nodes() -> None:
+    pathway = graph(
+        [start("a", text="Welcome.", name="Greeting"), node("b", text="Booked.", name="Book")],
+        [edge("e", "a", "b", "Wants a table")],
+    )
+    rig = engine_rig(pathway)
+    rig.port.script("select_path", route("e", 9))
+    brain = PathwayBrain(rig.engine, clock=rig.clock)
+    assert brain.turn_tags("assistant") == TurnTags(0, "a", "Greeting")
+    await drain(brain.start())
+    assert brain.turn_tags("assistant") == TurnTags(0, "a", "Greeting")
+    assert brain.turn_tags("user") == TurnTags(1, "a", "Greeting")
+    await drain(brain.on_user_turn(user("A table please", 1)))
+    assert brain.turn_tags("assistant") == TurnTags(1, "b", "Book")
+    assert brain.turn_tags("user") == TurnTags(2, "b", "Book")
+    brain.on_transfer_failed("Sorry, nobody answered.")
+    assert brain.turn_tags("assistant") == TurnTags(1, "b", "Book")
+    rig.state.ended = True
+    assert brain.turn_tags("user") is None

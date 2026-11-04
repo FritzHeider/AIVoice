@@ -14,12 +14,15 @@ from fakeredis import FakeAsyncRedis
 from pydantic import ValidationError
 from rest_client_helpers import SimRest, sim_rest
 from service_helpers import json_log_stream, log_events
+from sqlalchemy.exc import OperationalError
 from task_helpers import NOW, task_context
 from tts_helpers import VOICE_ID
 
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings, PrivacySettings
 from va_domain.voices import VoiceSettings
+from va_engine.models import load_graph
+from va_engine.navigation import ActiveGraph, PathwayUnavailableError
 from va_engine.opener import cache_text, phrase_format, phrase_voice
 from va_voice.phrase_cache import (
     PER_CALL_TTL_S,
@@ -218,3 +221,69 @@ async def test_the_budget_bounds_a_hanging_render() -> None:
     assert result == PrerenderResult(skipped="timeout")
     [event] = [e for e in log_events(stream) if e["event"] == "call_context.prerender_failed"]
     assert (event["error"], event["budget_s"]) == ("TimeoutError", 0.05)
+
+
+PATHWAY_ID = uuid.UUID("0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99")
+
+
+@dataclass
+class Graphs:
+    """A graph source with one pathway version (``error`` raised instead when set)."""
+
+    text: str = "Thanks for calling Bella Pasta, {{first_name}}."
+    error: Exception | None = None
+    loads: list[tuple[uuid.UUID, int]] = field(default_factory=list)
+
+    async def get(self, org_id: uuid.UUID, pathway_id: uuid.UUID, version: int) -> ActiveGraph:
+        del org_id
+        self.loads.append((pathway_id, version))
+        if self.error is not None:
+            raise self.error
+        nodes = [
+            {"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "text": self.text}}
+        ]
+        return ActiveGraph(pathway_id, version, load_graph(nodes, [], None))
+
+
+def pathway_context(**config: Any) -> CallContext:
+    defaults: dict[str, Any] = {"runner_type": "pathway", "pathway_id": str(PATHWAY_ID), "pathway_version": 3}
+    return context(**{**defaults, **config})
+
+
+async def test_a_pathway_call_prerenders_its_start_line(rig: Rig) -> None:
+    graphs = Graphs()
+    prerender = OpenerPrerender(cache=rig.cache, org_settings=rig.orgs, model_id=MODEL, graphs=graphs)
+    ctx = pathway_context()
+    opener = await prerender.opener_for_call(ctx, NOW)
+    assert opener == "Thanks for calling Bella Pasta, Ana."
+    assert graphs.loads == [(PATHWAY_ID, 3)]
+    result = await prerender.render(ctx.model_copy(update={"opener_text": opener}))
+    assert result.opener
+    assert opener in await rig.texts()
+
+
+async def test_task_calls_keep_their_first_sentence(rig: Rig) -> None:
+    graphs = Graphs()
+    prerender = OpenerPrerender(cache=rig.cache, org_settings=rig.orgs, model_id=MODEL, graphs=graphs)
+    assert await prerender.opener_for_call(context(), NOW) == OPENER
+    assert graphs.loads == []
+
+
+@pytest.mark.parametrize(
+    ("graphs", "config", "reason"),
+    [
+        (None, {}, None),
+        (Graphs(), {"pathway_version": None}, None),
+        (Graphs(text="   "), {}, None),
+        (Graphs(error=PathwayUnavailableError("version_not_found")), {}, "version_not_found"),
+        (Graphs(error=OperationalError("SELECT", {}, OSError())), {}, "OperationalError"),
+    ],
+)
+async def test_no_pathway_opener(
+    rig: Rig, graphs: Graphs | None, config: dict[str, Any], reason: str | None
+) -> None:
+    stream = json_log_stream()
+    prerender = OpenerPrerender(cache=rig.cache, org_settings=rig.orgs, model_id=MODEL, graphs=graphs)
+    assert await prerender.opener_for_call(pathway_context(**config), NOW) is None
+    failures = [e["reason"] for e in log_events(stream) if e["event"] == "call_context.pathway_opener_failed"]
+    assert failures == ([] if reason is None else [reason])

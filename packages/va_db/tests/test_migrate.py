@@ -44,7 +44,7 @@ def test_migrations_ship_inside_the_va_db_package() -> None:
     assert (migrations / "env.py").is_file()
     assert (migrations / "script.py.mako").is_file()
     assert (migrations / "versions" / "0001_initial.py").is_file()
-    assert _head() == "0008"
+    assert _head() == "0009"
 
 
 def test_negative_months_ahead_is_a_usage_error() -> None:

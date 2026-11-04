@@ -897,6 +897,47 @@ class EngineIO(Protocol):
 > (the call's `start_node_id` when the graph has it, else the start node, logged; seeded with
 > `CallContext.variables`).
 
+> Decision (2026-11-04): pathway calls in the media runtime (P07-T12b). `va_media.runtime.CallRuntime` runs
+> `runner_type` `task` and `pathway` calls (persona/agent still end `error`). For a pathway call it builds the
+> brain before any vendor socket opens (`va_media.pathway_runtime.build_pathway_brain`):
+> 1. **Graph**: the exact `CallContext.config.pathway_version` of `pathway_id` through the per-process
+>    `va_pathways.call_graphs.CallGraphCache` (LRU of 128 parsed graphs keyed `(org_id, pathway_id, version)`;
+>    only published/archived versions are cached, a draft version is read from the database on every call). A
+>    missing pathway id/version, an absent or deleted pathway, a missing version, or a graph that no longer parses
+>    ends the call with `error` before any audio (logged `media.pathway_unavailable` with the reason).
+> 2. **Ports**: decisions (`Decider`), dialogue replies (`GatewayDialogue` over `PathwayPrompt` with
+>    `DialogueSettings.for_call`) and composed final lines (`GatewayLinePort`) over the platform LLM gateway;
+>    Webhook nodes over one process-wide guarded tool HTTP client (`va_tools.http.tools_client`,
+>    `WEBHOOK_ALLOW_PRIVATE`; `http://` URLs only in `local`/`test`); SMS nodes through
+>    `va_media.call_sms.CallSmsPort` (from the node's `from`, else the call's own number: `from` of an outbound
+>    call, `to` of an inbound one; a fresh UUIDv7 message id per send; recorded like the voicemail SMS in the
+>    number pair's conversation; failures are `SmsOutcome(sent=False, error=<reason>)`, never raised; no port
+>    without a database); forwarding and Transfer Pathway through the cache's loader (`production`/`staging` pins
+>    resolved on every load, numbers through the cache).
+> 3. **Events**: every engine event is published as a call event through the call's `TurnRecorder` in the same
+>    ordered chain as `call.turn` (`TurnRecorder.engine_event`), with the engine's `data` (including
+>    `turn_index`) and a fixed message of node ids and numbers only (`va_media.pathway_events`); event types other
+>    than `call.route`/`call.extraction`/`call.loop_condition`/`call.webhook_node`/`call.sms_sent` are dropped
+>    (logged). Turn rows and `call.turn` events carry the engine node (`node_id`, `node_name`) and the engine turn
+>    (`call_turns.pathway_turn`) from `PathwayBrain.turn_tags`: a caller turn is the engine's next turn index at
+>    the current node (the pipeline observes a routed turn before the Brain accepts it); an agent turn belongs to
+>    the engine turn and node current when its line was handed to the pipeline.
+> 4. **Snapshots**: `on_state` writes `dump_engine_state(state)` to `call:{id}:engine` (TTL 7 200 s) in one
+>    ordered background chain, latest state winning (`va_media.pathway_runtime.EngineStateSaver`; Redis failures
+>    logged, never raised). On exit the brain settles and closes, then the snapshot is flushed, then the call's
+>    events are drained and its rows flushed.
+> 5. **Final variables**: the end-of-call routine (specs/07 §18) reads the final snapshot and merges its
+>    `variables` into `calls.variables` (`stored || final`) before recording the end, whatever ended the call
+>    (the session body may be cancelled by a carrier hangup, so the variables travel through the snapshot, not
+>    the session result). A missing or unreadable snapshot merges nothing (logged).
+> 6. **Opener prefetch**: when the start node (the call's `start_node_id` when present) is a non-global Default
+>    node with a static `text` and the call does not `wait_for_greeting`, `prefetch_call_context` stores the
+>    rendered line (`va_engine.pathway_call.opener_text`: same scope as the engine's `Say` — state variables,
+>    `request_data`, call built-ins at prefetch time, timezone) as `CallContext.opener_text` and pre-renders it
+>    into the phrase cache; the engine's start `Say` is identical text, so the Speaker plays it from the cache (a
+>    template using a time built-in may differ at call time: the line then goes through the TTS socket). The
+>    worker reads the graph through its own `CallGraphCache`; a graph that cannot be read leaves no opener.
+
 ## 11. Validation (save draft = warnings allowed; publish = errors block)
 
 | Rule | Code | Message | Save | Publish |
@@ -993,6 +1034,12 @@ Keys always present (null when not applicable); keys sorted as above; times UTC 
 > 5. A superseded turn (specs/07 §8) loses its records and events. `created_at` serializes as
 >    `YYYY-MM-DDTHH:MM:SS.mmmZ` (UTC, truncated to milliseconds); the canonical bytes are the entries as JSON in
 >    the key order above, two-space indented, with a trailing newline (snapshot-tested).
+>
+> Addendum (2026-11-04, P07-T12b): a voice call's `call_turns.turn_index` counts pipeline turns (opener, caller,
+> agent: one engine turn can produce several assistant rows, one per chained node line), so pathway calls also
+> store the engine turn index in `call_turns.pathway_turn` (migration 0009; NULL for other runners). The Call
+> Object groups a row by `pathway_turn` when it is set, else by `turn_index`; rule 1's "at most one assistant row
+> per turn index" holds for `turn_index` only, the grouping joins a turn's rows as described.
 
 ## 13. Configuration precedence for node model options
 `node.modelOptions` → `global_config` defaults → call config (`temperature`, `interruptibility`,

@@ -27,7 +27,7 @@ from va_db.session import Database
 from va_domain.org import OrgSettings
 from va_domain.pathway_tests import Scenario, SimulationJob
 from va_engine.engine import PathwayEngine
-from va_engine.models import dump_graph, graph_hash, load_graph
+from va_engine.models import PathwayGraph, dump_graph, graph_hash, load_graph
 from va_engine.models.results import Action, Wait
 from va_engine.navigation import ActiveGraph
 from va_llm.tokens import default_counter
@@ -50,6 +50,7 @@ __all__ = [
     "size_rule",
     "spec",
     "store_bella_pasta",
+    "store_pathway",
     "store_unit_test",
     "text_rig",
 ]
@@ -156,7 +157,14 @@ def job(simulation_id: str = "1-1", **fields: Any) -> SimulationJob:
 
 async def store_bella_pasta(database: Database, org_id: uuid.UUID) -> uuid.UUID:
     """A pathway of ``org_id`` whose version 1 (the draft) is :func:`bella_pasta`."""
-    graph = dump_graph(bella_pasta().graph)
+    return await store_pathway(database, org_id, bella_pasta().graph, name="Bella Pasta")
+
+
+async def store_pathway(
+    database: Database, org_id: uuid.UUID, pathway: PathwayGraph, *, name: str
+) -> uuid.UUID:
+    """A pathway of ``org_id`` whose version 1 (the draft) is ``pathway``."""
+    graph = dump_graph(pathway)
     stored = PathwayGraphJson(
         nodes=list(graph["nodes"]),
         edges=list(graph["edges"]),
@@ -164,10 +172,10 @@ async def store_bella_pasta(database: Database, org_id: uuid.UUID) -> uuid.UUID:
         graph_hash=graph_hash(graph),
     )
     async with database.tenant_session(org_id) as session:
-        pathway, _ = await PathwayRepo(session, org_id).create(
-            name="Bella Pasta", description="", folder_id=None, graph=stored
+        created, _ = await PathwayRepo(session, org_id).create(
+            name=name, description="", folder_id=None, graph=stored
         )
-        return pathway.id
+        return created.id
 
 
 async def store_unit_test(

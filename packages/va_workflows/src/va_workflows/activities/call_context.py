@@ -72,7 +72,7 @@ class CallContextActivities:
                 return PrefetchResult(stored=False, status=status)
             prerender = self._prerender
             if prerender is not None:
-                opener = prerender.opener_for(context, self._clock.now())
+                opener = await prerender.opener_for_call(context, self._clock.now())
                 context = context.model_copy(update={"opener_text": opener})
             await self._store.save(context)
             ttl_s = context.ttl_s()

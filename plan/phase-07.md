@@ -185,7 +185,7 @@
     pathway (route, end call after final line, barge-in truncation, wait timeout reprompt); pipeline tests for the
     per-node no-input timeout.
 
-- [ ] P07-T12b Media runtime runs pathway calls
+- [x] P07-T12b Media runtime runs pathway calls — CallRuntime builds PathwayBrain over CallGraphCache (va_pathways.call_graphs), engine events via TurnRecorder.engine_event, call_turns.pathway_turn (migration 0009), EngineStateSaver snapshot + CallEnd variable merge, CallSmsPort over shared OutboundSms, worker pathway opener prefetch; review: lint/typecheck/placeholders/spec refs/jscpd 0 pass, make test 12611 passed + 1 pre-existing wall-clock underrun flake (passes 3/3 alone, task opened), e2e 18 passed on rebuilt stack
   - Spec refs: specs/07 §16, specs/11 §9 (`call:{id}:engine`, final variables), §12, specs/19 §2 (`call.route`,
     `call.extraction`, `call.loop_condition`, `call.webhook_node`, `call.sms_sent`), specs/01 §2.1 step 2
   - Depends on: P07-T12a

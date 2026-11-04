@@ -492,6 +492,10 @@
 
 ## Decisions
 
+### mem-1793795260-f93b
+> P07-T12b: pathway call variables reach calls.variables via the call:{id}:engine snapshot read by CallEnd (a carrier hangup cancels the session body, so a SessionEnd field would lose them); PathwayBrain.turn_tags tags agent turns by the line last handed to the pipeline because a SayStream is recorded in history only after the generator resumes; call_turns.pathway_turn groups pathway_logs
+<!-- tags: media, pathways | created: 2026-11-04 -->
+
 ### mem-1793604160-bb3f
 > P05-T11b plan: media end routine runs in CallSession between _race and _cleanup (lock still held); stream_closed re-reads carrier_state primary_hangup then waits 3 s on feed.next_carrier; worker_lost → no hangup/no row, CallWorkflow hangs up; shared va_db.call_end.record_answered_end with end_call activity
 <!-- tags: media, calls, workflows | created: 2026-11-02 -->
@@ -505,6 +509,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793796176-e35b
+> failure: make test -> test_runtime_sim::test_caller_turn_is_answered_by_the_task_brain va_audio_underruns_total 1 != 0 under xdist load (realtime sim, wall clock); passes alone; next: make underrun assertion load-tolerant or drive on accelerated clock
+<!-- tags: media, testing, flaky | created: 2026-11-04 -->
 
 ### mem-1793787934-5c75
 > e2e flakes 2026-11-04: interruptibility_levels[1] fails ~40% (barge clear 1183ms vs 1200 rule: assertion measures from utterance start+MARKER_MS but pipeline counts VAD speech_ms); amd_ivr_mode lost 2nd DTMF once on cold stack. Re-run alone as evidence; task fix:e2e-interrupt-level1

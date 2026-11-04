@@ -71,7 +71,7 @@ _SPEC_COLUMNS: dict[str, str] = {
     ),
     "call_turns": (
         "id org_id call_id turn_index role text text_spoken? interrupted start_ms end_ms node_id? node_name? "
-        "language_code? stt_confidence? latency text_realtime? created_at updated_at"
+        "language_code? stt_confidence? latency text_realtime? created_at updated_at pathway_turn?"
     ),
     "call_events": "id org_id call_id seq category level message data created_at event_type?",
     "call_analyses": ("id org_id call_id kind goal? questions? schema? result model created_at updated_at"),

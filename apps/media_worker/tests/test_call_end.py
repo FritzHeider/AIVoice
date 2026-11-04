@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Final, cast
 
 import fakeredis
 import pytest
@@ -26,6 +26,10 @@ from va_db.models import CallStatus
 from va_db.session import Database
 from va_domain.call_workflow import PipelineFinished
 from va_domain.carrier import CarrierEvent, carrier_state_key
+from va_engine.engine import new_pathway_state
+from va_engine.models import dump_engine_state, load_graph
+from va_engine.navigation import ActiveGraph
+from va_engine.pathway_call import engine_state_key
 from va_events import DomainEvent, EventPublishError, EventType
 from va_media.call_end import STREAM_CLOSED_WAIT_S, STREAM_LOST_MESSAGE, CallEnd
 from va_media.channels import CallFeed
@@ -152,6 +156,7 @@ async def rig(  # noqa: PLR0913 - keyword-only test knobs
     state: dict[str, str] | None = None,
     broken_db: bool = False,
     no_telnyx: bool = False,
+    context_config: dict[str, Any] | None = None,
     **values: Any,
 ) -> AsyncIterator[Rig]:
     clock = ManualClock()
@@ -166,7 +171,7 @@ async def rig(  # noqa: PLR0913 - keyword-only test knobs
     fake_events = events if events is not None else FakeEvents()
     signaller = RecordingSignaller()
     session = CallSession(
-        context=call_context(call.call_id, org_id=call.org_id),
+        context=call_context(call.call_id, org_id=call.org_id, **(context_config or {})),
         socket=FakeSocket(),
         start=START,
         ownership=CallOwnership(redis, call.call_id, "pod-test"),
@@ -460,3 +465,74 @@ async def test_redis_failures_are_logged_and_the_rest_runs(database: Database) -
         assert r.signalled() == [("agent_end_call", "agent")]
     events = {e["event"] for e in log_events(stream)}
     assert {"media.carrier_state_unavailable", "media.slot_release_failed"} <= events
+
+
+PATHWAY_CALL: Final = {
+    "runner_type": "pathway",
+    "pathway_id": "0191f2a4-7c55-7a1e-9a10-5b2e4c8f1a99",
+    "pathway_version": 1,
+}
+
+
+def engine_snapshot(variables: dict[str, Any]) -> str:
+    nodes = [{"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "text": "Hi."}}]
+    state = new_pathway_state(ActiveGraph(None, None, load_graph(nodes, [], None)))
+    state.variables.update(variables)
+    return dump_engine_state(state)
+
+
+@pytest.mark.parametrize("end", [ended("agent_end_call", "agent"), ended("transferred", "agent")])
+async def test_a_pathway_calls_final_variables_are_merged(database: Database, end: SessionEnd) -> None:
+    async with rig(database, context_config=PATHWAY_CALL, variables={"name": "Ann", "party": 2}) as r:
+        await r.redis.set(engine_state_key(r.call.call_id), engine_snapshot({"party": 4, "time": "7pm"}))
+        await r.finish(end)
+        call = await load_call(database, r.call)
+        assert call.variables == {"name": "Ann", "party": 4, "time": "7pm"}
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "event", "problem"),
+    [
+        (None, "media.engine_state_missing", None),
+        ("not json", "media.engine_state_unreadable", "invalid_json"),
+        ('{"schema_version": 3}', "media.engine_state_unreadable", "invalid_fields"),
+        (engine_snapshot({}), None, None),
+    ],
+)
+async def test_without_final_variables_nothing_is_merged(
+    database: Database, snapshot: str | None, event: str | None, problem: str | None
+) -> None:
+    stream = json_log_stream()
+    async with rig(database, context_config=PATHWAY_CALL, variables={"name": "Ann"}) as r:
+        if snapshot is not None:
+            await r.redis.set(engine_state_key(r.call.call_id), snapshot)
+        await r.finish(ended("agent_end_call", "agent"))
+        assert (await load_call(database, r.call)).variables == {"name": "Ann"}
+        assert r.signalled() == [("agent_end_call", "agent")]
+    logged = [
+        e
+        for e in log_events(stream)
+        if e["event"] in {"media.engine_state_missing", "media.engine_state_unreadable"}
+    ]
+    assert [(e["event"], e.get("problem")) for e in logged] == ([] if event is None else [(event, problem)])
+
+
+async def test_variable_merge_failures_are_logged_and_the_rest_runs(database: Database) -> None:
+    stream = json_log_stream()
+    async with rig(database, context_config=PATHWAY_CALL, broken_db=True) as r:
+        await r.redis.set(engine_state_key(r.call.call_id), engine_snapshot({"party": 4}))
+        await r.finish(ended("agent_end_call", "agent"))
+        assert r.signalled() == [("agent_end_call", "agent")]
+    async with rig(database, context_config=PATHWAY_CALL) as r:
+        server = fakeredis.FakeServer()
+        server.connected = False
+        r.ender = CallEnd(
+            database=database,
+            redis=fakeredis.FakeAsyncRedis(server=server),
+            signaller=r.signaller,
+            clock=r.clock,
+        )
+        await r.finish(ended("agent_end_call", "agent"))
+        assert r.signalled() == [("agent_end_call", "agent")]
+    events = {e["event"] for e in log_events(stream)}
+    assert {"media.variables_merge_failed", "media.engine_state_unavailable"} <= events

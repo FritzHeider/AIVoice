@@ -619,3 +619,24 @@ async def test_another_orgs_child_rows_never_leak(database: Database) -> None:
 
 def _columns(call: Call) -> dict[str, Any]:
     return {column.key: getattr(call, column.key) for column in Call.__mapper__.column_attrs}
+
+
+async def test_pathway_turns_group_by_their_engine_turn(database: Database) -> None:
+    """Pipeline turns 2 and 3 (two chained nodes of engine turn 1) make one log entry (P07-T12b)."""
+    call = await seed_call(database, status="completed", runner_type="pathway")
+    rows = [
+        _turn(call, 0, "assistant", "Welcome to Bella.", node_id="start", node_name="Start", pathway_turn=0),
+        _turn(call, 1, "user", "A table please.", node_id="start", node_name="Start", pathway_turn=1),
+        _turn(call, 2, "assistant", "Sure.", node_id="book", node_name="Book", pathway_turn=1),
+        _turn(call, 3, "assistant", "How many guests?", node_id="size", node_name="Size", pathway_turn=1),
+    ]
+    route = {"turn_index": 1, "from_node": "start", "to_node": "book", "label": "Book", "tag_color": None}
+    async with database.tenant_session(call.org_id) as session:
+        session.add_all(rows)
+        session.add(_event(call, 1, "route", route, "call.route"))
+    [body] = await _objects(database, call.org_id, call.call_id)
+    assert [(log.node_id, log.text, log.user_text) for log in body.pathway_logs] == [
+        ("start", "Welcome to Bella.", None),
+        ("size", "Sure. How many guests?", "A table please."),
+    ]
+    assert body.pathway_logs[1].tag.name == "Size"

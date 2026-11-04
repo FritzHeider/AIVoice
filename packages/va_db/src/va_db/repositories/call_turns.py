@@ -32,6 +32,7 @@ _UPDATED_COLUMNS = (
     "node_id",
     "node_name",
     "language_code",
+    "pathway_turn",
 )
 
 
@@ -113,6 +114,7 @@ class CallTurnRepo:
             "node_name": row.node_name,
             "language_code": row.language_code,
             "latency": row.latency,
+            "pathway_turn": row.pathway_turn,
         }
 
 

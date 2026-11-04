@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ import pytest
 from clock_helpers import ManualClock
 from media_helpers import call_context
 from service_helpers import json_log_stream, log_events
+from sms_fakes import FakeTelnyx
 from sms_rows import add_sms_number, add_telnyx_account, random_e164
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -23,8 +23,7 @@ from va_db.session import Database
 from va_domain.call_context import CallContext
 from va_events import DomainEvent, EventPublishError, EventType
 from va_media.voicemail_sms import SMS_SENT_MESSAGE, VoicemailSms, voicemail_message_id
-from va_telnyx import Message as TelnyxMessage
-from va_telnyx import MessageCreate, TelnyxApiError, UnknownTelnyxAccount, WebhookScheme
+from va_telnyx import TelnyxApiError, WebhookScheme
 from va_telnyx.errors import TelnyxErrorItem, TelnyxTransportError
 
 pytestmark = pytest.mark.integration
@@ -32,42 +31,6 @@ pytestmark = pytest.mark.integration
 EDGE = "edge.test:8100"
 PLATFORM_PROFILE = "mp-platform"
 TEMPLATE = "Hi {{name}}, sorry we missed you. Call {{from}} back."
-
-
-@dataclass
-class FakeTelnyx:
-    """Client factory + client: records sends; ``fail`` raises from ``send_message``, ``unknown`` from
-    ``for_account``."""
-
-    sent: list[MessageCreate] = field(default_factory=list)
-    accounts: list[uuid.UUID | None] = field(default_factory=list)
-    status: str | None = "queued"
-    parts: int | None = 2
-    unknown: bool = False
-    fail: Exception | None = None
-
-    async def for_account(self, telnyx_account_id: uuid.UUID | None) -> FakeTelnyx:
-        if self.unknown:
-            raise UnknownTelnyxAccount(telnyx_account_id or uuid.uuid4())
-        self.accounts.append(telnyx_account_id)
-        return self
-
-    async def send_message(self, message: MessageCreate) -> TelnyxMessage:
-        if self.fail is not None:
-            raise self.fail
-        self.sent.append(message)
-        recipient: dict[str, Any] = {"phone_number": message.to}
-        if self.status is not None:
-            recipient["status"] = self.status
-        return TelnyxMessage.model_validate(
-            {
-                "id": f"msg-{secrets.token_hex(8)}",
-                "direction": "outbound",
-                "from": {"phone_number": message.from_},
-                "to": [recipient],
-                "parts": self.parts,
-            }
-        )
 
 
 @dataclass

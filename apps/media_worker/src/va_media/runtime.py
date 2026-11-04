@@ -5,8 +5,8 @@
 org provider store behind the envelope, the org settings reader, the token counter, the Silero model and the
 VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRuntime.__call__`:
 
-1. refuses runners other than ``task`` (pathway/persona/agent Brains arrive in later phases) and calls whose
-   org is gone, without opening a vendor socket;
+1. refuses runners other than ``task`` and ``pathway`` (persona/agent Brains arrive in later phases) and
+   calls whose org is gone, without opening a vendor socket;
 2. wraps the session's socket in :class:`~va_media.transport.TelnyxMediaTransport` and maps the context onto
    the :class:`PipelineConfig` (``va_media.runtime_config``);
 3. opens the realtime STT and TTS sockets concurrently (closed on every path, including cancellation by the
@@ -45,6 +45,17 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     :data:`BACKGROUND_ASSETS_DIR`; an asset that cannot be read is logged ``media.background_unavailable`` and
     the call goes on without a bed. ``noise_cancellation`` gates the VAD path and turns Scribe's
     ``filter_background_audio`` on (``va_media.runtime_config``; specs/07 §10 Decision P05-T15).
+11. a ``pathway`` call runs a :class:`~va_engine.pathway_brain.PathwayBrain` on its pinned version
+    (:func:`~va_media.pathway_runtime.build_pathway_brain` over
+    :class:`~va_media.pathway_runtime.PathwayTools`: the per-process graph cache, the shared tool HTTP client,
+    the SMS port over
+    :class:`~va_media.call_sms.OutboundSms`), built before any vendor socket opens: a version that cannot be
+    loaded ends the call with ``error`` (logged ``media.pathway_unavailable``). Its engine events become call
+    events through the recorder, its rows carry ``pathway_turn``/``node_id``/``node_name``, and its state is
+    snapshotted in ``call:{id}:engine`` after every turn
+    (:class:`~va_media.pathway_runtime.EngineStateSaver`);
+    on exit the brain settles and closes before the snapshot is flushed and the call's events are drained
+    (specs/11 §10 Decision P07-T12b).
 """
 
 from __future__ import annotations
@@ -86,18 +97,22 @@ from va_elevenlabs import (
     TtsError,
     TtsSocket,
 )
+from va_engine.navigation import PathwayUnavailableError
 from va_engine.opener import phrase_voice
+from va_engine.pathway_brain import PathwayBrain
 from va_engine.system_tools import facts_for_call
-from va_engine.task_runner import DialogueSource, TaskBrain
+from va_engine.task_runner import TaskBrain
 from va_events import CallEventBuffer, DbCallEventWriter, DbWebhookRouter, EventPublisher
 from va_llm import LlmMetrics
 from va_llm.platform import platform_gateway
 from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
+from va_media.call_sms import CallSmsPort, OutboundSms
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
 from va_media.maintenance import maintenance_takeover
+from va_media.pathway_runtime import EngineStateSaver, PathwayGateway, PathwayTools, build_pathway_brain
 from va_media.phrases import CallPhrases
 from va_media.runtime_config import (
     ERROR_END,
@@ -115,11 +130,14 @@ from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError
 from va_media.turn_writer import TurnWriter
 from va_media.turns import CallPersistence, TurnRecorder
 from va_media.vad_model import VadStatus
-from va_media.voicemail import DbAnsweredBy, LlmAnswerClassifier, StructuredSource, VoicemailMonitor
+from va_media.voicemail import DbAnsweredBy, LlmAnswerClassifier, VoicemailMonitor
 from va_media.voicemail_sms import VoicemailSms
 from va_media.workflow_signal import TemporalPipelineSignaller
+from va_pathways.call_graphs import CallGraphCache
+from va_pathways.runs import insecure_urls_allowed
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount, webhook_scheme
 from va_telnyx.settings import telnyx_factory, telnyx_http
+from va_tools.http import tools_client
 from va_voice.background import BackgroundAssetError, BackgroundLibrary
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.outbound import FrameMixer
@@ -144,6 +162,7 @@ __all__ = [
     "RuntimeDependencies",
     "RuntimeFactory",
     "RuntimeGateway",
+    "TransferAware",
     "background_mixer",
     "open_persistence",
     "open_runtime",
@@ -184,8 +203,15 @@ class RuntimeFactory(Protocol):
     ) -> AbstractAsyncContextManager[SessionBody]: ...
 
 
-class RuntimeGateway(DialogueSource, StructuredSource, Protocol):
-    """The LLM gateway of the runtime: dialogue streams and structured outputs (:class:`LlmGateway`)."""
+class RuntimeGateway(PathwayGateway, Protocol):
+    """The LLM gateway of the runtime: dialogue streams, structured outputs and completions
+    (:class:`LlmGateway`)."""
+
+
+class TransferAware(Protocol):
+    """A Brain that learns about a failed transfer (:class:`TaskBrain`, :class:`PathwayBrain`)."""
+
+    def on_transfer_failed(self, spoken: str) -> None: ...
 
 
 class OrgSettingsSource(Protocol):
@@ -221,8 +247,10 @@ class CallRuntime:
         end_routine: CallEnd | None = None,
         tracer_provider: TracerProvider | None = None,
         database: Database | None = None,
+        pathways: PathwayTools | None = None,
     ) -> None:
         self._settings = settings
+        self._pathways = pathways
         self._background = background
         self._database = database
         self._end_routine = end_routine
@@ -251,7 +279,7 @@ class CallRuntime:
 
     async def __call__(self, session: CallSession) -> SessionEnd:
         context = session.context
-        if context.config.runner_type != "task":
+        if context.config.runner_type not in {"task", "pathway"}:
             _log.error("media.runner_unsupported", runner_type=context.config.runner_type)
             return ERROR_END
         if self._vad_model is None:
@@ -284,6 +312,14 @@ class CallRuntime:
     ) -> SessionEnd:
         context = session.context
         async with AsyncExitStack() as stack:
+            recorder = self._recorder(session)
+            if recorder is not None and self._persistence is not None:
+                stack.push_async_callback(self._persistence.finish_call, recorder, context)
+            try:
+                brain = await self._brain(stack, context, org, recorder)
+            except PathwayUnavailableError as exc:
+                _log.error("media.pathway_unavailable", reason=exc.reason)
+                return ERROR_END
             try:
                 vendors = await self._open_vendors(stack, context, org, config)
             except (SttError, TtsError, OSError) as exc:
@@ -292,16 +328,7 @@ class CallRuntime:
             telnyx = await self._telnyx_client(context)
             watch = CarrierWatch(session.feed, session.carrier_state)
             call_control_id = session.start.call_control_id
-            recorder = self._recorder(session)
             monitor = self._monitor(session, watch)
-            brain = TaskBrain(
-                context=context,
-                settings=org,
-                gateway=self._gateway,
-                counter=self._counter,
-                facts=facts_for_call(context, org, sms_capable=False),
-                clock=self._clock,
-            )
             actions = MediaActions(
                 call_id=context.call_id,
                 call_control_id=call_control_id,
@@ -337,8 +364,6 @@ class CallRuntime:
             maintenance = maintenance_takeover(context)
             if maintenance is not None:
                 pipeline.take_over(maintenance)
-            if recorder is not None and self._persistence is not None:
-                stack.push_async_callback(self._persistence.finish_call, recorder, context)
             if monitor is not None:
                 _start_monitor(stack, monitor, watch, pipeline)
             watcher = asyncio.create_task(watch.run(), name="carrier-watch")
@@ -347,6 +372,55 @@ class CallRuntime:
                 recorder.started(stream_format(session.start.media_format))
             result = await pipeline.run()
         return session_end(result)
+
+    async def _brain(
+        self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
+    ) -> TaskBrain | PathwayBrain:
+        """The call's Brain. A pathway brain closes on exit (settling its background work), then its last
+        snapshot is flushed, both before the call's events are drained (registered after the recorder's
+        ``finish_call``). ``PathwayUnavailableError`` when the pathway cannot run."""
+        if context.config.runner_type == "task":
+            return TaskBrain(
+                context=context,
+                settings=org,
+                gateway=self._gateway,
+                counter=self._counter,
+                facts=facts_for_call(context, org, sms_capable=False),
+                clock=self._clock,
+            )
+        if self._pathways is None:
+            raise PathwayUnavailableError("not_configured")
+        saver = None if self._redis is None else EngineStateSaver(self._redis, context.call_id)
+        brain = await build_pathway_brain(
+            context,
+            org,
+            tools=self._pathways,
+            gateway=self._gateway,
+            counter=self._counter,
+            clock=self._clock,
+            sms=self._sms_port(context),
+            recorder=recorder,
+            saver=saver,
+        )
+        if saver is not None:
+            stack.push_async_callback(saver.aclose)
+        stack.push_async_callback(brain.aclose)
+        return brain
+
+    def _sms_port(self, context: CallContext) -> CallSmsPort | None:
+        """The SMS port of a pathway call (``None`` without a database: the message cannot be recorded)."""
+        if self._database is None:
+            return None
+        sender = OutboundSms(
+            database=self._database,
+            telnyx=self._telnyx,
+            platform_profile_id=self._settings.telnyx_messaging_profile_id,
+            edge_public_host=self._settings.edge_public_host,
+            clock=self._clock,
+            log_prefix="media.pathway_sms",
+            webhook_scheme=webhook_scheme(self._settings.va_env.value),
+        )
+        return CallSmsPort(sender, context)
 
     def _cold_transfer(
         self, session: CallSession, org: OrgSettings, telnyx: TelnyxClient | None, watch: CarrierWatch
@@ -512,7 +586,7 @@ def _start_monitor(
 
 
 def _bind_transfer(
-    actions: MediaActions, pipeline: CallPipeline, brain: TaskBrain, failed_message: str
+    actions: MediaActions, pipeline: CallPipeline, brain: TransferAware, failed_message: str
 ) -> None:
     """A bridged transfer ends the AI's part of the call (takeover ``transferred``, no message); a failed one
     tells the Brain and speaks the org's ``transfer_failed_message``, then the conversation goes on."""
@@ -597,7 +671,8 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
 ) -> AsyncIterator[CallRuntime]:
     """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
     database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
-    platform LLM connection is prewarmed (a failure is logged, never raised). The Telnyx pool and client
+    platform LLM connection is prewarmed (a failure is logged, never raised). Pathway calls share one guarded
+    tool HTTP client (``WEBHOOK_ALLOW_PRIVATE``) and one graph cache. The Telnyx pool and client
     factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound DTMF and the end-of-call hangup; the
     end routine signals ``CallWorkflow`` through a lazily connected Temporal client (not a readiness check,
     specs/07 §2)."""
@@ -626,6 +701,8 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             resolve_key=TelnyxKeyResolver(database, envelope),
             clock=clock,
         )
+        tools_http = tools_client(settings)
+        stack.push_async_callback(tools_http.aclose)
         executor = await stack.enter_async_context(VadExecutor(settings.media_vad_threads))
         persistence = await stack.enter_async_context(
             open_persistence(database, container.redis, clock=clock)
@@ -657,4 +734,9 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             persistence=persistence,
             end_routine=end_routine,
             database=database,
+            pathways=PathwayTools(
+                graphs=CallGraphCache(database),
+                tools_http=tools_http,
+                allow_http=insecure_urls_allowed(settings.va_env),
+            ),
         )

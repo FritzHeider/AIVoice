@@ -14,6 +14,7 @@ from va_common.settings import (
     StreamTokenSettings,
     TelnyxPublicKeySettings,
     TemporalSettings,
+    WebhookSafetySettings,
 )
 from va_common.stream_tokens import media_ws_scheme
 from va_elevenlabs.settings import ElevenLabsSettings
@@ -34,6 +35,7 @@ class MediaSettings(
     ElevenLabsSettings,
     LlmSettings,
     TelnyxApiSettings,
+    WebhookSafetySettings,
 ):
     """Admission, drain, media WebSocket authentication, vendor, and LLM settings of a media-worker pod.
 
@@ -41,7 +43,7 @@ class MediaSettings(
     without environment; the app lifespan refuses to start without them (specs/07 §3 Decision P05-T07a).
     ``LOCAL_MASTER_KEY`` (local KMS provider) is needed once the call runtime opens (org LLM provider and BYO
     Telnyx keys); ``TELNYX_API_BASE``/``TELNYX_API_KEY`` serve outbound DTMF (precall sequence,
-    ``press_button``).
+    ``press_button``). ``WEBHOOK_ALLOW_PRIVATE`` guards the Webhook nodes of pathway calls.
     """
 
     service_name: ClassVar[str] = "media-worker"

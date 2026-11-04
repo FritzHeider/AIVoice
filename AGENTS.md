@@ -1921,3 +1921,17 @@ Grafana 3001
   records a line the consumer spoke itself. Tests: `packages/va_engine/tests/test_pathway_brain.py` (engine_rig +
   a `drain` that reads streams like the pipeline) and `test_pathway_brain_pipeline.py` (static-text graphs on the
   harness's accelerated clock; KeyedPort scripts the routes, no FakeLLM needed).
+- 2026-11-04 (P07-T12b): pathway calls in the media runtime: `CallRuntime(pathways=va_media.pathway_runtime.
+  PathwayTools(graphs=va_pathways.call_graphs.CallGraphCache(db), tools_http=, allow_http=))` builds a
+  `PathwayBrain` (before vendor sockets; unloadable version → `ERROR_END`, `media.pathway_unavailable`). Engine
+  events → `TurnRecorder.engine_event` (messages `va_media.pathway_events`); rows get `call_turns.pathway_turn`
+  (migration 0009, head `0009`) + node via `TurnRecorder.tagger = brain` (`PathwayBrain.turn_tags`); the Call
+  Object groups pathway rows by `pathway_turn`. `EngineStateSaver` writes `call:{id}:engine`
+  (`va_engine.pathway_call.engine_state_key`); `CallEnd` merges that snapshot's variables into `calls.variables`
+  (`CallRepo.merge_variables`) because a carrier hangup cancels the body (no session result). SMS core shared by
+  voicemail and SMS nodes: `va_media.call_sms.OutboundSms` (+ `CallSmsPort`); test fake `support/sms_fakes.
+  FakeTelnyx`. Worker prefetch: `OpenerPrerender(graphs=CallGraphCache)` + `opener_for_call` (pathway start line).
+  Tests: `apps/media_worker/tests/test_runtime_pathway_sim.py` (`pathway_rig`: ONE Redis = the container's for
+  snapshot/end routine/events; FakeLLM routes by `system_contains: ['Current step: "<node name>"']`),
+  `runtime_rig.sim_runtime(pathways=)`, `pathways_helpers.store_pathway(db, org, graph, name=)`,
+  `engine_rig(facts=)`. A runtime pipeline end `agent_hangup` maps to `agent_end_call` before the end routine.

@@ -44,6 +44,7 @@ from va_db.telnyx_keys import TelnyxKeyResolver
 from va_elevenlabs import ElevenLabsRest
 from va_llm import LlmMetrics
 from va_llm.platform import platform_gateway
+from va_pathways.call_graphs import CallGraphCache
 from va_pathways.conversation import TextDeps
 from va_pathways.runs import insecure_urls_allowed
 from va_telnyx.settings import telnyx_factory, telnyx_http
@@ -157,7 +158,8 @@ async def build_container(
 async def _opener_prerender(
     settings: WorkerSettings, database: Database, redis: Redis, clock: SystemClock
 ) -> AsyncIterator[OpenerPrerender]:
-    """The phrase cache over ElevenLabs REST (its HTTP client and renders in flight are closed on exit)."""
+    """The phrase cache over ElevenLabs REST (its HTTP client and renders in flight are closed on exit);
+    pathway openers come from the graphs of the calls' pinned versions."""
     http = http_client(settings, timeout=ELEVENLABS_HTTP_TIMEOUT)
     rest = ElevenLabsRest(
         settings.elevenlabs_api_key.get_secret_value(), settings.elevenlabs_api_base, http, clock=clock
@@ -168,6 +170,7 @@ async def _opener_prerender(
             cache=cache,
             org_settings=OrgSettingsReader(database, redis),
             model_id=settings.elevenlabs_tts_model,
+            graphs=CallGraphCache(database),
         )
     finally:
         await cache.aclose()

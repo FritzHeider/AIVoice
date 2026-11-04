@@ -261,14 +261,26 @@ async def test_rejected_vendor_key_ends_with_error_before_any_audio() -> None:
         assert not r.state.elevenlabs.stt.sockets
 
 
-async def test_non_task_runner_is_refused_without_vendor_sockets() -> None:
+async def test_unsupported_runner_is_refused_without_vendor_sockets() -> None:
+    async with rig() as r:
+        r.scenario("silence: {ms: 60000}")
+        async with r.call(runner_type="persona", task=None, persona_id=str(uuid.uuid4()), persona_version=1):
+            end = await r.body.end()
+        assert end == ERROR_END
+        assert r.org_settings.reads == []
+        assert r.state.elevenlabs.stt.sessions == []
+
+
+async def test_a_pathway_call_without_pathway_support_is_refused_without_vendor_sockets() -> None:
+    stream = json_log_stream()
     async with rig() as r:
         r.scenario("silence: {ms: 60000}")
         async with r.call(runner_type="pathway", task=None, pathway_id=str(uuid.uuid4()), pathway_version=1):
             end = await r.body.end()
         assert end == ERROR_END
-        assert r.org_settings.reads == []
         assert r.state.elevenlabs.stt.sessions == []
+    reasons = [e["reason"] for e in log_events(stream) if e["event"] == "media.pathway_unavailable"]
+    assert reasons == ["not_configured"]
 
 
 async def test_missing_org_ends_with_error() -> None:

@@ -18,13 +18,20 @@ actions) to the narrower :class:`va_voice.pipeline.Brain` contract (specs/07 §1
 Closing an output stream (barge-in) closes the engine generator; the pipeline then calls
 :meth:`on_interrupted`. ``on_state`` runs after every finished or closed engine generator and after a
 truncation or a transfer-failure note, so the runtime can snapshot the state.
+
+:meth:`turn_tags` tells the media worker's turn recorder which engine turn and node a pipeline turn belongs to
+(``call_turns.pathway_turn``/``node_id``/``node_name``; Decision P07-T12b under specs/11 §10): the pipeline's
+observer sees a routed caller turn before the Brain accepts it (every routed turn is accepted next, so it is
+the engine's next turn index at the current node); an agent turn belongs to the engine turn and node that were
+current when its line was handed to the pipeline.
 """
 
 from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncGenerator, Callable
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Literal
 
 from pydantic import JsonValue
 
@@ -47,7 +54,7 @@ from va_engine.models import (
 from va_engine.models.results import PressButton, TransferRequest
 from va_voice.pipeline.models import BrainOutput, BrainTiming, EndCall, SpeakStatic, SpeakText, UserTurn
 
-__all__ = ["PATHWAY_END_REASON", "SETTLE_TIMEOUT_S", "PathwayBrain"]
+__all__ = ["PATHWAY_END_REASON", "SETTLE_TIMEOUT_S", "PathwayBrain", "TurnTags"]
 
 PATHWAY_END_REASON: Final = "agent_hangup"
 """The pipeline end reason of an End Call node (the engine's own reason goes to the log)."""
@@ -61,6 +68,15 @@ _log = get_logger(__name__)
 
 
 _NOTHING: Final[tuple[BrainOutput, ...]] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TurnTags:
+    """The engine turn index and node a pipeline turn belongs to."""
+
+    pathway_turn: int
+    node_id: str | None
+    node_name: str | None
 
 
 async def _nothing() -> AsyncGenerator[BrainOutput]:
@@ -83,6 +99,7 @@ class PathwayBrain:
         self._clock = clock
         self._on_state = on_state
         self._wait_ms: int | None = None
+        self._spoken: tuple[int, str] | None = None
 
     @property
     def engine(self) -> PathwayEngine:
@@ -99,6 +116,17 @@ class PathwayBrain:
 
     def pathway_logs(self) -> list[PathwayLog]:
         return self._engine.pathway_logs()
+
+    def turn_tags(self, role: Literal["user", "assistant"]) -> TurnTags | None:
+        """The engine turn and node of the pipeline turn being recorded (see the module docstring); ``None``
+        for a caller turn once the conversation ended (the engine ignores it)."""
+        state = self._engine.state
+        if role == "user":
+            if state.ended:
+                return None
+            return self._tags(state.turn_index + 1, state.current_node_id)
+        turn_index, node_id = self._spoken or (state.turn_index, state.current_node_id)
+        return self._tags(turn_index, node_id)
 
     # Brain protocol.
 
@@ -126,6 +154,7 @@ class PathwayBrain:
         """The transfer failed and the media worker says ``spoken`` instead: the history keeps it so later
         decisions know (specs/06 §10.1 Decision P05-T13)."""
         self._engine.note_assistant(spoken)
+        self._mark_spoken()
         self._publish()
 
     def timing(self) -> BrainTiming:
@@ -165,8 +194,10 @@ class PathwayBrain:
 
     def _output(self, action: Action) -> BrainOutput | None:  # noqa: PLR0911 - one return per action type
         if isinstance(action, Say):
+            self._mark_spoken()
             return SpeakStatic(action.text, interruptible=action.interruptible is not False)
         if isinstance(action, SayStream):
+            self._mark_spoken()
             return SpeakText(action.tokens, interruptible=action.interruptible is not False)
         if isinstance(action, Wait):
             self._wait_ms = max(1, round(action.seconds * _MS_PER_SECOND))
@@ -183,6 +214,14 @@ class PathwayBrain:
         kind = "switch_graph" if isinstance(action, SwitchGraph) else "human_takeover"
         _log.warning("pathway_brain.action_ignored", action=kind)
         return None
+
+    def _mark_spoken(self) -> None:
+        state = self._engine.state
+        self._spoken = (state.turn_index, state.current_node_id)
+
+    def _tags(self, turn_index: int, node_id: str) -> TurnTags:
+        node = self._engine.navigator.graph.node(node_id)
+        return TurnTags(turn_index, node_id, None if node is None else node.data.name)
 
     def _publish(self) -> None:
         if self._on_state is not None:

@@ -3047,7 +3047,9 @@ dependencies = [
     { name = "va-engine" },
     { name = "va-events" },
     { name = "va-llm" },
+    { name = "va-pathways" },
     { name = "va-telnyx" },
+    { name = "va-tools" },
     { name = "va-voice" },
 ]
 
@@ -3065,7 +3067,9 @@ requires-dist = [
     { name = "va-engine", editable = "packages/va_engine" },
     { name = "va-events", editable = "packages/va_events" },
     { name = "va-llm", editable = "packages/va_llm" },
+    { name = "va-pathways", editable = "packages/va_pathways" },
     { name = "va-telnyx", editable = "packages/va_telnyx" },
+    { name = "va-tools", editable = "packages/va_tools" },
     { name = "va-voice", editable = "packages/va_voice" },
 ]
 

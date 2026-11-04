@@ -16,7 +16,9 @@ dependencies = [
     "va-engine",
     "va-events",
     "va-llm",
+    "va-pathways",
     "va-telnyx",
+    "va-tools",
     "va-voice",
 ]
 
@@ -36,5 +38,7 @@ va-domain = { workspace = true }
 va-elevenlabs = { workspace = true }
 va-engine = { workspace = true }
 va-llm = { workspace = true }
+va-pathways = { workspace = true }
 va-telnyx = { workspace = true }
+va-tools = { workspace = true }
 va-voice = { workspace = true }

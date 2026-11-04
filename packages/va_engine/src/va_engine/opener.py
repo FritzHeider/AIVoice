@@ -2,9 +2,9 @@
 
 ``prefetch_call_context`` renders the templated ``first_sentence`` once (:func:`render_opener`), stores the
 text in ``CallContext.opener_text`` and the audio in the phrase cache under the key of :func:`phrase_voice`,
-:func:`phrase_format` and :func:`cache_text`; the task runner speaks ``opener_text`` verbatim and the media
-Speaker looks it up with the same voice, the leg's TTS format and the pronounced text, so both sides agree on
-the entry.
+:func:`phrase_format` and :func:`cache_text`; the task runner speaks ``opener_text`` verbatim (a pathway
+brain speaks the identical start line, :func:`va_engine.pathway_call.opener_text`) and the media Speaker looks
+it up with the same voice, the leg's TTS format and the pronounced text, so both sides agree on the entry.
 """
 
 from __future__ import annotations

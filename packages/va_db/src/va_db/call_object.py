@@ -341,11 +341,12 @@ def _transcripts(turns: Sequence[CallTurn]) -> list[Transcript]:
 
 
 def _pathway_logs(call: Call, turns: Sequence[CallTurn], details: _Details) -> list[PathwayLog]:
-    """specs/11 §12 entries from the turns and the route/condition/extraction/tool events (P07-T08c)."""
+    """specs/11 §12 entries from the turns and the route/condition/extraction/tool events (P07-T08c); a
+    pathway call's rows are grouped by their engine turn (``pathway_turn``, Decision P07-T12b)."""
     return build_pathway_logs(
         [
             LogTurn(
-                turn_index=turn.turn_index,
+                turn_index=turn.turn_index if turn.pathway_turn is None else turn.pathway_turn,
                 role=turn.role,
                 text=turn.text_,
                 node_id=turn.node_id,

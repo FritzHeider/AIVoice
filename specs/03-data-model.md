@@ -959,6 +959,7 @@ CREATE TABLE call_turns (
   text_realtime   text,                                -- user turns: realtime STT text kept when batch re-transcription replaces `text`
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now(),
+  pathway_turn    integer,                             -- pathway calls: the engine turn index (specs/11 §12 Decision P07-T12b); last: added by migration 0009
   UNIQUE (call_id, turn_index, role)
 );
 CREATE INDEX call_turns_call_idx ON call_turns(call_id, turn_index);

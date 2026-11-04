@@ -18,7 +18,8 @@ __all__ = ["CallTurnRow", "LatencyMerge", "TurnDelete", "TurnOp"]
 
 @dataclass(frozen=True, slots=True)
 class CallTurnRow:
-    """One turn; ``start_ms``/``end_ms`` are relative to the call's answer time."""
+    """One turn; ``start_ms``/``end_ms`` are relative to the call's answer time; ``pathway_turn`` is the
+    engine turn index of a pathway call (``None`` for other runners)."""
 
     org_id: uuid.UUID
     call_id: uuid.UUID
@@ -33,6 +34,7 @@ class CallTurnRow:
     node_name: str | None = None
     language_code: str | None = None
     latency: dict[str, Any] = field(default_factory=dict)
+    pathway_turn: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

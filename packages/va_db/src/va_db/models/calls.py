@@ -371,6 +371,9 @@ class CallTurn(IdMixin, TimestampMixin, Base):
     stt_confidence: Mapped[float | None] = mapped_column(REAL)
     latency: Mapped[dict[str, Any]] = jsonb_column("{}")
     text_realtime: Mapped[str | None] = mapped_column(Text)
+    # The engine turn index of a pathway call's row (NULL for other runners). Migration 0009 appended it, so
+    # it sorts after the TimestampMixin columns like the database column (specs/11 §12 Decision P07-T12b).
+    pathway_turn: Mapped[int | None] = mapped_column(Integer, sort_order=1)
 
 
 class CallEvent(Base):

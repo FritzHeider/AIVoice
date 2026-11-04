@@ -295,7 +295,7 @@ Dev dependencies (root `pyproject.toml` `[dependency-groups] dev`): `pytest`, `p
 | `PLATFORM_POOL_ORG_ID` | api, worker | created by `scripts/seed_dev.py` / bootstrap | system org owning the shared caller-ID pool (`16-phone-numbers.md`) |
 | `SUPPORTED_NUMBER_COUNTRIES` | api, worker | `US,CA,GB,AU,IE,DE,FR,ES,NL,SE,MX,BR` | countries where numbers can be searched/purchased |
 | `INTERNATIONAL_ALLOWED_COUNTRIES` | api, worker | `US,CA,GB,AU,IE,NZ,DE,FR,ES,IT,NL,BE,SE,NO,DK,FI,MX,BR,IN,PH,SG` | destinations ever dialable; others always blocked |
-| `WEBHOOK_ALLOW_PRIVATE` | dispatcher, api, worker | `true` (forced `false` in staging/production) | allow private-IP webhook/tool targets in local/test |
+| `WEBHOOK_ALLOW_PRIVATE` | dispatcher, api, worker, media | `true` (forced `false` in staging/production) | allow private-IP webhook/tool targets in local/test |
 | `ELEVENLABS_ZERO_RETENTION_AVAILABLE` | api, media, worker | `false` | platform ElevenLabs account supports `enable_logging=false` (required for HIPAA mode) |
 | `LLM_DEFAULT_BAA_COVERED` | api, worker | `false` | default Telnyx Inference provider is covered by a BAA |
 | `LLM_MODEL_COSTS_JSON` | media, worker, api | `{}` | per-model COGS overrides `{"model":{"in_per_1k_micros":n,"out_per_1k_micros":n}}` merged over built-in defaults |
