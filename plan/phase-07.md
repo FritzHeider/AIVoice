@@ -110,7 +110,7 @@
   - Acceptance: pass/fail/error outcomes for route, variables (subset, case-insensitive), grading and variations
     with scripted FakeLLM; test chat suite unchanged and green.
 
-- [ ] P07-T11b Unit test CRUD, from_call, runs read API
+- [x] P07-T11b Unit test CRUD, from_call, runs read API — routers/pathway_tests + services/pathway_tests + va_db PathwayTestRepo/PathwayRunRepo, specs/12 §8 Decision; review: make test 12353 passed/7 skipped (99% cov), lint/typecheck/placeholders/test-ts pass, openapi drift + spec refs clean, jscpd 0 clones
   - Spec refs: specs/12-pathways-api.md §2, §8, §10, §11; specs/03-data-model.md (`pathway_unit_tests`, `pathway_test_runs`)
   - Depends on: P07-T11a
   - Deliverables: `routers/pathway_tests.py` (list/create/get/patch/delete tests, `POST /tests/from_call`,

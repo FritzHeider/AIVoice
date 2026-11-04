@@ -1261,7 +1261,7 @@ Header `Idempotency-Key` (1–255 chars) honored on all `POST` endpoints. Middle
   `api_key.roll`, `pathway.create`,
   `pathway.update`, `pathway.delete`, `pathway.publish`, `pathway.promote`, `pathway.version_save`, `pathway.revert`,
   `pathway.import`, `pathway.duplicate`, `pathway_folder.create`, `pathway_folder.update`, `pathway_folder.delete`,
-  `pathway_folder.move`,
+  `pathway_folder.move`, `pathway_test.create`, `pathway_test.update`, `pathway_test.delete`,
   `persona.publish`, `agent.version_create`,
   `agent.env_pin`, `experiment.start`, `experiment.stop`, `tool.create`, `tool.update`, `tool.delete`, `kb.create`,
   `kb.delete`, `voice.clone`, `voice.delete`, `number.purchase`, `number.release`, `number.inbound_update`,

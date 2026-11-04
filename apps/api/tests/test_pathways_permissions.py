@@ -121,6 +121,15 @@ def test_role_helpers_for_api_keys_and_widgets() -> None:
     assert FORCE_DELETE_MESSAGE == "Force delete requires an owner or admin."
 
 
+def assert_reads(role: MemberRole, reads: list[httpx.Response]) -> None:
+    """Readers get every read, other roles are refused."""
+    if role in READERS:
+        assert [response.status_code for response in reads] == [200] * len(reads)
+    else:
+        for response in reads:
+            assert error_of(response)[:2] == (403, "FORBIDDEN")
+
+
 PUBLISHERS: Final[frozenset[MemberRole]] = frozenset({"owner", "admin", "developer"})
 
 
@@ -132,11 +141,7 @@ async def test_version_role_matrix(
     pathway = await seed_pathway(identity, member.org.id)
     base = f"{BASE}/{pathway.id}"
     reads = [await client.get(f"{base}/versions"), await client.get(f"{base}/version/1")]
-    if role in READERS:
-        assert [response.status_code for response in reads] == [200, 200]
-    else:
-        for response in reads:
-            assert error_of(response)[:2] == (403, "FORBIDDEN")
+    assert_reads(role, reads)
 
     headers = write_headers(client)
     saved = await client.post(f"{base}/version", json={"name": "v1"}, headers=headers)
@@ -263,3 +268,30 @@ async def test_chat_needs_pathways_write(
         f"{BASE}/chat/create", json={"pathway_id": str(pathway.id)}, headers={"Authorization": key}
     )
     assert error_of(response)[:2] == (403, "FORBIDDEN")
+
+
+TESTERS: Final[frozenset[MemberRole]] = frozenset({"owner", "admin", "developer", "analyst"})
+_UNIT_TEST: Final = {"name": "Greets", "node_id": "start", "user_message": "Hi"}
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_unit_test_role_matrix(
+    role: MemberRole, client: httpx.AsyncClient, identity: IdentityDb, container: SessionContainer
+) -> None:
+    """Analysts manage unit tests (specs/04 §3.2 row "Pathway tests / simulations"; Decision P07-T11b)."""
+    member = await signed_in(client, identity, container, role)
+    pathway = await seed_pathway(identity, member.org.id)
+    base = f"{BASE}/{pathway.id}"
+    reads = [await client.get(f"{base}/tests"), await client.get(f"{base}/runs")]
+    assert_reads(role, reads)
+
+    headers = write_headers(client)
+    created = await client.post(f"{base}/tests", json=_UNIT_TEST, headers=headers)
+    if role not in TESTERS:
+        assert error_of(created)[:2] == (403, "FORBIDDEN")
+        return
+    assert created.status_code == 200, created.text
+    test_url = f"{base}/tests/{created.json()['test']['test_id']}"
+    patched = await client.patch(test_url, json={"name": "Greets back"}, headers=headers)
+    deleted = await client.delete(test_url, headers=headers)
+    assert (patched.status_code, deleted.status_code) == (200, 200)

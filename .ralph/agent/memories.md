@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793753822-cf55
+> P07-T11b: unit test CRUD/from_call/runs = routers/pathway_tests (UnitTest* schema names: src Test* classes get collected by pytest; test-file helper class named Tests with __init__ errors collection) + services/pathway_tests capture_turn + va_db PathwayTestRepo/PathwayRunRepo; analysts may write tests (no editor guard); session_helpers.error_of returns (status, code, field) not message; cross-tenant factories read context.params[pathway_id]
+<!-- tags: api, pathways, testing | created: 2026-11-04 -->
+
 ### mem-1793750810-7c1c
 > P07-T11a: va_pathways package = shared text runs (TextConversation/TextRecorder/DbPathwayLoader moved from api) + unit_tests.run_unit_test; GradeVerdict uses validation_alias/serialization_alias 'pass' (plain alias makes mypy demand keyword pass); FakeLLM error status 400 makes analysis calls unavailable instantly (5xx retries 2s/8s on gateway clock -> hangs on ManualClock); LlmControl mixin shared by api ChatStack and TextRig to keep jscpd 0
 <!-- tags: pathways, testing | created: 2026-11-04 -->

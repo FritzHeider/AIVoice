@@ -412,6 +412,37 @@ Result item:
 > 6. Case items add `actions` (simulated actions, chat shape) and `error` when set; `grading` is `null` without a
 >    goal. Result items add `status`, plus `error` and `variations_short` when set.
 
+> Decision (2026-11-04): unit test CRUD and runs read API (P07-T11b).
+> 1. Permissions: reads (`GET /tests`, `/tests/{test_id}`, `/runs`, `/runs/{run_id}`) need `pathways:read`; test
+>    writes (create, patch, delete, `from_call`) need `pathways:write` with no editing-role guard: specs/04 §3.2 row
+>    "Pathway tests / simulations" gives analysts access (and is authoritative over the "tests" in §10's second
+>    row). Billing has no access.
+> 2. Audit actions `pathway_test.create` (also `from_call`, with `source_call_id`), `pathway_test.update`,
+>    `pathway_test.delete` (the §11 `pathway.test.*`, two-part like `pathway_folder.*`). Rows carry a summary
+>    (`name`, `node_id`, `history_messages`, `expected_keys`, `simulated_variations`, `source_call_id`), never the
+>    history, caller message, or `expected` values (mocked tool bodies may hold secrets); updates add `fields`
+>    (the changed columns). A patch that changes nothing writes no row.
+> 3. Every route first loads the live pathway (404 "Pathway not found."); a test or run of another pathway of the
+>    same org is 404 ("Pathway test not found." / "Pathway test run not found.") like another org's.
+> 4. Body rules: `name` 1-200 trimmed; `node_id` 1-200 (not checked against any version: runs report
+>    `unknown_node`); `history` at most 200 items `{role: user|assistant, content ≤ 4 000}`; `user_message` 1-4 000
+>    after trimming; `expected` keys `route_to_node_id` (≤ 200), `variables`, `grading_goal` (≤ 2 000),
+>    `request_data`, `mock_tools` (Decision P07-T11a items 1-2), unknown keys rejected, stored exactly as sent;
+>    `simulated_variations` 0-20, default 5. Violations are 400 `INVALID_INPUT` with the field path.
+> 5. PATCH sets only sent, non-null fields (`expected` replaces the whole object). DELETE removes the row (the table
+>    has no `deleted_at`) and answers `{"status":"success","message":"Test deleted."}`.
+> 6. Lists are newest first with `limit` (1-100, default 50) and `cursor` (`next_cursor`); runs also filter by
+>    `kind` (`unit`|`simulation`|`regression`). Run list items omit `results` and carry `summary {total, passed,
+>    failed, error}` counted from `results[*].status`; the run detail adds `results`.
+> 7. `from_call` body `{call_id, turn_index (≥ 0), name, expected?, simulated_variations?}`: an unknown call is 404
+>    `CALL_NOT_FOUND`; a call that did not run this pathway is 400 `INVALID_INPUT` field `call_id` ("The call did
+>    not run this pathway."). The tested turn is the `user` row with that `turn_index` (indices are shared by both
+>    roles), else 400 field `turn_index` ("The call has no caller turn with this index."). `history` = every
+>    earlier turn as `{role, content}` (assistant content = `text_spoken` when recorded: what the caller heard);
+>    `node_id` = the turn's `node_id`, else the latest earlier turn's, else 400 field `turn_index` ("The turn has no
+>    pathway node."); `expected` = the body's, else `{"route_to_node_id": <node of the first later assistant turn
+>    with one>}`, else `{}`; `source_call_id` = the call.
+
 ## 9. Simulations and regression
 
 `POST /v1/pathway/{id}/simulations`:

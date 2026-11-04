@@ -1013,6 +1013,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/pathway/{pathway_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Runs List
+         * @description The pathway's unit, simulation, and regression runs, newest first (without results).
+         */
+        get: operations["pathways_runs_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Runs Get
+         * @description One run of the pathway with its results.
+         */
+        get: operations["pathways_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/tests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Tests List
+         * @description The pathway's unit tests, newest first.
+         */
+        get: operations["pathways_tests_list"];
+        put?: never;
+        /**
+         * Pathways Tests Create
+         * @description Create a unit test: the caller says ``user_message`` on ``node_id`` after ``history``.
+         */
+        post: operations["pathways_tests_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/tests/from_call": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pathways Tests From Call
+         * @description Create a unit test from a caller turn of a call that ran this pathway.
+         */
+        post: operations["pathways_tests_from_call"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pathway/{pathway_id}/tests/{test_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pathways Tests Get
+         * @description One unit test of the pathway.
+         */
+        get: operations["pathways_tests_get"];
+        put?: never;
+        post?: never;
+        /**
+         * Pathways Tests Delete
+         * @description Delete a unit test (past run results keep their copy).
+         */
+        delete: operations["pathways_tests_delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Pathways Tests Update
+         * @description Change a unit test; sent non-null fields replace the stored ones (``expected`` as a whole).
+         */
+        patch: operations["pathways_tests_update"];
+        trace?: never;
+    };
     "/v1/pathway/{pathway_id}/validate": {
         parameters: {
             query?: never;
@@ -3644,6 +3756,36 @@ export interface components {
         };
         EventTypes: string[];
         /**
+         * ExpectedBody
+         * @description What the test asserts (``route_to_node_id``, ``variables``, ``grading_goal``), the run's
+         *     ``request_data``, and ``mock_tools`` answers by request source; unknown keys are rejected.
+         * @example {
+         *       "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+         *       "route_to_node_id": "node_order",
+         *       "variables": {
+         *         "pizza_size": "large"
+         *       }
+         *     }
+         */
+        ExpectedBody: {
+            /** Grading Goal */
+            grading_goal?: string | null;
+            /** Mock Tools */
+            mock_tools?: {
+                [key: string]: components["schemas"]["MockResponse"];
+            };
+            /** Request Data */
+            request_data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** Route To Node Id */
+            route_to_node_id?: string | null;
+            /** Variables */
+            variables?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+        };
+        /**
          * ExperimentsSettings
          * @description Experiment arm assignment.
          */
@@ -3967,6 +4109,19 @@ export interface components {
              * @constant
              */
             status: "ok";
+        };
+        /**
+         * HistoryItem
+         * @description One message before the tested caller message.
+         */
+        HistoryItem: {
+            /** Content */
+            content: string;
+            /**
+             * Role
+             * @enum {string}
+             */
+            role: "user" | "assistant";
         };
         /**
          * ImportBody
@@ -4466,6 +4621,18 @@ export interface components {
              * @default false
              */
             default_enabled: boolean;
+        };
+        /**
+         * MockResponse
+         * @description A unit test's canned answer for one request source (``expected.mock_tools`` value).
+         */
+        MockResponse: {
+            body?: components["schemas"]["JsonValue"];
+            /**
+             * Status
+             * @default 200
+             */
+            status: number;
         };
         /**
          * OrgLimits
@@ -5893,6 +6060,228 @@ export interface components {
             secret: string | null;
         };
         /**
+         * RunDetail
+         * @description A test run with its per-test (or per-scenario) results.
+         * @example {
+         *       "created_at": "2026-11-04T09:20:00Z",
+         *       "finished_at": "2026-11-04T09:20:09Z",
+         *       "kind": "unit",
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "results": [
+         *         {
+         *           "cases": [],
+         *           "duration_ms": 4120,
+         *           "name": "Routes to order",
+         *           "passed": true,
+         *           "status": "passed",
+         *           "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+         *         }
+         *       ],
+         *       "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+         *       "started_at": "2026-11-04T09:20:00Z",
+         *       "status": "failed",
+         *       "summary": {
+         *         "error": 0,
+         *         "failed": 1,
+         *         "passed": 1,
+         *         "total": 2
+         *       },
+         *       "version_number": 3
+         *     }
+         */
+        RunDetail: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "unit" | "simulation" | "regression";
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /** Results */
+            results: components["schemas"]["JsonValue"][];
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "passed" | "failed" | "error";
+            summary: components["schemas"]["RunSummary"];
+            /** Version Number */
+            version_number: number;
+        };
+        /**
+         * RunList
+         * @description ``GET /v1/pathway/{pathway_id}/runs``: newest first.
+         * @example {
+         *       "runs": [
+         *         {
+         *           "created_at": "2026-11-04T09:20:00Z",
+         *           "finished_at": "2026-11-04T09:20:09Z",
+         *           "kind": "unit",
+         *           "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *           "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+         *           "started_at": "2026-11-04T09:20:00Z",
+         *           "status": "failed",
+         *           "summary": {
+         *             "error": 0,
+         *             "failed": 1,
+         *             "passed": 1,
+         *             "total": 2
+         *           },
+         *           "version_number": 3
+         *         }
+         *       ],
+         *       "status": "success"
+         *     }
+         */
+        RunList: {
+            /**
+             * Next Cursor
+             * @description Cursor of the next page; null on the last page.
+             */
+            next_cursor: string | null;
+            /** Runs */
+            runs: components["schemas"]["RunListItem"][];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * RunListItem
+         * @description A test run without its results.
+         * @example {
+         *       "created_at": "2026-11-04T09:20:00Z",
+         *       "finished_at": "2026-11-04T09:20:09Z",
+         *       "kind": "unit",
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+         *       "started_at": "2026-11-04T09:20:00Z",
+         *       "status": "failed",
+         *       "summary": {
+         *         "error": 0,
+         *         "failed": 1,
+         *         "passed": 1,
+         *         "total": 2
+         *       },
+         *       "version_number": 3
+         *     }
+         */
+        RunListItem: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "unit" | "simulation" | "regression";
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "running" | "passed" | "failed" | "error";
+            summary: components["schemas"]["RunSummary"];
+            /** Version Number */
+            version_number: number;
+        };
+        /**
+         * RunOne
+         * @description ``GET /v1/pathway/{pathway_id}/runs/{run_id}``.
+         * @example {
+         *       "run": {
+         *         "created_at": "2026-11-04T09:20:00Z",
+         *         "finished_at": "2026-11-04T09:20:09Z",
+         *         "kind": "unit",
+         *         "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *         "results": [
+         *           {
+         *             "cases": [],
+         *             "duration_ms": 4120,
+         *             "name": "Routes to order",
+         *             "passed": true,
+         *             "status": "passed",
+         *             "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+         *           }
+         *         ],
+         *         "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+         *         "started_at": "2026-11-04T09:20:00Z",
+         *         "status": "failed",
+         *         "summary": {
+         *           "error": 0,
+         *           "failed": 1,
+         *           "passed": 1,
+         *           "total": 2
+         *         },
+         *         "version_number": 3
+         *       },
+         *       "status": "success"
+         *     }
+         */
+        RunOne: {
+            run: components["schemas"]["RunDetail"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * RunSummary
+         * @description Result counts by status (``total`` also counts results without a known status).
+         * @example {
+         *       "error": 0,
+         *       "failed": 1,
+         *       "passed": 1,
+         *       "total": 2
+         *     }
+         */
+        RunSummary: {
+            /** Error */
+            error: number;
+            /** Failed */
+            failed: number;
+            /** Passed */
+            passed: number;
+            /** Total */
+            total: number;
+        };
+        /**
          * SendCallRequest
          * @description The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.
          * @example {
@@ -6721,6 +7110,285 @@ export interface components {
              * Format: uuid
              */
             user_id: string;
+        };
+        /**
+         * UnitTestCreate
+         * @description ``POST /v1/pathway/{pathway_id}/tests``.
+         * @example {
+         *       "expected": {
+         *         "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+         *         "route_to_node_id": "node_order",
+         *         "variables": {
+         *           "pizza_size": "large"
+         *         }
+         *       },
+         *       "history": [
+         *         {
+         *           "content": "Hi, Bella Pasta.",
+         *           "role": "assistant"
+         *         }
+         *       ],
+         *       "name": "Routes to order",
+         *       "node_id": "start",
+         *       "simulated_variations": 5,
+         *       "user_message": "Can I get a large pepperoni?"
+         *     }
+         */
+        UnitTestCreate: {
+            /** @description The assertions. */
+            expected?: components["schemas"]["ExpectedBody"];
+            /**
+             * History
+             * @description Messages before the tested one.
+             */
+            history?: components["schemas"]["HistoryItem"][];
+            /**
+             * Name
+             * @description Test name (1-200 characters).
+             */
+            name: string;
+            /**
+             * Node Id
+             * @description The node the conversation is on when the caller speaks.
+             */
+            node_id: string;
+            /**
+             * Simulated Variations
+             * @description Paraphrases also run (0-20).
+             * @default 5
+             */
+            simulated_variations: number;
+            /**
+             * User Message
+             * @description The caller message the test sends.
+             */
+            user_message: string;
+        };
+        /**
+         * UnitTestDeleted
+         * @description ``DELETE /v1/pathway/{pathway_id}/tests/{test_id}`` result.
+         * @example {
+         *       "message": "Test deleted.",
+         *       "status": "success"
+         *     }
+         */
+        UnitTestDeleted: {
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * UnitTestFromCall
+         * @description ``POST /v1/pathway/{pathway_id}/tests/from_call``.
+         * @example {
+         *       "call_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4da0",
+         *       "name": "Large pepperoni",
+         *       "turn_index": 3
+         *     }
+         */
+        UnitTestFromCall: {
+            /**
+             * Call Id
+             * Format: uuid
+             * @description A call that ran this pathway.
+             */
+            call_id: string;
+            /** @description Assertions; default = the route the call actually took. */
+            expected?: components["schemas"]["ExpectedBody"] | null;
+            /**
+             * Name
+             * @description Test name (1-200 characters).
+             */
+            name: string;
+            /**
+             * Simulated Variations
+             * @description Paraphrases also run (0-20).
+             * @default 5
+             */
+            simulated_variations: number;
+            /**
+             * Turn Index
+             * @description The caller turn to test (its `turn_index` in the transcript).
+             */
+            turn_index: number;
+        };
+        /**
+         * UnitTestList
+         * @description ``GET /v1/pathway/{pathway_id}/tests``: newest first.
+         * @example {
+         *       "status": "success",
+         *       "tests": [
+         *         {
+         *           "created_at": "2026-11-04T09:15:00Z",
+         *           "expected": {
+         *             "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+         *             "route_to_node_id": "node_order",
+         *             "variables": {
+         *               "pizza_size": "large"
+         *             }
+         *           },
+         *           "history": [
+         *             {
+         *               "content": "Hi, Bella Pasta.",
+         *               "role": "assistant"
+         *             }
+         *           ],
+         *           "name": "Routes to order",
+         *           "node_id": "start",
+         *           "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *           "simulated_variations": 5,
+         *           "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+         *           "updated_at": "2026-11-04T09:15:00Z",
+         *           "user_message": "Can I get a large pepperoni?"
+         *         }
+         *       ]
+         *     }
+         */
+        UnitTestList: {
+            /**
+             * Next Cursor
+             * @description Cursor of the next page; null on the last page.
+             */
+            next_cursor: string | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Tests */
+            tests: components["schemas"]["UnitTestView"][];
+        };
+        /**
+         * UnitTestOne
+         * @description One unit test (get, create, update, from_call).
+         * @example {
+         *       "status": "success",
+         *       "test": {
+         *         "created_at": "2026-11-04T09:15:00Z",
+         *         "expected": {
+         *           "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+         *           "route_to_node_id": "node_order",
+         *           "variables": {
+         *             "pizza_size": "large"
+         *           }
+         *         },
+         *         "history": [
+         *           {
+         *             "content": "Hi, Bella Pasta.",
+         *             "role": "assistant"
+         *           }
+         *         ],
+         *         "name": "Routes to order",
+         *         "node_id": "start",
+         *         "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *         "simulated_variations": 5,
+         *         "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+         *         "updated_at": "2026-11-04T09:15:00Z",
+         *         "user_message": "Can I get a large pepperoni?"
+         *       }
+         *     }
+         */
+        UnitTestOne: {
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            test: components["schemas"]["UnitTestView"];
+        };
+        /**
+         * UnitTestUpdate
+         * @description ``PATCH /v1/pathway/{pathway_id}/tests/{test_id}``: sent non-null fields replace the stored ones.
+         * @example {
+         *       "name": "Routes to order"
+         *     }
+         */
+        UnitTestUpdate: {
+            expected?: components["schemas"]["ExpectedBody"] | null;
+            /** History */
+            history?: components["schemas"]["HistoryItem"][] | null;
+            /** Name */
+            name?: string | null;
+            /** Node Id */
+            node_id?: string | null;
+            /** Simulated Variations */
+            simulated_variations?: number | null;
+            /** User Message */
+            user_message?: string | null;
+        };
+        /**
+         * UnitTestView
+         * @description A pathway unit test.
+         * @example {
+         *       "created_at": "2026-11-04T09:15:00Z",
+         *       "expected": {
+         *         "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+         *         "route_to_node_id": "node_order",
+         *         "variables": {
+         *           "pizza_size": "large"
+         *         }
+         *       },
+         *       "history": [
+         *         {
+         *           "content": "Hi, Bella Pasta.",
+         *           "role": "assistant"
+         *         }
+         *       ],
+         *       "name": "Routes to order",
+         *       "node_id": "start",
+         *       "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+         *       "simulated_variations": 5,
+         *       "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+         *       "updated_at": "2026-11-04T09:15:00Z",
+         *       "user_message": "Can I get a large pepperoni?"
+         *     }
+         */
+        UnitTestView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Expected */
+            expected: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /** History */
+            history: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /** Name */
+            name: string;
+            /** Node Id */
+            node_id: string;
+            /**
+             * Pathway Id
+             * Format: uuid
+             */
+            pathway_id: string;
+            /** Simulated Variations */
+            simulated_variations: number;
+            /** Source Call Id */
+            source_call_id: string | null;
+            /**
+             * Test Id
+             * Format: uuid
+             */
+            test_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** User Message */
+            user_message: string;
         };
         /**
          * ValidationView
@@ -9713,6 +10381,354 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Reverted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_runs_list: {
+        parameters: {
+            query?: {
+                /** @description Only runs of this kind. */
+                kind?: ("unit" | "simulation" | "regression") | null;
+                /** @description Page size (1-100). */
+                limit?: number;
+                /** @description next_cursor of the previous page. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunList"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_list: {
+        parameters: {
+            query?: {
+                /** @description Page size (1-100). */
+                limit?: number;
+                /** @description next_cursor of the previous page. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestList"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnitTestCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_from_call: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnitTestFromCall"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+                test_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestOne"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+                test_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestDeleted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    pathways_tests_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pathway_id: string;
+                test_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnitTestUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnitTestOne"];
                 };
             };
             /** @description Invalid input */

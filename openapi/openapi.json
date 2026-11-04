@@ -4016,6 +4016,76 @@
         "minItems": 1,
         "type": "array"
       },
+      "ExpectedBody": {
+        "additionalProperties": false,
+        "description": "What the test asserts (``route_to_node_id``, ``variables``, ``grading_goal``), the run's\n``request_data``, and ``mock_tools`` answers by request source; unknown keys are rejected.",
+        "examples": [
+          {
+            "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+            "route_to_node_id": "node_order",
+            "variables": {
+              "pizza_size": "large"
+            }
+          }
+        ],
+        "properties": {
+          "grading_goal": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grading Goal"
+          },
+          "mock_tools": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MockResponse"
+            },
+            "title": "Mock Tools",
+            "type": "object"
+          },
+          "request_data": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Request Data",
+            "type": "object"
+          },
+          "route_to_node_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route To Node Id"
+          },
+          "variables": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variables"
+          }
+        },
+        "title": "ExpectedBody",
+        "type": "object"
+      },
       "ExperimentsSettings": {
         "additionalProperties": false,
         "description": "Experiment arm assignment.",
@@ -4585,6 +4655,31 @@
           "status"
         ],
         "title": "HealthStatus",
+        "type": "object"
+      },
+      "HistoryItem": {
+        "additionalProperties": false,
+        "description": "One message before the tested caller message.",
+        "properties": {
+          "content": {
+            "maxLength": 4000,
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "HistoryItem",
         "type": "object"
       },
       "ImportBody": {
@@ -5463,6 +5558,24 @@
           }
         },
         "title": "MemorySettings",
+        "type": "object"
+      },
+      "MockResponse": {
+        "additionalProperties": false,
+        "description": "A unit test's canned answer for one request source (``expected.mock_tools`` value).",
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "status": {
+            "default": 200,
+            "maximum": 599.0,
+            "minimum": 100.0,
+            "title": "Status",
+            "type": "integer"
+          }
+        },
+        "title": "MockResponse",
         "type": "object"
       },
       "OrgLimits": {
@@ -7951,6 +8064,374 @@
         "title": "RotatedSigningSecret",
         "type": "object"
       },
+      "RunDetail": {
+        "description": "A test run with its per-test (or per-scenario) results.",
+        "examples": [
+          {
+            "created_at": "2026-11-04T09:20:00Z",
+            "finished_at": "2026-11-04T09:20:09Z",
+            "kind": "unit",
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "results": [
+              {
+                "cases": [],
+                "duration_ms": 4120,
+                "name": "Routes to order",
+                "passed": true,
+                "status": "passed",
+                "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+              }
+            ],
+            "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+            "started_at": "2026-11-04T09:20:00Z",
+            "status": "failed",
+            "summary": {
+              "error": 0,
+              "failed": 1,
+              "passed": 1,
+              "total": 2
+            },
+            "version_number": 3
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "kind": {
+            "enum": [
+              "unit",
+              "simulation",
+              "regression"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "passed",
+              "failed",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RunSummary"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "pathway_id",
+          "version_number",
+          "kind",
+          "status",
+          "summary",
+          "started_at",
+          "finished_at",
+          "created_at",
+          "results"
+        ],
+        "title": "RunDetail",
+        "type": "object"
+      },
+      "RunList": {
+        "description": "``GET /v1/pathway/{pathway_id}/runs``: newest first.",
+        "examples": [
+          {
+            "runs": [
+              {
+                "created_at": "2026-11-04T09:20:00Z",
+                "finished_at": "2026-11-04T09:20:09Z",
+                "kind": "unit",
+                "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+                "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+                "started_at": "2026-11-04T09:20:00Z",
+                "status": "failed",
+                "summary": {
+                  "error": 0,
+                  "failed": 1,
+                  "passed": 1,
+                  "total": 2
+                },
+                "version_number": 3
+              }
+            ],
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor of the next page; null on the last page.",
+            "title": "Next Cursor"
+          },
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunListItem"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "runs",
+          "next_cursor"
+        ],
+        "title": "RunList",
+        "type": "object"
+      },
+      "RunListItem": {
+        "description": "A test run without its results.",
+        "examples": [
+          {
+            "created_at": "2026-11-04T09:20:00Z",
+            "finished_at": "2026-11-04T09:20:09Z",
+            "kind": "unit",
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+            "started_at": "2026-11-04T09:20:00Z",
+            "status": "failed",
+            "summary": {
+              "error": 0,
+              "failed": 1,
+              "passed": 1,
+              "total": 2
+            },
+            "version_number": 3
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "kind": {
+            "enum": [
+              "unit",
+              "simulation",
+              "regression"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "passed",
+              "failed",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RunSummary"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "pathway_id",
+          "version_number",
+          "kind",
+          "status",
+          "summary",
+          "started_at",
+          "finished_at",
+          "created_at"
+        ],
+        "title": "RunListItem",
+        "type": "object"
+      },
+      "RunOne": {
+        "description": "``GET /v1/pathway/{pathway_id}/runs/{run_id}``.",
+        "examples": [
+          {
+            "run": {
+              "created_at": "2026-11-04T09:20:00Z",
+              "finished_at": "2026-11-04T09:20:09Z",
+              "kind": "unit",
+              "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+              "results": [
+                {
+                  "cases": [],
+                  "duration_ms": 4120,
+                  "name": "Routes to order",
+                  "passed": true,
+                  "status": "passed",
+                  "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80"
+                }
+              ],
+              "run_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d90",
+              "started_at": "2026-11-04T09:20:00Z",
+              "status": "failed",
+              "summary": {
+                "error": 0,
+                "failed": 1,
+                "passed": 1,
+                "total": 2
+              },
+              "version_number": 3
+            },
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/RunDetail"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "title": "RunOne",
+        "type": "object"
+      },
+      "RunSummary": {
+        "description": "Result counts by status (``total`` also counts results without a known status).",
+        "examples": [
+          {
+            "error": 0,
+            "failed": 1,
+            "passed": 1,
+            "total": 2
+          }
+        ],
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "passed",
+          "failed",
+          "error"
+        ],
+        "title": "RunSummary",
+        "type": "object"
+      },
       "SendCallRequest": {
         "description": "The full Send Call body: runner selection (§3.1) and the destination on top of `CallParameters`.",
         "examples": [
@@ -9552,6 +10033,476 @@
           "user_id"
         ],
         "title": "TransferOwnershipRequest",
+        "type": "object"
+      },
+      "UnitTestCreate": {
+        "description": "``POST /v1/pathway/{pathway_id}/tests``.",
+        "examples": [
+          {
+            "expected": {
+              "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+              "route_to_node_id": "node_order",
+              "variables": {
+                "pizza_size": "large"
+              }
+            },
+            "history": [
+              {
+                "content": "Hi, Bella Pasta.",
+                "role": "assistant"
+              }
+            ],
+            "name": "Routes to order",
+            "node_id": "start",
+            "simulated_variations": 5,
+            "user_message": "Can I get a large pepperoni?"
+          }
+        ],
+        "properties": {
+          "expected": {
+            "$ref": "#/components/schemas/ExpectedBody",
+            "description": "The assertions."
+          },
+          "history": {
+            "description": "Messages before the tested one.",
+            "items": {
+              "$ref": "#/components/schemas/HistoryItem"
+            },
+            "maxItems": 200,
+            "title": "History",
+            "type": "array"
+          },
+          "name": {
+            "description": "Test name (1-200 characters).",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "node_id": {
+            "description": "The node the conversation is on when the caller speaks.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "simulated_variations": {
+            "default": 5,
+            "description": "Paraphrases also run (0-20).",
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Simulated Variations",
+            "type": "integer"
+          },
+          "user_message": {
+            "description": "The caller message the test sends.",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "User Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "node_id",
+          "user_message"
+        ],
+        "title": "UnitTestCreate",
+        "type": "object"
+      },
+      "UnitTestDeleted": {
+        "description": "``DELETE /v1/pathway/{pathway_id}/tests/{test_id}`` result.",
+        "examples": [
+          {
+            "message": "Test deleted.",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "UnitTestDeleted",
+        "type": "object"
+      },
+      "UnitTestFromCall": {
+        "description": "``POST /v1/pathway/{pathway_id}/tests/from_call``.",
+        "examples": [
+          {
+            "call_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4da0",
+            "name": "Large pepperoni",
+            "turn_index": 3
+          }
+        ],
+        "properties": {
+          "call_id": {
+            "description": "A call that ran this pathway.",
+            "format": "uuid",
+            "title": "Call Id",
+            "type": "string"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Assertions; default = the route the call actually took."
+          },
+          "name": {
+            "description": "Test name (1-200 characters).",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "simulated_variations": {
+            "default": 5,
+            "description": "Paraphrases also run (0-20).",
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Simulated Variations",
+            "type": "integer"
+          },
+          "turn_index": {
+            "description": "The caller turn to test (its `turn_index` in the transcript).",
+            "minimum": 0.0,
+            "title": "Turn Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "call_id",
+          "turn_index",
+          "name"
+        ],
+        "title": "UnitTestFromCall",
+        "type": "object"
+      },
+      "UnitTestList": {
+        "description": "``GET /v1/pathway/{pathway_id}/tests``: newest first.",
+        "examples": [
+          {
+            "status": "success",
+            "tests": [
+              {
+                "created_at": "2026-11-04T09:15:00Z",
+                "expected": {
+                  "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+                  "route_to_node_id": "node_order",
+                  "variables": {
+                    "pizza_size": "large"
+                  }
+                },
+                "history": [
+                  {
+                    "content": "Hi, Bella Pasta.",
+                    "role": "assistant"
+                  }
+                ],
+                "name": "Routes to order",
+                "node_id": "start",
+                "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+                "simulated_variations": 5,
+                "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+                "updated_at": "2026-11-04T09:15:00Z",
+                "user_message": "Can I get a large pepperoni?"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor of the next page; null on the last page.",
+            "title": "Next Cursor"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "tests": {
+            "items": {
+              "$ref": "#/components/schemas/UnitTestView"
+            },
+            "title": "Tests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tests",
+          "next_cursor"
+        ],
+        "title": "UnitTestList",
+        "type": "object"
+      },
+      "UnitTestOne": {
+        "description": "One unit test (get, create, update, from_call).",
+        "examples": [
+          {
+            "status": "success",
+            "test": {
+              "created_at": "2026-11-04T09:15:00Z",
+              "expected": {
+                "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+                "route_to_node_id": "node_order",
+                "variables": {
+                  "pizza_size": "large"
+                }
+              },
+              "history": [
+                {
+                  "content": "Hi, Bella Pasta.",
+                  "role": "assistant"
+                }
+              ],
+              "name": "Routes to order",
+              "node_id": "start",
+              "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+              "simulated_variations": 5,
+              "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+              "updated_at": "2026-11-04T09:15:00Z",
+              "user_message": "Can I get a large pepperoni?"
+            }
+          }
+        ],
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "test": {
+            "$ref": "#/components/schemas/UnitTestView"
+          }
+        },
+        "required": [
+          "test"
+        ],
+        "title": "UnitTestOne",
+        "type": "object"
+      },
+      "UnitTestUpdate": {
+        "description": "``PATCH /v1/pathway/{pathway_id}/tests/{test_id}``: sent non-null fields replace the stored ones.",
+        "examples": [
+          {
+            "name": "Routes to order"
+          }
+        ],
+        "properties": {
+          "expected": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "history": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HistoryItem"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "History"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "simulated_variations": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Simulated Variations"
+          },
+          "user_message": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Message"
+          }
+        },
+        "title": "UnitTestUpdate",
+        "type": "object"
+      },
+      "UnitTestView": {
+        "description": "A pathway unit test.",
+        "examples": [
+          {
+            "created_at": "2026-11-04T09:15:00Z",
+            "expected": {
+              "grading_goal": "The agent should acknowledge the order and ask about toppings or delivery.",
+              "route_to_node_id": "node_order",
+              "variables": {
+                "pizza_size": "large"
+              }
+            },
+            "history": [
+              {
+                "content": "Hi, Bella Pasta.",
+                "role": "assistant"
+              }
+            ],
+            "name": "Routes to order",
+            "node_id": "start",
+            "pathway_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d70",
+            "simulated_variations": 5,
+            "test_id": "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d80",
+            "updated_at": "2026-11-04T09:15:00Z",
+            "user_message": "Can I get a large pepperoni?"
+          }
+        ],
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expected": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Expected",
+            "type": "object"
+          },
+          "history": {
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "node_id": {
+            "title": "Node Id",
+            "type": "string"
+          },
+          "pathway_id": {
+            "format": "uuid",
+            "title": "Pathway Id",
+            "type": "string"
+          },
+          "simulated_variations": {
+            "title": "Simulated Variations",
+            "type": "integer"
+          },
+          "source_call_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Call Id"
+          },
+          "test_id": {
+            "format": "uuid",
+            "title": "Test Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_message": {
+            "title": "User Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "test_id",
+          "pathway_id",
+          "name",
+          "node_id",
+          "history",
+          "user_message",
+          "expected",
+          "simulated_variations",
+          "source_call_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UnitTestView",
         "type": "object"
       },
       "ValidationView": {
@@ -14768,6 +15719,617 @@
         ],
         "x-envelope": "legacy",
         "x-permission": "pathways.publish",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/runs": {
+      "get": {
+        "description": "The pathway's unit, simulation, and regression runs, newest first (without results).",
+        "operationId": "pathways_runs_list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only runs of this kind.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "unit",
+                    "simulation",
+                    "regression"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only runs of this kind.",
+              "title": "Kind"
+            }
+          },
+          {
+            "description": "Page size (1-100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (1-100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "next_cursor of the previous page.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Runs List",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/{pathway_id}/runs/{run_id}": {
+      "get": {
+        "description": "One run of the pathway with its results.",
+        "operationId": "pathways_runs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Runs Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      }
+    },
+    "/v1/pathway/{pathway_id}/tests": {
+      "get": {
+        "description": "The pathway's unit tests, newest first.",
+        "operationId": "pathways_tests_list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size (1-100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (1-100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "next_cursor of the previous page.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests List",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "post": {
+        "description": "Create a unit test: the caller says ``user_message`` on ``node_id`` after ``history``.",
+        "operationId": "pathways_tests_create",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnitTestCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests Create",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_test.create"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/tests/from_call": {
+      "post": {
+        "description": "Create a unit test from a caller turn of a call that ran this pathway.",
+        "operationId": "pathways_tests_from_call",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnitTestFromCall"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests From Call",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_test.create"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      }
+    },
+    "/v1/pathway/{pathway_id}/tests/{test_id}": {
+      "delete": {
+        "description": "Delete a unit test (past run results keep their copy).",
+        "operationId": "pathways_tests_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "test_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Test Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests Delete",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_test.delete"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:write"
+      },
+      "get": {
+        "description": "One unit test of the pathway.",
+        "operationId": "pathways_tests_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "test_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Test Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests Get",
+        "tags": [
+          "Pathways"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "pathways:read"
+      },
+      "patch": {
+        "description": "Change a unit test; sent non-null fields replace the stored ones (``expected`` as a whole).",
+        "operationId": "pathways_tests_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pathway_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pathway Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "test_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Test Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnitTestUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitTestOne"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Pathways Tests Update",
+        "tags": [
+          "Pathways"
+        ],
+        "x-audit": [
+          "pathway_test.update"
+        ],
+        "x-envelope": "legacy",
         "x-scope": "pathways:write"
       }
     },

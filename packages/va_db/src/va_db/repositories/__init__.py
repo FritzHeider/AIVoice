@@ -9,7 +9,8 @@ the tenant :class:`ApiKeyRepo`, the tenant :class:`AuditLogRepo` (reading the au
 tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), the tenant :class:`ContactRepo` (inbound
 caller contacts; specs/06 §7), the tenant :class:`WebhookEndpointRepo` and :class:`WebhookDeliveryRepo`
 (webhook endpoints and delivery history; specs/19 §10), the tenant :class:`PathwayRepo` (pathways and their
-versions; specs/12 §1-§3), and the system-scope ones.
+versions; specs/12 §1-§3), the tenant :class:`PathwayTestRepo` and :class:`PathwayRunRepo` (unit tests and
+test runs; specs/12 §8), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -99,6 +100,7 @@ from va_db.repositories.pathway_folders import (
     FolderTree,
     PathwayFolderRepo,
 )
+from va_db.repositories.pathway_tests import RUN_RESOURCE, TEST_RESOURCE, PathwayRunRepo, PathwayTestRepo
 from va_db.repositories.pathways import (
     PATHWAY_RESOURCE,
     PathwayGraphJson,
@@ -157,7 +159,9 @@ __all__ = [
     "PURGE_RULES",
     "REPLAY_WINDOW",
     "RETRY_CLAIM_LIMIT",
+    "RUN_RESOURCE",
     "SUB_ACCOUNT_REFERENCE",
+    "TEST_RESOURCE",
     "WEBHOOK_ACCOUNT_STATUSES",
     "ApiKeyLookupRepo",
     "ApiKeyRecord",
@@ -207,6 +211,8 @@ __all__ = [
     "PathwayRefIds",
     "PathwayReference",
     "PathwayRepo",
+    "PathwayRunRepo",
+    "PathwayTestRepo",
     "PhoneNumberRoutingRepo",
     "PinEnvironment",
     "PurgeRule",

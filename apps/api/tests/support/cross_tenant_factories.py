@@ -7,6 +7,7 @@ imported from here); the suite reports any path parameter without one.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import orjson
@@ -17,8 +18,14 @@ from session_helpers import add_member, store_api_key, sub_account
 
 from va_api.services.pathway_chat import DEFAULT_SIMULATE_FROM, DEFAULT_SIMULATE_TO, ChatSession, ChatStore
 from va_common.ids import new_id
-from va_db.models import WebhookDelivery, WebhookEndpoint
-from va_db.repositories import InvitationRepo, PathwayFolderRepo, PathwayGraphJson, PathwayRepo
+from va_db.models import PathwayTestRun, WebhookDelivery, WebhookEndpoint
+from va_db.repositories import (
+    InvitationRepo,
+    PathwayFolderRepo,
+    PathwayGraphJson,
+    PathwayRepo,
+    PathwayTestRepo,
+)
 from va_engine.models import EngineState, dump_engine_state, graph_hash
 
 __all__ = ["REGISTRY"]
@@ -149,6 +156,41 @@ async def _chat(context: FactoryContext) -> str:
     return str(chat_id)
 
 
+async def _unit_test(context: FactoryContext) -> str:
+    """A unit test of the pathway created for ``{pathway_id}`` to its left."""
+    org_id = context.tenant.org_id
+    pathway_id = uuid.UUID(context.params["pathway_id"])
+    async with context.identity.database.tenant_session(org_id) as session:
+        test = await PathwayTestRepo(session, org_id).add(
+            pathway_id,
+            {
+                "name": "Cross-tenant test",
+                "node_id": "start",
+                "history": [],
+                "user_message": "Hi",
+                "expected": {},
+            },
+        )
+        return str(test.id)
+
+
+async def _test_run(context: FactoryContext) -> str:
+    """A finished unit run of the pathway created for ``{pathway_id}`` to its left."""
+    org_id = context.tenant.org_id
+    run = PathwayTestRun(
+        org_id=org_id,
+        pathway_id=uuid.UUID(context.params["pathway_id"]),
+        version_number=1,
+        kind="unit",
+        status="passed",
+        results=[],
+    )
+    async with context.identity.database.tenant_session(org_id) as session:
+        session.add(run)
+        await session.flush()
+        return str(run.id)
+
+
 async def _first_version(context: FactoryContext) -> str:
     """Version 1, which every pathway has."""
     del context
@@ -169,6 +211,11 @@ REGISTRY.register_resource_factory("version_number", _first_version, path_prefix
 REGISTRY.register_owner_status("pathways_promote", 409)
 REGISTRY.register_resource_factory("folder_id", _folder)
 REGISTRY.register_resource_factory("chat_id", _chat)
+REGISTRY.register_resource_factory("test_id", _unit_test)
+REGISTRY.register_resource_factory("run_id", _test_run)
+# The from_call example names a call that exists nowhere: the owner's control is ``404 CALL_NOT_FOUND``, while
+# org B is refused at the pathway (``404 NOT_FOUND``) before any call is read.
+REGISTRY.register_owner_status("pathways_tests_from_call", 404)
 # The factory chat has ended, so the owner's send control is ``409 CONFLICT`` (no model call) while org B gets
 # ``NOT_FOUND``.
 REGISTRY.register_request("pathways_chat_send", json={"message": "Hi"})

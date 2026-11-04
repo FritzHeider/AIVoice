@@ -1859,3 +1859,11 @@ Grafana 3001
   `bella_pasta(hook_port)`, `spec(...)`; session fixture `pathways_db_url`. A FakeLLM rule `error: {status: 400}`
   makes an analysis call unavailable at once (4xx is not retried; 5xx would wait 2 s/8 s on the gateway clock).
   FakeLLM YAML rule values are YAML: unquoted trailing spaces are stripped.
+- 2026-11-04 (P07-T11b): unit test CRUD / `from_call` / runs read = `routers/pathway_tests.py` (side-effect import in
+  `main.py`, on `pathways_router`; schemas `pathway_tests_schemas`) over `va_api.services.pathway_tests` (pure
+  `capture_turn(TranscriptTurn[...], turn_index)`) and tenant `va_db.repositories.PathwayTestRepo`/`PathwayRunRepo`
+  (T11c adds run writes there). Test writes need `pathways:write` WITHOUT the editor guard (analysts allowed, specs/04
+  §3.2). Rules: specs/12 §8 Decision P07-T11b. Never name a src class `Test*` (pytest collects imported ones; even a
+  test-file helper class `Tests` with `__init__` fails collection under `filterwarnings=error`): the schemas are
+  `UnitTest*`. Cross-tenant factories `test_id`/`run_id` read `context.params["pathway_id"]` (the pathway created to
+  their left). `session_helpers.error_of` returns `(status, code, field)`, not the message.
