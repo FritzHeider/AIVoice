@@ -168,15 +168,27 @@
   - Deliverables: `/v1/tools` CRUD (TL- ids, legacy envelope; the `/test` route is in P08-T02), validation of name/url/method/input_schema/response_map, secret header encryption, audit, cross-tenant factory
   - Acceptance: API tests for every field and error path; secrets never returned.
 
-- [ ] P08-T02 Tool runtime, system tools, LLM exposure, speech during tool
-  - Spec refs: specs/13-tools-and-dynamic-data.md (LLM exposure, execution runtime, built-in system tools)
+- [x] P08-T02a ToolRunner core and `POST /v1/tools/{tool_id}/test` — va_tools models/render/runner/signing + `/test` route (tools:write, audit-exempt); review re-run: lint/typecheck/placeholders exit 0, make test 12868 passed 7 skipped cov 99.08 %; spec specs/13 §5 Decision P08-T02a (split from P08-T02 by the planner, 2026-11-05: the original task spans the runner, two runners' in-call wiring, and the API)
+  - Spec refs: specs/13-tools-and-dynamic-data.md §2 (`/test`), §3, §4 (function schema), §5 steps 1, 3-8, 10
   - Depends on: P08-T01, P05-T09
-  - Deliverables: `POST /v1/tools/{tool_id}/test` (specs/13 §2; moved from P08-T01: it needs the runtime), function schema generation, in-call execution with timeout/retries/JSONPath extraction, `speech` filler via phrase cache, result injection as tool message, inline tool objects in Send Call, system tools (end_call, transfer_call, press_button, send_sms, schedule_callback, lookup_knowledge)
-  - Acceptance: harness tests for filler timing, timeout behaviour, extraction into variables.
+  - Deliverables: `va_tools.models` (`ToolSpec` from a stored row or an inline tool), `va_tools.render` (request rendering with `input.*`), `va_tools.runner.ToolRunner` (argument validation, rendering, signed execution over `HttpExecutor`, response map, LLM tool message, `call.tool` event data with masked headers, `TOOL_FAILED` classification), `function_def(spec)`; `POST /v1/tools/{tool_id}/test`
+  - Acceptance: unit tests for every runner step (invalid arguments, rendering with type preservation and URL encoding, query merge, secret headers sent but masked, retries/timeout outcomes, JSONPath single/multi/no match, 4 000-char data cap, 2 KB excerpt); API tests for `/test` against a real-socket receiver incl. masking and errors.
+
+- [ ] P08-T02b Task-mode tools in calls: executor, speech during tool, fillers, executor-backed system tools
+  - Spec refs: specs/13 §4, §5 steps 2 and 9, §6 (`send_sms`, `schedule_callback`); specs/09 §9 (fillers)
+  - Depends on: P08-T02a
+  - Deliverables: media `ToolExecutor` over `ToolRunner` (call `tool_ids` loaded with decrypted secrets + `inline_tools`, inline overrides org tool of the same name), `call.tool`/`call.error TOOL_FAILED` events, variables merged into engine state, `TaskBrain` speech-during-tool (speech starts with the request) and the 1 200 ms cached filler (round-robin, ≤ 1 per tool call, `engine.tool_fillers`), `send_sms`/`schedule_callback` system tools
+  - Acceptance: harness tests for filler timing (speech ≤ 300 ms after the tool call, filler at 1 200 ms, none when the tool is fast), timeout behaviour, extraction into variables; runtime sim test of a tool call.
+
+- [ ] P08-T02c Pathway node tools and `globalTools`
+  - Spec refs: specs/13 §4 (node `tools` ∪ `globalTools` ∪ system tools), specs/11 §5.7 tools line, specs/11 §3 (`allowEndCallTool`)
+  - Depends on: P08-T02b, P07-T12
+  - Deliverables: PathwayEngine offers node + global custom tools and allowed system tools on reply nodes, runs them through the same executor with speech/filler, records answers, honours the per-turn/per-call caps
+  - Acceptance: engine tests (tool round on a node, global tool, `allowEndCallTool=false`), runtime sim pathway call with a tool.
 
 - [ ] P08-T03 Dynamic data
   - Spec refs: specs/13-tools-and-dynamic-data.md (dynamic_data)
-  - Depends on: P08-T02
+  - Depends on: P08-T02a
   - Deliverables: pre-call fetch in `prefetch_call_context`, per-turn refresh rules, Redis cache keyed by request hash, JSONPath `response_data` mapping with `context` injection, `call.dynamic_data` events
   - Acceptance: tests for cache hits, failures (call proceeds with event), templated requests.
 
@@ -224,7 +236,7 @@
 
 - [ ] P08-T11 E2E: tools
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list: tool_call_with_speech)
-  - Depends on: P08-T02
+  - Depends on: P08-T02b
   - Deliverables: `tests_e2e/test_tool_call_with_speech.py`
   - Acceptance: filler heard (recorded agent audio contains filler phrase marker), tool result used in reply.
 

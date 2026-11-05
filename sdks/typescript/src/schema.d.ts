@@ -1327,6 +1327,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tools/{tool_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tools Test
+         * @description Send the tool's request once with ``input`` and ``variables``; invalid input and failed requests are
+         *     reported in the body (``error``), not as an HTTP error.
+         */
+        post: operations["tools_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/webhooks/deliveries": {
         parameters: {
             query?: never;
@@ -7677,6 +7698,143 @@ export interface components {
             tools: components["schemas"]["ToolView"][];
         };
         /**
+         * ToolTestRequest
+         * @description ``POST /v1/tools/{tool_id}/test``: the tool input (the model's arguments) and template variables.
+         * @example {
+         *       "input": {
+         *         "date": "2026-11-06",
+         *         "party_size": 4,
+         *         "time": "19:30"
+         *       },
+         *       "variables": {
+         *         "customer_name": "Ada"
+         *       }
+         *     }
+         */
+        ToolTestRequest: {
+            /**
+             * Input
+             * @description Arguments validated against `input_schema` (`{{input.*}}`).
+             */
+            input?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Variables
+             * @description Conversation variables the templates may read.
+             */
+            variables?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
+        /**
+         * ToolTestRequestView
+         * @description The request as sent: full URL, masked secret header values.
+         * @example {
+         *       "body": {
+         *         "caller": "",
+         *         "date": "2026-11-06",
+         *         "party": 4,
+         *         "time": "19:30"
+         *       },
+         *       "headers": {
+         *         "Authorization": "••••",
+         *         "Content-Type": "application/json"
+         *       },
+         *       "method": "POST",
+         *       "url": "https://api.bellapasta.com/availability"
+         *     }
+         */
+        ToolTestRequestView: {
+            body: components["schemas"]["JsonValue"];
+            /** Headers */
+            headers: {
+                [key: string]: string;
+            };
+            /**
+             * Method
+             * @enum {string}
+             */
+            method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /** Url */
+            url: string;
+        };
+        /**
+         * ToolTestResult
+         * @description ``POST /v1/tools/{tool_id}/test`` result.
+         *
+         *     ``error`` is null for a 2xx answer, else ``invalid_arguments`` (``details`` lists why; nothing is sent),
+         *     ``http_error``, ``timeout``, ``connection``, ``blocked``, ``invalid_url``, or ``render_error``.
+         * @example {
+         *       "details": [],
+         *       "duration_ms": 182,
+         *       "extracted": {
+         *         "alternatives": "20:30",
+         *         "available": false
+         *       },
+         *       "request": {
+         *         "body": {
+         *           "caller": "",
+         *           "date": "2026-11-06",
+         *           "party": 4,
+         *           "time": "19:30"
+         *         },
+         *         "headers": {
+         *           "Authorization": "••••",
+         *           "Content-Type": "application/json"
+         *         },
+         *         "method": "POST",
+         *         "url": "https://api.bellapasta.com/availability"
+         *       },
+         *       "response": {
+         *         "alternatives": [
+         *           {
+         *             "time": "20:30"
+         *           }
+         *         ],
+         *         "available": false
+         *       },
+         *       "status": "success",
+         *       "status_code": 200,
+         *       "truncated": false
+         *     }
+         */
+        ToolTestResult: {
+            /**
+             * Details
+             * @description Input validation failures (`path`, `message`).
+             */
+            details: {
+                [key: string]: components["schemas"]["JsonValue"];
+            }[];
+            /** Duration Ms */
+            duration_ms: number;
+            /** Error */
+            error: string | null;
+            /**
+             * Extracted
+             * @description Every `response` variable (null = no match).
+             */
+            extracted: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            request: components["schemas"]["ToolTestRequestView"] | null;
+            response: components["schemas"]["JsonValue"];
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Status Code */
+            status_code: number | null;
+            /**
+             * Truncated
+             * @description Whether the response exceeded 1 MiB and was cut.
+             */
+            truncated: boolean;
+        };
+        /**
          * ToolUpdate
          * @description ``POST /v1/tools/{tool_id}``: any subset of the ToolCreate fields.
          *
@@ -12187,6 +12345,50 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ToolDeleted"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolTestRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolTestResult"];
                 };
             };
             /** @description Invalid input */

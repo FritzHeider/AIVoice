@@ -1239,3 +1239,178 @@ Keep the `first_group`/`last_group` asserts and `(first.received_at - last_group
 - Diff checked against specs/13 §2/§3 + Decision P08-T01: legacy bodies, TL- ids, masking, null semantics,
   reference sources (persona config / agent call_settings are call-parameter layers → `tools` key), TOOL_NOT_FOUND
   in cross-tenant REFUSED, secrets never in responses/audit (tests assert raw text). Ticked and committed.
+
+## Planner 2026-11-05 — after P08-T01 approval
+- Inbox: every note is in DONE. Next unticked task: P08-T02. It covers the runner, the `/test` API, task-mode
+  in-call wiring with speech/fillers, executor-backed system tools, and pathway node tools: too big for one
+  activation. Split in plan/phase-08.md into P08-T02a (runner core + `/test`), P08-T02b (task-mode in-call +
+  speech/filler + send_sms/schedule_callback), and P08-T02c (pathway node/global tools). T03 now depends on T02a
+  and T11 on T02b.
+
+## Plan P08-T02a (ToolRunner core + POST /v1/tools/{tool_id}/test)
+### Facts (existing code to reuse; never copy it)
+- `va_tools.http.HttpExecutor.execute(HttpCall) -> HttpOutcome` already handles preflight, the SSRF client,
+  timeouts, retries with 250 ms × attempt backoff, the 1 MiB cap with `truncated`, JSON/text parsing, and
+  `extract` JSONPath (`extract_all`: single → value, multi → list, none → None). Signer hook: `signer(body) -> headers`.
+- `va_engine.templating`: `render`, `render_url` (percent-encodes values), `render_json` (type preservation),
+  `TemplateScope(input=..., variables=, request_data=, builtins=, timezone=, missing=)`, `cached_template`.
+- `va_tools.secrets.decrypt_secret_headers(envelope, org_id, tool_id, blob)`, `mask_secret`/`mask_headers`.
+- `va_pathways.recording.excerpt` (2 000 chars) and `masked_headers` (`***` for secret-named keys).
+  `va_events.webhook_signing.signature_headers(secrets, body, ts)`, `va_db.webhook_secrets.active_signing_secrets`.
+- `va_engine.task_tools.tool_result` gives compact JSON for tool messages. `va_llm.models.ToolDef(name, description,
+  parameters)`, `ToolCall(id, name, arguments)` (check field names in va_llm.models).
+- The api container already has `tools_http` (guarded client) and `envelope`; `ToolDeps(database, envelope, allow_http)`.
+
+### va_tools/models.py (new)
+- `@dataclass(frozen=True, slots=True) ToolSpec`: `tool_id: str | None` (`TL-…` for stored tools, None inline),
+  `name, description, speech: str | None, url, method: HttpMethod, headers: Mapping[str,str],
+  secret_headers: Mapping[str,str]` (plaintext, `repr=False` via `field(repr=False)`), `query: Mapping[str,str],
+  body: JsonValue, input_schema: Mapping[str, JsonValue], response_map: Mapping[str,str], timeout_ms: int,
+  retries: int, inline: bool`.
+  - `ToolSpec.from_row(row: va_db.models.Tool, secret_headers)`; `ToolSpec.from_inline(tool: InlineTool)`. For
+    inline tools, every `headers` value counts as secret in logs/events (specs/13 §4), so the masking set is all
+    header names. Expose `masked_names() -> frozenset[str]` (secret header names, plus every header name when
+    inline). va_tools already depends on va-domain; add `va-db` to va_tools deps only if `from_row` needs the
+    model type. Prefer a structural `ToolRowLike` Protocol (attributes id, name, ... response_map) so va_tools
+    does not depend on va_db.
+- `function_def(spec) -> ToolDef` (specs/13 §4: name, description, parameters = input_schema).
+
+### va_tools/render.py (new)
+- `render_request(spec, scope: TemplateScope, *, signer: Signer | None = None) -> RenderedRequest`, where
+  `RenderedRequest(call: HttpCall, shown_headers: dict[str,str])`:
+  - url = `render_url(spec.url, scope).strip()`. Rendered query values (`render(value, scope)`) are merged into
+    the URL query with `urllib.parse` (`urlsplit` → `parse_qsl(keep_blank_values=True)` + new pairs →
+    `urlencode(..., doseq=True)`). A query key already present in the URL is replaced by the `query` value.
+  - headers = rendered plain headers, then secret headers verbatim (never templated: a secret is not a
+    template), with secret values winning on case-insensitive collisions (validation already forbids those for
+    stored tools).
+  - body = `render_json(spec.body, scope)` when not None. `HttpCall(method, url, headers, body, timeout_ms,
+    retries, extract=tuple(response_map.items()), source_id=spec.tool_id or spec.name)`.
+  - `shown_headers` = headers where names in `spec.masked_names()` show `"••••"` and other secret-named keys
+    are masked with `va_pathways`-style `masked_headers`. To avoid making va_tools depend on va_pathways, move
+    `masked_headers` + `excerpt` + `MASK` into `va_tools.render` (or `va_common.redaction`, if `is_secret_key`
+    lives there) and have `va_pathways.recording` import them from the new home. Keep one implementation.
+- A template that fails to parse (`TemplateSyntaxError`) raises `ToolRenderError(field)`. Stored tools cannot
+  have one (validated), but inline/legacy rows might.
+
+### va_tools/runner.py (new)
+- `ToolInvocation` result dataclass: `content: str` (the tool message for the LLM), `status_code: int | None`,
+  `outcome: HttpOutcomeKind | Literal["invalid_arguments","render_error"]`, `extracted: dict[str, JsonValue]`
+  (non-null only, to merge into variables), `all_extracted` (every name incl. None, for the `/test` response),
+  `request: dict` (url, method, headers masked, body) or None, `response: JsonValue`, `duration_ms`,
+  `truncated: bool`, `failed: bool` (True for timeout/connection/blocked/invalid_url/http_error),
+  `error_kind: str | None`, plus `event_data() -> dict[str, JsonValue]`, which is the specs/19 `call.tool` data:
+  `tool_name, tool_id, request{url (va_engine redacted_url? use the masked full URL: keep `redacted_url` from
+  handlers.reports for query secrets), method, headers(masked), body}, status_code, response_excerpt (≤ 2 000
+  chars), duration_ms, extracted, outcome, attempts, truncated`.
+- `parse_arguments(spec, raw: str) -> dict | list[dict]` errors. Step 1: `orjson.loads`. Non-object or bad JSON →
+  details `[{"path": "", "message": "arguments are not a JSON object"}]`. Then `Draft202012Validator(input_schema)
+  .iter_errors`, sorted by path, each `{"path": "a.b[0]"-style, "message": err.message[:300]}`, at most 10.
+  Content = `tool_result({"error":"invalid_arguments","details":[...]})`. Cache validators per spec with
+  `functools.lru_cache` keyed by the schema's canonical JSON (orjson OPT_SORT_KEYS), maxsize 256.
+- `class ToolRunner`: `__init__(self, http: HttpPort, *, clock: Clock)`;
+  `async run(self, spec, arguments: str | Mapping, scope: TemplateScope) -> ToolInvocation`.
+  Steps: validate → scope with `input=args` (`dataclasses.replace(scope, input=args)`) → render → `http.execute`
+  → build. The message (step 7): success (`ok`) = `{"status": code, "data": <parsed body truncated>,
+  "extracted": {...all names...}}`, where data truncation is: when the compact JSON of body > 4 000 chars, use
+  `excerpt(body, 4000)` as a string (spec: "truncated to 4 000 chars as JSON"). Failure (step 10) =
+  `{"status": code or 0, "error": kind}`, kind ∈ `timeout|connection|blocked|invalid_url|http_error`. An
+  http_error with a body also gets no data (spec shape).
+  Never raises (wrap render errors as outcome `render_error`, content `{"status":0,"error":"render_error"}`).
+- `failure_detail(invocation) -> str` for the `call.error` TOOL_FAILED detail (`"<tool_name>: <kind>"` +
+  status). T02b emits the events; T02a only provides the data.
+
+### Signing
+- `va_tools.signing.tool_signer(secrets: Sequence[str], clock: Clock) -> Signer`: returns
+  `signature_headers(secrets, body, int(clock.now().timestamp()))` (only `X-VA-Signature`, plus the Bland
+  header, same scheme as specs/19 §8). va_tools adds the `va-events` dependency if it does not have it. Check the
+  import graph: va_events must not depend on va_tools.
+
+### API: POST /v1/tools/{tool_id}/test
+- Schemas (tools_schemas.py): `ToolTestRequest {input: dict[str, JsonValue] = {}, variables: dict[str, JsonValue]
+  = {}}` (extra forbid, example); `ToolTestRequestView {url, method, headers, body}`; `ToolTestResponse {status:
+  "success", request: ToolTestRequestView | None, status_code: int | None, response: JsonValue, extracted: dict,
+  duration_ms: int, error: str | None, details: list | None, truncated: bool}` with an example matching
+  specs/13 §2. The `error`/`details` fields are additions recorded in the Decision.
+- Service `va_api.services.tools.test_tool(deps, ctx, tool_id, body, *, http_client, clock)`: load the row in
+  `tenant_session` (`ToolRepo.get`), load the org (signing secrets via `active_signing_secrets` in a
+  `global_session` with `OrgRepo`; follow how webhook_test_send loads them and reuse its helper if it has one).
+  Close the sessions, then decrypt the secret headers, build the `ToolSpec`, and use the scope
+  `TemplateScope(input=body.input, variables=body.variables, builtins=builtin_values(now=, timezone="UTC",
+  from_number="", to_number="", call_id="tool-test", voice_id=None, language="en", inbound=False))`. Run
+  `ToolRunner(HttpExecutor(container.tools_http, clock=, allow_http=deps.allow_http, signer=tool_signer(...)))`.
+  Invalid arguments → 200 with `error: "invalid_arguments"` and details (it is the tool's answer, not a request
+  error). Never open a DB session while the request runs.
+- Route: `@tools_router.post("/{tool_id}/test", operation_id="tools_test", openapi_extra={**_WRITE,
+  **audit_exempt("dry run: sends the tool request, changes no stored state")})`, scope `tools:write` (it sends
+  a real request with secrets). It must be declared BEFORE `POST /{tool_id}` only if path matching could
+  collide; `/{tool_id}/test` has two segments, so there is no collision. Cross-tenant: the existing `tool_id`
+  factory and the ToolTestRequest example cover it (owner control = 200; the test-send will fail to connect to
+  the example host, which is still 200 with `error`). Confirm the suite's fake resolver; if the example URL host
+  resolves nowhere the request returns `connection` quickly. If it makes the cross-tenant suite slow (retries),
+  check the factory tool's `retries` (0 by default).
+- `make openapi` + both `gen:api`.
+
+### Tests
+- `packages/va_tools/tests/test_runner.py` (respx over `plain_executor()` from tools_helpers, ManualClock or
+  `FrozenClock`; check what tools_helpers provides):
+  invalid JSON args; schema violation with sorted details; valid → request rendered (`{{input.date}}` in body
+  keeps int type for `{{input.party_size}}` whole-value templates; URL path value percent-encoded; query merged
+  and overriding; secret header sent verbatim but masked in `event_data` and `request`; inline tool headers all
+  masked); response_map single/multi/no match with only non-null in `extracted`; data > 4 000 chars cut;
+  excerpt ≤ 2 000; 5xx then 200 with retries=1 → attempts 2; timeout → `{"status":0,"error":"timeout"}` with
+  failed True; 404 → `{"status":404,"error":"http_error"}`; blocked URL; render error; `function_def`.
+- `packages/va_tools/tests/test_render.py`: query merge cases, header collision, masking rules.
+- `packages/va_tools/tests/test_signing.py`: the signer's header verifies with an independent HMAC.
+- `apps/api/tests/test_tools_test_api.py`: a real-socket receiver (`webhook_receiver.served_receiver`, map
+  `hooks.test` via `container.host_resolver.answers`, as in chat tests; `allow_http` in test env): success
+  echoes status/response/extracted/duration, the receiver got the secret header plaintext + `X-VA-Signature`
+  that verifies with the org secret (rotate first via the API to know it, or read it via `active_signing_secrets`);
+  the response body never contains the plaintext secret; invalid input → 200 `invalid_arguments`; receiver 500
+  → `status_code` 500, `error: http_error`; unknown tool → 404 TOOL_NOT_FOUND; `tools:read` key → 403; no audit
+  row is written.
+- The cross-tenant, audit-marker, and openapi suites run automatically.
+
+### Specs/docs
+- specs/13 §5 `> Decision (2026-11-05) P08-T02a:` covering the ToolSpec/runner module names; the message
+  shapes (success, failure kinds, `render_error`, data cut as an excerpt string when > 4 000 chars); `extracted`
+  in the message listing every name, with only non-null merged; secret headers never templated; query override
+  rule; inline headers masked as `••••`; the `/test` additions (`error`, `details`, `truncated`; invalid
+  arguments answer 200); `/test` needs `tools:write` and is audit-exempt; signing = specs/19 §8 headers with the
+  org's active secrets.
+- Also update specs/13 §2 Decision P08-T01 item 7 to point to P08-T02a.
+- AGENTS.md dated line.
+
+### Gates
+- Targeted: `uv run pytest packages/va_tools packages/va_pathways apps/api/tests/test_tools_test_api.py
+  apps/api/tests/test_tools_api.py apps/api/tests/test_cross_tenant_routes.py apps/api/tests/test_audit_markers.py
+  apps/api/tests/test_openapi.py -q`.
+- `make fmt lint typecheck placeholders`, then `make check` in the background with a heartbeat Monitor
+  (PATH += /home/ralph/.local/bin). Backpressure strings: audit (`uv export` + `uvx pip-audit`, `corepack pnpm
+  audit`), jscpd 0 clones, radon average (`complexity: <n>,`).
+
+### Risks
+- Moving `masked_headers`/`excerpt` out of va_pathways: keep the re-exports or update the imports; jscpd.
+- Import cycles: va_tools → va_events (signing) and va_tools → va_engine already exist. va_events must not import va_tools.
+- The cross-tenant suite actually sends the test request: make sure the example host fails fast (fake resolver)
+  and does not hang for `timeout_ms`.
+
+## Build P08-T02a (2026-11-05)
+- New va_tools modules: models (ToolSpec from_row/from_inline, masked_names, function_def), render (render_request,
+  merge_query, shown_headers, excerpt moved from va_pathways.recording which now imports it), runner (ToolRunner,
+  ToolInvocation content/failed/variables/event_data, argument_errors lru-cached validators, failure_detail),
+  signing (tool_signer over va_events.signature_headers). va_tools deps + va-db/va-events/va-llm.
+- Templates read args only as {{input.x}} (input layer = {"input": args}).
+- api: POST /v1/tools/{id}/test (tools:write, audit_exempt) → services/tool_tests.run_tool_test/tool_test_result;
+  schemas ToolTestRequest/ToolTestRequestView/ToolTestResult (+error/details/truncated). Cross-tenant tool factory
+  URL now https://127.0.0.1:9/tool (SessionContainer allows private IPs, so a public/private resolved host would
+  really connect). openapi + both gen:api regenerated.
+- Spec: specs/13 §5 Decision P08-T02a; §2 Decision item 7 points to it. AGENTS.md line.
+- Tests: va_tools test_render(13)/test_runner(18+)/test_signing(2); api test_tools_test_api (7).
+- make check exit 0: 12868 passed, 7 skipped; TS 22/52/48; pip-audit clean, pnpm audit 0, jscpd 0 clones, radon A 2.81.
+
+## Review P08-T02a (2026-11-05) — APPROVED
+- Re-ran: make lint/typecheck/placeholders exit 0; make test 12868 passed, 7 skipped, cov 99.08 % (exit 0).
+- Diff vs specs/13 §2/§5 + Decision P08-T02a: argument validation, input.* rendering, query merge, secret headers
+  verbatim + masked, signing via specs/19 §8 headers, message shapes, call.tool data, /test 200-for-every-run.
+  Minor note (not blocking): secret-header decrypt runs inside the tenant session (no DB use; same as P08-T01 code).

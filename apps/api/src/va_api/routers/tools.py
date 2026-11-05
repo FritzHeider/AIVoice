@@ -1,8 +1,9 @@
 """Custom tools API under ``/v1/tools`` (specs/13-tools-and-dynamic-data.md §2; legacy bodies).
 
 Rules: specs/13 §2 Decision P08-T01. Reads need ``tools:read``, changes ``tools:write``. ``tool_id`` accepts
-``TL-<uuid>`` or the bare uuid; responses always use the ``TL-`` form and mask secret header values. The
-``/test`` route arrives with the tool runtime (P08-T02).
+``TL-<uuid>`` or the bare uuid; responses always use the ``TL-`` form and mask secret header values.
+``/test`` sends one real, signed request with the tool's secrets, so it needs ``tools:write``; it changes no
+stored state and is audit-exempt (specs/13 §5 Decision P08-T02a).
 """
 
 from __future__ import annotations
@@ -11,10 +12,10 @@ from typing import Annotated, Final
 
 from fastapi import Depends, Query, Request
 
-from va_api.audit import audited
+from va_api.audit import audit_exempt, audited
 from va_api.auth.context import RequestContext
 from va_api.auth.dependencies import require_scope
-from va_api.auth.session_auth import database_of, envelope_of, settings_of
+from va_api.auth.session_auth import clock_of, database_of, envelope_of, settings_of
 from va_api.envelopes import legacy_router
 from va_api.routers.tools_schemas import (
     ToolCreate,
@@ -22,8 +23,11 @@ from va_api.routers.tools_schemas import (
     ToolDeleted,
     ToolEnvelope,
     ToolList,
+    ToolTestRequest,
+    ToolTestResult,
     ToolUpdate,
 )
+from va_api.services.tool_tests import ToolTestDeps, run_tool_test, tool_test_result
 from va_api.services.tools import (
     DELETED_MESSAGE,
     ToolDeps,
@@ -44,6 +48,7 @@ __all__ = [
     "tools_get",
     "tools_list",
     "tools_router",
+    "tools_test",
     "tools_update",
 ]
 
@@ -122,3 +127,20 @@ async def tools_delete(
     """Soft-delete a tool that no published resource lists (or any tool with ``force``)."""
     await delete_tool(tool_deps(request), ctx, parse_tool_id(tool_id), force=force)
     return ToolDeleted(message=DELETED_MESSAGE)
+
+
+@tools_router.post(
+    "/{tool_id}/test",
+    operation_id="tools_test",
+    openapi_extra={**_WRITE, **audit_exempt("dry run: sends the tool request, stores nothing")},
+)
+async def tools_test(
+    tool_id: str, body: ToolTestRequest, request: Request, ctx: WriteTools
+) -> ToolTestResult:
+    """Send the tool's request once with ``input`` and ``variables``; invalid input and failed requests are
+    reported in the body (``error``), not as an HTTP error."""
+    deps = ToolTestDeps(
+        tools=tool_deps(request), http=request.app.state.container.tools_http, clock=clock_of(request)
+    )
+    invocation = await run_tool_test(deps, ctx, parse_tool_id(tool_id), body)
+    return tool_test_result(invocation)

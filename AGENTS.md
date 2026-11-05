@@ -2019,3 +2019,11 @@ Grafana 3001
   decrypting needs no DB. The audit redactor blanks the whole `secret_headers` key. Cross-tenant factory
   `tool_id` returns the `TL-` form; `(404, "TOOL_NOT_FOUND")` is in `cross_tenant.REFUSED`. Factories may run
   several times per tenant: give rows with per-org unique names a random suffix.
+- 2026-11-05 (P08-T02a): tool runtime core = `va_tools.models.ToolSpec` (`from_row(row, secrets)`/`from_inline`,
+  `masked_names()`, `function_def`), `va_tools.render.render_request` (+ `excerpt`, moved here from va_pathways),
+  `va_tools.runner.ToolRunner(http, clock=).run(spec, args, scope)` → `ToolInvocation` (`content`, `failed`,
+  `variables`, `event_data()`, `failure_detail`), `va_tools.signing.tool_signer(secrets, clock)`; templates read
+  arguments only as `{{input.x}}`. `/test` = `va_api.services.tool_tests.run_tool_test` over the container's
+  `tools_http`. Never name a src function `test_*` either (`tool_test_result`, not `test_result`). The api test
+  `SessionContainer` allows private destinations: a URL resolving to a private IP really connects, so point tools
+  at the receiver (`hooks.test` → 127.0.0.1) or a closed local port (cross-tenant `tool_id` factory: `127.0.0.1:9`).

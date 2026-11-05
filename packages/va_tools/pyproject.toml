@@ -1,7 +1,7 @@
 [project]
 name = "va-tools"
 version = "0.1.0"
-description = "VoiceAgents tool runtime: SSRF-safe HTTP executor and JSONPath extraction, tool validation and secret headers"
+description = "VoiceAgents tool runtime: SSRF-safe HTTP executor and JSONPath extraction, tool validation and secret headers, the tool runner"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "httpx>=0.28",
@@ -10,8 +10,11 @@ dependencies = [
     "orjson>=3.13.0",
     "pydantic>=2.9",
     "va-common",
+    "va-db",
     "va-domain",
     "va-engine",
+    "va-events",
+    "va-llm",
 ]
 
 [build-system]
@@ -20,5 +23,8 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 va-common = { workspace = true }
+va-db = { workspace = true }
 va-domain = { workspace = true }
 va-engine = { workspace = true }
+va-events = { workspace = true }
+va-llm = { workspace = true }

@@ -3,7 +3,8 @@
 ``ToolCreate`` is the Send Call inline tool (:class:`va_domain.calls.tools.InlineTool`, which validates every
 field shape) plus write-only ``secret_headers``. ``ToolUpdate`` takes any subset of the same fields: the
 service merges it over the stored definition and validates the result as a whole, so field rules are not
-repeated here. Responses show secret header values masked (specs/13 §2 Decision P08-T01).
+repeated here. Responses show secret header values masked (specs/13 §2 Decision P08-T01). The ``/test`` bodies
+follow specs/13 §5 Decision P08-T02a.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ __all__ = [
     "ToolDeleted",
     "ToolEnvelope",
     "ToolList",
+    "ToolTestRequest",
+    "ToolTestRequestView",
+    "ToolTestResult",
     "ToolUpdate",
     "ToolView",
 ]
@@ -172,3 +176,81 @@ class ToolDeleted(BaseModel):
 
     status: Literal["success"] = "success"
     message: str
+
+
+_TEST_REQUEST_EXAMPLE: Final[dict[str, Any]] = {
+    "url": "https://api.bellapasta.com/availability",
+    "method": "POST",
+    "headers": {"Content-Type": "application/json", "Authorization": "••••"},
+    "body": {"date": "2026-11-06", "time": "19:30", "party": 4, "caller": ""},
+}
+
+
+class ToolTestRequest(BaseModel):
+    """``POST /v1/tools/{tool_id}/test``: the tool input (the model's arguments) and template variables."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "input": {"date": "2026-11-06", "time": "19:30", "party_size": 4},
+                    "variables": {"customer_name": "Ada"},
+                }
+            ]
+        },
+    )
+
+    input: dict[str, JsonValue] = Field(
+        default_factory=dict, description="Arguments validated against `input_schema` (`{{input.*}}`)."
+    )
+    variables: dict[str, JsonValue] = Field(
+        default_factory=dict, description="Conversation variables the templates may read."
+    )
+
+
+class ToolTestRequestView(BaseModel):
+    """The request as sent: full URL, masked secret header values."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [_TEST_REQUEST_EXAMPLE]})
+
+    url: str
+    method: HttpMethod
+    headers: dict[str, str]
+    body: JsonValue
+
+
+class ToolTestResult(BaseModel):
+    """``POST /v1/tools/{tool_id}/test`` result.
+
+    ``error`` is null for a 2xx answer, else ``invalid_arguments`` (``details`` lists why; nothing is sent),
+    ``http_error``, ``timeout``, ``connection``, ``blocked``, ``invalid_url``, or ``render_error``.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "success",
+                    "request": _TEST_REQUEST_EXAMPLE,
+                    "status_code": 200,
+                    "response": {"available": False, "alternatives": [{"time": "20:30"}]},
+                    "extracted": {"available": False, "alternatives": "20:30"},
+                    "duration_ms": 182,
+                    "error": None,
+                    "details": [],
+                    "truncated": False,
+                }
+            ]
+        }
+    )
+
+    status: Literal["success"] = "success"
+    request: ToolTestRequestView | None
+    status_code: int | None
+    response: JsonValue
+    extracted: dict[str, JsonValue] = Field(description="Every `response` variable (null = no match).")
+    duration_ms: int
+    error: str | None
+    details: list[dict[str, JsonValue]] = Field(description="Input validation failures (`path`, `message`).")
+    truncated: bool = Field(description="Whether the response exceeded 1 MiB and was cut.")

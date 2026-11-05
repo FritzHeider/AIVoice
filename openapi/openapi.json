@@ -10633,6 +10633,217 @@
         "title": "ToolList",
         "type": "object"
       },
+      "ToolTestRequest": {
+        "additionalProperties": false,
+        "description": "``POST /v1/tools/{tool_id}/test``: the tool input (the model's arguments) and template variables.",
+        "examples": [
+          {
+            "input": {
+              "date": "2026-11-06",
+              "party_size": 4,
+              "time": "19:30"
+            },
+            "variables": {
+              "customer_name": "Ada"
+            }
+          }
+        ],
+        "properties": {
+          "input": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Arguments validated against `input_schema` (`{{input.*}}`).",
+            "title": "Input",
+            "type": "object"
+          },
+          "variables": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Conversation variables the templates may read.",
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "title": "ToolTestRequest",
+        "type": "object"
+      },
+      "ToolTestRequestView": {
+        "description": "The request as sent: full URL, masked secret header values.",
+        "examples": [
+          {
+            "body": {
+              "caller": "",
+              "date": "2026-11-06",
+              "party": 4,
+              "time": "19:30"
+            },
+            "headers": {
+              "Authorization": "••••",
+              "Content-Type": "application/json"
+            },
+            "method": "POST",
+            "url": "https://api.bellapasta.com/availability"
+          }
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "method",
+          "headers",
+          "body"
+        ],
+        "title": "ToolTestRequestView",
+        "type": "object"
+      },
+      "ToolTestResult": {
+        "description": "``POST /v1/tools/{tool_id}/test`` result.\n\n``error`` is null for a 2xx answer, else ``invalid_arguments`` (``details`` lists why; nothing is sent),\n``http_error``, ``timeout``, ``connection``, ``blocked``, ``invalid_url``, or ``render_error``.",
+        "examples": [
+          {
+            "details": [],
+            "duration_ms": 182,
+            "extracted": {
+              "alternatives": "20:30",
+              "available": false
+            },
+            "request": {
+              "body": {
+                "caller": "",
+                "date": "2026-11-06",
+                "party": 4,
+                "time": "19:30"
+              },
+              "headers": {
+                "Authorization": "••••",
+                "Content-Type": "application/json"
+              },
+              "method": "POST",
+              "url": "https://api.bellapasta.com/availability"
+            },
+            "response": {
+              "alternatives": [
+                {
+                  "time": "20:30"
+                }
+              ],
+              "available": false
+            },
+            "status": "success",
+            "status_code": 200,
+            "truncated": false
+          }
+        ],
+        "properties": {
+          "details": {
+            "description": "Input validation failures (`path`, `message`).",
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "extracted": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "Every `response` variable (null = no match).",
+            "title": "Extracted",
+            "type": "object"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolTestRequestView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "response": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Code"
+          },
+          "truncated": {
+            "description": "Whether the response exceeded 1 MiB and was cut.",
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "request",
+          "status_code",
+          "response",
+          "extracted",
+          "duration_ms",
+          "error",
+          "details",
+          "truncated"
+        ],
+        "title": "ToolTestResult",
+        "type": "object"
+      },
       "ToolUpdate": {
         "additionalProperties": false,
         "description": "``POST /v1/tools/{tool_id}``: any subset of the ToolCreate fields.\n\nOmitted fields keep their stored value. ``null`` clears ``speech``, ``body``, and ``secret_headers``; the\nother fields reject it. ``secret_headers`` replaces the whole stored set.",
@@ -18419,6 +18630,72 @@
         "x-audit": [
           "tool.update"
         ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:write"
+      }
+    },
+    "/v1/tools/{tool_id}/test": {
+      "post": {
+        "description": "Send the tool's request once with ``input`` and ``variables``; invalid input and failed requests are\nreported in the body (``error``), not as an HTTP error.",
+        "operationId": "tools_test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tool_id",
+            "required": true,
+            "schema": {
+              "title": "Tool Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolTestResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools Test",
+        "tags": [
+          "Tools"
+        ],
+        "x-audit-exempt": "dry run: sends the tool request, stores nothing",
         "x-envelope": "legacy",
         "x-scope": "tools:write"
       }

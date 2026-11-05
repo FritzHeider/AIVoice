@@ -19,7 +19,6 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from va_common.json import dumps_str
 from va_common.masking import is_secret_key
 from va_engine.engine_events import CONDITION_EVENT, EXTRACTION_EVENT, ROUTE_EVENT
 from va_engine.handlers.reports import redacted_url
@@ -37,6 +36,7 @@ from va_engine.models.results import (
 )
 from va_engine.ports import HttpCall, HttpOutcome, HttpOutcomeKind, HttpPort, SmsOutcome, SmsRequest
 from va_tools.jsonpath import extract_all
+from va_tools.render import EXCERPT_LIMIT, excerpt
 
 __all__ = [
     "EXCERPT_LIMIT",
@@ -52,25 +52,13 @@ __all__ = [
     "mocked_outcome",
 ]
 
-EXCERPT_LIMIT: Final = 2_000
 MASK: Final = "***"
 SIMULATED_MESSAGE_PREFIX: Final = "sim-"
-_ELLIPSIS: Final = "…"
 _WEBHOOK_EVENT: Final = "call.webhook_node"
 _SMS_EVENT: Final = "call.sms_sent"
 _OK_STATUS_CLASS: Final = 2
 
 type Item = dict[str, JsonValue]
-
-
-def excerpt(value: JsonValue, limit: int = EXCERPT_LIMIT) -> str | None:
-    """``value`` as text (JSON unless it is a string), at most ``limit`` characters (``…`` marks a cut)."""
-    if value is None:
-        return None
-    text = value if isinstance(value, str) else dumps_str(value)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + _ELLIPSIS
 
 
 def masked_headers(headers: Mapping[str, str]) -> dict[str, JsonValue]:

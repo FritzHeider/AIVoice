@@ -83,7 +83,7 @@ packages/va_tools/src/va_tools/
 >    (`config.tools`), or any version of a live agent (`call_settings.tools`) lists the tool in either id form.
 >    `?force=true` is open to every `tools:write` principal (unlike pathways, deleting a tool loses no data
 >    that cannot be recreated).
-> 7. `POST /v1/tools/{tool_id}/test` ships with the tool runtime (P08-T02).
+> 7. `POST /v1/tools/{tool_id}/test` ships with the tool runtime (specs/13 §5 Decision P08-T02a).
 
 ## 3. Secret headers
 
@@ -133,6 +133,35 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 10. Failures (timeout/connection/4xx/5xx after retries) return `{"status": <code or 0>, "error": "<kind>"}` to the
     LLM; the dialogue prompt instructs the model to apologize briefly and offer alternatives. Errors also emit
     `call.error` level warning `TOOL_FAILED`.
+
+> Decision (2026-11-05) P08-T02a: the runner core is `va_tools.models.ToolSpec` (from a stored row with its
+> decrypted secret headers, or from a Send Call inline tool; `function_def(spec)` is the §4 function),
+> `va_tools.render.render_request`, `va_tools.runner.ToolRunner.run(spec, arguments, scope)` over the shared
+> `va_tools.http.HttpExecutor`, and `va_tools.signing.tool_signer` (the specs/19 §8 headers with every active org
+> webhook secret). Steps 2 and 9 (speech, fillers) and the events belong to the in-call executor (P08-T02b).
+> 1. Arguments: blank text is `{}`; anything but a JSON object is `invalid_arguments` with the detail
+>    `{"path": "", "message": "arguments are not a JSON object"}`; schema errors are `{path, message}` (path like
+>    `a.b[0]`, message ≤ 300 chars), sorted by path, at most 10. A schema that is itself invalid or has an
+>    unresolvable `$ref` accepts any object (stored tools are validated; this only guards legacy rows).
+> 2. Templates read the arguments as `input.*` only (`{{input.date}}`; the input layer is `{"input": args}`), then
+>    the usual specs/11 §8 layers. A `query` key replaces every pair of that key already in the URL; secret header
+>    values are never templated and win over a plain header of the same name (case-insensitive). A template that
+>    does not parse is the outcome `render_error` (tool message `{"status":0,"error":"render_error"}`).
+> 3. Tool message: `data` is the parsed body itself when its compact JSON has at most 4 000 characters, else a
+>    4 000-character excerpt string ending in `…`; `extracted` lists every `response` name (null = no match). Only
+>    non-null values of a 2xx answer are merged into variables; failures (`http_error`, `timeout`, `connection`,
+>    `blocked`, `invalid_url`, `render_error`) carry no `data` and count as `TOOL_FAILED` (`"<tool>: <kind>"`
+>    plus ` (<status>)` for HTTP errors); `invalid_arguments` does not.
+> 4. Shown headers (the `/test` answer and `call.tool`): secret headers, every inline tool header (§4), and every
+>    secret-named header (`Authorization`, `X-Api-Key`, …) show as `••••`. `call.tool` data = `tool_name`,
+>    `tool_id`, `outcome`, `request` (`url` without user info/query/fragment, `method`, masked `headers`, `body`
+>    capped like `data`), `status_code`, `response_excerpt` (≤ 2 000 chars), `duration_ms`, `attempts`,
+>    `truncated`, `extracted`.
+> 5. `POST /v1/tools/{tool_id}/test` needs `tools:write` (it sends the stored secrets), writes no audit row and
+>    stores nothing. It answers 200 for every run: the §2 body plus `error` (null for 2xx, else the outcome),
+>    `details` (argument errors), and `truncated`; `request` shows the full URL and is null when nothing was sent.
+>    Built-ins are those of a conversation without a call (empty numbers and `call_id`, UTC, `en`). No database
+>    session is open while the request runs.
 
 Max tool calls per assistant turn: 4 (parallel tool calls from the LLM run concurrently, max 3 in parallel). Max
 tool calls per call: 100.

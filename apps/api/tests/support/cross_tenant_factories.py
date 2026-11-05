@@ -129,7 +129,9 @@ async def _tool(context: FactoryContext) -> str:
             {
                 "name": f"cross_tenant_{new_id().hex}",
                 "description": "Cross-tenant tool",
-                "url": "https://hooks.test/tool",
+                # The owner's /test control connects to a closed local port (refused at once, or blocked
+                # by the SSRF guard): no request leaves the machine.
+                "url": "https://127.0.0.1:9/tool",
             }
         )
         return to_public(PublicPrefix.TOOL, tool.id)
