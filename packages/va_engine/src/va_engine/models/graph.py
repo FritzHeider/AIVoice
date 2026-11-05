@@ -61,6 +61,7 @@ class GlobalConfig(CamelModel):
     default_language: str | None = None
     memory_enabled: bool = False
     global_tools: list[str | dict[str, JsonValue]] = Field(default_factory=list)
+    allow_end_call_tool: bool = True
     global_kb: str | list[str] | None = None
     max_total_turns: int = Field(default=200, ge=1, le=1_000)
     error_phrase: str = "I'm sorry, I'm having trouble right now."

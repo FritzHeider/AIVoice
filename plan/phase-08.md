@@ -235,11 +235,17 @@
   - Deliverables: `sms_capable` fact from the agent number/messaging readiness (shared with `va_db.voicemail_sms.sms_sender`), `send_sms` over `OutboundSms`, `schedule_callback` creating a scheduled child call (same config, `start_time`, `parent_call_id`) and starting its `CallWorkflow`, both behind the call's executor
   - Acceptance: availability tests (number not SMS-capable, `engine.allow_callbacks` off), runtime sim test sending an SMS, DB test of the scheduled callback row and workflow start.
 
-- [ ] P08-T02c Pathway node tools and `globalTools`
-  - Spec refs: specs/13 §4 (node `tools` ∪ `globalTools` ∪ system tools), specs/11 §5.7 tools line, specs/11 §3 (`allowEndCallTool`)
+- [x] P08-T02c1 Pathway engine tool rounds on reply nodes (split from P08-T02c by the planner, 2026-11-05: engine and media wiring are separately testable) — va_engine.engine_node_tools (NodeTools.offer, run_node_round) + shared va_engine.tool_tasks (TaskBrain delegates), PathwayToolExecutor.definitions_for, GlobalConfig.allow_end_call_tool, EnginePorts.tools / ConversationFacts.system_tools+tool_fillers; no tool round after an unavailable or cut-off reply (mutant without the guards fails 3 tests); specs/13 §4 Decision P08-T02c1, specs/11 §3.4/§5.9; lint/typecheck/placeholders pass, make test 13015 passed 7 skipped (cov 99.07%; a first run had 1 unrelated sim flake, task fix:sim-shared-redis-exit-flake), jscpd 0, radon worst C (12)
+  - Spec refs: specs/13 §4, §6; specs/11 §3.4 (`allowEndCallTool`), §5.7 tools line
   - Depends on: P08-T02b1, P07-T12
-  - Deliverables: PathwayEngine offers node + global custom tools and allowed system tools on reply nodes, runs them through the same executor with speech/filler, records answers, honours the per-turn/per-call caps
-  - Acceptance: engine tests (tool round on a node, global tool, `allowEndCallTool=false`), runtime sim pathway call with a tool.
+  - Deliverables: shared tool-task helpers extracted from TaskBrain (`va_engine.tool_tasks`), `GlobalConfig.allow_end_call_tool`, `PathwayToolExecutor.definitions_for`, PathwayEngine offering node ∪ `globalTools` custom tools and allowed system tools on Default / Knowledge Base nodes with speech/filler, variables, `end_call`/`press_button`, per-pass/per-call caps
+  - Acceptance: engine tests (tool round on a node, global tool, `allowEndCallTool=false`, end_call, press_button, caps, barge-in mid-tool), TaskBrain tests unchanged and green.
+
+- [ ] P08-T02c2 Pathway call tools in the media runtime (split from P08-T02c)
+  - Spec refs: specs/13 §4-§6
+  - Depends on: P08-T02c1
+  - Deliverables: `CallToolSource.pathway_executor` over every tool the pinned graph references (TL ids + inline objects), `CallToolExecutor.definitions_for`, runtime builds system tools + executor for pathway calls and passes facts to the engine
+  - Acceptance: media unit tests + runtime sim pathway call with a node tool (call.tool event, tool answer used in the reply).
 
 - [ ] P08-T03 Dynamic data
   - Spec refs: specs/13-tools-and-dynamic-data.md (dynamic_data)

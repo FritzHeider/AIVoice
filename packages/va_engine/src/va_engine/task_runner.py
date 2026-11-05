@@ -23,11 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Final
+from typing import Final
 
 import orjson
 
@@ -42,8 +41,6 @@ from va_engine.models.state import EngineState, TurnRecord
 from va_engine.opener import parse_field
 from va_engine.system_tools import SystemToolFacts, system_tools
 from va_engine.task_tools import (
-    EXECUTOR_CONCURRENCY,
-    FILLER_DELAY_S,
     INTERRUPTED,
     MAX_INVALID_ROUNDS,
     MAX_TOOL_CALLS_PER_CALL,
@@ -53,8 +50,9 @@ from va_engine.task_tools import (
     RoundPlan,
     plan_round,
 )
-from va_engine.templating import MissingVariables, Template, TemplateScope, TemplateSyntaxError, render
+from va_engine.templating import MissingVariables, Template, TemplateScope, render
 from va_engine.tool_executor import ToolAnswer, ToolExecutor
+from va_engine.tool_tasks import ToolLines, merge_variables, runnable_facts, start_tools, stop_tasks
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import LlmUnavailableError
@@ -70,7 +68,6 @@ from va_llm.prompts import (
 )
 from va_llm.tokens import TokenCounter
 from va_llm.window import ConversationWindow
-from va_voice.phrase_cache import TOOL_FILLERS
 from va_voice.pipeline.models import (
     BrainOutput,
     BrainTiming,
@@ -167,9 +164,8 @@ class TaskBrain:
         self._executor = executor
         self._memory_context = memory_context
         self._on_state = on_state
-        self._fillers_on = settings.engine.tool_fillers
-        self._fillers = 0
-        self._facts = _runnable_facts(facts, executor)
+        self._lines = ToolLines(executor, clock=clock, enabled=settings.engine.tool_fillers)
+        self._facts = runnable_facts(facts, executor)
         custom = executor.definitions() if executor is not None else ()
         self._tools: tuple[ToolDef, ...] = (*system_tools(self._facts), *custom)
         speech = executor.tool_speech if executor is not None else None
@@ -341,8 +337,9 @@ class TaskBrain:
         answered: set[str] = set()
         tasks: dict[str, asyncio.Task[ToolAnswer]] = {}
         try:
-            tasks = self._start_tools(plan.executed)
-            line = await self._tool_line(plan.executed, tasks)
+            scope = self._scope()
+            tasks = start_tools(self._executor, plan.executed, scope)
+            line = await self._lines.line(plan.executed, tasks, scope)
             if line is not None:
                 yield self._note_line(line)
             results = {call_id: await task for call_id, task in tasks.items()}
@@ -354,7 +351,7 @@ class TaskBrain:
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
         finally:
-            await _stop_tasks(tasks.values())
+            await stop_tasks(tasks.values())
             for item in plan.calls:
                 if item.call.id not in answered:
                     self._answer(item.call, INTERRUPTED, answered)
@@ -380,76 +377,8 @@ class TaskBrain:
             yield self._say(message, interruptible=False)
         yield TransferRequest(target=item.target, label=item.transfer.label, message=message or None)
 
-    def _start_tools(self, planned: tuple[PlannedCall, ...]) -> dict[str, asyncio.Task[ToolAnswer]]:
-        """One task per executed call (at most :data:`EXECUTOR_CONCURRENCY` run at once), all rendered in
-        the scope of the round's start."""
-        executor = self._executor
-        if executor is None or not planned:
-            return {}
-        gate = asyncio.Semaphore(EXECUTOR_CONCURRENCY)
-        scope = dataclasses.replace(self._scope(), variables=dict(self._state.variables))
-        return {
-            item.call.id: asyncio.create_task(
-                _execute_gated(executor, item.call, scope, gate), name=f"tool-{item.call.name}"
-            )
-            for item in planned
-        }
-
-    async def _tool_line(
-        self, planned: tuple[PlannedCall, ...], tasks: Mapping[str, asyncio.Task[ToolAnswer]]
-    ) -> str | None:
-        """What the caller hears while the round's tools run: tool speech, else a filler for slow tools."""
-        if not self._fillers_on or not tasks:
-            return None
-        speech = self._speech_line(planned)
-        if speech is not None:
-            return speech
-        if not await self._still_running(tasks.values()):
-            return None
-        filler = TOOL_FILLERS[self._fillers % len(TOOL_FILLERS)]
-        self._fillers += 1
-        return filler
-
-    def _speech_line(self, planned: tuple[PlannedCall, ...]) -> str | None:
-        """The rendered ``speech`` of the first executed call whose tool has one (arguments: ``input.*``)."""
-        executor = self._executor
-        if executor is None:
-            return None
-        for item in planned:
-            template = executor.speech(item.call.name)
-            if template is None:
-                continue
-            scope = dataclasses.replace(self._scope(), input={"input": _arguments(item.call)})
-            try:
-                text = render(template, scope).strip()
-            except TemplateSyntaxError:
-                _log.warning("task_tool_speech_invalid", tool=item.call.name)
-                return None
-            return text or None
-        return None
-
-    async def _still_running(self, tasks: Iterable[asyncio.Task[ToolAnswer]]) -> bool:
-        """Wait up to :data:`FILLER_DELAY_S` (on the injected clock) for ``tasks``; whether any still runs."""
-        pending = {task for task in tasks if not task.done()}
-        if not pending:
-            return False
-        delay = asyncio.create_task(self._clock.sleep(FILLER_DELAY_S), name="tool-filler-delay")
-        try:
-            while pending and not delay.done():
-                await asyncio.wait({*pending, delay}, return_when=asyncio.FIRST_COMPLETED)
-                pending = {task for task in pending if not task.done()}
-        finally:
-            await _stop_tasks((delay,))
-        return bool(pending)
-
     def _merge_variables(self, planned: tuple[PlannedCall, ...], results: Mapping[str, ToolAnswer]) -> None:
-        changed = False
-        for item in planned:
-            answer = results.get(item.call.id)
-            if answer is not None and answer.variables:
-                self._state.variables.update(answer.variables)
-                changed = True
-        if changed and self._on_state is not None:
+        if merge_variables(self._state.variables, planned, results) and self._on_state is not None:
             self._on_state(self._state)
 
     def _handles(self, name: str) -> bool:
@@ -572,47 +501,3 @@ class TaskBrain:
 def _log_missing_variable(call_id: str, path: str) -> None:
     """The template sink (a function, not a bound method: the brain is freed without the cyclic collector)."""
     _log.info("template_variable_missing", path=path, call_id=call_id)
-
-
-def _arguments(call: ToolCall) -> dict[str, object]:
-    """The call's arguments as a mapping (``{}`` when they are not a JSON object)."""
-    try:
-        value: object = orjson.loads(call.arguments_json or "{}")
-    except orjson.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _runnable_facts(facts: SystemToolFacts, executor: ToolExecutor | None) -> SystemToolFacts:
-    """``facts`` without the executor-backed system tools the executor does not run (never offered)."""
-
-    def runs(name: str) -> bool:
-        return executor is not None and executor.handles(name)
-
-    return dataclasses.replace(
-        facts,
-        sms_capable=facts.sms_capable and runs("send_sms"),
-        allow_schedule_callback=facts.allow_schedule_callback and runs("schedule_callback"),
-        has_knowledge_bases=facts.has_knowledge_bases and runs("lookup_knowledge"),
-    )
-
-
-async def _execute_gated(
-    executor: ToolExecutor, call: ToolCall, scope: TemplateScope, gate: asyncio.Semaphore
-) -> ToolAnswer:
-    """Run one call (an exception answers ``tool_failed``)."""
-    async with gate:
-        try:
-            return await executor.execute(call, scope)
-        except Exception as exc:
-            _log.warning("task_tool_failed", tool=call.name, error_type=type(exc).__name__)
-            return ToolAnswer(TOOL_FAILED)
-
-
-async def _stop_tasks(tasks: Iterable[asyncio.Task[Any]]) -> None:
-    """Cancel the unfinished ``tasks`` and wait until they ended."""
-    running = [task for task in tasks if not task.done()]
-    for task in running:
-        task.cancel()
-    if running:
-        await asyncio.wait(running)

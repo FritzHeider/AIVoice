@@ -646,3 +646,246 @@ Diff matches the plan and inbox note: bounded keepalive (`_await_bounded` never 
 keepers stopped in finally, body still awaited; heartbeat cancelled on renewer completion; cancelled tasks filtered
 in `_race`. Reviewer tightened the wedged-teardown test: `pttl(owner) <= 60_000` was vacuous (a renewal sets 15 s,
 which also satisfies it) → `> OWNER_TTL_MS`. Inbox note appended to DONE.
+
+## Plan P08-T02c1 — pathway engine tool rounds on reply nodes (split from P08-T02c; T02c2 = media wiring)
+
+All inbox notes are in DONE. Split recorded in plan/phase-08.md (parent T02c removed, T02c1/T02c2 added).
+
+### 0. Scope decisions (record as `> Decision (2026-11-05) P08-T02c1:` under specs/13 §4, in the same commit)
+1. Reply nodes = `Default` and `Knowledge Base` (global nodes included) whose reply streams from the dialogue LLM
+   (no static `text`). They offer: node `tools` ∪ `global_config.globalTools` (custom, resolved through the
+   executor, node first, de-duplicated by name) + system tools allowed by `SystemToolFacts` (runner `pathway`:
+   `end_call` only when `globalConfig.allowEndCallTool` (default true), never `transfer_call`, `press_button` on
+   voice, `send_sms`/`schedule_callback` only when the executor runs them). Other node types offer no
+   custom/system tools; Scheduling keeps exactly `list_slots`/`book_slot` (13 §6 "Scheduling node only").
+2. Call-level `tools` (Send Call) apply to task mode only (13 §4 "call tools (task mode)").
+3. Without an executor (text chat, unit tests, simulations — `EnginePorts.tools is None`) no custom tools; without
+   `ConversationFacts.system_tools` (None) no system tools: text runs are unchanged by this task.
+4. Tool loop per pass at a node: same caps as task mode (`MAX_TOOL_ROUNDS` 3 rounds, `MAX_INVALID_ROUNDS` 2, 4 calls
+   per round, 100 per call via `plan_round(budget=)`), then the node's reply is requested without tools. Answers
+   are `tool` history records (context updates, like Scheduling; call ids/arguments not persisted); a reply cut
+   by a barge-in records unanswered calls `{"error":"interrupted"}`. Speech/filler line as task mode (first
+   executed tool's rendered `speech`, else a filler after 1.2 s, `engine.tool_fillers=false` silences both) —
+   spoken as a `Say` and recorded as an assistant history line. Tool variables merge into `state.variables`.
+5. `end_call`: final line = `final_message`, else `"Goodbye."` unless the pass already spoke text this round;
+   `state.ended=True`, `end_reason="agent_end_call"`, yields `Say(final)` then
+   `EndCallAction(reason="agent_end_call", ended_by="agent", after_mark=<final's mark or None>)` (the brain maps it
+   as every EndCallAction; runtime maps to `agent_end_call`). `press_button` → `SendDtmfAction(digits=...)` after
+   the answers are recorded.
+6. Tools of another pathway entered by Transfer Pathway resolve only if the executor knows them (T02c2 loads the
+   pinned graph's tools); unknown refs are skipped (`engine.tool_unresolved` info log with the count).
+
+### 1. Shared tool-task helpers — new `packages/va_engine/src/va_engine/tool_tasks.py`
+Move out of `task_runner.py` (TaskBrain then delegates; behaviour identical, keeps jscpd 0):
+- `def call_arguments(call: ToolCall) -> dict[str, object]` (was `_arguments`).
+- `def runnable_facts(facts: SystemToolFacts, executor: ToolExecutor | None) -> SystemToolFacts` (was
+  `_runnable_facts`).
+- `async def execute_gated(executor, call, scope, gate) -> ToolAnswer` (log event name stays `task_tool_failed`?
+  → rename to `tool_failed` is a behaviour change; keep `task_tool_failed` only if a test asserts it — grep; else use
+  `engine.tool_failed` and update tests).
+- `async def stop_tasks(tasks)`.
+- `def start_tools(executor, planned: Sequence[PlannedCall], scope) -> dict[str, asyncio.Task[ToolAnswer]]`
+  (semaphore EXECUTOR_CONCURRENCY; scope copied with `variables=dict(scope.variables)`).
+- `class ToolLines` (per conversation; no back-reference to the owner — P08-FIX-3 cycle rule): `__init__(executor,
+  *, clock, enabled: bool)`, `async def line(planned, tasks, scope) -> str | None` (speech of the first executed
+  call rendered with `dataclasses.replace(scope, input={"input": call_arguments(call)})`, `TemplateSyntaxError` →
+  log `tool_speech_invalid`, None; else filler `TOOL_FILLERS[n % len]` round-robin when tasks still run after
+  `FILLER_DELAY_S` on the clock), `still_running` internal.
+- `def merge_variables(variables: dict, planned, results) -> bool` (changed?).
+TaskBrain: replace the methods with these (keep `_run_tools` flow and its logs). All existing task tests must pass
+unmodified except log-name updates if any.
+
+### 2. Executor protocol — `va_engine/tool_executor.py`
+- `type ToolRef = str | Mapping[str, JsonValue]` (a node/global `tools` entry).
+- `class PathwayToolExecutor(ToolExecutor, Protocol)`: `def definitions_for(self, refs: Sequence[ToolRef]) ->
+  tuple[ToolDef, ...]` — the executor's tools named by `refs` in ref order (str = `TL-<uuid>`/bare uuid matched to a
+  stored tool id; mapping = inline tool by its `name`), unknown refs skipped, duplicates once. (Implemented by
+  `CallToolExecutor` in T02c2.)
+- `GlobalConfig.allow_end_call_tool: bool = True` (`va_engine/models/graph.py`; camel `allowEndCallTool`); add
+  `"allowEndCallTool": true,` to the specs/11 §3.4 JSON block (verify `test_graph.py` / validation tests still
+  pass; lossless dump uses exclude_unset so Bland fixtures unaffected).
+
+### 3. Engine — `va_engine/engine.py` (+ new `va_engine/engine_node_tools.py` to keep engine.py < ~900 lines and
+radon low)
+- `EnginePorts.tools: PathwayToolExecutor | None = None`; `ConversationFacts.system_tools: SystemToolFacts | None =
+  None`; `ConversationFacts.tool_fillers: bool = True`.
+- `engine_node_tools.py`:
+  - `REPLY_NODE_TYPES = frozenset({"Default", "Knowledge Base"})`.
+  - `def node_tool_refs(node, graph) -> list[ToolRef]` = `node.data.tools` + `graph.global_config.global_tools`.
+  - `class NodeTools` (built once per engine: `executor`, `facts` = `runnable_facts(facts, executor)` or None):
+    `offered(node, graph) -> tuple[ToolDef, ...]` (system tools first then custom, custom names that are reserved
+    or already offered skipped), `handles(name)`, `facts`.
+  - `async def run_node_round(...)`-style helper (or a small class `NodeToolRound`) that, given the planned round
+    (`plan_round(calls, facts, handles=executor.handles, budget=)`), starts tasks, yields the line, collects
+    results, merges variables, records answers through a callback, yields `SendDtmfAction`s, and returns the
+    terminal planned call; `finally` stops tasks and records unanswered as INTERRUPTED. Keep it an async generator
+    of `Action`s with an out-param box for the terminal (pattern of `_relayed`'s `box`).
+- `_prepare(node, suffix)`: Scheduling → scheduling tools (unchanged); reply node with `NodeTools` → `offered(...)`;
+  also set `self._dialogue.tool_speech = executor.tool_speech or DEFAULT_TOOL_SPEECH` (check attr name in
+  dialogue.py: `tool_speech`).
+- `_respond`: generalize the loop: after the reply, `if node.type == "Scheduling"`: existing `_tool_round`; elif
+  custom/system tools were offered and the reply was a `SayStream` with tool calls: run the node round (yield its
+  actions via `_out` so `Say`s are remembered and terminal actions set `run.done`); end_call → yields final Say +
+  EndCallAction (state.ended/end_reason set) and returns; counters per pass: rounds, invalid rounds; after limits
+  `self._dialogue.tools = ()`; call-wide `self._tool_calls_used` (engine attribute; 100 cap).
+  "Spoke this round" for the Goodbye rule = the reply stream produced text (the `_streamed` collected parts; reuse
+  the recorded assistant record of this round — simplest: track via `_remember` count in the round).
+- Tool answer records: `TurnRecord(role="tool", content, node_id, tool_name, tool_call_id, at_ms)` (same as
+  `_tool_round`; extract a `_record_tool(node_id, call_id, name, content)` helper used by both).
+- Scope for tools: `TemplateScope(variables=state.variables, request_data=facts.request_data,
+  builtins=ctx builtins, timezone=facts.timezone)` — reuse how handlers build scope (`handlers/base.py` has a scope
+  builder from `TurnContext`; use it).
+- After variables merge, nothing else (PathwayBrain publishes state after each relay).
+
+### 4. Tests
+- `packages/va_engine/tests/test_tool_tasks.py`: ToolLines speech render / invalid template / filler round-robin /
+  disabled / fast tools no filler; start_tools concurrency ≤ 3; execute_gated exception → TOOL_FAILED; runnable_facts.
+  (Move the equivalents from task tests only if they would duplicate; TaskBrain tests stay.)
+- `packages/va_engine/tests/test_engine_tools.py` (engine_rig gains `tools: RecordingExecutor | None`,
+  `system: SystemToolFacts | None`, `fillers: bool`; `RecordingExecutor` gains `refs: dict[str, str]` (ref → name)
+  and `definitions_for(refs)`):
+  - `test_a_node_tool_is_offered_and_its_answer_feeds_the_next_reply`: Default node with `tools: ["TL-…"]`; FakeSource
+    reply 1 = tool call `lookup` ; reply 2 = text; asserts request 1 tools names contain `lookup`, executor called,
+    a `tool` history record with the content, request 2 contains the context update, spoken text = reply 2.
+  - `test_global_tools_are_offered_on_every_reply_node` (two nodes, global tool on both; not on a Webhook/End Call
+    node; Scheduling node offers only list_slots/book_slot).
+  - `test_end_call_tool_is_offered_only_when_allowed` (allowEndCallTool false → not in tools, a returned end_call is
+    answered unknown_tool invalid; true → offered).
+  - `test_end_call_speaks_the_final_message_and_ends`: final_message → Say + EndCallAction(reason agent_end_call),
+    state.ended; without final_message and reply text → no Goodbye; without text → "Goodbye.".
+  - `test_press_button_sends_dtmf` → SendDtmfAction digits, answer `{"status":"sent",...}`.
+  - `test_tool_speech_is_spoken_while_the_tool_runs` (hold executor; Say(speech) yielded before release) and filler
+    when no speech (FrozenClock → instant filler while held) and `tool_fillers=False` silences.
+  - `test_tool_variables_merge_into_the_state`.
+  - `test_the_fourth_request_of_a_pass_offers_no_tools` (3 tool rounds → 4th request tools == ()).
+  - `test_a_barge_in_mid_tool_records_interrupted` (close the generator while held → record `{"error":"interrupted"}`,
+    task cancelled).
+  - `test_without_an_executor_or_facts_no_tools_are_offered` (existing rigs: request tools == ()).
+  - `test_transfer_call_is_never_offered_on_pathways` (facts with transfer list → absent).
+- `test_graph.py`: `allowEndCallTool` parses, default true, round-trips via dump only when set.
+- PathwayBrain: one test in `test_pathway_brain.py` that an engine end_call EndCallAction and SendDtmfAction map to
+  EndCall / PressButton (existing mapping; add only if not covered).
+
+### 5. Spec + docs
+- specs/11 §3.4 block `allowEndCallTool`; specs/13 §4 Decision P08-T02c1 (items of §0); update specs/11 §5.9
+  Decision P07-T08b rule 7's "Other nodes offer no tools until phase 08" → add a line in the new Decision that
+  it is superseded.
+- AGENTS.md line: `va_engine.tool_tasks` shared helpers, `EnginePorts.tools`/`ConversationFacts.system_tools`,
+  `engine_rig(tools=, system=)`.
+
+### Gates
+make fmt lint typecheck placeholders; make test (background + heartbeat Monitor; ~25 min); jscpd 0; radon;
+pip-audit; pnpm audit. No e2e flow change (media unchanged until T02c2).
+
+### Risks
+- Refactor of TaskBrain: keep log event names asserted by tests (grep `task_tool_failed`, `task_tool_speech_invalid`).
+- Speculative stream opened at `_prepare` time now carries tools: an adopted speculative stream may return tool
+  calls → handled by the same round (dialogue.last is the adopted stream).
+- FakeSource scripts consumed by speculation (see AGENTS P07-T08b note): script a throwaway reply or build the rig
+  with `speculative=False` for tool tests.
+- engine.py size/complexity: put the round logic in `engine_node_tools.py`.
+
+## Build P08-T02c1 (2026-11-05)
+- New `va_engine.tool_tasks` (call_arguments, runnable_facts, execute_gated, stop_tasks, start_tools, merge_variables,
+  ToolLines); TaskBrain delegates to it (behaviour unchanged; log names now `tool_failed`/`tool_speech_invalid`).
+- `tool_executor.ToolRef` + `PathwayToolExecutor.definitions_for(refs)`; `GlobalConfig.allow_end_call_tool` (+ specs/11
+  §3.4 block line).
+- New `va_engine.engine_node_tools`: REPLY_NODE_TYPES, NO_SYSTEM_TOOLS, ToolOffer(tools, facts, custom, handles),
+  NodeTools.offer (system first, runner pathway, allowEndCallTool from the active graph; custom via definitions_for,
+  reserved/dup dropped, `engine.tool_unresolved` count), run_node_round (line, answers, DTMF after answers,
+  interrupted in finally).
+- Engine: EnginePorts.tools, ConversationFacts.system_tools/tool_fillers; `_respond` generalized (`_reply_calls`,
+  `_scheduling_round`, `_node_round`, `_tool_end`, `_record_tool`, `_tools_exhausted`, `_ToolBudget`); `_prepare` sets the
+  offer. end_call reason `agent_end_call` (Decision notes the §6 table's `agent_end_call_tool` is not used).
+- Tests: test_engine_tools.py (21), test_graph allowEndCallTool; engine_rig(tools=, system=, fillers=),
+  RecordingExecutor.refs/definitions_for.
+- Spec Decision P08-T02c1 under specs/13 §4; specs/11 §5.9 rule 7 marked superseded; AGENTS line.
+Gates: fmt/lint/typecheck/placeholders pass; make test 12991 passed 7 skipped (cov 99.06%, exit 0); jscpd 0 clones; radon avg A (3.37); pip-audit clean; pnpm audit 1 moderate (no high). No media/e2e change (T02c2 wires media).
+
+## Review P08-T02c1 (2026-11-05)
+Rejected: 4 findings (1 blocker). Reviewer gates: `make lint`, `make typecheck`, `make placeholders` pass;
+`check_openapi_drift` current; jscpd 0 clones; radon worst C (12) `PathwayEngine._respond`; `uv run pytest
+packages/va_engine` 1109 passed (engine_node_tools 100 %, engine.py 98 %, tool_tasks 95 %). The reviewer's full
+`make test` was stopped at 38 % (no failure up to there) once the rejection was certain, so the full suite was NOT
+re-verified this round. `logs/make_test.log` now ends with `exit=2` from that killed run: truncate it before the
+next run.
+
+1. BLOCKER `packages/va_engine/src/va_engine/engine.py` `_reply_calls` (`return await last.tool_calls()`): the real
+   `va_llm.dialogue.DialogueStream.tool_calls()` raises `LlmUnavailableError` after an unavailable stream
+   (`_raise_failure`; proven by `packages/va_llm/tests/test_dialogue_stream.py::
+   test_the_fallback_has_its_own_ttft_deadline`). Before this task a Default/KB node returned early (no tools);
+   now every reply node that offers tools (every voice pathway call once T02c2 passes facts, `press_button` is
+   always offered on voice) speaks the `errorPhrase` and then raises out of `start`/`handle_user_turn` (the
+   pipeline logs `pipeline_failed`) instead of ending the turn as specs/11 §5.9 Decision P07-T08b requires.
+   Repro (prints `RAISED LlmUnavailableError` with system facts, the normal `[stream, say errorPhrase]` without):
+   `uv run python /var/tmp/review_p08t02c1/repro_unavailable.py`. The tests cannot see it because
+   `dialogue_helpers.FakeStream.tool_calls` never raises. Required: (a) no tool round when
+   `self._dialogue.unavailable is not None` (turn ends exactly like the no-tools case, nothing raised);
+   (b) make `FakeStream.tool_calls` mirror production (raise `fail` when it is an `LlmUnavailableError`);
+   (c) tests in `test_engine_tools.py`: unavailable reply on a node with tools + system facts, and on a
+   Scheduling node (same function), asserting the actions and that no `tool` record exists.
+2. Should fix, same function: the calls of a cut-off stream (`last.error` set; the real stream returns the named
+   calls with partial `arguments_json`, `test_dialogue_stream.py` lines 350-362) are planned and executed. Task mode
+   drops them (`TaskBrain._round_calls`, `task_llm_stream_failed`) and Decision P08-T02c1 item 3 says the rounds
+   follow task mode. Required: ignore the calls when `last.error is not None` (warning log), give `FakeStream` a
+   way to script `error` together with `calls`, add a test; or keep it and say so in the Decision with the reason.
+3. Dead code `packages/va_engine/src/va_engine/engine_node_tools.py:143,166`: `RoundOutcome.variables_changed` is
+   written and never read (engine and tests). Remove the field and its docstring mention (call `merge_variables`
+   for its effect), or use it.
+4. Missing tests: (a) the call-wide cap of 100 on pathways (`_prepare` `spent`, `_tools_exhausted` third
+   condition, `plan_round(budget=)` in `_node_round`) has no behaviour test: add one (e.g. monkeypatch
+   `va_engine.engine.MAX_TOOL_CALLS_PER_CALL` to 2 and assert `too_many_tool_calls` answers, then no tools
+   offered on the next pass); (b) the planned `test_tool_tasks.py` was not written and `tool_tasks.py` lines 49-50
+   (non-JSON arguments → `{}` for the speech scope) and 174 are uncovered: add the direct tests.
+
+Checked and fine: offer rules (system first, `allowEndCallTool`, never `transfer_call`, reserved/duplicate custom
+names dropped, Scheduling unchanged), `end_call` reason `agent_end_call` (specs/13 §6 Decision 2026-11-02),
+`press_button` after answers, interrupted answers in `finally`, no engine back-reference from `NodeTools`/
+`ToolLines`, TaskBrain refactor behaviour-identical, spec Decision + specs/11 §3.4/§5.9 edits, AGENTS line, plan split.
+
+## Build P08-T02c1 fix (2026-11-05)
+Review findings 1-4 addressed:
+1. BLOCKER fixed: `PathwayEngine._reply_calls` returns no calls when `self._dialogue.unavailable is not None` (the turn
+   ends after the `errorPhrase` exactly like a node without tools; nothing raised). `dialogue_helpers.FakeStream`
+   now mirrors production: `fail=LlmUnavailableError` sets `error` and `tool_calls()` raises it. New test
+   `test_an_unavailable_model_ends_the_turn_with_the_error_phrase[reply-node|scheduling]` (tools + system facts).
+   Reviewer repro `/var/tmp/review_p08t02c1/repro_unavailable.py` now prints the normal actions for both cases.
+2. Cut-off stream: `_reply_calls` drops the calls when `last.error is not None` (warning `engine.llm_stream_failed`);
+   `FakeStream(error=)` / `FakeSource.reply(..., error=)` script it; test
+   `test_the_calls_of_a_cut_off_reply_are_not_run`. Verified: with both guards removed these 3 tests fail.
+3. `RoundOutcome.variables_changed` removed (merge_variables called for its effect).
+4. Tests: `test_the_call_wide_cap_answers_the_excess_and_then_offers_no_tools` (monkeypatched cap 2: third call
+   `too_many_tool_calls`, same pass and next pass offer no tools); new `packages/va_engine/tests/test_tool_tasks.py`
+   (15 tests: call_arguments incl. non-JSON, runnable_facts, execute_gated failure, start_tools gate + frozen
+   variables, merge order, stop_tasks, ToolLines speech/invalid/blank → filler, disabled, round-robin on ManualClock,
+   fast tools no filler, no executor) → tool_tasks.py 100 %. Extra: `test_a_static_node_never_runs_the_calls_of_an_
+   earlier_stream` covers the SayStream guard (engine.py line was uncovered).
+Spec: Decision P08-T02c1 item 5 (specs/13 §4) — failed/cut-off reply runs no tool round (also Scheduling). AGENTS line.
+Gates (this iteration): make fmt/lint/typecheck/placeholders exit 0; make test 13015 passed, 7 skipped, coverage
+99.07 %, exit=0 (logs/make_test.log); va_engine 1131+ passed (tool_tasks 100 %, engine_node_tools 100 %); jscpd 0
+clones; radon average A (2.42), worst in touched files C (12) `PathwayEngine._respond` (unchanged); pip-audit no known
+vulnerabilities; pnpm audit 1 moderate, no high. No media/e2e change (T02c2 wires media), so make e2e not run.
+
+## Review P08-T02c1 fix (2026-11-05)
+Approved. All 4 findings of the previous review are fixed and verified:
+1. `PathwayEngine._reply_calls` returns no calls when `dialogue.unavailable` is set (reply node and Scheduling); the
+   earlier repro `/var/tmp/review_p08t02c1/repro_unavailable.py` now prints the normal `[stream, say errorPhrase]`
+   for both cases. `FakeStream` mirrors `va_llm.dialogue.DialogueStream` (`error` set, `tool_calls()` raises).
+2. Calls of a cut-off stream (`last.error`) are dropped with `engine.llm_stream_failed` (same rule as
+   `TaskBrain._round_calls`; `error` is set only for post-token truncation or unavailability, a successful
+   fallback leaves it `None`).
+   Mutation check: a pytest plugin restoring the pre-fix `_reply_calls`
+   (`/var/tmp/review_p08t02c1_fix/mutant_reply_calls.py`) fails exactly the 3 new tests, 23 pass.
+3. `RoundOutcome.variables_changed` is gone.
+4. Call-wide cap test and `test_tool_tasks.py` (15 tests) exist; `tool_tasks.py` and `engine_node_tools.py` 100 %,
+   `engine.py` 98 %.
+Also checked: `_speculate` calls `_prepare` first, so a speculative request carries the node's tool offer; spec
+Decision item 5 matches the code; no leftover `task_tool_failed`/`task_tool_speech_invalid` references.
+Gates (this iteration): make lint / typecheck / placeholders exit 0; check_spec_refs 0 problems; openapi current;
+jscpd 0 clones; radon worst C (12) `PathwayEngine._respond`, C (11) `TaskBrain._run_tools`.
+make test run 1: 1 failed, 13014 passed, 7 skipped — `apps/sim/tests/test_sim_shared_redis.py::
+test_two_sim_processes_share_scenarios_and_reset` (`(0, 1) == (0, 0)`: a sim child exited 1). Not caused by this
+diff (only va_engine + docs changed; the sim does not import va_engine), passes 6/6 alone, already seen once in
+P08-FIX-7. Filed task `fix:sim-shared-redis-exit-flake` (capture the child's stderr, then fix the cause) and a
+fix memory. make test run 2: 13015 passed, 7 skipped, coverage 99.07 %, exit=0 (logs/make_test.log; run 1 kept
+as logs/make_test_review_run1.log). make e2e not run: no media/call flow change (T02c2 wires media).

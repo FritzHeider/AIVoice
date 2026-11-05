@@ -2,8 +2,11 @@
 
 :class:`FakeStream` follows the :class:`va_llm.dialogue.DialogueStream` consumer contract: a speculative
 stream yields nothing until ``commit()``; ``discard()`` ends ``text()`` empty; ``fail`` is raised from
-``text()`` after the deltas (an :class:`LlmUnavailableError` with no deltas = a pre-token failure). It is
-also an async context manager (closing on exit), as :class:`va_engine.task_runner.TaskBrain` uses streams.
+``text()`` after the deltas (an :class:`LlmUnavailableError` with no deltas = a pre-token failure) and, when
+it is an :class:`LlmUnavailableError`, is the stream's ``error`` and raised from ``tool_calls()`` as well;
+``error`` scripts a stream cut off after its deltas (``text()`` ends quietly, ``tool_calls()`` returns the
+calls named so far). It is also an async context manager (closing on exit), as
+:class:`va_engine.task_runner.TaskBrain` uses streams.
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ class FakeStream:
         *,
         fail: Exception | None = None,
         calls: Sequence[ToolCall] = (),
+        error: Exception | None = None,
     ) -> None:
         self.request = request
         self.deltas = list(deltas)
@@ -74,7 +78,7 @@ class FakeStream:
         self.closed = 0
         self.iterated = False
         self.yielded: list[str] = []
-        self.error: Exception | None = None
+        self.error: Exception | None = fail if isinstance(fail, LlmUnavailableError) else error
         self._released = asyncio.Event()
         if not request.speculative:
             self._released.set()
@@ -94,6 +98,8 @@ class FakeStream:
             raise self.fail
 
     async def tool_calls(self) -> list[ToolCall]:
+        if isinstance(self.error, LlmUnavailableError):
+            raise self.error
         return list(self.calls)
 
     def commit(self) -> None:
@@ -119,6 +125,7 @@ class _Script:
     deltas: Sequence[str]
     fail: Exception | None = None
     calls: Sequence[ToolCall] = ()
+    error: Exception | None = None
 
 
 @dataclass(slots=True)
@@ -129,9 +136,13 @@ class FakeSource:
     streams: list[FakeStream] = field(default_factory=list)
 
     def reply(
-        self, *deltas: str, fail: Exception | None = None, calls: Sequence[ToolCall] = ()
+        self,
+        *deltas: str,
+        fail: Exception | None = None,
+        calls: Sequence[ToolCall] = (),
+        error: Exception | None = None,
     ) -> FakeSource:
-        self.script.append(_Script(deltas, fail, calls))
+        self.script.append(_Script(deltas, fail, calls, error))
         return self
 
     @property
@@ -140,7 +151,7 @@ class FakeSource:
 
     async def stream_dialogue(self, request: DialogueRequest) -> DialogueStream:
         step = self.script.pop(0) if self.script else _Script(())
-        stream = FakeStream(request, step.deltas, fail=step.fail, calls=step.calls)
+        stream = FakeStream(request, step.deltas, fail=step.fail, calls=step.calls, error=step.error)
         self.streams.append(stream)
         return cast("DialogueStream", stream)
 

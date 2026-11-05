@@ -253,6 +253,7 @@ Aliases accepted on import: `"Transfer Node"`→`Transfer Call`, `"End Node"`→
   "defaultLanguage": null,
   "memoryEnabled": false,
   "globalTools": [],                     // tool ids available on every node
+  "allowEndCallTool": true,              // reply nodes may offer end_call (specs/13 §6)
   "globalKb": null,                      // KB ids searched on every node (in addition to node kb)
   "maxTotalTurns": 200,
   "errorPhrase": "I'm sorry, I'm having trouble right now.",
@@ -675,7 +676,8 @@ setting `engine.speculative=false`. Metrics: `speculation_hit` / `speculation_mi
 >    `{"error":"unknown_tool"}`, the calls after a failed booking that routes → `{"error":"skipped"}`) and recorded
 >    as `tool` history turns (the next request shows them as §5.8 rule 3 context updates, so no separate in-turn
 >    messages are added), then the node responds again; the 4th request of a pass offers no tools. A failed
->    booking with `onFailureNodeId` routes there (rule 3). Other nodes offer no tools until phase 08.
+>    booking with `onFailureNodeId` routes there (rule 3). Other nodes offer no tools until phase 08 (superseded:
+>    specs/13 §4 Decision P08-T02c1).
 > 8. Until phase 08, Knowledge Base nodes respond like Default nodes (no knowledge block) and Custom Code nodes run
 >    nothing, speak their `text`/`prompt` when present and wait only then (`engine.node_degraded`).
 > 9. Events go to `va_engine.engine_events.EngineEvents.emit(event_type, data)` (sync; the transport adapter

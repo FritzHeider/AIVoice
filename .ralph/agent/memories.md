@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793876594-d56e
+> P08-T02c1 fix: real DialogueStream.tool_calls() raises LlmUnavailableError and a cut-off stream returns partial calls with stream.error set -> engine/_reply_calls and TaskBrain must check dialogue.unavailable / stream.error before tool_calls(); dialogue_helpers.FakeStream now mirrors this (fail=unavailable sets error + raises from tool_calls; reply(error=) scripts a cut-off); invalid/blank tool speech falls back to the filler
+<!-- tags: engine, tools, testing | created: 2026-11-05 -->
+
 ### mem-1793872418-c1aa
 > P08-FIX-15: CallSession teardown keepalive bounded by TEARDOWN_KEEPALIVE_S (25 s) via asyncio.wait({teardown, clock.sleep}) without cancelling the teardown; heartbeat cancelled by a done callback on the renewer; filter cancelled tasks before task.exception()
 <!-- tags: media, session | created: 2026-11-05 -->
@@ -529,6 +533,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793877553-82e2
+> flake (2nd sighting): apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset fails under full make test with a sim child exit code 1 ((0,1) in P08-T02c1 review, (1,0) in P08-FIX-7); passes alone; child stderr is DEVNULL so cause unknown -> task fix:sim-shared-redis-exit-flake: capture stderr first, then fix shutdown
+<!-- tags: testing, sim | created: 2026-11-05 -->
 
 ### mem-1793838880-d41e
 > flake: apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset failed once under full make test (assert (1, 0) == (0, 0) at line 123) during P08-FIX-7; passes 3/3 alone; unrelated to va_workflows

@@ -100,6 +100,15 @@ def test_global_config_id_helpers() -> None:
     assert config.tool_ids() == ["TL-1"]
 
 
+def test_allow_end_call_tool_defaults_true_and_dumps_only_when_set() -> None:
+    assert load_graph([start()], []).global_config.allow_end_call_tool is True
+
+    loaded = load_graph([start()], [], {"allowEndCallTool": False})
+
+    assert loaded.global_config.allow_end_call_tool is False
+    assert dump_graph(loaded)["global_config"] == {"allowEndCallTool": False}
+
+
 def test_schema_errors_map_to_field_paths() -> None:
     with pytest.raises(ValidationError) as caught:
         load_graph(

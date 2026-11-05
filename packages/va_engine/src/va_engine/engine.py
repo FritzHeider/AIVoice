@@ -51,9 +51,9 @@ from va_engine.engine_events import (
     report_event,
     route_tag_color,
 )
+from va_engine.engine_node_tools import NO_OFFER, NodeTools, RoundOutcome, ToolOffer, run_node_round
 from va_engine.engine_tools import (
     MAX_SCHEDULING_ROUNDS,
-    SchedulingRound,
     run_scheduling_calls,
     scheduling_tools,
 )
@@ -80,6 +80,11 @@ from va_engine.models.state import EngineState, TurnRecord
 from va_engine.navigation import ActiveGraph, Navigator, PathwayLoader, Transition
 from va_engine.ports import HttpPort, SmsPort
 from va_engine.speculative import Speculation, speculation_allowed
+from va_engine.system_tools import EndCallArgs, SystemToolFacts
+from va_engine.task_runner import AGENT_END_CALL, DEFAULT_GOODBYE
+from va_engine.task_tools import MAX_INVALID_ROUNDS, MAX_TOOL_CALLS_PER_CALL, MAX_TOOL_ROUNDS, plan_round
+from va_engine.tool_executor import PathwayToolExecutor
+from va_llm.models import ToolCall
 from va_llm.prompts import INTERRUPTION_MARK, dtmf_message
 from va_voice.pipeline.models import UserTurn
 
@@ -103,7 +108,8 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EnginePorts:
-    """The engine's collaborators (``loader``, ``http``, ``sms`` optional: their nodes report a problem)."""
+    """The engine's collaborators (``loader``, ``http``, ``sms`` optional: their nodes report a problem;
+    ``tools`` optional: no custom tools are offered without it)."""
 
     decider: Decider
     dialogue: GatewayDialogue
@@ -112,11 +118,13 @@ class EnginePorts:
     loader: PathwayLoader | None = None
     http: HttpPort | None = None
     sms: SmsPort | None = None
+    tools: PathwayToolExecutor | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConversationFacts:
-    """What the conversation's templates and decisions see besides the state."""
+    """What the conversation's templates and decisions see besides the state; ``system_tools`` ``None`` =
+    reply nodes offer no system tool (text runs), ``tool_fillers`` = ``engine.tool_fillers``."""
 
     org_id: uuid.UUID
     call_id: uuid.UUID | None = None
@@ -125,6 +133,8 @@ class ConversationFacts:
     builtins: Mapping[str, object] = field(default_factory=dict)
     timezone: str = "UTC"
     transfer_list: Mapping[str, str] = field(default_factory=dict)
+    system_tools: SystemToolFacts | None = None
+    tool_fillers: bool = True
 
 
 def new_pathway_state(active: ActiveGraph) -> EngineState:
@@ -180,6 +190,15 @@ class _Extraction:
 
     async def extract(self, ctx: TurnContext) -> ExtractionResult | None:
         return await self._extract(ctx.node)
+
+
+@dataclass(slots=True)
+class _ToolBudget:
+    """The tool rounds of one reply pass at a node (``spoke`` = a reply of the pass produced text)."""
+
+    rounds: int = 0
+    invalid: int = 0
+    spoke: bool = False
 
 
 @dataclass(slots=True)
@@ -246,6 +265,11 @@ class PathwayEngine:
         self._speculation: Speculation | None = None
         self._background: set[asyncio.Task[None]] = set()
         self._extraction = _Extraction(self._extract_latest)
+        self._tools = NodeTools(ports.tools, facts.system_tools, clock=clock, fillers=facts.tool_fillers)
+        self._offer: ToolOffer = NO_OFFER
+        self._tool_calls_used = 0
+        if ports.tools is not None and ports.tools.tool_speech:
+            self._dialogue.tool_speech = ports.tools.tool_speech
 
     @property
     def state(self) -> EngineState:
@@ -492,10 +516,11 @@ class PathwayEngine:
         self._handler_route(run, node, result)
 
     async def _respond(self, run: _Run, node: PathwayNode, suffix: str | None) -> AsyncGenerator[Action]:
-        """The node's reply; a Scheduling reply's tool calls are answered and the node responds again."""
+        """The node's reply; the tool calls of a streamed reply are answered and the node responds again
+        (Scheduling: its booking tools; reply nodes: custom and system tools, Decision P08-T02c1)."""
         handler = self._handler(node)
         self._prepare(node, suffix)
-        rounds = 0
+        budget = _ToolBudget()
         while True:
             ctx = self._ctx(node)
             result = await handler.respond(ctx)
@@ -505,41 +530,119 @@ class PathwayEngine:
                     yield action
             if run.done or self._handler_route(run, node, result):
                 return
-            answered = await self._tool_round(ctx, result)
-            if answered is None:
+            calls = await self._reply_calls(result)
+            if not calls:
                 return
-            if answered.route_to is not None:
-                run.next = self._route_to(node, answered.route_to)
-                return
-            rounds += 1
-            if rounds >= MAX_SCHEDULING_ROUNDS:
+            budget.spoke = budget.spoke or bool(self._dialogue.text.strip())
+            if node.type == "Scheduling":
+                if not await self._scheduling_round(run, ctx, calls):
+                    return
+                budget.rounds += 1
+            else:
+                async with contextlib.aclosing(self._node_round(run, node, calls, budget)) as actions:
+                    async for action in actions:
+                        yield action
+                if run.over():
+                    return
+            if self._tools_exhausted(node, budget):
                 self._dialogue.tools = ()
 
-    async def _tool_round(self, ctx: TurnContext, result: HandlerResult) -> SchedulingRound | None:
-        """Answer the tool calls of a streamed reply that offered tools (``None`` = no call to answer)."""
+    def _tools_exhausted(self, node: PathwayNode, budget: _ToolBudget) -> bool:
+        if node.type == "Scheduling":
+            return budget.rounds >= MAX_SCHEDULING_ROUNDS
+        return (
+            budget.rounds >= MAX_TOOL_ROUNDS
+            or budget.invalid >= MAX_INVALID_ROUNDS
+            or self._tool_calls_used >= MAX_TOOL_CALLS_PER_CALL
+        )
+
+    async def _reply_calls(self, result: HandlerResult) -> list[ToolCall]:
+        """The tool calls of a streamed reply that offered tools (empty when there is nothing to answer).
+
+        A reply the model could not give (``unavailable``: the turn ends after the ``errorPhrase``) and a
+        reply cut off mid-stream (its calls may be incomplete) are followed by no tool round, as in task
+        mode."""
         last = self._dialogue.last
-        if not self._dialogue.tools or last is None:
-            return None
+        if not self._dialogue.tools or last is None or self._dialogue.unavailable is not None:
+            return []
         if not any(isinstance(action, SayStream) for action in result.actions):
-            return None
-        calls = await last.tool_calls()
-        if not calls:
-            return None
+            return []
+        if last.error is not None:
+            _log.warning("engine.llm_stream_failed", error_type=type(last.error).__name__)
+            return []
+        return await last.tool_calls()
+
+    async def _scheduling_round(self, run: _Run, ctx: TurnContext, calls: Sequence[ToolCall]) -> bool:
+        """Answer a Scheduling reply's calls; False when a failed booking routed away."""
         answered = await run_scheduling_calls(ctx, calls)
         for answer in answered.answers:
-            self._record(
-                TurnRecord(
-                    role="tool",
-                    content=answer.content,
-                    node_id=ctx.node.id,
-                    tool_call_id=answer.call_id,
-                    tool_name=answer.name,
-                    at_ms=self._now_ms(),
-                )
-            )
+            self._record_tool(ctx.node.id, answer.call_id, answer.name, answer.content)
         for report in answered.reports:
             self._emit(*report_event(report))
-        return answered
+        if answered.route_to is not None:
+            run.next = self._route_to(ctx.node, answered.route_to)
+            return False
+        return True
+
+    async def _node_round(
+        self, run: _Run, node: PathwayNode, calls: Sequence[ToolCall], budget: _ToolBudget
+    ) -> AsyncGenerator[Action]:
+        """One round of custom/system tool calls at a reply node, then its ``end_call`` if any."""
+        offer = self._offer
+        plan = plan_round(
+            calls, offer.facts, handles=offer.handles, budget=MAX_TOOL_CALLS_PER_CALL - self._tool_calls_used
+        )
+        self._tool_calls_used += plan.used
+        budget.rounds += 1
+        budget.invalid += int(plan.invalid)
+        ctx = self._ctx(node)
+        outcome = RoundOutcome()
+        executed = run_node_round(
+            plan,
+            tools=self._tools,
+            scope=ctx.scope(),
+            variables=self.state.variables,
+            next_mark=ctx.next_mark,
+            answer=lambda call, content: self._record_tool(node.id, call.id, call.name, content),
+            outcome=outcome,
+        )
+        async with contextlib.aclosing(executed) as produced:
+            async for produced_action in produced:
+                async with contextlib.aclosing(self._out(run, (produced_action,))) as actions:
+                    async for action in actions:
+                        yield action
+        terminal = outcome.terminal
+        if terminal is None or terminal.end is None:
+            return
+        async with contextlib.aclosing(self._out(run, self._tool_end(ctx, terminal.end, budget))) as actions:
+            async for action in actions:
+                yield action
+
+    def _tool_end(self, ctx: TurnContext, end: EndCallArgs, budget: _ToolBudget) -> tuple[Action, ...]:
+        """``end_call``: its ``final_message`` (else ``Goodbye.`` when the pass said nothing), then the
+        end."""
+        final = (end.final_message or "").strip() or (None if budget.spoke else DEFAULT_GOODBYE)
+        state = self.state
+        state.ended = True
+        state.end_reason = AGENT_END_CALL
+        disarm(state)
+        line = Say(text=final, mark=ctx.next_mark()) if final else None
+        ending = EndCallAction(
+            reason=AGENT_END_CALL, ended_by="agent", after_mark=line.mark if line is not None else None
+        )
+        return (line, ending) if line is not None else (ending,)
+
+    def _record_tool(self, node_id: str, call_id: str, name: str, content: str) -> None:
+        self._record(
+            TurnRecord(
+                role="tool",
+                content=content,
+                node_id=node_id,
+                tool_call_id=call_id,
+                tool_name=name,
+                at_ms=self._now_ms(),
+            )
+        )
 
     # Speech.
 
@@ -770,7 +873,13 @@ class PathwayEngine:
     def _prepare(self, node: PathwayNode, suffix: str | None) -> None:
         """The dialogue port's per-reply inputs at ``node``."""
         self._dialogue.condition_suffix = suffix
-        self._dialogue.tools = scheduling_tools() if node.type == "Scheduling" else ()
+        if node.type == "Scheduling":
+            self._offer = NO_OFFER
+            self._dialogue.tools = scheduling_tools()
+        else:
+            self._offer = self._tools.offer(node, self._nav.graph)
+            spent = self._tool_calls_used >= MAX_TOOL_CALLS_PER_CALL
+            self._dialogue.tools = () if spent else self._offer.tools
         self._dialogue.extra = []
 
     def _ctx(self, node: PathwayNode) -> TurnContext:

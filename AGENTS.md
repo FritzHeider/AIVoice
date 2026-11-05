@@ -2064,3 +2064,14 @@ Grafana 3001
   5 s, session clock): past it `media.body_teardown_overran` is logged, renewer + heartbeat stop, the session still
   awaits the body. The heartbeat is cancelled by a done callback on the renewer (lock lost → no more beats); `_race`
   skips cancelled tasks before reading results (`task.exception()` on a cancelled task raises).
+- 2026-11-05 (P08-T02c1): pathway reply-node tools = `va_engine.engine_node_tools` (`NodeTools.offer(node, graph)` →
+  `ToolOffer(tools, facts, custom)`, `run_node_round`) over the shared `va_engine.tool_tasks` helpers (`start_tools`,
+  `ToolLines`, `merge_variables`, `runnable_facts`, `stop_tasks`; TaskBrain uses them too). Inputs:
+  `EnginePorts.tools` (a `PathwayToolExecutor` with `definitions_for(refs)`), `ConversationFacts.system_tools`
+  (`None` = no system tools) and `.tool_fillers`; `GlobalConfig.allow_end_call_tool`. Tests: `engine_rig(tools=,
+  system=, fillers=)` and `task_helpers.RecordingExecutor(refs={"TL-1": "lookup"})`; a held-tool filler test must
+  `release.set()` then `release.clear()` per round (a set event never holds the next round).
+  `dialogue_helpers.FakeStream` mirrors the real stream's failure contract: `reply(fail=unavailable())` sets `error`
+  and makes `tool_calls()` raise; `reply(..., calls=[...], error=LlmConnectionError(...))` scripts a cut-off stream.
+  Engine/TaskBrain code must check `unavailable`/`stream.error` before `tool_calls()`. An invalid or blank tool
+  `speech` falls back to the filler (`test_tool_tasks.py` drives `ToolLines` on a `ManualClock`).

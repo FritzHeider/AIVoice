@@ -28,6 +28,8 @@ from va_engine.handlers import Channel
 from va_engine.models import Action, EngineState, PathwayGraph, SayStream
 from va_engine.navigation import ActiveGraph, PathwayLoader
 from va_engine.ports import HttpPort, SmsPort
+from va_engine.system_tools import SystemToolFacts
+from va_engine.tool_executor import PathwayToolExecutor
 from va_llm.models import ChatMessage
 from va_llm.policy import CallType
 from va_llm.structured import validate_arguments
@@ -190,9 +192,12 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
     state: EngineState | None = None,
     port: KeyedPort | None = None,
     facts: ConversationFacts | None = None,
+    tools: PathwayToolExecutor | None = None,
+    system: SystemToolFacts | None = None,
+    fillers: bool = True,
 ) -> Rig:
     """An engine at the start of ``pathway`` (pathway :data:`PATHWAY_ID` v1) on a frozen clock (``facts``
-    replace the default restaurant facts)."""
+    replace the default restaurant facts; ``tools``/``system``/``fillers`` set the reply node tools)."""
     clock = FrozenClock(NOW)
     dialogue, source, _ = dialogue_rig(speculative=speculative)
     keyed = port if port is not None else KeyedPort()
@@ -210,6 +215,7 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
             loader=loader,
             http=http,
             sms=sms,
+            tools=tools,
         ),
         facts=facts
         if facts is not None
@@ -220,6 +226,8 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
             request_data={"restaurant_name": "Bella Pasta"},
             builtins={"from": CALLER, "call_id": str(CALL_ID), "user_number": CALLER},
             timezone="UTC",
+            system_tools=system,
+            tool_fillers=fillers,
         ),
         clock=clock,
     )

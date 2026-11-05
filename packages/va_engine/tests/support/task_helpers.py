@@ -106,14 +106,16 @@ async def drain(outputs: AsyncIterator[BrainOutput]) -> list[Rendered]:
 
 @dataclass(slots=True)
 class RecordingExecutor:
-    """A tool executor: answers ``results[name]`` (default ``{"ok":name}``) with ``variables[name]``, counts
-    concurrency, holds every call on ``release`` when ``hold`` is set, and takes ``durations[name]`` seconds
-    on ``clock`` (bind one to time calls). ``note`` is the tool usage note speech, ``speeches[name]`` the
-    tool's ``speech`` template; ``started`` and ``cancelled`` record ``(name, clock ms)``."""
+    """A (pathway) tool executor: ``refs`` maps node tool ids to tool names; answers ``results[name]``
+    (default ``{"ok":name}``) with ``variables[name]``, counts concurrency, holds every call on ``release``
+    when ``hold`` is set, and takes ``durations[name]`` seconds on ``clock`` (bind one to time calls).
+    ``note`` is the tool usage note speech, ``speeches[name]`` the tool's ``speech`` template; ``started``
+    and ``cancelled`` record ``(name, clock ms)``."""
 
     tools: tuple[ToolDef, ...] = ()
     note: str | None = None
     names: frozenset[str] = frozenset()
+    refs: dict[str, str] = field(default_factory=dict)
     results: dict[str, str] = field(default_factory=dict)
     variables: dict[str, dict[str, Any]] = field(default_factory=dict)
     speeches: dict[str, str] = field(default_factory=dict)
@@ -132,6 +134,17 @@ class RecordingExecutor:
 
     def definitions(self) -> tuple[ToolDef, ...]:
         return self.tools
+
+    def definitions_for(self, refs: Sequence[str | Mapping[str, Any]]) -> tuple[ToolDef, ...]:
+        """The tools named by ``refs`` (a string through ``refs``, a mapping by its ``name``), once each."""
+        by_name = {tool.name: tool for tool in self.tools}
+        found: dict[str, ToolDef] = {}
+        for ref in refs:
+            name = self.refs.get(ref) if isinstance(ref, str) else ref.get("name")
+            tool = by_name.get(name) if isinstance(name, str) else None
+            if tool is not None:
+                found.setdefault(tool.name, tool)
+        return tuple(found.values())
 
     @property
     def tool_speech(self) -> str | None:

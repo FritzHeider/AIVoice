@@ -102,6 +102,34 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 (`end_call`, `transfer_call`, `press_button`, `send_sms`, `schedule_callback`, `lookup_knowledge`, `book_slot`,
 `list_slots`) and customer tools may not use them (validation error `INVALID_INPUT`).
 
+> Decision (2026-11-05) P08-T02c1: tools on pathway nodes (`va_engine.engine_node_tools`, shared round helpers in
+> `va_engine.tool_tasks`).
+> 1. Reply nodes = `Default` and `Knowledge Base` nodes (global nodes included) whose reply streams from the
+>    dialogue model (no static `text`). They offer the allowed system tools (runner `pathway`: `end_call` only when
+>    `global_config.allowEndCallTool`, default true; never `transfer_call`; `press_button` on voice; `send_sms`/
+>    `schedule_callback`/`lookup_knowledge` only when the call's executor runs them), then the custom tools of the
+>    node's `tools` followed by `global_config.globalTools` that the executor resolves (`PathwayToolExecutor.
+>    definitions_for(refs)`: a string = stored tool id, a mapping = inline tool by `name`; ref order, a tool named
+>    twice once; unresolved refs are skipped and logged `engine.tool_unresolved` with a count; custom tools with a
+>    reserved or already offered name are dropped). Other node types offer no custom or system tool; a Scheduling
+>    node offers exactly `list_slots`/`book_slot`. Call-level `tools` apply to task mode only.
+> 2. Without an executor (text chat, unit tests, simulations) no custom tools are offered; without system tool
+>    facts (`ConversationFacts.system_tools` `None`) no system tools: text runs are unchanged.
+> 3. Each reply pass at a node allows at most 3 tool rounds, 2 rounds with an invalid call, 4 calls per round and
+>    100 tool calls per call (task-mode caps); then the node replies once more without tools. Tool answers are
+>    `tool` history records (context updates on later requests, like Scheduling; call ids and arguments are not
+>    persisted). A round cut by a barge-in answers its unanswered calls `{"error":"interrupted"}` and cancels the
+>    unfinished tools. Speech and fillers follow §5 Decision P08-T02b1 item 3; the line is spoken as a `Say` and
+>    recorded as an assistant history line. Tool variables merge into the conversation variables after the round.
+> 4. `end_call` speaks `final_message`, else `Goodbye.` unless a reply of the pass already produced text, sets the
+>    state ended with `end_reason` `agent_end_call` (as task mode; the §6 table's `agent_end_call_tool` is not
+>    used), and yields `EndCallAction(reason="agent_end_call", ended_by="agent", after_mark=<the line's mark>)`.
+>    `press_button` yields `SendDtmfAction(digits, duration_ms=250)` after the round's answers were recorded.
+> 5. A reply the model could not give (unavailable: the turn ends after the `errorPhrase`, exactly as on a node
+>    without tools, specs/11 §5.9 Decision P07-T08b) and a reply cut off mid-stream (stream error after the first
+>    token; its tool calls may be incomplete; logged `engine.llm_stream_failed`) are followed by no tool round and
+>    no further request in that pass, as in task mode. This also holds for Scheduling nodes.
+
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same
 fields as ToolCreate (no `secret_headers`; inline `headers` values are treated as secret in logs).
