@@ -1,5 +1,28 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-22 "The run goes on after a cut round" is a property of the system tool (`SystemTool.detaches`), not of being a system tool — see .ralph/review-inbox/2026-11-05-p08-fix-21-wip-review.md (no blockers; item 1 fixed here, items 2 and 3 closed with a written reason below) — `va_tools.executor.SystemTool.detaches` (protocol member, no default), `CallToolExecutor._run_system` runs a non-detaching tool in the waiting task (never pending, never detached, reads `interrupted`), `ToolSms`/`CallbackScheduler` `detaches: Final = True`, 6 new test cases (3 parametrized twins, cancelled-with-its-wait, TaskBrain barge-in `interrupted`, media class check), Decision P08-FIX-22 (specs/13 §6, pointers in Decisions P08-FIX-13 item 2 and P08-FIX-21 item 1); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, make test 13092 passed 7 skipped (cov 99.08%, va_tools/executor 99%), make e2e 20 passed (capacity flow 0 underruns; the builder's first run on the cold stack had 11 underruns from one ~65 ms media loop stall, runtime task fix:capacity-start-burst-stall, the flow runs no system tool); reviewer mutation checks on a shadow copy: always shield → the 2 non-detaching tests fail, never shield → 6 fail, `ToolSms.detaches = False` → the media test fails
+  - Spec refs: specs/13 §6 (Decisions P08-FIX-13 item 2, P08-FIX-21), specs/13 §4 (Decision P08-FIX-20)
+  - Depends on: P08-FIX-21
+  - Deliverables: `va_tools.executor.SystemTool.detaches: bool` (protocol member, no default: every tool says
+    it); `CallToolExecutor` owns, shields and notes as detached only the runs of tools with `detaches`; a tool
+    without it runs in the waiting task, is cancelled with its wait, is never `detached` (a cut round answers
+    it `interrupted`) and leaves nothing for `aclose`; `ToolSms.detaches` / `CallbackScheduler.detaches` true;
+    specs/13 §6 Decision `P08-FIX-22` (+ pointer in Decision P08-FIX-13 item 2 and Decision P08-FIX-21 item 1);
+    AGENTS.md.
+  - Acceptance: va_tools tests: a system tool with `detaches = False` whose wait is cancelled mid-run is
+    cancelled, not detached, and `aclose` has nothing to wait for; it answers, reports a failure
+    (`call.error` `TOOL_FAILED`) and propagates a crash like the detaching ones; TaskBrain barge-in test with
+    the real executor: a held non-detaching tool reads `interrupted` and never completes, the detaching twin
+    still reads `in_progress` and completes once; media test: `send_sms` and `schedule_callback` detach;
+    `make check` and `make e2e` pass; append the note name to `.ralph/review-inbox/DONE` on approval.
+  - Closed without a change (Planner, 2026-11-05, DEC-015): item 2 (an `in_progress` answer is never replaced
+    by the run's outcome): the case needs a barge-in during the few hundred ms of a system tool run AND a
+    failure of that run; the failure is recorded (`call.error` `TOOL_FAILED`) and the caps of Decision
+    P08-FIX-13 item 3 bound a model that sends again; replacing the answer needs a call-to-record link that
+    survives superseded turns (`keep_tool_records`, `completed_rounds`) and the persisted engine state in both
+    runners. The reviewer marked it "fine to drop". Item 3 (a run that had just ended when its wait was
+    cancelled also reads `in_progress`): stated in Decision P08-FIX-21 item 1 ("still running, or just
+    finished"), a window of two or three loop turns that errs on the safe side; no change asked for.
 - [x] P08-FIX-21 A system tool whose run goes on after the round was cut is answered `in_progress`, not `interrupted`; a test pins the cut while the tools are awaited — see .ralph/review-inbox/2026-11-05-p08-fix-20-wip-review.md (items 1, 2; neither is a blocker) — `ToolExecutor.detached(call)` (object identity), `CallToolExecutor` notes a system tool call whose wait was cancelled while its run was not, `task_tools.IN_PROGRESS`, `settle_round(..., executor=)`/`cut_contents(..., executor=)` in both runners, 4 unit + 4 engine + 4 TaskBrain + 4 executor tests and the barge-in test, Decision P08-FIX-21 (specs/13 §6, with §4/§5 pointers); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, make test 13086 passed 7 skipped (cov 99.08%, tool_tasks/tool_executor/task_tools/engine_node_tools 100%, va_tools/executor 99%), make e2e 20 passed (capacity flow 0 underruns; the builder's first run had 4 underruns from one media loop stall on the cold stack, tracked as runtime task fix:capacity-start-burst-stall); reviewer mutation checks on a shadow copy: every cancellation detaches → 1 test fails, `detached` by equality → 1, never detached → 2, cut never asks the executor → 5, every cancelled call `in_progress` → 19, cancelled wait turned into an answer → 5
   - Spec refs: specs/13 §4 (Decision P08-FIX-20), §6 (Decisions P08-T02b2, P08-FIX-13 item 2), §5 (Decision P08-T02b1 item 4), specs/07 §8
   - Depends on: P08-FIX-20
@@ -403,7 +426,9 @@
   - Spec refs: specs/11-pathways-engine.md (Knowledge Base node); specs/14-knowledge-bases.md (injection format into the voice prompt); specs/05-calls-api.md (tools array with KB- ids)
   - Depends on: P08-T08, P07-T12
   - Deliverables: KB node handler, `KB-` ids in Send Call `tools` enable retrieval for task-mode calls, prompt injection format
-  - Acceptance: e2e kb_lookup passes.
+  - Acceptance: e2e kb_lookup passes; the `lookup_knowledge` `SystemTool` declares `detaches = False`
+    (specs/13 §6 Decision P08-FIX-22): a test cuts a round during a held lookup, the lookup is cancelled and
+    the call reads `interrupted`.
 
 - [ ] P08-T11 E2E: tools
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list: tool_call_with_speech)

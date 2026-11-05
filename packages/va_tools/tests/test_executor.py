@@ -1,5 +1,5 @@
-"""The in-call tool executor (specs/13 §5, Decision P08-T02b1; detached system tool runs: specs/13 §6,
-Decision P08-FIX-21) over respx."""
+"""The in-call tool executor (specs/13 §5, Decision P08-T02b1; detached system tool runs and system tools
+that do not detach: specs/13 §6, Decisions P08-FIX-21 and P08-FIX-22) over respx."""
 
 from __future__ import annotations
 
@@ -178,6 +178,7 @@ def test_reserved_names_and_duplicates_are_dropped() -> None:
 class _System:
     name: str
     outcome: SystemOutcome
+    detaches: bool = True
     calls: list[ToolCall] = field(default_factory=list)
 
     async def run(self, call: ToolCall) -> SystemOutcome:
@@ -195,9 +196,10 @@ async def test_system_tools_are_handled_but_not_defined_and_have_no_speech() -> 
     assert executor.speech("send_sms") is None
 
 
-async def test_a_system_tool_answers_without_a_tool_event() -> None:
+@pytest.mark.parametrize("detaches", [True, False])
+async def test_a_system_tool_answers_without_a_tool_event(detaches: bool) -> None:
     stream = json_log_stream()
-    sms = _System("send_sms", SystemOutcome('{"status":"sent","segments":1}'))
+    sms = _System("send_sms", SystemOutcome('{"status":"sent","segments":1}'), detaches=detaches)
     events = _Events()
     async with plain_executor() as (http, clock):
         executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[sms])
@@ -212,8 +214,11 @@ async def test_a_system_tool_answers_without_a_tool_event() -> None:
     assert "secret text" not in stream.getvalue()
 
 
-async def test_a_failed_system_tool_reports_tool_failed() -> None:
-    callback = _System("schedule_callback", SystemOutcome('{"error":"callback_failed"}', "workflow_start"))
+@pytest.mark.parametrize("detaches", [True, False])
+async def test_a_failed_system_tool_reports_tool_failed(detaches: bool) -> None:
+    callback = _System(
+        "schedule_callback", SystemOutcome('{"error":"callback_failed"}', "workflow_start"), detaches=detaches
+    )
     events = _Events()
     async with plain_executor() as (http, clock):
         runner = ToolRunner(http, clock=clock)
@@ -233,6 +238,7 @@ class _GatedSystem:
 
     name: str
     outcome: SystemOutcome | Exception | None
+    detaches: bool = True
     gate: asyncio.Event = field(default_factory=asyncio.Event)
     started: asyncio.Event = field(default_factory=asyncio.Event)
     finished: list[str] = field(default_factory=list)
@@ -329,8 +335,9 @@ async def test_a_crash_nobody_awaits_is_reported_and_retrieved() -> None:
     assert crashed["error_type"] == "RuntimeError"
 
 
-async def test_an_awaited_crash_propagates_to_the_caller() -> None:
-    tool = _GatedSystem("send_sms", RuntimeError("boom"))
+@pytest.mark.parametrize("detaches", [True, False])
+async def test_an_awaited_crash_propagates_to_the_caller(detaches: bool) -> None:
+    tool = _GatedSystem("send_sms", RuntimeError("boom"), detaches=detaches)
     tool.gate.set()
     events = _Events()
     async with plain_executor() as (http, clock):
@@ -410,3 +417,25 @@ async def test_a_custom_tool_cancelled_mid_request_is_not_detached(api: respx.Mo
     assert route.call_count == 0  # respx records a call only when it completes: the request was cancelled
     assert not executor.detached(call)
     assert (events.tools, events.failures) == ([], [])
+
+
+# Whether a run goes on after a cut is the tool's own property (Decision P08-FIX-22).
+
+
+async def test_a_tool_that_does_not_detach_is_cancelled_with_its_wait() -> None:
+    stream = json_log_stream()
+    tool = _GatedSystem("lookup_knowledge", SystemOutcome('{"results":[]}'), detaches=False)
+    call = _system_call(tool)
+    events = _Events()
+
+    executor, _ = await _cancel_mid_run(tool, events, call)
+
+    assert tool.cancelled
+    assert tool.finished == []
+    assert not executor.detached(call)
+    assert events.failures == []
+    tool.gate.set()
+    await executor.aclose(timeout_s=0)  # nothing is pending: the executor never owned the run
+    assert tool.finished == []
+    logged = {e["event"] for e in log_events(stream)}
+    assert logged.isdisjoint({"tools.system_tools_abandoned", "tools.system_tool_ran"})

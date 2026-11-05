@@ -2118,3 +2118,9 @@ Grafana 3001
   `RecordingExecutor(detaching=frozenset({name}))` (`left_running`), `await executor.wait_started(name)`. To pin a
   cut "while the tools are awaited", run the reply in a task (`asyncio.create_task(drive(...))`, fillers off),
   wait until the tools started, `cancel()` it and expect `CancelledError` (specs/13 §6 Decision P08-FIX-21).
+- 2026-11-05 (P08-FIX-22): every `va_tools.executor.SystemTool` declares `detaches` (protocol member, no default;
+  a `Final` class attribute or a dataclass field). True (`send_sms`, `schedule_callback`) = executor-owned shielded
+  run, `in_progress` at a cut, drained by `aclose`. False = the run happens in the waiting task, is cancelled with
+  it, is never `detached` and reads `interrupted`; `lookup_knowledge` (P08-T10) must be false. Test fakes:
+  `_GatedSystem(name, outcome, detaches=False)` (va_tools `test_executor.py`), `_HeldSms(detaches=False)` +
+  `_barge_in(sms)` (`test_executor_barge_in.py`; specs/13 §6 Decision P08-FIX-22).

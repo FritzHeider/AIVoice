@@ -183,3 +183,12 @@ Template:
 - **Reasoning:** Decision P08-FIX-20's rule is "interrupted only for what did not happen"; for an executor-owned run the opposite is known at the cut, and a duplicate customer SMS is a visible defect that P08-T02c2 would spread to pathway calls. The query costs one protocol method, two fakes, and one extra argument to `settle_round`.
 - **Reversibility:** High before P08-T02c2 (one protocol method; implementations: `CallToolExecutor` and the test fakes)
 - **Timestamp:** 2026-11-05T15:05:00Z
+
+## DEC-015
+- **Decision:** What to do with review note 2026-11-05-p08-fix-21-wip-review.md (no blockers): item 1 (`in_progress` is decided by "is a system tool", wrong for a future read-only `lookup_knowledge`), item 2 (`in_progress` is never replaced by the run's outcome), item 3 (a run that just ended also reads `in_progress`)
+- **Chosen Option:** Item 1: fix now in P08-FIX-22 with `SystemTool.detaches` (protocol member without a default; `send_sms`/`schedule_callback` true; a tool without it runs in the waiting task and is cancelled with it) and put `detaches = False` into the acceptance of P08-T10. Item 2: close without a change. Item 3: close (already stated in Decision P08-FIX-21 item 1).
+- **Confidence:** 70
+- **Alternatives Considered:** item 1 only as an acceptance line of P08-T10 (the trap stays in the protocol until then, and P08-T02c2 builds more on the executor first); item 2 as its own task: keep the outcome of detached runs in `CallToolExecutor` and let both runners rewrite the `in_progress` record before the next request, or add a context note about a failed detached run
+- **Reasoning:** Item 1 is a few lines while the executor has two system tools and three test fakes; a protocol member without a default makes every later tool state its choice. Item 2 needs a barge-in inside the few hundred ms of a run AND a failure of that run; the truth is recorded as `call.error` `TOOL_FAILED`, the per-call caps bound a model that sends again, and the rewrite needs a link from the call object to a history record that survives `keep_tool_records` / `completed_rounds` and the persisted engine state in two runners. That is a lot of mutable coupling for a rare case, the reviewer marked it "fine to drop", and the phase still has T02c2-T11 open.
+- **Reversibility:** High (item 1: one protocol member; item 2 can be added later without changing stored data)
+- **Timestamp:** 2026-11-05T16:20:00Z

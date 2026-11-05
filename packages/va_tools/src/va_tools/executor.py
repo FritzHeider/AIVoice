@@ -13,13 +13,18 @@ offers system tools from the call's facts), have no ``speech`` (a slow one gets 
 ``call.tool``: their domain events are their own; a :class:`SystemOutcome` with a ``failure`` also reports
 ``call.error`` ``TOOL_FAILED`` (``<tool>: <failure>``).
 
-A system tool has a side effect the caller asked for, so its body runs to completion even when a barge-in
-cancels the turn waiting for it (Decision P08-FIX-13 under specs/13 §6): each run is a task the executor owns,
-awaited through :func:`asyncio.shield`, and its outcome (failure event included) is still reported after
-nobody waits for it any more. The executor tells the round so (:meth:`CallToolExecutor.detached`), which
-answers the call ``in_progress`` instead of ``interrupted`` (Decision P08-FIX-21 under specs/13 §6); the
-cancellation of the wait itself always propagates. :meth:`CallToolExecutor.aclose` waits for unfinished runs
-at call end (up to :data:`SYSTEM_DRAIN_S`) and cancels what is left.
+A system tool that ``detaches`` (:attr:`SystemTool.detaches`) has a side effect the caller asked for, so its
+body runs to completion even when a barge-in cancels the turn waiting for it (Decision P08-FIX-13 under
+specs/13 §6): each run is a task the executor owns, awaited through :func:`asyncio.shield`, and its outcome
+(failure event included) is still reported after nobody waits for it any more. The executor tells the round so
+(:meth:`CallToolExecutor.detached`), which answers the call ``in_progress`` instead of ``interrupted``
+(Decision P08-FIX-21 under specs/13 §6); the cancellation of the wait itself always propagates.
+:meth:`CallToolExecutor.aclose` waits for unfinished runs at call end (up to :data:`SYSTEM_DRAIN_S`) and
+cancels what is left.
+
+A system tool that does not detach (a lookup) runs in the waiting task and is cancelled with it: the executor
+neither owns nor drains the run, a cut round answers it ``interrupted`` and the model asks again (Decision
+P08-FIX-22 under specs/13 §6).
 """
 
 from __future__ import annotations
@@ -85,6 +90,12 @@ class SystemTool(Protocol):
     @property
     def name(self) -> str: ...
 
+    @property
+    def detaches(self) -> bool:
+        """Whether a run goes on when the turn waiting for it is cut (a side effect the caller asked for:
+        ``send_sms``, ``schedule_callback``). A tool without one (a lookup) is cancelled with its wait."""
+        ...
+
     async def run(self, call: ToolCall) -> SystemOutcome: ...
 
 
@@ -141,8 +152,8 @@ class CallToolExecutor:
 
     def detached(self, call: ToolCall) -> bool:
         """Whether the system tool run of ``call`` went on when the wait for it was cancelled (by object
-        identity: equal calls are different runs). A run cancelled by :meth:`aclose` and a custom tool,
-        whose request is cancelled with its wait, are not detached."""
+        identity: equal calls are different runs). A run cancelled by :meth:`aclose`, a system tool that
+        does not detach and a custom tool, both cancelled with their wait, are not detached."""
         return any(item is call for item in self._detached)
 
     async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
@@ -166,6 +177,9 @@ class CallToolExecutor:
         return ToolAnswer(invocation.content, invocation.variables)
 
     async def _run_system(self, tool: SystemTool, call: ToolCall) -> ToolAnswer:
+        if not tool.detaches:  # nothing to finish for nobody: the run ends with the wait for it
+            outcome = await self._finish_system(tool, call)
+            return ToolAnswer(outcome.content)
         task = asyncio.create_task(self._finish_system(tool, call), name=f"system-tool:{tool.name}")
         self._pending.add(task)
         task.add_done_callback(self._settled)

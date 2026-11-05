@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793897162-d964
+> P08-FIX-22: every va_tools.executor.SystemTool declares detaches (protocol property, no default; Final class attr or dataclass field): true (send_sms, schedule_callback) = executor-owned shielded run, in_progress at a cut, drained by aclose; false = runs in the waiting task via _finish_system, cancelled with its wait, never detached, reads interrupted, nothing for aclose; lookup_knowledge (P08-T10) must be false; fakes _GatedSystem(name, outcome, detaches=False), _HeldSms(detaches=False) + _barge_in(sms)
+<!-- tags: tools, engine, testing | created: 2026-11-05 -->
+
 ### mem-1793892062-3255
 > P08-FIX-21: a system tool run that goes on after a cut round reads task_tools.IN_PROGRESS ({"status":"in_progress"}) not interrupted: ToolExecutor.detached(call) by object identity (ToolCall is equal by value), CallToolExecutor notes a call when the shielded wait is cancelled while the run task is not (aclose-cancelled runs and custom tools are not detached); settle_round(plan, tasks, executor=, answered=, merged=) / cut_contents(..., executor=) ask it; never turn a cancelled wait into an answer in an executor (a runner cancelled while awaiting a tool task forwards the cancel, a result would swallow it); fakes RecordingExecutor(detaching=) + wait_started(name); pin a cut while tools are awaited by cancelling asyncio.create_task(drive(...)) with fillers off; editing a test file while make test runs -> restart the run (kill wrapper shell first so no stale exit= line)
 <!-- tags: engine, tools, testing | created: 2026-11-05 -->
@@ -553,6 +557,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793896618-d08e
+> failure: cmd=make e2e (P08-FIX-22 run 1, 2026-11-05 16:26Z, images rebuilt right after make test), exit=2, error=test_concurrent_calls_on_one_media_worker assert underruns == 0 got 11 (50 calls, 0 failed scenarios, overhead p50 110 / p95 155 ms); media log: 11 outbound.underrun within 62 ms (16:29:59.909-.972Z), wake_late_ms 60-70, prev_send_await_ms ~0, turn=0, during the session_started/carrier_answered/amd_verdict burst, no gc_pause at that moment (16 ms at 16:29:58.57, 17 ms at 16:30:09.60) = second occurrence of fix:capacity-start-burst-stall on a cold stack; next=profile the media loop during the 50-session start burst (py-spy --nonblocking) under that task
+<!-- tags: e2e, media, performance | created: 2026-11-05 -->
 
 ### mem-1793893365-76b2
 > failure: cmd=make e2e (P08-FIX-21 run 1, cold stack right after make test), exit=2, error=tests_e2e/test_concurrent_calls.py assert underruns == 0 got 4 (one ~70 ms media event-loop stall 0.9 s after 50 sessions attached: 4 outbound.underrun within 12 ms, wake_late_ms 63-70, prev_send_await_ms 0.1, no gc_pause; unrelated to tool rounds), re-run make e2e passed 20/20 and 3 standalone capacity runs had 0 underruns; next=task fix:capacity-start-burst-stall (profile the cold start burst); note 'cmd; echo exit=$?' background wrappers always report exit code 0, read the exit= line in the log

@@ -11,7 +11,8 @@ times are never logged. Both need the other party's number to be E.164 (:func:`~
 an anonymous or withheld caller gets ``{"error": ..., "reason": "no_callable_number"}``), and both are capped
 per call: :data:`MAX_TOOL_SMS_PER_CALL` messages sent or in flight, one pending callback
 (:data:`va_db.callbacks.MAX_PENDING_CALLBACKS`); a run past the cap answers ``{"error": "limit_reached"}``
-without an error event.
+without an error event. Both are side effects the caller asked for, so both ``detach``: a run goes on when
+its round is cut (Decision P08-FIX-22 under specs/13 §6).
 
 :class:`ToolSms` sends the message from the call's agent number to the other party through
 :class:`~va_media.call_sms.OutboundSms` and publishes ``call.sms_sent`` (``source: "tool"``); a refusal
@@ -141,6 +142,7 @@ class ToolSms:
     """The ``send_sms`` tool of one call (see the module docstring)."""
 
     name: Final = "send_sms"
+    detaches: Final = True
 
     def __init__(self, sender: OutboundSms, context: CallContext, events: ToolEvents | None) -> None:
         self._sender = sender
@@ -260,6 +262,7 @@ class CallbackScheduler:
     """The ``schedule_callback`` tool of one call (see the module docstring)."""
 
     name: Final = "schedule_callback"
+    detaches: Final = True
 
     def __init__(self, deps: CallbackDeps, context: CallContext) -> None:
         self._deps = deps

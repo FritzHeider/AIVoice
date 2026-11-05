@@ -369,7 +369,8 @@ tool calls per call: 100.
 >    rule): for an anonymous or withheld caller the runtime builds neither (`media.system_tools_skipped`, reason
 >    `no_callable_number`), so the model is not offered them; a handler reached anyway answers
 >    `{"error":"sms_failed"|"callback_failed","reason":"no_callable_number"}`.
-> 2. A system tool run is a side effect the caller asked for, so it runs to completion when a barge-in
+> 2. A `send_sms` / `schedule_callback` run is a side effect the caller asked for (the tool says so:
+>    `SystemTool.detaches`, Decision P08-FIX-22), so it runs to completion when a barge-in
 >    interrupts the turn: the executor owns each run as a task awaited through `asyncio.shield`. The model is
 >    told the run is in progress (Decision P08-FIX-21); the run's outcome (failure event included) is still
 >    reported, and at call end
@@ -417,9 +418,9 @@ tool calls per call: 100.
 > only for what did not happen") applied to a run whose continuation is known at the cut.
 > 1. The executor reports such calls: `va_engine.tool_executor.ToolExecutor.detached(call) -> bool`, by object
 >    identity (call ids may be empty or repeated, and equal calls are different runs). `CallToolExecutor` notes
->    a call when the wait for its executor-owned run is cancelled while the run itself is not (still running, or
->    just finished). A run cancelled by `aclose` is not detached, and neither is a custom tool: its request is
->    cancelled with the wait. Both still read `interrupted`.
+>    a call (of a tool that detaches, Decision P08-FIX-22) when the wait for its executor-owned run is cancelled
+>    while the run itself is not (still running, or just finished). A run cancelled by `aclose` is not detached,
+>    and neither is a custom tool: its request is cancelled with the wait. Both still read `interrupted`.
 > 2. `va_engine.tool_tasks.cut_contents` / `settle_round(..., executor=)` ask the executor that ran the round
 >    for every executor call cancelled at the cut (`va_engine.task_tools.IN_PROGRESS`); a call whose run
 >    finished keeps its real answer as before.
@@ -431,6 +432,21 @@ tool calls per call: 100.
 >    bound a model that sends again anyway.
 >
 > Applies to task-mode calls now and to pathway calls once their executor is wired (P08-T02c2).
+>
+> Decision (2026-11-05) P08-FIX-22: whether a run goes on after its round was cut is a property of the tool,
+> not of being a system tool: `va_tools.executor.SystemTool.detaches` (every system tool declares it).
+> 1. `send_sms` and `schedule_callback` declare `detaches = True` (a side effect the caller asked for):
+>    Decision P08-FIX-13 item 2 and Decision P08-FIX-21 apply to them unchanged.
+> 2. A system tool without a side effect declares `detaches = False` (the `lookup_knowledge` of P08-T10): its
+>    run happens in the task that waits for it and is cancelled with it; the executor neither owns nor drains
+>    it (`aclose`), it is never `detached`, and a cut round answers it `{"error":"interrupted"}`.
+>    `in_progress` would be wrong there: that answer is never followed by the result, so the model would
+>    neither have the knowledge nor look again. A failure outcome or a crash is reported like for every system
+>    tool (`call.error` `TOOL_FAILED`).
+> 3. Not changed, on purpose: an `in_progress` answer is not replaced by the run's outcome later (Decision
+>    P08-FIX-21 item 4). It would matter only when a barge-in lands inside a run that then fails; the failure
+>    is on the call (`call.error` `TOOL_FAILED`), and rewriting the answer needs a link from the call to a
+>    history record that survives superseded turns and the persisted engine state in both runners.
 >
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the

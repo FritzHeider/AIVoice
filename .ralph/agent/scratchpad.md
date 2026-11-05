@@ -2104,3 +2104,192 @@ For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-21-wip-review.md` is no
 item 1 = `in_progress` should be a per-tool property before `lookup_knowledge` becomes a `SystemTool`, item 2 =
 an `in_progress` answer is never resolved, item 3 = documented window). Appended
 `2026-11-05-p08-fix-20-wip-review.md` to DONE.
+
+## Planner (2026-11-05, after P08-FIX-21 approval)
+Inbox: `2026-11-05-p08-fix-21-wip-review.md` is new (no blockers). Inserted P08-FIX-22 at the top of
+plan/phase-08.md for item 1; items 2 and 3 are closed with a written reason in the task text (DEC-015 in
+`.ralph/agent/decisions.md`). P08-T10 acceptance now requires `lookup_knowledge` to declare `detaches = False`.
+P08-FIX-18 (note 2026-11-05-p08-fix-15-review.md) stays the next unticked task after this one, then P08-T02c2.
+
+## Plan P08-FIX-22 — "the run goes on after a cut" is a property of the system tool (`SystemTool.detaches`)
+
+### Findings (read at HEAD 5b36fe9)
+- `packages/va_tools/src/va_tools/executor.py` `_run_system` (l.168-178) shields EVERY `system=` tool and notes
+  it detached when its wait is cancelled. Right for `send_sms`/`schedule_callback` (a side effect the caller
+  asked for). Wrong for a read-only tool: `lookup_knowledge` is reserved, so P08-T10 can only add it through
+  `system=`; a cut round would then answer it `in_progress`, which is never followed by the result, so the
+  model neither gets the knowledge nor looks again. `interrupted` is the true answer there.
+- `SystemTool` implementations: `va_media.call_system_tools.ToolSms` / `CallbackScheduler` (`name: Final = ...`
+  class attributes) and the test fakes `_System`, `_GatedSystem` (va_tools `tests/test_executor.py`), `_HeldSms`
+  (`tests/test_executor_barge_in.py`). `va_engine` is not touched: it only asks `ToolExecutor.detached(call)`.
+
+### 1. `packages/va_tools/src/va_tools/executor.py`
+- `SystemTool` protocol gains a read-only member (no default; every tool states it):
+  ```python
+  @property
+  def detaches(self) -> bool:
+      """Whether a run goes on when the turn waiting for it is cut (a side effect the caller asked for:
+      ``send_sms``, ``schedule_callback``). A tool without one (a lookup) is cancelled with its wait."""
+      ...
+  ```
+- `_run_system`: first lines
+  ```python
+  if not tool.detaches:  # nothing to finish for nobody: the run ends with the wait for it
+      outcome = await self._finish_system(tool, call)
+      return ToolAnswer(outcome.content)
+  ```
+  then the existing executor-owned shielded task + `_detached` note, unchanged. A non-detaching run is in the
+  waiting task: its cancellation propagates out of `tool.run` through `_finish_system` (which already
+  re-raises `CancelledError` without reporting), it is never in `_pending` (nothing for `aclose`), never in
+  `_detached` (→ `cut_contents` answers `interrupted`); failure outcome and crash are reported by
+  `_finish_system` exactly as for detaching tools (a crash reaches `execute_gated` → `tool_failed`).
+- Module docstring, third paragraph: "A system tool that ``detaches`` has a side effect the caller asked for,
+  so its body runs to completion ... (Decision P08-FIX-13)"; add: "A system tool that does not (a lookup) runs
+  in the waiting task and is cancelled with it: a cut round answers it ``interrupted`` and the model asks again
+  (Decision P08-FIX-22 under specs/13 §6)." `detached` docstring: mention "a system tool that does not detach".
+
+### 2. `apps/media_worker/src/va_media/call_system_tools.py`
+- `ToolSms`: `detaches: Final = True` under `name`; `CallbackScheduler`: same. Module docstring: one sentence
+  (both runs go on after a cut round, Decision P08-FIX-22).
+
+### 3. Tests
+`packages/va_tools/tests/test_executor.py`
+- `_System`: field `detaches: bool = True` (after `outcome`, before `calls`); `_GatedSystem`: `detaches: bool =
+  True` (after `outcome`).
+- Parametrize over `detaches` (`@pytest.mark.parametrize("detaches", [True, False])`, booleans only) the three
+  behaviours both kinds share: `test_a_system_tool_answers_without_a_tool_event`,
+  `test_a_failed_system_tool_reports_tool_failed`, `test_an_awaited_crash_propagates_to_the_caller`.
+- New `test_a_tool_that_does_not_detach_is_cancelled_with_its_wait`: `_GatedSystem("lookup_knowledge",
+  SystemOutcome('{"results":[]}'), detaches=False)`, `call = _system_call(tool)`, `events = _Events()`,
+  `executor, _ = await _cancel_mid_run(tool, events, call)` → `tool.cancelled`, `tool.finished == []`,
+  `not executor.detached(call)`, `events.failures == []`; then `tool.gate.set()`; `stream = json_log_stream()`
+  taken before; `await executor.aclose(timeout_s=0)` → still `tool.finished == []` and no
+  `tools.system_tools_abandoned` / `tools.system_tool_ran` event in the log (nothing was pending).
+- New `test_a_tool_that_does_not_detach_leaves_nothing_to_drain_after_it_answered` is NOT needed (covered by
+  the parametrized answer test); do not add tests that restate the same branch.
+`packages/va_tools/tests/test_executor_barge_in.py`
+- `_HeldSms`: fields `detaches: bool = True`, `cancelled: bool = False` (set in an `except
+  asyncio.CancelledError: self.cancelled = True; raise` around the gate wait).
+- Factor the body into `async def _barge_in(sms) -> tuple[TaskBrain, CallToolExecutor, ToolCall]` (builds the
+  brain, reads up to the filler `SpeakStatic`, `await reply.aclose()`), used by the existing test and by
+  `test_a_barge_in_cancels_a_system_tool_that_does_not_detach`: `_HeldSms(detaches=False)` → `sms.cancelled`,
+  `not executor.detached(call)`, tool messages `== [INTERRUPTED]` (the `va_engine.task_tools` constant for
+  `{"error":"interrupted"}`; check its exported name there), then `sms.gate.set(); await executor.aclose()` →
+  `sms.sent == []`. The existing test additionally asserts `not sms.cancelled`. Update the module docstring
+  (Decision P08-FIX-22). Keep jscpd at 0 (the helper is the point).
+`apps/media_worker/tests/test_call_system_tools.py`
+- `test_both_system_tools_run_on_when_their_round_is_cut`: `assert ToolSms.detaches is True` and
+  `CallbackScheduler.detaches is True` (class attributes, no rig).
+
+Mutation checks to report (restore byte-identical, sha256): (a) `_run_system` without the `detaches` branch
+(always shields) → the two new non-detaching tests fail; (b) the branch taken for every tool (never shields) →
+the existing detached / barge-in `in_progress` / "lets the system tool finish" tests fail; (c)
+`ToolSms.detaches = False` → the media test fails.
+
+### 4. Spec + docs (same commit)
+- specs/13 §6, new block directly after the Decision P08-FIX-21 block (before "Decision (2026-11-02): the end
+  reason ..."), keep `specs/NN §N` references on ONE line:
+  `> Decision (2026-11-05) P08-FIX-22:` whether a run goes on after its round was cut is a property of the
+  tool, not of being a system tool: `va_tools.executor.SystemTool.detaches`.
+  1. `send_sms` and `schedule_callback` declare `detaches = True` (a side effect the caller asked for):
+     Decision P08-FIX-13 item 2 and Decision P08-FIX-21 apply to them unchanged.
+  2. A system tool without a side effect declares `detaches = False` (the `lookup_knowledge` of P08-T10): its
+     run happens in the task that waits for it and is cancelled with it; the executor neither owns nor drains
+     it (`aclose`), it is never `detached`, and a cut round answers it `{"error":"interrupted"}`.
+     `in_progress` would be wrong there: that answer is never followed by the result, so the model would
+     neither have the knowledge nor look again. A failure outcome or a crash is reported like for every system
+     tool (`call.error` `TOOL_FAILED`).
+  3. Not changed, on purpose: an `in_progress` answer is not replaced by the run's outcome later (Decision
+     P08-FIX-21 item 4). It would matter only when a barge-in lands inside a run that then fails; the failure
+     is on the call (`call.error` `TOOL_FAILED`), and rewriting the answer needs a link from the call to a
+     history record that survives superseded turns and the persisted engine state in both runners.
+- Reword in place: Decision P08-FIX-13 item 2 lead "A system tool run is a side effect the caller asked for"
+  → "A `send_sms` / `schedule_callback` run is a side effect the caller asked for (the tool says so:
+  `SystemTool.detaches`, Decision P08-FIX-22)"; Decision P08-FIX-21 item 1 after "`CallToolExecutor` notes a
+  call": "(of a tool that detaches, Decision P08-FIX-22)".
+- AGENTS.md bullet `2026-11-05 (P08-FIX-22)`: every `SystemTool` declares `detaches` (protocol member, no
+  default; `Final` class attribute or dataclass field); true = executor-owned shielded run, `in_progress` at a
+  cut, drained by `aclose`; false = runs in the waiting task, cancelled with it, `interrupted`;
+  `lookup_knowledge` (P08-T10) must be false; test fakes `_GatedSystem(..., detaches=False)`.
+- Do NOT tick the plan or touch `.ralph/review-inbox/DONE` (the Reviewer appends
+  `2026-11-05-p08-fix-21-wip-review.md`). The plan file and `.ralph/agent/decisions.md` (DEC-015) already
+  carry the Planner's edits; commit them with the task.
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest packages/va_tools
+packages/va_engine apps/media_worker/tests/test_call_system_tools.py -q`; `uv run python
+scripts/check_spec_refs.py`; `make test` in the background (`: > logs/make_test.log`, then `make test >
+logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat Monitor ~2 min); `npx --yes jscpd@4
+--silent`; `uvx radon cc -s -a` on the touched src files; pip-audit with the CI export (`uv export --frozen
+--all-packages --no-hashes --no-emit-workspace`); `corepack pnpm audit --audit-level high`; `make e2e`
+(background + heartbeat; the executor is on the path of every in-call tool).
+
+### Risks
+- mypy: a `Final` class attribute / dataclass field must satisfy the protocol's read-only property (as `name`
+  already does); any other structural `SystemTool` would surface in `make typecheck` (grep found none).
+- Known flakes, report both runs if hit: `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset` (task fix:sim-shared-redis-exit-flake); the capacity flow
+  on a cold stack (task fix:capacity-start-burst-stall; attribute with the `outbound.underrun` lines).
+
+## Build P08-FIX-22 (2026-11-05)
+Implemented exactly the plan, no deviations.
+- `packages/va_tools/src/va_tools/executor.py`: `SystemTool.detaches` (read-only protocol property, no default);
+  `_run_system` runs a tool with `detaches` false in the waiting task (`_finish_system` directly: never in
+  `_pending`, never in `_detached`), the shielded executor-owned path is unchanged for the others; module and
+  `detached` docstrings.
+- `apps/media_worker/src/va_media/call_system_tools.py`: `ToolSms.detaches: Final = True`,
+  `CallbackScheduler.detaches: Final = True`, one docstring sentence.
+- Tests: va_tools `test_executor.py` (`_System`/`_GatedSystem` field `detaches`, the answer / failure / awaited
+  crash tests parametrized over it, new `test_a_tool_that_does_not_detach_is_cancelled_with_its_wait`);
+  `test_executor_barge_in.py` (`_HeldSms.detaches`/`cancelled`, helper `_barge_in(sms)` + `_tool_messages`, new
+  `test_a_barge_in_cancels_a_system_tool_that_does_not_detach`, the existing test also asserts `not
+  sms.cancelled`); media `test_both_system_tools_run_on_when_their_round_is_cut`.
+- Spec: specs/13 §6 Decision P08-FIX-22 (3 items) + pointers in Decision P08-FIX-13 item 2 and Decision
+  P08-FIX-21 item 1. AGENTS.md bullet. Plan not ticked, DONE untouched.
+Gates (final tree; PATH with /home/ralph/.local/bin): `make fmt` 0, `make lint` 0, `make typecheck` 0, `make
+placeholders` 0 findings, `check_spec_refs` 0 problems, jscpd 0 clones, radon repo average 2.93 (touched src
+files average 2.65, no C+ block), pip-audit (CI export) no known vulnerabilities, `pnpm audit --audit-level high`
+exit 0 (1 known moderate), `make test` exit 0: 13092 passed, 7 skipped (13086 + 6 new), coverage 99.09 %
+(va_tools/executor.py 99 %, the one partial branch 202->204 is the pre-existing crash-without-events path, was
+188->190; call_system_tools.py 96 % unchanged lines).
+Mutation checks (sources restored byte-identical, sha256 compared): (a) `_run_system` always shields → the 2
+new non-detaching tests fail; (b) never shields → 7 fail (finish-and-report, aclose cancel, unawaited crash,
+detached, aclose-not-detached, barge-in in_progress, media callback-still-starts); (c) `ToolSms.detaches =
+False` → the media test fails.
+
+e2e (both on the final tree; logs `logs/make_e2e_run1.log`, `logs/make_e2e.log`):
+- Run 1 (16:26Z, images rebuilt, started right after `make test`): exit 2, `1 failed, 19 passed, 107
+  deselected in 419.06s`. Failed: `test_concurrent_calls_on_one_media_worker` `assert underruns == 0` got 11
+  (50 calls, 0 failed scenarios, overhead p50 110 / p95 155 ms). Media log (`logs/e2e_run1_underruns.log`):
+  the 11 `outbound.underrun` lines sit within 62 ms (16:29:59.909-.972Z), `wake_late_ms` 60-70,
+  `prev_send_await_ms` ~0, `prev_resume_ms` ~0, `turn=0` = one ~65 ms media event-loop stall inside the
+  session start burst (`media.session_started` / `carrier_answered` / `amd_verdict` lines around it); no
+  `gc_pause` at that moment (16 ms at 16:29:58.57, 17 ms at 16:30:09.60). The flow runs no system tool
+  (`_run_system` is never entered), so the change is not on that path. Second occurrence of runtime task
+  `fix:capacity-start-burst-stall` (still open; fix memory mem-1793896618-d08e added).
+- Run 2 (16:35Z, stack reused): exit 0, `20 passed, 107 deselected in 415.82s`.
+- Capacity flow alone, 2 more runs on the same stack: 2/2 passed, 0 underruns, overhead p50 102 / 102 ms,
+  p95 164 / 168 ms.
+So 1 of 4 capacity runs failed, on the cold stack, like in P08-FIX-21 (1 of 5). Reported as an intermittent
+gate failure, not hidden; the Reviewer's re-run decides.
+
+## Review P08-FIX-22 (2026-11-05) — APPROVED
+Re-ran on the builder's tree (PATH with /home/ralph/.local/bin): `make lint` 0, `make typecheck` 0, `make
+placeholders` 0 findings, `check_spec_refs` 0 problems, jscpd 0 clones, radon average 2.93 (no C+ block in
+va_tools/executor.py / call_system_tools.py), pip-audit (CI export) clean, `pnpm audit --audit-level high` exit 0
+(1 known moderate), `make test` exit 0: 13092 passed, 7 skipped, coverage 99.08 % (va_tools/executor.py 99 %,
+partial branch 202->204 pre-existing; call_system_tools.py 96 %, unchanged lines), `make e2e` exit 0: 20 passed
+in 417.8 s, started 17:01Z right after `make test` ended (logs/make_e2e_review.log); the capacity flow passed,
+so the builder's run-1 underruns did not reproduce (task fix:capacity-start-burst-stall stays open).
+Diff read against specs/13 §6 (Decisions P08-FIX-13 item 2, P08-FIX-21, P08-FIX-22): the non-detaching path
+awaits `_finish_system` in the waiting task (never in `_pending`/`_detached`, cancellation re-raised without a
+report, failure/crash reported like the detaching path); the detaching path is unchanged; `SystemTool`
+implementers are `ToolSms`, `CallbackScheduler` and the three test fakes, all declare `detaches`.
+Mutation checks on a shadow copy (PYTHONPATH over the editable install, repo untouched; va_tools
+test_executor.py + test_executor_barge_in.py = 27 tests): always shield → the 2 non-detaching tests fail; never
+shield → 6 fail; `ToolSms.detaches = False` → the media class test fails.
+Reviewer edits: rewrapped the over-long line in Decision P08-FIX-21 item 1 (wording unchanged); ticked the plan;
+appended `2026-11-05-p08-fix-21-wip-review.md` to DONE.
+For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-22-wip-review.md` is new and not in DONE (no blockers;
+item 1 = a non-detaching tool's `run` must not delay or swallow cancellation because `stop_tasks` waits for it
+without a bound: one docstring/spec sentence and an assert in the P08-T10 cut test, or drop).

@@ -530,6 +530,11 @@ async def test_a_callback_whose_wait_was_cancelled_still_starts(database: Databa
     assert [started.call_id for started in starter.started] == [child.id]
 
 
+def test_both_system_tools_run_on_when_their_round_is_cut() -> None:
+    assert ToolSms.detaches is True
+    assert CallbackScheduler.detaches is True
+
+
 async def test_a_failure_record_that_fails_once_is_retried(database: Database) -> None:
     seeded, context = await _call(database)
     starter = RecordingStarter(fail=True)
