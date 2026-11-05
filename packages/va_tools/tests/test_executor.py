@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -220,3 +222,107 @@ async def test_a_failed_system_tool_reports_tool_failed() -> None:
     assert answer.content == '{"error":"callback_failed"}'
     assert events.failures == ["schedule_callback: workflow_start"]
     assert events.tools == []
+
+
+@dataclass(slots=True)
+class _GatedSystem:
+    """A system tool whose run waits for ``gate`` (``outcome`` ``None`` = never finishes; an exception is
+    raised)."""
+
+    name: str
+    outcome: SystemOutcome | Exception | None
+    gate: asyncio.Event = field(default_factory=asyncio.Event)
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    finished: list[str] = field(default_factory=list)
+    cancelled: bool = False
+
+    async def run(self, call: ToolCall) -> SystemOutcome:
+        self.started.set()
+        try:
+            await self.gate.wait()
+            if self.outcome is None:
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.finished.append(call.id)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        assert self.outcome is not None
+        return self.outcome
+
+
+async def _cancel_mid_run(tool: _GatedSystem, events: _Events) -> tuple[CallToolExecutor, asyncio.Task[Any]]:
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
+    waiting = asyncio.create_task(
+        executor.execute(ToolCall(id="c1", name=tool.name, arguments_json="{}"), SCOPE)
+    )
+    await tool.started.wait()
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    return executor, waiting
+
+
+async def test_a_cancelled_wait_lets_the_system_tool_finish_and_report() -> None:
+    tool = _GatedSystem("send_sms", SystemOutcome('{"error":"sms_failed"}', "telnyx_error"))
+    events = _Events()
+    executor, _ = await _cancel_mid_run(tool, events)
+    assert not tool.cancelled
+    assert events.failures == []
+    tool.gate.set()
+    await executor.aclose()
+    assert tool.finished == ["c1"]
+    assert not tool.cancelled
+    assert events.failures == ["send_sms: telnyx_error"]
+
+
+async def test_aclose_cancels_a_run_that_outlives_the_drain() -> None:
+    stream = json_log_stream()
+    tool = _GatedSystem("schedule_callback", None)
+    tool.gate.set()
+    executor, _ = await _cancel_mid_run(tool, _Events())
+    await executor.aclose(timeout_s=0.01)
+    assert tool.cancelled
+    [abandoned] = [e for e in log_events(stream) if e["event"] == "tools.system_tools_abandoned"]
+    assert abandoned["count"] == 1
+    await executor.aclose()
+
+
+async def test_aclose_without_runs_returns_at_once() -> None:
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock))
+    await executor.aclose(timeout_s=0)
+
+
+async def test_a_crash_nobody_awaits_is_reported_and_retrieved() -> None:
+    stream = json_log_stream()
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        tool = _GatedSystem("send_sms", RuntimeError("boom"))
+        events = _Events()
+        executor, _ = await _cancel_mid_run(tool, events)
+        tool.gate.set()
+        await executor.aclose()
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert unhandled == []
+    assert events.failures == ["send_sms: crashed"]
+    [crashed] = [e for e in log_events(stream) if e["event"] == "tools.system_tool_crashed"]
+    assert crashed["error_type"] == "RuntimeError"
+
+
+async def test_an_awaited_crash_propagates_to_the_caller() -> None:
+    tool = _GatedSystem("send_sms", RuntimeError("boom"))
+    tool.gate.set()
+    events = _Events()
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
+        with pytest.raises(RuntimeError):
+            await executor.execute(ToolCall(id="c1", name="send_sms", arguments_json="{}"), SCOPE)
+    assert events.failures == ["send_sms: crashed"]

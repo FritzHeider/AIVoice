@@ -1,5 +1,5 @@
 """The executor-backed system tools of task-mode calls: ``send_sms`` and ``schedule_callback`` (specs/13 §6;
-Decision P08-T02b2 under specs/13 §6).
+Decisions P08-T02b2 and P08-FIX-13 under specs/13 §6).
 
 Both run behind the call's :class:`~va_tools.executor.CallToolExecutor` as
 :class:`~va_tools.executor.SystemTool` objects; the runtime offers a tool to the model only when it built its
@@ -7,40 +7,49 @@ handler (:func:`sms_capable` and the org settings for ``send_sms``; the settings
 starter for ``schedule_callback``).
 Every run gets fresh message and callback ids (providers may omit or reuse tool call ids, and the brain never
 re-runs a tool call), so two calls of a tool send two messages or schedule two callbacks. Numbers, texts and
-times are never logged.
+times are never logged. Both need the other party's number to be E.164 (:func:`~va_media.call_sms.dialable`;
+an anonymous or withheld caller gets ``{"error": ..., "reason": "no_callable_number"}``), and both are capped
+per call: :data:`MAX_TOOL_SMS_PER_CALL` messages sent or in flight, one pending callback
+(:data:`va_db.callbacks.MAX_PENDING_CALLBACKS`); a run past the cap answers ``{"error": "limit_reached"}``
+without an error event.
 
 :class:`ToolSms` sends the message from the call's agent number to the other party through
 :class:`~va_media.call_sms.OutboundSms` and publishes ``call.sms_sent`` (``source: "tool"``); a refusal
-answers ``{"error": "sms_failed", "reason": ...}`` and reports ``call.error`` ``TOOL_FAILED``.
+answers ``{"error": "sms_failed", "reason": ...}`` and reports ``call.error`` ``TOOL_FAILED`` (a message
+Telnyx did not accept does not count against the cap).
 
 :class:`CallbackScheduler` checks the requested time (:func:`va_domain.call_callback.callback_time`), creates
 the scheduled child call with its ``call.scheduled`` event row (routed to the webhook outbox) in one tenant
 transaction (:func:`va_db.callbacks.schedule_callback`), broadcasts the event after the commit and starts the
 child's ``CallWorkflow``, which admits the child at dial time like every scheduled call. An unusable time
-answers ``{"error": "invalid_datetime", "reason": ...}`` without an error event (the model may correct it); a
-start failure fails the child (``call.error`` ``dispatch_failed`` on the child) unless the workflow already
-moved it on.
+answers ``{"error": "invalid_datetime", "reason": ...}`` without an error event (the model may correct it). A
+start failure terminates the child's workflow id (a timed-out start may have reached Temporal) and fails
+the child (``call.error`` ``dispatch_failed`` on the child; one retry) unless the workflow already moved it
+on; when the failure cannot be recorded the child stays ``scheduled`` without a workflow, logged at error
+level ``media.callback_orphaned`` with its id.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import orjson
 from pydantic import JsonValue
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.service import RPCError
 
-from va_common.checks import TemporalConnector, WorkflowStartError, start_workflow
+from va_common.checks import TemporalConnector, WorkflowStartError, start_workflow, terminate_workflow
 from va_common.errors import AppError
 from va_common.ids import new_id
 from va_common.logging import get_logger
 from va_common.time import Clock
-from va_db.callbacks import ScheduledCallback, schedule_callback
+from va_db.callbacks import CallbackLimitError, ScheduledCallback, schedule_callback
 from va_db.models import CallEventLevel
 from va_db.repositories import CallRepo, CallTransitionError
 from va_db.session import Database
@@ -48,7 +57,7 @@ from va_db.voicemail_sms import sms_sender
 from va_domain.call_callback import CallbackTimeError, callback_time
 from va_domain.call_context import CallContext
 from va_domain.call_retry import iso_utc
-from va_domain.call_workflow import CALL_WORKFLOW_NAME, CallWorkflowInput
+from va_domain.call_workflow import CALL_WORKFLOW_NAME, CallWorkflowInput, call_workflow_id
 from va_events import (
     SCHEDULED_MESSAGE,
     DomainEvent,
@@ -60,11 +69,12 @@ from va_events import (
     row_for,
 )
 from va_llm.models import ToolCall
-from va_media.call_sms import OutboundSms, SmsNotSent, agent_number, counterpart_number
+from va_media.call_sms import OutboundSms, SmsNotSent, agent_number, counterpart_number, dialable
 from va_tools.executor import SystemOutcome, ToolEvents
 
 __all__ = [
     "CALLBACK_START_FAILED",
+    "MAX_TOOL_SMS_PER_CALL",
     "CallbackDeps",
     "CallbackScheduler",
     "CallbackStartError",
@@ -77,7 +87,12 @@ __all__ = [
 CALLBACK_START_FAILED: Final = "Call workflow could not be started."
 """``calls.error_message`` and ``call.error`` message of a callback whose workflow could not be started."""
 
+MAX_TOOL_SMS_PER_CALL: Final = 3
+"""Messages the ``send_sms`` tool may send (or have in flight) in one call."""
+
 _START_TIMEOUT_S: Final = 10.0
+_FAIL_ATTEMPTS: Final = 2
+_NO_CALLABLE_NUMBER: Final = "no_callable_number"
 _START_RPC_TIMEOUT_S: Final = 5.0
 
 _log = get_logger(__name__)
@@ -109,6 +124,11 @@ def _argument(call: ToolCall, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _limit_reached(tool: str) -> SystemOutcome:
+    _log.info("media.system_tool_refused", tool=tool, reason="limit_reached")
+    return SystemOutcome(_content({"error": "limit_reached"}))
+
+
 class ToolSms:
     """The ``send_sms`` tool of one call (see the module docstring)."""
 
@@ -118,25 +138,38 @@ class ToolSms:
         self._sender = sender
         self._context = context
         self._events = events
+        self._used = 0
 
     async def run(self, call: ToolCall) -> SystemOutcome:
-        context = self._context
         text = (_argument(call, "message") or "").strip()
         if not text:
             return SystemOutcome(
                 _content({"error": "sms_failed", "reason": "blank_message"}), "blank_message"
             )
-        try:
-            sent = await self._sender.deliver(
-                context,
-                sender_number=agent_number(context),
-                to=counterpart_number(context),
-                text=text,
-                message_id=new_id(),
+        if not dialable(counterpart_number(self._context)):
+            return SystemOutcome(
+                _content({"error": "sms_failed", "reason": _NO_CALLABLE_NUMBER}), _NO_CALLABLE_NUMBER
             )
+        if self._used >= MAX_TOOL_SMS_PER_CALL:
+            return _limit_reached(self.name)
+        self._used += 1  # before the first await: concurrent runs count each other
+        try:
+            return await self._send(text)
         except SmsNotSent as refused:
+            self._used -= 1
             _log.warning(refused.event, reason=refused.reason)
             return SystemOutcome(_content({"error": "sms_failed", "reason": refused.reason}), refused.reason)
+
+    async def _send(self, text: str) -> SystemOutcome:
+        """Send ``text``; raises :class:`SmsNotSent` when Telnyx did not accept it."""
+        context = self._context
+        sent = await self._sender.deliver(
+            context,
+            sender_number=agent_number(context),
+            to=counterpart_number(context),
+            text=text,
+            message_id=new_id(),
+        )
         if self._events is not None:
             self._events.sms_sent(
                 {
@@ -158,6 +191,10 @@ class CallbackStarter(Protocol):
     """Starts the ``CallWorkflow`` of a committed callback; raises :class:`CallbackStartError`."""
 
     async def start(self, call: CallWorkflowInput) -> None: ...
+
+    async def abandon(self, call_id: uuid.UUID) -> None:
+        """Terminate the workflow a failed start may still have created (best effort, never raises)."""
+        ...
 
 
 class TemporalCallbackStarter:
@@ -182,6 +219,13 @@ class TemporalCallbackStarter:
         except WorkflowStartError as exc:
             msg = f"CallWorkflow of callback {call.call_id} could not be started"
             raise CallbackStartError(msg) from exc.__cause__
+
+    async def abandon(self, call_id: uuid.UUID) -> None:
+        try:
+            async with asyncio.timeout(_START_TIMEOUT_S):
+                await terminate_workflow(self._connector, call_workflow_id(call_id), CALLBACK_START_FAILED)
+        except (RPCError, TimeoutError, OSError, RuntimeError) as exc:
+            _log.warning("media.callback_abandon_failed", error_type=type(exc).__name__)
 
 
 class _EventsUnavailableError(Exception):
@@ -210,6 +254,10 @@ class CallbackScheduler:
     async def run(self, call: ToolCall) -> SystemOutcome:
         context = self._context
         deps = self._deps
+        if not dialable(counterpart_number(context)):
+            return SystemOutcome(
+                _content({"error": "callback_failed", "reason": _NO_CALLABLE_NUMBER}), _NO_CALLABLE_NUMBER
+            )
         try:
             moment = callback_time(
                 _argument(call, "datetime_iso") or "", context.config.timezone, deps.clock.now()
@@ -219,15 +267,16 @@ class CallbackScheduler:
             return SystemOutcome(_content({"error": "invalid_datetime", "reason": exc.reason}))
         try:
             scheduled, event = await self._create(call, moment)
+        except CallbackLimitError:
+            return _limit_reached(self.name)
         except (SQLAlchemyError, OSError, AppError, _EventsUnavailableError) as exc:
             failure = "events" if isinstance(exc, _EventsUnavailableError) else "database"
             _log.warning("media.callback_failed", failure=failure, error_type=type(exc).__name__)
             return SystemOutcome(_content({"error": "callback_failed"}), failure)
-        if event is not None:
-            await self._broadcast(event)
-            if not await self._start(scheduled):
-                return SystemOutcome(_content({"error": "callback_failed"}), "workflow_start")
-        _log.info("media.callback_scheduled", created=scheduled.created)
+        await self._broadcast(event)
+        if not await self._start(scheduled):
+            return SystemOutcome(_content({"error": "callback_failed"}), "workflow_start")
+        _log.info("media.callback_scheduled")
         local = scheduled.scheduled_for.astimezone(ZoneInfo(context.config.timezone))
         return SystemOutcome(
             _content(
@@ -239,9 +288,8 @@ class CallbackScheduler:
             )
         )
 
-    async def _create(self, call: ToolCall, moment: datetime) -> tuple[ScheduledCallback, DomainEvent | None]:
-        """The callback child (created, or found when its id already exists) and, when created, its committed
-        event."""
+    async def _create(self, call: ToolCall, moment: datetime) -> tuple[ScheduledCallback, DomainEvent]:
+        """The created callback child and its committed event."""
         context = self._context
         deps = self._deps
         async with deps.database.tenant_session(context.org_id) as session:
@@ -253,8 +301,6 @@ class CallbackScheduler:
                 scheduled_for=moment,
                 note=_argument(call, "note"),
             )
-            if not scheduled.created:
-                return scheduled, None
             data: dict[str, JsonValue] = {
                 "status": "scheduled",
                 "scheduled_for": iso_utc(scheduled.scheduled_for),
@@ -303,7 +349,7 @@ class CallbackScheduler:
             _log.warning("media.callback_event_broadcast_failed", event_type=event.type.value)
 
     async def _start(self, scheduled: ScheduledCallback) -> bool:
-        """Start the child's workflow; ``False`` when it failed and the child was marked failed."""
+        """Start the child's workflow; ``False`` when it failed and the child was not left to its workflow."""
         context = self._context
         try:
             await self._deps.starter.start(
@@ -313,40 +359,51 @@ class CallbackScheduler:
             )
         except CallbackStartError as exc:
             _log.warning("media.callback_start_failed", error_type=type(exc.__cause__).__name__)
-            return not await self._fail_child(scheduled.call_id)
+            await self._deps.starter.abandon(scheduled.call_id)
+            return await self._fail_child(scheduled.call_id) == "moved_on"
         return True
 
-    async def _fail_child(self, child_id: uuid.UUID) -> bool:
-        """Mark the child failed with its ``call.error``; ``False`` when the workflow already moved it on
-        (a timed-out start that reached Temporal) or the failure could not be recorded."""
+    async def _fail_child(self, child_id: uuid.UUID) -> Literal["failed", "moved_on", "unrecorded"]:
+        """Mark the child failed with its ``call.error`` (:data:`_FAIL_ATTEMPTS` tries): ``moved_on`` when the
+        workflow already moved it on (a timed-out start that reached Temporal), ``unrecorded`` when every try
+        failed (the child stays ``scheduled`` without a workflow, logged ``media.callback_orphaned``)."""
+        for attempt in range(1, _FAIL_ATTEMPTS + 1):
+            try:
+                event = await self._record_failure(child_id)
+            except CallTransitionError as exc:
+                _log.info("media.callback_moved_on", status=exc.current)
+                return "moved_on"
+            except (SQLAlchemyError, OSError) as exc:
+                _log.warning(
+                    "media.callback_failure_unrecorded", attempt=attempt, error_type=type(exc).__name__
+                )
+                continue
+            if event is not None:
+                await self._broadcast(event)
+            return "failed"
+        _log.error("media.callback_orphaned", child_call_id=str(child_id))
+        return "unrecorded"
+
+    async def _record_failure(self, child_id: uuid.UUID) -> DomainEvent | None:
+        """One try of :meth:`_fail_child`: the transition and its event row in one transaction (the event is
+        ``None`` when it could not be sequenced; the failure itself is still recorded)."""
         context = self._context
         deps = self._deps
-        event: DomainEvent | None = None
-        try:
-            async with deps.database.tenant_session(context.org_id) as session:
-                await CallRepo(session, context.org_id).transition(
-                    child_id,
-                    "failed",
-                    from_={"scheduled"},
-                    error_message=CALLBACK_START_FAILED,
-                    end_reason="error",
-                    ended_by="error",
-                    ended_at=deps.clock.now(),
-                    queue_status="call_error",
+        async with deps.database.tenant_session(context.org_id) as session:
+            await CallRepo(session, context.org_id).transition(
+                child_id,
+                "failed",
+                from_={"scheduled"},
+                error_message=CALLBACK_START_FAILED,
+                end_reason="error",
+                ended_by="error",
+                ended_at=deps.clock.now(),
+                queue_status="call_error",
+            )
+            data: dict[str, JsonValue] = {"code": "dispatch_failed", "detail": "workflow_start"}
+            try:
+                return await self._persist(
+                    session, child_id, EventType.CALL_ERROR, CALLBACK_START_FAILED, data
                 )
-                data: dict[str, JsonValue] = {"code": "dispatch_failed", "detail": "workflow_start"}
-                try:
-                    event = await self._persist(
-                        session, child_id, EventType.CALL_ERROR, CALLBACK_START_FAILED, data
-                    )
-                except _EventsUnavailableError:
-                    event = None  # the failure itself must still be recorded; the event is lost with Redis
-        except CallTransitionError as exc:
-            _log.info("media.callback_moved_on", status=exc.current)
-            return False
-        except (SQLAlchemyError, OSError) as exc:
-            _log.warning("media.callback_failure_unrecorded", error_type=type(exc).__name__)
-            return True
-        if event is not None:
-            await self._broadcast(event)
-        return True
+            except _EventsUnavailableError:
+                return None

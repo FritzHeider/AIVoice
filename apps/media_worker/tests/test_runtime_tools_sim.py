@@ -23,6 +23,7 @@ from llm_client_helpers import served_requests
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from runtime_rig import MODELS_DIR, WAIT_S, RecordingRuntime, StaticOrgSettings, sim_runtime
+from service_helpers import json_log_stream, log_events
 from sim_media import EdgeRelay, realtime_telnyx, streamed_call
 from sms_rows import add_sms_number
 from sqlalchemy import select, update
@@ -110,9 +111,10 @@ class ToolsRig:
         say: str = "where is my order",
         tools: bool = True,
         from_number: str | None = None,
+        to_number: str | None = None,
     ) -> None:
         """Run one call to its end (the caller says ``say``, then hangs up); ``tools``: the call carries the
-        inline tool; ``from_number`` replaces the context's agent number."""
+        inline tool; ``from_number`` / ``to_number`` replace the context's agent / other party number."""
         text = f'id: tools-{uuid.uuid4().hex[:8]}\nmatch: {{to: "{CALLEE}"}}\nanswer: {{after_ms: 200}}\n'
         steps = (
             "wait_agent_speech: {}",
@@ -132,6 +134,8 @@ class ToolsRig:
         )
         if from_number is not None:
             context = context.model_copy(update={"from_number": from_number})
+        if to_number is not None:
+            context = context.model_copy(update={"to_number": to_number})
         loader.contexts[seeded.call_id] = context
         options: dict[str, Any] = {"carrier": {"answered_by": "human"}, "relay": self.relay}
         options.update(state=self.state, container=self.container, call_id=seeded.call_id, answered=True)
@@ -262,6 +266,9 @@ class RecordingStarter:
     async def start(self, call: CallWorkflowInput) -> None:
         self.started.append(call)
 
+    async def abandon(self, call_id: uuid.UUID) -> None:
+        raise AssertionError(call_id)
+
 
 def _offered(request: dict[str, Any]) -> list[str]:
     return [tool["function"]["name"] for tool in request["tools"] or []]
@@ -366,3 +373,20 @@ async def test_callbacks_are_not_offered_when_the_org_does_not_allow_them(media_
         first = (await served_requests(r.llm))[0]
         assert _offered(first) == ["end_call", "press_button"]
         assert starter.started == []
+
+
+async def test_no_system_tool_is_offered_without_a_callable_number(media_db_url: str) -> None:
+    starter = RecordingStarter()
+    org = OrgSettings.model_validate({"engine": {"allow_callbacks": True}})
+    rules = _callback_rules((utcnow() + timedelta(days=1)).isoformat())
+    async with tools_rig(media_db_url, Reply(200), rules=rules, org=org, starter=starter) as r:
+        seeded = await r.seeded()
+        stream = json_log_stream()
+        await r.call(seeded, say="please call me back tomorrow", tools=False, to_number="anonymous")
+        first = (await served_requests(r.llm))[0]
+        assert _offered(first) == ["end_call", "press_button"]
+        assert starter.started == []
+        assert any(
+            e["event"] == "media.system_tools_skipped" and e["reason"] == "no_callable_number"
+            for e in log_events(stream)
+        )

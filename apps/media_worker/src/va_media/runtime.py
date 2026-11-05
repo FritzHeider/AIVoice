@@ -65,7 +65,9 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     SMS-capable org number and ``tools.allow_send_sms``) and ``schedule_callback`` (offered with
     ``tools.allow_schedule_callback`` or ``engine.allow_callbacks``; the child's ``CallWorkflow`` is started
     through :class:`~va_media.call_system_tools.TemporalCallbackStarter` over the Temporal client the end
-    routine signals with) (:mod:`va_media.call_system_tools`; specs/13 §6 Decision P08-T02b2).
+    routine signals with) (:mod:`va_media.call_system_tools`; specs/13 §6 Decision P08-T02b2). Neither is
+    offered when the other party has no E.164 number; at call end the executor waits for system tool runs a
+    barge-in left running before the snapshot and the events are flushed (Decision P08-FIX-13).
 """
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ from va_llm.platform import platform_gateway
 from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
-from va_media.call_sms import CallSmsPort, OutboundSms
+from va_media.call_sms import CallSmsPort, OutboundSms, counterpart_number, dialable
 from va_media.call_system_tools import (
     CallbackDeps,
     CallbackScheduler,
@@ -448,6 +450,8 @@ class CallRuntime:
         if executor is not None and self._redis is not None:
             saver = EngineStateSaver(self._redis, context.call_id)
             stack.push_async_callback(saver.aclose)
+        if executor is not None:
+            stack.push_async_callback(executor.aclose)  # LIFO: drains before the snapshot flush
         return TaskBrain(
             context=context,
             settings=org,
@@ -464,9 +468,13 @@ class CallRuntime:
     ) -> tuple[bool, list[SystemTool]]:
         """Whether the agent number can send SMS, and the executor-backed system tools the call may use
         (specs/13 §6 Decision P08-T02b2): only tools the runtime can run are built (a database for both, a
-        workflow starter for callbacks), and the TaskBrain offers only built ones."""
+        workflow starter for callbacks), and the TaskBrain offers only built ones. An anonymous or withheld
+        other party gets neither (Decision P08-FIX-13): nothing could reach it."""
         database = self._database
         if database is None or self._call_tools is None:
+            return False, []
+        if not dialable(counterpart_number(context)):
+            _log.info("media.system_tools_skipped", reason="no_callable_number")
             return False, []
         tools: list[SystemTool] = []
         sms_ok = org.tools.allow_send_sms and await sms_capable(database, context)

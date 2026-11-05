@@ -343,3 +343,127 @@ pip-audit clean, pnpm audit no high.
 Approved. Re-ran lint/typecheck/placeholders (pass) and make test (12941 passed, 7 skipped, cov 99.04%).
 Fixes verified: new_id() per system tool run (call_system_tools.py:135,252), reused/blank tool call id tests,
 turns.py docstrings in order, spec Decision updated.
+
+## Plan P08-FIX-13 — system tools hardening (review inbox: 2026-11-04-p08-t02b2-system-tools.md,
+## 2026-11-05-p08-t02b2-system-tools-review.md, 2026-11-05-p08-t02b2-recheck.md)
+
+### 1. Run-to-completion through barge-in (BLOCKER) — `packages/va_tools/src/va_tools/executor.py`
+- `CallToolExecutor.__init__` adds `self._pending: set[asyncio.Task[SystemOutcome]] = set()`.
+- `_run_system(tool, call)`: `task = asyncio.create_task(self._finish_system(tool, call), name=f"system-tool:{tool.name}")`,
+  add to `_pending`, `task.add_done_callback(self._pending.discard)`; `outcome = await asyncio.shield(task)`; return
+  `ToolAnswer(outcome.content)`. `_finish_system` = `await tool.run(call)` then the existing failure event + log
+  (so a late outcome is still reported after the brain stopped waiting). An unexpected exception inside the task:
+  log `tools.system_tool_crashed` (error_type) + `tool_failed(f"{name}: crashed")` and re-raise (the TaskBrain
+  already maps an exception to TOOL_FAILED); when nobody awaits it any more, retrieve it in the done callback
+  (`task.exception()` after `not task.cancelled()`) so asyncio never logs "exception never retrieved".
+- `async def aclose(self, timeout_s: float = SYSTEM_DRAIN_S) -> None` (`SYSTEM_DRAIN_S: Final = 20.0`, > 10 s start +
+  DB): wait for `_pending` with `asyncio.wait(..., timeout=timeout_s)` (wall time is fine here: call teardown, not a
+  test-clock deadline — OR use `va_common.waits.within` with the executor's clock if it has one; the executor has
+  no clock today → asyncio.wait timeout); cancel leftovers and log `tools.system_tools_abandoned` (count). Never raises.
+- No change to `TaskBrain._stop_tasks`: cancelling the outer tool task now only ends the shield wait. The model still
+  gets INTERRUPTED; the caps (§3) bound the retry it may make.
+- Runtime `_task_brain` (`apps/media_worker/src/va_media/runtime.py`): `if executor is not None:
+  stack.push_async_callback(executor.aclose)` right after building it (LIFO → runs after brain.aclose / saver
+  pushed later, i.e. before them? push it BEFORE the saver so it runs AFTER the saver's flush? Order wanted: brain
+  stopped → pending system tools drained → saver flush. Saver is pushed after executor creation and brain.aclose
+  in the pathway branch; in `_task_brain` push `executor.aclose` before `saver.aclose` so it runs after it — either
+  order is acceptable since system tools change no brain state; keep it simple: push right after building).
+  P08-FIX-3 rule: push the bound method of the executor (an owned part), not a runtime method — fine.
+
+### 2. No tools for anonymous/withheld callers (BLOCKER)
+- `va_media.call_sms`: add `def dialable(number: str) -> bool: return number.startswith("+")` (same rule as
+  `va_edge.accept`); export.
+- `CallRuntime._system_tools`: `if not dialable(counterpart_number(context)): return False, []` (log
+  `media.system_tools_skipped`, reason `no_callable_number`) before the SMS capability query. `sms_ok` False → facts
+  stop offering `send_sms`; callback dropped by `_runnable_facts`.
+- Guards in `ToolSms.run` / `CallbackScheduler.run`: not dialable → `SystemOutcome(_content({"error":
+  "sms_failed"|"callback_failed", "reason": "no_callable_number"}), "no_callable_number")`.
+
+### 3. Per-call caps (should fix)
+- Callback: `va_db/callbacks.py`: `MAX_PENDING_CALLBACKS: Final = 1`; `class CallbackLimitError(Exception)`; after the
+  parent `FOR UPDATE`, `count(Call.id) where parent_call_id == parent_id, org_id, status == "scheduled"`; `>= MAX`
+  → raise. (During a live call the only children are callbacks: retry children are created after the call ended.)
+  Remove the dead existing-child branch and `ScheduledCallback.created`; fix the module docstring (fresh id per run;
+  cap). `CallbackScheduler.run` catches `CallbackLimitError` → `{"error":"limit_reached"}`, no failure, log
+  `media.callback_refused reason=limit_reached`. Remove `created`/`event is None` handling in `_create`/`run`
+  (`_create` always returns the event).
+- SMS: `ToolSms` `MAX_TOOL_SMS_PER_CALL: Final = 3` (module constant in call_system_tools), counter `self._used`
+  incremented BEFORE `deliver` (in-flight counts; concurrency safe because increment happens before the first
+  await), decremented on `SmsNotSent` (Telnyx did not accept: queued-row/DB/profile/telnyx_error refusals). At cap →
+  `{"error":"limit_reached"}`, no failure event.
+- Export the constants; document caps in the spec Decision.
+
+### 4. Start failure without orphans (should fix) — `call_system_tools.py`
+- `CallbackStarter` protocol gains `async def abandon(self, call_id: uuid.UUID) -> None` (best effort, never raises);
+  `TemporalCallbackStarter.abandon` → `terminate_workflow(connector, call_workflow_id(call_id) /
+  CallWorkflowInput(...).workflow_id(), "callback start failed")` catching `RPCError`/`OSError`/`RuntimeError`
+  (whatever `connector.client()` raises — check `start_workflow`'s except list and mirror it) → log
+  `media.callback_abandon_failed`. Covers a timed-out start that reached Temporal (a live sleeper would otherwise
+  sleep up to 90 days).
+- `_start` on `CallbackStartError`: `await starter.abandon(child)` then `_fail_child`. `_fail_child` returns an enum-ish
+  `Literal["failed","moved_on","unrecorded"]`: try the transition up to 2 attempts on `SQLAlchemyError/OSError`;
+  `CallTransitionError` → "moved_on" (answer scheduled, as today); after 2 failures log at ERROR
+  `media.callback_orphaned` with `child_call_id=str(child)` and answer `{"error":"callback_failed"}` failure
+  `workflow_start` (the workflow was terminated, nothing will dial it; no recovery sweep exists in specs/17 — note
+  in the Decision that a future sweep must not start children of callback start failures… simply: state the row
+  stays `scheduled` without a workflow and is logged). Docstrings match code exactly.
+
+### 5. Tests
+- `packages/va_tools/tests/test_executor.py`: cancel the `execute` task while a gated system tool runs → tool keeps
+  running, completes, `tool_failed` reported for a late failure outcome, `aclose()` waits for it; `aclose` with a
+  never-finishing tool returns after the timeout (pass `timeout_s=0.05`... use a small value; it's wall time but
+  tiny) and cancels it; crashing tool not awaited → no "never retrieved" warning (filterwarnings=error catches it via
+  the loop exception handler? assert via `loop.set_exception_handler` recording nothing).
+- `packages/va_db/tests/test_callbacks_db.py`: second callback while one is `scheduled` → `CallbackLimitError`; after
+  the first is moved to `canceled`/`failed` a new one succeeds; drop the `created=False` test.
+- `apps/media_worker/tests/test_call_system_tools.py`: anonymous inbound → `no_callable_number` for both; 4th SMS →
+  limit_reached (3 Telnyx sends); SMS refused by Telnyx does not use up the cap; second callback → limit_reached,
+  one row, one start; start failure → `abandon` called with the child id, child failed; first `_fail_child`
+  transition raising (wrap database to fail the first tenant_session once) → still failed on retry; both attempts
+  failing → `media.callback_orphaned` logged with child id, answer callback_failed.
+- Barge-in at the brain level: `packages/va_engine/tests/` (task_helpers / FakeSource) OR media level: build a
+  `TaskBrain` with a real `CallToolExecutor` holding a gated system tool (a fake SystemTool whose run awaits an
+  Event then records), close the reply generator mid-tool (`first_stream`/`aclosing` pattern), release the gate,
+  `await executor.aclose()` → the side effect ran exactly once. Plus a media test: `CallbackScheduler` with a gated
+  `RecordingStarter` behind an executor; cancel the execute task; release → one child, one start, child still
+  `scheduled` (not failed).
+- Runtime: `_system_tools` with an anonymous inbound context (runtime sim `Rig.call(direction="inbound", from=
+  "anonymous")` if supported, else a unit test of `_system_tools` via `sim_runtime(...)` checking the FakeLLM request
+  `tools` lacks `send_sms`/`schedule_callback`) — reuse the existing "callbacks-not-offered" runtime sim test shape.
+
+### 6. Spec + docs
+- specs/13 §6 Decision P08-T02b2: item 1 add "both need the other party's number to be E.164 (an anonymous/withheld
+  caller gets neither)"; new item: system tool bodies run to completion when a barge-in interrupts the turn (the model
+  hears the interruption, the outcome is still reported, call end waits up to 20 s); caps (1 pending callback per
+  call counted under the parent lock, 3 SMS per call sent or in flight, `{"error":"limit_reached"}`, no error
+  event); start failure: terminate the workflow id, mark failed (one retry), else log `media.callback_orphaned`.
+  Or as a separate `> Decision (2026-11-05) P08-FIX-13:` block — preferred (keeps history).
+- AGENTS.md learned line (shielded system tools + `aclose`, `dialable`, caps).
+
+### Gates
+make fmt lint typecheck placeholders; make test in background + heartbeat Monitor; jscpd; radon; audits. No e2e change.
+
+### Risks
+- `asyncio.shield` + task GC: keep strong refs in `_pending` (done).
+- Exception-never-retrieved warnings under filterwarnings=error → done-callback retrieval.
+- Existing tests asserting `ScheduledCallback.created` / duplicate behaviour must be updated, not deleted silently.
+
+## Build P08-FIX-13 (2026-11-05)
+Implemented per plan. Executor: shielded system tool tasks (`_pending`, `_settled` retrieves exceptions,
+`tools.system_tool_crashed` → TOOL_FAILED `crashed`), `aclose(timeout_s=SYSTEM_DRAIN_S=20)`; runtime pushes
+`executor.aclose` after the saver (LIFO: drains before snapshot flush and before events drain). `dialable` in
+call_sms; runtime skips both tools (`media.system_tools_skipped`), handlers guard too. Caps: ToolSms 3 (count
+before await, refunded on SmsNotSent), `va_db.callbacks.MAX_PENDING_CALLBACKS=1`/`CallbackLimitError`
+(`ScheduledCallback.created` + existing-child branch removed). Start failure: `CallbackStarter.abandon`
+(TemporalCallbackStarter → terminate_workflow, never raises), `_fail_child` 2 attempts → "failed"/"moved_on"/
+"unrecorded" (`media.callback_orphaned` error). Spec `> Decision (2026-11-05) P08-FIX-13` under specs/13 §6;
+AGENTS line. Tests: va_tools test_executor (+5), test_executor_barge_in (TaskBrain closes reply mid-tool),
+va_db callbacks (limit, freed slot), media test_call_system_tools (+8), test_callback_starter (7), runtime sim
+anonymous → only end_call/press_button.
+Gates: lint/typecheck/placeholders pass; make test 12964 passed 7 skipped (cov 99%); jscpd 0; radon avg 2.83; pip-audit clean; pnpm audit no high.
+
+## Review P08-FIX-13 (2026-11-05)
+Approved. Re-ran lint/typecheck/placeholders (pass) and make test (12964 passed, 7 skipped, cov 99.06%). All
+three inbox notes' findings covered: shield + aclose (runtime LIFO before saver/events), dialable gate in runtime
+and handlers, caps, abandon + 2-try _fail_child with media.callback_orphaned, dead created path removed, spec
+Decision P08-FIX-13. Inbox notes appended to DONE.

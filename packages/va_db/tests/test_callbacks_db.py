@@ -1,5 +1,5 @@
-"""Callback children of the ``schedule_callback`` tool on a migrated database (specs/13 §6 Decision
-P08-T02b2)."""
+"""Callback children of the ``schedule_callback`` tool on a migrated database (specs/13 §6 Decisions
+P08-T02b2, P08-FIX-13)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from tenant_rows import OrgFactory, open_database
 
 from va_common.ids import new_id
 from va_db.call_children import COPIED_COLUMNS
-from va_db.callbacks import ScheduledCallback, schedule_callback
+from va_db.callbacks import CallbackLimitError, ScheduledCallback, schedule_callback
 from va_db.models import Call
-from va_db.repositories import NotFoundError
+from va_db.repositories import CallRepo, NotFoundError
 from va_db.session import Database
 from va_domain.call_workflow import call_workflow_id
 
@@ -59,7 +59,7 @@ async def test_an_outbound_parent_gets_a_scheduled_child_with_its_columns(databa
     child_id = new_id()
     scheduled = await _schedule(database, parent, child_id)
 
-    assert scheduled == ScheduledCallback(child_id, WHEN, created=True)
+    assert scheduled == ScheduledCallback(child_id, WHEN)
     [child] = await _children(database, parent)
     async with database.tenant_session(parent.org_id) as session:
         stored = await session.get_one(Call, parent.call_id)
@@ -99,18 +99,30 @@ async def test_an_inbound_parent_calls_the_caller_back_from_the_called_number(da
     assert "callback_note" not in child.config
 
 
-async def test_a_repeated_tool_call_schedules_one_callback(database: Database) -> None:
+async def test_a_second_pending_callback_is_refused(database: Database) -> None:
     parent = await seed_call(database, status="in_progress", config=CONFIG)
-    child_id = new_id()
-    await _schedule(database, parent, child_id)
-    again = await _schedule(database, parent, child_id)
+    first = new_id()
+    await _schedule(database, parent, first)
+    with pytest.raises(CallbackLimitError):
+        await _schedule(database, parent, new_id())
 
-    assert again == ScheduledCallback(child_id, WHEN, created=False)
+    assert [child.id for child in await _children(database, parent)] == [first]
+
+
+async def test_a_callback_that_left_scheduled_frees_the_slot(database: Database) -> None:
+    parent = await seed_call(database, status="in_progress", config=CONFIG)
+    first = new_id()
+    await _schedule(database, parent, first)
+    async with database.tenant_session(parent.org_id) as session:
+        await CallRepo(session, parent.org_id).transition(first, "canceled", from_={"scheduled"})
+    second = new_id()
+    await _schedule(database, parent, second)
+
     async with database.tenant_session(parent.org_id) as session:
         count = await session.scalar(
             select(func.count()).select_from(Call).where(Call.parent_call_id == parent.call_id)
         )
-    assert count == 1
+    assert count == 2
 
 
 async def test_a_call_of_another_org_is_not_found(database: Database) -> None:

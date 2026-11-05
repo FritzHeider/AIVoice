@@ -1,5 +1,24 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-13 System tools: run to completion through barge-in, no tools for anonymous callers, per-call caps, orphan-free start failures — see .ralph/review-inbox/2026-11-04-p08-t02b2-system-tools.md, 2026-11-05-p08-t02b2-system-tools-review.md, 2026-11-05-p08-t02b2-recheck.md — shielded executor-owned system tool runs + aclose drain, dialable() gate, caps (3 SMS, 1 pending callback), abandon+retried fail on start failure; Decision P08-FIX-13; lint/typecheck/placeholders pass, make test 12964 passed 7 skipped (cov 99.06%)
+  - Spec refs: specs/13 §6 (Decision P08-T02b2), specs/05 §3.3, specs/07 §8
+  - Depends on: P08-T02b2
+  - Deliverables: `CallToolExecutor` runs each system tool in a task it owns, awaited through `asyncio.shield`
+    (a barge-in cancel stops the wait, never the side effect; the outcome is still logged/reported) and
+    `aclose(timeout_s)` awaits the pending ones at call end (runtime exit stack); `send_sms`/`schedule_callback`
+    built only when the other party's number is E.164 (`+…`), handlers refuse `no_callable_number`; caps: one
+    pending (`scheduled`) callback child per parent, counted under the parent `FOR UPDATE` lock, and 3 SMS per call
+    (sent or in flight), both answer `{"error":"limit_reached"}` without an error event; a failed callback start
+    terminates the workflow id (best effort) then marks the child failed with one retry, logging
+    `media.callback_orphaned` (error, child id) when it still cannot be recorded, docstring and code agree; the dead
+    `created`/existing-child path of `va_db.callbacks` removed and docstrings made accurate; specs/13 §6 Decision
+    updated.
+  - Acceptance: closing the brain generator while the starter / Telnyx is gated leaves one child with a started
+    workflow / one sent SMS and a later call reaches the cap; anonymous inbound context offers neither tool; second
+    pending callback and fourth SMS answer `limit_reached`; start failure + DB failure on the first transition
+    attempt still marks the child failed; `make check` passes; append the three note names to
+    `.ralph/review-inbox/DONE` on approval.
+
 - [x] P08-FIX-12 Precall ordering test must still catch a duplicate opener generation — see .ralph/review-inbox/2026-11-05-p08-fix-5-precall-retry-review.md — `opener_attempt` helper: 1-2 requests by received_at, a second must be on another model with identical messages; unit tests refuse same-model repeat/other messages/3 requests/none; review make test 12727 passed, 7 skipped, cov 99 %; lint/typecheck/placeholders exit 0
   - Spec refs: specs/10 §2 (Decision P03-T13b: one attempt on the platform `fallback` model after a failed first attempt), specs/30 §3.4
   - Depends on: P08-FIX-5

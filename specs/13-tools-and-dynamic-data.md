@@ -245,6 +245,26 @@ tool calls per call: 100.
 >    `{"error":"callback_failed"}`; a database or event failure creates nothing and answers the same.
 > 4. Pathway calls get these tools with P08-T02c.
 >
+> Decision (2026-11-05) P08-FIX-13: hardening of the P08-T02b2 system tools.
+> 1. Both tools need the other party's number to be E.164 (`va_media.call_sms.dialable`, the edge's inbound
+>    rule): for an anonymous or withheld caller the runtime builds neither (`media.system_tools_skipped`, reason
+>    `no_callable_number`), so the model is not offered them; a handler reached anyway answers
+>    `{"error":"sms_failed"|"callback_failed","reason":"no_callable_number"}`.
+> 2. A system tool run is a side effect the caller asked for, so it runs to completion when a barge-in
+>    interrupts the turn: the executor owns each run as a task awaited through `asyncio.shield`. The model gets
+>    the usual interruption answer; the run's outcome (failure event included) is still reported, and at call end
+>    `CallToolExecutor.aclose` waits up to 20 s for unfinished runs (before the snapshot and the call's events
+>    are flushed), then cancels the rest (`tools.system_tools_abandoned`).
+> 3. Per-call caps: `send_sms` sends at most 3 messages per call (sent or in flight; a message Telnyx did not
+>    accept does not count); a call has at most 1 pending callback (children in status `scheduled`, counted under
+>    the parent row lock, `va_db.callbacks.CallbackLimitError`; a canceled/failed/dialed callback frees the
+>    slot). A run past a cap answers `{"error":"limit_reached"}` with no error event.
+> 4. A failed callback start first terminates the child's workflow id (a timed-out start may have reached
+>    Temporal and would otherwise sleep until the due time), then marks the child `failed` as in P08-T02b2 item 3,
+>    retrying the write once. When both writes fail the row stays `scheduled` without a workflow and is logged at
+>    error level `media.callback_orphaned` with the child call id (no sweep starts such rows); the tool answers
+>    `{"error":"callback_failed"}`.
+>
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the
 > tool's `final_message`; without one it is `"Goodbye."` unless the reply already spoke text this turn (specs/11 §6

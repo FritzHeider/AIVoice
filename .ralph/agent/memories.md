@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793868338-3d0d
+> P08-FIX-13: system tool runs are executor-owned shielded tasks (barge-in cancels only the wait; executor.aclose drains at call end); dialable() gates both system tools; caps MAX_TOOL_SMS_PER_CALL=3, MAX_PENDING_CALLBACKS=1; CallbackStarter.abandon terminates the workflow id on start failure
+<!-- tags: tools, media | created: 2026-11-05 -->
+
 ### mem-1793861772-fd0f
 > P08-T02b1: task tools = va_tools.executor.CallToolExecutor + merged_tools; TaskBrain runs tool tasks, one speech/filler line per round (TOOL_FILLERS, 1.2s on brain clock), lines are history records not messages; media CallToolSource + TurnRecorder.tool/tool_failed; FakeSource works as TaskBrain gateway for AcceleratedClock harness tests; FrozenClock makes filler wait instant
 <!-- tags: engine, tools, media, testing | created: 2026-11-05 -->

@@ -1,11 +1,13 @@
 """The executor-backed system tools ``send_sms`` and ``schedule_callback`` on a real database (specs/13 §6;
-Decision P08-T02b2)."""
+Decisions P08-T02b2, P08-FIX-13)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Literal
@@ -20,39 +22,71 @@ from sms_fakes import FakeTelnyx
 from sms_rows import add_sms_number, random_e164
 from sqlalchemy import select
 from tenant_rows import OrgFactory, open_database
+from tools_helpers import plain_executor
 
 from va_common.ids import new_id
 from va_common.time import SystemClock, utcnow
+from va_db.callbacks import MAX_PENDING_CALLBACKS
 from va_db.models import Call, CallEvent, Message
+from va_db.repositories import CallRepo
 from va_db.session import Database
 from va_domain.call_context import CallContext
 from va_domain.call_workflow import CallWorkflowInput
+from va_engine.templating import TemplateScope
 from va_events import DbWebhookRouter, EventPublisher
 from va_llm.models import ToolCall
 from va_media.call_sms import OutboundSms
 from va_media.call_system_tools import (
     CALLBACK_START_FAILED,
+    MAX_TOOL_SMS_PER_CALL,
     CallbackDeps,
     CallbackScheduler,
     CallbackStartError,
     ToolSms,
     sms_capable,
 )
+from va_telnyx.errors import TelnyxError
+from va_tools.executor import CallToolExecutor
+from va_tools.runner import ToolRunner
 
 pytestmark = pytest.mark.integration
 
 
 @dataclass
 class RecordingStarter:
-    """Records starts; ``fail`` raises :class:`CallbackStartError`, ``on_start`` runs before returning."""
+    """Records starts and abandons; ``fail`` raises :class:`CallbackStartError`; ``gate`` holds a start."""
 
     started: list[CallWorkflowInput] = field(default_factory=list)
+    abandoned: list[uuid.UUID] = field(default_factory=list)
     fail: bool = False
+    gate: asyncio.Event | None = None
+    waiting: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def start(self, call: CallWorkflowInput) -> None:
+        if self.gate is not None:
+            self.waiting.set()
+            await self.gate.wait()
         if self.fail:
             raise CallbackStartError("refused") from ConnectionError("down")
         self.started.append(call)
+
+    async def abandon(self, call_id: uuid.UUID) -> None:
+        self.abandoned.append(call_id)
+
+
+class FlakyDatabase:
+    """A database whose tenant sessions number ``failing`` (1-based) fail to open."""
+
+    def __init__(self, database: Database, failing: set[int]) -> None:
+        self._database = database
+        self._failing = failing
+        self.opened = 0
+
+    def tenant_session(self, org_id: uuid.UUID) -> AbstractAsyncContextManager[Any]:
+        self.opened += 1
+        if self.opened in self._failing:
+            return BrokenDatabase()
+        return self._database.tenant_session(org_id)
 
 
 @dataclass
@@ -266,8 +300,11 @@ async def test_every_callback_run_schedules_even_with_a_reused_tool_call_id(
     early = (utcnow() + timedelta(hours=3)).replace(microsecond=0)
     late = early + timedelta(days=1)
     first = await scheduler.run(_tool_call("schedule_callback", tool_call_id, datetime_iso=early.isoformat()))
+    first_id = uuid.UUID(json.loads(first.content)["scheduled_call_id"])
+    async with database.tenant_session(seeded.org_id) as session:  # frees the one pending callback slot
+        await CallRepo(session, seeded.org_id).transition(first_id, "canceled", from_={"scheduled"})
     again = await scheduler.run(_tool_call("schedule_callback", tool_call_id, datetime_iso=late.isoformat()))
-    ids = [uuid.UUID(json.loads(o.content)["scheduled_call_id"]) for o in (first, again)]
+    ids = [first_id, uuid.UUID(json.loads(again.content)["scheduled_call_id"])]
     assert ids[0] != ids[1]
     children = {child.id: child.start_time for child in await _children(database, seeded)}
     assert children == {ids[0]: early, ids[1]: late}
@@ -309,6 +346,7 @@ async def test_a_failed_start_fails_the_child(database: Database) -> None:
     events = await _events(database, seeded, child.id)
     assert [e.event_type for e in events] == ["call.scheduled", "call.error"]
     assert events[1].data == {"code": "dispatch_failed", "detail": "workflow_start"}
+    assert starter.abandoned == [child.id]
 
 
 async def test_a_database_failure_answers_callback_failed(database: Database) -> None:
@@ -332,3 +370,134 @@ async def test_a_parent_of_another_org_schedules_nothing(database: Database) -> 
     )
     assert outcome.failure == "database"
     assert await _children(database, seeded) == []
+
+
+# P08-FIX-13: callable numbers, caps, run-to-completion, start failures
+
+
+async def test_an_anonymous_caller_gets_no_sms_and_no_callback(database: Database) -> None:
+    seeded, context = await _call(database, direction="inbound")
+    anonymous = context.model_copy(update={"from_number": "anonymous"})
+    telnyx = FakeTelnyx()
+    starter = RecordingStarter()
+    sms = await ToolSms(_sender(database, telnyx), anonymous, None).run(_tool_call("send_sms", message="Hi"))
+    when = (utcnow() + timedelta(hours=3)).isoformat()
+    callback = await _scheduler(database, fakeredis.FakeAsyncRedis(), starter, anonymous).run(
+        _tool_call("schedule_callback", datetime_iso=when)
+    )
+    assert (sms.failure, json.loads(sms.content)) == (
+        "no_callable_number",
+        {"error": "sms_failed", "reason": "no_callable_number"},
+    )
+    assert (callback.failure, json.loads(callback.content)) == (
+        "no_callable_number",
+        {"error": "callback_failed", "reason": "no_callable_number"},
+    )
+    assert telnyx.sent == []
+    assert await _messages(database, seeded.org_id) == []
+    assert await _children(database, seeded) == []
+    assert starter.started == []
+
+
+async def test_send_sms_stops_at_the_per_call_cap(database: Database) -> None:
+    _, context = await _call(database)
+    telnyx = FakeTelnyx()
+    tool = ToolSms(_sender(database, telnyx), context, None)
+    outcomes = [
+        await tool.run(_tool_call("send_sms", message=f"Note {n}")) for n in range(MAX_TOOL_SMS_PER_CALL + 1)
+    ]
+    assert len(telnyx.sent) == MAX_TOOL_SMS_PER_CALL
+    assert (outcomes[-1].failure, json.loads(outcomes[-1].content)) == (None, {"error": "limit_reached"})
+
+
+async def test_concurrent_send_sms_runs_count_against_the_cap(database: Database) -> None:
+    _, context = await _call(database)
+    telnyx = FakeTelnyx()
+    tool = ToolSms(_sender(database, telnyx), context, None)
+    outcomes = await asyncio.gather(
+        *(tool.run(_tool_call("send_sms", message=f"Note {n}")) for n in range(MAX_TOOL_SMS_PER_CALL + 2))
+    )
+    assert len(telnyx.sent) == MAX_TOOL_SMS_PER_CALL
+    assert sum(json.loads(o.content) == {"error": "limit_reached"} for o in outcomes) == 2
+
+
+async def test_a_message_telnyx_refused_does_not_use_up_the_cap(database: Database) -> None:
+    _, context = await _call(database)
+    telnyx = FakeTelnyx(fail=TelnyxError("refused", "send_message"))
+    tool = ToolSms(_sender(database, telnyx), context, None)
+    refused = await tool.run(_tool_call("send_sms", message="Hi"))
+    assert refused.failure == "telnyx_error"
+    telnyx.fail = None
+    sent = [await tool.run(_tool_call("send_sms", message=f"Note {n}")) for n in range(MAX_TOOL_SMS_PER_CALL)]
+    assert [o.failure for o in sent] == [None] * MAX_TOOL_SMS_PER_CALL
+    assert len(telnyx.sent) == MAX_TOOL_SMS_PER_CALL
+
+
+async def test_a_second_pending_callback_reaches_the_limit(database: Database) -> None:
+    seeded, context = await _call(database)
+    starter = RecordingStarter()
+    scheduler = _scheduler(database, fakeredis.FakeAsyncRedis(), starter, context)
+    when = (utcnow() + timedelta(hours=3)).isoformat()
+    first = await scheduler.run(_tool_call("schedule_callback", datetime_iso=when))
+    again = await scheduler.run(_tool_call("schedule_callback", datetime_iso=when))
+    assert json.loads(first.content)["status"] == "scheduled"
+    assert (again.failure, json.loads(again.content)) == (None, {"error": "limit_reached"})
+    assert len(await _children(database, seeded)) == MAX_PENDING_CALLBACKS
+    assert len(starter.started) == 1
+
+
+async def test_a_callback_whose_wait_was_cancelled_still_starts(database: Database) -> None:
+    seeded, context = await _call(database)
+    gate = asyncio.Event()
+    starter = RecordingStarter(gate=gate)
+    scheduler = _scheduler(database, fakeredis.FakeAsyncRedis(), starter, context)
+    events = RecordingToolEvents()
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor(
+            [], runner=ToolRunner(http, clock=clock), events=events, system=[scheduler]
+        )
+    when = (utcnow() + timedelta(hours=3)).isoformat()
+    waiting = asyncio.create_task(
+        executor.execute(_tool_call("schedule_callback", datetime_iso=when), TemplateScope())
+    )
+    await starter.waiting.wait()
+    waiting.cancel()  # a barge-in stops the turn waiting for the tool
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    gate.set()
+    await executor.aclose()
+
+    [child] = await _children(database, seeded)
+    assert child.status == "scheduled"
+    assert [started.call_id for started in starter.started] == [child.id]
+
+
+async def test_a_failure_record_that_fails_once_is_retried(database: Database) -> None:
+    seeded, context = await _call(database)
+    starter = RecordingStarter(fail=True)
+    flaky = FlakyDatabase(database, failing={2})  # 1 = the child's creation, 2 = the first failure record
+    when = (utcnow() + timedelta(hours=3)).isoformat()
+    outcome = await _scheduler(flaky, fakeredis.FakeAsyncRedis(), starter, context).run(  # type: ignore[arg-type]
+        _tool_call("schedule_callback", datetime_iso=when)
+    )
+    assert outcome.failure == "workflow_start"
+    [child] = await _children(database, seeded)
+    assert child.status == "failed"
+    assert starter.abandoned == [child.id]
+
+
+async def test_an_unrecordable_start_failure_is_logged_as_orphaned(database: Database) -> None:
+    stream = json_log_stream()
+    seeded, context = await _call(database)
+    starter = RecordingStarter(fail=True)
+    flaky = FlakyDatabase(database, failing={2, 3})
+    when = (utcnow() + timedelta(hours=3)).isoformat()
+    outcome = await _scheduler(flaky, fakeredis.FakeAsyncRedis(), starter, context).run(  # type: ignore[arg-type]
+        _tool_call("schedule_callback", datetime_iso=when)
+    )
+    assert (outcome.failure, json.loads(outcome.content)) == ("workflow_start", {"error": "callback_failed"})
+    [child] = await _children(database, seeded)
+    assert child.status == "scheduled"
+    assert starter.abandoned == [child.id]
+    [orphaned] = [e for e in log_events(stream) if e["event"] == "media.callback_orphaned"]
+    assert (orphaned["level"], orphaned["child_call_id"]) == ("error", str(child.id))

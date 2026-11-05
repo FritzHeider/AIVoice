@@ -52,6 +52,7 @@ __all__ = [
     "SmsNotSent",
     "agent_number",
     "counterpart_number",
+    "dialable",
 ]
 
 _log = get_logger(__name__)
@@ -95,6 +96,12 @@ def agent_number(context: CallContext) -> str:
 def counterpart_number(context: CallContext) -> str:
     """The other party's number: ``to`` of an outbound call, ``from`` of an inbound one."""
     return context.from_number if context.direction == "inbound" else context.to_number
+
+
+def dialable(number: str) -> bool:
+    """Whether ``number`` can be texted or called back: E.164, not ``anonymous`` or a withheld caller ID (the
+    same rule as the edge's inbound accept)."""
+    return number.startswith("+")
 
 
 class OutboundSms:

@@ -12,13 +12,20 @@ The executor also runs the call's executor-backed system tools (:class:`SystemTo
 offers system tools from the call's facts), have no ``speech`` (a slow one gets a filler), and report no
 ``call.tool``: their domain events are their own; a :class:`SystemOutcome` with a ``failure`` also reports
 ``call.error`` ``TOOL_FAILED`` (``<tool>: <failure>``).
+
+A system tool has a side effect the caller asked for, so its body runs to completion even when a barge-in
+cancels the turn waiting for it (Decision P08-FIX-13 under specs/13 §6): each run is a task the executor owns,
+awaited through :func:`asyncio.shield`, and its outcome (failure event included) is still reported after
+nobody waits for it any more. :meth:`CallToolExecutor.aclose` waits for unfinished runs at call end (up to
+:data:`SYSTEM_DRAIN_S`) and cancels what is left.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
 from pydantic import JsonValue
 
@@ -30,7 +37,18 @@ from va_llm.models import ToolCall, ToolDef
 from va_tools.models import ToolSpec, function_def
 from va_tools.runner import ToolRunner, failure_detail
 
-__all__ = ["CallToolExecutor", "SystemOutcome", "SystemTool", "ToolEvents", "merged_tools"]
+__all__ = [
+    "SYSTEM_DRAIN_S",
+    "CallToolExecutor",
+    "SystemOutcome",
+    "SystemTool",
+    "ToolEvents",
+    "merged_tools",
+]
+
+SYSTEM_DRAIN_S: Final = 20.0
+"""How long :meth:`CallToolExecutor.aclose` waits for unfinished system tool runs (longer than a callback's
+workflow start deadline plus its database writes)."""
 
 _log = get_logger(__name__)
 
@@ -97,6 +115,7 @@ class CallToolExecutor:
         self._system: Mapping[str, SystemTool] = {tool.name: tool for tool in system}
         self._runner = runner
         self._events = events
+        self._pending: set[asyncio.Task[SystemOutcome]] = set()
 
     def definitions(self) -> tuple[ToolDef, ...]:
         return tuple(function_def(spec) for spec in self._specs.values())
@@ -138,8 +157,45 @@ class CallToolExecutor:
         return ToolAnswer(invocation.content, invocation.variables)
 
     async def _run_system(self, tool: SystemTool, call: ToolCall) -> ToolAnswer:
-        outcome = await tool.run(call)
+        task = asyncio.create_task(self._finish_system(tool, call), name=f"system-tool:{tool.name}")
+        self._pending.add(task)
+        task.add_done_callback(self._settled)
+        outcome = await asyncio.shield(task)
+        return ToolAnswer(outcome.content)
+
+    async def _finish_system(self, tool: SystemTool, call: ToolCall) -> SystemOutcome:
+        """One system tool run, reported here so a run nobody waits for any more is still reported."""
+        try:
+            outcome = await tool.run(call)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.exception("tools.system_tool_crashed", tool=tool.name, error_type=type(exc).__name__)
+            if self._events is not None:
+                self._events.tool_failed(f"{tool.name}: crashed")
+            raise
         if outcome.failure is not None and self._events is not None:
             self._events.tool_failed(f"{tool.name}: {outcome.failure}")
         _log.info("tools.system_tool_ran", tool=tool.name, failure=outcome.failure)
-        return ToolAnswer(outcome.content)
+        return outcome
+
+    def _settled(self, task: asyncio.Task[SystemOutcome]) -> None:
+        """Forget a finished run; retrieve its exception (already logged and reported) so a run nobody
+        awaits any more never triggers asyncio's "exception was never retrieved"."""
+        self._pending.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def aclose(self, timeout_s: float = SYSTEM_DRAIN_S) -> None:
+        """Wait up to ``timeout_s`` for unfinished system tool runs, then cancel the rest (logged
+        ``tools.system_tools_abandoned``); never raises."""
+        pending = set(self._pending)
+        if not pending:
+            return
+        _done, left = await asyncio.wait(pending, timeout=timeout_s)
+        if not left:
+            return
+        for task in left:
+            task.cancel()
+        await asyncio.wait(left)
+        _log.warning("tools.system_tools_abandoned", count=len(left))

@@ -2050,3 +2050,9 @@ Grafana 3001
   `phone_numbers.e164` is unique and the sim always hands out the same number.
   Never derive dedupe ids from the model's tool call id (providers omit or reuse it: `_PartialCall.id` defaults
   to `""`); system tool runs get fresh ids.
+- 2026-11-05 (P08-FIX-13): system tool runs are shielded tasks owned by `CallToolExecutor` (a barge-in cancels
+  only the wait; the runtime pushes `executor.aclose` on the call's exit stack, which drains ≤ 20 s). Both system
+  tools need `va_media.call_sms.dialable(counterpart_number(context))`; caps `MAX_TOOL_SMS_PER_CALL` (3) and
+  `va_db.callbacks.MAX_PENDING_CALLBACKS` (1, `CallbackLimitError`) answer `{"error":"limit_reached"}`.
+  `CallbackStarter` fakes must implement `abandon(call_id)`. Media tests: `FlakyDatabase(db, failing={n})` in
+  `test_call_system_tools.py` fails the n-th tenant session.
