@@ -1,5 +1,17 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-12 Precall ordering test must still catch a duplicate opener generation — see .ralph/review-inbox/2026-11-05-p08-fix-5-precall-retry-review.md — `opener_attempt` helper: 1-2 requests by received_at, a second must be on another model with identical messages; unit tests refuse same-model repeat/other messages/3 requests/none; review make test 12727 passed, 7 skipped, cov 99 %; lint/typecheck/placeholders exit 0
+  - Spec refs: specs/10 §2 (Decision P03-T13b: one attempt on the platform `fallback` model after a failed first attempt), specs/30 §3.4
+  - Depends on: P08-FIX-5
+  - Deliverables: replace the messages-only dedupe in
+    `apps/media_worker/tests/test_runtime_sim.py::test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks`
+    with the gateway's bounded retry shape: requests sorted by `received_at`, 1 ≤ count ≤ 2, a second request must be
+    on a different `model` with identical `messages`; the 500 ms settle stays bounded on the first request; comment says
+    "one fallback-model attempt after a timed-out first attempt". Test-only.
+  - Acceptance: a duplicate opener generation on the same model (2 identical requests) or a third request fails the
+    test; a fallback attempt passes; the test passes alone 3/3; `make check` passes; append the note name to
+    `.ralph/review-inbox/DONE` on approval.
+
 - [x] P08-FIX-1 Recording copy lock + expired-link refresh, with per-recording object keys and a lock-aware busy retry — see .ralph/review-inbox/2026-11-04-recording-copy.md and .ralph/review-inbox/2026-11-04-recording-copy-lock.md — maintainer patch landed; `recording_copy_key` per-recording S3 key (loser deletes its own object unless same key); `RecordingBusy` next_retry_delay = lock PTTL + 1 s; specs/06 §11 rules 1/4 + Decision P08-FIX-1; review make check exit=0 (12641 passed, 7 skipped, cov 99%)
   - Spec refs: specs/06-telephony-telnyx.md §11 (Decision P05-T14 rules 1, 4, 5, 7); specs/03-data-model.md §11 (`call:{id}:reccopy`); specs/30-testing-and-evals.md §3.2
   - Depends on: none

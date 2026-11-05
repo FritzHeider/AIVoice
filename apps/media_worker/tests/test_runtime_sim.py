@@ -52,6 +52,7 @@ from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, SessionEnd
 from va_media.turns import CallPersistence
 from va_media.voicemail_sms import SMS_SENT_MESSAGE
+from va_sim.llm.store import LlmRequest
 from va_sim.server import running_sims
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
@@ -300,6 +301,75 @@ def dtmf_groups(streamed: StreamedCall) -> list[str]:
     return [entry.digits for entry in streamed.sim_call().dtmf_sent]
 
 
+def opener_attempt(requests: list[LlmRequest]) -> LlmRequest:
+    """The first request of one opener generation, after checking the gateway's retry shape.
+
+    Under load the gateway may time out its first attempt and make exactly one more attempt on the
+    fallback model with the same messages (specs/10 §2). Anything else (a second generation, a repeat
+    on the same model, a third request) is a regression.
+    """
+    ordered = sorted(requests, key=lambda request: datetime.fromisoformat(request.received_at))
+    assert 1 <= len(ordered) <= 2
+    if len(ordered) == 2:
+        assert ordered[1].model != ordered[0].model
+        assert ordered[1].messages == ordered[0].messages
+    return ordered[0]
+
+
+def _llm_request(received_at: str, model: str = "primary", text: str = "hello") -> LlmRequest:
+    return LlmRequest(
+        id=f"req-{received_at}-{model}",
+        received_at=received_at,
+        model=model,
+        call_id=None,
+        stream=True,
+        messages=[{"role": "user", "content": text}],
+        tools=None,
+        tool_choice=None,
+        temperature=None,
+        max_tokens=None,
+        response_format=None,
+    )
+
+
+EARLY: Final = "2026-11-05T10:00:00.000+00:00"
+LATE: Final = "2026-11-05T10:00:02.000+00:00"
+
+
+def test_opener_attempt_accepts_one_request() -> None:
+    only = _llm_request(EARLY)
+    assert opener_attempt([only]) is only
+
+
+def test_opener_attempt_accepts_one_fallback_attempt_and_returns_the_earlier() -> None:
+    first = _llm_request(EARLY)
+    retry = _llm_request(LATE, model="fallback")
+    assert opener_attempt([retry, first]) is first
+
+
+@pytest.mark.parametrize(
+    "requests",
+    [
+        pytest.param([_llm_request(EARLY), _llm_request(LATE)], id="same-model"),
+        pytest.param(
+            [_llm_request(EARLY), _llm_request(LATE, model="fallback", text="other")], id="other-messages"
+        ),
+        pytest.param(
+            [
+                _llm_request(EARLY),
+                _llm_request(LATE, model="fallback"),
+                _llm_request("2026-11-05T10:00:04.000+00:00", model="third"),
+            ],
+            id="three-requests",
+        ),
+        pytest.param([], id="none"),
+    ],
+)
+def test_opener_attempt_refuses_other_retry_shapes(requests: list[LlmRequest]) -> None:
+    with pytest.raises(AssertionError):
+        opener_attempt(requests)
+
+
 async def test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks() -> None:
     async with rig() as r:
         r.scenario("wait_agent_speech: {}", "hangup: {}")
@@ -308,13 +378,9 @@ async def test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks() -> 
             sent = streamed.sim_call().dtmf_sent
         assert end == STREAM_CLOSED
         assert [entry.digits for entry in sent] == ["12", "3"]
-        # The opener is generated (FakeLLM) only after the last group and the 500 ms settle. Under load the
-        # gateway may time out its first attempt and resend the same request, so every request must be the
-        # same opener generation and the earliest attempt is the one bounded by the settle.
-        requests = r.state.llm.requests
-        assert requests
-        assert all(request.messages == requests[0].messages for request in requests)
-        first = min(requests, key=lambda request: datetime.fromisoformat(request.received_at))
+        # The opener is generated (FakeLLM) only after the last group and the 500 ms settle; the earliest
+        # attempt is the one bounded by the settle.
+        first = opener_attempt(r.state.llm.requests)
         last_group = datetime.fromisoformat(sent[-1].at)
         first_group = datetime.fromisoformat(sent[0].at)
         assert (last_group - first_group).total_seconds() >= 0.5

@@ -1005,3 +1005,62 @@ Helper module name must be unique on the shared pythonpath (`redis_ttl` — chec
 ## Review P08-FIX-5 (2026-11-05) — APPROVED
 - Re-ran: make lint/typecheck/placeholders exit 0; precall test alone passes; make test 12721 passed, 7 skipped,
   cov 99.07 %. Diff is test-only and matches the plan (identical-retry tolerance, earliest request bounds the settle).
+
+## Planner 2026-11-05 — after P08-FIX-5 approval
+- New inbox note `2026-11-05-p08-fix-5-precall-retry-review.md` (blocker): the messages-only dedupe accepts N
+  identical opener generations. I checked the code: `va_llm/dialogue.py` `_fallback` gives a failed dialogue attempt
+  exactly one more attempt on `platform_fallback` (the `fallback` model), and skips it when that target is the same as
+  the primary. The defaults are LLM_DIALOGUE_MODEL GLM-5.3-Flash vs LLM_FALLBACK_MODEL Kimi-K2.6, which differ, so a
+  legitimate retry is always on another model. Inserted P08-FIX-12 at the top of plan/phase-08.md.
+
+## Plan P08-FIX-12 (bounded retry shape in the precall ordering test)
+### Change (test only): `apps/media_worker/tests/test_runtime_sim.py` ~lines 311-321
+```python
+# The opener is generated (FakeLLM) only after the last group and the 500 ms settle. Under load the
+# gateway may time out its first attempt and make one fallback-model attempt after a timed-out first
+# attempt (specs/10 §2); anything else (a second generation, a third request) is a regression.
+requests = sorted(r.state.llm.requests, key=lambda request: datetime.fromisoformat(request.received_at))
+assert 1 <= len(requests) <= 2
+if len(requests) == 2:
+    assert requests[1].model != requests[0].model
+    assert requests[1].messages == requests[0].messages
+first = requests[0]
+```
+Keep the `first_group`/`last_group` asserts and `(first.received_at - last_group) >= 0.5 s`.
+- If it reads more cleanly, extract `_opener_attempts(requests) -> LlmRequest` (a module-level helper that
+  returns the first request after asserting the shape). That makes the shape unit-testable without a sim. Add
+  `test_opener_attempts_accept_one_fallback_attempt_only` over hand-built `va_sim.llm.store.LlmRequest`
+  objects. Check the constructor fields in `packages/va_sim/src/va_sim/llm/store.py:55`, and build them via
+  `dataclasses.replace` on a base. The cases: 1 request passes; 2 requests on different models with the same
+  messages pass and the earlier one is returned; 2 requests on the same model fail (AssertionError); 3 requests fail;
+  2 requests with different messages fail. This proves the acceptance criteria ("a duplicate on the same model fails").
+  Use `pytest.raises(AssertionError)`. Recommended. If LlmRequest is awkward to build, use a small local frozen
+  dataclass with `received_at`/`model`/`messages` and type the helper with a Protocol.
+- Lines 218 (`rule_id == ["table"]`) and 352 (`len == 1`) stay unchanged. They have not flaked, and the note asks
+  for the bounded shape only if they get the retry treatment.
+### Gates
+- `uv run pytest apps/media_worker/tests/test_runtime_sim.py -k "precall or opener_attempts" -q`, 3 times.
+- `make fmt lint typecheck placeholders`, then `make check` in the background with a heartbeat Monitor
+  (PATH += /home/ralph/.local/bin). For backpressure, also run audit (`uv export --frozen --no-hashes
+  --no-emit-workspace` + `uvx pip-audit -r`, `corepack pnpm audit --audit-level high`), `npx --yes jscpd@4 --silent`
+  (0 clones) and the radon average. Emit plain text with `complexity: <n>,`.
+- Reviewer: tick P08-FIX-12, append `2026-11-05-p08-fix-5-precall-retry-review.md` to `.ralph/review-inbox/DONE`, and
+  commit `test(media): bound the precall opener retry to one fallback attempt` with footer `Task: P08-FIX-12`.
+### Risks
+- A rig that sets the fallback model equal to the dialogue model makes the gateway skip the fallback. Then a timeout
+  ends the reply with no retry, and that only gives one request, so the test still holds.
+
+## Build P08-FIX-12 (2026-11-05)
+- Changed `test_runtime_sim.py` only. The new module helper `opener_attempt(requests)` sorts requests by
+  `received_at` and accepts 1 to 2 of them. If there are 2, the second must use a different model and the same
+  messages. It returns the earliest request. The precall test uses it to check the 500 ms settle.
+- New unit tests with hand-built `va_sim.llm.store.LlmRequest`: one request passes; a fallback attempt passes and
+  the earlier request is returned; a repeat on the same model, a retry with different messages, three requests,
+  or no requests all raise AssertionError.
+- Results: `-k "precall or opener_attempt"` passed 3/3 (7 tests). fmt, lint, typecheck and placeholders exit 0.
+  `make check` exit 0 (12727 passed, 7 skipped; TS 22/52/48). pip-audit is clean and pnpm audit exits 0. jscpd
+  reports 0 clones. The radon average is A (2.92).
+
+## Review P08-FIX-12 (2026-11-05) — APPROVED
+- Re-ran: make lint/typecheck/placeholders exit 0; `-k "precall or opener_attempt"` 7 passed; make test 12727 passed,
+  7 skipped, cov 99 %. Test-only diff matches the plan and the inbox note (same-model duplicate fails). Note added to DONE.
