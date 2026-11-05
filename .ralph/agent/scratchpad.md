@@ -304,3 +304,104 @@ lock beyond the retry budget" scenario and the budget arithmetic. No production 
 - Re-ran: `make lint typecheck placeholders` exit 0; new tests 3 passed; `make test`: 12663 passed, 7 skipped, cov 99 %,
   1 failed = media runtime sim precall test (FakeLLM timeout → retry → 2 requests under load; 3/3 pass alone; unrelated
   to this test-only diff) → logged as P08-FIX-5 (DEC-011). Inbox note appended to DONE.
+
+## Planner 2026-11-04 — after P08-FIX-2 approval
+- Inbox: new note `2026-11-04-p08-fix-2-budget-test.md` (not in DONE, no task): the P08-FIX-2 budget test ignores
+  the time steps 1-2 spend inside the 30 min budget (wait up to 600 s etc.) → inserted P08-FIX-6 above P08-FIX-4.
+  Other open notes are covered by P08-FIX-4. First unticked + unblocked: P08-FIX-6.
+
+## Plan P08-FIX-6 (store_recording deadline inside the post-call budget)
+Chosen fix (reviewer's option a): bound `store_recording` dynamically by the remaining budget instead of
+certifying a constant bound. Worst cases (policy math, backoff ×2 from initial capped at maximum):
+finalize_call_record 5×30 s + (1+2+4+8) = 165 s; bookkeeping (lookup/mark) 5×10 + (2+4+8+16) = 80 s each;
+finalize_billing 10×30 + (1+2+4+8+10×5) = 365 s. Pre-store worst = 165 + 80 (mark) + 80 (lookup) + 600 (wait) +
+80 (mark) = 1005 s. Reserve after store = billing 365 + 2 marks 160 = 525 s. Worst store window =
+1800 − 1005 − 525 = 270 s > 0.
+
+### Production changes
+1. `packages/va_workflows/src/va_workflows/post_call/plan.py` (pure, workflow-safe; or a new `post_call/budget.py`
+   if plan.py should stay step-only — keep imports to datetime + temporalio.common):
+   - `def retry_worst_case(timeout: timedelta, policy: RetryPolicy) -> timedelta`: `maximum_attempts × timeout` +
+     the sum of the `maximum_attempts − 1` backoff intervals (`initial × coeff^i`, each capped at
+     `maximum_interval`). Raise `ValueError` for `maximum_attempts < 1` (unlimited) — never used for that.
+   - `STORE_RESERVE: Final = retry_worst_case(BILLING_TIMEOUT, BILLING_RETRY) + 2 * retry_worst_case(
+     BOOKKEEPING_TIMEOUT, BOOKKEEPING_RETRY)` (store mark + billing mark).
+   - `def store_window(started: datetime, now: datetime, budget_s: int) -> timedelta | None`: time left until
+     `started + budget − STORE_RESERVE`; `None` when ≤ 0 (or < 1 s).
+2. `post_call_workflow.py` `_store_recording`: `window = store_window(workflow.info().start_time, workflow.now(),
+   timings.budget_s)` (thread `timings` through `_recording_steps` → `_store_recording`). `None` → `_begin` is NOT
+   called... simpler: `_begin("store_recording")`, then if `window is None`: `self._recording = "skipped"`,
+   `workflow.logger.warning("postcall.store_recording_out_of_time")`, append to `_failed` (or `_skipped`; pick
+   `_skipped` and do not list it in `_ran`, i.e. check before `_begin`) and return. Otherwise pass
+   `schedule_to_close_timeout=window` alongside start_to_close/retry policy. Temporal stops retrying when the next
+   attempt (incl. a `next_retry_delay`) would pass schedule-to-close → ActivityError → existing `_fail` path
+   (`recording = "skipped"`). Verify `workflow.info().start_time` is the workflow (not run) start under
+   time-skipping; for continue-as-new irrelevant (none here).
+   - If the time-skipping test server does NOT honour schedule_to_close against a `next_retry_delay` (test 3
+     below fails), fallback: add optional `deadline: datetime | None` to `StoreRecordingInput`, and in
+     `RecordingActivities._lock` raise non-retryable `RecordingBusy`-out-of-time (new type name in
+     `activities.errors`, e.g. `RECORDING_OUT_OF_TIME`) when `now + delay > deadline`. Document whichever lands.
+3. Docstring of the module (budget paragraph) mentions the store deadline.
+
+### Tests
+- `packages/va_workflows/tests/test_post_call_plan.py` (or new `test_post_call_budget.py`):
+  - `retry_worst_case` exact values: RECORD (165 s), BOOKKEEPING (80 s), BILLING (365 s), a 1-attempt policy =
+    timeout only, cap applied.
+  - `store_window`: full window at start (1800 − 525), None after deadline, None exactly at deadline.
+  - True budget property: `retry_worst_case(RECORD) + 3 × retry_worst_case(BOOKKEEPING) + RECORDING_WAIT_S +
+    STORE_RESERVE < POSTCALL_BUDGET_S` (the worst-case pre-store path still leaves a store window).
+- `packages/va_workflows/tests/test_recording_busy_retry.py`: DELETE `test_busy_retries_fit_the_post_call_budget`
+  (false claim) — keep the `COPY_LOCK_TTL_MS > STORE_RECORDING_TIMEOUT` assertion as its own small test.
+- `packages/va_workflows/tests/test_post_call_workflow.py` (time skipping, `postcall_rig`):
+  - `test_a_store_refused_busy_past_the_window_fails_before_the_budget`: `FakePostCallActivities(store=retryable(
+    BUSY_MESSAGE, RECORDING_BUSY, next_retry_delay=timedelta(minutes=6, seconds=1)), send={"finalize_call_record":
+    [recording_event(start)]})`, default timings; result: `timed_out is False`, `"store_recording" in failed`,
+    `recording == "skipped"`, `finalize_billing` in `names()` and `price_micros` set, store attempts count 4
+    (0, 361, 722, 1083 s < 1275 s; 1444 s would pass it) — assert ≥ 2 and that the last store call happened before
+    `1800 − STORE_RESERVE` workflow seconds if measurable from history; at minimum the outcome fields.
+  - `test_no_store_window_left_skips_the_copy`: recording signal arrives late so the window is gone, e.g.
+    `PostCallTimings(budget_s=STORE_RESERVE_s + 5)` with the event signalled after the wait... simplest: timings
+    budget_s = int(STORE_RESERVE.total_seconds()) (window ≤ 0 at once); store never called, `recording ==
+    "skipped"`, billing runs, `timed_out` false. Check `PostCallTimings.budget_s` has no lower bound beyond gt=0.
+  - Existing workflow tests with short budgets (budget of a few seconds + `block`) now hit the "no window" branch
+    when they expected store to run/block: check every `PostCallTimings(budget_s=...)` use and adjust only where the
+    test was about store (e.g. a budget-cancel-during-store test should block in `finalize_billing` instead, or use
+    a budget > reserve). Do not weaken asserts.
+
+### Specs/docs
+- specs/18-post-call-analysis.md §1: `> Decision (2026-11-04) P08-FIX-6:` store_recording runs with
+  schedule_to_close = budget deadline − reserve (billing + 2 marks worst case from the policies, 525 s), skipped when
+  no window remains; worst-case math above.
+- specs/06 §11 Decision P08-FIX-1: amend the sentence claiming the busy retries fit the budget → refer to P08-FIX-6.
+- AGENTS.md dated line: `va_workflows.post_call` `retry_worst_case`/`store_window`; short-budget workflow tests skip
+  the store step.
+
+### Gates
+- `uv run pytest packages/va_workflows -q`, then `make check` (background + heartbeat Monitor, PATH +=
+  /home/ralph/.local/bin, ~25 min). No e2e (post-call worker path unchanged in flows; default budget leaves the
+  full window).
+- Reviewer: tick P08-FIX-6, append `2026-11-04-p08-fix-2-budget-test.md` to `.ralph/review-inbox/DONE`, commit
+  `fix(workflows): bound store_recording by the post-call budget` + `Task: P08-FIX-6`.
+
+### Risks
+- Time-skipping server and schedule_to_close vs next_retry_delay (fallback above).
+- `workflow.info().start_time` vs history start: use it, deterministic on replay.
+- Workflow code change = replay compatibility of running post-call workflows: dev only, acceptable (no versioning
+  needed pre-production); mention in the Decision.
+
+## Build P08-FIX-6 (2026-11-04)
+- New `va_workflows.post_call.budget` (`retry_worst_case`, `STORE_RESERVE` = 365 + 2×80 = 525 s, `MIN_STORE_WINDOW` 1 s,
+  `store_window`). `_store_recording(event, timings)`: no window → skipped (`postcall.store_recording_out_of_time`,
+  `recording = skipped`, not in `ran`); else `schedule_to_close_timeout=window`. The time-skipping server honours it
+  against `next_retry_delay` (no fallback needed): 361 s busy delays → 4 attempts, then step failed, billing runs, no timeout.
+- Tests: test_post_call_budget.py (policy worst cases, default cap, unlimited, reserve, window edges, slowest pre-store
+  path leaves 270 s); 3 workflow tests (busy past window, no window, scheduled timeout), all 3 fail without the
+  workflow change; replaced the false budget test with `test_a_live_holder_never_outlives_its_lock`. Rig gained
+  `PostCallRun.schedule_to_close`/`history_span`. Existing short-budget tests never reach store (unchanged).
+- Specs: specs/18 §1 Decision P08-FIX-6; specs/06 §11 P08-FIX-1 Decision amended. AGENTS.md line.
+- Gates: make check exit 0 (12676 passed, 7 skipped); radon avg 3.04 post_call; jscpd 0 clones in va_workflows.
+
+## Review P08-FIX-6 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12676 passed, 7 skipped, cov 99 %).
+- Diff matches the plan and specs/18 §1 Decision P08-FIX-6; reserve math (365 + 2×80) and window (1800 − 1005 − 525 = 270 s)
+  verified by pure tests; skip branch checks the budget first; specs/06 §11 amended. Inbox note appended to DONE.

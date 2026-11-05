@@ -55,6 +55,21 @@
     the constants. No production change unless the test fails.
   - Acceptance: test passes; `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
 
+- [x] P08-FIX-6 store_recording deadline inside the post-call budget (the P08-FIX-2 budget test certified a false bound) — see .ralph/review-inbox/2026-11-04-p08-fix-2-budget-test.md — va_workflows.post_call.budget (retry_worst_case, STORE_RESERVE 525 s, store_window) schedules store_recording with schedule_to_close = budget deadline − reserve, skipped with no window; false budget test replaced; 3 workflow tests (busy past window → 4 attempts, step failed, billing runs, no timeout; no window → skipped; window asserted); review: lint/typecheck/placeholders exit 0, make test 12676 passed, 7 skipped, cov 99 %
+  - Spec refs: specs/18-post-call-analysis.md §1 (Decision P05-T18b), specs/06-telephony-telnyx.md §11 (Decision P08-FIX-1)
+  - Depends on: P08-FIX-2
+  - Deliverables: the budget timer starts with the workflow, so steps 1-2 (finalize ≤ 165 s, recording wait 600 s,
+    lookups/marks) eat into the window `store_recording` gets; `(attempts-1) × lock TTL + timeout < budget` ignores
+    them (real worst case ≈ 39 min). Fix in production: `PostCallWorkflow._store_recording` runs the activity with a
+    `schedule_to_close_timeout` = time left until `start + budget − reserve` (reserve = worst case of
+    `finalize_billing` + two marks, computed from the retry policies by a pure helper), and skips the step
+    (`recording = "skipped"`, logged) when no window is left, so a busy/failing copy ends before the budget and
+    billing still runs. Replace the false constant test with true ones (pure worst-case helper, positive store
+    window after the worst-case steps 1-2, workflow test: repeated 6 min busy refusals fail the step before the
+    budget, `finalize_billing` runs, `timed_out` false). Record in specs/18 §1 + amend the specs/06 §11 P08-FIX-1
+    Decision.
+  - Acceptance: tests pass; `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
+
 - [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3

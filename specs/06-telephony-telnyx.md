@@ -723,7 +723,8 @@ Parsing rules and outbound builders: the specs/06 §4.1 Decision P03-T09 rule 4.
 > Decision (2026-11-04, P08-FIX-1): per-recording object keys and the lock-aware busy retry (rules 1 and 4) close
 >    the review findings that a fail-open copy of two recordings could leave the object holding the other run's bytes
 >    (and the winner then deleting its carrier copy), and that the ~30 s `RecordingBusy` retry budget ended long
->    before a crashed holder's 6 min lock expired.
+>    before a crashed holder's 6 min lock expired. The busy retries are bounded by the post-call budget through the
+>    copy's `schedule_to_close` deadline (specs/18 §1 Decision P08-FIX-6), not by the retry policy alone.
 > 5. Carrier copy. After the commit, when the org's `delete_carrier_recordings` (default true) holds and the event
 >    carries `recording_id`, the activity calls `DELETE /v2/recordings/{id}` with the call's account; a failure is logged
 >    (`recording.carrier_delete_failed`) and never fails the copy. An `already_stored` run deletes nothing (it may be a

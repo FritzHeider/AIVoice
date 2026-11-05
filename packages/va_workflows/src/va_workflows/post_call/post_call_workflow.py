@@ -16,6 +16,10 @@ The recording wait checks the stored ``call.recording.saved`` webhook first (the
 before signalling, so a signal sent before this workflow existed is not lost) and then waits for the
 ``recording_saved`` signal up to 10 min; without one it records ``call.error`` ``RECORDING_MISSING`` and goes
 on without the recording.
+
+The copy runs with a ``schedule_to_close`` deadline of the budget minus what billing and the step marks need
+at their worst case (Decision P08-FIX-6): busy retries that would pass it end the step as failed, and with no
+window left the copy is skipped, so billing always gets its time inside the budget.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ with workflow.unsafe.imports_passed_through():
         StoreRecordingInput,
         StoreRecordingResult,
     )
+    from va_workflows.post_call.budget import store_window
     from va_workflows.post_call.plan import planned_steps, remaining
     from va_workflows.post_call.results import PostCallResult, RecordingOutcome
 
@@ -196,7 +201,7 @@ class PostCallWorkflow:
                 self._recording = "skipped"
                 self._skipped.append("store_recording")
                 return
-        await self._store_recording(event)
+        await self._store_recording(event, timings)
 
     async def _await_recording(self, timings: PostCallTimings) -> CarrierEvent | None:
         self._begin("await_recording")
@@ -248,13 +253,22 @@ class PostCallWorkflow:
             return
         await self._mark("await_recording")
 
-    async def _store_recording(self, event: CarrierEvent) -> None:
+    async def _store_recording(self, event: CarrierEvent, timings: PostCallTimings) -> None:
+        window = store_window(workflow.info().start_time, workflow.now(), timings.budget_s)
+        if window is None:
+            # Billing and the marks need the rest of the budget: the call is billed without its copy.
+            self._raise_if_out_of_time()
+            workflow.logger.warning("postcall.store_recording_out_of_time")
+            self._recording = "skipped"
+            self._skipped.append("store_recording")
+            return
         self._begin("store_recording")
         try:
             stored: StoreRecordingResult = await workflow.execute_activity(
                 "store_recording",
                 StoreRecordingInput(call_id=self._call.call_id, org_id=self._call.org_id, event=event),
                 start_to_close_timeout=STORE_RECORDING_TIMEOUT,
+                schedule_to_close_timeout=window,
                 retry_policy=STORE_RECORDING_RETRY,
                 result_type=StoreRecordingResult,
             )

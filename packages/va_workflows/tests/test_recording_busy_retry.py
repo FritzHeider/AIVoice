@@ -1,6 +1,6 @@
 """A busy ``store_recording`` waits out a long copy-lock holder (specs/06 §11 Decision P08-FIX-1): the busy
-delay outlasts the policy's 30 s backoff cap in Temporal, the worst case fits the post-call budget, and the
-retry finds the holder's copy already stored."""
+delay outlasts the policy's 30 s backoff cap in Temporal, and the retry finds the holder's copy already
+stored."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from workflow_rig import workflow_env
 
 from va_db.models import Call
 from va_db.session import Database
-from va_domain.post_call import POSTCALL_BUDGET_S
 from va_workflows.activities.errors import RECORDING_BUSY, retryable
 from va_workflows.activities.recording import (
     BUSY_MESSAGE,
@@ -99,17 +98,11 @@ async def test_a_long_running_holder_is_waited_out_and_its_copy_is_already_store
     assert await redis.get(copy_lock_key(call.call_id)) is None
 
 
-def test_busy_retries_fit_the_post_call_budget() -> None:
-    """Worst case of a waiting run: every attempt but the last is refused with the longest busy delay (a full
-    lock TTL + margin), and the last one copies for a whole start-to-close timeout."""
-    assert (
-        timedelta(milliseconds=COPY_LOCK_TTL_MS) > STORE_RECORDING_TIMEOUT
-    )  # a live holder never outlives it
-    attempts = STORE_RECORDING_RETRY.maximum_attempts
-    assert attempts > 1
-    busy = timedelta(milliseconds=COPY_LOCK_TTL_MS + BUSY_RETRY_MARGIN_MS)
-    worst = (attempts - 1) * busy + STORE_RECORDING_TIMEOUT
-    assert worst < timedelta(seconds=POSTCALL_BUDGET_S)
+def test_a_live_holder_never_outlives_its_lock() -> None:
+    """The lock outlasts one whole copy attempt, so a busy delay of PTTL + margin waits out a live holder (the
+    retries stay inside the post-call budget through the store window, specs/18 §1 Decision P08-FIX-6)."""
+    assert timedelta(milliseconds=COPY_LOCK_TTL_MS) > STORE_RECORDING_TIMEOUT
+    assert BUSY_RETRY_MARGIN_MS > 0
 
 
 class _BusyOnce:

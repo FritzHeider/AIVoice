@@ -68,6 +68,17 @@ Total budget target: `call.completed` webhook ≤ 20 s after hangup p95 when no 
 > 5. The 30 min budget is enforced by the child itself (the parent abandons it): steps 1-11 race a workflow timer; on
 >    expiry they are cancelled and `emit_completed` still runs (result `timed_out`). `PostCallWorkflowInput.timings`
 >    (`PostCallTimings`, unset in production) exists so tests can shorten the waits.
+> Decision (2026-11-04, P08-FIX-6): `store_recording` is bounded by the budget. It is scheduled with
+>    `schedule_to_close` = workflow start + budget − `STORE_RESERVE` − now (`va_workflows.post_call.budget.store_window`),
+>    where `STORE_RESERVE` = the worst case of `finalize_billing` plus two `mark_postcall_step` runs, each computed from
+>    its start-to-close timeout and retry policy by `retry_worst_case` (every attempt times out, every backoff interval
+>    is waited: billing 10 × 30 s + 65 s = 365 s, a mark 5 × 10 s + 30 s = 80 s, reserve 525 s). Temporal stops retrying
+>    once the next attempt (a `RecordingBusy` `next_retry_delay` included) would pass that deadline, and the step fails
+>    as in rule 4 (`recording = skipped`). With less than 1 s left the copy is not started (`postcall.store_recording_
+>    out_of_time`, listed in `skipped`, `recording = skipped`). The slowest path to the copy (step 1 165 s, three
+>    bookkeeping runs 240 s, the 10 min wait) is 1 005 s, so the default budget always leaves a window of at least
+>    270 s, and billing always runs inside the budget. Running workflows from before this change are not versioned
+>    (no production deployments yet).
 > 6. `emit_completed` locks the call row, returns `not_ended` (logged error, nothing written) for a non-terminal call and
 >    `already_completed` when `queue_status = 'complete'`; otherwise it sets `queue_status = 'complete'` and records
 >    `call.completed` whose `data` is the Call Object exactly as `GET /v1/calls/{id}` serialises it (7-day recording URL

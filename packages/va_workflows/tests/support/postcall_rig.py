@@ -11,7 +11,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
@@ -216,6 +216,22 @@ class PostCallRun:
             for event in self.history
             if EventType.Name(event.event_type) == "EVENT_TYPE_TIMER_STARTED"
         ]
+
+    def schedule_to_close(self, activity_type: str) -> list[timedelta]:
+        """The ``schedule_to_close`` timeouts ``activity_type`` was scheduled with, in order."""
+        return [
+            attributes.schedule_to_close_timeout.ToTimedelta()
+            for event in self.history
+            if EventType.Name(event.event_type) == "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+            and (attributes := event.activity_task_scheduled_event_attributes).activity_type.name
+            == activity_type
+        ]
+
+    def history_span(self) -> timedelta:
+        """Workflow time from the first history event to the last."""
+        first: datetime = self.history[0].event_time.ToDatetime()
+        last: datetime = self.history[-1].event_time.ToDatetime()
+        return last - first
 
 
 async def run_post_call(

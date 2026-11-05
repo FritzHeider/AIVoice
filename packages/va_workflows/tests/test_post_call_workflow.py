@@ -4,6 +4,7 @@ P05-T18b)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import pytest
 from postcall_rig import (
@@ -18,8 +19,11 @@ from temporalio.testing import WorkflowEnvironment
 from workflow_rig import boom, not_found, workflow_env
 
 from va_domain.post_call import POSTCALL_BUDGET_S, RECORDING_WAIT_S, PostCallTimings
+from va_workflows.activities.errors import RECORDING_BUSY, retryable
 from va_workflows.activities.post_call_inputs import SavedRecording
+from va_workflows.activities.recording import BUSY_MESSAGE
 from va_workflows.activities.recording_inputs import StoreRecordingResult
+from va_workflows.post_call.budget import STORE_RESERVE
 
 
 @pytest.fixture
@@ -66,6 +70,9 @@ async def test_a_connected_recorded_call_runs_every_step_in_order(env: WorkflowE
     assert (result.skipped, result.failed, result.timed_out) == ((), (), False)
     assert run.timers() == [POSTCALL_BUDGET_S]
     assert run.phase == "done"
+    # The copy may use the budget minus the billing reserve (it starts at once here).
+    (window,) = run.schedule_to_close("store_recording")
+    assert timedelta(seconds=_STORE_WINDOW_S - 5) < window <= timedelta(seconds=_STORE_WINDOW_S)
 
 
 async def test_an_unanswered_call_runs_record_billing_and_completion_only(env: WorkflowEnvironment) -> None:
@@ -325,3 +332,60 @@ async def test_an_unrecorded_missing_recording_is_not_marked(env: WorkflowEnviro
     assert "report_recording_missing" in fakes.names()
     assert "await_recording" not in fakes.marks()
     assert (run.result.recording, run.result.failed, run.result.completed) == ("missing", (), "emitted")
+
+
+_STORE_WINDOW_S = POSTCALL_BUDGET_S - int(STORE_RESERVE.total_seconds())
+"""The copy's deadline when it starts at once (1275 s)."""
+_LONG_BUSY = timedelta(minutes=6, seconds=1)
+"""The longest busy delay (copy-lock TTL + margin): retries at 0, 361, 722, 1083 s fit the window, 1444 s
+does not."""
+
+
+async def test_busy_retries_past_the_store_window_fail_the_copy_and_billing_still_runs(
+    env: WorkflowEnvironment,
+) -> None:
+    start = postcall_start()
+    event = recording_event(start)
+    busy = retryable(BUSY_MESSAGE, RECORDING_BUSY, next_retry_delay=_LONG_BUSY)
+    fakes = FakePostCallActivities(record=CONNECTED_RECORDED, found=[SavedRecording(event=event)], store=busy)
+    run = await run_post_call(env, fakes, start)
+
+    attempts = [name for name in fakes.names() if name == "store_recording"]
+    assert len(attempts) == _STORE_WINDOW_S // int(_LONG_BUSY.total_seconds()) + 1
+    assert fakes.names()[-2:] == ["finalize_billing", "emit_completed"]
+    assert "store_recording" not in fakes.marks()
+    result = run.result
+    assert (result.timed_out, result.recording, result.failed, result.price_micros, result.completed) == (
+        False,
+        "skipped",
+        ("store_recording",),
+        180_000,
+        "emitted",
+    )
+    assert run.history_span() < timedelta(seconds=POSTCALL_BUDGET_S)
+
+
+async def test_no_store_window_left_skips_the_copy_and_bills(env: WorkflowEnvironment) -> None:
+    start = postcall_start(
+        PostCallTimings(recording_wait_s=RECORDING_WAIT_S, budget_s=int(STORE_RESERVE.total_seconds()))
+    )
+    event = recording_event(start)
+    fakes = FakePostCallActivities(record=CONNECTED_RECORDED, found=[SavedRecording(event=event)])
+    run = await run_post_call(env, fakes, start)
+
+    assert fakes.names() == [
+        "finalize_call_record",
+        "find_saved_recording",
+        "finalize_billing",
+        "emit_completed",
+    ]
+    assert fakes.marks() == ["finalize_call_record", "await_recording", "finalize_billing", "emit_completed"]
+    result = run.result
+    assert (result.timed_out, result.recording, result.skipped, result.failed, result.price_micros) == (
+        False,
+        "skipped",
+        ("store_recording",),
+        (),
+        180_000,
+    )
+    assert "store_recording" not in result.ran

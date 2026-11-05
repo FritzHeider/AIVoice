@@ -1983,3 +1983,8 @@ Grafana 3001
   `support/busy_retry_stub.BusyRetryStub` workflow). Under the time-skipping server measure retry waits with
   `workflow.now()` inside the workflow: `activity.info().current_attempt_scheduled_time` stays wall-clock (5 ms apart
   for a skipped 5 min wait).
+- 2026-11-04 (P08-FIX-6): `va_workflows.post_call.budget` (`retry_worst_case(timeout, policy)`, `STORE_RESERVE` 525 s,
+  `store_window(started, now, budget_s)`) schedules `store_recording` with `schedule_to_close` = budget deadline −
+  reserve; the time-skipping server honours it against a `next_retry_delay` (retries stop, `ActivityError`). A
+  `PostCallTimings(budget_s=)` ≤ 525 skips the copy (`skipped`), so a post-call test that needs `store_recording` to run
+  must keep the default budget. `PostCallRun.schedule_to_close(activity)` / `history_span()` read the history.
