@@ -3,25 +3,39 @@ P08-FIX-6).
 
 Pure functions over the activities' timeouts and retry policies; workflow-safe (no I/O imports). The copy is
 the only step whose retries can wait for minutes (a busy copy lock asks for a retry after the holder's lock
-TTL), so it gets a ``schedule_to_close`` deadline that leaves room for the steps after it: billing plus the
-two step marks, each at its policy's worst case.
+TTL), so it gets a ``schedule_to_close`` deadline that leaves room for the steps after it: every implemented
+step between the copy and ``emit_completed`` plus the step marks, each at its policy's worst case (Decision
+P08-FIX-8 derives the reserve from :data:`va_workflows.post_call.plan.IMPLEMENTED`).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta
+from types import MappingProxyType
 from typing import Final
 
 from temporalio.common import RetryPolicy
 
+from va_domain.post_call import POSTCALL_STEPS, PostCallStep
 from va_workflows.activities.post_call_inputs import (
     BILLING_RETRY,
     BILLING_TIMEOUT,
     BOOKKEEPING_RETRY,
     BOOKKEEPING_TIMEOUT,
 )
+from va_workflows.post_call.plan import IMPLEMENTED
 
-__all__ = ["MIN_STORE_WINDOW", "STORE_RESERVE", "retry_worst_case", "store_window"]
+__all__ = [
+    "MARK_WORST_CASE",
+    "MIN_STORE_WINDOW",
+    "STEP_WORST_CASE",
+    "STORE_RESERVE",
+    "reserve_for",
+    "retry_worst_case",
+    "steps_after_store",
+    "store_window",
+]
 
 _DEFAULT_MAXIMUM_FACTOR: Final = 100
 """Temporal's default ``maximum_interval`` is 100 x ``initial_interval``."""
@@ -47,11 +61,46 @@ def retry_worst_case(timeout: timedelta, policy: RetryPolicy) -> timedelta:
     return attempts * timeout + backoff
 
 
-STORE_RESERVE: Final = retry_worst_case(BILLING_TIMEOUT, BILLING_RETRY) + 2 * retry_worst_case(
-    BOOKKEEPING_TIMEOUT, BOOKKEEPING_RETRY
+MARK_WORST_CASE: Final = retry_worst_case(BOOKKEEPING_TIMEOUT, BOOKKEEPING_RETRY)
+"""The worst case of one step mark (``mark_postcall_step``)."""
+
+STEP_WORST_CASE: Final[Mapping[PostCallStep, timedelta]] = MappingProxyType(
+    {"finalize_billing": retry_worst_case(BILLING_TIMEOUT, BILLING_RETRY)}
 )
-"""What must stay of the budget once the copy is over: ``finalize_billing`` and the marks of
-``store_recording`` and ``finalize_billing`` at their worst case (365 s + 2 x 80 s = 525 s)."""
+"""The worst case of every step that may run after the copy. Each implemented step between
+``store_recording`` and ``emit_completed`` needs an entry (:func:`reserve_for` refuses a step without one);
+``emit_completed`` runs whatever is left of the budget, so it has none."""
+
+
+def steps_after_store(implemented: Iterable[PostCallStep] = IMPLEMENTED) -> tuple[PostCallStep, ...]:
+    """The steps of ``implemented`` strictly between ``store_recording`` and ``emit_completed``, in spec
+    order."""
+    wanted = set(implemented)
+    start = POSTCALL_STEPS.index("store_recording") + 1
+    end = POSTCALL_STEPS.index("emit_completed")
+    return tuple(step for step in POSTCALL_STEPS[start:end] if step in wanted)
+
+
+def reserve_for(
+    steps: Iterable[PostCallStep], *, worst_cases: Mapping[PostCallStep, timedelta] = STEP_WORST_CASE
+) -> timedelta:
+    """The budget that must remain once the copy is over: the copy's own mark plus, for each of ``steps``,
+    its worst case and its mark. Raises ``ValueError`` for a step without a worst case."""
+    reserve = MARK_WORST_CASE
+    for step in steps:
+        worst = worst_cases.get(step)
+        if worst is None:
+            message = f"no worst case for post-call step {step}"
+            raise ValueError(message)
+        reserve += worst + MARK_WORST_CASE
+    return reserve
+
+
+STORE_RESERVE: Final = reserve_for(steps_after_store())
+"""What must stay of the budget once the copy is over (today ``finalize_billing`` and the marks of
+``store_recording`` and ``finalize_billing``: 365 s + 2 x 80 s = 525 s). It excludes schedule-to-start
+latency: a worker backlog can still push the later steps past the budget, and the budget timer then ends
+the run and ``emit_completed`` reports it, as for any overrun."""
 
 
 def store_window(started: datetime, now: datetime, budget_s: int) -> timedelta | None:

@@ -6,7 +6,7 @@ import pytest
 from postcall_rig import facts
 
 from va_domain.post_call import POSTCALL_STEPS
-from va_workflows.post_call.plan import ALWAYS_RUN, planned_steps, remaining
+from va_workflows.post_call.plan import ALWAYS_RUN, IMPLEMENTED, planned_steps, remaining
 
 
 def test_the_step_names_follow_the_spec_table() -> None:
@@ -46,3 +46,14 @@ def test_remaining_drops_completed_steps_but_keeps_the_always_run_ones() -> None
         "emit_completed",
     )
     assert frozenset({"finalize_call_record", "emit_completed"}) == ALWAYS_RUN
+
+
+@pytest.mark.parametrize("connected", [True, False])
+@pytest.mark.parametrize("storage", [True, False])
+def test_planned_steps_are_implemented(connected: bool, storage: bool) -> None:
+    assert set(planned_steps(facts(connected=connected, wanted=True, storage=storage))) <= IMPLEMENTED
+    assert set(planned_steps(None)) <= IMPLEMENTED
+
+
+def test_every_implemented_step_is_planned_for_a_recorded_call() -> None:
+    assert set(planned_steps(facts(connected=True, wanted=True, storage=True))) == IMPLEMENTED

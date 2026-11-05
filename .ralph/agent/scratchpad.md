@@ -509,3 +509,77 @@ SDK delivering a timeout to a non-heartbeating activity) + larger minimum window
 - Diff matches the plan and specs/18 §1 Decision P08-FIX-7: late check before lock (after parse/url) and after upload
   (delete object, no event, lock released in finally), `commit_by = workflow.now() + window`, MIN_STORE_WINDOW 60 s.
   Tests cover start/commit stages, room case, below-minimum skip, and commit_by value. Inbox note appended to DONE.
+
+## Planner 2026-11-05 — after P08-FIX-7 approval
+- Inbox: `2026-11-04-p08-fix-6-store-window-review.md` is not in DONE and had no task (non-blocker: STORE_RESERVE is
+  hard-wired, undercounts once analysis steps 4-10 land; also document that schedule-to-start latency is excluded).
+  Inserted P08-FIX-8 above P08-FIX-4. Other open notes (fix-3 / underrun) are covered by P08-FIX-4.
+
+## Plan P08-FIX-8 (reserve derived from the steps after store_recording)
+### Production changes
+1. `packages/va_workflows/src/va_workflows/post_call/plan.py`:
+   - `IMPLEMENTED: Final[frozenset[PostCallStep]] = frozenset({"finalize_call_record", "await_recording",
+     "store_recording", "finalize_billing", "emit_completed"})` (docstring: steps `planned_steps` can plan; a new step
+     joins here). Export in `__all__`. `planned_steps` keeps its logic; add an assertion-free consistency: nothing
+     else (tests check `planned_steps` output ⊆ IMPLEMENTED).
+2. `packages/va_workflows/src/va_workflows/post_call/budget.py`:
+   - `STEP_WORST_CASE: Final[Mapping[PostCallStep, timedelta]] = MappingProxyType({"finalize_billing":
+     retry_worst_case(BILLING_TIMEOUT, BILLING_RETRY)})` — worst case of each step that may run after the copy
+     (docstring: every IMPLEMENTED step between `store_recording` and `emit_completed` needs an entry; `emit_completed`
+     runs regardless of the budget so it has none).
+   - `MARK_WORST_CASE: Final = retry_worst_case(BOOKKEEPING_TIMEOUT, BOOKKEEPING_RETRY)`.
+   - `def steps_after_store(implemented: Iterable[PostCallStep] = IMPLEMENTED) -> tuple[PostCallStep, ...]`: the
+     steps of `POSTCALL_STEPS` strictly between `store_recording` and `emit_completed` that are in `implemented`.
+   - `def reserve_for(steps: Iterable[PostCallStep]) -> timedelta`: `MARK_WORST_CASE` (the copy's own mark) +
+     Σ (`STEP_WORST_CASE[step]` + `MARK_WORST_CASE`); raises `KeyError`-free `ValueError(f"no worst case for {step}")`
+     when a step lacks an entry (so a missing entry fails at import, not silently).
+   - `STORE_RESERVE: Final = reserve_for(steps_after_store())` (still 525 s). Docstring updated: derived, and it
+     excludes schedule-to-start latency (a worker backlog can still push billing past the budget; the budget timer then
+     ends the run and `emit_completed` reports it as today).
+   - Update `__all__`. Imports `POSTCALL_STEPS` from va_domain.post_call, `IMPLEMENTED` from plan (no cycle: plan does
+     not import budget). Keep module workflow-safe (no I/O).
+### Tests (`packages/va_workflows/tests/test_post_call_budget.py`, `test_post_call_plan.py`)
+- `test_the_reserve_covers_billing_and_two_marks` stays (525 s).
+- `test_steps_after_the_copy_are_billing_today`: `steps_after_store() == ("finalize_billing",)`.
+- `test_every_step_after_the_copy_has_a_worst_case`: for each step in `steps_after_store(IMPLEMENTED)`, key in
+  `STEP_WORST_CASE` (the guard).
+- `test_a_new_step_without_a_worst_case_is_refused`: `reserve_for(steps_after_store(IMPLEMENTED | {"summarize"}))`
+  raises ValueError naming `summarize`.
+- `test_a_new_step_grows_the_reserve`: monkeypatch-free — call `reserve_for(("summarize", "finalize_billing"))` with a
+  local mapping? Simpler: give `reserve_for(steps, worst_cases=STEP_WORST_CASE)` a keyword param; assert
+  `reserve_for(("summarize","finalize_billing"), worst_cases={**STEP_WORST_CASE, "summarize": 40 s}) == 525 + 40 + 80`.
+- `test_post_call_plan.py`: `test_planned_steps_are_implemented`: for facts combinations already used there (connected
+  + recording + storage, None, not connected), `set(planned_steps(f)) <= IMPLEMENTED`; and every IMPLEMENTED step
+  appears for the full-facts case.
+### Specs/docs
+- specs/18 §1: append `> Decision (2026-11-05) P08-FIX-8:` reserve = mark of the copy + (worst case + mark) of every
+  implemented step between store_recording and emit_completed, from `STEP_WORST_CASE`; a step without an entry fails
+  at import/test; reserve excludes schedule-to-start latency (worker backlog), accepted: the budget timer still ends the
+  run and emit_completed reports.
+- AGENTS.md: one dated line (`budget.STEP_WORST_CASE`/`reserve_for`, `plan.IMPLEMENTED`: a new post-call step needs both).
+### Gates
+- `uv run pytest packages/va_workflows -q`; `make lint typecheck placeholders`; `make check` (background + heartbeat
+  Monitor, PATH += /home/ralph/.local/bin). No e2e.
+- Reviewer: tick P08-FIX-8, append `2026-11-04-p08-fix-6-store-window-review.md` to DONE, commit
+  `refactor(workflows): derive the store_recording reserve from the following steps` + `Task: P08-FIX-8`.
+### Risks
+- Workflow import path: budget.py is imported inside `imports_passed_through`; new imports must stay pure (plan.py and
+  va_domain.post_call are). `MappingProxyType` is fine for mypy (`Mapping[PostCallStep, timedelta]`).
+
+## Build P08-FIX-8 (2026-11-05)
+- `plan.IMPLEMENTED` (5 steps); `budget.MARK_WORST_CASE` (80 s), `STEP_WORST_CASE` (finalize_billing 365 s),
+  `steps_after_store(implemented)`, `reserve_for(steps, worst_cases=)` (ValueError for a missing entry);
+  `STORE_RESERVE = reserve_for(steps_after_store())` = 525 s, docstring notes schedule-to-start exclusion.
+- Tests: budget (steps after copy, guard, mark, missing-entry refusal, outside steps, growth 525+40+80), plan
+  (planned ⊆ IMPLEMENTED, full facts == IMPLEMENTED). New tests fail without src (imports).
+- specs/18 §1 Decision P08-FIX-8; AGENTS.md line.
+- Gates: make check exit 0 (12692 passed, 7 skipped, cov 99.07 %); lint/typecheck/placeholders 0 findings; radon
+  post_call avg 3.04; jscpd 0 clones va_workflows; pip-audit no known vulns; pnpm audit 1 moderate (no high).
+
+## Review P08-FIX-8 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` run 1: 1 failed
+  (`test_prefetch_activity.py::test_the_context_of_a_queued_call_is_stored_with_its_ttl`, fakeredis TTL 5399 vs 5400:
+  wall-clock flake in an untouched file; passes alone); run 2 exit 0 (12692 passed, 7 skipped, cov 99 %).
+  Flake tracked as runtime task `fix:prefetch-ttl-flake` (planner: consider a FIX task).
+- Diff matches plan + specs/18 §1 Decision P08-FIX-8: reserve derived (525 s unchanged), missing worst case raises at
+  import, plan ⊆ IMPLEMENTED tests. Inbox note appended to DONE.

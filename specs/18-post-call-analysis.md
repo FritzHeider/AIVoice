@@ -87,6 +87,13 @@ Total budget target: `call.completed` webhook ≤ 20 s after hangup p95 when no 
 >    non-retryable `RecordingOutOfTime`, deletes its uploaded object (commit stage), keeps the carrier copy, releases
 >    the lock, and records no event, so `call.completed`'s `recording = skipped` stays true. `commit_by = null` (older
 >    inputs, other callers) means no deadline.
+> Decision (2026-11-05, P08-FIX-8): `STORE_RESERVE` is derived, not hard-wired: `reserve_for(steps_after_store())` =
+>    one mark (the copy's own) + (worst case + one mark) for every step in `va_workflows.post_call.plan.IMPLEMENTED`
+>    strictly between `store_recording` and `emit_completed`, with worst cases from `budget.STEP_WORST_CASE` (today
+>    only `finalize_billing`, so still 525 s). A step implemented later (steps 4-10, 12) without a worst-case entry
+>    makes `reserve_for` raise at import and a guard test fail, so the reserve grows with the steps after the copy.
+>    The reserve excludes schedule-to-start latency (a worker backlog); that is accepted: the budget timer still ends
+>    the run and `emit_completed` reports it like any other overrun.
 > 6. `emit_completed` locks the call row, returns `not_ended` (logged error, nothing written) for a non-terminal call and
 >    `already_completed` when `queue_status = 'complete'`; otherwise it sets `queue_status = 'complete'` and records
 >    `call.completed` whose `data` is the Call Object exactly as `GET /v1/calls/{id}` serialises it (7-day recording URL

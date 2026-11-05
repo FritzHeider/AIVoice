@@ -83,6 +83,17 @@
     no event, carrier copy kept), workflow test (small window → skipped), `make check` passes; append the note's file
     name to `.ralph/review-inbox/DONE` on approval.
 
+- [x] P08-FIX-8 Derive the store_recording reserve from the steps that follow it — see .ralph/review-inbox/2026-11-04-p08-fix-6-store-window-review.md — `plan.IMPLEMENTED` + `budget.STEP_WORST_CASE`/`steps_after_store`/`reserve_for` (ValueError for a step without a worst case), `STORE_RESERVE` still 525 s; guard/growth/refusal tests; specs/18 §1 Decision P08-FIX-8 (schedule-to-start excluded); review: lint/typecheck/placeholders 0 findings, make test 12692 passed, 7 skipped, cov 99 % (first run hit an unrelated fakeredis TTL flake in test_prefetch_activity, tracked as a task)
+  - Spec refs: specs/18-post-call-analysis.md §1 (Decisions P08-FIX-6, P08-FIX-7)
+  - Depends on: P08-FIX-7
+  - Deliverables (non-blocker): `STORE_RESERVE` is hard-wired to "finalize_billing + two marks"; when analysis steps
+    4-10 land between `store_recording` and `finalize_billing` it silently undercounts. Compute the reserve from the
+    implemented steps after `store_recording` (per-step worst case + its mark) and add a test that fails when a step
+    becomes plannable without a worst-case entry. State in the Decision that the reserve excludes schedule-to-start
+    latency (worker backlog).
+  - Acceptance: reserve still 525 s for today's steps; guard test fails for an implemented step without an entry;
+    `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
+
 - [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3

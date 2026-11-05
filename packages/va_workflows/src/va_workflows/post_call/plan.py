@@ -10,11 +10,18 @@ from collections.abc import Iterable
 from va_domain.post_call import POSTCALL_STEPS, PostCallStep
 from va_workflows.activities.post_call_inputs import CallRecordFacts
 
-__all__ = ["ALWAYS_RUN", "planned_steps", "remaining"]
+__all__ = ["ALWAYS_RUN", "IMPLEMENTED", "planned_steps", "remaining"]
 
 ALWAYS_RUN: frozenset[PostCallStep] = frozenset({"finalize_call_record", "emit_completed"})
 """Steps that run on every execution: step 1 returns the facts the rest is planned with, and step 13 is the
 end of every run (both are guarded, so a re-run changes nothing)."""
+
+IMPLEMENTED: frozenset[PostCallStep] = frozenset(
+    {"finalize_call_record", "await_recording", "store_recording", "finalize_billing", "emit_completed"}
+)
+"""The steps :func:`planned_steps` can plan. A new step joins here, and when it runs between
+``store_recording`` and ``emit_completed`` it also needs a ``budget.STEP_WORST_CASE`` entry (specs/18 §1
+Decision P08-FIX-8)."""
 
 
 def planned_steps(facts: CallRecordFacts | None) -> tuple[PostCallStep, ...]:

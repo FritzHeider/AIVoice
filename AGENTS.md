@@ -1992,3 +1992,6 @@ Grafana 3001
   activity raises non-retryable `RECORDING_OUT_OF_TIME` before the lock or after the upload (deleting its object)
   instead of committing late; `MIN_STORE_WINDOW` is 60 s. Recording activity tests pass `activities(..., clock=
   FrozenClock(utcnow()))` and advance it in `MemoryS3(before_upload=...)` to make a deadline pass mid-copy.
+- 2026-11-05 (P08-FIX-8): `va_workflows.post_call.budget.STORE_RESERVE` = `reserve_for(steps_after_store())` over
+  `plan.IMPLEMENTED` and `budget.STEP_WORST_CASE`: a new post-call step goes into `IMPLEMENTED`, and if it runs
+  between `store_recording` and `emit_completed` it also needs a `STEP_WORST_CASE` entry (else import fails).

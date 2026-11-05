@@ -16,7 +16,17 @@ from va_workflows.activities.post_call_inputs import (
     RECORD_RETRY,
     RECORD_TIMEOUT,
 )
-from va_workflows.post_call.budget import MIN_STORE_WINDOW, STORE_RESERVE, retry_worst_case, store_window
+from va_workflows.post_call.budget import (
+    MARK_WORST_CASE,
+    MIN_STORE_WINDOW,
+    STEP_WORST_CASE,
+    STORE_RESERVE,
+    reserve_for,
+    retry_worst_case,
+    steps_after_store,
+    store_window,
+)
+from va_workflows.post_call.plan import IMPLEMENTED
 
 STARTED = datetime(2026, 11, 4, 12, tzinfo=UTC)
 
@@ -51,6 +61,35 @@ def test_an_unlimited_policy_has_no_worst_case() -> None:
 
 def test_the_reserve_covers_billing_and_two_marks() -> None:
     assert timedelta(seconds=525) == STORE_RESERVE
+
+
+def test_steps_after_the_copy_are_billing_today() -> None:
+    assert steps_after_store() == ("finalize_billing",)
+
+
+def test_every_step_after_the_copy_has_a_worst_case() -> None:
+    for step in steps_after_store(IMPLEMENTED):
+        assert step in STEP_WORST_CASE
+
+
+def test_a_mark_is_the_bookkeeping_worst_case() -> None:
+    assert timedelta(seconds=80) == MARK_WORST_CASE
+
+
+def test_a_new_step_without_a_worst_case_is_refused() -> None:
+    with pytest.raises(ValueError, match="summarize"):
+        reserve_for(steps_after_store(IMPLEMENTED | {"summarize"}))
+
+
+def test_steps_outside_the_copy_and_completion_do_not_count() -> None:
+    assert steps_after_store(("finalize_call_record", "store_recording", "emit_completed")) == ()
+    assert reserve_for(()) == MARK_WORST_CASE
+
+
+def test_a_new_step_grows_the_reserve() -> None:
+    worst_cases = {**STEP_WORST_CASE, "summarize": timedelta(seconds=40)}
+    reserve = reserve_for(steps_after_store(IMPLEMENTED | {"summarize"}), worst_cases=worst_cases)
+    assert reserve == timedelta(seconds=525 + 40 + 80)
 
 
 def test_the_window_runs_to_the_budget_minus_the_reserve() -> None:
