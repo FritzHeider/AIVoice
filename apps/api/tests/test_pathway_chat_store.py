@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
+from redis_ttl import assert_expires_in
 
 from va_api.services.pathway_chat import (
     BUSY_MESSAGE,
@@ -50,7 +51,7 @@ async def test_store_round_trip_ttl_org_check_and_lock() -> None:
     store = ChatStore(redis)
     chat_id = uuid.uuid4()
     await store.save(chat_id, _session())
-    assert await redis.ttl(chat_key(chat_id)) == CHAT_TTL_S
+    await assert_expires_in(redis, chat_key(chat_id), CHAT_TTL_S)
     assert (await store.load(ORG, chat_id)).simulate_to == "+14155550100"
     with pytest.raises(AppError) as foreign:
         await store.load(uuid.uuid4(), chat_id)

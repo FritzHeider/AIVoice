@@ -9,6 +9,7 @@ import httpx
 import orjson
 import respx
 from llm_client_helpers import EMBED_MODEL, EMBEDDINGS, EmbeddingsRig, embedding_body, embeddings_rig
+from redis_ttl import assert_expires_in
 from service_helpers import json_log_stream, log_events
 
 from va_llm.embedding_cache import QUERY_CACHE_TTL_S
@@ -31,7 +32,8 @@ async def test_a_miss_embeds_and_caches_for_24_hours(erig: EmbeddingsRig, llm_ap
     assert vector == [1.0, 0.0, 0.0, 0.0]
     key = query_cache_key(EMBED_MODEL, 4, "where is my order?")
     assert await _cached(erig, key) == vector
-    assert await erig.redis.ttl(key) == QUERY_CACHE_TTL_S == 86_400
+    assert QUERY_CACHE_TTL_S == 86_400
+    await assert_expires_in(erig.redis, key, QUERY_CACHE_TTL_S)
     assert route.call_count == 1
     assert erig.metric("va_llm_embedding_cache_total", result="miss") == 1
     (record,) = erig.usage.records

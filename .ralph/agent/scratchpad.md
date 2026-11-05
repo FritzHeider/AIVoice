@@ -671,3 +671,59 @@ SDK delivering a timeout to a non-heartbeating activity) + larger minimum window
   IMPLEMENTED derived; all-flags test reads `CallRecordFacts.model_fields` (3 bools + done_steps verified);
   PRE_STORE_WORST_CASE 1005 s, `check_copy_window` at import (1590 ≤ 1800), edge/edge+1 s/short-budget tests.
   Both inbox notes appended to DONE. Next: P08-FIX-10 (prefetch TTL flake).
+
+## Planner 2026-11-05 — after P08-FIX-9 approval
+- Inbox: every note is in DONE or covered by P08-FIX-4. Next unticked: P08-FIX-10 (runtime task `fix:prefetch-ttl-flake`).
+
+## Plan P08-FIX-10 (wall-clock-free TTL assertions)
+### Cause
+fakeredis stores expiry as wall-clock deadline; `TTL` floors the remaining seconds, so if ≥ 1 ms... (any time) passes
+between SET EX and TTL under load, `TTL` reads 5399. Exact `ttl == N` asserts are flaky. Same pattern exists in
+4 places: `packages/va_workflows/tests/test_prefetch_activity.py:75` (the reported flake),
+`packages/va_db/tests/test_call_context.py:120`, `packages/va_events/tests/test_publisher.py:61`,
+`packages/va_llm/tests/test_embedding_cache.py:34`. Fix all four (same root cause; no production change).
+### Helper (new) `packages/va_common/tests/redis_ttl.py` (dir already on pytest pythonpath + mypy mypy_path)
+```python
+TTL_SLACK_MS: Final = 30_000  # generous: a loaded xdist worker never stalls this long between write and read
+async def assert_expires_in(redis: Redis-like (Any with pttl), key: str, ttl_s: int, *, slack_ms: int = TTL_SLACK_MS) -> None:
+    remaining = await redis.pttl(key)
+    assert ttl_s * 1000 - slack_ms < remaining <= ttl_s * 1000, f"{key}: pttl {remaining} ms, expected ≤ {ttl_s} s"
+```
+Type `redis` as `redis.asyncio.Redis` (FakeAsyncRedis subclasses it). The upper bound proves the key was set with
+at most `ttl_s` (a longer TTL fails), the lower bound proves it was set with more than `ttl_s - 30 s` (e.g. 5400 vs
+3900 still distinguished; -1 no-expiry / -2 missing fail).
+### Changes
+- prefetch test: `await assert_expires_in(redis, call_context_key(call.call_id), 5400)`; keep `result.ttl_s == 5400`
+  and the log `ttl_s` asserts (those are exact values the store was asked to set — the intent).
+- test_call_context: `assert context.ttl_s() == 3900` + `await assert_expires_in(redis, key, context.ttl_s())`.
+- test_publisher: `await assert_expires_in(rig.redis, key, CALL_SEQ_TTL_S)` (the expire(5) before still proves refresh:
+  5 s < CALL_SEQ_TTL_S - 30 s — check CALL_SEQ_TTL_S value; if it is < 60 s pass a smaller `slack_ms` above 5 s).
+- test_embedding_cache: `assert QUERY_CACHE_TTL_S == 86_400` + helper.
+- Unit test for the helper in `packages/va_common/tests/test_redis_ttl.py` (fakeredis): key set EX 100 passes;
+  key set PX 100_000 - 31_000 (i.e. 69 s) fails AssertionError; key without expiry fails; missing key fails;
+  key with EX 101 fails (upper bound).
+- AGENTS.md: dated line "assert Redis TTLs with `redis_ttl.assert_expires_in(redis, key, ttl_s)`; never `ttl == N`
+  (fakeredis floors a wall-clock deadline)".
+- grep once more `ttl(.*) ==` / `pttl(.*) ==` across packages/apps/tests_e2e tests to catch any other exact assert.
+### Gates
+`uv run pytest packages/va_common/tests/test_redis_ttl.py packages/va_workflows/tests/test_prefetch_activity.py
+packages/va_db/tests/test_call_context.py packages/va_events/tests/test_publisher.py packages/va_llm/tests/test_embedding_cache.py -q`;
+`make lint typecheck placeholders`; `make check` (background + heartbeat Monitor, PATH += /home/ralph/.local/bin).
+Reviewer: tick P08-FIX-10, close runtime task `fix:prefetch-ttl-flake`, commit `test: assert redis ttls without
+wall-clock races` + `Task: P08-FIX-10`.
+### Risks
+Helper module name must be unique on the shared pythonpath (`redis_ttl` — check no clash). Never mutate fakeredis time.
+
+## Build P08-FIX-10 (2026-11-05)
+- Helper `packages/va_common/tests/redis_ttl.py` (`assert_expires_in(redis, key, ttl_s, slack_ms=30_000)`, PTTL window)
+  + `test_redis_ttl.py` (7 cases: exact, inside slack, shorter, longer, no expiry -1, missing -2, custom slack).
+- Replaced exact `ttl == N` in 6 tests (the plan's 4 + two more found by grep: `apps/api/tests/test_failure_counter.py`
+  restart-window test, `apps/api/tests/test_pathway_chat_store.py`). Bounded `0 < ttl <= WINDOW_S` asserts left as is.
+- AGENTS.md dated line. No production change.
+- Gates: make check exit 0 (12704 passed, 7 skipped, cov 99.07 %); lint/typecheck/placeholders 0 findings; radon redis_ttl avg 2.0; jscpd 0 clones.
+
+## Review P08-FIX-10 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12704 passed, 7 skipped, cov 99.07 %).
+- Diff: helper + 7 unit tests; 6 call sites switched. Every TTL used (600 s, 3900, 5400, 86 400, 172 800) is well above
+  the 30 s slack, so the `expire(5)` refresh tests still prove the refresh. No remaining exact `ttl(...) ==` asserts (grep).
+  Runtime task fix:prefetch-ttl-flake closed.

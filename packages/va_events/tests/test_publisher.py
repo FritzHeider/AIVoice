@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from event_helpers import ORG, PublisherRig, event, publisher_rig, stream_events, stream_payloads
+from redis_ttl import assert_expires_in
 
 from va_events import STREAMS, EventPublisher, EventPublishError, EventType, decode, event_uuid, stream_for
 from va_events import publisher as publisher_module
@@ -58,7 +59,7 @@ async def test_seq_increases_per_call_and_refreshes_the_ttl(rig: PublisherRig) -
     assert key == f"call:{{{call_a}}}:seq"
     await rig.redis.expire(key, 5)
     await rig.publisher.publish(event(EventType.CALL_TURN, call_id=call_a))
-    assert await rig.redis.ttl(key) == CALL_SEQ_TTL_S
+    await assert_expires_in(rig.redis, key, CALL_SEQ_TTL_S)
     assert await rig.redis.get(key) == b"4"
 
 

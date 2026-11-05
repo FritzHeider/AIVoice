@@ -108,7 +108,7 @@
   - Acceptance: tests for the table, the all-flags test, the import-time refusal helper; reserve still 525 s;
     `make check` passes; append both note names to `.ralph/review-inbox/DONE` on approval.
 
-- [ ] P08-FIX-10 Flaky `test_the_context_of_a_queued_call_is_stored_with_its_ttl` (fakeredis TTL 5399 vs 5400)
+- [x] P08-FIX-10 Flaky `test_the_context_of_a_queued_call_is_stored_with_its_ttl` (fakeredis TTL 5399 vs 5400) — `redis_ttl.assert_expires_in` (PTTL window, 7 unit tests) replaces 6 exact `ttl == N` asserts; make test 12704 passed, 7 skipped, cov 99.07 %; lint/typecheck/placeholders 0 findings
   - Spec refs: specs/03 §11 (Redis keys)
   - Depends on: none
   - Deliverables: the prefetch activity test compares a fakeredis wall-clock `TTL` with an exact value; under load a

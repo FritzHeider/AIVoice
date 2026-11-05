@@ -1998,3 +1998,6 @@ Grafana 3001
 - 2026-11-05 (P08-FIX-9): a new post-call step = an entry in `va_workflows.post_call.plan._PLAN` (step → condition;
   `IMPLEMENTED` is derived) plus a `budget.STEP_WORST_CASE` entry when it runs after the copy. `budget` raises at import
   (`check_copy_window`) when `PRE_STORE_WORST_CASE` + `MIN_STORE_WINDOW` + `STORE_RESERVE` exceeds `POSTCALL_BUDGET_S`.
+- 2026-11-05 (P08-FIX-10): assert Redis TTLs with `redis_ttl.assert_expires_in(redis, key, ttl_s)`
+  (`packages/va_common/tests`, PTTL within 30 s below `ttl_s`); never `ttl(key) == N`: the expiry is a wall-clock
+  deadline and `TTL` floors it, so a loaded worker reads `N - 1`.

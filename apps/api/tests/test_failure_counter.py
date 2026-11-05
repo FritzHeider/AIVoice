@@ -5,6 +5,7 @@ from __future__ import annotations
 import fakeredis
 import pytest
 from redis.asyncio import Redis
+from redis_ttl import assert_expires_in
 from structlog.testing import capture_logs
 
 from va_api.auth.failure_counter import FailureCounters
@@ -50,7 +51,7 @@ async def test_locking_failure_restarts_the_window() -> None:
     await counters.record([(KEY, 2)])
     await redis.expire(KEY, 5)
     await counters.record([(KEY, 2)])
-    assert await redis.ttl(KEY) == WINDOW_S
+    await assert_expires_in(redis, KEY, WINDOW_S)
 
 
 async def test_counter_without_ttl_reports_the_full_window() -> None:

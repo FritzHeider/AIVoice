@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from redis_ttl import assert_expires_in
 from resolved_configs import RESOLVED_NAMES, resolved_config
 from service_helpers import json_log_stream, log_events, reset_logging
 
@@ -117,7 +118,8 @@ async def test_save_sets_the_ttl_and_load_round_trips(redis: FakeAsyncRedis) -> 
 
     await store.save(context)
 
-    assert await redis.ttl(call_context_key(context.call_id)) == context.ttl_s() == 3900
+    assert context.ttl_s() == 3900
+    await assert_expires_in(redis, call_context_key(context.call_id), context.ttl_s())
     assert await store.load(context.call_id) == context
 
 

@@ -11,6 +11,7 @@ import pytest
 from call_rows import SeededCall, load_call, seed_call
 from fakeredis import FakeAsyncRedis
 from obs_helpers import memory_provider
+from redis_ttl import assert_expires_in
 from resolved_configs import resolved_config
 from rest_client_helpers import SimRest, sim_rest
 from service_helpers import json_log_stream, log_events
@@ -72,7 +73,7 @@ async def test_the_context_of_a_queued_call_is_stored_with_its_ttl(
     assert result == PrefetchResult(stored=True, status="queued", ttl_s=5400)
     stored = await CallContextStore(redis).load(call.call_id)
     assert stored == build_call_context(await load_call(database, call), now=NOW)
-    assert await redis.ttl(call_context_key(call.call_id)) == 5400
+    await assert_expires_in(redis, call_context_key(call.call_id), 5400)
     [event] = [line for line in log_events(stream) if line["event"] == "call_context.stored"]
     assert (event["call_id"], event["org_id"], event["ttl_s"]) == (str(call.call_id), str(call.org_id), 5400)
 
