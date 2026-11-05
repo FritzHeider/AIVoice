@@ -1995,3 +1995,6 @@ Grafana 3001
 - 2026-11-05 (P08-FIX-8): `va_workflows.post_call.budget.STORE_RESERVE` = `reserve_for(steps_after_store())` over
   `plan.IMPLEMENTED` and `budget.STEP_WORST_CASE`: a new post-call step goes into `IMPLEMENTED`, and if it runs
   between `store_recording` and `emit_completed` it also needs a `STEP_WORST_CASE` entry (else import fails).
+- 2026-11-05 (P08-FIX-9): a new post-call step = an entry in `va_workflows.post_call.plan._PLAN` (step → condition;
+  `IMPLEMENTED` is derived) plus a `budget.STEP_WORST_CASE` entry when it runs after the copy. `budget` raises at import
+  (`check_copy_window`) when `PRE_STORE_WORST_CASE` + `MIN_STORE_WINDOW` + `STORE_RESERVE` exceeds `POSTCALL_BUDGET_S`.

@@ -583,3 +583,91 @@ SDK delivering a timeout to a non-heartbeating activity) + larger minimum window
   Flake tracked as runtime task `fix:prefetch-ttl-flake` (planner: consider a FIX task).
 - Diff matches plan + specs/18 §1 Decision P08-FIX-8: reserve derived (525 s unchanged), missing worst case raises at
   import, plan ⊆ IMPLEMENTED tests. Inbox note appended to DONE.
+
+## Planner 2026-11-05 — after P08-FIX-8 approval
+- Inbox: two new notes (`2026-11-05-p08-fix-8-reserve-guard-review.md`, `2026-11-05-p08-fix-8-reserve-review.md`),
+  both non-blockers about FIX-8: IMPLEMENTED is a second hand-kept list; no guard that the reserve leaves a copy
+  window. Inserted P08-FIX-9 above P08-FIX-4. Also added P08-FIX-10 for the runtime task `fix:prefetch-ttl-flake`
+  (fakeredis TTL 5399 vs 5400) so it gets a plan slot.
+
+## Plan P08-FIX-9 (one source for planned steps + copy-window guard)
+### Production changes
+1. `packages/va_workflows/src/va_workflows/post_call/plan.py`:
+   - Private predicates (pure, `CallRecordFacts | None -> bool`): `_always(_)` → True; `_with_facts(f)` → `f is not None`;
+     `_recorded(f)` → `f is not None and f.connected and f.recording_wanted and f.recording_storage`.
+   - `_PLAN: Final[Mapping[PostCallStep, Callable[[CallRecordFacts | None], bool]]] = MappingProxyType({
+     "finalize_call_record": _with_facts, "await_recording": _recorded, "store_recording": _recorded,
+     "finalize_billing": _always, "emit_completed": _always})` (docstring: the ONE table; a new step joins here with its
+     condition, and if it runs between store_recording and emit_completed it needs a `budget.STEP_WORST_CASE` entry).
+   - `IMPLEMENTED: Final = frozenset(_PLAN)` (docstring: derived, never edited by hand).
+   - `planned_steps(facts)` = `tuple(step for step in POSTCALL_STEPS if (cond := _PLAN.get(step)) is not None and cond(facts))`
+     (same results as today; docstring unchanged in substance).
+   - Imports: `Callable`, `Mapping` from collections.abc, `MappingProxyType`, `Final`. Workflow-safe (no I/O).
+2. `packages/va_workflows/src/va_workflows/post_call/budget.py`:
+   - `PRE_STORE_WORST_CASE: Final = retry_worst_case(RECORD_TIMEOUT, RECORD_RETRY) + 3 * MARK_WORST_CASE +
+     timedelta(seconds=RECORDING_WAIT_S)` (docstring: step 1, its mark, the recording lookup (bookkeeping policy — check
+     what the existing test assumes: it uses 3 x bookkeeping worst case = mark 1 + lookup + wait mark), the full recording
+     wait, the wait's mark; today 1005 s). Import `RECORD_RETRY`, `RECORD_TIMEOUT` from post_call_inputs and
+     `POSTCALL_BUDGET_S`, `RECORDING_WAIT_S` from va_domain.post_call.
+   - `def check_copy_window(*, before_store: timedelta, reserve: timedelta, budget_s: int) -> None`: raises
+     `ValueError(f"the post-call budget of {budget_s} s leaves no store_recording window: {before_store} before the copy,
+     {reserve} reserved after it")` when `before_store + MIN_STORE_WINDOW + reserve > timedelta(seconds=budget_s)`.
+   - Module level after `STORE_RESERVE`: `check_copy_window(before_store=PRE_STORE_WORST_CASE, reserve=STORE_RESERVE,
+     budget_s=POSTCALL_BUDGET_S)` (import fails loudly if a future step eats the window; tests catch it first).
+   - `STORE_RESERVE` docstring: the sum assumes the post-copy steps run one after another (as `_before_completion` does);
+     steps run in parallel would reserve their max instead.
+   - Add `PRE_STORE_WORST_CASE`, `check_copy_window` to `__all__`. Module docstring: one sentence on the import guard.
+### Tests
+- `packages/va_workflows/tests/test_post_call_plan.py`:
+  - `_all_flags_on() -> CallRecordFacts`: build from `CallRecordFacts.model_fields`: every field whose annotation is
+    `bool` → True; assert the remaining field names == {"done_steps"} (so a new non-bool gating field forces an update).
+  - `test_every_flag_on_plans_exactly_the_implemented_steps`: `set(planned_steps(_all_flags_on())) == IMPLEMENTED`.
+  - `test_implemented_is_the_plan_table`: `IMPLEMENTED == frozenset(plan._PLAN)` is tautological — instead assert
+    `IMPLEMENTED == frozenset({the five steps})` (pins today's set; a change is deliberate).
+  - Keep the existing parametrized tests (behaviour unchanged); drop/merge `test_every_implemented_step_is_planned_for_a_recorded_call`
+    into the all-flags test.
+- `packages/va_workflows/tests/test_post_call_budget.py`:
+  - `test_the_pre_store_worst_case`: `PRE_STORE_WORST_CASE == timedelta(seconds=1005)`; rewrite
+    `test_the_slowest_path_to_the_copy_still_leaves_a_window` to use `PRE_STORE_WORST_CASE` (window == 270 s, ≥ MIN).
+  - `test_a_reserve_that_eats_the_window_is_refused`: `check_copy_window(before_store=PRE_STORE_WORST_CASE,
+    reserve=timedelta(seconds=POSTCALL_BUDGET_S) - PRE_STORE_WORST_CASE - MIN_STORE_WINDOW + timedelta(seconds=1),
+    budget_s=POSTCALL_BUDGET_S)` raises ValueError matching "no store_recording window"; exactly at the edge (without +1 s)
+    returns None.
+  - `test_the_default_budget_keeps_a_copy_window`: `check_copy_window(... STORE_RESERVE ...)` returns None (explicit).
+### Specs/docs
+- specs/18 §1: amend the P08-FIX-8 Decision sentence ("A step implemented later ... makes reserve_for raise at import")
+  to be exact, or append `> Decision (2026-11-05, P08-FIX-9):` — `planned_steps` reads one table keyed by step, whose
+  keys are `IMPLEMENTED`, so a plannable step is always in the reserve's input and one without a `STEP_WORST_CASE`
+  entry fails at import; an all-flags-on facts test plans exactly `IMPLEMENTED`; `budget` refuses at import when
+  `PRE_STORE_WORST_CASE` (1005 s) + `MIN_STORE_WINDOW` + `STORE_RESERVE` exceeds `POSTCALL_BUDGET_S`; the reserve sums
+  the post-copy steps because they run in sequence (parallel steps would reserve their max).
+- AGENTS.md: amend the P08-FIX-8 line (or add a dated line): new post-call step = an entry in `plan._PLAN` (condition) +
+  `budget.STEP_WORST_CASE` when after the copy; `budget` import fails when the copy window disappears.
+### Gates
+- `uv run pytest packages/va_workflows -q`; `make lint typecheck placeholders`; `make check` (background + heartbeat
+  Monitor, PATH += /home/ralph/.local/bin). No e2e. radon/jscpd as usual.
+- Reviewer: tick P08-FIX-9, append both 2026-11-05 note names to DONE, commit
+  `refactor(workflows): plan post-call steps from one table and guard the copy window` + `Task: P08-FIX-9`.
+### Risks
+- Workflow sandbox: plan.py/budget.py are imported via `imports_passed_through`; new imports are pure. Module-level
+  `check_copy_window` runs at import in the worker: it passes today (1005 + 60 + 525 = 1590 ≤ 1800).
+- `CallRecordFacts.model_fields[...].annotation` with `from __future__ import annotations` in pydantic: pydantic resolves
+  annotations, so `annotation is bool` works; verify.
+
+## Build P08-FIX-9 (2026-11-05)
+- `plan._PLAN` (step → condition: `_with_facts`/`_recorded`/`_always`), `IMPLEMENTED = frozenset(_PLAN)`,
+  `planned_steps` reads the table (same results). `budget.PRE_STORE_WORST_CASE` (1005 s), `check_copy_window(...)`
+  called at import (1005 + 60 + 525 ≤ 1800); STORE_RESERVE docstring notes sequential sum.
+- Tests: plan `_all_flags_on()` from `CallRecordFacts.model_fields` (non-bool fields must be {"done_steps"}) plans
+  exactly IMPLEMENTED; IMPLEMENTED pinned to the five steps. Budget: PRE_STORE value, slowest path window 270 s, default
+  budget passes, edge passes / edge+1 s refused, short budget (1500 s) refused. New tests fail without src (imports).
+- specs/18 §1 Decision P08-FIX-9; AGENTS.md dated line.
+- Gates: make check exit 0 (12697 passed, 7 skipped, cov 99.07 %); lint/typecheck/placeholders 0 findings; va_workflows
+  356 passed; radon post_call avg 2.81; jscpd 0 clones va_workflows; pip-audit no known vulns; pnpm audit 1 moderate.
+
+## Review P08-FIX-9 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12697 passed, 7 skipped, cov 99.07 %).
+- Diff matches plan + specs/18 §1 Decision P08-FIX-9: `_PLAN` table drives `planned_steps` (same results),
+  IMPLEMENTED derived; all-flags test reads `CallRecordFacts.model_fields` (3 bools + done_steps verified);
+  PRE_STORE_WORST_CASE 1005 s, `check_copy_window` at import (1590 ≤ 1800), edge/edge+1 s/short-budget tests.
+  Both inbox notes appended to DONE. Next: P08-FIX-10 (prefetch TTL flake).

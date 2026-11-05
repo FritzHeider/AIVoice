@@ -19,8 +19,10 @@ from va_workflows.activities.post_call_inputs import (
 from va_workflows.post_call.budget import (
     MARK_WORST_CASE,
     MIN_STORE_WINDOW,
+    PRE_STORE_WORST_CASE,
     STEP_WORST_CASE,
     STORE_RESERVE,
+    check_copy_window,
     reserve_for,
     retry_worst_case,
     steps_after_store,
@@ -115,15 +117,39 @@ def test_a_copy_needs_a_minute() -> None:
     assert timedelta(seconds=60) == MIN_STORE_WINDOW
 
 
-def test_the_slowest_path_to_the_copy_still_leaves_a_window() -> None:
-    """Step 1, its mark, the recording lookup, the full recording wait, and the wait's mark, each at its
-    worst case, end before the store deadline."""
-    before_store = (
+def test_the_pre_store_worst_case() -> None:
+    """Step 1, its mark, the recording lookup, the full recording wait, and the wait's mark."""
+    expected = (
         retry_worst_case(RECORD_TIMEOUT, RECORD_RETRY)
         + 3 * retry_worst_case(BOOKKEEPING_TIMEOUT, BOOKKEEPING_RETRY)
         + timedelta(seconds=RECORDING_WAIT_S)
     )
-    window = store_window(STARTED, STARTED + before_store, POSTCALL_BUDGET_S)
+    assert expected == PRE_STORE_WORST_CASE
+    assert timedelta(seconds=1005) == PRE_STORE_WORST_CASE
+
+
+def test_the_slowest_path_to_the_copy_still_leaves_a_window() -> None:
+    window = store_window(STARTED, STARTED + PRE_STORE_WORST_CASE, POSTCALL_BUDGET_S)
     assert window is not None
     assert window == timedelta(seconds=1800 - 1005 - 525)
     assert window >= MIN_STORE_WINDOW
+
+
+def test_the_default_budget_keeps_a_copy_window() -> None:
+    check_copy_window(before_store=PRE_STORE_WORST_CASE, reserve=STORE_RESERVE, budget_s=POSTCALL_BUDGET_S)
+
+
+def test_a_reserve_that_eats_the_window_is_refused() -> None:
+    edge = timedelta(seconds=POSTCALL_BUDGET_S) - PRE_STORE_WORST_CASE - MIN_STORE_WINDOW
+    check_copy_window(before_store=PRE_STORE_WORST_CASE, reserve=edge, budget_s=POSTCALL_BUDGET_S)
+    with pytest.raises(ValueError, match="no store_recording window"):
+        check_copy_window(
+            before_store=PRE_STORE_WORST_CASE,
+            reserve=edge + timedelta(seconds=1),
+            budget_s=POSTCALL_BUDGET_S,
+        )
+
+
+def test_a_short_budget_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget of 1500 s"):
+        check_copy_window(before_store=PRE_STORE_WORST_CASE, reserve=STORE_RESERVE, budget_s=1500)

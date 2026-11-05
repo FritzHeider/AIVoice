@@ -6,6 +6,7 @@ import pytest
 from postcall_rig import facts
 
 from va_domain.post_call import POSTCALL_STEPS
+from va_workflows.activities.post_call_inputs import CallRecordFacts
 from va_workflows.post_call.plan import ALWAYS_RUN, IMPLEMENTED, planned_steps, remaining
 
 
@@ -55,5 +56,28 @@ def test_planned_steps_are_implemented(connected: bool, storage: bool) -> None:
     assert set(planned_steps(None)) <= IMPLEMENTED
 
 
-def test_every_implemented_step_is_planned_for_a_recorded_call() -> None:
-    assert set(planned_steps(facts(connected=True, wanted=True, storage=True))) == IMPLEMENTED
+def _all_flags_on() -> CallRecordFacts:
+    """Facts with every gating flag set, read from the model so a new flag is switched on too."""
+    fields = CallRecordFacts.model_fields
+    flags = {name for name, field in fields.items() if field.annotation is bool}
+    assert set(fields) - flags == {"done_steps"}, "a new non-bool fact needs a planning test"
+    return CallRecordFacts.model_validate(dict.fromkeys(flags, True))
+
+
+def test_every_flag_on_plans_exactly_the_implemented_steps() -> None:
+    assert set(planned_steps(_all_flags_on())) == IMPLEMENTED
+
+
+def test_the_implemented_steps_today() -> None:
+    assert (
+        frozenset(
+            {
+                "finalize_call_record",
+                "await_recording",
+                "store_recording",
+                "finalize_billing",
+                "emit_completed",
+            }
+        )
+        == IMPLEMENTED
+    )

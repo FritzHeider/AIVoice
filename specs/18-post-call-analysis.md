@@ -94,6 +94,13 @@ Total budget target: `call.completed` webhook ≤ 20 s after hangup p95 when no 
 >    makes `reserve_for` raise at import and a guard test fail, so the reserve grows with the steps after the copy.
 >    The reserve excludes schedule-to-start latency (a worker backlog); that is accepted: the budget timer still ends
 >    the run and `emit_completed` reports it like any other overrun.
+> Decision (2026-11-05, P08-FIX-9): `planned_steps` reads one table keyed by step (`plan._PLAN`, step → condition on
+>    the call facts) and `IMPLEMENTED` is derived from its keys, so a plannable step is always an input of the reserve
+>    and one without a `STEP_WORST_CASE` entry fails at import; a test that switches every boolean fact on must plan
+>    exactly `IMPLEMENTED`. `budget` also refuses at import when `PRE_STORE_WORST_CASE` (step 1, the recording lookup,
+>    the full recording wait, and three marks at their worst case: 1005 s) + `MIN_STORE_WINDOW` + `STORE_RESERVE`
+>    exceeds `POSTCALL_BUDGET_S` (today 1005 + 60 + 525 = 1590 ≤ 1800 s). The reserve sums the post-copy steps because
+>    they run in sequence; steps run in parallel would reserve their maximum instead.
 > 6. `emit_completed` locks the call row, returns `not_ended` (logged error, nothing written) for a non-terminal call and
 >    `already_completed` when `queue_status = 'complete'`; otherwise it sets `queue_status = 'complete'` and records
 >    `call.completed` whose `data` is the Call Object exactly as `GET /v1/calls/{id}` serialises it (7-day recording URL

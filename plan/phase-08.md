@@ -94,6 +94,28 @@
   - Acceptance: reserve still 525 s for today's steps; guard test fails for an implemented step without an entry;
     `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
 
+- [x] P08-FIX-9 One source for the planned post-call steps and a guard that the copy keeps a window — see .ralph/review-inbox/2026-11-05-p08-fix-8-reserve-guard-review.md, 2026-11-05-p08-fix-8-reserve-review.md — `plan._PLAN` table (IMPLEMENTED derived), all-flags facts test, `budget.PRE_STORE_WORST_CASE` 1005 s + import-time `check_copy_window`; reserve 525 s; make test 12697 passed, 7 skipped, cov 99.07 %; lint/typecheck/placeholders 0 findings
+  - Spec refs: specs/18-post-call-analysis.md §1 (Decisions P08-FIX-6, P08-FIX-7, P08-FIX-8)
+  - Depends on: P08-FIX-8
+  - Deliverables (non-blockers): (1) `plan.IMPLEMENTED` is a second hand-kept copy of `planned_steps`' step set, so a
+    step planned only under a condition the test fixture does not set can skip the reserve; build `planned_steps`
+    from one table keyed by step (`IMPLEMENTED` = its keys) and test that an all-flags-on `CallRecordFacts` plans
+    exactly `IMPLEMENTED` (the builder sets every bool field, so the test grows with the model). (2) Nothing stops
+    the reserve from growing until `store_window` returns `None` on every call (silent `recording = skipped`): move
+    the pre-store worst case into `budget` and refuse at import when pre-store + `MIN_STORE_WINDOW` +
+    `STORE_RESERVE` exceeds `POSTCALL_BUDGET_S`. (3) Decision wording: what the guard really checks, and that the
+    reserve sums the post-copy steps because they run in sequence (parallel steps would use the max).
+  - Acceptance: tests for the table, the all-flags test, the import-time refusal helper; reserve still 525 s;
+    `make check` passes; append both note names to `.ralph/review-inbox/DONE` on approval.
+
+- [ ] P08-FIX-10 Flaky `test_the_context_of_a_queued_call_is_stored_with_its_ttl` (fakeredis TTL 5399 vs 5400)
+  - Spec refs: specs/03 §11 (Redis keys)
+  - Depends on: none
+  - Deliverables: the prefetch activity test compares a fakeredis wall-clock `TTL` with an exact value; under load a
+    second passes between the write and the read. Assert the intent without wall-clock dependence (e.g. `PTTL`
+    within the expected TTL and a lower bound, or read the TTL the store was asked to set).
+  - Acceptance: test robust to a slow read; `make check` passes.
+
 - [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3

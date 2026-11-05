@@ -5,7 +5,9 @@ Pure functions over the activities' timeouts and retry policies; workflow-safe (
 the only step whose retries can wait for minutes (a busy copy lock asks for a retry after the holder's lock
 TTL), so it gets a ``schedule_to_close`` deadline that leaves room for the steps after it: every implemented
 step between the copy and ``emit_completed`` plus the step marks, each at its policy's worst case (Decision
-P08-FIX-8 derives the reserve from :data:`va_workflows.post_call.plan.IMPLEMENTED`).
+P08-FIX-8 derives the reserve from :data:`va_workflows.post_call.plan.IMPLEMENTED`). Importing the module
+fails when the slowest path to the copy, the minimum window, and the reserve no longer fit in the default
+budget (Decision P08-FIX-9).
 """
 
 from __future__ import annotations
@@ -17,20 +19,24 @@ from typing import Final
 
 from temporalio.common import RetryPolicy
 
-from va_domain.post_call import POSTCALL_STEPS, PostCallStep
+from va_domain.post_call import POSTCALL_BUDGET_S, POSTCALL_STEPS, RECORDING_WAIT_S, PostCallStep
 from va_workflows.activities.post_call_inputs import (
     BILLING_RETRY,
     BILLING_TIMEOUT,
     BOOKKEEPING_RETRY,
     BOOKKEEPING_TIMEOUT,
+    RECORD_RETRY,
+    RECORD_TIMEOUT,
 )
 from va_workflows.post_call.plan import IMPLEMENTED
 
 __all__ = [
     "MARK_WORST_CASE",
     "MIN_STORE_WINDOW",
+    "PRE_STORE_WORST_CASE",
     "STEP_WORST_CASE",
     "STORE_RESERVE",
+    "check_copy_window",
     "reserve_for",
     "retry_worst_case",
     "steps_after_store",
@@ -100,7 +106,28 @@ STORE_RESERVE: Final = reserve_for(steps_after_store())
 """What must stay of the budget once the copy is over (today ``finalize_billing`` and the marks of
 ``store_recording`` and ``finalize_billing``: 365 s + 2 x 80 s = 525 s). It excludes schedule-to-start
 latency: a worker backlog can still push the later steps past the budget, and the budget timer then ends
-the run and ``emit_completed`` reports it, as for any overrun."""
+the run and ``emit_completed`` reports it, as for any overrun. The worst cases are summed because the
+steps after the copy run one after another; steps run in parallel would reserve their maximum instead."""
+
+PRE_STORE_WORST_CASE: Final = (
+    retry_worst_case(RECORD_TIMEOUT, RECORD_RETRY) + 3 * MARK_WORST_CASE + timedelta(seconds=RECORDING_WAIT_S)
+)
+"""The slowest path to the copy: step 1, its mark, the recording lookup (bookkeeping policy), the full
+recording wait, and the wait's mark, each at its worst case (today 1005 s)."""
+
+
+def check_copy_window(*, before_store: timedelta, reserve: timedelta, budget_s: int) -> None:
+    """Raise ``ValueError`` when ``before_store`` + ``MIN_STORE_WINDOW`` + ``reserve`` exceeds the budget,
+    i.e. when the slowest run would always skip the copy."""
+    if before_store + MIN_STORE_WINDOW + reserve > timedelta(seconds=budget_s):
+        message = (
+            f"the post-call budget of {budget_s} s leaves no store_recording window: {before_store} before "
+            f"the copy, {reserve} reserved after it"
+        )
+        raise ValueError(message)
+
+
+check_copy_window(before_store=PRE_STORE_WORST_CASE, reserve=STORE_RESERVE, budget_s=POSTCALL_BUDGET_S)
 
 
 def store_window(started: datetime, now: datetime, budget_s: int) -> timedelta | None:
