@@ -46,7 +46,8 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     the call goes on without a bed. ``noise_cancellation`` gates the VAD path and turns Scribe's
     ``filter_background_audio`` on (``va_media.runtime_config``; specs/07 §10 Decision P05-T15).
 11. a ``pathway`` call runs a :class:`~va_engine.pathway_brain.PathwayBrain` on its pinned version
-    (:func:`~va_media.pathway_runtime.build_pathway_brain` over
+    (:func:`~va_media.pathway_runtime.load_call_graph` and
+    :func:`~va_media.pathway_runtime.build_pathway_brain` over
     :class:`~va_media.pathway_runtime.PathwayTools`: the per-process graph cache, the shared tool HTTP client,
     the SMS port over
     :class:`~va_media.call_sms.OutboundSms`), built before any vendor socket opens: a version that cannot be
@@ -55,7 +56,13 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     snapshotted in ``call:{id}:engine`` after every turn
     (:class:`~va_media.pathway_runtime.EngineStateSaver`);
     on exit the brain settles and closes before the snapshot is flushed and the call's events are drained
-    (specs/11 §10 Decision P07-T12b).
+    (specs/11 §10 Decision P07-T12b). Its reply nodes offer the system tools of item 12 (never
+    ``transfer_call``; ``end_call`` per ``globalConfig.allowEndCallTool``) and run the custom tools their
+    ``tools`` and ``globalConfig.globalTools`` name through the call's
+    :class:`~va_media.call_tools.PathwayCallTools` (the stored tools of the pinned graph and of every graph
+    the call switches to, inline tools, signed requests); ``call.tool`` events carry the engine turn and node
+    (:class:`~va_media.pathway_runtime.PathwayToolEvents`), and system tool runs a barge-in left running are
+    drained before the brain closes (specs/13 §4 Decision P08-T02c2).
 12. a ``task`` call with custom tools (``tool_ids``, ``inline_tools``) hands its :class:`TaskBrain` the
     call's :class:`~va_tools.executor.CallToolExecutor` from :class:`~va_media.call_tools.CallToolSource`
     (stored tools with decrypted secret headers, inline tools, the shared tool HTTP client): tool runs become
@@ -112,6 +119,7 @@ from va_elevenlabs import (
 from va_engine.navigation import PathwayUnavailableError
 from va_engine.opener import phrase_voice
 from va_engine.pathway_brain import PathwayBrain
+from va_engine.pathway_call import start_state
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
 from va_events import CallEventBuffer, DbCallEventWriter, DbWebhookRouter, EventPublisher
@@ -133,7 +141,14 @@ from va_media.call_tools import CallToolSource
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
 from va_media.maintenance import maintenance_takeover
-from va_media.pathway_runtime import EngineStateSaver, PathwayGateway, PathwayTools, build_pathway_brain
+from va_media.pathway_runtime import (
+    EngineStateSaver,
+    PathwayGateway,
+    PathwayToolEvents,
+    PathwayTools,
+    build_pathway_brain,
+    load_call_graph,
+)
 from va_media.phrases import CallPhrases
 from va_media.runtime_config import (
     ERROR_END,
@@ -417,12 +432,29 @@ class CallRuntime:
         ``finish_call``). ``PathwayUnavailableError`` when the pathway cannot run."""
         if context.config.runner_type == "task":
             return await self._task_brain(stack, context, org, recorder)
+        return await self._pathway_brain(stack, context, org, recorder)
+
+    async def _pathway_brain(
+        self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
+    ) -> PathwayBrain:
+        """A pathway brain on the call's pinned version with the tools of its graphs and the call's system
+        tools (specs/13 §4 Decision P08-T02c2). On exit (LIFO) the system tool runs a barge-in left running
+        are drained, then the brain closes, then the snapshot is flushed."""
         if self._pathways is None:
             raise PathwayUnavailableError("not_configured")
+        active = await load_call_graph(context, self._pathways)
+        state = start_state(active, context)
+        sms_ok, system = await self._system_tools(context, org, recorder)
+        call_tools = None
+        if self._call_tools is not None:
+            events = None if recorder is None else PathwayToolEvents(recorder, state)
+            call_tools = await self._call_tools.pathway_tools(context, active.graph, events, system=system)
         saver = None if self._redis is None else EngineStateSaver(self._redis, context.call_id)
-        brain = await build_pathway_brain(
+        brain = build_pathway_brain(
             context,
             org,
+            active=active,
+            state=state,
             tools=self._pathways,
             gateway=self._gateway,
             counter=self._counter,
@@ -430,10 +462,14 @@ class CallRuntime:
             sms=self._sms_port(context),
             recorder=recorder,
             saver=saver,
+            call_tools=call_tools,
+            system_tools=facts_for_call(context, org, sms_capable=sms_ok),
         )
         if saver is not None:
             stack.push_async_callback(saver.aclose)
         stack.push_async_callback(brain.aclose)
+        if call_tools is not None:
+            stack.push_async_callback(call_tools.executor.aclose)
         return brain
 
     async def _task_brain(

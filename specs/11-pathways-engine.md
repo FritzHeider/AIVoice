@@ -1048,6 +1048,9 @@ Keys always present (null when not applicable); keys sorted as above; times UTC 
 > store the engine turn index in `call_turns.pathway_turn` (migration 0009; NULL for other runners). The Call
 > Object groups a row by `pathway_turn` when it is set, else by `turn_index`; rule 1's "at most one assistant row
 > per turn index" holds for `turn_index` only, the grouping joins a turn's rows as described.
+>
+> Addendum (2026-11-05, P08-T02c2): the `call.tool` events of a pathway call carry `turn_index` and `node_id`
+> (specs/13 §4 Decision P08-T02c2 item 4), so rule 3 lists a node's custom tool runs in `decision.tools`.
 
 ## 13. Configuration precedence for node model options
 `node.modelOptions` → `global_config` defaults → call config (`temperature`, `interruptibility`,

@@ -218,6 +218,54 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 > `cut_contents`). This narrows the "every later call" / "unanswered calls" wording of Decision P08-FIX-19
 > item 1, Decision P08-T02c1 item 3 and §5 Decision P08-T02b1 item 4.
 
+> Decision (2026-11-05) P08-T02c2: pathway calls in the media worker get node tools and system tools.
+> 1. The call's `PathwayToolExecutor` is `va_tools.pathway_executor.PathwayCallExecutor`. `for_refs(refs)`
+>    returns a `CallToolExecutor` over the tools the refs resolve to, in ref order: a string ref is a stored
+>    tool id (`TL-<uuid>` or a bare uuid, `tool_ref_id`; the Tools API parses its path ids with the same
+>    function) and resolves when the call loaded that tool; a mapping ref is validated as a Send Call inline tool
+>    (`va_domain.calls.tools.InlineTool`: no `secret_headers`, its `headers` are masked like secrets) and one
+>    that does not validate resolves to nothing (logged `tools.inline_tool_invalid` once per call with the error
+>    count only). So does a mapping ref that cannot be written as JSON (an integer beyond 64 bits passes graph
+>    validation): it could not be sent either, and it is logged once per call for all such refs (`errors=1`).
+>    Tools with a reserved name are dropped; of several refs with one tool name the first wins
+>    (`tools.tool_skipped`). Every node executor shares the call's `va_tools.executor.SystemRuns`: the
+>    executor-backed system tools run on any reply node, a run one node left behind is `detached` for every
+>    other node's executor (§6 Decision P08-FIX-21), and all runs are drained once.
+> 2. Loading (`va_media.call_tools.PathwayCallTools`): the stored tools named by the node `tools` and the
+>    `globalTools` of the call's pinned graph are loaded when the call starts, before any vendor socket opens,
+>    and those of every graph the call switches to (Transfer Pathway node, forwarding to a pathway) right after
+>    that graph is loaded. Rows are read in one tenant session of the call's org (ids that are absent, deleted
+>    or another org's resolve to nothing) and their secret headers are decrypted after the session closed. An
+>    id whose lookup ran is not looked up again in the call. A lookup that could not run (database, KMS;
+>    logged `media.tools_unavailable`), that ran out of time, or that was cancelled with the turn that
+>    switched graphs learned nothing about its ids: the graph keeps its inline tools and the next load of that
+>    graph looks again (every switch or return to the graph is such a load, so the retries are bounded by the
+>    graph loads of the call). Requests are signed as in §5 Decision P08-T02b1 item 1; the org's signing
+>    secrets are read when the first graph with tool refs is seen, and until that read worked requests go out
+>    unsigned. A read that failed (`media.tool_signing_unavailable`) or ran out of time is repeated at the
+>    next load of a graph with tool refs; an org that is gone is not asked for again. Deadline: the load at
+>    call start has none of its own (the wait task mode has too, before any audio); a load at a graph switch
+>    runs inside the caller's turn and gets 2 s on the call clock
+>    (`va_media.call_tools.SWITCH_LOAD_TIMEOUT_S`) for the tools and the signing secrets together. Past it
+>    the switch goes on with what was finished: a tool lookup cut off is logged `media.tools_unavailable`
+>    (`error_type` `TimeoutError`) and skips the signing read, a signing read cut off is logged
+>    `media.tool_signing_unavailable`.
+> 3. System tools: the facts are the task-mode ones (`facts_for_call`) with runner `pathway`, so reply nodes
+>    offer `end_call` (per `allowEndCallTool`), `press_button`, and `send_sms`/`schedule_callback` under the
+>    task-mode availability rules (§6 Decisions P08-T02b2 and P08-FIX-13), never `transfer_call`. Fillers follow
+>    the org's `engine.tool_fillers`. A media worker without a call tool source offers `end_call` and
+>    `press_button` only.
+> 4. Events: tool runs are reported as in task mode (§5 Decision P08-T02b1 item 2). The `call.tool` data of a
+>    pathway call also carries `turn_index` and `node_id` (the engine turn and current node when the run is
+>    reported), which lists the run in that turn's `pathway_logs[].decision.tools` (specs/11 §12 rule 3).
+> 5. The call's tool speech (quoted by the tool usage note) is the first non-blank `speech` among the tools the
+>    pinned graph's refs resolve to, in node order then `globalTools`; while the call has none, the refs of a
+>    graph loaded later are searched the same way, and once found it stays. The engine reads it before every
+>    reply pass (`PathwayEngine._prepare`), so the note quotes a later graph's speech from that graph's first
+>    reply on; until the call has one the note quotes the first filler phrase.
+> 6. At call end the system tool runs a barge-in left running are drained (20 s, §6 Decision P08-FIX-13 item 2)
+>    before the brain closes and the engine snapshot is flushed.
+
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same
 fields as ToolCreate (no `secret_headers`; inline `headers` values are treated as secret in logs).
@@ -362,7 +410,7 @@ tool calls per call: 100.
 >    time in the call's timezone). A failed start marks the child `failed` (`error`/`call_error`, `call.error`
 >    `{"code":"dispatch_failed","detail":"workflow_start"}`) unless the workflow already moved it on, and answers
 >    `{"error":"callback_failed"}`; a database or event failure creates nothing and answers the same.
-> 4. Pathway calls get these tools with P08-T02c.
+> 4. Pathway calls get these tools on their reply nodes: §4 Decision P08-T02c2 item 3.
 >
 > Decision (2026-11-05) P08-FIX-13: hardening of the P08-T02b2 system tools.
 > 1. Both tools need the other party's number to be E.164 (`va_media.call_sms.dialable`, the edge's inbound
@@ -418,8 +466,10 @@ tool calls per call: 100.
 >    end routine neither records nor hangs up (specs/07 §18 Decision P05-T11b step 1) and signals
 >    `worker_lost`; `CallWorkflow` ends the call (on that signal, or on its heartbeat watch: `worker_crash`).
 >    One party ends the call, not two.
-> 2. A `transferred` end stays: its routine neither records nor hangs up anyway, and `worker_lost` would make
->    the workflow hang up on the bridged caller and target.
+> 2. A `transferred` end that decided the race stays: its routine neither records nor hangs up anyway, and
+>    `worker_lost` would make the workflow hang up on the bridged caller and target. A lock lost, or an
+>    overrun, before the body returned `transferred` (it returns after its exit stack unwound) still ends
+>    `worker_lost`, as for every call the pod still answers for.
 > 3. A session that failed (the body or a control handler raised) still raises and closes 1011; its end
 >    routine is given `worker_lost` instead of the failure, for the same reason as item 1.
 > 4. The lock: not released after a loss (it is not ours), released by compare-and-delete after an overrun.

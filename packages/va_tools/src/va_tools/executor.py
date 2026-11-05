@@ -15,16 +15,21 @@ offers system tools from the call's facts), have no ``speech`` (a slow one gets 
 
 A system tool that ``detaches`` (:attr:`SystemTool.detaches`) has a side effect the caller asked for, so its
 body runs to completion even when a barge-in cancels the turn waiting for it (Decision P08-FIX-13 under
-specs/13 §6): each run is a task the executor owns, awaited through :func:`asyncio.shield`, and its outcome
-(failure event included) is still reported after nobody waits for it any more. The executor tells the round so
-(:meth:`CallToolExecutor.detached`), which answers the call ``in_progress`` instead of ``interrupted``
-(Decision P08-FIX-21 under specs/13 §6); the cancellation of the wait itself always propagates.
-:meth:`CallToolExecutor.aclose` waits for unfinished runs at call end (up to :data:`SYSTEM_DRAIN_S`) and
-cancels what is left.
+specs/13 §6): each run is a task the call's :class:`SystemRuns` owns, awaited through :func:`asyncio.shield`,
+and its outcome (failure event included) is still reported after nobody waits for it any more. The executor
+tells the round so (:meth:`CallToolExecutor.detached`), which answers the call ``in_progress`` instead of
+``interrupted`` (Decision P08-FIX-21 under specs/13 §6); the cancellation of the wait itself always
+propagates. :meth:`CallToolExecutor.aclose` waits for unfinished runs at call end (up to
+:data:`SYSTEM_DRAIN_S`) and cancels what is left.
 
-A system tool that does not detach (a lookup) runs in the waiting task and is cancelled with it: the executor
-neither owns nor drains the run, a cut round answers it ``interrupted`` and the model asks again (Decision
-P08-FIX-22 under specs/13 §6).
+A system tool that does not detach (a lookup) runs in the waiting task and is cancelled with it: nothing owns
+or drains the run, a cut round answers it ``interrupted`` and the model asks again (Decision P08-FIX-22 under
+specs/13 §6).
+
+:class:`SystemRuns` holds the system tools of one call and their runs. A task-mode call has one executor,
+which builds its own; the node executors of a pathway call (:mod:`va_tools.pathway_executor`) share the
+call's, so a run one node left behind is known to every other node's executor and drained once (Decision
+P08-T02c2 under specs/13 §4).
 """
 
 from __future__ import annotations
@@ -48,13 +53,14 @@ __all__ = [
     "SYSTEM_DRAIN_S",
     "CallToolExecutor",
     "SystemOutcome",
+    "SystemRuns",
     "SystemTool",
     "ToolEvents",
     "merged_tools",
 ]
 
 SYSTEM_DRAIN_S: Final = 20.0
-"""How long :meth:`CallToolExecutor.aclose` waits for unfinished system tool runs (longer than a callback's
+"""How long :meth:`SystemRuns.aclose` waits for unfinished system tool runs (longer than a callback's
 workflow start deadline plus its database writes)."""
 
 _log = get_logger(__name__)
@@ -113,74 +119,32 @@ def merged_tools(stored: Sequence[ToolSpec], inline: Sequence[ToolSpec]) -> tupl
     return tuple(kept.values())
 
 
-class CallToolExecutor:
-    """Runs the custom tools of one call (see the module docstring)."""
+class SystemRuns:
+    """The executor-backed system tools of one call and their runs (one owner: every executor of the call
+    shares it, so a detached run is known to all of them and drained once)."""
 
-    def __init__(
-        self,
-        specs: Sequence[ToolSpec],
-        *,
-        runner: ToolRunner,
-        events: ToolEvents | None = None,
-        system: Sequence[SystemTool] = (),
-    ) -> None:
-        self._specs: Mapping[str, ToolSpec] = {spec.name: spec for spec in specs}
-        self._system: Mapping[str, SystemTool] = {tool.name: tool for tool in system}
-        self._runner = runner
+    def __init__(self, tools: Sequence[SystemTool] = (), *, events: ToolEvents | None = None) -> None:
+        self._tools: Mapping[str, SystemTool] = {tool.name: tool for tool in tools}
         self._events = events
         self._pending: set[asyncio.Task[SystemOutcome]] = set()
         self._detached: list[ToolCall] = []
 
-    def definitions(self) -> tuple[ToolDef, ...]:
-        return tuple(function_def(spec) for spec in self._specs.values())
-
-    @property
-    def tool_speech(self) -> str | None:
-        for spec in self._specs.values():
-            if spec.speech and spec.speech.strip():
-                return spec.speech
-        return None
-
     def handles(self, name: str) -> bool:
-        return name in self._specs or name in self._system
-
-    def speech(self, name: str) -> str | None:
-        spec = self._specs.get(name)
-        if spec is None or not spec.speech or not spec.speech.strip():
-            return None
-        return spec.speech
+        return name in self._tools
 
     def detached(self, call: ToolCall) -> bool:
-        """Whether the system tool run of ``call`` went on when the wait for it was cancelled (by object
-        identity: equal calls are different runs). A run cancelled by :meth:`aclose`, a system tool that
-        does not detach and a custom tool, both cancelled with their wait, are not detached."""
+        """Whether the run of ``call`` went on when the wait for it was cancelled (by object identity: equal
+        calls are different runs). A run cancelled by :meth:`aclose` and a system tool that does not detach,
+        cancelled with its wait, are not detached."""
         return any(item is call for item in self._detached)
 
-    async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
-        system = self._system.get(call.name)
-        if system is not None:
-            return await self._run_system(system, call)
-        spec = self._specs[call.name]
-        invocation = await self._runner.run(spec, call.arguments_json, scope)
-        if self._events is not None:
-            self._events.tool(invocation.event_data())
-            if invocation.failed:
-                self._events.tool_failed(failure_detail(invocation))
-        _log.info(
-            "tools.call_ran",
-            tool=spec.name,
-            outcome=invocation.outcome,
-            status=invocation.status_code,
-            attempts=invocation.attempts,
-            duration_ms=invocation.duration_ms,
-        )
-        return ToolAnswer(invocation.content, invocation.variables)
-
-    async def _run_system(self, tool: SystemTool, call: ToolCall) -> ToolAnswer:
+    async def run(self, call: ToolCall) -> ToolAnswer:
+        """Run the system tool ``call`` names (the caller checked :meth:`handles`)."""
+        tool = self._tools[call.name]
         if not tool.detaches:  # nothing to finish for nobody: the run ends with the wait for it
-            outcome = await self._finish_system(tool, call)
+            outcome = await self._finish(tool, call)
             return ToolAnswer(outcome.content)
-        task = asyncio.create_task(self._finish_system(tool, call), name=f"system-tool:{tool.name}")
+        task = asyncio.create_task(self._finish(tool, call), name=f"system-tool:{tool.name}")
         self._pending.add(task)
         task.add_done_callback(self._settled)
         try:
@@ -191,7 +155,7 @@ class CallToolExecutor:
             raise
         return ToolAnswer(outcome.content)
 
-    async def _finish_system(self, tool: SystemTool, call: ToolCall) -> SystemOutcome:
+    async def _finish(self, tool: SystemTool, call: ToolCall) -> SystemOutcome:
         """One system tool run, reported here so a run nobody waits for any more is still reported."""
         try:
             outcome = await tool.run(call)
@@ -227,3 +191,73 @@ class CallToolExecutor:
             task.cancel()
         await asyncio.wait(left)
         _log.warning("tools.system_tools_abandoned", count=len(left))
+
+
+class CallToolExecutor:
+    """Runs the custom tools of one call (see the module docstring).
+
+    ``system``: the call's system tools, or the :class:`SystemRuns` this executor shares with the call's
+    other executors (``events`` then report only this executor's custom tool runs).
+    """
+
+    def __init__(
+        self,
+        specs: Sequence[ToolSpec],
+        *,
+        runner: ToolRunner,
+        events: ToolEvents | None = None,
+        system: Sequence[SystemTool] | SystemRuns = (),
+    ) -> None:
+        self._specs: Mapping[str, ToolSpec] = {spec.name: spec for spec in specs}
+        self._runs = system if isinstance(system, SystemRuns) else SystemRuns(system, events=events)
+        self._runner = runner
+        self._events = events
+
+    def definitions(self) -> tuple[ToolDef, ...]:
+        return tuple(function_def(spec) for spec in self._specs.values())
+
+    @property
+    def tool_speech(self) -> str | None:
+        for spec in self._specs.values():
+            if spec.speech and spec.speech.strip():
+                return spec.speech
+        return None
+
+    def handles(self, name: str) -> bool:
+        return name in self._specs or self._runs.handles(name)
+
+    def speech(self, name: str) -> str | None:
+        spec = self._specs.get(name)
+        if spec is None or not spec.speech or not spec.speech.strip():
+            return None
+        return spec.speech
+
+    def detached(self, call: ToolCall) -> bool:
+        """Whether the system tool run of ``call`` went on when the wait for it was cancelled (by object
+        identity: equal calls are different runs). A run cancelled by :meth:`aclose`, a system tool that
+        does not detach and a custom tool, both cancelled with their wait, are not detached."""
+        return self._runs.detached(call)
+
+    async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
+        if self._runs.handles(call.name):
+            return await self._runs.run(call)
+        spec = self._specs[call.name]
+        invocation = await self._runner.run(spec, call.arguments_json, scope)
+        if self._events is not None:
+            self._events.tool(invocation.event_data())
+            if invocation.failed:
+                self._events.tool_failed(failure_detail(invocation))
+        _log.info(
+            "tools.call_ran",
+            tool=spec.name,
+            outcome=invocation.outcome,
+            status=invocation.status_code,
+            attempts=invocation.attempts,
+            duration_ms=invocation.duration_ms,
+        )
+        return ToolAnswer(invocation.content, invocation.variables)
+
+    async def aclose(self, timeout_s: float = SYSTEM_DRAIN_S) -> None:
+        """Wait up to ``timeout_s`` for the call's unfinished system tool runs, then cancel the rest
+        (:meth:`SystemRuns.aclose`); never raises."""
+        await self._runs.aclose(timeout_s)

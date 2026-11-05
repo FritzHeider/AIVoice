@@ -3,6 +3,7 @@ the SMS node port, and the brain builder's refusals (specs/11 §9, §10 Decision
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -10,6 +11,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from clock_helpers import ManualClock
+from dialogue_helpers import FakeSource
 from fakeredis import FakeAsyncRedis
 from media_helpers import call_context
 from redis.asyncio import Redis
@@ -19,6 +21,7 @@ from sms_fakes import FakeTelnyx
 from sms_rows import add_sms_number, random_e164
 from sqlalchemy import select
 from tenant_rows import OrgFactory, open_database
+from tools_helpers import GatedSystem
 
 from va_common.ids import new_id
 from va_db.models import Message
@@ -28,12 +31,23 @@ from va_domain.org import OrgSettings
 from va_engine.engine import new_pathway_state
 from va_engine.models import EngineState, load_engine_state, load_graph
 from va_engine.navigation import ActiveGraph, PathwayUnavailableError
+from va_engine.pathway_brain import PathwayBrain
 from va_engine.pathway_call import ENGINE_STATE_TTL_S, engine_state_key
 from va_engine.ports import SmsOutcome, SmsRequest
+from va_engine.system_tools import SystemToolFacts, facts_for_call
 from va_llm.tokens import default_counter
 from va_media.call_sms import CallSmsPort, OutboundSms, agent_number, counterpart_number
-from va_media.pathway_runtime import EngineStateSaver, PathwayTools, RecorderEvents, build_pathway_brain
+from va_media.call_tools import CallToolSource, PathwayCallTools
+from va_media.pathway_runtime import (
+    EngineStateSaver,
+    PathwayToolEvents,
+    PathwayTools,
+    RecorderEvents,
+    build_pathway_brain,
+    load_call_graph,
+)
 from va_pathways.call_graphs import CallGraphCache
+from va_tools.executor import SystemOutcome
 
 EDGE = "edge.test:8100"
 
@@ -185,16 +199,138 @@ async def test_a_pathway_call_without_a_loadable_version_is_refused(database: Da
     reasons = []
     for context in contexts:
         with pytest.raises(PathwayUnavailableError) as refused:
-            await build_pathway_brain(
-                context,
-                OrgSettings(),
-                tools=_tools(database),
-                gateway=cast("Any", None),
-                counter=default_counter(),
-                clock=ManualClock(),
-                sms=None,
-                recorder=None,
-                saver=None,
-            )
+            await load_call_graph(context, _tools(database))
         reasons.append(refused.value.reason)
     assert reasons == ["not_found", "not_found"]
+
+
+class _ToolRecorder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def tool(self, data: dict[str, Any]) -> None:
+        self.calls.append(("tool", data))
+
+    def tool_failed(self, detail: str) -> None:
+        self.calls.append(("tool_failed", detail))
+
+    def sms_sent(self, data: dict[str, Any]) -> None:
+        self.calls.append(("sms_sent", data))
+
+
+def test_tool_events_carry_the_engine_turn_and_node_of_the_report() -> None:
+    recorder = _ToolRecorder()
+    state = _state()
+    events = PathwayToolEvents(cast("Any", recorder), state)
+    run = {"tool_name": "lookup", "outcome": "ok"}
+    events.tool(dict(run))
+    state.turn_index, state.current_node_id = 3, "orders"
+    events.tool(dict(run))
+    events.tool_failed("lookup: http_error (500)")
+    events.sms_sent({"to": "+14155550100"})
+    assert recorder.calls == [
+        ("tool", {**run, "turn_index": 0, "node_id": "start"}),
+        ("tool", {**run, "turn_index": 3, "node_id": "orders"}),
+        ("tool_failed", "lookup: http_error (500)"),
+        ("sms_sent", {"to": "+14155550100"}),
+    ]
+
+
+def _reply_graph() -> ActiveGraph:
+    """One reply node whose line streams from the dialogue model."""
+    nodes = [
+        {"id": "start", "type": "Default", "data": {"name": "Start", "isStart": True, "prompt": "Greet."}}
+    ]
+    return ActiveGraph(None, None, load_graph(nodes, [], None))
+
+
+def _brain(  # noqa: PLR0913 - what one built brain varies in
+    context: CallContext,
+    org: OrgSettings,
+    active: ActiveGraph,
+    state: EngineState,
+    *,
+    gateway: FakeSource | None = None,
+    call_tools: PathwayCallTools | None = None,
+    system_tools: SystemToolFacts | None = None,
+) -> PathwayBrain:
+    return build_pathway_brain(
+        context,
+        org,
+        active=active,
+        state=state,
+        tools=_tools(cast("Database", None)),
+        gateway=cast("Any", gateway),
+        counter=default_counter(),
+        clock=ManualClock(),
+        sms=None,
+        recorder=None,
+        saver=None,
+        call_tools=call_tools,
+        system_tools=system_tools,
+    )
+
+
+def test_the_brain_runs_on_the_given_graph_and_state() -> None:
+    active = _reply_graph()
+    state = new_pathway_state(active)
+    context = call_context(new_id(), runner_type="pathway")
+    org = OrgSettings.model_validate({"engine": {"tool_fillers": False}})
+    brain = _brain(context, org, active, state, system_tools=SystemToolFacts(runner="pathway"))
+    assert brain.state is state
+    assert brain.engine.navigator.graph is active.graph
+
+
+async def _offered(context: CallContext, org: OrgSettings, call_tools: PathwayCallTools | None) -> list[str]:
+    """The tools the start node's reply offers the model on a call every system tool is allowed on (the
+    agent number can send SMS)."""
+    active = _reply_graph()
+    source = FakeSource().reply("Hello.")
+    brain = _brain(
+        context,
+        org,
+        active,
+        new_pathway_state(active),
+        gateway=source,
+        call_tools=call_tools,
+        system_tools=facts_for_call(context, org, sms_capable=True),
+    )
+    async with contextlib.aclosing(brain.start()) as outputs:
+        spoken = ["".join([token async for token in output.tokens]) async for output in outputs]  # type: ignore[union-attr]
+    await brain.aclose()
+    assert spoken == ["Hello."]
+    [request] = source.requests
+    return [tool.name for tool in request.tools]
+
+
+async def test_reply_nodes_offer_only_the_system_tools_the_call_can_run_and_never_a_transfer() -> None:
+    """specs/13 §4 Decision P08-T02c2 item 3: a call that allows every system tool (and has a transfer
+    number) offers its reply nodes the task-mode set without ``transfer_call``; a media worker without a
+    call tool source runs no executor-backed system tool, so it offers ``end_call`` and ``press_button``."""
+    context = call_context(new_id(), runner_type="pathway", transfer_phone_number="+14155550123")
+    org = OrgSettings.model_validate({"tools": {"allow_schedule_callback": True}})
+    facts = facts_for_call(context, org, sms_capable=True)
+    assert (facts.runner, facts.transfer_phone_number) == ("pathway", "+14155550123")
+    assert (facts.sms_capable, facts.allow_schedule_callback) == (True, True)
+
+    assert await _offered(context, org, None) == ["end_call", "press_button"]
+
+    source = CallToolSource(
+        database=cast("Database", None),
+        envelope=cast("Any", None),
+        tools_http=cast("httpx.AsyncClient", None),
+        allow_http=True,
+        clock=ManualClock(),
+    )
+    answer = SystemOutcome('{"status":"ok"}')
+    sms_only = await source.pathway_tools(
+        context, _reply_graph().graph, None, system=[GatedSystem("send_sms", answer)]
+    )
+    assert await _offered(context, org, sms_only) == ["end_call", "press_button", "send_sms"]
+    both = await source.pathway_tools(
+        context,
+        _reply_graph().graph,
+        None,
+        system=[GatedSystem("send_sms", answer), GatedSystem("schedule_callback", answer)],
+    )
+    assert await _offered(context, org, both) == ["end_call", "press_button", "send_sms", "schedule_callback"]

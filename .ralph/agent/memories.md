@@ -2,6 +2,26 @@
 
 ## Patterns
 
+### mem-1793912036-4c7f
+> P08-T02c2 approved on the second pass: reviewer re-ran every gate incl. make e2e (make test ~15 min, e2e ~7 min; run them one after the other, light gates/probes in between); a deadline-sharing claim needs a test where the first stage spends clock time (ManualClock: fake tenant session that sleeps 1.5 s then fails -> the signing read must sleep 0.5 s) - the committed test would pass with a fresh budget, probe kept in logs/probe_review_t02c2_test.py; Monitor expires after 10 min even with a larger timeout_ms, re-arm at the expiry notice
+<!-- tags: tools, pathways, review, testing | created: 2026-11-05 -->
+
+### mem-1793910625-9a09
+> P08-T02c2 second pass: PathwayEngine reads ports.tools.tool_speech in _prepare (per reply pass, not __init__); PathwayCallTools.ensure(graph, timeout_s=) marks ids tried / signing read final (CallToolSource.read_signer -> SigningRead(signer, final)) only when the read ran, loader bounds it with SWITCH_LOAD_TIMEOUT_S=2s via waits.within on the source clock (FrozenClock source times every switch load out at once -> tests use SystemClock or ManualClock + _Held().wrap('tenant'|'global') over _FirstSessions); inline tool ref with an int > 64 bits resolves to nothing (dumps TypeError caught, logged once per call); jscpd flags two near-identical test fake classes in ONE file (merge them); stopping make test yourself shows as a failed background task (exit 144)
+<!-- tags: tools, pathways, media, testing | created: 2026-11-05 -->
+
+### mem-1793907989-efbc
+> Reviewer: before approving, list .ralph/review-inbox for notes about the task under review that are not in DONE (a maintainer note can land after the Planner looked: 2026-11-05-p08-t02c2-wip-review.md arrived mid-loop with a blocker); P08-T02c2 rejected: PathwayEngine reads ports.tools.tool_speech once in __init__ (engine.py:278), so a speech added to PathwayCallExecutor later never reaches the tool usage note; va_common.json.dumps raises TypeError for ints beyond 64 bits (inline tool cache key in _inline_spec); review probes go in git-ignored logs/ and run with uv run pytest <file> -n 0 --no-cov -p no:cacheprovider
+<!-- tags: tools, pathways, review, testing | created: 2026-11-05 -->
+
+### mem-1793907678-535f
+> P08-T02c2 verify pass: the offered system-tool set of a media-built pathway brain is pinned in apps/media_worker/tests/test_pathway_runtime.py (_brain helper + _offered: build_pathway_brain(gateway=FakeSource), drain brain.start(), read source.requests[0].tools); no call tool source -> end_call/press_button only, never transfer_call; a graph without tool refs lets CallToolSource.pathway_tools run with database=None; make test ~15 min on the EC2 runner (13122 passed), make e2e ~7 min; the Monitor tool expires after 10 min, re-arm it at the expiry notice
+<!-- tags: tools, pathways, media, testing | created: 2026-11-05 -->
+
+### mem-1793905733-b7a5
+> P08-T02c2: pathway call tools in media = va_tools.pathway_executor.PathwayCallExecutor (add/knows/for_refs -> CallToolExecutor per node, tool_ref_id, graph_tool_refs) over shared va_tools.executor.SystemRuns; media CallToolSource.pathway_tools -> PathwayCallTools(executor, ensure(graph), loader(inner)); pathway_runtime.load_call_graph + sync build_pathway_brain(active=, state=, call_tools=, system_tools=); PathwayToolEvents stamps call.tool with turn_index/node_id; state changed before an await in a per-turn path must survive cancellation (mark ids tried / signer read only AFTER the await, a barge-in cancels the graph switch); FakeLLM rule tool_name matches forced fn else any offered tool -> tool_name:<custom> + system_contains '## Current step: <node>' selects a node's dialogue requests; jscpd flags shared rig headers: runtime_rig.sim_backends/local_tool_source
+<!-- tags: tools, pathways, media, testing | created: 2026-11-05 -->
+
 ### mem-1793900869-38bf
 > P08-FIX-18: CallSession ends OWNERSHIP_LOST (run result, metric worker_lost, ender) when the lock was lost or the teardown overran TEARDOWN_KEEPALIVE_S by the time the body teardown finished, whatever decided the race, except a transferred end; a failed session still raises/1011 but its ender gets OWNERSHIP_LOST not None (flags read via _abandoned()); tests _lose_lock/_overrun/_in_teardown + rig(control_handler=) in test_session.py; pkill -f '[x]pattern' still kills your own shell if the same command line contains the literal text elsewhere (kill by pid instead)
 <!-- tags: media, session, testing | created: 2026-11-05 -->
@@ -543,6 +563,10 @@
 <!-- tags: database, testing | created: 2026-10-27 -->
 
 ## Decisions
+
+### mem-1793902706-a548
+> P08-T02c2 plan: pathway call tools = va_tools.pathway_executor.PathwayCallExecutor (for_refs -> CallToolExecutor per node over one shared va_tools.executor.SystemRuns) + va_media.call_tools.PathwayCallTools (ensure(graph) loads stored tools for the pinned graph and every graph the loader brings, lazy _CallSigner) + PathwayToolEvents(recorder, state) stamping call.tool with turn_index/node_id (pathway logs ignore events without turn_index); inbox note 2026-11-05-p08-fix-18-wip-review.md closed by wording (DEC-018) inside P08-T02c2, Reviewer appends it to DONE
+<!-- tags: tools, pathways, media | created: 2026-11-05 -->
 
 ### mem-1793795260-f93b
 > P07-T12b: pathway call variables reach calls.variables via the call:{id}:engine snapshot read by CallEnd (a carrier hangup cancels the session body, so a SessionEnd field would lose them); PathwayBrain.turn_tags tags agent turns by the line last handed to the pipeline because a SayStream is recorded in history only after the generator resumes; call_turns.pathway_turn groups pathway_logs

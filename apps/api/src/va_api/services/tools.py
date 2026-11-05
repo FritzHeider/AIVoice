@@ -10,7 +10,6 @@ this module, in responses and in audit rows alike. An update that changes nothin
 
 from __future__ import annotations
 
-import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -25,11 +24,12 @@ from va_api.auth.context import RequestContext
 from va_api.routers.tools_schemas import ToolCreate, ToolUpdate, ToolView
 from va_common.crypto import Envelope
 from va_common.errors import AppError
-from va_common.ids import PublicPrefix, from_public, is_public, new_id, to_public
+from va_common.ids import PublicPrefix, new_id, to_public
 from va_db.models import Tool
 from va_db.repositories import ToolReference, ToolRepo
 from va_db.session import Database
 from va_domain.calls.tools import InlineTool
+from va_tools.pathway_executor import tool_ref_id
 from va_tools.secrets import decrypt_secret_headers, encrypt_secret_headers, mask_headers
 from va_tools.validation import check_tool_definition
 
@@ -52,7 +52,6 @@ IN_USE_MESSAGE: Final = (
     "Tool is used by published pathways, personas, or agents; pass force=true to delete it."
 )
 INVALID_TOOL_ID_MESSAGE: Final = "tool_id must be TL-<uuid> or a uuid."
-_BARE_UUID: Final = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 _SECRET_FIELD: Final = "secret_headers"  # noqa: S105 - a field name
 
 
@@ -75,11 +74,10 @@ class ToolPage:
 
 def parse_tool_id(value: str) -> uuid.UUID:
     """``TL-<uuid>`` or a bare uuid; ``INVALID_INPUT`` (field ``tool_id``) otherwise."""
-    if is_public(value, PublicPrefix.TOOL):
-        return from_public(value, PublicPrefix.TOOL)
-    if _BARE_UUID.match(value):
-        return uuid.UUID(value)
-    raise AppError("INVALID_INPUT", INVALID_TOOL_ID_MESSAGE, field="tool_id")
+    tool_id = tool_ref_id(value)
+    if tool_id is None:
+        raise AppError("INVALID_INPUT", INVALID_TOOL_ID_MESSAGE, field="tool_id")
+    return tool_id
 
 
 def _definition(row: Tool) -> dict[str, Any]:

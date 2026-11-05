@@ -22,30 +22,32 @@ from call_rows import SeededCall, load_call, seed_call
 from llm_client_helpers import served_requests
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
-from runtime_rig import MODELS_DIR, WAIT_S, RecordingRuntime, StaticOrgSettings, sim_runtime
+from runtime_rig import (
+    MODELS_DIR,
+    WAIT_S,
+    RecordingRuntime,
+    StaticOrgSettings,
+    local_tool_source,
+    sim_backends,
+    sim_runtime,
+)
 from service_helpers import json_log_stream, log_events
 from sim_media import EdgeRelay, realtime_telnyx, streamed_call
 from sms_rows import add_sms_number
 from sqlalchemy import select, update
 from telnyx_helpers import CALLEE, register
-from tenant_rows import open_database
 from tts_helpers import VOICE_ID
-from webhook_receiver import Receiver, Reply, served_receiver
+from webhook_receiver import Receiver, Reply
 
-from va_common.crypto import Envelope, LocalKmsProvider
-from va_common.time import SystemClock, utcnow
+from va_common.time import utcnow
 from va_db.models import Call, CallEvent, PhoneNumber
 from va_db.provisioning import OrgProvisioner
-from va_db.repositories import OrgDataKeyStore
 from va_db.repositories.identity import NewUser
 from va_db.session import Database
 from va_domain.call_workflow import CallWorkflowInput
 from va_domain.org import OrgSettings
 from va_engine.models import load_engine_state
 from va_engine.pathway_call import engine_state_key
-from va_media.call_tools import CallToolSource
-from va_media.runtime import open_persistence
-from va_sim.server import running_sims
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 
@@ -166,42 +168,33 @@ async def tools_rig(  # noqa: PLR0913 - the rig's options, keyword-only
     state = realtime_telnyx(relay)
     container = FakeMediaContainer()
     receiver = Receiver(reply)
-    async with (
-        open_database(media_db_url) as database,
-        running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls,
-        served_receiver(receiver) as port,
-        httpx.AsyncClient(base_url=urls["llm"]) as llm,
-        httpx.AsyncClient() as tools_http,
-        open_persistence(database, container.redis, clock=SystemClock()) as persistence,
-    ):
-        envelope = Envelope(LocalKmsProvider.from_hex(secrets.token_hex(32)), OrgDataKeyStore(database))
-        source = CallToolSource(
-            database=database, envelope=envelope, tools_http=tools_http, allow_http=True, clock=SystemClock()
-        )
+    async with sim_backends(media_db_url, state, receiver, container.redis) as backends:
+        database = backends.database
+        source = local_tool_source(database, backends.tools_http)
         async with sim_runtime(
             state,
-            urls,
+            backends.urls,
             org_settings=StaticOrgSettings(org if org is not None else OrgSettings()),
             phrase_redis=container.redis,
-            persistence=persistence,
+            persistence=backends.persistence,
             database=database,
             end_redis=container.redis,
             call_tools=source,
             messaging=messaging,
             callback_starter=starter,
         ) as parts:
-            await add_rules(llm, rules)
+            await add_rules(backends.llm, rules)
             yield ToolsRig(
                 state,
-                llm,
+                backends.llm,
                 parts.body,
                 container,
                 parts.signaller,
                 relay,
                 database,
-                OrgProvisioner(database, envelope),
+                OrgProvisioner(database, source.envelope),
                 receiver,
-                port,
+                backends.receiver_port,
                 parts.sms_number,
                 starter,
             )

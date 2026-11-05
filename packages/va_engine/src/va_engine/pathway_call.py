@@ -2,9 +2,10 @@
 
 :func:`pathway_facts` builds the engine's :class:`~va_engine.engine.ConversationFacts` from the call's
 :class:`~va_domain.call_context.CallContext` (``transfer_list`` stays empty: pathways ignore it, specs/05
-§3). :func:`start_state` is the fresh :class:`~va_engine.models.EngineState` of the call: the graph's start
-node, or the call's ``start_node_id`` when the graph has that node (an unknown id falls back to the start
-node, logged), seeded with the context's variables.
+§3) plus the system tools the runtime allows its reply nodes and the org's ``engine.tool_fillers``
+(specs/13 §4 Decision P08-T02c2). :func:`start_state` is the fresh :class:`~va_engine.models.EngineState` of
+the call: the graph's start node, or the call's ``start_node_id`` when the graph has that node (an unknown id
+falls back to the start node, logged), seeded with the context's variables.
 
 :func:`opener_text` is the line the engine says first when the call's start node is a Default node with a
 static ``text``: ``prefetch_call_context`` stores it as ``CallContext.opener_text`` and pre-renders it into
@@ -27,6 +28,7 @@ from va_engine.engine import ConversationFacts, new_pathway_state
 from va_engine.handlers.base import has_content
 from va_engine.models import EngineState
 from va_engine.navigation import ActiveGraph
+from va_engine.system_tools import SystemToolFacts
 from va_engine.templating import TemplateScope, TemplateSyntaxError, render
 
 __all__ = ["ENGINE_STATE_TTL_S", "engine_state_key", "opener_text", "pathway_facts", "start_state"]
@@ -37,8 +39,15 @@ ENGINE_STATE_TTL_S: Final = 7200
 _log = get_logger(__name__)
 
 
-def pathway_facts(context: CallContext, *, now: datetime) -> ConversationFacts:
-    """The facts of a voice pathway call at ``now`` (an aware datetime)."""
+def pathway_facts(
+    context: CallContext,
+    *,
+    now: datetime,
+    system_tools: SystemToolFacts | None = None,
+    tool_fillers: bool = True,
+) -> ConversationFacts:
+    """The facts of a voice pathway call at ``now`` (an aware datetime). ``system_tools``: what the call
+    allows its reply nodes to offer (``None`` = no system tool); ``tool_fillers``: ``engine.tool_fillers``."""
     config = context.config
     return ConversationFacts(
         org_id=context.org_id,
@@ -47,6 +56,8 @@ def pathway_facts(context: CallContext, *, now: datetime) -> ConversationFacts:
         request_data=dict(config.request_data),
         builtins=call_builtins(context, now=now),
         timezone=config.timezone,
+        system_tools=system_tools,
+        tool_fillers=tool_fillers,
     )
 
 

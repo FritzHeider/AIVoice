@@ -14,7 +14,7 @@ import httpx
 import pytest
 import respx
 from service_helpers import json_log_stream, log_events
-from tools_helpers import API, plain_executor
+from tools_helpers import API, GatedSystem, RecordedEvents, plain_executor
 
 from va_engine.templating import TemplateScope
 from va_llm.models import ToolCall
@@ -28,6 +28,12 @@ SCHEMA: dict[str, Any] = {
     "required": ["order"],
 }
 SCOPE = TemplateScope(variables={"city": "Rome"})
+
+
+@pytest.fixture
+def api() -> Iterator[respx.MockRouter]:
+    with respx.mock(base_url=API, assert_all_called=False) as router:
+        yield router
 
 
 def _spec(name: str = "lookup_order", *, tool_id: str | None = "TL-1", **fields: Any) -> ToolSpec:
@@ -45,28 +51,9 @@ def _spec(name: str = "lookup_order", *, tool_id: str | None = "TL-1", **fields:
     return ToolSpec(**{**values, **fields})
 
 
-@dataclass(slots=True)
-class _Events:
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    failures: list[str] = field(default_factory=list)
-
-    def tool(self, data: dict[str, Any]) -> None:
-        self.tools.append(data)
-
-    def tool_failed(self, detail: str) -> None:
-        self.failures.append(detail)
-
-    def sms_sent(self, data: dict[str, Any]) -> None:
-        self.tools.append({"sms_sent": data})
-
-
-@pytest.fixture
-def api() -> Iterator[respx.MockRouter]:
-    with respx.mock(base_url=API, assert_all_called=False) as router:
-        yield router
-
-
-async def _execute(specs: list[ToolSpec], name: str, arguments: str, events: _Events | None = None) -> Any:
+async def _execute(
+    specs: list[ToolSpec], name: str, arguments: str, events: RecordedEvents | None = None
+) -> Any:
     async with plain_executor() as (http, clock):
         executor = CallToolExecutor(specs, runner=ToolRunner(http, clock=clock), events=events)
         return await executor.execute(ToolCall(id="c1", name=name, arguments_json=arguments), SCOPE)
@@ -74,7 +61,7 @@ async def _execute(specs: list[ToolSpec], name: str, arguments: str, events: _Ev
 
 async def test_a_successful_run_answers_reports_and_extracts(api: respx.MockRouter) -> None:
     route = api.post("/lookup_order").respond(200, json={"status": "shipped", "eta": None})
-    events = _Events()
+    events = RecordedEvents()
     answer = await _execute([_spec()], "lookup_order", '{"order": "A7"}', events)
 
     assert json.loads(route.calls.last.request.content) == {"order": "A7", "city": "Rome"}
@@ -96,7 +83,7 @@ async def test_a_successful_run_answers_reports_and_extracts(api: respx.MockRout
 
 async def test_a_failing_run_reports_tool_failed(api: respx.MockRouter) -> None:
     api.post("/lookup_order").respond(500, json={"status": "down"})
-    events = _Events()
+    events = RecordedEvents()
     answer = await _execute([_spec()], "lookup_order", '{"order": "A7"}', events)
     assert json.loads(answer.content) == {"status": 500, "error": "http_error"}
     assert dict(answer.variables) == {}
@@ -106,7 +93,7 @@ async def test_a_failing_run_reports_tool_failed(api: respx.MockRouter) -> None:
 
 async def test_invalid_arguments_report_the_run_but_no_failure(api: respx.MockRouter) -> None:
     route = api.post("/lookup_order").respond(200)
-    events = _Events()
+    events = RecordedEvents()
     answer = await _execute([_spec()], "lookup_order", '{"nope": 1}', events)
     assert json.loads(answer.content)["error"] == "invalid_arguments"
     assert not route.called
@@ -116,7 +103,7 @@ async def test_invalid_arguments_report_the_run_but_no_failure(api: respx.MockRo
 
 async def test_inline_header_values_are_masked_in_the_event(api: respx.MockRouter) -> None:
     route = api.post("/lookup_order").respond(200, json={})
-    events = _Events()
+    events = RecordedEvents()
     inline = _spec(tool_id=None, headers={"X-Token": "inline-value"})
     await _execute([inline], "lookup_order", '{"order": "A7"}', events)
     assert route.calls.last.request.headers["X-Token"] == "inline-value"
@@ -200,7 +187,7 @@ async def test_system_tools_are_handled_but_not_defined_and_have_no_speech() -> 
 async def test_a_system_tool_answers_without_a_tool_event(detaches: bool) -> None:
     stream = json_log_stream()
     sms = _System("send_sms", SystemOutcome('{"status":"sent","segments":1}'), detaches=detaches)
-    events = _Events()
+    events = RecordedEvents()
     async with plain_executor() as (http, clock):
         executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[sms])
         call = ToolCall(id="c9", name="send_sms", arguments_json='{"message": "secret text"}')
@@ -219,7 +206,7 @@ async def test_a_failed_system_tool_reports_tool_failed(detaches: bool) -> None:
     callback = _System(
         "schedule_callback", SystemOutcome('{"error":"callback_failed"}', "workflow_start"), detaches=detaches
     )
-    events = _Events()
+    events = RecordedEvents()
     async with plain_executor() as (http, clock):
         runner = ToolRunner(http, clock=clock)
         executor = CallToolExecutor([], runner=runner, events=events, system=[callback])
@@ -231,47 +218,18 @@ async def test_a_failed_system_tool_reports_tool_failed(detaches: bool) -> None:
     assert events.tools == []
 
 
-@dataclass(slots=True)
-class _GatedSystem:
-    """A system tool whose run waits for ``gate`` (``outcome`` ``None`` = never finishes; an exception is
-    raised)."""
-
-    name: str
-    outcome: SystemOutcome | Exception | None
-    detaches: bool = True
-    gate: asyncio.Event = field(default_factory=asyncio.Event)
-    started: asyncio.Event = field(default_factory=asyncio.Event)
-    finished: list[str] = field(default_factory=list)
-    cancelled: bool = False
-
-    async def run(self, call: ToolCall) -> SystemOutcome:
-        self.started.set()
-        try:
-            await self.gate.wait()
-            if self.outcome is None:
-                await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
-        self.finished.append(call.id)
-        if isinstance(self.outcome, Exception):
-            raise self.outcome
-        assert self.outcome is not None
-        return self.outcome
-
-
-def _system_call(tool: _GatedSystem) -> ToolCall:
+def _system_call(tool: GatedSystem) -> ToolCall:
     return ToolCall(id="c1", name=tool.name, arguments_json="{}")
 
 
-async def _system_executor(tool: _GatedSystem, events: _Events | None = None) -> CallToolExecutor:
+async def _system_executor(tool: GatedSystem, events: RecordedEvents | None = None) -> CallToolExecutor:
     """An executor that runs only the system tool ``tool`` (system tools need no HTTP client)."""
     async with plain_executor() as (http, clock):
         return CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
 
 
 async def _cancel_mid_run(
-    tool: _GatedSystem, events: _Events, call: ToolCall | None = None
+    tool: GatedSystem, events: RecordedEvents, call: ToolCall | None = None
 ) -> tuple[CallToolExecutor, asyncio.Task[Any]]:
     """Cancel the wait for ``call`` (default: a fresh one) while ``tool`` runs it."""
     executor = await _system_executor(tool, events)
@@ -284,8 +242,8 @@ async def _cancel_mid_run(
 
 
 async def test_a_cancelled_wait_lets_the_system_tool_finish_and_report() -> None:
-    tool = _GatedSystem("send_sms", SystemOutcome('{"error":"sms_failed"}', "telnyx_error"))
-    events = _Events()
+    tool = GatedSystem("send_sms", SystemOutcome('{"error":"sms_failed"}', "telnyx_error"))
+    events = RecordedEvents()
     executor, _ = await _cancel_mid_run(tool, events)
     assert not tool.cancelled
     assert events.failures == []
@@ -298,9 +256,9 @@ async def test_a_cancelled_wait_lets_the_system_tool_finish_and_report() -> None
 
 async def test_aclose_cancels_a_run_that_outlives_the_drain() -> None:
     stream = json_log_stream()
-    tool = _GatedSystem("schedule_callback", None)
+    tool = GatedSystem("schedule_callback", None)
     tool.gate.set()
-    executor, _ = await _cancel_mid_run(tool, _Events())
+    executor, _ = await _cancel_mid_run(tool, RecordedEvents())
     await executor.aclose(timeout_s=0.01)
     assert tool.cancelled
     [abandoned] = [e for e in log_events(stream) if e["event"] == "tools.system_tools_abandoned"]
@@ -321,8 +279,8 @@ async def test_a_crash_nobody_awaits_is_reported_and_retrieved() -> None:
     previous = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
     try:
-        tool = _GatedSystem("send_sms", RuntimeError("boom"))
-        events = _Events()
+        tool = GatedSystem("send_sms", RuntimeError("boom"))
+        events = RecordedEvents()
         executor, _ = await _cancel_mid_run(tool, events)
         tool.gate.set()
         await executor.aclose()
@@ -337,9 +295,9 @@ async def test_a_crash_nobody_awaits_is_reported_and_retrieved() -> None:
 
 @pytest.mark.parametrize("detaches", [True, False])
 async def test_an_awaited_crash_propagates_to_the_caller(detaches: bool) -> None:
-    tool = _GatedSystem("send_sms", RuntimeError("boom"), detaches=detaches)
+    tool = GatedSystem("send_sms", RuntimeError("boom"), detaches=detaches)
     tool.gate.set()
-    events = _Events()
+    events = RecordedEvents()
     async with plain_executor() as (http, clock):
         executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
         with pytest.raises(RuntimeError):
@@ -351,10 +309,10 @@ async def test_an_awaited_crash_propagates_to_the_caller(detaches: bool) -> None
 
 
 async def test_a_call_whose_wait_was_cancelled_mid_run_is_detached() -> None:
-    tool = _GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
+    tool = GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
     call, never_run = _system_call(tool), _system_call(tool)
 
-    executor, _ = await _cancel_mid_run(tool, _Events(), call)
+    executor, _ = await _cancel_mid_run(tool, RecordedEvents(), call)
 
     assert executor.detached(call)
     assert never_run == call
@@ -367,7 +325,7 @@ async def test_a_call_whose_wait_was_cancelled_mid_run_is_detached() -> None:
 
 
 async def test_a_call_that_was_answered_is_not_detached() -> None:
-    tool = _GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
+    tool = GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
     tool.gate.set()
     call = _system_call(tool)
     executor = await _system_executor(tool)
@@ -379,7 +337,7 @@ async def test_a_call_that_was_answered_is_not_detached() -> None:
 
 
 async def test_a_run_cancelled_by_aclose_is_not_detached() -> None:
-    tool = _GatedSystem("schedule_callback", None)
+    tool = GatedSystem("schedule_callback", None)
     tool.gate.set()
     call = _system_call(tool)
     executor = await _system_executor(tool)
@@ -403,7 +361,7 @@ async def test_a_custom_tool_cancelled_mid_request_is_not_detached(api: respx.Mo
         return httpx.Response(200, json={"status": "shipped"})
 
     route = api.post("/lookup_order").mock(side_effect=held)
-    events = _Events()
+    events = RecordedEvents()
     call = ToolCall(id="c1", name="lookup_order", arguments_json='{"order": "A7"}')
     async with plain_executor() as (http, clock):
         executor = CallToolExecutor([_spec()], runner=ToolRunner(http, clock=clock), events=events)
@@ -424,9 +382,9 @@ async def test_a_custom_tool_cancelled_mid_request_is_not_detached(api: respx.Mo
 
 async def test_a_tool_that_does_not_detach_is_cancelled_with_its_wait() -> None:
     stream = json_log_stream()
-    tool = _GatedSystem("lookup_knowledge", SystemOutcome('{"results":[]}'), detaches=False)
+    tool = GatedSystem("lookup_knowledge", SystemOutcome('{"results":[]}'), detaches=False)
     call = _system_call(tool)
-    events = _Events()
+    events = RecordedEvents()
 
     executor, _ = await _cancel_mid_run(tool, events, call)
 

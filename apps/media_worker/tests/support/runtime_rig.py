@@ -5,6 +5,7 @@ the end-of-call hangup. Shared by the runtime sim tests and the in-process inbou
 from __future__ import annotations
 
 import asyncio
+import secrets
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -20,10 +21,14 @@ from service_helpers import settings_of
 from starlette.applications import Starlette
 from telnyx_client_helpers import sms_number
 from telnyx_helpers import VOICE_URL
+from tenant_rows import open_database
+from webhook_receiver import Receiver, served_receiver
 
+from va_common.crypto import Envelope, LocalKmsProvider
 from va_common.http import http_client
 from va_common.metrics import Service, ServiceMetrics, build_metrics, new_registry
 from va_common.time import SystemClock
+from va_db.repositories import OrgDataKeyStore
 from va_db.session import Database
 from va_domain.org import OrgSettings
 from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
@@ -33,11 +38,11 @@ from va_media.call_end import CallEnd
 from va_media.call_system_tools import CallbackStarter
 from va_media.call_tools import CallToolSource
 from va_media.pathway_runtime import PathwayTools
-from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, OrgSettingsSource
+from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, OrgSettingsSource, open_persistence
 from va_media.session import CallSession, SessionEnd
 from va_media.settings import MediaSettings
 from va_media.turns import CallPersistence
-from va_sim.server import SimName, simulator_routes
+from va_sim.server import SimName, running_sims, simulator_routes
 from va_sim.state import SimState
 from va_sim.telnyx.store import DEFAULT_API_KEY
 from va_telnyx import TelnyxClientFactory
@@ -51,8 +56,11 @@ __all__ = [
     "MODELS_DIR",
     "WAIT_S",
     "RecordingRuntime",
+    "SimBackends",
     "SimRuntime",
     "StaticOrgSettings",
+    "local_tool_source",
+    "sim_backends",
     "sim_runtime",
 ]
 
@@ -114,6 +122,45 @@ class SimRuntime:
 
 async def _no_byo_key(_account_id: uuid.UUID) -> str | None:
     return None
+
+
+@dataclass
+class SimBackends:
+    """What a runtime sim rig with tools runs on (see :func:`sim_backends`)."""
+
+    database: Database
+    urls: Mapping[SimName, str]
+    receiver_port: int
+    llm: httpx.AsyncClient
+    """FakeLLM's control client."""
+    tools_http: httpx.AsyncClient
+    persistence: CallPersistence
+
+
+@asynccontextmanager
+async def sim_backends(
+    media_db_url: str, state: SimState, receiver: Receiver, redis: Redis
+) -> AsyncIterator[SimBackends]:
+    """The media database, FakeElevenLabs and FakeLLM on sockets, ``receiver`` served for tool and webhook
+    requests, a plain tool HTTP client, and the call persistence over ``redis``."""
+    async with (
+        open_database(media_db_url) as database,
+        running_sims(state, ports={"elevenlabs": 0, "llm": 0}) as urls,
+        served_receiver(receiver) as port,
+        httpx.AsyncClient(base_url=urls["llm"]) as llm,
+        httpx.AsyncClient() as tools_http,
+        open_persistence(database, redis, clock=SystemClock()) as persistence,
+    ):
+        yield SimBackends(database, urls, port, llm, tools_http, persistence)
+
+
+def local_tool_source(database: Database, tools_http: httpx.AsyncClient) -> CallToolSource:
+    """A call tool source over ``database`` with a fresh local-KMS envelope (``source.envelope`` provisions
+    orgs and encrypts their tools' secret headers); tool URLs may be ``http://`` and private."""
+    envelope = Envelope(LocalKmsProvider.from_hex(secrets.token_hex(32)), OrgDataKeyStore(database))
+    return CallToolSource(
+        database=database, envelope=envelope, tools_http=tools_http, allow_http=True, clock=SystemClock()
+    )
 
 
 @asynccontextmanager

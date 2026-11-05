@@ -2130,3 +2130,26 @@ Grafana 3001
   but its ender gets `OWNERSHIP_LOST` instead of `None` (specs/13 §6 Decision P08-FIX-18). Tests:
   `_lose_lock(r)` (the renewer must be 5 s from its next renewal) / `_overrun(r)` and `rig(control_handler=)` in
   `apps/media_worker/tests/test_session.py`.
+- 2026-11-05 (P08-T02c2): pathway call tools in the media worker (specs/13 §4 Decision P08-T02c2):
+  `va_tools.pathway_executor.PathwayCallExecutor(runner=, events=, system=)` (`add(stored, refs)`, `knows(id)`,
+  `for_refs(refs)` → a `CallToolExecutor` per node; `tool_ref_id(ref)` parses `TL-<uuid>`/bare uuid, also used by
+  the api's `parse_tool_id`; `graph_tool_refs(graph)`). System runs live in `va_tools.executor.SystemRuns`
+  (`CallToolExecutor(system=tools | SystemRuns)`): node executors share the call's. Media:
+  `CallToolSource.pathway_tools(context, graph, events, system=)` → `PathwayCallTools` (`executor`,
+  `ensure(graph)`, `loader(inner)`), `pathway_runtime.load_call_graph` + sync `build_pathway_brain(..., active=,
+  state=, call_tools=, system_tools=)`, `PathwayToolEvents(recorder, state)` stamps `call.tool` with
+  `turn_index`/`node_id`. The engine reads `ports.tools.tool_speech` in `_prepare` (every reply pass), so a
+  speech a later graph brought reaches the usage note. `PathwayCallTools.ensure(graph, timeout_s=)`: ids are
+  marked tried and the signing read final (`CallToolSource.read_signer` → `SigningRead(signer, final)`) only when
+  the read ran; a failed, timed-out or cancelled one is retried at the next load of the graph. The loader bounds
+  it with `SWITCH_LOAD_TIMEOUT_S` (2 s) on the source's clock, so loader tests need a clock that really sleeps
+  (`_switch(..., clock=)`: `SystemClock`, or `ManualClock` + `_Held().wrap("tenant"|"global")` for the
+  deadline); a `FrozenClock` source times every switch load out at once. `va_common.json.dumps` raises
+  `TypeError` for an int beyond 64 bits (an inline tool ref holding one resolves to nothing). Tests: `tools_helpers.GatedSystem`/`RecordedEvents` (va_tools),
+  `test_runtime_pathway_sim.pathway_rig(rules=, reply=)` now always has a `CallToolSource`. FakeLLM: a rule's
+  `tool_name` matches the forced function when one is forced, else any OFFERED tool, so `tool_name: <custom tool>`
+  + `system_contains: ['## Current step: <node name>']` selects a reply node's dialogue requests and never the
+  forced decision calls (router prompts say `Current step: "<name>"`, dialogue prompts `## Current step: <name>`). To read
+  what a media-built pathway brain offers the model without FakeLLM, pass `gateway=dialogue_helpers.FakeSource()`
+  to `build_pathway_brain`, drain `brain.start()` and read `source.requests[0].tools`
+  (`test_pathway_runtime._offered`); a graph without tool refs lets `CallToolSource.pathway_tools` run with no database.

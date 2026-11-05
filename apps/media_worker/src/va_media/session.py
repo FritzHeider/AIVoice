@@ -31,9 +31,11 @@ the lock lost.
 A session that stopped vouching for its call does not end it (specs/13 §6 Decision P08-FIX-18): when the lock
 was lost during the teardown, or the teardown ran past the bound, the session ends :data:`OWNERSHIP_LOST`
 whatever decided the race, so the end routine neither records nor hangs up and ``CallWorkflow`` alone ends
-the call. A ``transferred`` end stays (its routine neither records nor hangs up either, and ``worker_lost``
-would make the workflow hang up on the bridged caller and target). A failed session still raises, but its
-ender is given :data:`OWNERSHIP_LOST` instead of ``None``.
+the call. A ``transferred`` end that decided the race stays (its routine neither records nor hangs up
+either, and ``worker_lost`` would make the workflow hang up on the bridged caller and target); a lock lost,
+or an overrun, before the body returned ``transferred`` still ends ``worker_lost``, as for every call the pod
+still answers for. A failed session still raises, but its ender is given :data:`OWNERSHIP_LOST` instead of
+``None``.
 
 Cleanup always deletes the heartbeat, releases the lock unless it was lost, and closes the WebSocket (1000,
 or 1011 when the body raised).

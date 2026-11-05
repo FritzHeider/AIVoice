@@ -387,7 +387,7 @@
   - Deliverables: shared tool-task helpers extracted from TaskBrain (`va_engine.tool_tasks`), `GlobalConfig.allow_end_call_tool`, `PathwayToolExecutor.definitions_for`, PathwayEngine offering node ∪ `globalTools` custom tools and allowed system tools on Default / Knowledge Base nodes with speech/filler, variables, `end_call`/`press_button`, per-pass/per-call caps
   - Acceptance: engine tests (tool round on a node, global tool, `allowEndCallTool=false`, end_call, press_button, caps, barge-in mid-tool), TaskBrain tests unchanged and green.
 
-- [ ] P08-T02c2 Pathway call tools in the media runtime (split from P08-T02c)
+- [x] P08-T02c2 Pathway call tools in the media runtime (split from P08-T02c) — `va_tools.pathway_executor.PathwayCallExecutor` (`add`/`knows`/`for_refs` per node over the shared `va_tools.executor.SystemRuns`, `tool_ref_id`, `graph_tool_refs`), media `CallToolSource.pathway_tools` → `PathwayCallTools` (`ensure(graph, timeout_s=)`, tool-loading loader bounded by `SWITCH_LOAD_TIMEOUT_S` 2 s, `read_signer` → `SigningRead`), `load_call_graph` + sync `build_pathway_brain`, `PathwayToolEvents` (`call.tool` with `turn_index`/`node_id`), `PathwayEngine._prepare` reads the call's tool speech per reply pass; Decision P08-T02c2 (specs/13 §4, addendum specs/11 §12), specs/13 §6 Decision P08-FIX-18 item 2 reworded (DEC-018, closes 2026-11-05-p08-fix-18-wip-review.md by wording); first review rejected with 4 findings (maintainer note 2026-11-05-p08-t02c2-wip-review.md: blocker item 1 + items 2-4), all fixed in code with tests (usage note quotes a later graph's speech; unwritable inline ref resolves to nothing; failed/timed-out/cancelled loads and signing reads are retried at the next load of the graph; switch deadline); reviewer re-run on the final tree: lint/typecheck/placeholders pass (mypy 1617 files), check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, openapi current, make test 13128 passed 7 skipped (cov 99.08%; call_tools, pathway_runtime, pathway_executor 100%), make e2e 20 passed (capacity flow included); reviewer probe (git-ignored logs/): the signing read at a switch gets only what the tool load left of the 2 s (1.5 s load → 0.5 s read), no deadline at call start
   - Spec refs: specs/13 §4-§6
   - Depends on: P08-T02c1
   - Deliverables: `CallToolSource.pathway_executor` over every tool the pinned graph references (TL ids + inline objects, keyed by ref), a `PathwayToolExecutor.for_refs(refs)` implementation whose node executors share the call's runner, events and system tool runs (Decision P08-FIX-17), runtime builds system tools + executor for pathway calls and passes facts to the engine
@@ -395,6 +395,15 @@
     tests of the real `for_refs` (review note 2026-11-05-p08-fix-19-wip-review.md item 2, Decision P08-FIX-17
     item 2): two nodes with different tools of one name (different URL and different `speech`) each speak their
     own speech and call their own URL, and a node executor does not `handle` a custom tool its refs do not name.
+  - Also closes .ralph/review-inbox/2026-11-05-p08-fix-18-wip-review.md (no blockers; Planner, 2026-11-05,
+    DEC-018): its item 1 (a `transferred` end stays only when it is the end that decided the race) is closed by
+    wording, option 3 of the note: reword specs/13 §6 Decision P08-FIX-18 item 2 and the matching sentence of
+    the `va_media.session` module docstring to "a `transferred` end that decided the race stays; a lock lost
+    (or an overrun) before the body returned it still ends `worker_lost`, as for every call the pod still
+    answers for". No code change: the window is the body's unwind after the bridge (normally well under a
+    second) together with a lock lost in it (Redis unreachable for 15 s or the key gone), the same outage ends
+    every other call of the pod `worker_lost`, and a pod crash in that window ends the call `worker_crash`
+    anyway. Append the note name to `.ralph/review-inbox/DONE` on approval.
 
 - [ ] P08-T03 Dynamic data
   - Spec refs: specs/13-tools-and-dynamic-data.md (dynamic_data)

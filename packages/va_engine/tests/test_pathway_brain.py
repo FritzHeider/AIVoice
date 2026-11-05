@@ -19,6 +19,7 @@ from va_engine.models.results import PressButton, TransferRequest
 from va_engine.navigation import ActiveGraph
 from va_engine.pathway_brain import PATHWAY_END_REASON, PathwayBrain, TurnTags
 from va_engine.pathway_call import pathway_facts, start_state
+from va_engine.system_tools import SystemToolFacts
 from va_voice.pipeline.models import BrainOutput, BrainTiming, EndCall, SpeakStatic, SpeakText, UserTurn
 
 TARGET = "+14155550123"
@@ -286,6 +287,10 @@ def test_pathway_facts_and_start_state() -> None:
     assert facts.timezone == "America/New_York"
     assert facts.builtins["call_id"] == str(context.call_id)
     assert dict(facts.transfer_list) == {}
+    assert (facts.system_tools, facts.tool_fillers) == (None, True)
+    allowed = SystemToolFacts(runner="pathway", sms_capable=True)
+    with_tools = pathway_facts(context, now=context.created_at, system_tools=allowed, tool_fillers=False)
+    assert (with_tools.system_tools, with_tools.tool_fillers) == (allowed, False)
 
 
 @pytest.mark.parametrize(("start_node_id", "expected"), [(None, "a"), ("a", "a"), ("b", "b"), ("gone", "a")])

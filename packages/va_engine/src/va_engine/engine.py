@@ -275,8 +275,6 @@ class PathwayEngine:
         self._offer: ToolOffer = NO_OFFER
         self._tool_calls_used = 0
         self._owed_end: tuple[Action, ...] = ()
-        if ports.tools is not None and ports.tools.tool_speech:
-            self._dialogue.tool_speech = ports.tools.tool_speech
 
     @property
     def state(self) -> EngineState:
@@ -899,8 +897,13 @@ class PathwayEngine:
     # State.
 
     def _prepare(self, node: PathwayNode, suffix: str | None) -> None:
-        """The dialogue port's per-reply inputs at ``node``."""
+        """The dialogue port's per-reply inputs at ``node``. The call's tool speech is read here, per reply
+        pass: a graph the call switched to may have brought the first one (specs/13 §4, Decision P08-T02c2
+        item 5)."""
         self._dialogue.condition_suffix = suffix
+        speech = None if self._ports.tools is None else self._ports.tools.tool_speech
+        if speech:
+            self._dialogue.tool_speech = speech
         if node.type == "Scheduling":
             self._offer = NO_OFFER
             self._dialogue.tools = scheduling_tools()
