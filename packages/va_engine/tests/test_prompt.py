@@ -106,6 +106,17 @@ def test_system_prompt_carries_runtime_facts_known_information_and_memory() -> N
     assert "Likes pepperoni." in system
 
 
+def test_system_prompt_ends_with_the_calls_dynamic_data_context() -> None:
+    ctx = handler_ctx(_node(prompt="Ask."), variables={"customer_name": "Ana"})
+    lines = ("The customer's name is Ana.", "Their plan is Pro.")
+
+    system = _system(ctx, memory_context="Likes pepperoni.", context_sections=lines)
+
+    assert "- customer_name: Ana" in system
+    assert system.endswith("\n\n## Context\nThe customer's name is Ana.\nTheir plan is Pro.")
+    assert "## Context" not in _system(ctx)
+
+
 def test_instruction_templates_are_the_applied_global_prompt_and_the_prompt_or_text() -> None:
     texted = handler_ctx(_node(text="Hi {{a}}"), global_config={"globalPrompt": "G {{b}}"})
     assert instruction_templates(texted.node, texted.graph) == ("G {{b}}", "Hi {{a}}")
@@ -292,6 +303,7 @@ def test_settings_for_call_map_the_context_and_org() -> None:
             "from_number": "+14155550100",
             "config": config,
             "variables": {},
+            "context_sections": ["The customer's name is Ana."],
             "created_at": NOW,
         }
     )
@@ -311,5 +323,6 @@ def test_settings_for_call_map_the_context_and_org() -> None:
         context_budget_tokens=4000,
         speculative=False,
         memory_context="m",
+        context_sections=("The customer's name is Ana.",),
     )
     assert PathwayPrompt(settings, counter=counter(), clock=FrozenClock(NOW)).settings is settings

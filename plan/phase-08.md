@@ -405,11 +405,23 @@
     every other call of the pod `worker_lost`, and a pod crash in that window ends the call `worker_crash`
     anyway. Append the note name to `.ralph/review-inbox/DONE` on approval.
 
-- [ ] P08-T03 Dynamic data
-  - Spec refs: specs/13-tools-and-dynamic-data.md (dynamic_data)
+- [x] P08-T03a Dynamic data core and the outbound pre-call fetch (split from P08-T03 by the planner, 2026-11-05: the fetcher with the worker's pre-call fetch, the per-turn refresh inside the brains, and the inbound budget in the edge are separately testable and touch three services) — `va_tools.dynamic_data` (fetch/fetch_all, `dyn:` cache, JSONPath variables with the depth 32 / U+0000 / 16 KB rules, context lines), `PreCallDynamicData` in `prefetch_call_context` (fetch → opener → save → record), `## Context` prompt block in task and pathway calls, specs/13 §7 + specs/10 §5 Decisions; approved on the second review pass (first pass: deep nesting and U+0000 broke the stores, fixed at the source); reviewer gates: `make test` 13200 passed / 7 skipped, coverage 99.08 %, `make e2e` 20 passed, lint/typecheck/placeholders/spec refs/OpenAPI drift clean, jscpd 0 clones, radon 2.94, audits clean
+  - Spec refs: specs/13-tools-and-dynamic-data.md §7; specs/01-architecture.md §2.1 step 2; specs/10-llm-gateway.md §5; specs/19-events-and-webhooks.md §2 (`call.dynamic_data`)
   - Depends on: P08-T02a
-  - Deliverables: pre-call fetch in `prefetch_call_context`, per-turn refresh rules, Redis cache keyed by request hash, JSONPath `response_data` mapping with `context` injection, `call.dynamic_data` events
-  - Acceptance: tests for cache hits, failures (call proceeds with event), templated requests.
+  - Deliverables: `va_tools.dynamic_data` (templated request, Redis cache `dyn:{org_id}:{sha256}` with `cache_ttl_seconds`, JSONPath `response_data` mapping, `context` lines rendered after extraction, event data without the query), the `timing: "pre_call"` fetch in `prefetch_call_context` filling `CallContext.variables`/`context_sections` (and `calls.variables`) before the opener is rendered, `call.dynamic_data` events (level `warning` on failure), the `## Context` section of the voice system prompt in task and pathway calls
+  - Acceptance: tests for cache hit/miss/TTL, failures (the call proceeds, warning event, no variables), templated requests (url, query, headers, body), context only for non-null variables, the prompt section in both runners; `make e2e` still passes (the outbound call path changes).
+
+- [ ] P08-T03b Per-turn dynamic data (`timing: "every_turn"`) in calls (split from P08-T03)
+  - Spec refs: specs/13-tools-and-dynamic-data.md §7 (`every_turn`)
+  - Depends on: P08-T03a
+  - Deliverables: re-fetch at the start of each user turn concurrently with routing (task brain and pathway engine), 800 ms budget with the stale value on timeout, variables and context lines of a refreshed fetch replace the earlier ones, `call.dynamic_data` events from the media worker, variables in the engine state snapshot
+  - Acceptance: fake-clock tests for the budget and the stale fallback, cache hit, failure tolerance (the reply goes on); a runtime sim test where the prompt of the second turn carries the refreshed context.
+
+- [ ] P08-T03c Inbound dynamic data: 1.5 s inline budget in the edge, the rest asynchronously (split from P08-T03)
+  - Spec refs: specs/13-tools-and-dynamic-data.md §7 (inbound); specs/01-architecture.md §2.2 step 3; specs/06-telephony-telnyx.md §7 step 10
+  - Depends on: P08-T03a
+  - Deliverables: pre-call fetches inside the edge accept's context budget; fetches not finished in time go on after the answer and their variables/context reach the running call (`inject_context`) from the next turn; `call.dynamic_data` events for both
+  - Acceptance: tests: a fast fetch is in the stored context before the answer; a slow fetch does not delay the answer and appears from the next turn; a failed fetch leaves the call running; ring-to-answer stages unaffected without `dynamic_data`.
 
 - [ ] P08-T04 Deno sandbox and Custom Code node
   - Spec refs: specs/13-tools-and-dynamic-data.md §8; specs/11-pathways-engine.md (Custom Code node)

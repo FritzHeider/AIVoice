@@ -551,6 +551,68 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 - Emits `call.dynamic_data` with `{url (no query secrets), status_code, duration_ms, variables_set:[…], cached:bool}`.
 - Failures do not fail the call; event level `warning`.
 
+> Decision (2026-11-05) P08-T03a: the dynamic data core and the outbound pre-call fetch. `every_turn` (P08-T03b)
+> and the inbound budget (P08-T03c) build on it.
+>
+> **One fetch** (`va_tools.dynamic_data.DynamicDataFetcher.fetch(spec, index, scope, timeout_ms=)`, never raises):
+> 1. The request is the spec rendered like a tool request (`va_tools.render.render_request`, the specs/13 §5
+>    Decision P08-T02a rules: URL expressions percent-encoded, `query` merged into the URL, headers as text, a
+>    lone body expression keeps its value's type). A template that does not parse is the outcome `render_error`
+>    and nothing is sent.
+> 2. The cache is used only with `cache: true`, `cache_ttl_seconds` > 0 and a Redis client. The key is
+>    `dyn:{org_id}:{sha256 hex}` over `"<METHOD>\n<rendered url with the merged query>\n<body>"`, the body as
+>    compact JSON with sorted keys (empty for no body); headers are not part of it, the org is. The value is
+>    `{"status": int, "body": <parsed JSON or text>}`. A readable value is a hit (no request, outcome `ok`,
+>    `cached: true`, the JSONPaths applied to the stored body); an unreadable value and a Redis failure are misses.
+> 3. On a miss the request goes through the shared HTTP executor (specs/13 §9 Decision 2026-11-03) with
+>    `User-Agent` and `X-VA-Call-Id` and **without a signature**: step 4 of §5 signs tool requests only, and a
+>    dynamic data endpoint authenticates the platform by its own header, as in the example above. Only a 2xx
+>    answer that was not truncated and whose compact JSON is at most 262 144 bytes is stored
+>    (`SET … EX cache_ttl_seconds`); a failed write is logged and ignored; failures are never cached.
+> 4. Variables are set only for the outcome `ok` (a 2xx answer): each `response_data` item sets `name` to the
+>    JSONPath value of `data`. A null or missing value sets nothing, and neither does a value the stores behind
+>    a call cannot hold (each is logged by name, never with the value, and skipped; the fetch stays `ok` with its
+>    other variables, and a skipped variable gets no context line): a value whose arrays and objects nest more
+>    than 32 deep (a scalar is 0, `[1]` is 1; the context JSON, the engine state and the event dumps stop at
+>    about 254 levels and wrap a variable in levels of their own, so the limit keeps a wide margin), a value
+>    with U+0000 in any string or object key (Postgres `jsonb` refuses it, which would lose the events and the
+>    `calls.variables` merge of every fetch of the call), and a value whose compact JSON exceeds 16 384 bytes.
+>    The rules apply alike to a fetched and a cached answer. Of two items with one name the later one counts.
+> 5. `context` is rendered for each variable that was set and has a non-blank `context`, with this fetch's
+>    variables in front of the scope's, stripped and cut to 2 000 characters; a blank result or a template that
+>    does not parse gives no line.
+> 6. Every outcome but `ok` (`http_error`, `timeout`, `connection`, `blocked`, `invalid_url`, `render_error`, and
+>    `error` for anything else that raised) sets nothing and is a `warning`.
+>
+> **Several fetches** (`fetch_all`) run concurrently, each rendered in the SAME scope (a fetch never sees another
+> fetch's variables), within one budget on the injected clock; a fetch not finished by then is cancelled and
+> reported as `timeout`. Results are merged in `dynamic_data` order (`merge_results`): a later fetch wins a
+> variable name, and its context line (or its having none) replaces the earlier line of that name.
+>
+> **Outbound pre-call** (`va_workflows.activities.dynamic_data.PreCallDynamicData`, inside
+> `prefetch_call_context`): the `timing: "pre_call"` specs are rendered with the call's variables,
+> `request_data` and built-ins, each request gets 5 s (connect ≤ 2 s) and no retries, the phase gets 6 s (inside
+> the activity's 20 s). The merged variables and context lines go into `CallContext.variables` /
+> `context_sections` BEFORE the opener is rendered, so the first sentence, the prompts and "Known information"
+> see them. After the context is saved, one transaction writes a `call.dynamic_data` event per fetch and merges
+> the variables into `calls.variables` (a task call without tools has no engine-state snapshot that would), then
+> the events are broadcast. Recording after the save means an activity retry caused by a failed save has
+> recorded nothing; a recording failure is logged (`call_context.dynamic_data_record_failed`) and swallowed,
+> because dynamic data never fails a call. An attempt that fails after it recorded (the activity timing out
+> during the opener pre-render) fetches and records again on the retry, so these events are at-least-once.
+> A context the media worker rebuilds from the `calls` row (Redis miss,
+> specs/07 §3) carries no dynamic data. The worker shares one guarded tool HTTP client between these fetches and
+> the pathway test runs.
+>
+> **Event** `call.dynamic_data`: message `Dynamic data: {n} variables set` (`1 variable set`; plus ` (cached)`) or
+> `Dynamic data failed: {outcome}` (plus ` ({status})` when a response arrived); data `{url, method, status_code,
+> duration_ms, variables_set, cached, outcome, timing, index}` where `url` has no user info, query or fragment
+> (empty when it could not be rendered) and `index` is the spec's position in `dynamic_data`. Logs
+> (`tools.dynamic_data`) carry the index, timing, outcome, status, cache flag, duration and variable count only.
+>
+> **Prompt**: the context lines are the `## Context` block of the Voice System Prompt (specs/10 §5 Decision
+> P08-T03a) in task and pathway calls.
+
 ## 8. Custom code sandbox (`va_tools.sandbox.deno`)
 
 ### 8.1 Contract

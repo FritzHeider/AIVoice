@@ -2,6 +2,7 @@
 
 ``counterpart`` is the callee for outbound calls and the number the caller dialled (our agent number) for
 inbound calls; web calls have none. Persona fields (agent name, company) arrive with personas (phase 13).
+The context's dynamic data lines (``context_sections``, specs/13 §7) become the prompt's ``## Context`` block.
 """
 
 from __future__ import annotations
@@ -42,4 +43,5 @@ def voice_prompt_inputs(
         counterpart=counterpart_of(context),
         variables=cast("Mapping[str, PromptValue]", variables),
         memory_context=memory_context,
+        context_sections=tuple(context.context_sections),
     )

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "VoiceAgents Temporal workflows and activities: call lifecycle"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "httpx>=0.28",
     "opentelemetry-api>=1.45.1",
     "phonenumbers>=9",
     "pydantic>=2.9",
@@ -18,6 +19,7 @@ dependencies = [
     "va-llm",
     "va-pathways",
     "va-telnyx",
+    "va-tools",
     "va-voice",
 ]
 
@@ -35,4 +37,5 @@ va-events = { workspace = true }
 va-llm = { workspace = true }
 va-pathways = { workspace = true }
 va-telnyx = { workspace = true }
+va-tools = { workspace = true }
 va-voice = { workspace = true }

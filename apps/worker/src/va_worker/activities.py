@@ -4,7 +4,8 @@ Decision P05-T06d).
 One instance of each activity class per process, sharing one call limiter, one event publisher (activities
 write their ``call_events`` rows in their own transactions, so it has no sink), and one Redis call context
 store. The shared Telnyx HTTP pool and client factory come from :mod:`va_telnyx.settings`; the opener
-pre-render (specs/07 §11 Decision P05-T10d) shares the process's phrase cache. The post-call queue runs
+pre-render (specs/07 §11 Decision P05-T10d) shares the process's phrase cache, and the pre-call dynamic data
+(specs/13 §7 Decision P08-T03a) the process's guarded tool HTTP client. The post-call queue runs
 ``PostCallWorkflow`` with its activities (specs/18 §1 Decision P05-T18b); ``store_recording`` (specs/06 §11
 Decision P05-T14) is polled there when object storage is configured, and ``PathwayTestWorkflow`` with its
 activities (specs/12 §8 Decision P07-T11c) when the text-run dependencies (LLM gateway, tool HTTP client)
@@ -17,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from prometheus_client import Histogram
 from redis.asyncio import Redis
 
@@ -35,6 +37,7 @@ from va_worker.task_queues import TaskQueueRegistration
 from va_workflows.activities.call_context import CallContextActivities
 from va_workflows.activities.call_end import CallEndActivities
 from va_workflows.activities.dial_request import DialSettings
+from va_workflows.activities.dynamic_data import PreCallDynamicData
 from va_workflows.activities.liveness import CallLivenessActivities
 from va_workflows.activities.pathway_tests import PathwayTestActivities
 from va_workflows.activities.post_call import PostCallActivities
@@ -77,9 +80,25 @@ class WorkerActivities:
         storage: RecordingStorage | None = None,
         postcall_step_ms: Histogram | None = None,
         text: TextDeps | None = None,
+        tools_http: httpx.AsyncClient | None = None,
+        allow_http: bool = False,
     ) -> WorkerActivities:
+        """``tools_http`` (the guarded tool client; ``allow_http`` admits plain ``http://`` URLs) turns the
+        pre-call dynamic data of ``prefetch_call_context`` on."""
         limiter = CallLimiter(redis, clock=clock)
         publisher = EventPublisher(redis, call_events=None, router=DbWebhookRouter(database))
+        dynamic = (
+            None
+            if tools_http is None
+            else PreCallDynamicData(
+                database=database,
+                redis=redis,
+                http=tools_http,
+                publisher=publisher,
+                clock=clock,
+                allow_http=allow_http,
+            )
+        )
         recording = (
             None
             if storage is None
@@ -96,7 +115,9 @@ class WorkerActivities:
             )
         )
         return cls(
-            context=CallContextActivities(database, CallContextStore(redis), clock, prerender=prerender),
+            context=CallContextActivities(
+                database, CallContextStore(redis), clock, prerender=prerender, dynamic=dynamic
+            ),
             telephony=TelephonyActivities(
                 database=database,
                 telnyx=telnyx,

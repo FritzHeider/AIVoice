@@ -2153,3 +2153,18 @@ Grafana 3001
   what a media-built pathway brain offers the model without FakeLLM, pass `gateway=dialogue_helpers.FakeSource()`
   to `build_pathway_brain`, drain `brain.start()` and read `source.requests[0].tools`
   (`test_pathway_runtime._offered`); a graph without tool refs lets `CallToolSource.pathway_tools` run with no database.
+- 2026-11-05 (P08-T03a): dynamic data core = `va_tools.dynamic_data` (`DynamicDataFetcher(http_port, redis=, org_id=,
+  clock=).fetch(spec, index, scope, timeout_ms=)` never raises, `fetch_all(specs, scope, timeout_ms=, budget_s=)`,
+  `DynamicDataResult.event_data()/message()/level`, `merge_results`, `cache_key`; rules: specs/13 §7 Decision
+  P08-T03a; a value nested > `MAX_VARIABLE_DEPTH` (32) or holding U+0000 is skipped by name like an oversized
+  one: pydantic/orjson dumps stop at ~254 levels, Postgres `jsonb` refuses U+0000, and `orjson.loads` accepts
+  both). Outbound pre-call = `va_workflows.activities.dynamic_data.PreCallDynamicData` (`fetch(context)` before
+  the opener render, `record(data)` after `store.save`), wired by `WorkerActivities.build(tools_http=, allow_http=)`
+  (the worker container owns ONE `tools_client`, shared with the pathway test runs). The prompt's `## Context` block
+  is `VoicePromptInputs.context_sections` (appended after the verbatim template). `build_call_context` does NOT copy
+  `calls.variables` into the context: a context's variables are only what the prefetch produced. `fetch_all` is
+  bounded by `within` on the clock, so a `FrozenClock`/`RecordingClock` fetcher times every fetch out at once: use
+  `ManualClock` (va_tools tests) or `SystemClock` (activity tests, which also need real time for the `call_events`
+  partitions). Shared prefetch test pieces: `packages/va_workflows/tests/support/prefetch_rig.py` (`opener_config`,
+  `phrase_cache()`, `opener_prerender`, `run_prefetch`). respx: `route.mock(side_effect=[answer])` (a list) keeps
+  mypy happy for a `Response | Exception` parameter.

@@ -2,8 +2,10 @@
 
 ``prefetch_call_context`` stores it in Redis ``call:{<id>}:ctx`` (hash-tag form, like every per-call key in
 :mod:`va_domain.carrier`) with a TTL of the maximum call duration plus one hour. ``config`` is the resolved
-:class:`~va_domain.calls.config.SendCallConfig`. ``variables`` and ``context_sections`` are filled by pre-call
-dynamic data, ``memory`` by the contact's memory (specs/20 §2.3); each stays empty until its producer exists.
+:class:`~va_domain.calls.config.SendCallConfig`. ``variables`` and ``context_sections`` are filled by the
+pre-call dynamic data of ``prefetch_call_context`` (specs/13 §7 Decision P08-T03a: the variables set and one
+rendered context line per variable that has one); ``memory`` is filled by the contact's memory (specs/20
+§2.3) and stays empty until its producer exists.
 ``opener_text`` is the templated ``first_sentence`` rendered once at prefetch (specs/07 §11 step 5, Decision
 P05-T10d): the media worker speaks it verbatim, so it matches the phrase cache entry rendered for it.
 """

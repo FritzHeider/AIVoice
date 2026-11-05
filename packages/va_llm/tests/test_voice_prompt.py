@@ -14,6 +14,7 @@ import pytest
 
 from va_llm.models import ChatMessage
 from va_llm.prompts import (
+    CONTEXT_HEADER,
     DEFAULT_TOOL_SPEECH,
     VoicePromptInputs,
     assemble_messages,
@@ -187,6 +188,34 @@ def test_braces_render_literally() -> None:
     assert "Say {agent_name} and {{x}}." in prompt
     assert "- k: {weekday}" in prompt
     assert "on behalf of {x}." in prompt
+
+
+def test_context_lines_follow_the_template_as_their_own_block() -> None:
+    lines = [
+        "The customer's name is Ana.",
+        "  Their plan is Pro.  ",
+        "   ",
+        "Use {braces} and {{x}} as written.",
+    ]
+    prompt = render_voice_system(inputs(glossary_terms=["Acme"], context_sections=lines))
+
+    assert prompt.endswith(
+        "\nImportant names and terms: Acme\n\n"
+        "## Context\nThe customer's name is Ana.\nTheir plan is Pro.\nUse {braces} and {{x}} as written."
+    )
+    assert prompt.startswith(render_voice_system(inputs(glossary_terms=["Acme"])))
+    assert prompt.count(CONTEXT_HEADER) == 1
+
+
+@pytest.mark.parametrize("lines", [(), ("",), ("  ", "\n")])
+def test_no_context_block_without_context_lines(lines: tuple[str, ...]) -> None:
+    assert render_voice_system(inputs(context_sections=lines)) == render_voice_system(inputs())
+    assert CONTEXT_HEADER not in render_voice_system(inputs(context_sections=lines))
+
+
+def test_the_context_block_is_not_part_of_the_verbatim_template() -> None:
+    assert CONTEXT_HEADER == "## Context"
+    assert CONTEXT_HEADER not in load_prompt("voice_system")
 
 
 @pytest.mark.parametrize(

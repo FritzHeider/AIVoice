@@ -80,3 +80,17 @@ def test_instructions_are_never_cut() -> None:
     assert fitted.instructions == inputs.instructions
     assert fitted.knowledge_chunks == ()
     assert fitted.memory_context == "Short memory."
+
+
+def test_context_lines_are_never_cut_and_count_towards_the_size() -> None:
+    lines = ("The customer's name is Ana.", "Their plan is Pro and renews every March.")
+    inputs = base(memory_context=MEMORY, context_sections=lines)
+    without_lines = size(base(knowledge_chunks=CHUNKS[:5]))
+
+    fitted = fit_voice_system(inputs, counter=COUNTER, max_context=max_context_for(without_lines))
+    starved = fit_voice_system(inputs, counter=COUNTER, max_context=10)
+
+    assert fitted.context_sections == lines
+    assert len(fitted.knowledge_chunks) < 5
+    assert (starved.context_sections, starved.knowledge_chunks) == (lines, ())
+    assert render_voice_system(starved).endswith("## Context\n" + "\n".join(lines))

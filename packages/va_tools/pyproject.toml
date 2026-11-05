@@ -9,6 +9,7 @@ dependencies = [
     "jsonschema>=4.26",
     "orjson>=3.13.0",
     "pydantic>=2.9",
+    "redis>=5.1",
     "va-common",
     "va-db",
     "va-domain",

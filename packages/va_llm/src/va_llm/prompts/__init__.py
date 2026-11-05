@@ -1,9 +1,10 @@
 """Voice dialogue prompts (specs/10-llm-gateway.md §4-§6; Decision 2026-11-02 P05-T09b).
 
 :func:`render_voice_system` fills the verbatim Voice System Prompt (``voice_system.txt``) from plain values;
-the engine maps a call's context onto :class:`VoicePromptInputs`. :func:`assemble_messages` puts the §4
-message list together, and :func:`fit_voice_system` keeps the system prompt within its share of the model
-context.
+the engine maps a call's context onto :class:`VoicePromptInputs`. The dynamic data context lines follow the
+rendered template as a ``## Context`` block (specs/10 §5 Decision P08-T03a). :func:`assemble_messages` puts
+the §4 message list together, and :func:`fit_voice_system` keeps the system prompt within its share of the
+model context.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from va_llm.models import ChatMessage
 from va_llm.tokens import TokenCounter
 
 __all__ = [
+    "CONTEXT_HEADER",
     "DEFAULT_MAX_CONTEXT",
     "DEFAULT_TOOL_SPEECH",
     "MEMORY_MAX_TOKENS",
@@ -48,6 +50,7 @@ DEFAULT_TOOL_SPEECH = "One moment."
 EXCLUDED_VARIABLES = frozenset({"call_id", "voice_id"})
 EXAMPLES_INTRO = "Examples of how to respond at this step:"
 INTERRUPTION_MARK = "—"
+CONTEXT_HEADER = "## Context"
 
 _PROMPT_NAME = re.compile(r"[a-z][a-z_]*")
 _BAD_PROMPT_NAME = "prompt names are lower-case words joined by underscores"
@@ -64,6 +67,7 @@ class VoicePromptInputs:
 
     ``now_local`` is an aware datetime already in ``timezone``. ``counterpart`` is the outbound callee display
     or the inbound company/number (unused for web). ``knowledge_chunks`` are ranked best first.
+    ``context_sections`` are the dynamic data context lines (specs/13 §7), in the order they are shown.
     """
 
     now_local: datetime
@@ -78,6 +82,7 @@ class VoicePromptInputs:
     memory_context: str | None = None
     knowledge_chunks: Sequence[str] = ()
     glossary_terms: Sequence[str] = ()
+    context_sections: Sequence[str] = ()
 
 
 def load_prompt(name: str) -> str:
@@ -144,8 +149,14 @@ def _glossary(terms: Sequence[str]) -> str:
     return f"\nImportant names and terms: {', '.join(unique)}\n" if unique else ""
 
 
+def _context(sections: Sequence[str]) -> str:
+    lines = [line for section in sections if (line := section.strip())]
+    return f"\n\n{CONTEXT_HEADER}\n" + "\n".join(lines) if lines else ""
+
+
 def render_voice_system(inputs: VoicePromptInputs) -> str:
-    """The rendered Voice System Prompt (specs/10 §5), trailing whitespace removed."""
+    """The rendered Voice System Prompt (specs/10 §5), trailing whitespace removed, followed by the
+    ``## Context`` block when there are context lines (blank ones are dropped; braces stay literal)."""
     agent_name = (inputs.agent_name or "").strip() or _DEFAULT_AGENT_NAME
     company = (inputs.company or "").strip()
     values = {
@@ -162,7 +173,7 @@ def render_voice_system(inputs: VoicePromptInputs) -> str:
         "knowledge_section": _knowledge(inputs.knowledge_chunks),
         "glossary_section": _glossary(inputs.glossary_terms),
     }
-    return load_prompt("voice_system").format_map(values).rstrip()
+    return load_prompt("voice_system").format_map(values).rstrip() + _context(inputs.context_sections)
 
 
 def render_answer_classifier(transcript: str, seconds: float) -> str:
@@ -192,7 +203,8 @@ def fit_voice_system(
     """Inputs whose prompt (plus ``extra_tokens``, e.g. examples) fits 60 % of ``max_context`` (specs/10 §6).
 
     Lowest-ranked knowledge chunks go first, then the memory context is cut to :data:`MEMORY_MAX_TOKENS`; the
-    instructions are never cut, so the result may still be over the share.
+    instructions and the context lines are never cut (the lines count towards the size), so the result may
+    still be over the share.
     """
     limit = SYSTEM_SHARE * max_context
 

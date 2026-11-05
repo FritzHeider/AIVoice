@@ -2,6 +2,26 @@
 
 ## Patterns
 
+### mem-1793918993-6623
+> P08-T03a approved on the second pass (reviewer re-ran make test 13200 passed + make e2e 20 passed). Review technique: prove new tests guard a rule without editing source by a pytest plugin in git-ignored logs/probe_plugin (autouse fixture monkeypatching the private function; run with PYTHONPATH=logs/probe_plugin uv run pytest <file> -p <plugin> -n 0 --no-cov -p no:cacheprovider). Fact: Postgres jsonb prints floats as plain numerics, so 1e20/3.4e38 read back as Python ints beyond 64 bits (and -0.0 as 0.0); orjson.dumps refuses such ints (Deliverer.send, va_events.model.encode) - pre-existing, reachable via Send Call metadata, runtime task fix:webhook-body-big-int; never assert context variables == calls.variables for huge floats
+<!-- tags: tools, dynamic-data, review, testing | created: 2026-11-05 -->
+
+### mem-1793917609-e574
+> P08-T03a second pass: DynamicDataFetcher._variables skips (log tools.dynamic_data_value_unstorable index/name/reason, fetch stays ok) a value nested > MAX_VARIABLE_DEPTH=32 (scalar 0, [1] 1) or with U+0000 in any string/object key, checked by the iterative _unstorable BEFORE the 16 KB size rule; rule: filter at the source values the stores behind a call cannot hold (pydantic/orjson dumps stop ~254 levels, Postgres jsonb refuses U+0000) instead of widening the recorders; respx raw JSON answers = respond(200, content=text.encode(), headers={'content-type':'application/json'}); prove new tests fail by neutering the one call (copy the file to /var/tmp, sed, run, copy back) when the source file is untracked and git stash cannot help
+<!-- tags: tools, dynamic-data, testing | created: 2026-11-05 -->
+
+### mem-1793915801-d640
+> P08-T03a rejected: a 2xx dynamic data value passes the 16 KB rule but breaks the stores: nesting > 254 levels makes CallContextStore.save (pydantic model_dump_json) raise -> prefetch_call_context fails all 3 attempts (workflow dials without context, healthy fetches lost, no event); a string with U+0000 is refused by Postgres JSONB -> PreCallDynamicData._record's one transaction loses ALL call.dynamic_data events + calls.variables. Fix at the source in DynamicDataFetcher._variables (depth limit with margin, no NUL in strings/keys, log by name). orjson.loads turns ints beyond 64 bits into floats and parses up to 1024 levels; orjson.dumps stops at 254. Probes logs/probe_review_t03a_db_test.py (own module Postgres fixture via migrated_postgres + open_database) and logs/probe_review_t03a_test.py
+<!-- tags: tools, dynamic-data, review, testing | created: 2026-11-05 -->
+
+### mem-1793914340-e677
+> P08-T03a built: va_tools.dynamic_data (DynamicDataFetcher.fetch never raises, fetch_all bounded by within on the clock -> FrozenClock/RecordingClock time every fetch out, tests use ManualClock or SystemClock; cache dyn:{org}:{sha256} via stdlib json), va_workflows.activities.dynamic_data.PreCallDynamicData (fetch before opener render, record events + calls.variables after store.save, never raises), worker owns ONE tools_client shared with TextDeps; '## Context' block = VoicePromptInputs.context_sections appended after the verbatim template; build_call_context does NOT copy calls.variables into CallContext.variables (the planner assumed it did); shared prefetch test rig packages/va_workflows/tests/support/prefetch_rig.py; jscpd flags repeated client/executor/fetcher setup inside one test file (extract an asynccontextmanager); a background waiter (until grep exit=) is killed at 10 min, re-run it in the foreground with timeout 590000
+<!-- tags: tools, dynamic-data, testing | created: 2026-11-05 -->
+
+### mem-1793912502-a31b
+> P08-T03 split by the planner: T03a = va_tools.dynamic_data fetcher + outbound pre-call fetch in prefetch_call_context + '## Context' prompt block (appended after the verbatim voice_system template), T03b = every_turn refresh in the brains (800 ms, stale), T03c = inbound 1.5 s edge budget + inject_context; CallContext.variables already flow into opener/prompts/Known information, context_sections had no reader; a task call without tools has no engine-state saver, so the prefetch activity must merge pre-call variables into calls.variables itself; HttpExecutor.execute and ToolRunner._capped raise TypeError for a rendered body with an int beyond 64 bits (orjson) - runtime task fix:http-body-big-int, probes logs/probe_plan_t03*.py
+<!-- tags: tools, dynamic-data, planning | created: 2026-11-05 -->
+
 ### mem-1793912036-4c7f
 > P08-T02c2 approved on the second pass: reviewer re-ran every gate incl. make e2e (make test ~15 min, e2e ~7 min; run them one after the other, light gates/probes in between); a deadline-sharing claim needs a test where the first stage spends clock time (ManualClock: fake tenant session that sleeps 1.5 s then fails -> the signing read must sleep 0.5 s) - the committed test would pass with a fresh budget, probe kept in logs/probe_review_t02c2_test.py; Monitor expires after 10 min even with a larger timeout_ms, re-arm at the expiry notice
 <!-- tags: tools, pathways, review, testing | created: 2026-11-05 -->

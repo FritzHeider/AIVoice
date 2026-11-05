@@ -108,6 +108,18 @@ async def test_pathway_test_runs_get_the_text_dependencies() -> None:
     assert "va_llm_request_duration_ms" in exposed
 
 
+async def test_pre_call_dynamic_data_shares_the_guarded_tool_client() -> None:
+    async with build_container(dialing_settings(**UNREACHABLE)) as container:
+        dynamic = container.activities.context.dynamic
+        tests = container.activities.pathway_tests
+        assert dynamic is not None
+        assert tests is not None
+        assert dynamic._http is tests._text.tools_http
+        assert dynamic._allow_http
+        assert not dynamic._http.is_closed
+    assert dynamic._http.is_closed
+
+
 async def test_recordings_go_to_the_configured_bucket_with_sse_per_kms_provider() -> None:
     settings = dialing_settings(**UNREACHABLE, s3_bucket_recordings="rec-bucket")
     async with build_container(settings) as container:

@@ -157,7 +157,7 @@ claim stale pending entries older than 60 s with `XAUTOCLAIM`.
 | `call.extraction` | extraction | media | variables extracted (data: variables) | `call` |
 | `call.loop_condition` | route | media | condition scored (data: score 0–10, met:bool) | `call` |
 | `call.tool` | tool | media | tool request/response (data: tool_name, request{url,method,body}, status_code, response_excerpt ≤ 2 KB, duration_ms, extracted) | `tool` |
-| `call.dynamic_data` | dynamic_data | worker/media | dynamic data fetch result | `dynamic_data` |
+| `call.dynamic_data` | dynamic_data | worker/media | dynamic data fetch result (data: url without query, method, status_code, duration_ms, variables_set, cached, outcome, timing, index; level `warning` unless outcome is `ok`; specs/13 §7 Decision P08-T03a) | `dynamic_data` |
 | `call.webhook_node` | webhook | media | pathway webhook node executed | `webhook` |
 | `call.webhook_delivery` | webhook | dispatcher | each delivery attempt of a webhook about the call (§8) | — |
 | `call.guard_rail` | guard_rail | media | guard rail evaluated/triggered | `call` |

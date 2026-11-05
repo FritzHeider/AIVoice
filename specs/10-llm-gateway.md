@@ -299,6 +299,14 @@ Placeholder rendering rules (all produced by `va_llm.prompts.render_voice_system
 > filler phrase of `13` §5), `dtmf_message`, `context_update`, `interrupted_message` (`text_spoken.rstrip() + "—"`),
 > `example_messages`, `assemble_messages(system, tool_note=, examples=, window=)` in §4 order.
 
+> Decision (2026-11-05) P08-T03a: the dynamic data context (specs/13 §7 "appended to the system prompt under
+> `## Context`") is not a placeholder of the verbatim template. `render_voice_system` appends, after the rendered
+> and right-stripped template, a blank line, the line `## Context`, and one line per entry of
+> `VoicePromptInputs.context_sections` (each stripped; blank ones dropped; braces stay literal); with no line
+> there is no block. The §6 fit never cuts these lines (they count towards the prompt's size). The engine fills
+> them from `CallContext.context_sections` for task calls (`va_engine.voice_inputs`) and pathway calls
+> (`DialogueSettings.context_sections`).
+
 ## 6. Conversation window (`window.py`)
 
 - Token counting: `tiktoken.get_encoding("cl100k_base")` as an approximation for all models (+ 4 tokens per message).

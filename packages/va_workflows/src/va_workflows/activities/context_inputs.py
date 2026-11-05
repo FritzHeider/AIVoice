@@ -17,7 +17,8 @@ from va_workflows.activities.errors import CALL_NOT_FOUND
 __all__ = ["PREFETCH_RETRY", "PREFETCH_TIMEOUT", "PrefetchResult"]
 
 PREFETCH_TIMEOUT: Final = timedelta(seconds=20)
-"""Covers the opener pre-render (8 s budget, specs/07 §11 Decision P05-T10d) on top of the context build."""
+"""Covers the pre-call dynamic data (6 s budget, specs/13 §7 Decision P08-T03a) and the opener pre-render (8 s
+budget, specs/07 §11 Decision P05-T10d) on top of the context build."""
 PREFETCH_RETRY: Final = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
@@ -29,8 +30,8 @@ PREFETCH_RETRY: Final = RetryPolicy(
 
 class PrefetchResult(BaseModel):
     """``stored`` tells whether a context was saved, ``status`` is the call's status when it was read,
-    ``ttl_s`` the context's Redis TTL when stored, and ``opener_cached`` whether the opener is in the phrase
-    cache."""
+    ``ttl_s`` the context's Redis TTL when stored, ``opener_cached`` whether the opener is in the phrase
+    cache, and ``dynamic_data`` the number of pre-call dynamic data fetches that ran."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -38,3 +39,4 @@ class PrefetchResult(BaseModel):
     status: str
     ttl_s: int | None = None
     opener_cached: bool = False
+    dynamic_data: int = 0

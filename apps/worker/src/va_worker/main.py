@@ -106,8 +106,9 @@ async def build_container(
 ) -> AsyncIterator[Container]:
     """Postgres engine, Redis client, Temporal connector (pydantic converter), the database, the envelope,
     the Telnyx client factory (BYO keys through :class:`TelnyxKeyResolver`), the opener pre-render (ElevenLabs
-    REST + phrase cache + org settings reader), the object store (recordings), the pathway test runs' text
-    dependencies (LLM gateway with org providers, guarded tool HTTP client), and the activity instances;
+    REST + phrase cache + org settings reader), the object store (recordings), the guarded tool HTTP client
+    (pre-call dynamic data and pathway test runs share it), the pathway test runs' text dependencies (LLM
+    gateway with org providers), and the activity instances;
     ``metrics`` is the registry the probes serve (a fresh one when ``None``).
 
     No network I/O until used. ``RuntimeError`` before anything is opened when ``STREAM_TOKEN_SECRET`` or
@@ -131,6 +132,9 @@ async def build_container(
         resolver = TelnyxKeyResolver.for_provider(database, kms_provider)
         factory = telnyx_factory(settings, http=http, redis=redis, resolve_key=resolver, clock=clock)
         store = await stack.enter_async_context(open_object_store(settings))
+        tools_http = tools_client(settings, resolver=system_resolver)
+        stack.push_async_callback(tools_http.aclose)
+        allow_http = insecure_urls_allowed(settings.va_env)
         activities = WorkerActivities.build(
             database=database,
             redis=redis,
@@ -141,8 +145,10 @@ async def build_container(
             storage=RecordingStorage(store, settings.s3_bucket_recordings, sse_for(settings)),
             postcall_step_ms=service_metrics.histogram("va_postcall_duration_ms"),
             text=await stack.enter_async_context(
-                _text_deps(settings, database, kms_provider, clock, service_metrics)
+                _text_deps(settings, database, kms_provider, service_metrics, tools_http)
             ),
+            tools_http=tools_http,
+            allow_http=allow_http,
         )
         yield Container(
             temporal=temporal,
@@ -182,14 +188,14 @@ async def _text_deps(
     settings: WorkerSettings,
     database: Database,
     kms_provider: KmsProvider,
-    clock: SystemClock,
     metrics: ServiceMetrics,
+    tools_http: httpx.AsyncClient,
 ) -> AsyncIterator[TextDeps]:
-    """The LLM gateway (``va_llm_*`` metrics on the probe registry) and the guarded tool HTTP client the
-    pathway unit-test runs use (both HTTP clients are closed on exit)."""
-    async with AsyncExitStack() as stack:
-        llm_http = http_client(settings, timeout=LLM_HTTP_TIMEOUT)
-        stack.push_async_callback(llm_http.aclose)
+    """The LLM gateway (``va_llm_*`` metrics on the probe registry; its HTTP client is closed on exit) and
+    the process's guarded tool HTTP client (owned by the container) for the pathway unit-test runs."""
+    clock = SystemClock()
+    llm_http = http_client(settings, timeout=LLM_HTTP_TIMEOUT)
+    try:
         gateway = platform_gateway(
             settings,
             database=database,
@@ -198,14 +204,14 @@ async def _text_deps(
             clock=clock,
             metrics=LlmMetrics(metrics.registry),
         )
-        tools_http = tools_client(settings, resolver=system_resolver)
-        stack.push_async_callback(tools_http.aclose)
         yield TextDeps(
             gateway=gateway,
             tools_http=tools_http,
             clock=clock,
             allow_http=insecure_urls_allowed(settings.va_env),
         )
+    finally:
+        await llm_http.aclose()
 
 
 def create_app(  # noqa: PLR0913 - keyword-only test seams

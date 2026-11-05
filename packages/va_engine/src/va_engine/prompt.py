@@ -66,7 +66,8 @@ class DialogueSettings:
     """The call- and org-level inputs of every pathway dialogue request.
 
     ``dialogue_model``/``temperature`` are the call config's values (the last layers of §13 before the
-    platform default); ``speculative`` is the org's ``engine.speculative``.
+    platform default); ``speculative`` is the org's ``engine.speculative``; ``context_sections`` are the
+    call's dynamic data context lines (the prompt's ``## Context`` block, specs/13 §7).
     """
 
     org_id: uuid.UUID
@@ -80,6 +81,7 @@ class DialogueSettings:
     context_budget_tokens: int = 6_000
     speculative: bool = True
     memory_context: str | None = None
+    context_sections: tuple[str, ...] = ()
 
     @classmethod
     def for_call(
@@ -99,6 +101,7 @@ class DialogueSettings:
             context_budget_tokens=org.llm.context_budget_tokens,
             speculative=org.engine.speculative,
             memory_context=memory_context,
+            context_sections=tuple(context.context_sections),
         )
 
 
@@ -219,6 +222,7 @@ class PathwayPrompt:
             counterpart=settings.counterpart,
             variables=cast("dict[str, PromptValue]", variables),
             memory_context=settings.memory_context,
+            context_sections=settings.context_sections,
         )
         return render_voice_system(fit_voice_system(inputs, counter=self._counter, extra_tokens=extra_tokens))
 
