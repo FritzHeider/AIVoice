@@ -116,6 +116,14 @@
     within the expected TTL and a lower bound, or read the TTL the store was asked to set).
   - Acceptance: test robust to a slow read; `make check` passes.
 
+- [x] P08-FIX-11 `assert_expires_in` accepts missing / non-expiring keys when `ttl_s` ≤ slack — see .ralph/review-inbox/2026-11-05-redis-ttl-helper-small-ttl.md — lower bound max(0, ttl−slack): missing/no-expiry keys fail for short TTLs (ttl_s 10 cases fail on old helper); make test 12708 passed, 7 skipped, cov 99 %; lint/typecheck/placeholders 0 findings
+  - Spec refs: specs/03 §11 (Redis keys)
+  - Depends on: P08-FIX-10
+  - Deliverables (non-blocker): the lower bound `ttl_s * 1000 - slack_ms` is ≤ 0 for short TTLs, so PTTL -1/-2 pass.
+    Clamp the lower bound at 0 (a key must exist and expire), document it, and add short-TTL unit cases.
+  - Acceptance: `ttl_s=10` missing key and key without expiry fail, `ttl_s=10` key set EX 10 passes; `make check`
+    passes; append the note name to `.ralph/review-inbox/DONE` on approval.
+
 - [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3

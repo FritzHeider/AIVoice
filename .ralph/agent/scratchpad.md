@@ -727,3 +727,44 @@ Helper module name must be unique on the shared pythonpath (`redis_ttl` — chec
 - Diff: helper + 7 unit tests; 6 call sites switched. Every TTL used (600 s, 3900, 5400, 86 400, 172 800) is well above
   the 30 s slack, so the `expire(5)` refresh tests still prove the refresh. No remaining exact `ttl(...) ==` asserts (grep).
   Runtime task fix:prefetch-ttl-flake closed.
+
+## Planner 2026-11-05 — after P08-FIX-10 approval
+- Inbox: new note `2026-11-05-redis-ttl-helper-small-ttl.md` (non-blocker on the FIX-10 helper). Inserted P08-FIX-11
+  above P08-FIX-4. Other undone notes are all P08-FIX-4's.
+
+## Plan P08-FIX-11 (TTL helper: short TTLs must not accept -1/-2)
+### Change
+- `packages/va_common/tests/redis_ttl.py` `assert_expires_in`: `lower = max(0, ttl_s * 1000 - slack_ms)`;
+  `assert lower < remaining <= ttl_s * 1000` (message unchanged in form: `"{key}: pttl {remaining} ms, expected within
+  ({lower}, {ttl_s * 1000}] ms"` — keep the `"<key>: pttl <n>"` prefix the tests match on). Docstring: for TTLs at or
+  below the slack the window is `(0, ttl_s]`: the key must exist and expire, but the length is only bounded above.
+  Also raise `ValueError` when `ttl_s <= 0` (meaningless call) — optional, skip if it adds no test value; keep simple.
+### Tests (`packages/va_common/tests/test_redis_ttl.py`)
+- `test_a_short_ttl_passes`: set EX 10, `assert_expires_in(redis, KEY, 10)` passes.
+- `test_a_missing_key_fails_for_a_short_ttl`: `pytest.raises(AssertionError, match="pttl -2")` with ttl_s=10.
+- `test_a_key_without_expiry_fails_for_a_short_ttl`: plain SET, ttl_s=10 → match "pttl -1".
+- `test_a_longer_ttl_fails_for_a_short_ttl`: EX 11 vs 10 → AssertionError.
+- Optionally parametrize over `ttl_s` in (10, 100) to keep jscpd at 0 instead of duplicating bodies
+  (parametrize with fixed ints only — never random).
+- Verify the new missing/no-expiry cases fail against the old helper (revert line, run, restore).
+### Docs
+- AGENTS.md P08-FIX-10 line: append "short TTLs (≤ 30 s) are only bounded above; the key must still exist and expire".
+### Gates
+- `uv run pytest packages/va_common/tests/test_redis_ttl.py -q`; `make lint typecheck placeholders`; `make check`
+  (background + heartbeat Monitor; PATH += /home/ralph/.local/bin). No e2e (test-only change).
+- Reviewer: tick P08-FIX-11, append `2026-11-05-redis-ttl-helper-small-ttl.md` to DONE, commit
+  `test: refuse missing keys in short redis ttl asserts` + `Task: P08-FIX-11`.
+### Risks
+- None for callers: all six use TTLs ≥ 600 s, window unchanged for them.
+
+## Build P08-FIX-11 (2026-11-05)
+- `assert_expires_in`: window `(max(0, ttl_s*1000 - slack_ms), ttl_s*1000]`; message `"<key>: pttl <n> ms, expected within (lo, hi] ms"`.
+- Tests: missing/no-expiry parametrized over ttl_s 10 and 100; short TTL passes; EX 11 vs 10 fails. The ttl_s=10
+  missing/no-expiry cases fail against the old helper (verified with git stash), pass now (11 passed).
+- AGENTS.md P08-FIX-10 line amended. Test-only change.
+- Gates: make fmt/lint/typecheck/placeholders exit 0 (0 findings); make test exit 0 (12708 passed, 7 skipped, cov 99 %).
+
+## Review P08-FIX-11 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12708 passed, 7 skipped, cov 99 %).
+- Diff: window `(max(0, ttl-slack), ttl]`; short-TTL missing/no-expiry/longer cases tested; callers (TTLs ≥ 600 s)
+  unaffected. Inbox note appended to DONE.

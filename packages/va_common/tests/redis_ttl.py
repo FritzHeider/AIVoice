@@ -23,8 +23,10 @@ async def assert_expires_in(redis: Redis, key: str, ttl_s: int, *, slack_ms: int
 
     The upper bound proves the expiry is not longer than ``ttl_s``; the lower bound proves it is longer than
     ``ttl_s`` minus ``slack_ms`` (a missing key, a key without expiry, or a shorter TTL fail).
+    For a TTL at or below the slack the lower bound is 0: the key must exist and expire, but its length is
+    only bounded above (``PTTL`` answers -2 for a missing key and -1 for one without expiry).
     """
+    upper = ttl_s * 1000
+    lower = max(0, upper - slack_ms)
     remaining = await redis.pttl(key)
-    assert ttl_s * 1000 - slack_ms < remaining <= ttl_s * 1000, (
-        f"{key}: pttl {remaining} ms, expected within {slack_ms} ms below {ttl_s} s"
-    )
+    assert lower < remaining <= upper, f"{key}: pttl {remaining} ms, expected within ({lower}, {upper}] ms"
