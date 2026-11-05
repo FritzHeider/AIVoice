@@ -669,7 +669,8 @@ setting `engine.speculative=false`. Metrics: `speculation_hit` / `speculation_mi
 >    received, also when the generator is closed mid-stream. A stream without a token because the model was
 >    unavailable is followed by the `errorPhrase`. `on_interrupted` replaces the last spoken record (blank text →
 >    `—`) and sets `interrupted`. DTMF turns are recorded as `[Caller pressed: …]`; a turn with `supersedes`
->    removes the superseded user record and everything after it; any user turn disarms the wait timer. Marks are
+>    removes the superseded user record and everything after it
+>    except its `tool` records (specs/13 §4 Decision P08-FIX-17 item 1); any user turn disarms the wait timer. Marks are
 >    `t{turn_index}.{n}`, unique per turn index (wait-timeout lines continue the numbering).
 > 7. Scheduling: the node's reply is offered `list_slots`/`book_slot`; after a streamed reply its tool calls are
 >    answered in order (invalid JSON or a blank `start` → `{"error":"invalid_arguments"}`, other names →
@@ -726,7 +727,8 @@ start. No routing calls; extraction only via tools. All other behavior identical
 >    failure after the first token keeps the spoken text and drops the round's tool calls.
 > 7. Barge-in (§5.1): the interrupted assistant message keeps only the heard text ending in `—` (`—` alone when
 >    nothing was heard) and its history record is marked `interrupted`. A turn that supersedes an earlier one
->    (specs/07 §8) removes the earlier user message and everything after it. DTMF turns become
+>    (specs/07 §8) removes the earlier user message and everything after it
+>    except its completed tool rounds (specs/13 §4 Decision P08-FIX-17 item 1). DTMF turns become
 >    `[Caller pressed: …]` user messages. `on_no_input` yields nothing (the pipeline reprompts); timing uses the
 >    call-level `PipelineConfig` (no node overrides).
 

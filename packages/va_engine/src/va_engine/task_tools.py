@@ -3,7 +3,9 @@
 :func:`plan_round` classifies the tool calls of one model reply in call order: calls past the per-round cap
 (or the call-wide budget) are answered ``too_many_tool_calls``, calls after the first terminal call
 (``end_call``, ``transfer_call``) are answered ``skipped``, invalid calls are answered with the
-``invalid_arguments`` message, and the rest are executed by the runner. Pure: no I/O.
+``invalid_arguments`` message, and the rest are executed by the runner. :func:`completed_rounds` picks the
+tool rounds a superseded turn hands on to the turn that replaces it (specs/13 §4 Decision P08-FIX-17). Pure:
+no I/O.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from va_engine.system_tools import (
     parse_system_call,
     resolve_transfer,
 )
-from va_llm.models import ToolCall
+from va_llm.models import ChatMessage, ToolCall
 
 __all__ = [
     "ENDING",
@@ -41,6 +43,7 @@ __all__ = [
     "TRANSFERRING",
     "PlannedCall",
     "RoundPlan",
+    "completed_rounds",
     "plan_round",
     "sent_digits",
     "tool_result",
@@ -159,3 +162,25 @@ def plan_round(
         invalid = invalid or (item.kind == "answer")
         planned.append(item)
     return RoundPlan(tuple(planned), invalid=invalid, used=used)
+
+
+def completed_rounds(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+    """The completed tool rounds in ``messages``.
+
+    Each assistant message with tool calls (without its text: nobody heard it) followed by its ``tool``
+    answers; a round lacking an answer for every call, and every other message, is left out.
+    """
+    rounds: list[ChatMessage] = []
+    position = 0
+    while position < len(messages):
+        message = messages[position]
+        position += 1
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        answers: list[ChatMessage] = []
+        while position < len(messages) and messages[position].role == "tool":
+            answers.append(messages[position])
+            position += 1
+        if len(answers) == len(message.tool_calls):
+            rounds.extend((message.model_copy(update={"content": None}), *answers))
+    return rounds

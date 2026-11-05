@@ -1,4 +1,5 @@
-"""Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16)."""
+"""Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16,
+P08-FIX-17)."""
 
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from va_engine.system_tools import SystemToolFacts
 from va_llm.errors import LlmConnectionError
 from va_llm.models import ToolCall, ToolDef
 from va_voice.phrase_cache import TOOL_FILLERS
+from va_voice.pipeline import UserTurn
 
 LOOKUP = ToolDef(
     name="lookup",
@@ -267,10 +269,14 @@ async def test_tool_speech_is_spoken_before_the_follow_up_and_variables_merge() 
     assert ("assistant", "Looking up Paris.") in rig.history()
 
 
-async def drive_held(rig: Rig, tools: RecordingExecutor, *, close_on_line: bool) -> list[tuple[Any, ...]]:
-    """Start the conversation with held tools: release the waiting ones (or close the turn) at each line."""
+async def drive_held(
+    rig: Rig, tools: RecordingExecutor, *, close_on_line: bool, turn: UserTurn | None = None
+) -> list[tuple[Any, ...]]:
+    """Start the conversation (or run the caller's ``turn``) with held tools: release the waiting ones (or
+    close the turn) at each line."""
     rendered: list[tuple[Any, ...]] = []
-    async with contextlib.aclosing(rig.engine.start()) as actions:
+    running = rig.engine.start() if turn is None else rig.engine.handle_user_turn(turn)
+    async with contextlib.aclosing(running) as actions:
         async for action in actions:
             rendered.extend(await spoken((action,)))
             if isinstance(action, Say):
@@ -493,3 +499,168 @@ async def test_a_static_node_never_runs_the_calls_of_an_earlier_stream() -> None
     assert [item[:2] for item in actions] == [("say", "All set.")]
     assert [c.id for c in tools.calls] == ["c0", "c1", "c2"]
     assert len(tool_records(rig)) == 3
+
+
+# A superseded turn keeps the answers of the tools it ran (Decision P08-FIX-17 item 1).
+
+
+def context_update(name: str, content: str) -> str:
+    return f"Tool {name} returned: {content}"
+
+
+def position(rig: Rig, role: str, text: str) -> int:
+    """Where the last request holds a ``role`` message containing ``text``."""
+    messages = rig.source.requests[-1].messages
+    [found] = [
+        index
+        for index, message in enumerate(messages)
+        if message.role == role and text in (message.content or "")
+    ]
+    return found
+
+
+async def test_a_superseded_turn_keeps_its_tool_records() -> None:
+    result = '{"status":200,"data":"9-5"}'
+    tools = executor(results={"lookup": result}, variables={"lookup": {"hours": "9-5"}})
+    rig = engine_rig(one_node(), tools=tools, fillers=False)
+    rig.source.reply("Hello.").reply("", calls=[call("c1", "lookup", city="Paris")])
+    rig.source.reply("It opens at nine.").reply("Both open at nine.")
+    await rig.start()
+    await drive(rig.engine.handle_user_turn(user("paris", 1)))
+
+    await drive(rig.engine.handle_user_turn(user("paris and lyon", 2, supersedes=1)))
+
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", result),
+        ("user", "paris and lyon"),
+        ("assistant", "Both open at nine."),
+    ]
+    assert position(rig, "system", context_update("lookup", result)) < position(rig, "user", "paris and lyon")
+    assert [c.name for c in tools.calls] == ["lookup"]
+    assert rig.state.variables["hours"] == "9-5"
+
+
+async def test_a_superseded_turn_keeps_an_interrupted_answer() -> None:
+    tools = executor(hold=True)
+    rig = engine_rig(one_node(), tools=tools)
+    rig.source.reply("Hello.").reply("", calls=[call("c1", "lookup")]).reply("Sure.")
+    await rig.start()
+    cut = await drive_held(rig, tools, close_on_line=True, turn=user("paris", 1))
+
+    await drive(rig.engine.handle_user_turn(user("paris please", 2, supersedes=1)))
+
+    interrupted = '{"error":"interrupted"}'
+    assert cut[-1][:2] == ("say", TOOL_FILLERS[0])
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", interrupted),
+        ("user", "paris please"),
+        ("assistant", "Sure."),
+    ]
+    assert position(rig, "system", context_update("lookup", interrupted)) < position(
+        rig, "user", "paris please"
+    )
+
+
+async def test_a_second_supersede_keeps_the_tool_record_once() -> None:
+    tools = executor()
+    rig = engine_rig(one_node(), tools=tools, fillers=False)
+    rig.source.reply("Hello.").reply("", calls=[call("c1", "lookup")]).reply("One.")
+    rig.source.reply("Two.").reply("Three.")
+    await rig.start()
+    await drive(rig.engine.handle_user_turn(user("paris", 1)))
+    await drive(rig.engine.handle_user_turn(user("paris and", 2, supersedes=1)))
+
+    await drive(rig.engine.handle_user_turn(user("paris and lyon", 3, supersedes=2)))
+
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", '{"ok":"lookup"}'),
+        ("user", "paris and lyon"),
+        ("assistant", "Three."),
+    ]
+
+
+# A node runs exactly the tools its refs name (Decision P08-FIX-17 item 2).
+
+
+def inline(description: str, host: str) -> dict[str, Any]:
+    return {"name": "lookup", "description": description, "url": f"https://{host}.hooks.test/x"}
+
+
+def descriptions(rig: Rig) -> list[list[str]]:
+    return [[tool.description for tool in request.tools] for request in rig.source.requests]
+
+
+async def test_two_nodes_run_their_own_tool_of_one_name() -> None:
+    pathway = graph(
+        [
+            start("a", prompt="Help.", tools=[inline("A", "a")]),
+            node("b", prompt="More.", tools=[inline("B", "b")]),
+        ],
+        [edge("e1", "a", "b", "Caller wants more")],
+    )
+    tools = executor(tools=(), refs={})
+    rig = engine_rig(pathway, tools=tools, fillers=False, speculative=False)
+    rig.source.reply("", calls=[call("c1", "lookup")]).reply("From A.")
+    rig.source.reply("", calls=[call("c2", "lookup")]).reply("From B.")
+    await rig.start()
+    rig.port.script("select_path", route("e1", 9))
+
+    await rig.say("More, please.")
+
+    assert rig.state.current_node_id == "b"
+    assert descriptions(rig) == [["A"], ["A"], ["B"], ["B"]]
+    assert tools.ran == [("https://a.hooks.test/x", "lookup"), ("https://b.hooks.test/x", "lookup")]
+    assert tool_records(rig) == [("lookup", '{"ok":"lookup"}')] * 2
+
+
+@pytest.mark.parametrize(
+    ("refs", "description", "ran"),
+    [
+        (["TL-1", inline("inline", "a")], LOOKUP.description, "TL-1"),
+        ([inline("inline", "a"), "TL-1"], "inline", "https://a.hooks.test/x"),
+    ],
+    ids=["stored-first", "inline-first"],
+)
+async def test_the_first_ref_of_a_name_is_the_tool_that_runs(
+    refs: list[Any], description: str, ran: str
+) -> None:
+    tools = executor()
+    rig = engine_rig(one_node(tools=refs), tools=tools, fillers=False)
+    rig.source.reply("", calls=[call("c1", "lookup")]).reply("Done.")
+    stream = json_log_stream()
+
+    await rig.start()
+
+    assert descriptions(rig) == [[description], [description]]
+    assert tools.ran == [(ran, "lookup")]
+    shadowed = [event["count"] for event in log_events(stream) if event["event"] == "engine.tool_unresolved"]
+    assert shadowed == [1]
+
+
+async def test_global_tools_yield_to_a_node_tool_of_the_same_name() -> None:
+    pathway = one_node({"globalTools": [inline("global", "g")]}, tools=[inline("node", "n")])
+    tools = executor(tools=(), refs={})
+    rig = engine_rig(pathway, tools=tools, fillers=False)
+    rig.source.reply("", calls=[call("c1", "lookup")]).reply("Done.")
+
+    await rig.start()
+
+    assert descriptions(rig)[0] == ["node"]
+    assert tools.ran == [("https://n.hooks.test/x", "lookup")]
+
+
+async def test_the_offer_carries_the_node_executor() -> None:
+    pathway = one_node(tools=[])
+    clock = engine_rig(pathway).clock
+    main = pathway.nodes[0]
+
+    bare = NodeTools(None, VOICE, clock=clock, fillers=True).offer(main, pathway)
+    scoped = NodeTools(executor(), VOICE, clock=clock, fillers=True).offer(main, pathway)
+
+    assert bare.executor is None
+    assert scoped.executor is not None
+    assert scoped.executor.definitions() == ()
+    assert (scoped.executor.handles("lookup"), scoped.custom) == (True, frozenset())

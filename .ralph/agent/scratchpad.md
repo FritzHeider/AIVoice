@@ -1089,3 +1089,300 @@ Read the whole diff against .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md 
   invariant only (executed calls exist only with an executor: `ToolOffer.handles`, `TaskBrain._handles`,
   `runnable_facts`).
 No findings. Inbox notes stay out of DONE until P08-FIX-17 (items 3, 4).
+
+## Planner (2026-11-05, after P08-FIX-16 approval)
+Inbox: no new notes (open ones: t02c1-recheck + t02c1-engine-node-tools-review → FIX-17; fix-15-review → FIX-18).
+Next unticked task: P08-FIX-17. Plan entry rewritten with the decided design (DEC-012 in decisions.md); P08-T02c2
+deliverable now names `for_refs`.
+
+## Plan P08-FIX-17 — a superseded turn keeps its tool answers; a node runs exactly the tools its refs name
+Notes: .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md items 3, 4 (+ engine-node-tools-review item 4).
+
+### Findings (read at HEAD 9ecbbdf)
+- Pre-audio merge (va_voice pipeline `_route_locked`): a caller turn ending while the reply has produced no audio
+  cancels the reply (generator closed → `stop_tasks` cancels unfinished custom tools, answered `interrupted`) and
+  delivers the merged turn with `supersedes`. `PathwayEngine._drop_turn` (engine.py ~960) deletes every record
+  since the superseded user record, `tool` records included; `TaskBrain._drop_turn` (task_runner.py ~488) deletes
+  `self._messages[position:]` and the records. Side effects + merged variables stay → next request has no trace.
+- Pathway history renders `tool` records as `[Context update] Tool <name> returned: <content>` system messages
+  (`prompt._history_message`); `handle_user_turn` needs the caller's record LAST (`history = state.history[:-1]`).
+- TaskBrain messages are provider-shaped: `assistant(tool_calls)` then one `tool` message per call
+  (`_record_reply`, `_answer`); the window (`va_llm.window.split_turns`) groups at `user` messages.
+- `PathwayToolExecutor.definitions_for(refs)` + `execute(call, scope)` by `call.name`: one definition per name per
+  call, so node B's same-name tool would run node A's definition once P08-T02c2 builds the executor.
+
+### 1. Pathway: keep the superseded turn's tool records — `packages/va_engine/src/va_engine/engine.py`
+`_drop_turn(index)`: after `mark`/`logbook.drop_turn(turn_index)` (unchanged):
+```python
+history = self.state.history
+dropped = min(self._records_added - added, len(history))
+kept = [record for record in history[-dropped:] if record.role == "tool"] if dropped > 0 else []
+if dropped > 0:
+    history[-dropped:] = kept
+self._records_added = added + len(kept)
+self._spoken = None
+```
+Every `tool` record stays (results, `invalid_arguments`, `interrupted`, Scheduling `list_slots`/`book_slot`
+answers), in order, with its own `node_id`/`at_ms`; user/assistant records of the turn go as before; the logbook
+drop is unchanged (it holds no tool records). Docstring: say why (the tool ran; Decision P08-FIX-17). Nothing
+else in the engine changes for item 3 (`_accept` then records the merged turn behind the kept records).
+
+### 2. Task mode: carry the completed tool rounds — `task_tools.py` + `task_runner.py`
+`packages/va_engine/src/va_engine/task_tools.py` (pure, export in `__all__`):
+```python
+def completed_rounds(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+    """The completed tool rounds in ``messages``: each assistant message with tool calls (without its text:
+    nobody heard it) followed by its ``tool`` answers; a round lacking an answer for every call, and every
+    other message, is left out."""
+```
+(walk the list; for an assistant message with `tool_calls` collect the directly following `tool` messages; keep
+`message.model_copy(update={"content": None})` + answers only when `len(answers) == len(message.tool_calls)`.)
+`task_runner.py`:
+- new attribute `self._carried: list[ChatMessage] = []`.
+- `_drop_turn(index)`: `self._carried = completed_rounds(self._messages[position:])` before `del
+  self._messages[position:]`; records: same rule as the engine (`kept = [r for r in tail if r.role == "tool"]`,
+  `history[-dropped:] = kept`, `self._records_added = added + len(kept)`; keep the existing guard
+  `0 < dropped <= len(history)`); `_spoken` reset unchanged. Docstring updated.
+- `_accept(turn)`: after `self._append(message, at_ms=…)` add `self._messages.extend(self._carried);
+  self._carried = []` (messages only: their `tool` records already sit in the history ahead of the merged user
+  record; `_marks[turn.index]` is taken before the user message, so a second supersede finds user + carried
+  rounds in its range and carries them again). `start(greeting)` also goes through `_accept` (nothing carried
+  there).
+Result for the next request: `…, user(merged), assistant(content=None, tool_calls=[…]), tool, …` → the standard
+tool-round shape; `assert_tool_pairing` holds; no assistant message follows an assistant message.
+
+### 3. Ref-based resolution — `tool_executor.py`, `tool_tasks.py`, `engine_node_tools.py`, `engine.py`, `task_runner.py`
+`packages/va_engine/src/va_engine/tool_executor.py`:
+```python
+class PathwayToolExecutor(Protocol):   # no longer extends ToolExecutor
+    """The tools of a pathway call, resolved per node (specs/13 §4, Decision P08-FIX-17)."""
+    @property
+    def tool_speech(self) -> str | None: ...      # the tool usage note's speech (unchanged meaning)
+    def handles(self, name: str) -> bool: ...     # executor-backed SYSTEM tools the call runs (runnable_facts)
+    def for_refs(self, refs: Sequence[ToolRef]) -> ToolExecutor:
+        """The executor of one node: ``definitions()`` are the tools ``refs`` name, in ref order (a string =
+        that stored tool, a mapping = that inline tool; unresolved refs skipped; of several refs with one tool
+        name the first wins); ``handles``/``speech``/``execute`` answer for exactly those definitions plus the
+        call's system tools."""
+```
+Module docstring updated. `ToolExecutor` unchanged (task mode).
+`tool_tasks.py`:
+- `runnable_facts(facts, executor: ToolExecutor | PathwayToolExecutor | None)` (only `handles` is used).
+- `ToolLines.__init__(self, *, clock, enabled)`; `line(self, executor: ToolExecutor | None, planned, tasks,
+  scope)`; `_speech(executor, planned, scope)`. (The node's executor differs per reply, so it is an argument.)
+`task_runner.py`: `ToolLines(clock=clock, enabled=settings.engine.tool_fillers)`;
+`self._lines.line(self._executor, plan.executed, tasks, scope)`.
+`engine_node_tools.py`:
+- `ToolOffer` gains `executor: ToolExecutor | None = None` ("runs the offer's custom and executor-backed system
+  tools").
+- `NodeTools.__init__`: `self.lines = ToolLines(clock=clock, enabled=fillers)`.
+- `NodeTools.offer`: `scoped = None if self.executor is None else self.executor.for_refs(node_tool_refs(node,
+  graph))` (also with no refs: system tools run through it); `_custom(node, scoped, refs, taken)` reads
+  `scoped.definitions()`; keep the reserved/taken filter and the `engine.tool_unresolved` log (count = distinct
+  ref keys − definitions: refs that produced no definition, i.e. unresolved or shadowed by an earlier ref of the
+  same name; say so in the docstring); return `ToolOffer(..., executor=scoped)`.
+- `run_node_round(plan, *, executor: ToolExecutor | None, lines: ToolLines, scope, variables, next_mark, answer,
+  outcome)` (replaces `tools: NodeTools`): `start_tools(executor, …)`, `lines.line(executor, …)`.
+- module docstring: one sentence on per-node resolution.
+`engine.py` `_node_round`: `run_node_round(plan, executor=offer.executor, lines=self._tools.lines, …)`.
+`engine.__init__` keeps `ports.tools.tool_speech`. No validation rule, no specs/11 §11 change.
+GC rule (AGENTS P08-FIX-3): the offer/view hold the call's executor, never the engine → no cycle.
+
+### 4. Tests
+Fake — `packages/va_engine/tests/support/task_helpers.py` `RecordingExecutor`: replace `definitions_for` by
+`for_refs(refs)` returning a small node view (same module, e.g. `NodeExecutor` dataclass: parent, resolved
+`tools`, `labels: dict[name, label]`) with `definitions()`, `tool_speech`, `handles(name)` (`name in labels or
+parent.handles(name)`), `speech(name)` (parent), `execute(call, scope)` (appends `(labels.get(call.name,
+call.name), call.name)` to a new parent list `ran`, then delegates to `parent.execute`). Resolution: a string ref
+through `parent.refs` → the `parent.tools` entry (label = the ref); a mapping with `description` or `url` defines
+its own `ToolDef(name, description, parameters={"type": "object"})` (label = its `url`, else its name); a bare
+`{"name": …}` mapping resolves by name as today; first ref per name wins. Existing constructions
+(`executor(refs=…)`, TaskBrain uses) keep working.
+`packages/va_engine/tests/test_engine_tools.py`:
+- `test_a_superseded_turn_keeps_its_tool_records`: `started`/start with "Hello.", turn 1 `reply("",
+  calls=[call("c1","lookup",city="Paris")]).reply("It opens at nine.")` driven fully, then
+  `handle_user_turn(user("paris and lyon", 2, supersedes=1))` with `reply("Both open at nine.")`: history ==
+  `[assistant Hello., tool lookup <result>, user "paris and lyon", assistant "Both open at nine."]` (roles +
+  contents, no turn-1 user/assistant record); the last request's messages contain `[Context update] Tool lookup
+  returned: <result>` positioned before the `user` message "paris and lyon"; `[c.name for c in tools.calls] ==
+  ["lookup"]`; `rig.state.variables` still hold the tool's variables (`variables={"lookup": {"hours": "9-5"}}`).
+- `test_a_superseded_turn_keeps_an_interrupted_answer`: `drive_held(rig, tools, close_on_line=True)` (filler
+  line, tool cancelled) then a superseding turn: `tool_records(rig) == [("lookup", '{"error":"interrupted"}')]`.
+- `test_a_superseded_scheduling_turn_keeps_its_booking_answer` only if cheap with the existing
+  `scheduling_node()` helper + `FakeHttp` (else skip: the code path is the same `_record_tool`).
+- `test_two_nodes_run_their_own_tool_of_one_name`: two Default nodes (`start("a", tools=[{name: lookup,
+  description: "A", url: "https://a.hooks.test/x"}])`, node `b` with description "B"/url b, edge a→b; route via
+  `KeyedPort`/rig routing helper as other two-node tool-less tests do): reply at `a` calls `lookup` →
+  `tools.ran == [("https://a.hooks.test/x", "lookup")]`, offered description "A"; after the route the reply at
+  `b` offers description "B" and its call appends `("https://b.hooks.test/x", "lookup")`.
+- `test_the_first_ref_of_a_name_is_the_tool_that_runs`: one node `tools=["TL-1", {name: lookup, description:
+  "inline", url: …}]`: offered once (LOOKUP's description), `tools.ran == [("TL-1", "lookup")]`; reversed order
+  → the inline one. Update `test_custom_tools_named_like_system_tools_or_twice_are_skipped` to the new
+  `NodeTools`/offer API if its construction changes.
+- NodeTools-level: `offer(...).executor` is `None` without an executor; with an executor and no refs it still
+  runs an executor-backed system tool (`test_executor_backed_system_tools_run_through_the_executor` stays green).
+`packages/va_engine/tests/test_engine_turns.py::test_superseding_turn_replaces_the_earlier_one` stays as is.
+`packages/va_engine/tests/test_task_tools.py`: `completed_rounds` cases: text + calls → content None kept with
+answers; two rounds; a round missing an answer dropped; plain user/assistant messages dropped; empty input.
+`packages/va_engine/tests/test_task_tool_speech.py` (FakeSource brain rig; or test_task_runner.py with FakeLLM
+rules if simpler):
+- `test_a_superseded_turn_carries_its_tool_round_behind_the_merged_message`: turn 1 = tool-only reply + tool
+  result + second reply, then `on_user_turn(user_turn(2, "order A7 and B2", supersedes=1))`: last request's
+  messages (after system/notes) end `user "order A7 and B2"`, `assistant(tool_calls=[lookup_order], content
+  None)`, `tool <result>`; `assert_tool_pairing`; no "order A7" user message from turn 1; `brain.state.history`
+  roles end `tool, user, assistant`; executor ran once.
+- `test_a_superseded_interrupted_round_is_carried_too` (held executor, generator closed before any line with
+  fillers off or at the filler; answers `interrupted`; carried round has both messages).
+- `test_a_second_supersede_carries_the_round_again` (turn 3 supersedes 2: round still present exactly once).
+`packages/va_engine/tests/test_tool_tasks.py`: adapt `ToolLines(clock=…, enabled=…)` / `line(executor, …)`.
+Mutation check to report: restoring `del history[-dropped:]` (engine) / dropping `_carried` (TaskBrain) fails the
+new tests; resolving by name across nodes (fake ignoring refs) fails the two-node test.
+
+### 5. Spec + docs (same commit)
+- specs/13 §4: new `> Decision (2026-11-05) P08-FIX-17:` after Decision P08-FIX-16:
+  1. Superseded turn (specs/07 §8 pre-audio merge): tools that ran stay on record. Pathways: the turn's `tool`
+     history records stay, ahead of the merged caller turn (context updates on the next request); its user and
+     assistant records go as before. Task mode: its completed tool rounds (assistant `tool_calls` message
+     without text + `tool` answers) are re-appended behind the merged caller message, `tool` records stay; a
+     round without an answer for every call is dropped. Answers `interrupted` are kept like any other.
+     Variables and `call.tool` events were never withdrawn.
+  2. Per-node resolution: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor` (replaces `definitions_for`);
+     a node offers, speaks for and executes exactly the definitions its `tools` + `globalTools` refs name; of
+     several refs with one tool name the first wins (node tools before global tools), so the definition shown
+     to the model is the one that runs, and different tools of one name on different nodes (inline or stored)
+     never mix; no §11 validation rule. Node executors share the call's runner, events and system tool runs
+     (one drain at call end) — binding for P08-T02c2.
+  In Decision P08-T02c1 item 1 mark the `definitions_for` clause "(superseded by Decision P08-FIX-17 item 2)".
+- specs/13 §5 Decision P08-T02b1: add item 5 pointing to `specs/13 §4` Decision P08-FIX-17 item 1 (same line).
+- specs/11 §5.9 Decision P07-T08b (line ~671 "a turn with `supersedes` removes the superseded user record and
+  everything after it"): append "except its `tool` records (specs/13 §4 Decision P08-FIX-17)" on one line.
+- AGENTS.md bullet `2026-11-05 (P08-FIX-17)`: `for_refs` + `ToolOffer.executor` + `ToolLines.line(executor, …)`;
+  superseded turns keep tool records / `completed_rounds` + `_carried`; fake `RecordingExecutor.for_refs`/`ran`.
+- Do NOT touch `.ralph/review-inbox/DONE` (Reviewer appends both note names on approval); plan tick = Reviewer.
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+-q`; `uv run python scripts/check_spec_refs.py`; `make test` in the background (`: > logs/make_test.log`, then
+`make test > logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat Monitor ~2 min);
+`npx --yes jscpd@4 --silent` (0 clones: the two `_drop_turn` record blocks are near-identical — if jscpd flags
+them, move the shared part into `va_engine.models.state` as `keep_tool_records(history, dropped) -> int`);
+`uvx radon cc -s -a` on touched files; `uvx pip-audit` on `uv export`; `corepack pnpm audit`. No media/e2e flow
+changes (pathway tools reach the media runtime in P08-T02c2; task-mode supersede is covered by va_engine tests
+and nothing in apps/ implements `definitions_for`) → no `make e2e`.
+
+### Risks
+- Anything else implementing/using `definitions_for` or `ToolLines(executor, …)`: grep found only the engine,
+  `task_helpers.RecordingExecutor` and specs/plan text; re-grep apps/ and packages/ before finishing.
+- `RecordingExecutor` must still satisfy `ToolExecutor` (TaskBrain tests) and now `PathwayToolExecutor`
+  (`engine_rig(tools=)`): mypy checks both structurally.
+- TaskBrain: `_carried` must be cleared in `_accept` only; a `_drop_turn` whose mark is unknown leaves it empty.
+  A carried round sits inside the new turn's `_marks` range (mark taken before the user message) — covered by
+  the second-supersede test.
+- Window trimming: carried rounds belong to the current (never dropped) turn; fine.
+- Known flake (task fix:sim-shared-redis-exit-flake): `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset`; if it fails, re-run alone and report both runs.
+
+## Build P08-FIX-17 (2026-11-05)
+Implemented the plan; two deviations, both written into specs/13 §4 Decision P08-FIX-17.
+
+What changed
+- `va_engine.tool_executor`: `PathwayToolExecutor` no longer extends `ToolExecutor`; it has `tool_speech`,
+  `handles(name)` and `for_refs(refs) -> ToolExecutor` (replaces `definitions_for`).
+- `va_engine.tool_tasks`: `ToolLines(clock=, enabled=)`, `line(executor, planned, tasks, scope)` (speech lookup is
+  a module function); `runnable_facts` accepts either executor kind.
+- `va_engine.engine_node_tools`: `ToolOffer.executor` (the node's own), `NodeTools.offer` calls
+  `executor.for_refs(node refs)` also with no refs (system tools), `run_node_round(plan, executor=, lines=, ...)`.
+- `va_engine.engine`: `_node_round` passes `offer.executor`; `_drop_turn` keeps the turn's `tool` records.
+- `va_engine.models.state.keep_tool_records(history, count) -> kept` shared by engine and TaskBrain (the two
+  `_drop_turn` blocks would otherwise be a jscpd clone).
+- `va_engine.task_tools.completed_rounds(messages)`; `TaskBrain._carried` set in `_drop_turn`, appended behind the
+  merged user message in `_accept`.
+
+Deviations from the plan
+1. TaskBrain `_drop_turn` uses the shared clamp (`min(count, len(history))`) instead of the old
+   `0 < dropped <= len(history)` guard. They differ only if one turn added more records than the history holds
+   (cap 200; a turn adds at most a few dozen), where the clamp is the engine's established behaviour.
+2. Not in the plan, found while implementing: a task-mode `transfer_call` records `{"status":"transferring"}`
+   before its message is spoken and the `TransferRequest` is yielded. The pipeline merges a caller turn into any
+   running reply without audio (`_route_locked`: `running and not reply_audio_started`), so a reply can be closed
+   on the transfer message; before this task the whole turn was dropped, with carrying the model would have been
+   told "transferring" for a transfer that never happened. `TaskBrain._transfer` now rewrites that answer
+   (message + record) to `interrupted` when the request was not handed over
+   (`test_a_transfer_closed_on_its_message_is_carried_as_interrupted`; mutation: without the rewrite it fails).
+   `end_call`/`transfer_call` cut earlier in the round were already answered `interrupted`.
+
+Not done / residual
+- Scheduling variant of the superseded-turn test skipped (plan: only if cheap; same `_record_tool` path).
+- Pathway `run_node_round` records every `press_button` answer `sent` before yielding the `SendDtmfAction`s
+  (order from P08-T02c1). With two presses in one round and a reply closed at the first, the second is on
+  record as sent though it never went out; that record now survives a supersede. Not changed here (needs its
+  own decision on answer/yield order); worth a planner look.
+- `.ralph/review-inbox/DONE` and the plan tick untouched (Reviewer).
+
+Tests added
+- test_engine_tools.py: superseded turn keeps tool records (result, interrupted, second supersede once);
+  two nodes run their own inline `lookup`; first ref of a name wins (stored-first / inline-first, shadowed ref
+  logged); node tool beats a global tool of the same name; `ToolOffer.executor` with/without an executor.
+- test_task_tool_speech.py: carried round behind the merged message (request shape + pairing + history +
+  variables), second supersede, interrupted round, turn without rounds, transfer closed on its message,
+  transfer handed over.
+- test_task_tools.py: `completed_rounds` (text stripped, two rounds, incomplete round, plain messages, empty).
+- test_state.py: `keep_tool_records` (0, negative, tail, mixed, clamp).
+- Fake: `task_helpers.RecordingExecutor.for_refs` → `NodeExecutor`; `executor.ran` = (label, name).
+
+Mutation checks (each run on packages/va_engine, then restored)
+- keep no tool records → 8 failed (3 engine, 2 state, 3 TaskBrain).
+- TaskBrain does not append `_carried` → 3 failed.
+- NodeTools reuses the first node's executor → 2 failed (two-node test, global-tools offer test).
+- transfer answer not rewritten → 1 failed.
+
+Gates (final code)
+- make fmt: exit 0. make lint: exit 0. make typecheck: exit 0 (mypy: no issues in 1614 files).
+- make placeholders: 0 findings. check_spec_refs: 0 problems. check_openapi_drift: both current.
+- make test: 13052 passed, 7 skipped (live suite), coverage 99.08 % (touched files 98-100 %), 830 s. The known
+  sim shared-Redis flake did not fire. An earlier run was killed by me on purpose (to add deviation 2), its
+  `exit=2` is not a test result.
+- make test-ts: exit 0 (widget 22, dashboard 52, sdk 48 passed). No TS change.
+- jscpd: 0 clones. radon: average 3.09 on touched files, nothing at C or worse.
+- pip-audit --strict on `uv export` (CI form): no known vulnerabilities.
+- pnpm audit: `--audit-level high` (the CI gate) exit 0; plain `pnpm audit` exit 1 with 1 moderate advisory
+  (minimatch <11.0.1 via typescript-eslint 8.72.0, dev-only, lockfile untouched since 2026-10-25, unrelated to
+  this task) → task fix:pnpm-audit-minimatch opened.
+- make e2e not run: no media/e2e flow changed (pathway tools reach the media runtime in P08-T02c2; nothing in
+  apps/ implements the changed protocol).
+
+## Review P08-FIX-17 (2026-11-05) — APPROVED
+Re-run by the reviewer on the final tree: make lint / typecheck / placeholders exit 0; check_spec_refs 0;
+jscpd 0 clones; pip-audit (CI form) clean; pnpm audit --audit-level high exit 0 (1 moderate, task
+fix:pnpm-audit-minimatch); make test exit 0: 13052 passed, 7 skipped, coverage 99.08 % (touched files 98-100 %).
+radon: average 3.09; `PathwayEngine._respond` is C (12), unchanged from HEAD (the builder's "nothing at C" was
+inaccurate, not a regression).
+
+Read against specs/13 §4 Decision P08-FIX-17, specs/11 §5.9/§6 notes, plan deliverables and the pipeline
+(`_route_locked` → `_cancel_reply` waits for the reply task, `_reply` closes the Brain generator in `finally`, so
+`interrupted` answers and the transfer rewrite are in place before `_drop_turn`; `_end_call` sets `_closing` at
+once, so a task-mode `EndCall` handed over can never be superseded).
+- Mark arithmetic holds across a second supersede (engine: kept tool records sit before the new turn's mark;
+  TaskBrain: carried rounds sit behind the merged user message, inside the new mark, and are picked up again once).
+- `placed` index stays valid: nothing between `_answer` and the `_transfer` finally removes messages.
+- `ToolOffer.executor` is the same node executor for the offer and the round; no engine reference (no cycle).
+Mutation checks (packages/va_engine, each restored byte-identical afterwards): keep no tool records → 9 failed;
+transfer answer not rewritten → 1 failed; carried rounds not appended → 4 failed; node executor built from no
+refs → 20 failed.
+Reviewer probe (/var/tmp/review_fix17/test_adhoc.py, not in the repo): transfer closed on its message, then a
+merged turn whose reply calls `transfer_call` again → carried answer `interrupted`, the second call yields a
+`TransferRequest` and is answered `transferring`, pairing valid.
+
+Both notes of this task appended to `.ralph/review-inbox/DONE` (t02c1-recheck, t02c1-engine-node-tools-review).
+
+For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-17-review.md` (maintainer review of this work tree,
+written 12:38Z, NOT in DONE) still needs its FIX task.
+- Its item 1 (blocker: carried round says "transferring" for a transfer never requested) is fixed in this commit
+  (`TaskBrain._transfer`/`_interrupt_answer`, test `test_a_transfer_closed_on_its_message_is_carried_as_interrupted`,
+  Decision text names the case). Still owed from that item: the regression assertion that a second
+  `transfer_call` in the merged turn yields a `TransferRequest` (behaviour verified by the probe above, no repo
+  test asserts it).
+- Its item 2 (not a blocker) is open: pathway `run_node_round` records every `press_button` answer `sent`
+  before yielding the `SendDtmfAction`s; with two presses in one round and the reply closed at the first, the
+  second stays on record as sent, and that record now survives a supersede. Fix as the note says (answer and
+  yield per press, like TaskBrain) and state the order in the Decision.

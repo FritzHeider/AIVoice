@@ -1,11 +1,13 @@
-"""Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1 and P08-FIX-16 under
-specs/13 §4).
+"""Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1, P08-FIX-16 and
+P08-FIX-17 under specs/13 §4).
 
 A reply node (:data:`REPLY_NODE_TYPES`, global nodes included) whose reply streams from the dialogue model
 is offered the system tools the conversation allows (:class:`~va_engine.system_tools.SystemToolFacts` with
 runner ``pathway``: never ``transfer_call``; ``end_call`` only when ``globalConfig.allowEndCallTool``)
 followed by the custom tools of the node's ``tools`` and ``globalConfig.globalTools`` the executor resolves.
-:class:`NodeTools` computes that :class:`ToolOffer`; :func:`run_node_round` executes one round of the
+Tools are resolved per node (:meth:`~va_engine.tool_executor.PathwayToolExecutor.for_refs`): a node offers,
+speaks for and runs exactly the definitions its own refs name, so two nodes may hold different tools of one
+name. :class:`NodeTools` computes that :class:`ToolOffer`; :func:`run_node_round` executes one round of the
 model's calls: executor tools run as tasks while the tool speech or a filler plays, their answers and
 variables are recorded, and ``press_button`` yields a :class:`~va_engine.models.results.SendDtmfAction`. A
 round cut short (barge-in) cancels its tool tasks and answers the unanswered calls ``interrupted``; calls
@@ -28,7 +30,7 @@ from va_engine.models.results import Action, Say, SendDtmfAction
 from va_engine.system_tools import SystemToolFacts, is_reserved, system_tools
 from va_engine.task_tools import INTERRUPTED, PlannedCall, RoundPlan
 from va_engine.templating import TemplateScope
-from va_engine.tool_executor import PathwayToolExecutor, ToolAnswer, ToolRef
+from va_engine.tool_executor import PathwayToolExecutor, ToolAnswer, ToolExecutor, ToolRef
 from va_engine.tool_tasks import (
     ToolLines,
     merge_variables,
@@ -76,12 +78,14 @@ NO_SYSTEM_TOOLS: Final = SystemToolFacts(runner="pathway", channel="sms", allow_
 
 @dataclass(frozen=True, slots=True)
 class ToolOffer:
-    """The tools of one reply: definitions (system first), the facts they were built from, and the custom
-    tool names the executor runs."""
+    """The tools of one reply: definitions (system first), the facts they were built from, the custom
+    tool names the executor runs, and ``executor``: the node's own, which runs the offer's custom and
+    executor-backed system tools (``None`` = the conversation has no executor)."""
 
     tools: tuple[ToolDef, ...] = ()
     facts: SystemToolFacts = NO_SYSTEM_TOOLS
     custom: frozenset[str] = frozenset()
+    executor: ToolExecutor | None = None
 
     def handles(self, name: str) -> bool:
         """Whether the executor runs ``name`` here (an offered custom tool or an offered executor-backed
@@ -108,7 +112,7 @@ class NodeTools:
     ) -> None:
         self.executor = executor
         self._facts = None if facts is None else runnable_facts(facts, executor)
-        self.lines = ToolLines(executor, clock=clock, enabled=fillers)
+        self.lines = ToolLines(clock=clock, enabled=fillers)
 
     def offer(self, node: PathwayNode, graph: PathwayGraph) -> ToolOffer:
         """The tools a reply at ``node`` offers (:data:`NO_OFFER` for other node types)."""
@@ -121,26 +125,39 @@ class NodeTools:
                 self._facts, runner="pathway", allow_end_call_tool=graph.global_config.allow_end_call_tool
             )
             system = system_tools(facts)
-        custom = self._custom(node, graph, {tool.name for tool in system})
+        refs = node_tool_refs(node, graph)
+        # Also without refs: the node's executor runs the executor-backed system tools.
+        scoped = None if self.executor is None else self.executor.for_refs(refs)
+        custom = _custom(node, scoped, refs, {tool.name for tool in system})
         return ToolOffer(
-            tools=(*system, *custom), facts=facts, custom=frozenset(tool.name for tool in custom)
+            tools=(*system, *custom),
+            facts=facts,
+            custom=frozenset(tool.name for tool in custom),
+            executor=scoped,
         )
 
-    def _custom(self, node: PathwayNode, graph: PathwayGraph, taken: set[str]) -> list[ToolDef]:
-        refs = node_tool_refs(node, graph)
-        if self.executor is None or not refs:
-            return []
-        resolved = self.executor.definitions_for(refs)
-        missing = len({_ref_key(ref) for ref in refs}) - len(resolved)
-        if missing > 0:
-            _log.info("engine.tool_unresolved", node_id=node.id, count=missing)
-        custom: list[ToolDef] = []
-        for tool in resolved:
-            if is_reserved(tool.name) or tool.name in taken:
-                continue
-            taken.add(tool.name)
-            custom.append(tool)
-        return custom
+
+def _custom(
+    node: PathwayNode, scoped: ToolExecutor | None, refs: list[ToolRef], taken: set[str]
+) -> list[ToolDef]:
+    """The node executor's definitions that may be offered (not named like a system tool).
+
+    ``engine.tool_unresolved`` counts the refs that produced no definition: unresolved ones and those
+    shadowed by an earlier ref with the same tool name.
+    """
+    if scoped is None or not refs:
+        return []
+    resolved = scoped.definitions()
+    missing = len({_ref_key(ref) for ref in refs}) - len(resolved)
+    if missing > 0:
+        _log.info("engine.tool_unresolved", node_id=node.id, count=missing)
+    custom: list[ToolDef] = []
+    for tool in resolved:
+        if is_reserved(tool.name) or tool.name in taken:
+            continue
+        taken.add(tool.name)
+        custom.append(tool)
+    return custom
 
 
 @dataclass(slots=True)
@@ -152,22 +169,24 @@ class RoundOutcome:
     answered: int = 0
 
 
-async def run_node_round(  # noqa: PLR0913 - the round, its tools, scope, and the engine's callbacks
+async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and the engine's callbacks
     plan: RoundPlan,
     *,
-    tools: NodeTools,
+    executor: ToolExecutor | None,
+    lines: ToolLines,
     scope: TemplateScope,
     variables: MutableMapping[str, Any],
     next_mark: Callable[[], str],
     answer: Callable[[ToolCall, str], None],
     outcome: RoundOutcome,
 ) -> AsyncGenerator[Action]:
-    """Execute ``plan``: yields the speech/filler line, then one :class:`SendDtmfAction` per ``press_button``
-    after every call was answered through ``answer`` (in call order)."""
+    """Execute ``plan`` with the node's ``executor`` (:attr:`ToolOffer.executor`): yields the speech/filler
+    line, then one :class:`SendDtmfAction` per ``press_button`` after every call was answered through
+    ``answer`` (in call order)."""
     tasks: list[asyncio.Task[ToolAnswer]] = []
     try:
-        tasks = start_tools(tools.executor, plan.executed, scope)
-        line = await tools.lines.line(plan.executed, tasks, scope)
+        tasks = start_tools(executor, plan.executed, scope)
+        line = await lines.line(executor, plan.executed, tasks, scope)
         if line is not None:
             yield Say(text=line, mark=next_mark())
         answers = [await task for task in tasks]

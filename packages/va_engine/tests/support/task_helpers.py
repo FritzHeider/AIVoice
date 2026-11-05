@@ -28,7 +28,7 @@ from va_domain.org import OrgSettings
 from va_engine.system_tools import SystemToolFacts, facts_for_call
 from va_engine.task_runner import TaskBrain
 from va_engine.templating import TemplateScope
-from va_engine.tool_executor import ToolAnswer
+from va_engine.tool_executor import ToolAnswer, ToolRef
 from va_llm.models import ToolCall, ToolDef
 from va_llm.tokens import default_counter
 from va_sim.state import SimState
@@ -38,6 +38,7 @@ __all__ = [
     "AGENT_NUMBER",
     "CALLEE",
     "NOW",
+    "NodeExecutor",
     "RecordingExecutor",
     "Rendered",
     "Sim",
@@ -104,13 +105,62 @@ async def drain(outputs: AsyncIterator[BrainOutput]) -> list[Rendered]:
     return rendered
 
 
+def _resolve(
+    ref: ToolRef, ids: Mapping[str, str], by_name: Mapping[str, ToolDef]
+) -> tuple[ToolDef, str] | None:
+    """The definition ``ref`` names and its label (``None`` = unresolved)."""
+    if isinstance(ref, str):
+        tool = by_name.get(ids.get(ref, ""))
+        return None if tool is None else (tool, ref)
+    name = ref.get("name")
+    if not isinstance(name, str):
+        return None
+    description, url = ref.get("description"), ref.get("url")
+    if description is None and url is None:
+        tool = by_name.get(name)
+        return None if tool is None else (tool, name)
+    inline = ToolDef(
+        name=name,
+        description=description if isinstance(description, str) else "",
+        parameters={"type": "object"},
+    )
+    return inline, url if isinstance(url, str) else name
+
+
+@dataclass(slots=True)
+class NodeExecutor:
+    """One node's tools of a :class:`RecordingExecutor`: its definitions and which of them ran."""
+
+    parent: RecordingExecutor
+    tools: tuple[ToolDef, ...]
+    labels: dict[str, str]
+
+    def definitions(self) -> tuple[ToolDef, ...]:
+        return self.tools
+
+    @property
+    def tool_speech(self) -> str | None:
+        return self.parent.tool_speech
+
+    def handles(self, name: str) -> bool:
+        return name in self.labels or self.parent.handles(name)
+
+    def speech(self, name: str) -> str | None:
+        return self.parent.speech(name)
+
+    async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
+        self.parent.ran.append((self.labels.get(call.name, call.name), call.name))
+        return await self.parent.execute(call, scope)
+
+
 @dataclass(slots=True)
 class RecordingExecutor:
     """A (pathway) tool executor: ``refs`` maps node tool ids to tool names; answers ``results[name]``
     (default ``{"ok":name}``) with ``variables[name]``, counts concurrency, holds every call on ``release``
     when ``hold`` is set, and takes ``durations[name]`` seconds on ``clock`` (bind one to time calls).
     ``note`` is the tool usage note speech, ``speeches[name]`` the tool's ``speech`` template; ``started``
-    and ``cancelled`` record ``(name, clock ms)``."""
+    and ``cancelled`` record ``(name, clock ms)``. :meth:`for_refs` gives a node its :class:`NodeExecutor`,
+    whose runs are listed in ``ran`` as ``(label of the definition that ran, tool name)``."""
 
     tools: tuple[ToolDef, ...] = ()
     note: str | None = None
@@ -124,6 +174,7 @@ class RecordingExecutor:
     hold: bool = False
     clock: Clock | None = None
     calls: list[ToolCall] = field(default_factory=list)
+    ran: list[tuple[str, str]] = field(default_factory=list)
     scopes: list[TemplateScope] = field(default_factory=list)
     started: list[tuple[str, float]] = field(default_factory=list)
     cancelled: list[tuple[str, float]] = field(default_factory=list)
@@ -135,16 +186,23 @@ class RecordingExecutor:
     def definitions(self) -> tuple[ToolDef, ...]:
         return self.tools
 
-    def definitions_for(self, refs: Sequence[str | Mapping[str, Any]]) -> tuple[ToolDef, ...]:
-        """The tools named by ``refs`` (a string through ``refs``, a mapping by its ``name``), once each."""
+    def for_refs(self, refs: Sequence[ToolRef]) -> NodeExecutor:
+        """The node executor of ``refs``, first ref per tool name.
+
+        A string resolves through ``refs`` to one of ``tools`` (label: the ref). A mapping with a
+        ``description`` or ``url`` is its own inline definition (label: its ``url``, else its name); a bare
+        ``{"name": ...}`` mapping resolves to the tool of that name (label: the name).
+        """
         by_name = {tool.name: tool for tool in self.tools}
         found: dict[str, ToolDef] = {}
+        labels: dict[str, str] = {}
         for ref in refs:
-            name = self.refs.get(ref) if isinstance(ref, str) else ref.get("name")
-            tool = by_name.get(name) if isinstance(name, str) else None
-            if tool is not None:
-                found.setdefault(tool.name, tool)
-        return tuple(found.values())
+            resolved = _resolve(ref, self.refs, by_name)
+            if resolved is not None and resolved[0].name not in found:
+                tool, label = resolved
+                found[tool.name] = tool
+                labels[tool.name] = label
+        return NodeExecutor(self, tuple(found.values()), labels)
 
     @property
     def tool_speech(self) -> str | None:

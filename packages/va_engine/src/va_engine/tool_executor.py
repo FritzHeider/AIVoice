@@ -4,8 +4,8 @@ Custom tools and the executor-backed system tools (``send_sms``, ``schedule_call
 run outside the engine (``va_tools.executor.CallToolExecutor``). Runners call :meth:`ToolExecutor.execute`
 only with calls whose name :meth:`ToolExecutor.handles` (system tool arguments are validated first); the
 returned :class:`ToolAnswer` carries the content of the ``tool`` message answering the call and the variables
-the call extracted. Pathway calls use a :class:`PathwayToolExecutor`, which also resolves node tool refs
-(Decision P08-T02c1).
+the call extracted. Pathway calls use a :class:`PathwayToolExecutor`, which hands every node the
+:class:`ToolExecutor` of exactly the tools that node's refs name (specs/13 §4, Decision P08-FIX-17).
 """
 
 from __future__ import annotations
@@ -57,10 +57,24 @@ class ToolExecutor(Protocol):
         ...
 
 
-class PathwayToolExecutor(ToolExecutor, Protocol):
-    """An executor that also resolves the tools a pathway node names (specs/13 §4, Decision P08-T02c1)."""
+class PathwayToolExecutor(Protocol):
+    """The tools of a pathway call, resolved per node (specs/13 §4, Decision P08-FIX-17)."""
 
-    def definitions_for(self, refs: Sequence[ToolRef]) -> tuple[ToolDef, ...]:
-        """The executor's tools named by ``refs`` in ref order (a string = a stored tool id, a mapping = an
-        inline tool by its ``name``); unknown refs are skipped and a tool named twice is listed once."""
+    @property
+    def tool_speech(self) -> str | None:
+        """The call's tool speech (the tool usage note quotes it)."""
+        ...
+
+    def handles(self, name: str) -> bool:
+        """Whether the call runs the executor-backed system tool ``name``."""
+        ...
+
+    def for_refs(self, refs: Sequence[ToolRef]) -> ToolExecutor:
+        """The executor of one node.
+
+        Its ``definitions()`` are the tools ``refs`` name, in ref order: a string is that stored tool, a
+        mapping is that inline tool; refs that resolve to nothing are skipped, and of several refs with one
+        tool name the first wins. ``handles``/``speech``/``execute`` answer for exactly those definitions
+        plus the call's system tools, so the definition a node shows the model is the one that runs there.
+        """
         ...

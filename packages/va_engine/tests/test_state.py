@@ -33,6 +33,7 @@ from va_engine.models import (
     dump_engine_state,
     load_engine_state,
 )
+from va_engine.models.state import keep_tool_records
 
 FIXTURES = Path(__file__).parent / "fixtures" / "engine_state"
 PATHWAY = uuid.UUID("0190f5a2-7c3e-7b1a-9d2e-4f6a8b0c1d2e")
@@ -452,3 +453,26 @@ _states = st.builds(
 @given(_states)
 def test_round_trip_property(state: EngineState) -> None:
     assert load_engine_state(dump_engine_state(state)) == state
+
+
+def _tool(content: str) -> TurnRecord:
+    return TurnRecord(role="tool", content=content, node_id=None, tool_name="lookup", at_ms=0)
+
+
+@pytest.mark.parametrize(
+    ("count", "kept", "contents"),
+    [
+        (0, 0, ["turn 0", "turn 1", "a", "turn 2", "b", "turn 3"]),
+        (-1, 0, ["turn 0", "turn 1", "a", "turn 2", "b", "turn 3"]),
+        (1, 0, ["turn 0", "turn 1", "a", "turn 2", "b"]),
+        (4, 2, ["turn 0", "turn 1", "a", "b"]),
+        (99, 2, ["a", "b"]),
+    ],
+)
+def test_keep_tool_records_drops_the_tail_except_its_tool_records(
+    count: int, kept: int, contents: list[str]
+) -> None:
+    history = [_turn(0), _turn(1), _tool("a"), _turn(2), _tool("b"), _turn(3)]
+
+    assert keep_tool_records(history, count) == kept
+    assert [record.content for record in history] == contents

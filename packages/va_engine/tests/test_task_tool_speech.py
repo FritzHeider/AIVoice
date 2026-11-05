@@ -1,4 +1,5 @@
-"""TaskBrain tool rounds in the call pipeline: speech during tools, fillers, variables, barge-in (P08-T02b1).
+"""TaskBrain tool rounds in the call pipeline: speech during tools, fillers, variables, barge-in (P08-T02b1),
+and the tool rounds a superseded turn hands on (specs/13 §4 Decision P08-FIX-17).
 
 The harness runs on the accelerated clock: the brain, the scripted dialogue source (no socket) and the tool
 executor all share it, so tool durations and the 1 200 ms filler delay are virtual time.
@@ -57,8 +58,9 @@ def _brain(
     *,
     fillers: bool = True,
     states: list[dict[str, Any]] | None = None,
+    **config: Any,
 ) -> TaskBrain:
-    context = task_context(first_sentence="Hi, this is Maya.")
+    context = task_context(first_sentence="Hi, this is Maya.", **config)
     settings = OrgSettings.model_validate({"engine": {"tool_fillers": fillers}})
 
     def keep(state: EngineState) -> None:
@@ -297,3 +299,176 @@ async def test_speech_of_a_call_with_non_object_arguments_renders_without_input(
     await drain(brain.start())
     outputs = await drain(brain.on_user_turn(user_turn(1, "my order")))
     assert outputs == [("static", "One sec.", True), ("text", "Done.")]
+
+
+# A superseded turn (specs/07 §8 pre-audio merge) keeps the tools it ran (specs/13 §4 Decision P08-FIX-17).
+
+SHIPPED = '{"status":"shipped"}'
+
+
+def _wire(source: FakeSource) -> list[dict[str, Any]]:
+    """The messages of the last request as sent."""
+    return [m.model_dump(mode="json", exclude_none=True) for m in source.requests[-1].messages]
+
+
+def _shape(brain: TaskBrain) -> list[tuple[str, str | None, int]]:
+    """Role, content and number of tool calls of every message after the opener."""
+    return [(m.role, m.content, len(m.tool_calls)) for m in brain.messages[1:]]
+
+
+def _history(brain: TaskBrain) -> list[tuple[str, str]]:
+    return [(record.role, record.content) for record in brain.state.history[1:]]
+
+
+async def _superseded_round(source: FakeSource) -> tuple[TaskBrain, RecordingExecutor]:
+    """Turn 1 ran ``lookup_order`` and replied; ``source`` holds the scripts of the turns that follow."""
+    clock = FrozenClock()
+    executor = _executor(clock, results={"lookup_order": SHIPPED}, variables={"lookup_order": {"eta": "Fri"}})
+    brain = _brain(clock, source, executor, fillers=False)
+    await drain(brain.start())
+    await drain(brain.on_user_turn(user_turn(1, "order A7")))
+    return brain, executor
+
+
+async def test_a_superseded_turn_carries_its_tool_round_behind_the_merged_message() -> None:
+    source = FakeSource().reply("One moment. ", calls=[_call()]).reply(_reply(1)).reply("Both ship tomorrow.")
+    brain, executor = await _superseded_round(source)
+
+    outputs = await drain(brain.on_user_turn(user_turn(2, "order A7 and B2", supersedes=1)))
+
+    assert outputs == [("text", "Both ship tomorrow.")]
+    assert _shape(brain) == [
+        ("user", "order A7 and B2", 0),
+        ("assistant", None, 1),
+        ("tool", SHIPPED, 0),
+        ("assistant", "Both ship tomorrow.", 0),
+    ]
+    sent = _wire(source)
+    assert [(m["role"], m.get("content")) for m in sent[-3:]] == [
+        ("user", "order A7 and B2"),
+        ("assistant", None),
+        ("tool", SHIPPED),
+    ]
+    assert sent[-2]["tool_calls"][0]["id"] == sent[-1]["tool_call_id"] == "call_1"
+    assert_tool_pairing([{"messages": sent}])
+    assert _history(brain) == [
+        ("tool", SHIPPED),
+        ("user", "order A7 and B2"),
+        ("assistant", "Both ship tomorrow."),
+    ]
+    assert [call.name for call in executor.calls] == ["lookup_order"]
+    assert brain.state.variables["eta"] == "Fri"
+
+
+async def test_a_second_supersede_carries_the_round_again() -> None:
+    source = FakeSource().reply(calls=[_call()]).reply(_reply(1)).reply("Both.").reply("All three.")
+    brain, executor = await _superseded_round(source)
+    await drain(brain.on_user_turn(user_turn(2, "order A7 and B2", supersedes=1)))
+
+    await drain(brain.on_user_turn(user_turn(3, "order A7, B2 and C3", supersedes=2)))
+
+    assert _shape(brain) == [
+        ("user", "order A7, B2 and C3", 0),
+        ("assistant", None, 1),
+        ("tool", SHIPPED, 0),
+        ("assistant", "All three.", 0),
+    ]
+    assert_tool_pairing([{"messages": _wire(source)}])
+    assert _history(brain) == [
+        ("tool", SHIPPED),
+        ("user", "order A7, B2 and C3"),
+        ("assistant", "All three."),
+    ]
+    assert len(executor.calls) == 1
+
+
+async def test_a_superseded_interrupted_round_is_carried_too() -> None:
+    clock = FrozenClock()
+    source = FakeSource().reply(calls=[_call()]).reply("Never mind then.")
+    executor = _executor(clock, hold=True)
+    brain = _brain(clock, source, executor)
+    await drain(brain.start())
+    async with contextlib.aclosing(brain.on_user_turn(user_turn(1, "order A7"))) as outputs:
+        async for output in outputs:
+            if isinstance(output, SpeakText):
+                assert [delta async for delta in output.tokens] == []
+            if isinstance(output, SpeakStatic):
+                break
+
+    replies = await drain(brain.on_user_turn(user_turn(2, "never mind", supersedes=1)))
+
+    assert replies == [("text", "Never mind then.")]
+    assert [name for name, _ in executor.cancelled] == ["lookup_order"]
+    assert _shape(brain) == [
+        ("user", "never mind", 0),
+        ("assistant", None, 1),
+        ("tool", INTERRUPTED, 0),
+        ("assistant", "Never mind then.", 0),
+    ]
+    assert_tool_pairing([{"messages": _wire(source)}])
+    assert _history(brain) == [
+        ("tool", INTERRUPTED),
+        ("user", "never mind"),
+        ("assistant", "Never mind then."),
+    ]
+
+
+async def test_a_turn_without_tool_rounds_carries_nothing() -> None:
+    clock = FrozenClock()
+    source = FakeSource().reply("Which order?").reply("Got it.")
+    brain = _brain(clock, source, _executor(clock))
+    await drain(brain.start())
+    await drain(brain.on_user_turn(user_turn(1, "my order")))
+
+    await drain(brain.on_user_turn(user_turn(2, "my order A7", supersedes=1)))
+
+    assert _shape(brain) == [("user", "my order A7", 0), ("assistant", "Got it.", 0)]
+    assert _history(brain) == [("user", "my order A7"), ("assistant", "Got it.")]
+
+
+async def test_a_transfer_closed_on_its_message_is_carried_as_interrupted() -> None:
+    clock = FrozenClock()
+    transfer = ToolCall(id="call_t", name="transfer_call", arguments_json='{"message": "One moment."}')
+    source = FakeSource().reply(calls=[_call(), transfer]).reply("Sure, what else?")
+    executor = _executor(clock, results={"lookup_order": SHIPPED})
+    brain = _brain(clock, source, executor, fillers=False, transfer_phone_number="+14155550133")
+    await drain(brain.start())
+    async with contextlib.aclosing(brain.on_user_turn(user_turn(1, "a human please"))) as outputs:
+        async for output in outputs:
+            if isinstance(output, SpeakText):
+                assert [delta async for delta in output.tokens] == []
+            if isinstance(output, SpeakStatic):
+                break  # the caller spoke on before the transfer message's first audio
+
+    replies = await drain(brain.on_user_turn(user_turn(2, "a human, or wait", supersedes=1)))
+
+    assert isinstance(output, SpeakStatic)
+    assert (output.text, output.interruptible) == ("One moment.", False)
+    assert replies == [("text", "Sure, what else?")]
+    assert _shape(brain) == [
+        ("user", "a human, or wait", 0),
+        ("assistant", None, 2),
+        ("tool", SHIPPED, 0),
+        ("tool", INTERRUPTED, 0),
+        ("assistant", "Sure, what else?", 0),
+    ]
+    assert_tool_pairing([{"messages": _wire(source)}])
+    assert _history(brain) == [
+        ("tool", SHIPPED),
+        ("tool", INTERRUPTED),
+        ("user", "a human, or wait"),
+        ("assistant", "Sure, what else?"),
+    ]
+
+
+async def test_a_transfer_handed_over_keeps_its_transferring_answer() -> None:
+    clock = FrozenClock()
+    transfer = ToolCall(id="call_t", name="transfer_call", arguments_json='{"message": "One moment."}')
+    source = FakeSource().reply(calls=[transfer])
+    brain = _brain(clock, source, _executor(clock), transfer_phone_number="+14155550133")
+    await drain(brain.start())
+
+    outputs = await drain(brain.on_user_turn(user_turn(1, "a human please")))
+
+    assert [output[0] for output in outputs] == ["static", "action"]
+    assert [m.content for m in brain.messages if m.role == "tool"] == ['{"status":"transferring"}']

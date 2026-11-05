@@ -2067,7 +2067,7 @@ Grafana 3001
 - 2026-11-05 (P08-T02c1): pathway reply-node tools = `va_engine.engine_node_tools` (`NodeTools.offer(node, graph)` →
   `ToolOffer(tools, facts, custom)`, `run_node_round`) over the shared `va_engine.tool_tasks` helpers (`start_tools`,
   `ToolLines`, `merge_variables`, `runnable_facts`, `stop_tasks`; TaskBrain uses them too). Inputs:
-  `EnginePorts.tools` (a `PathwayToolExecutor` with `definitions_for(refs)`), `ConversationFacts.system_tools`
+  `EnginePorts.tools` (a `PathwayToolExecutor` with `for_refs(refs)`, P08-FIX-17), `ConversationFacts.system_tools`
   (`None` = no system tools) and `.tool_fillers`; `GlobalConfig.allow_end_call_tool`. Tests: `engine_rig(tools=,
   system=, fillers=)` and `task_helpers.RecordingExecutor(refs={"TL-1": "lookup"})`; a held-tool filler test must
   `release.set()` then `release.clear()` per round (a set event never holds the next round).
@@ -2084,3 +2084,15 @@ Grafana 3001
   `errorPhrase`, End Call node) are `Say(interruptible=False)`. Tests simulate the pipeline's pre-audio merge with
   `engine_helpers.closed_on_line(agen)` (closes the generator at the first `Say`); `end_call` arguments need
   `reason` (else the call is answered `invalid_arguments` and nothing ends).
+- 2026-11-05 (P08-FIX-17): pathway tools resolve per node: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor`
+  (replaces `definitions_for`; first ref per tool name wins), carried on `ToolOffer.executor`;
+  `run_node_round(plan, executor=offer.executor, lines=...)` and `ToolLines(clock=, enabled=).line(executor, ...)`
+  take the executor per round. A superseded turn keeps its tools: `va_engine.models.state.keep_tool_records(
+  history, count)` (engine + TaskBrain `_drop_turn`) leaves the `tool` records ahead of the merged turn, and
+  TaskBrain re-appends `task_tools.completed_rounds(...)` (`_carried`) behind the merged user message in
+  `_accept`. Fake: `task_helpers.RecordingExecutor.for_refs` → `NodeExecutor`; `executor.ran` lists `(label of
+  the definition that ran, tool name)` (label = the `TL-` ref, or an inline tool's `url`). `_prepare` computes the
+  offer once per reply pass, so `engine.tool_unresolved` logs once per pass, not per request.
+  TaskBrain rewrites a `transfer_call` answer to `interrupted` when the reply is closed on the transfer message
+  (`_transfer`/`_interrupt_answer`): an answer recorded before its action is yielded must be retracted if the
+  action never goes out, because superseded turns now keep their tool answers.

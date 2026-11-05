@@ -44,6 +44,7 @@ __all__ = [
     "PendingTransfer",
     "TurnRecord",
     "dump_engine_state",
+    "keep_tool_records",
     "load_engine_state",
 ]
 
@@ -252,6 +253,21 @@ class EngineState(BaseModel):
             (due if action.after_mark is None or action.after_mark == mark else kept).append(action)
         self.pending_actions = kept
         return due
+
+
+def keep_tool_records(history: list[TurnRecord], count: int) -> int:
+    """Remove the last ``count`` records of ``history`` except its ``tool`` records, which stay in order.
+
+    A superseded turn (specs/07 §8 pre-audio merge) loses its user and assistant records, but the tools it
+    ran stay on record (specs/13 §4 Decision P08-FIX-17). ``count`` is clamped to the history's length (older
+    records may have folded into the summary). Returns how many records stayed.
+    """
+    dropped = min(count, len(history))
+    if dropped <= 0:
+        return 0
+    kept = [record for record in history[-dropped:] if record.role == "tool"]
+    history[-dropped:] = kept
+    return len(kept)
 
 
 _V2_FIELDS: Final = ("pending_actions", "wait_armed_at_ms")

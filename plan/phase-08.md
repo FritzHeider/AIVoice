@@ -16,20 +16,27 @@
     `end_call` goodbye still ends `agent_hangup` with the line not interrupted; two tool calls with id `""` each
     run, get their own answer, and are both cancelled + answered `interrupted` on a barge-in (engine and
     TaskBrain); `make check` passes. The inbox notes go to DONE with P08-FIX-17 (it closes their items 3, 4).
-- [ ] P08-FIX-17 A superseded turn keeps the record of tools that already ran; one definition per inline tool name in a pathway — see .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md (items 3, 4), 2026-11-05-p08-t02c1-engine-node-tools-review.md (item 4)
-  - Spec refs: specs/13 §4 (Decision P08-T02c1), §5 (Decision P08-T02b1), specs/11 §11 (validation rules), specs/07 §8
+- [x] P08-FIX-17 A superseded turn keeps the record of tools that already ran; a pathway node runs exactly the tools its refs name (one definition per tool name per node) — see .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md (items 3, 4), 2026-11-05-p08-t02c1-engine-node-tools-review.md (item 4) — `keep_tool_records` (engine + TaskBrain `_drop_turn`), TaskBrain carries `completed_rounds` behind the merged caller message, undelivered task-mode `transfer_call` answer rewritten to `interrupted`, `PathwayToolExecutor.for_refs` + `ToolOffer.executor` (first ref per name wins); Decision P08-FIX-17 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, pip-audit clean, make test 13052 passed 7 skipped (cov 99.08%); 4 reviewer mutations each fail the new tests; reviewer probe: a second `transfer_call` in the merged turn yields its `TransferRequest`
+  - Spec refs: specs/13 §4 (Decisions P08-T02c1, P08-FIX-16), §5 (Decision P08-T02b1), specs/11 §5.9 (Decision P07-T08b), specs/07 §8
   - Depends on: P08-FIX-16
-  - Deliverables: `PathwayEngine._drop_turn` and `TaskBrain._drop_turn` keep the superseded turn's tool answers
-    (pathway: the `tool` history records stay ahead of the merged caller turn; task mode: the results stay in
-    the model's messages in a provider-valid form and as `tool` records), so the next request shows what ran;
-    the rule for same-name inline tools with different definitions (and an inline tool named like a referenced
-    stored tool) is decided, written into Decision P08-T02c1 and enforced (graph validation rule in specs/11 §11 +
-    `va_engine.validation`, or ref-based resolution) before P08-T02c2 builds the executor; Decisions updated in
-    specs/13 §4/§5; AGENTS.md.
+  - Deliverables: `PathwayEngine._drop_turn` keeps the superseded turn's `tool` history records ahead of the
+    merged caller turn (context updates on the next request); `TaskBrain` carries the superseded turn's
+    completed tool rounds (assistant `tool_calls` message without its unheard text + its `tool` answers) behind
+    the merged caller message and keeps their `tool` records, so the next request shows what ran in a
+    provider-valid shape. Planner decision (2026-11-05, DEC-012): same-name tools are settled by ref-based
+    resolution, not a validation rule: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor` replaces
+    `definitions_for`; the node's executor offers, speaks for and executes exactly the definitions its refs
+    name (first ref of a name wins within the node), so two nodes with different tools of one name (inline or
+    stored) each run their own; `ToolOffer.executor`, `run_node_round(executor=, lines=)`,
+    `ToolLines.line(executor, …)`; specs/13 §4 Decision `P08-FIX-17` (+ notes in Decision P08-T02c1 item 1,
+    §5 Decision P08-T02b1, specs/11 §5.9); AGENTS.md.
   - Acceptance: engine and TaskBrain tests: a tool-only reply superseded before any audio leaves the tool
-    result visible to the next request and the tool is not offered as never-run (request messages asserted);
-    validation/resolution tests for two nodes with different inline tools of one name; `make check` passes;
-    append both note names to `.ralph/review-inbox/DONE` on approval.
+    result visible to the next request (request messages asserted; pathway: context update ahead of the merged
+    turn; task mode: `user`, assistant `tool_calls`, `tool` in that order, pairing valid), also for a round
+    answered `interrupted`; resolution tests: two nodes with different inline tools of one name each offer and
+    run their own definition, and an inline tool named like a stored tool referenced earlier on the same node is
+    offered once (the first ref) and that definition runs; `make check` passes; append both note names to
+    `.ralph/review-inbox/DONE` on approval.
 - [ ] P08-FIX-18 A lock lost (or a keepalive overrun) during the body teardown ends the session as worker_lost — see .ralph/review-inbox/2026-11-05-p08-fix-15-review.md
   - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-FIX-14, P08-FIX-15), specs/07 §18
   - Depends on: P08-FIX-15
@@ -284,7 +291,7 @@
 - [ ] P08-T02c2 Pathway call tools in the media runtime (split from P08-T02c)
   - Spec refs: specs/13 §4-§6
   - Depends on: P08-T02c1
-  - Deliverables: `CallToolSource.pathway_executor` over every tool the pinned graph references (TL ids + inline objects), `CallToolExecutor.definitions_for`, runtime builds system tools + executor for pathway calls and passes facts to the engine
+  - Deliverables: `CallToolSource.pathway_executor` over every tool the pinned graph references (TL ids + inline objects, keyed by ref), a `PathwayToolExecutor.for_refs(refs)` implementation whose node executors share the call's runner, events and system tool runs (Decision P08-FIX-17), runtime builds system tools + executor for pathway calls and passes facts to the engine
   - Acceptance: media unit tests + runtime sim pathway call with a node tool (call.tool event, tool answer used in the reply).
 
 - [ ] P08-T03 Dynamic data

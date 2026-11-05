@@ -82,7 +82,7 @@ from va_engine.handlers.webhook import node_waits
 from va_engine.logs import PathwayLogBook
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.results import Action, EndCallAction, Say, SayStream, SwitchGraph, is_terminal
-from va_engine.models.state import EngineState, TurnRecord
+from va_engine.models.state import EngineState, TurnRecord, keep_tool_records
 from va_engine.navigation import ActiveGraph, Navigator, PathwayLoader, Transition
 from va_engine.ports import HttpPort, SmsPort
 from va_engine.speculative import Speculation, speculation_allowed
@@ -613,7 +613,8 @@ class PathwayEngine:
         outcome = RoundOutcome()
         executed = run_node_round(
             plan,
-            tools=self._tools,
+            executor=offer.executor,
+            lines=self._tools.lines,
             scope=ctx.scope(),
             variables=self.state.variables,
             next_mark=ctx.next_mark,
@@ -958,20 +959,20 @@ class PathwayEngine:
         return content
 
     def _drop_turn(self, index: int) -> None:
-        """A superseding turn replaces turn ``index``: its user record and everything after it go.
+        """A superseding turn replaces turn ``index``: its user and assistant records go, its ``tool``
+        records stay (ahead of the merged turn).
 
-        The turn is located by the number of records added since, not by a history index: once the history
-        passes ``HISTORY_CAP`` the oldest records fold into the summary and every index shifts.
+        The tools ran: their side effects and merged variables are not withdrawn, so the next request must
+        still see their answers (specs/13 §4 Decision P08-FIX-17). The turn is located by the number of
+        records added since, not by a history index: once the history passes ``HISTORY_CAP`` the oldest
+        records fold into the summary and every index shifts.
         """
         mark = self._turn_starts.pop(index, None)
         if mark is None:
             return
         added, turn_index = mark
         self._logbook.drop_turn(turn_index)
-        dropped = min(self._records_added - added, len(self.state.history))
-        if dropped > 0:
-            del self.state.history[-dropped:]
-        self._records_added = added
+        self._records_added = added + keep_tool_records(self.state.history, self._records_added - added)
         self._spoken = None
 
     def _remember(self, text: str, *, node_id: str | None = None) -> None:

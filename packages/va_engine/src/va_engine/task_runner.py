@@ -16,7 +16,8 @@ Executor tools run as tasks (specs/13 §5, Decision P08-T02b1): while they run t
 (round-robin per call); ``engine.tool_fillers=false`` silences both. Such lines are transcript records only,
 never model messages. The variables a round extracted are merged into the state in call order and reported
 to ``on_state``. A barge-in closes the round: unfinished tool tasks are cancelled and answered
-``interrupted``.
+``interrupted``. A turn superseded before any audio (specs/07 §8) loses its messages except its completed
+tool rounds, which follow the merged caller message (specs/13 §4 Decision P08-FIX-17): the tools ran.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from va_domain.org import OrgSettings
 from va_engine.builtins import call_builtins
 from va_engine.dialogue import DialogueSource
 from va_engine.models.results import PressButton, TransferRequest
-from va_engine.models.state import EngineState, TurnRecord
+from va_engine.models.state import EngineState, TurnRecord, keep_tool_records
 from va_engine.opener import parse_field
 from va_engine.system_tools import SystemToolFacts, system_tools
 from va_engine.task_tools import (
@@ -47,6 +48,7 @@ from va_engine.task_tools import (
     MAX_TOOL_ROUNDS,
     PlannedCall,
     RoundPlan,
+    completed_rounds,
     plan_round,
 )
 from va_engine.templating import MissingVariables, Template, TemplateScope, render
@@ -129,6 +131,9 @@ class _TurnBudget:
     spoke: bool = False
 
 
+type _Answered = tuple[int, TurnRecord | None]
+"""Where a tool answer sits: its index in the messages and its history record."""
+
 _NOTHING: Final[tuple[BrainOutput, ...]] = ()
 
 
@@ -170,7 +175,7 @@ class TaskBrain:
         self._executor = executor
         self._memory_context = memory_context
         self._on_state = on_state
-        self._lines = ToolLines(executor, clock=clock, enabled=settings.engine.tool_fillers)
+        self._lines = ToolLines(clock=clock, enabled=settings.engine.tool_fillers)
         self._facts = runnable_facts(facts, executor)
         custom = executor.definitions() if executor is not None else ()
         self._tools: tuple[ToolDef, ...] = (*system_tools(self._facts), *custom)
@@ -184,6 +189,7 @@ class TaskBrain:
         self._missing = MissingVariables(sink=partial(_log_missing_variable, str(context.call_id)))
         self._started = clock.monotonic()
         self._messages: list[ChatMessage] = []
+        self._carried: list[ChatMessage] = []
         self._state = EngineState(
             runner="task",
             pathway_id=None,
@@ -234,12 +240,16 @@ class TaskBrain:
                 yield output
 
     def _accept(self, turn: UserTurn) -> None:
-        """Append the caller's turn (keypad turns as the DTMF message) and remember where it starts."""
+        """Append the caller's turn (keypad turns as the DTMF message) and remember where it starts; the
+        tool rounds of the turn it supersedes follow it as messages (their ``tool`` records already sit in
+        the history)."""
         self._state.turn_index += 1
         self._marks[turn.index] = (len(self._messages), self._records_added)
         message = dtmf_message(turn.dtmf) if turn.dtmf else ChatMessage(role="user", content=turn.text)
         self._last_user = message.content or ""
         self._append(message, at_ms=int(turn.end_ms))
+        self._messages.extend(self._carried)
+        self._carried = []
 
     def on_no_input(self) -> AsyncIterator[BrainOutput]:
         """Nothing: the pipeline speaks its reprompt."""
@@ -342,16 +352,20 @@ class TaskBrain:
     async def _run_tools(self, plan: RoundPlan, budget: _TurnBudget) -> AsyncGenerator[BrainOutput]:
         answered = 0  # calls are answered in call order: a position, never a call id (Decision P08-FIX-16)
         tasks: list[asyncio.Task[ToolAnswer]] = []
+        terminal = plan.terminal
+        placed: _Answered | None = None
         try:
             scope = self._scope()
             tasks = start_tools(self._executor, plan.executed, scope)
-            line = await self._lines.line(plan.executed, tasks, scope)
+            line = await self._lines.line(self._executor, plan.executed, tasks, scope)
             if line is not None:
                 yield self._note_line(line)
             answers = [await task for task in tasks]
             self._merge_variables(answers)
             for item, content in round_contents(plan, answers):
-                self._answer(item.call, content)
+                at = self._answer(item.call, content)
+                if item is terminal:
+                    placed = at
                 answered += 1
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
@@ -359,13 +373,15 @@ class TaskBrain:
             await stop_tasks(tasks)
             for item in plan.calls[answered:]:
                 self._answer(item.call, INTERRUPTED)
-        terminal = plan.terminal
-        if terminal is not None:
-            async with contextlib.aclosing(self._finish(terminal, budget)) as outputs:
+        if terminal is not None and placed is not None:
+            async with contextlib.aclosing(self._finish(terminal, budget, placed)) as outputs:
                 async for output in outputs:
                     yield output
 
-    async def _finish(self, item: PlannedCall, budget: _TurnBudget) -> AsyncGenerator[BrainOutput]:
+    async def _finish(
+        self, item: PlannedCall, budget: _TurnBudget, placed: _Answered
+    ) -> AsyncGenerator[BrainOutput]:
+        """The round's ``end_call`` or ``transfer_call`` (its answer sits at ``placed``)."""
         if item.end is not None:
             final = item.end.final_message or (None if budget.spoke else DEFAULT_GOODBYE)
             self._state.ended = True
@@ -376,10 +392,31 @@ class TaskBrain:
             return
         if item.transfer is None or item.target is None:
             return
-        message = (item.transfer.message or "").strip()
-        if message:
-            yield self._say(message, interruptible=False)
-        yield TransferRequest(target=item.target, label=item.transfer.label, message=message or None)
+        request = TransferRequest(
+            target=item.target,
+            label=item.transfer.label,
+            message=(item.transfer.message or "").strip() or None,
+        )
+        async with contextlib.aclosing(self._transfer(request, placed)) as outputs:
+            async for output in outputs:
+                yield output
+
+    async def _transfer(self, request: TransferRequest, placed: _Answered) -> AsyncGenerator[BrainOutput]:
+        """Speak the transfer message, then hand ``request`` to the action handler.
+
+        A reply closed on the message (a caller turn ended before its first audio, specs/07 §8) never
+        reached the action handler: the call's answer then reads ``interrupted``, so the turn that
+        supersedes this one is not told the call is being transferred (specs/13 §4 Decision P08-FIX-17).
+        """
+        handed_over = False
+        try:
+            if request.message:
+                yield self._say(request.message, interruptible=False)
+            handed_over = True
+            yield request
+        finally:
+            if not handed_over:
+                self._interrupt_answer(placed)
 
     def _merge_variables(self, answers: list[ToolAnswer]) -> None:
         if merge_variables(self._state.variables, answers) and self._on_state is not None:
@@ -482,20 +519,33 @@ class TaskBrain:
         if text:
             self._mark_spoken(record)
 
-    def _answer(self, call: ToolCall, content: str) -> None:
-        self._append(ChatMessage(role="tool", content=content, tool_call_id=call.id), tool_name=call.name)
+    def _answer(self, call: ToolCall, content: str) -> _Answered:
+        message = ChatMessage(role="tool", content=content, tool_call_id=call.id)
+        record = self._append(message, tool_name=call.name)
+        return len(self._messages) - 1, record
+
+    def _interrupt_answer(self, placed: _Answered) -> None:
+        """The answered call never took effect: its ``tool`` message and record read ``interrupted``."""
+        index, record = placed
+        self._messages[index] = self._messages[index].model_copy(update={"content": INTERRUPTED})
+        if record is not None:
+            record.content = INTERRUPTED
 
     def _drop_turn(self, index: int) -> None:
-        """A superseding turn replaces turn ``index``: drop its user message and everything after it."""
+        """A superseding turn replaces turn ``index``: its user message and everything after it go, except
+        the tools it ran (specs/13 §4 Decision P08-FIX-17).
+
+        Its completed tool rounds are carried to the turn that replaces it (:meth:`_accept` appends them
+        behind the merged caller message) and its ``tool`` records stay in the history: the side effects
+        and merged variables were not withdrawn, so the model must still see the answers.
+        """
         mark = self._marks.pop(index, None)
         if mark is None:
             return
         position, added = mark
+        self._carried = completed_rounds(self._messages[position:])
         del self._messages[position:]
-        dropped = self._records_added - added
-        if 0 < dropped <= len(self._state.history):
-            del self._state.history[-dropped:]
-        self._records_added = added
+        self._records_added = added + keep_tool_records(self._state.history, self._records_added - added)
         if self._spoken is not None and self._spoken >= position:
             self._spoken = None
             self._spoken_record = None

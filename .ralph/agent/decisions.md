@@ -156,3 +156,12 @@ Template:
 - Reasoning: the diff is test-only in va_workflows; the failure (`apps/media_worker/tests/test_runtime_sim.py::test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks`) came from a wall-clock FakeLLM timeout plus a gateway retry under xdist load. It passes 3/3 alone, and the builder's full run was green.
 - Reversibility: high
 - Timestamp: 2026-11-04T23:40:00Z
+
+## DEC-012
+- Decision: How to settle same-name tools on pathway nodes (review note 2026-11-05-p08-t02c1-recheck.md item 4) and where a superseded turn's tool results go in task mode (item 3)
+- Chosen Option: (a) ref-based resolution: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor` (a node offers and runs exactly the definitions its refs name; first ref of a name wins within the node), no new specs/11 §11 validation rule; (b) task mode re-appends the superseded turn's completed tool rounds BEHIND the merged caller message, pathways keep the `tool` records AHEAD of it
+- Confidence: 75
+- Alternatives Considered: a `PATHWAY_TOOL_CONFLICT` validation rule (needs stored tool names in `GraphRefs`, blocks publishes, and a stored tool renamed after publish still collides, so a runtime rule is needed anyway); letting the pipeline hold instead of supersede once a tool ran (changes specs/07 §8 turn routing for every Brain); task-mode rounds ahead of the merged message (assistant message directly after an assistant message: not accepted by every OpenAI-compatible chat template)
+- Reasoning: the safety property is "the definition the model was shown is the one that runs"; only per-node resolution guarantees it for inline and stored tools alike. `user → assistant(tool_calls) → tool` is the standard provider shape and ties the calls to the caller's request, which is what stops a second booking; pathway history is a chronological record list rendered as context updates and its decision calls expect the caller's record last.
+- Reversibility: High before P08-T02c2 (protocol used only by the engine and the test fake); medium afterwards
+- Timestamp: 2026-11-05T11:50:00Z

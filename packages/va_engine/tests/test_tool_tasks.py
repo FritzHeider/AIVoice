@@ -216,9 +216,12 @@ async def test_the_line_is_the_first_speech_rendered_with_the_call_arguments() -
     )
     silent, tracked = planned("c1", "quiet"), planned("c2", "track", '{"order": "A-7"}')
     tasks, scope = await held_round(executor, silent, tracked, planned("c3"))
-    lines = ToolLines(executor, clock=ManualClock(), enabled=True)
+    lines = ToolLines(clock=ManualClock(), enabled=True)
 
-    assert await lines.line([silent, tracked, planned("c3")], tasks, scope) == "Tracking A-7 at Bella Pasta."
+    assert (
+        await lines.line(executor, [silent, tracked, planned("c3")], tasks, scope)
+        == "Tracking A-7 at Bella Pasta."
+    )
     await finish(executor, tasks)
 
 
@@ -226,9 +229,9 @@ async def test_a_speech_with_unreadable_arguments_renders_without_them() -> None
     executor = RecordingExecutor(hold=True, speeches={"lookup": "Checking{{input.city}}."})
     broken = planned("c1", "lookup", '{"city": "Par')
     tasks, scope = await held_round(executor, broken)
-    lines = ToolLines(executor, clock=ManualClock(), enabled=True)
+    lines = ToolLines(clock=ManualClock(), enabled=True)
 
-    assert await lines.line([broken], tasks, scope) == "Checking."
+    assert await lines.line(executor, [broken], tasks, scope) == "Checking."
     await finish(executor, tasks)
 
 
@@ -237,10 +240,10 @@ async def test_an_invalid_or_blank_speech_falls_back_to_the_filler(template: str
     executor = RecordingExecutor(hold=True, speeches={"lookup": template})
     tasks, scope = await held_round(executor, planned("c1"))
     clock = ManualClock()
-    lines = ToolLines(executor, clock=clock, enabled=True)
+    lines = ToolLines(clock=clock, enabled=True)
     stream = json_log_stream()
 
-    waiting = asyncio.create_task(lines.line([planned("c1")], tasks, scope))
+    waiting = asyncio.create_task(lines.line(executor, [planned("c1")], tasks, scope))
     await clock.wait_for_sleep(FILLER_DELAY_S)
     await clock.run_for(FILLER_DELAY_S)
 
@@ -254,22 +257,22 @@ async def test_disabled_lines_and_rounds_without_tasks_say_nothing() -> None:
     tasks, scope = await held_round(executor, planned("c1"))
 
     assert (
-        await ToolLines(executor, clock=ManualClock(), enabled=False).line([planned("c1")], tasks, scope)
+        await ToolLines(clock=ManualClock(), enabled=False).line(executor, [planned("c1")], tasks, scope)
         is None
     )
-    assert await ToolLines(executor, clock=ManualClock(), enabled=True).line([], [], scope) is None
+    assert await ToolLines(clock=ManualClock(), enabled=True).line(executor, [], [], scope) is None
     await finish(executor, tasks)
 
 
 async def test_fillers_rotate_while_a_tool_outlasts_the_delay() -> None:
     executor = RecordingExecutor(hold=True)
     clock = ManualClock()
-    lines = ToolLines(executor, clock=clock, enabled=True)
+    lines = ToolLines(clock=clock, enabled=True)
     spoken: list[str | None] = []
 
     for index in range(len(TOOL_FILLERS) + 1):
         tasks, scope = await held_round(executor, planned(f"c{index}"))
-        waiting = asyncio.create_task(lines.line([planned(f"c{index}")], tasks, scope))
+        waiting = asyncio.create_task(lines.line(executor, [planned(f"c{index}")], tasks, scope))
         await clock.wait_for_sleep(FILLER_DELAY_S)
         await clock.run_for(FILLER_DELAY_S)
         spoken.append(await waiting)
@@ -282,16 +285,16 @@ async def test_fillers_rotate_while_a_tool_outlasts_the_delay() -> None:
 async def test_tools_finishing_within_the_delay_get_no_filler() -> None:
     executor = RecordingExecutor(hold=True)
     clock = ManualClock()
-    lines = ToolLines(executor, clock=clock, enabled=True)
+    lines = ToolLines(clock=clock, enabled=True)
     tasks, scope = await held_round(executor, planned("c1"), planned("c2"))
 
-    waiting = asyncio.create_task(lines.line([planned("c1"), planned("c2")], tasks, scope))
+    waiting = asyncio.create_task(lines.line(executor, [planned("c1"), planned("c2")], tasks, scope))
     await clock.wait_for_sleep(FILLER_DELAY_S)
     await finish(executor, tasks)
 
     assert await waiting is None
     assert clock.sleepers == 0
-    assert await lines.line([planned("c1")], tasks, scope) is None
+    assert await lines.line(executor, [planned("c1")], tasks, scope) is None
 
 
 async def test_lines_without_an_executor_have_no_speech() -> None:
@@ -299,8 +302,8 @@ async def test_lines_without_an_executor_have_no_speech() -> None:
     await done
 
     assert (
-        await ToolLines(None, clock=ManualClock(), enabled=True).line(
-            [planned("c1")], [done], TemplateScope()
+        await ToolLines(clock=ManualClock(), enabled=True).line(
+            None, [planned("c1")], [done], TemplateScope()
         )
         is None
     )

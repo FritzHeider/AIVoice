@@ -1,14 +1,14 @@
 """Executor tool rounds shared by the task-mode runner and the pathway engine (specs/13 §5; Decisions
-P08-T02b1, P08-T02c1, P08-FIX-16).
+P08-T02b1, P08-T02c1, P08-FIX-16, P08-FIX-17).
 
 The executed calls of one round start as tasks at once (:func:`start_tools`, at most
 :data:`~va_engine.task_tools.EXECUTOR_CONCURRENCY` in parallel, all rendered with the variables of the
 round's start). :class:`ToolLines` picks what the caller hears while they run: the rendered ``speech`` of the
-first executed call whose tool has one, else (when a tool still runs after
-:data:`~va_engine.task_tools.FILLER_DELAY_S` on the injected clock) one filler of
-:data:`~va_voice.phrase_cache.TOOL_FILLERS`, round-robin per conversation. :func:`merge_variables` merges the
-round's extractions in call order and :func:`round_contents` pairs every call of the round with its ``tool``
-content.
+first executed call whose tool has one (asked of the executor that runs the round: a pathway node's own),
+else (when a tool still runs after :data:`~va_engine.task_tools.FILLER_DELAY_S` on the injected clock) one
+filler of :data:`~va_voice.phrase_cache.TOOL_FILLERS`, round-robin per conversation.
+:func:`merge_variables` merges the round's extractions in call order and :func:`round_contents` pairs every
+call of the round with its ``tool`` content.
 
 Tasks, answers and contents belong to a call by its position in the round, never by the model's call id:
 providers omit or repeat ids, and two calls sharing one must each run, be cancelled, and be answered.
@@ -35,7 +35,7 @@ from va_engine.task_tools import (
     RoundPlan,
 )
 from va_engine.templating import TemplateScope, TemplateSyntaxError, render
-from va_engine.tool_executor import ToolAnswer, ToolExecutor
+from va_engine.tool_executor import PathwayToolExecutor, ToolAnswer, ToolExecutor
 from va_llm.models import ToolCall
 from va_voice.phrase_cache import TOOL_FILLERS
 
@@ -62,7 +62,9 @@ def call_arguments(call: ToolCall) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def runnable_facts(facts: SystemToolFacts, executor: ToolExecutor | None) -> SystemToolFacts:
+def runnable_facts(
+    facts: SystemToolFacts, executor: ToolExecutor | PathwayToolExecutor | None
+) -> SystemToolFacts:
     """``facts`` without the executor-backed system tools the executor does not run (never offered)."""
 
     def runs(name: str) -> bool:
@@ -139,6 +141,26 @@ def round_contents(plan: RoundPlan, answers: Sequence[ToolAnswer]) -> list[tuple
     ]
 
 
+def _speech(
+    executor: ToolExecutor | None, planned: Sequence[PlannedCall], scope: TemplateScope
+) -> str | None:
+    """The rendered ``speech`` of the first executed call whose tool has one (arguments: ``input.*``)."""
+    if executor is None:
+        return None
+    for item in planned:
+        template = executor.speech(item.call.name)
+        if template is None:
+            continue
+        arguments = dataclasses.replace(scope, input={"input": call_arguments(item.call)})
+        try:
+            text = render(template, arguments).strip()
+        except TemplateSyntaxError:
+            _log.warning("tool_speech_invalid", tool=item.call.name)
+            return None
+        return text or None
+    return None
+
+
 class ToolLines:
     """The line spoken while a round's tools run (one per round; ``enabled=False`` silences them all).
 
@@ -146,22 +168,23 @@ class ToolLines:
     counting.
     """
 
-    def __init__(self, executor: ToolExecutor | None, *, clock: Clock, enabled: bool) -> None:
-        self._executor = executor
+    def __init__(self, *, clock: Clock, enabled: bool) -> None:
         self._clock = clock
         self._enabled = enabled
         self._fillers = 0
 
     async def line(
         self,
+        executor: ToolExecutor | None,
         planned: Sequence[PlannedCall],
         tasks: Sequence[asyncio.Task[ToolAnswer]],
         scope: TemplateScope,
     ) -> str | None:
-        """Tool speech, else a filler when a tool still runs after :data:`FILLER_DELAY_S`, else ``None``."""
+        """Tool speech (of ``executor``, which runs the round), else a filler when a tool still runs after
+        :data:`FILLER_DELAY_S`, else ``None``."""
         if not self._enabled or not tasks:
             return None
-        speech = self._speech(planned, scope)
+        speech = _speech(executor, planned, scope)
         if speech is not None:
             return speech
         if not await self._still_running(tasks):
@@ -169,24 +192,6 @@ class ToolLines:
         filler = TOOL_FILLERS[self._fillers % len(TOOL_FILLERS)]
         self._fillers += 1
         return filler
-
-    def _speech(self, planned: Sequence[PlannedCall], scope: TemplateScope) -> str | None:
-        """The rendered ``speech`` of the first executed call whose tool has one (arguments: ``input.*``)."""
-        executor = self._executor
-        if executor is None:
-            return None
-        for item in planned:
-            template = executor.speech(item.call.name)
-            if template is None:
-                continue
-            arguments = dataclasses.replace(scope, input={"input": call_arguments(item.call)})
-            try:
-                text = render(template, arguments).strip()
-            except TemplateSyntaxError:
-                _log.warning("tool_speech_invalid", tool=item.call.name)
-                return None
-            return text or None
-        return None
 
     async def _still_running(self, tasks: Iterable[asyncio.Task[ToolAnswer]]) -> bool:
         """Wait up to :data:`FILLER_DELAY_S` (on the clock) for ``tasks``; whether any still runs."""

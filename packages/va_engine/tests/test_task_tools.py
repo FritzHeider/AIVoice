@@ -1,4 +1,5 @@
-"""Tool round planning (specs/10 §7, specs/13 §5; Decision P05-T09c)."""
+"""Tool round planning (specs/10 §7, specs/13 §5; Decision P05-T09c) and the rounds a superseded turn hands on
+(specs/13 §4 Decision P08-FIX-17)."""
 
 from __future__ import annotations
 
@@ -10,11 +11,12 @@ from va_engine.task_tools import (
     SKIPPED,
     TOO_MANY_TOOL_CALLS,
     TRANSFERRING,
+    completed_rounds,
     plan_round,
     sent_digits,
     tool_result,
 )
-from va_llm.models import ToolCall
+from va_llm.models import ChatMessage, ToolCall
 
 FACTS = SystemToolFacts(runner="task", transfer_list={"sales": "+14155550111"})
 
@@ -72,3 +74,54 @@ def test_end_call_and_unknown_tools() -> None:
     }
     assert unknown.terminal is None
     assert tool_result({"a": 1}) == '{"a":1}'
+
+
+def _asks(*indexes: int, text: str | None = None) -> ChatMessage:
+    return ChatMessage(
+        role="assistant", content=text, tool_calls=tuple(_call(index, "lookup") for index in indexes)
+    )
+
+
+def _answers(index: int, content: str = "{}") -> ChatMessage:
+    return ChatMessage(role="tool", content=content, tool_call_id=f"c{index}")
+
+
+def test_completed_rounds_keep_each_round_without_its_text() -> None:
+    first, second = _asks(0, 1, text="One moment."), _asks(2)
+    messages = [
+        ChatMessage(role="user", content="where is my order"),
+        first,
+        _answers(0, '{"ok":1}'),
+        _answers(1),
+        second,
+        _answers(2),
+        ChatMessage(role="assistant", content="It ships tomorrow."),
+    ]
+
+    rounds = completed_rounds(messages)
+
+    assert rounds == [
+        first.model_copy(update={"content": None}),
+        _answers(0, '{"ok":1}'),
+        _answers(1),
+        second,
+        _answers(2),
+    ]
+    assert rounds[0].tool_calls == first.tool_calls
+
+
+def test_completed_rounds_drop_a_round_missing_an_answer() -> None:
+    messages = [_asks(0), _answers(0), _asks(1, 2), _answers(1), ChatMessage(role="user", content="hm")]
+
+    assert completed_rounds(messages) == [_asks(0), _answers(0)]
+
+
+def test_completed_rounds_of_plain_messages_are_empty() -> None:
+    plain = [
+        ChatMessage(role="user", content="hello"),
+        ChatMessage(role="assistant", content="Hi."),
+        _answers(9),
+    ]
+
+    assert completed_rounds(plain) == []
+    assert completed_rounds([]) == []

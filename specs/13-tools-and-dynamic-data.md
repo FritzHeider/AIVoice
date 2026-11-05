@@ -109,7 +109,8 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    `global_config.allowEndCallTool`, default true; never `transfer_call`; `press_button` on voice; `send_sms`/
 >    `schedule_callback`/`lookup_knowledge` only when the call's executor runs them), then the custom tools of the
 >    node's `tools` followed by `global_config.globalTools` that the executor resolves (`PathwayToolExecutor.
->    definitions_for(refs)`: a string = stored tool id, a mapping = inline tool by `name`; ref order, a tool named
+>    definitions_for(refs)`, superseded by Decision P08-FIX-17 item 2: a string = stored tool id, a mapping =
+>    inline tool by `name`; ref order, a tool named
 >    twice once; unresolved refs are skipped and logged `engine.tool_unresolved` with a count; custom tools with a
 >    reserved or already offered name are dropped). Other node types offer no custom or system tool; a Scheduling
 >    node offers exactly `list_slots`/`book_slot`. Call-level `tools` apply to task mode only.
@@ -149,6 +150,34 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    get their own `tool` answer. `start_tools` returns one task per executed call in call order;
 >    `round_contents(plan, answers)` pairs every planned call with its content. The id stays what is sent back
 >    to the model as `tool_call_id`.
+
+> Decision (2026-11-05) P08-FIX-17: a tool that ran stays on record when its turn is superseded, and a pathway
+> node runs exactly the tools its own refs name.
+> 1. Superseded turn (specs/07 §8 pre-audio merge: a caller turn that ends before the reply's first audio cancels
+>    the reply and is delivered merged, with `supersedes`): the tools of the superseded turn already ran, and
+>    their side effects, merged variables and `call.tool` events are never withdrawn, so their answers stay.
+>    Pathways: the turn's `tool` history records stay, in order, ahead of the merged caller turn (they reach the
+>    next request as context updates); its user and assistant records go as before. Task mode: its completed
+>    tool rounds (the assistant `tool_calls` message without its text, which nobody heard, followed by one `tool`
+>    answer per call) are re-appended behind the merged caller message, and their `tool` history records stay; a
+>    round lacking an answer for every call is dropped. `{"error":"interrupted"}` answers (tools cancelled when
+>    the reply was closed) are kept like any other answer. A turn superseded again carries the same rounds on,
+>    once. A task-mode `transfer_call` whose reply was closed on its `message` (before the message's first
+>    audio) never reached the action handler: its answer is rewritten from `{"status":"transferring"}` to
+>    `{"error":"interrupted"}` (message and history record), so the carried round does not tell the model that
+>    the call is being transferred. An `end_call` or `transfer_call` cut earlier in its round is answered
+>    `interrupted` like every unanswered call.
+> 2. Per-node resolution: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor` replaces `definitions_for`. The
+>    returned node executor's `definitions()` are the tools the node's `tools` followed by `globalTools` refs
+>    name, in ref order (a string = that stored tool, a mapping = that inline tool); unresolved refs are
+>    skipped, and of several refs with one tool name the first wins (node tools before global tools). The node
+>    offers, speaks for (`speech`) and executes exactly those definitions plus the call's executor-backed system
+>    tools, so the definition shown to the model is the one that runs, and different tools of one name on
+>    different nodes (inline or stored) never mix. `engine.tool_unresolved` counts the refs that produced no
+>    definition (unresolved, or shadowed by an earlier ref of the same name). There is no specs/11 §11 validation
+>    rule for repeated names. Node executors share the call's runner, events and system tool runs (one drain at
+>    call end): binding for P08-T02c2. `PathwayToolExecutor` itself keeps only `tool_speech` (the tool usage
+>    note) and `handles(name)` (which executor-backed system tools the call runs).
 
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same
@@ -239,6 +268,7 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 >    state to `call:{id}:engine` after a merge and the end routine merges its variables into `calls.variables`
 >    (as for pathway calls). `send_sms` and `schedule_callback` run behind the same executor (§6 Decision
 >    P08-T02b2); `lookup_knowledge` follows with P08-T10.
+> 6. A turn superseded before any audio keeps its completed tool rounds: specs/13 §4 Decision P08-FIX-17 item 1.
 
 Max tool calls per assistant turn: 4 (parallel tool calls from the LLM run concurrently, max 3 in parallel). Max
 tool calls per call: 100.

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793882534-415b
+> P08-FIX-17: pathway tools resolve per node via PathwayToolExecutor.for_refs(refs) -> ToolExecutor (first ref per name wins; ToolOffer.executor; run_node_round(executor=, lines=); ToolLines(clock=, enabled=).line(executor, ...)); superseded turns keep tools: models.state.keep_tool_records (engine + TaskBrain _drop_turn), TaskBrain carries task_tools.completed_rounds behind the merged user message (_carried in _accept); an answer recorded before its action is yielded must be retracted if the action never goes out (TaskBrain transfer closed on its message -> interrupted); test fake RecordingExecutor.for_refs -> NodeExecutor, executor.ran = (label, name); never pkill -f with a pattern that also matches your own shell command (use a [p]attern)
+<!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
+
 ### mem-1793879436-c633
 > P08-FIX-16: tool rounds are by position (tool_tasks.start_tools returns a task list, merge_variables(variables, answers), round_contents(plan, answers); runners count answered calls) because call ids may be empty/repeated; PathwayEngine owes an ended conversation's EndCallAction (_owed_end set in _out, cleared before the end is yielded; handle_user_turn after an undelivered end re-yields final line + end); final lines (end_call tool, loop protection) are Say(interruptible=False); tests use engine_helpers.closed_on_line; end_call tool args need reason
 <!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
