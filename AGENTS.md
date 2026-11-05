@@ -2124,3 +2124,9 @@ Grafana 3001
   it, is never `detached` and reads `interrupted`; `lookup_knowledge` (P08-T10) must be false. Test fakes:
   `_GatedSystem(name, outcome, detaches=False)` (va_tools `test_executor.py`), `_HeldSms(detaches=False)` +
   `_barge_in(sms)` (`test_executor_barge_in.py`; specs/13 §6 Decision P08-FIX-22).
+- 2026-11-05 (P08-FIX-18): `CallSession` ends `OWNERSHIP_LOST` (run result, metric label `worker_lost`, and the
+  end handed to the ender) when the lock was lost or the keepalive overran by the time the body's teardown finished,
+  whatever decided the race, except a `transferred` end (it stays); a failed session still raises and closes 1011,
+  but its ender gets `OWNERSHIP_LOST` instead of `None` (specs/13 §6 Decision P08-FIX-18). Tests:
+  `_lose_lock(r)` (the renewer must be 5 s from its next renewal) / `_overrun(r)` and `rig(control_handler=)` in
+  `apps/media_worker/tests/test_session.py`.

@@ -120,16 +120,32 @@
     run their own definition, and an inline tool named like a stored tool referenced earlier on the same node is
     offered once (the first ref) and that definition runs; `make check` passes; append both note names to
     `.ralph/review-inbox/DONE` on approval.
-- [ ] P08-FIX-18 A lock lost (or a keepalive overrun) during the body teardown ends the session as worker_lost — see .ralph/review-inbox/2026-11-05-p08-fix-15-review.md
-  - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-FIX-14, P08-FIX-15), specs/07 §18
+- [x] P08-FIX-18 A lock lost (or a keepalive overrun) during the body teardown ends the session as worker_lost — see .ralph/review-inbox/2026-11-05-p08-fix-15-review.md (item 1, not a blocker, fixed here); also closes .ralph/review-inbox/2026-11-05-p08-fix-22-wip-review.md (no blockers; its one forward note is carried into the P08-T10 acceptance, DEC-016) — `CallSession._abandoned()` (lock lost or `_overran`): `_race` returns `OWNERSHIP_LOST` unless the decided end is `transferred`, a failed session's ender gets `OWNERSHIP_LOST`; Decision P08-FIX-18 (specs/13 §6) + pointers in Decisions P08-FIX-14/15 and specs/07 §18; reviewer re-ran: lint/typecheck/placeholders/spec refs pass, jscpd 0 clones, radon 2.93, audits pass, make test 13095 passed 7 skipped (cov 99.08%), make e2e 20 passed, 5 mutations of session.py each killed by the intended tests
+  - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-FIX-14, P08-FIX-15), specs/07 §18 (Decisions P05-T11b, P05-T13), specs/01 §2.1
   - Depends on: P08-FIX-15
-  - Deliverables: `CallSession._race` returns `OWNERSHIP_LOST` when the renewer lost the lock during the body
-    teardown, and resolves the end as worker_lost when the teardown overran `TEARDOWN_KEEPALIVE_S` (the
-    heartbeat expired, `CallWorkflow` ends the call), so the media end routine neither records nor hangs up
-    in parallel with the workflow; Decision under specs/13 §6; AGENTS.md.
+  - Deliverables: `CallSession` no longer vouches for a call once the renewer lost the lock or the body teardown
+    overran `TEARDOWN_KEEPALIVE_S` (both keepers stopped): `run()` then returns `OWNERSHIP_LOST` instead of the
+    end that decided the race, and the ender is given `OWNERSHIP_LOST` (worker_lost: no record, no hangup, the
+    workflow does both), so the media end routine never ends a call in parallel with `CallWorkflow`. Planner
+    decisions (2026-11-05, DEC-017): (a) a `transferred` end stays (`_TRANSFERRED` neither records nor hangs
+    up, and `worker_lost` would make the workflow hang up on the bridged caller and target); (b) a session
+    that failed (body or control handler raised) still raises and closes 1011, but its ender is given
+    `OWNERSHIP_LOST` instead of `None` when the session no longer vouches for the call. The lock is released
+    as before (not after a loss; compare-and-delete after an overrun). Decision `P08-FIX-18` under specs/13 §6
+    (+ rewording of Decision P08-FIX-14 item 2 and a pointer in Decision P08-FIX-15 and specs/07 §18 Decision
+    P05-T11b step 1); AGENTS.md.
   - Acceptance: session tests: a renewer losing the lock while a gated body teardown runs → `run()` returns
-    `OWNERSHIP_LOST` and the ender sees worker_lost; same for a teardown past `TEARDOWN_KEEPALIVE_S`; existing
-    session tests pass; `make check` passes; append the note name to `.ralph/review-inbox/DONE` on approval.
+    `OWNERSHIP_LOST`, the ender sees it, `va_media_calls_ended_total{end_reason="worker_lost"}` counts it and
+    the lock is not released; same end for a teardown past `TEARDOWN_KEEPALIVE_S` (lock released); a
+    `transferred` end stays in both cases; a control-handler failure with the lock lost during the teardown
+    raises, closes 1011 and gives the ender `OWNERSHIP_LOST`; existing session tests pass; `make check` passes;
+    append both note names to `.ralph/review-inbox/DONE` on approval.
+  - Closed without a change now (Planner, 2026-11-05, DEC-016): note 2026-11-05-p08-fix-22-wip-review.md has
+    no blockers; its item 1 (a tool with `detaches = False` must end promptly when cancelled, because
+    `stop_tasks` waits for it without a bound) cannot happen with today's tools (the only non-detaching ones
+    are test fakes) and the reviewer offered "fold into P08-T10 or drop": the sentence in the `detaches`
+    docstring and in Decision P08-FIX-22 item 2, and the assertion that a cut returns without waiting for a
+    held lookup, are now part of the P08-T10 acceptance, where the first such tool is written.
 - [x] P08-FIX-15 Bound the session keepalive during the body teardown; stop the heartbeat once ownership is lost — see .ralph/review-inbox/2026-11-05-p08-fix-14-review.md — `TEARDOWN_KEEPALIVE_S` 25 s bound via asyncio.wait without cancelling the teardown, `media.body_teardown_overran`, heartbeat cancelled by a renewer done callback; Decision P08-FIX-15; lint/typecheck/placeholders pass, make test 12969 passed 7 skipped (cov 99.06%)
   - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decision P08-FIX-14)
   - Depends on: P08-FIX-14
@@ -428,7 +444,11 @@
   - Deliverables: KB node handler, `KB-` ids in Send Call `tools` enable retrieval for task-mode calls, prompt injection format
   - Acceptance: e2e kb_lookup passes; the `lookup_knowledge` `SystemTool` declares `detaches = False`
     (specs/13 §6 Decision P08-FIX-22): a test cuts a round during a held lookup, the lookup is cancelled and
-    the call reads `interrupted`.
+    the call reads `interrupted`, and the cut returns while the lookup's gate is still closed (it does not
+    wait for the lookup). The `SystemTool.detaches` docstring and specs/13 §6 Decision P08-FIX-22 item 2 gain
+    the rule "the `run` of a tool that does not detach must not delay or swallow cancellation: a cut round
+    waits for it without a bound (`va_engine.tool_tasks.stop_tasks`)" (review note
+    2026-11-05-p08-fix-22-wip-review.md item 1, DEC-016).
 
 - [ ] P08-T11 E2E: tools
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list: tool_call_with_speech)

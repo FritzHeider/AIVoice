@@ -400,16 +400,29 @@ tool calls per call: 100.
 >    tasks) is cancelled and awaited first while the ownership renewer and the heartbeat keep running, so the
 >    body's teardown (the system-tool drain, the snapshot flush) never lets the heartbeat or the lock expire;
 >    then the renewer and the heartbeat stop and the end routine runs. A lock lost during the teardown is not
->    released; the session's end stays the one that decided the race.
+>    released, and the session then ends `worker_lost` (Decision P08-FIX-18).
 >
 > Decision (2026-11-05) P08-FIX-15: the keepalive of item 2 of P08-FIX-14 is bounded. The renewer and the
 > heartbeat keep running during the body's teardown for at most `TEARDOWN_KEEPALIVE_S` = the 20 s system-tool
 > drain + 5 s (25 s) on the session clock. Past it the session logs `media.body_teardown_overran`, stops both
 > keepers (the heartbeat key expires after its 10 s TTL, so the workflow's heartbeat watch ends the call
 > `worker_crash`, and the lock is no longer renewed) and keeps waiting for the body before the end routine and
-> the cleanup: a wedged teardown can no longer pass for a live call. The heartbeat also stops as soon as the
-> renewer reports the lock lost (during the race or the teardown): the pod that lost the call stops vouching
-> for it.
+> the cleanup (which then run with `worker_lost`, Decision P08-FIX-18): a wedged teardown can no longer pass
+> for a live call. The heartbeat also stops as soon as the renewer reports the lock lost (during the race or
+> the teardown): the pod that lost the call stops vouching for it.
+>
+> Decision (2026-11-05) P08-FIX-18: a session that stopped vouching for its call does not end it.
+> 1. When the body's teardown is over, a session whose renewer lost the lock (during the race or the
+>    teardown), or whose teardown overran `TEARDOWN_KEEPALIVE_S` (both keepers stopped, Decision P08-FIX-15),
+>    ends with `end_reason='worker_lost'`, `ended_by='error'` (`OWNERSHIP_LOST`) whatever decided the race: the
+>    end routine neither records nor hangs up (specs/07 §18 Decision P05-T11b step 1) and signals
+>    `worker_lost`; `CallWorkflow` ends the call (on that signal, or on its heartbeat watch: `worker_crash`).
+>    One party ends the call, not two.
+> 2. A `transferred` end stays: its routine neither records nor hangs up anyway, and `worker_lost` would make
+>    the workflow hang up on the bridged caller and target.
+> 3. A session that failed (the body or a control handler raised) still raises and closes 1011; its end
+>    routine is given `worker_lost` instead of the failure, for the same reason as item 1.
+> 4. The lock: not released after a loss (it is not ours), released by compare-and-delete after an overrun.
 >
 > Decision (2026-11-05) P08-FIX-21: a system tool run that goes on after its round was cut (Decision P08-FIX-13
 > item 2) is answered `{"status":"in_progress"}`, not `{"error":"interrupted"}`. The message will normally be

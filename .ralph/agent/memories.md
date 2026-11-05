@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793900869-38bf
+> P08-FIX-18: CallSession ends OWNERSHIP_LOST (run result, metric worker_lost, ender) when the lock was lost or the teardown overran TEARDOWN_KEEPALIVE_S by the time the body teardown finished, whatever decided the race, except a transferred end; a failed session still raises/1011 but its ender gets OWNERSHIP_LOST not None (flags read via _abandoned()); tests _lose_lock/_overrun/_in_teardown + rig(control_handler=) in test_session.py; pkill -f '[x]pattern' still kills your own shell if the same command line contains the literal text elsewhere (kill by pid instead)
+<!-- tags: media, session, testing | created: 2026-11-05 -->
+
 ### mem-1793897162-d964
 > P08-FIX-22: every va_tools.executor.SystemTool declares detaches (protocol property, no default; Final class attr or dataclass field): true (send_sms, schedule_callback) = executor-owned shielded run, in_progress at a cut, drained by aclose; false = runs in the waiting task via _finish_system, cancelled with its wait, never detached, reads interrupted, nothing for aclose; lookup_knowledge (P08-T10) must be false; fakes _GatedSystem(name, outcome, detaches=False), _HeldSms(detaches=False) + _barge_in(sms)
 <!-- tags: tools, engine, testing | created: 2026-11-05 -->

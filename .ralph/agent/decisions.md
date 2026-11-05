@@ -192,3 +192,21 @@ Template:
 - **Reasoning:** Item 1 is a few lines while the executor has two system tools and three test fakes; a protocol member without a default makes every later tool state its choice. Item 2 needs a barge-in inside the few hundred ms of a run AND a failure of that run; the truth is recorded as `call.error` `TOOL_FAILED`, the per-call caps bound a model that sends again, and the rewrite needs a link from the call object to a history record that survives `keep_tool_records` / `completed_rounds` and the persisted engine state in two runners. That is a lot of mutable coupling for a rare case, the reviewer marked it "fine to drop", and the phase still has T02c2-T11 open.
 - **Reversibility:** High (item 1: one protocol member; item 2 can be added later without changing stored data)
 - **Timestamp:** 2026-11-05T16:20:00Z
+
+## DEC-016
+- **Decision:** What to do with review note 2026-11-05-p08-fix-22-wip-review.md (no blockers; item 1 = a non-detaching `SystemTool.run` must end promptly when cancelled because `stop_tasks` waits without a bound; "fold into P08-T10 or drop")
+- **Chosen Option:** No task of its own. The docstring sentence, the sentence in specs/13 §6 Decision P08-FIX-22 item 2 and the "cut returns without waiting for the held lookup" assertion are written into the P08-T10 acceptance; the note is closed with that reason in the P08-FIX-18 task text and goes to DONE when P08-FIX-18 is approved.
+- **Confidence:** 75
+- **Alternatives Considered:** a docs-only task P08-FIX-23 now (two sentences for a full build + review cycle of gates, about the behaviour of a tool that does not exist yet); dropping the note
+- **Reasoning:** Nothing in the tree can hit it (the only non-detaching tools are test fakes that re-raise at once); the rule matters to whoever writes `lookup_knowledge`, and that Builder reads the P08-T10 acceptance. Same handling as item 2 of 2026-11-05-p08-fix-19-wip-review.md (carried into a later task's acceptance).
+- **Reversibility:** High (plan text only)
+- **Timestamp:** 2026-11-05T17:25:00Z
+
+## DEC-017
+- **Decision:** Scope of P08-FIX-18 (note 2026-11-05-p08-fix-15-review.md item 1: a lock lost, or a keepalive overrun, during the body teardown still runs the full end routine). The note says the lost lock "outranks everything".
+- **Chosen Option:** One rule: once the session no longer vouches for the call (renewer lost the lock, or the teardown overran and both keepers stopped) the end is `OWNERSHIP_LOST`, with two stated edges: (a) a `transferred` end stays; (b) a failed session (body/control handler raised) still raises and closes 1011, but its ender gets `OWNERSHIP_LOST` instead of `None`.
+- **Confidence:** 70
+- **Alternatives Considered:** the note literally (also replace `transferred`); leave the failed-session case as `None` → `_BODY_FAILED`; a dedicated `SessionEnd` for the overrun
+- **Reasoning:** The defect is a second record + hangup next to the workflow's. `_TRANSFERRED` does neither, while `worker_lost` makes `CallWorkflow` run `end_call` + `hangup_call` on a bridged call whose caller and target are still talking (call_workflow.py `_after_pipeline`), so replacing it would turn a Redis flap into a dropped transfer. A failed session resolves to `_BODY_FAILED` (record `error` + hang up), the same double end the note is about, reachable when a control handler raises and the body then drains for up to 20 s; passing `OWNERSHIP_LOST` to the ender costs one expression. After an overrun the session gave the ownership up itself, so the existing constant fits and `media.body_teardown_overran` already tells the two apart in the log.
+- **Reversibility:** High (session.py only; no stored data)
+- **Timestamp:** 2026-11-05T17:25:00Z

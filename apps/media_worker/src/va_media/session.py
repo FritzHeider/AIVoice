@@ -16,8 +16,9 @@ The control listener hands each message of the call's :class:`~va_media.channels
 waits for it). A body or handler exception fails the session.
 
 After the race, an optional :class:`SessionEnder` (the end-of-call routine, ``va_media.call_end``) runs with
-the end (``None`` when the body raised) while the lock and the heartbeat are still held; its exception is
-logged ``media.end_routine_failed`` and never skips the cleanup.
+the end (``None`` when the body raised) while the lock and the heartbeat are still held (unless the session
+stopped vouching for the call, below); its exception is logged ``media.end_routine_failed`` and never skips
+the cleanup.
 
 When the race is decided, the body (and the end-request and control tasks) is cancelled and awaited first,
 while the renewer and the heartbeat keep the lock and the heartbeat key alive (its teardown may drain system
@@ -26,6 +27,13 @@ tools for up to 20 s, specs/13 §6 Decisions P08-FIX-14 and P08-FIX-15), for at 
 the renewer and the heartbeat stop (the heartbeat key expires and the workflow's heartbeat watch ends the
 call) and the session keeps waiting for the body. The heartbeat also stops as soon as the renewer reports
 the lock lost.
+
+A session that stopped vouching for its call does not end it (specs/13 §6 Decision P08-FIX-18): when the lock
+was lost during the teardown, or the teardown ran past the bound, the session ends :data:`OWNERSHIP_LOST`
+whatever decided the race, so the end routine neither records nor hangs up and ``CallWorkflow`` alone ends
+the call. A ``transferred`` end stays (its routine neither records nor hangs up either, and ``worker_lost``
+would make the workflow hang up on the bridged caller and target). A failed session still raises, but its
+ender is given :data:`OWNERSHIP_LOST` instead of ``None``.
 
 Cleanup always deletes the heartbeat, releases the lock unless it was lost, and closes the WebSocket (1000,
 or 1011 when the body raised).
@@ -76,6 +84,7 @@ HEARTBEAT_TTL_S: Final = 10
 TEARDOWN_KEEPALIVE_S: Final = SYSTEM_DRAIN_S + 5.0
 CLOSE_NORMAL: Final = 1000
 CLOSE_INTERNAL_ERROR: Final = 1011
+_TRANSFERRED_REASON: Final = "transferred"
 
 _log = get_logger(__name__)
 
@@ -112,7 +121,8 @@ type SessionBody = Callable[["CallSession"], Awaitable[SessionEnd]]
 
 
 class SessionEnder(Protocol):
-    """Runs once when a session ended, before its cleanup (``end`` is ``None`` when the body raised)."""
+    """Runs once when a session ended, before its cleanup. ``end`` is ``None`` when the body raised
+    (``OWNERSHIP_LOST`` when the session had also stopped vouching for the call)."""
 
     async def finish(self, session: CallSession, end: SessionEnd | None) -> None: ...
 
@@ -153,10 +163,16 @@ class CallSession:
         self._requested: SessionEnd | None = None
         self._end_requested = asyncio.Event()
         self._lost = False
+        self._overran = False
 
     @property
     def ownership_lost(self) -> bool:
         return self._lost
+
+    def _abandoned(self) -> bool:
+        """Whether the session stopped vouching for the call: the renewer lost the lock, or the body's
+        teardown overran the keepalive and both keepers stopped (specs/13 §6 Decision P08-FIX-18)."""
+        return self._lost or self._overran
 
     def request_end(self, end_reason: str, ended_by: str) -> None:
         """End the session with ``end_reason``/``ended_by`` (the first request wins)."""
@@ -178,7 +194,8 @@ class CallSession:
             try:
                 end = await self._race(body)
             finally:
-                await self._finish(end)
+                # a failed (or cancelled) session that no longer vouches for the call must not end it either
+                await self._finish(OWNERSHIP_LOST if end is None and self._abandoned() else end)
                 await self._cleanup(end)
             return end
 
@@ -206,12 +223,17 @@ class CallSession:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
             await self._stop_tasks(tasks, (renewer, heartbeat))
-        # priority: lost, requested, body, control (a heartbeat cancelled by the renewer is skipped)
+        # priority: lost (also when found after the teardown), requested, body, control (a heartbeat
+        # cancelled by the renewer is skipped)
         finished = [task for task in tasks if task in done and not task.cancelled()]
         for task in finished:
             if task.exception() is not None:
                 return task.result()
-        return finished[0].result()
+        decided = finished[0].result()
+        if self._abandoned() and decided.end_reason != _TRANSFERRED_REASON:
+            # the workflow ends the call, not this pod (specs/13 §6 Decision P08-FIX-18)
+            return OWNERSHIP_LOST
+        return decided
 
     async def _stop_tasks(
         self, tasks: Sequence[asyncio.Future[SessionEnd]], keepers: tuple[asyncio.Future[SessionEnd], ...]
@@ -248,6 +270,7 @@ class CallSession:
             with contextlib.suppress(asyncio.CancelledError):
                 await deadline
         if not teardown.done():
+            self._overran = True
             _log.error("media.body_teardown_overran", keepalive_s=TEARDOWN_KEEPALIVE_S)
 
     async def _wait_requested(self) -> SessionEnd:

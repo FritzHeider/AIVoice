@@ -2293,3 +2293,211 @@ appended `2026-11-05-p08-fix-21-wip-review.md` to DONE.
 For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-22-wip-review.md` is new and not in DONE (no blockers;
 item 1 = a non-detaching tool's `run` must not delay or swallow cancellation because `stop_tasks` waits for it
 without a bound: one docstring/spec sentence and an assert in the P08-T10 cut test, or drop).
+
+## Planner (2026-11-05, after P08-FIX-22 approval)
+Inbox: `2026-11-05-p08-fix-22-wip-review.md` is new (no blockers, one forward note for P08-T10). No task of its
+own (DEC-016): the docstring/spec sentence and the "cut does not wait for the held lookup" assertion are now in
+the P08-T10 acceptance; the note is closed in the P08-FIX-18 task text and goes to DONE with P08-FIX-18.
+Next unticked task: P08-FIX-18 (note 2026-11-05-p08-fix-15-review.md item 1). Plan file and decisions.md
+(DEC-016, DEC-017) are edited by the Planner; commit them with the task.
+
+## Plan P08-FIX-18 — a session that no longer vouches for the call ends `worker_lost`
+
+### Findings (read at HEAD da21529)
+- `apps/media_worker/src/va_media/session.py` `_race` (l.194-214): since FIX-14/15 the renewer runs up to
+  `TEARDOWN_KEEPALIVE_S` (25 s) after the race was decided. If it returns `OWNERSHIP_LOST` in that window
+  `_lost` is set and the heartbeat stops, but `_race` returns the end that won the race, so `CallEnd.resolve`
+  (call_end.py l.195-207) records + hangs up while the expired heartbeat makes `CallWorkflow` end the same call
+  (`worker_crash`) in parallel. Same after an overrun (`_await_bounded` l.240-251 only logs): both keepers are
+  stopped, the body returns later, the routine still ends the call as the owner.
+- `CallEnd.resolve` maps `end.end_reason == "worker_lost"` to `_WORKER_LOST` (no record, no hangup; variables
+  merge, event flush, slot release, `pipeline_finished(worker_lost)` still run; the workflow then does
+  `end_call` + `hangup_call`, call_workflow.py l.411). No change needed in call_end.py code.
+- Two edges (DEC-017): `transferred` must stay (`_TRANSFERRED` neither records nor hangs up; `worker_lost`
+  would make the workflow hang up on the bridged caller + target). A failed session (control handler raised,
+  body drains ≤ 20 s, lock lost meanwhile) gives the ender `None` → `_BODY_FAILED` (record + hangup): same
+  double end; the ender must get `OWNERSHIP_LOST` there, the exception still propagates (1011, label `error`).
+- `ownership_lost` (property) has no src user; tests use it. `_cleanup` releases unless `_lost` (Lua
+  compare-and-delete): unchanged, an overrun still releases.
+
+### 1. `apps/media_worker/src/va_media/session.py`
+- `__init__`: `self._overran = False`.
+- `_await_bounded`: where it logs `media.body_teardown_overran`, set `self._overran = True` first.
+- New method (a method, not a property: mypy narrows attributes/properties across earlier checks):
+  ```python
+  def _abandoned(self) -> bool:
+      """Whether the session stopped vouching for the call: the renewer lost the lock, or the body's
+      teardown overran the keepalive and both keepers stopped (specs/13 §6 Decision P08-FIX-18)."""
+      return self._lost or self._overran
+  ```
+- `_race`, after the exception loop (exceptions still win and raise):
+  ```python
+  decided = finished[0].result()
+  if self._abandoned() and decided.end_reason != TRANSFERRED_REASON:
+      return OWNERSHIP_LOST  # found after the teardown too: the workflow ends the call, not this pod
+  return decided
+  ```
+  `TRANSFERRED_REASON: Final = "transferred"` module constant (private name `_TRANSFERRED_REASON` is fine;
+  check whether `va_db.call_states` already exports a usable literal before adding one; do not import
+  `va_media.call_end` here: it imports session). Update the priority comment: "priority: lost (also when found
+  after the teardown), requested, body, control".
+- `run`: `await self._finish(OWNERSHIP_LOST if end is None and self._abandoned() else end)`; `_cleanup(end)`
+  and the return value unchanged (a failed session still closes 1011 with label `error`). Since `_race` already
+  returns `OWNERSHIP_LOST` for the non-failed case, `end is None` here means the race raised (or `run` was
+  cancelled).
+- Module docstring: replace the last sentences of the "When the race is decided" paragraph: a lock lost during
+  the teardown, or a teardown past the bound, ends the session `OWNERSHIP_LOST` whatever decided the race
+  (the ender neither records nor hangs up; a `transferred` end stays; a failed session still raises but its
+  ender gets `OWNERSHIP_LOST`), Decision P08-FIX-18. `SessionEnder` docstring: "`end` is `None` when the body
+  raised (``OWNERSHIP_LOST`` when the session had also stopped vouching for the call)".
+- `apps/media_worker/src/va_media/call_end.py`: docstring only, step 1: "an ownership loss (also one found
+  after the body's teardown, or a teardown past the keepalive: specs/13 §6 Decision P08-FIX-18) or the drain
+  timeout (``worker_lost``) neither records nor hangs up".
+
+### 2. Tests — `apps/media_worker/tests/test_session.py`
+- `rig(..., control_handler: ControlHandler | None = None)` passed to `CallSession`.
+- Helpers (keep jscpd at 0): `async def _lose_lock(r: Rig) -> None` (`SET owner pod-other`, `run_for(5.0)`,
+  assert `r.session.ownership_lost`) and `async def _overrun(r: Rig) -> None` (`run_for(TEARDOWN_KEEPALIVE_S)`);
+  `_ABANDON = {"lost": _lose_lock, "overran": _overrun}`.
+- Rework `test_a_lock_lost_during_the_body_teardown_is_not_released` →
+  `test_a_lock_lost_during_the_body_teardown_ends_the_session_worker_lost` with a `RecordingEnder`: keep the
+  "no beat after the lock was lost" asserts; after `body.gate.set()`: `await running == OWNERSHIP_LOST`,
+  `[seen[0] for seen in ender.seen] == [OWNERSHIP_LOST]`, `r.ended("worker_lost") == 1`,
+  `r.ended("completed") is None`, owner still `b"pod-other"`, heartbeat key deleted, `closed_with == 1000`.
+- `test_a_wedged_teardown_stops_the_keepalive_after_the_bound`: the two end assertions become
+  `OWNERSHIP_LOST` (run result and ender), add `r.ended("worker_lost") == 1`; the rest (released, `not
+  ownership_lost`) stays.
+- New `test_a_transferred_end_stays_when_the_session_stops_vouching_for_the_call`,
+  `@pytest.mark.parametrize("how", ["lost", "overran"])`: `request_end("transferred", "system")`, gated
+  teardown, `await _ABANDON[how](r)`, gate → run result and ender end ==
+  `SessionEnd("ended", end_reason="transferred", ended_by="system")`, `r.ended("transferred") == 1`.
+- New `test_a_failed_session_that_lost_the_lock_gives_the_ender_worker_lost`: `Exploding` control handler
+  (as in `test_control.py::test_handler_exception_fails_the_session_after_cleanup`), `GatedTeardown` body,
+  `r.session.notify(DrainNoticeControl(...))` (local delivery; build it like test_control.py does) → wait
+  `body.tearing`, `_lose_lock(r)`, gate → `pytest.raises(RuntimeError, match="handler bug")`,
+  `[seen[0] for seen in ender.seen] == [OWNERSHIP_LOST]`, `closed_with == 1011`, `r.ended("error") == 1`.
+  (The existing `test_the_ender_gets_none_when_the_body_raised` keeps proving `None` without a loss.)
+- `test_the_heartbeat_and_lock_are_kept_while_the_body_tears_down` must pass unchanged (no loss, no overrun:
+  the requested end stays). Grep other media tests for an end asserted after a lost lock/overrun
+  (`test_server*.py`, `test_drain_flow.py`, `test_call_end.py`) and adjust only if they hit the new rule.
+Mutation checks to report (restore byte-identical, sha256): (a) drop the `_abandoned()` branch in `_race` →
+the lost + overrun tests fail; (b) drop the `transferred` exception → the 2 transferred cases fail; (c) `run`
+passes plain `end` to `_finish` → the failed-session test fails; (d) `_await_bounded` without `_overran =
+True` → the wedged test fails.
+
+### 3. Spec + docs (same commit; keep each `specs/NN §N` reference on ONE line)
+- specs/13 §6, new block directly after the Decision P08-FIX-15 block (before Decision P08-FIX-21):
+  `> Decision (2026-11-05) P08-FIX-18:` a session that stopped vouching for its call does not end it.
+  1. When the body's teardown is over, a session whose renewer lost the lock (during the race or the
+     teardown), or whose teardown overran `TEARDOWN_KEEPALIVE_S` (both keepers stopped, Decision P08-FIX-15),
+     ends with `end_reason='worker_lost'`, `ended_by='error'` (`OWNERSHIP_LOST`) whatever decided the race: the
+     end routine neither records nor hangs up (specs/07 §18 Decision P05-T11b step 1) and signals
+     `worker_lost`; `CallWorkflow` ends the call (that signal, or its heartbeat watch: `worker_crash`). One
+     party ends the call, not two.
+  2. A `transferred` end stays: its routine neither records nor hangs up anyway, and `worker_lost` would make
+     the workflow hang up on the bridged caller and target.
+  3. A session that failed (the body or a control handler raised) still raises and closes 1011; its end
+     routine is given `worker_lost` instead of the failure, for the same reason as item 1.
+  4. The lock: not released after a loss (it is not ours), released by compare-and-delete after an overrun.
+- Reword in place: Decision P08-FIX-14 item 2 last sentence → "A lock lost during the teardown is not
+  released, and the session then ends `worker_lost` (Decision P08-FIX-18)."; Decision P08-FIX-15: after "keeps
+  waiting for the body before the end routine and the cleanup" add "(which then run with `worker_lost`,
+  Decision P08-FIX-18)"; specs/07 §18 Decision P05-T11b step 1: "`worker_lost` (ownership loss, drain
+  timeout" + ", a lock lost or a keepalive overrun during the body's teardown: specs/13 §6 Decision
+  P08-FIX-18)".
+- AGENTS.md bullet `2026-11-05 (P08-FIX-18)`: `CallSession` ends `OWNERSHIP_LOST` (ender included) when the
+  lock was lost or the keepalive overran by the time the body teardown finished, except a `transferred` end;
+  a failed session still raises but its ender gets `OWNERSHIP_LOST`; tests `_lose_lock(r)` / `_overrun(r)` and
+  `rig(control_handler=)` in `test_session.py`.
+- Do NOT tick the plan or touch `.ralph/review-inbox/DONE` (the Reviewer appends
+  `2026-11-05-p08-fix-15-review.md` and `2026-11-05-p08-fix-22-wip-review.md`).
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest
+apps/media_worker/tests/test_session.py apps/media_worker/tests/test_control.py
+apps/media_worker/tests/test_call_end.py apps/media_worker/tests/test_drain_flow.py -q`; `uv run python
+scripts/check_spec_refs.py`; `make test` in the background (`: > logs/make_test.log`, then `make test >
+logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat Monitor ~2 min); `npx --yes jscpd@4
+--silent`; `uvx radon cc -s -a` on session.py; pip-audit with the CI export (`uv export --frozen
+--all-packages --no-hashes --no-emit-workspace`); `corepack pnpm audit --audit-level high`; `make e2e`
+(background + heartbeat: `CallSession.run` is on the path of every call).
+
+### Risks
+- e2e `worker_crash` flow (kill_media) and drain flows end through other paths (no session left / requested
+  `worker_lost`); a normal call never loses the lock or overruns, so no e2e expectation should move. If one
+  does, read the media log for `media.ownership_lost` / `media.body_teardown_overran` before touching code.
+- mypy: `decided.end_reason` is `str | None`; compare with the constant, no cast. Read the flags through
+  `_abandoned()` only.
+- Known flakes, report both runs if hit: `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset` (task fix:sim-shared-redis-exit-flake); the capacity flow
+  on a cold stack (task fix:capacity-start-burst-stall; attribute with the `outbound.underrun` lines).
+
+## Build P08-FIX-18 (2026-11-05)
+Implemented exactly the plan; nothing ticked, DONE untouched, no commit (Reviewer's).
+- `apps/media_worker/src/va_media/session.py`: `_overran` flag set where `media.body_teardown_overran` is
+  logged; `_abandoned()` (method) = `_lost or _overran`; `_race` returns `OWNERSHIP_LOST` when abandoned and the
+  decided end is not `transferred` (`_TRANSFERRED_REASON`; `va_db.call_states` has no constant for it, only
+  list entries); `run` hands the ender `OWNERSHIP_LOST` when `end is None and _abandoned()` (the exception
+  still propagates, `_cleanup(end)` unchanged: 1011, label `error`). Module + `SessionEnder` docstrings.
+- `call_end.py`: docstring step 1 only (no code change: `resolve` already maps `worker_lost`).
+- Tests (`apps/media_worker/tests/test_session.py`, 17 tests, +3): `rig(control_handler=)`, helpers
+  `_lose_lock`, `_overrun`, `_ABANDON`, `_in_teardown(r, decide)` (added to keep jscpd at 0: the first draft
+  had one 5-line clone between the new tests); lost-during-teardown test reworked to `OWNERSHIP_LOST` (run
+  result, ender, metric `worker_lost` 1 / `completed` None, lock not released, 1000); wedged-teardown test now
+  ends `OWNERSHIP_LOST` (lock released); new parametrized transferred test (`lost`, `overran`); new
+  failed-session test (Exploding control handler via local `DrainNoticeControl`, lock lost in the teardown →
+  raises, ender `OWNERSHIP_LOST`, 1011, label `error`). `test_the_heartbeat_and_lock_are_kept...` and
+  `test_the_ender_gets_none_when_the_body_raised` unchanged and passing. No other media test hit the new rule
+  (`test_control.py`, `test_call_end.py`, `test_drain_flow.py` pass unchanged).
+- Spec: specs/13 §6 new Decision P08-FIX-18 (4 items) after Decision P08-FIX-15; reworded Decision P08-FIX-14
+  item 2 last sentence and Decision P08-FIX-15 (pointer); specs/07 §18 Decision P05-T11b step 1. AGENTS.md
+  bullet `2026-11-05 (P08-FIX-18)`.
+Gates (final tree; PATH with /home/ralph/.local/bin): `make fmt` 0, `make lint` 0, `make typecheck` 0, `make
+placeholders` 0 findings, `check_spec_refs` 0 problems, jscpd 0 clones, radon repo average 2.93 (`apps
+packages scripts`; session.py average 3.13, no C+ block), pip-audit (CI export) no known vulnerabilities,
+`pnpm audit --audit-level high` exit 0 (1 known moderate), `make test` exit 0: 13095 passed, 7 skipped
+(13092 + 3 new), coverage 99.08 % (session.py 98 %, misses 252-254 and 336 are unchanged lines: the
+cancelled-`run` path of `_stop_tasks` and the ack gather; call_end.py 99 %), `make e2e` exit 0: 20 passed,
+107 deselected in 418.5 s (started 17:37Z right after `make test`, images rebuilt; capacity flow passed, no
+underruns this run; logs/make_e2e.log).
+Mutation checks (run twice: in place before the last comment move with sha256 restore check, then on a shadow
+copy of the final source via PYTHONPATH, repo untouched; unmutated shadow control 17 passed): (a) `_race`
+without the `_abandoned()` branch → lost + wedged tests fail; (b) without the `transferred` exception → both
+transferred cases fail; (c) `run` passes plain `end` to `_finish` → the failed-session test fails; (d) no
+`_overran = True` → the wedged test fails.
+Process notes: two `make test` runs were killed and restarted by me (first to fix the jscpd clone in the test
+file, then to move a comment ruff had wrapped into a parenthesized return); the reported run is the third, on
+the final tree. One of my kill commands (`pkill -f "logs/[m]ake_test.log"`) killed its own shell because the
+same command line also contained the literal log path further on; the orphaned `make test` was then killed
+by pid.
+
+## Review P08-FIX-18 (2026-11-05) — APPROVED
+Re-ran on the final tree (PATH with /home/ralph/.local/bin): `make lint` 0, `make typecheck` 0, `make
+placeholders` 0, `check_spec_refs` 0 problems, jscpd 0 clones, radon average 2.93 (session.py: no C+ block),
+pip-audit (CI export) no known vulnerabilities, `pnpm audit --audit-level high` exit 0 (1 known moderate),
+`make test` exit 0: 13095 passed, 7 skipped, coverage 99.08 % (session.py 98 %, misses 252-254 and 336 are
+unchanged lines), `make e2e` exit 0: 20 passed, 107 deselected in 417.5 s (logs/review_e2e.log).
+Diff read against the plan and the note (2026-11-05-p08-fix-15-review.md item 1): `_race` returns
+`OWNERSHIP_LOST` when `_abandoned()` unless the decided end is `transferred`; exceptions still win; `run` hands
+the ender `OWNERSHIP_LOST` only when `end is None and _abandoned()`, `_cleanup(end)` unchanged (label `error`,
+1011); `_overran` set only where the overrun is logged. `CallEnd.resolve` maps `worker_lost` to `_WORKER_LOST`
+(no record, no hangup) and `CallWorkflow._after_pipeline` then runs `_end_and_hangup` (call_workflow.py
+l.411-412), `transferred` → `_transferred` (l.413): matches Decision P08-FIX-18 items 1-4 and the reworded
+Decisions P08-FIX-14/15 and specs/07 §18 step 1.
+Mutation checks on a shadow copy (PYTHONPATH, repo untouched; control 17 passed): (a) no `_abandoned()` branch
+in `_race` → lost + wedged tests fail; (b) no `transferred` exception → both transferred cases fail; (c) `run`
+passes plain `end` to `_finish` → the failed-session test fails; (d) no `_overran = True` → the wedged test
+fails; (e) `_abandoned()` ignores `_lost` → the lost + failed-session tests fail.
+Reviewer edits: ticked the plan; appended `2026-11-05-p08-fix-15-review.md` and
+`2026-11-05-p08-fix-22-wip-review.md` to DONE.
+For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-18-wip-review.md` is new and NOT in DONE (no
+blockers; says the change can be committed as is). Its item 1, which I confirmed by reading the code: no src
+caller requests a `transferred` end (`request_end` callers: `api_stop`, `insufficient_credits`, the drain's
+`worker_lost`); it only comes from the body returning after its exit stack unwound, so (a) a lock lost while
+a bridged body is still unwinding is decided by the renewer and ends `OWNERSHIP_LOST` (the workflow hangs up
+the bridged call; the window existed before this change), and (b) renewer and body finishing in the same loop
+turn take `finished[0]` = the renewer. The `transferred` exception covers only a loss found after the body
+returned it, and the two parametrized tests reach it through `request_end("transferred", ...)`. The note
+offers three options (look at every finished result; `CallSession.mark_transferred()` from the runtime's
+`transferred()` callback; or narrow Decision P08-FIX-18 item 2 / DEC-017 (a) to "a `transferred` end that
+decided the race stays"). Decide: FIX task or close with a written reason.

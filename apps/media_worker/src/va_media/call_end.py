@@ -5,7 +5,8 @@
 releases the ownership lock and deletes the heartbeat (so the edge still sees an owner and leaves the call row
 alone, specs/06 §5 Decision P05-T02 item 7). Steps, in order:
 
-1. **Resolve** the end (:class:`ResolvedEnd`): a failed body is ``error``; an ownership loss or the drain
+1. **Resolve** the end (:class:`ResolvedEnd`): a failed body is ``error``; an ownership loss (also one found
+   after the body's teardown, or a teardown past the keepalive: specs/13 §6 Decision P08-FIX-18) or the drain
    timeout (``worker_lost``) neither records nor hangs up (``CallWorkflow`` does both); a closed media stream
    waits up to 3 s for the carrier's hangup (the carrier state hash first, then the call's carrier channel):
    hung up → ``max_duration`` (``hangup_cause`` ``time_limit``), ``transferred`` (call status

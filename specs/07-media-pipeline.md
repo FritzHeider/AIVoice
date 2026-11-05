@@ -1008,7 +1008,9 @@ ends with `end_reason='max_duration'`.
 > to the worker); `end` is `None` when the body raised; an exception of the routine is logged
 > `media.end_routine_failed` and never skips the cleanup (heartbeat delete, lock release, socket close). Steps:
 > 1. Resolve: a raised body → `error` ("The call pipeline failed."), record + hang up. `worker_lost` (ownership
->    loss, drain timeout) → no record, no hangup (the workflow does both, specs/01 §2.1 Decision). A closed media
+>    loss, drain timeout, a lock lost or a keepalive overrun during the body's teardown:
+>    specs/13 §6 Decision P08-FIX-18) → no record, no hangup (the workflow does both,
+>    specs/01 §2.1 Decision). A closed media
 >    stream (`stream_closed`) re-reads `call:{<id>}:carrier_state` (the edge `HSET`s before it `PUBLISH`es, so a
 >    hangup the carrier watch already consumed is in the hash as `primary_hangup=1`), else reads the carrier feed
 >    (now its only reader) for the primary leg's `call.hangup` for up to 3 s of the injected clock: hung up →
