@@ -1,5 +1,23 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-19 A pathway `press_button` is answered `sent` only when its DTMF was handed over (answer and yield per press); regression test: a `transfer_call` repeated in the merged turn is requested — see .ralph/review-inbox/2026-11-05-p08-fix-17-review.md (item 2; item 1 was fixed in P08-FIX-17, its owed assertion is added here) — `run_node_round` answers each call and yields a `press_button`'s `SendDtmfAction` right after its answer (`RoundOutcome.terminal` set after the round; the `finally` answers the rest `interrupted`), 6 engine tests + TaskBrain repeated-transfer regression test, Decision P08-FIX-19 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, pip-audit clean, pnpm audit high exit 0, make test 13058 passed 7 skipped (cov 99.08%, engine_node_tools 100%); reviewer mutation checks on a shadow copy: collect-then-yield restored → 4 tests fail, `_interrupt_answer` dropped → 2 tests fail
+  - Spec refs: specs/13 §4 (Decisions P08-T02c1 item 4, P08-FIX-17 item 1), specs/11 §6 (Decision P05-T09c item 4), specs/07 §8
+  - Depends on: P08-FIX-17
+  - Deliverables: `va_engine.engine_node_tools.run_node_round` answers the round's calls in call order and yields
+    each `press_button`'s `SendDtmfAction` right after that call's answer (as `TaskBrain._run_tools` does), so a
+    reply closed at a press leaves the presses (and an `end_call`) behind it answered `{"error":"interrupted"}`
+    and the conversation not ended; a TaskBrain regression test that a `transfer_call` repeated in the turn
+    superseding a transfer closed on its message yields its `TransferRequest`; specs/13 §4 Decision `P08-FIX-19`
+    (an answer reporting an action is recorded only for an action handed to the consumer; notes in Decision
+    P08-T02c1 item 4 and Decision P08-FIX-17 item 1); AGENTS.md.
+  - Acceptance: engine tests: two presses around an executor call are answered and sent in call order (the
+    second press is not on record when the first `SendDtmfAction` is received); a reply closed at the first of
+    two presses records `sent` for the first and `interrupted` for the second, also after a superseding turn
+    (records ahead of the merged caller turn); a press followed by `end_call`, closed at the press, answers
+    `end_call` `interrupted`, leaves the state not ended, and the next turn replies normally; TaskBrain test: the
+    merged turn's second `transfer_call` yields a `TransferRequest`, tool answers `interrupted` then
+    `transferring`, pairing valid; `make check` passes; append the note name to `.ralph/review-inbox/DONE` on
+    approval.
 - [x] P08-FIX-16 Pathway `end_call` always ends the call (final line not interruptible, an undelivered end is delivered on the next turn); tool tasks keyed by position — see .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md (items 1, 2; replaces 2026-11-05-p08-t02c1-engine-node-tools-review.md) — `end_call`/loop-protection final lines `Say(interruptible=False)`, owed `EndCallAction` re-delivered on the next turn (`_owed_end`), tool rounds by position (`start_tools` list, `round_contents`); Decision P08-FIX-16 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, make test 13030 passed 7 skipped (cov 99.07%); reviewer pipeline probe of the pre-audio merge on the goodbye ended `agent_hangup`
   - Spec refs: specs/13 §4 (Decision P08-T02c1), specs/11 §5.9 (Decision P07-T08b), specs/07 §8 (pre-audio merge)
   - Depends on: P08-T02c1

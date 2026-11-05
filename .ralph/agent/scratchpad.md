@@ -1386,3 +1386,208 @@ written 12:38Z, NOT in DONE) still needs its FIX task.
   before yielding the `SendDtmfAction`s; with two presses in one round and the reply closed at the first, the
   second stays on record as sent, and that record now survives a supersede. Fix as the note says (answer and
   yield per press, like TaskBrain) and state the order in the Decision.
+
+## Planner (2026-11-05, after P08-FIX-17 approval)
+Inbox: two notes not in DONE. `2026-11-05-p08-fix-15-review.md` already has its task (P08-FIX-18, unticked).
+`2026-11-05-p08-fix-17-review.md` had none → inserted **P08-FIX-19** at the top of plan/phase-08.md (inbox rule:
+new FIX tasks go to the top; the note is marked blocker, although its blocker item 1 was already fixed in
+75e109d). FIX-19 is planned now; FIX-18 (session worker_lost, independent, media only) is next, then P08-T02c2.
+
+## Plan P08-FIX-19 — a pathway `press_button` is answered `sent` only when its DTMF was handed over; owed transfer regression test
+
+### Findings (read at HEAD 75e109d)
+- `packages/va_engine/src/va_engine/engine_node_tools.py` `run_node_round` (lines 186-207): answers EVERY call of
+  the round first (collecting `presses`), sets `outcome.terminal`, and only then yields one `SendDtmfAction` per
+  press. A reply closed at the first `SendDtmfAction` (GeneratorExit at that yield) leaves later presses recorded
+  `{"status":"sent",...}` though they were never yielded; since P08-FIX-17 those records survive a supersede.
+  Worse variant found while planning: `[press_button, end_call]` in one round closed at the press: `end_call` is
+  already answered `ending` and `outcome.terminal` is set, but the generator never reaches `_tool_end`, so the
+  record says "ending" for an end that is neither performed nor owed (`state.ended` False, `_owed_end` empty).
+- `TaskBrain._run_tools` (task_runner.py:353-378) is the model: per item `answer` → `answered += 1` → `yield
+  PressButton`; `finally` answers `plan.calls[answered:]` `interrupted`.
+- "Yielded = handed over" holds in the pipeline: `_reply` → `_handle_output` → `_handle_action` creates the
+  action task synchronously (before any suspension) and awaits it shielded (pipeline.py:783-796), so an action
+  the generator yielded goes out even when the reply is cancelled at once; a cancel can only land at an await
+  inside the generator chain (before the yield) or after the hand-over. `PathwayBrain` maps `SendDtmfAction` →
+  `PressButton` without awaiting (pathway_brain.py:212), and `_out(run, (action,))` yields a `SendDtmfAction`
+  without awaiting. So the press at which the close lands was sent: it stays `sent`.
+- Item 1 of the note is fixed (`TaskBrain._transfer`/`_interrupt_answer`); the Decision text names the case.
+  Owed: a repo test that a second `transfer_call` in the merged turn yields a `TransferRequest` (reviewer probe:
+  /var/tmp/review_fix17/test_adhoc.py `test_second_transfer_in_merged_turn_is_requested`, not in the repo).
+
+### 1. Code — `packages/va_engine/src/va_engine/engine_node_tools.py` only
+`run_node_round` body becomes (signature unchanged, no new parameters):
+```python
+    tasks: list[asyncio.Task[ToolAnswer]] = []
+    try:
+        tasks = start_tools(executor, plan.executed, scope)
+        line = await lines.line(executor, plan.executed, tasks, scope)
+        if line is not None:
+            yield Say(text=line, mark=next_mark())
+        answers = [await task for task in tasks]
+        merge_variables(variables, answers)
+        for item, content in round_contents(plan, answers):
+            answer(item.call, content)
+            outcome.answered += 1
+            if item.digits is not None:
+                yield SendDtmfAction(digits=item.digits, duration_ms=DTMF_DURATION_MS)
+        outcome.terminal = plan.terminal
+    finally:
+        await stop_tasks(tasks)
+        for item in plan.calls[outcome.answered :]:
+            answer(item.call, INTERRUPTED)
+            outcome.answered += 1
+```
+- `outcome.terminal` stays AFTER the loop: nothing with digits follows a terminal call (calls behind it are
+  `answer`/`skipped`), so it is set exactly when the whole round was answered and every press handed over; a
+  close at a press leaves it `None` and the `finally` answers the rest (an `end_call` included) `interrupted`.
+- Update the function docstring ("yields the speech/filler line, then answers the calls in call order through
+  `answer`, each `press_button` followed at once by its `SendDtmfAction`; a round closed at a press answers
+  the calls behind it `interrupted`"), the module docstring sentence about `press_button`, and the
+  `RoundOutcome` docstring (`terminal` is set once every call was answered and every press handed over).
+- No engine.py change expected: `_node_round` already closes `executed` via `aclosing` and reads
+  `outcome.terminal` only after the loop. Verify `_tool_calls_used`/`budget` are unaffected (set before the
+  round). Do not touch TaskBrain src.
+
+### 2. Tests
+`packages/va_engine/tests/test_engine_tools.py` (helpers there: `engine_rig`, `one_node`, `call`, `executor`,
+`tool_records`, `drive`, `user`, `spoken`, `VOICE`):
+- Add a small local helper, e.g. `async def closed_on_press(actions) -> list[tuple[Any, ...]]` (like
+  `engine_helpers.closed_on_line` but breaks at the first `SendDtmfAction`; reads streams via `spoken`). If it
+  would clone `closed_on_line` for jscpd, generalise `engine_helpers.closed_on_line` into
+  `closed_on(actions, kind)` with `closed_on_line = partial`-style wrapper instead.
+- Replace `test_press_button_sends_dtmf_after_the_answers` by
+  `test_presses_are_answered_and_sent_in_call_order`: `engine_rig(one_node(), tools=executor(results={"lookup":
+  '{"hours":"9-5"}'}), system=VOICE, fillers=False)`; reply 1 calls `[press "1", lookup, press "2"]`, reply 2
+  "Pressed."; drive `rig.engine.start()` by hand and snapshot `tool_records(rig)` at each `SendDtmfAction`:
+  at the first → `[("press_button", sent "1")]` (the second press and the lookup are not on record yet), at
+  the second → all three in call order; rendered actions == `[("stream","", "t0.1", None), ("dtmf","1",250,None),
+  ("dtmf","2",250,None), ("stream","Pressed.","t0.2",None)]` (take the exact mark strings from a run).
+- `test_a_reply_closed_at_the_first_press_answers_the_later_press_interrupted`: `one_node(tools=[])`,
+  `system=VOICE`, reply calls `[press "1", press "2"]`, closed at the first DTMF: seen DTMF digits == ["1"];
+  `tool_records == [("press_button", '{"status":"sent","digits":"1"}'), ("press_button",
+  '{"error":"interrupted"}')]`.
+- `test_a_superseded_turn_keeps_the_sent_and_the_interrupted_press`: `reply("Hello.")` start, turn 1 = the
+  two-press round closed at the first press (`handle_user_turn(user("press one", 1))`), then
+  `drive(handle_user_turn(user("press one two", 2, supersedes=1)))` with `reply("Okay.")`: `rig.history()` ==
+  `[("assistant","Hello."), ("tool", sent 1), ("tool", interrupted), ("user","press one two"),
+  ("assistant","Okay.")]`.
+- `test_an_end_call_behind_a_press_closed_at_the_press_does_not_end`: `one_node(tools=[])`, `system=VOICE`
+  (end_call offered by default), `reply("Hello.")`, turn 1 reply calls `[press "1", end_call(reason="done",
+  final_message="Bye.")]` closed at the DTMF; `tool_records` == `[press sent, ("end_call", interrupted)]`;
+  `rig.state.ended is False`; then `await rig.say("hello?")` with `reply("Still here.")` returns a normal
+  stream (no owed end, exactly one more request). Plus the unclosed counterpart inside the same or a sibling
+  test: the same round driven fully yields dtmf, the final `Say` (not interruptible), the end action, and
+  records `[press sent, ("end_call", '{"status":"ending"}')]`.
+`packages/va_engine/tests/test_task_tool_speech.py`:
+- `test_a_transfer_repeated_in_the_merged_turn_is_requested`: FakeSource `.reply(calls=[transfer]).reply(
+  calls=[again])` (both `transfer_call {"message": "One moment."}`, ids `call_t`/`call_u`), `_brain(clock,
+  source, _executor(clock), fillers=False, transfer_phone_number="+14155550133")`; turn 1 closed at the
+  `SpeakStatic` (factor that loop out of `test_a_transfer_closed_on_its_message_is_carried_as_interrupted` into
+  a helper `_closed_on_static(brain, turn) -> SpeakStatic` used by both tests, so jscpd stays at 0); turn 2
+  `drain(brain.on_user_turn(user_turn(2, "a human, now", supersedes=1)))` == `[("static", "One moment.",
+  False), ("action", <TransferRequest target "+14155550133", message "One moment.">)]` (assert `isinstance`
+  + `target`); `[m.content for m in brain.messages if m.role == "tool"] == [INTERRUPTED,
+  '{"status":"transferring"}']`; `_history` tool records the same pair; the turn-2 request (`_wire(source)`)
+  ends `user`, `assistant` (tool_calls, no content), `tool INTERRUPTED`; `assert_tool_pairing`.
+Mutation checks to report (restore byte-identical after each): (a) put back collect-then-yield in
+`run_node_round` → the three close-at-press tests and the order test fail; (b) drop the
+`TaskBrain._interrupt_answer` call in `_transfer` → the new transfer test fails on the first tool content.
+
+### 3. Spec + docs (same commit)
+- specs/13 §4: new block after Decision P08-FIX-17:
+  `> Decision (2026-11-05) P08-FIX-19:` an answer that reports an action is on record only for an action that
+  was handed to the consumer. 1. Pathway tool rounds answer their calls in call order and yield each
+  `press_button`'s `SendDtmfAction` right after that call's answer (the task-mode order, specs/11 §6 Decision
+  P05-T09c item 4 — keep spec ref and section on one line); a reply closed at a press leaves that press `sent`
+  (the pipeline runs a received action to completion: specs/07 §8 Decision P04-T12b, the `asyncio.shield`
+  sentence at specs/07 line ~400), answers every later call of
+  the round `{"error":"interrupted"}` — an `end_call` included, which then neither ends the conversation nor is
+  owed — and these records stay when the turn is superseded (Decision P08-FIX-17 item 1). 2. In Decision
+  P08-FIX-17 item 1 "ran" means: executor tools, and actions handed to the consumer (`press_button`, a
+  task-mode `transfer_call` after its message).
+- In Decision P08-T02c1 item 4 (line ~128) append to the `press_button` sentence: "(order superseded by
+  Decision P08-FIX-19: right after that call's answer)". In Decision P08-FIX-17 item 1 first sentence add
+  "(see Decision P08-FIX-19 for answers that report an action)".
+- AGENTS.md: one bullet `2026-11-05 (P08-FIX-19)`: `run_node_round` answers + yields per press; rule "an answer
+  that reports an action (`sent`, `transferring`, `ending`) is recorded only when the action is yielded; the
+  `finally` answers the rest `interrupted`"; test helper name(s).
+- Do NOT touch `.ralph/review-inbox/DONE` or the plan tick (Reviewer: appends
+  `2026-11-05-p08-fix-17-review.md`).
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+-q`; `uv run python scripts/check_spec_refs.py`; `make test` in the background (`: > logs/make_test.log`, then
+`make test > logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat Monitor ~2 min);
+`npx --yes jscpd@4 --silent`; `uvx radon cc -s -a` on touched files; `uvx pip-audit --strict` on `uv export`;
+`corepack pnpm audit --audit-level high` (plain `pnpm audit` has the known moderate minimatch advisory, task
+fix:pnpm-audit-minimatch). No `make e2e`: pathway tools are not wired into the media runtime before P08-T02c2,
+and no e2e flow issues two `press_button` calls in one pathway round; no TaskBrain src change.
+
+### Risks
+- Any test asserting the old order (all answers, then DTMF): only `test_press_button_sends_dtmf_after_the_answers`
+  (single press: still passes, but rename/replace as above); grep `("dtmf"` in packages/va_engine/tests and
+  `SendDtmfAction` in apps/ (media maps via PathwayBrain only) before finishing.
+- `rig.say` / `rig.start` helpers drain fully; the close-at-press tests must drive the generator by hand under
+  `contextlib.aclosing`.
+- `end_call` arguments need `reason` (else answered `invalid_arguments`, AGENTS P08-FIX-16).
+- Known flake (task fix:sim-shared-redis-exit-flake): `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset`; if it fails, re-run alone and report both runs.
+
+## Build P08-FIX-19 (2026-11-05)
+Implemented exactly the plan.
+- `packages/va_engine/src/va_engine/engine_node_tools.py`: `run_node_round` answers each call and yields a
+  `press_button`'s `SendDtmfAction` right after that call's answer; `outcome.terminal` is set after the loop; the
+  `finally` answers `plan.calls[outcome.answered:]` `interrupted`. Docstrings (module, `RoundOutcome`, function)
+  updated. No engine.py / TaskBrain src change (checked: `_out` yields a `SendDtmfAction` without awaiting, and
+  `_node_round` reads `outcome.terminal` only after the round).
+- Tests `test_engine_tools.py`: `test_press_button_sends_dtmf_right_after_its_answer` (renamed single press),
+  `test_presses_are_answered_and_sent_in_call_order` (records snapshotted at each DTMF),
+  `test_a_reply_closed_at_the_first_press_answers_the_later_press_interrupted`,
+  `test_a_superseded_turn_keeps_the_sent_and_the_interrupted_press`,
+  `test_an_end_call_behind_a_press_closed_at_the_press_does_not_end` (not ended, nothing owed, next turn is a normal
+  reply, 3 requests), `test_an_end_call_behind_a_press_handed_over_ends_the_call`. Helper
+  `engine_helpers.closed_on(agen, kind)`; `closed_on_line` now wraps it.
+- Tests `test_task_tool_speech.py`: `test_a_transfer_repeated_in_the_merged_turn_is_requested` (carried answer
+  `interrupted`, second call yields `TransferRequest` target +14155550133, answered `transferring`, turn-2 request
+  ends user / assistant tool_calls / tool interrupted, pairing valid); helper `_closed_on_static(brain, turn)` shared
+  with the existing closed-transfer test. Deviation from the plan's expected history: the `transferring` tool
+  record precedes the assistant "One moment." record (the answer is recorded before the message is spoken), so the
+  test asserts `[tool interrupted, user, tool transferring, assistant "One moment."]`.
+- Spec: specs/13 §4 new `> Decision (2026-11-05) P08-FIX-19` (2 items) + cross-references in Decision P08-T02c1
+  item 4 and Decision P08-FIX-17 item 1. AGENTS.md bullet `2026-11-05 (P08-FIX-19)`.
+
+Mutation checks (`uv run pytest packages/va_engine -n 4 --no-cov`, sources restored byte-identical, clean run
+1176 passed): (a) collect-then-yield put back in `run_node_round` → 4 failed (order test + the three close-at-press
+tests); (b) `_interrupt_answer` call dropped from `TaskBrain._transfer` → 2 failed (the closed-transfer test and
+the new repeated-transfer test).
+
+Gates (real results, this iteration):
+- make fmt / lint / typecheck / placeholders: exit 0 each. check_spec_refs: 0 problem(s) (re-run after the last
+  spec wording edit).
+- make test: exit 0, 13058 passed, 7 skipped (live suite), coverage 99.08 % (`engine_node_tools.py` 100 %), 849 s.
+  The known sim shared-Redis flake did not fire.
+- jscpd: 0 clones. radon on touched files: average 3.46; one C (11), the pre-existing test function
+  `test_an_end_call_closed_on_its_final_line_ends_on_the_next_turn` (untouched); src file all A/B.
+- pip-audit --strict (CI form, `uv export --frozen --all-packages`): no known vulnerabilities.
+- pnpm audit --audit-level high (CI gate): exit 0 (1 moderate, known, task fix:pnpm-audit-minimatch).
+- make test-ts not run (no TS change). make e2e not run: pathway tools are not wired into the media runtime
+  before P08-T02c2, no TaskBrain src change, no e2e flow issues two presses in one pathway round.
+
+## Review P08-FIX-19 (2026-11-05) — APPROVED
+Re-ran: make lint / typecheck / placeholders exit 0; check_spec_refs 0 problem(s); jscpd 0 clones; radon
+`engine_node_tools.py` average A (4.4); pip-audit (CI form) no known vulnerabilities; pnpm audit --audit-level high
+exit 0 (1 moderate, known task fix:pnpm-audit-minimatch); make test exit 0, 13058 passed, 7 skipped, coverage
+99.08 % (`engine_node_tools.py` 100 %), 830 s. The sim shared-Redis flake did not fire.
+Diff read against specs/13 §4 (Decisions P08-T02c1 item 4, P08-FIX-17 item 1, new P08-FIX-19), specs/11 §6 Decision
+P05-T09c item 4 and specs/07 §8 Decision P04-T12b: `run_node_round` answers per call and yields each press right
+after its answer; no await sits between `answer(...)` and the consumer's receipt (`_node_round` → `_out` →
+`PathwayBrain._relay` yield synchronously; `CallPipeline._handle_action` creates the action task before its first
+suspension and awaits it shielded), so "yielded = handed over" holds and a cancel can only land before the answer
+or after the hand-over. `plan_round` answers everything behind a terminal call `skipped`, so no press follows an
+`end_call`; `outcome.terminal` after the loop is correct.
+Reviewer mutation checks (shadow copy of `va_engine` on PYTHONPATH, repo untouched): collect-then-yield restored
+→ 4 failed in test_engine_tools.py (order test + three close-at-press tests); `_interrupt_answer` call dropped
+from `TaskBrain._transfer` → 2 failed in test_task_tool_speech.py (closed-transfer + repeated-transfer).
+Inbox note `2026-11-05-p08-fix-17-review.md`: item 1 fixed in 75e109d with its owed assertion added here, item 2
+fixed here → appended to `.ralph/review-inbox/DONE`. No findings.

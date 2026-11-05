@@ -125,7 +125,8 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 > 4. `end_call` speaks `final_message`, else `Goodbye.` unless a reply of the pass already produced text, sets the
 >    state ended with `end_reason` `agent_end_call` (as task mode; the §6 table's `agent_end_call_tool` is not
 >    used), and yields `EndCallAction(reason="agent_end_call", ended_by="agent", after_mark=<the line's mark>)`.
->    `press_button` yields `SendDtmfAction(digits, duration_ms=250)` after the round's answers were recorded.
+>    `press_button` yields `SendDtmfAction(digits, duration_ms=250)` after the round's answers were recorded
+>    (order superseded by Decision P08-FIX-19: right after that call's answer).
 > 5. A reply the model could not give (unavailable: the turn ends after the `errorPhrase`, exactly as on a node
 >    without tools, specs/11 §5.9 Decision P07-T08b) and a reply cut off mid-stream (stream error after the first
 >    token; its tool calls may be incomplete; logged `engine.llm_stream_failed`) are followed by no tool round and
@@ -154,7 +155,8 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 > Decision (2026-11-05) P08-FIX-17: a tool that ran stays on record when its turn is superseded, and a pathway
 > node runs exactly the tools its own refs name.
 > 1. Superseded turn (specs/07 §8 pre-audio merge: a caller turn that ends before the reply's first audio cancels
->    the reply and is delivered merged, with `supersedes`): the tools of the superseded turn already ran, and
+>    the reply and is delivered merged, with `supersedes`): the tools of the superseded turn already ran (see
+>    Decision P08-FIX-19 for answers that report an action), and
 >    their side effects, merged variables and `call.tool` events are never withdrawn, so their answers stay.
 >    Pathways: the turn's `tool` history records stay, in order, ahead of the merged caller turn (they reach the
 >    next request as context updates); its user and assistant records go as before. Task mode: its completed
@@ -178,6 +180,24 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    rule for repeated names. Node executors share the call's runner, events and system tool runs (one drain at
 >    call end): binding for P08-T02c2. `PathwayToolExecutor` itself keeps only `tool_speech` (the tool usage
 >    note) and `handles(name)` (which executor-backed system tools the call runs).
+
+> Decision (2026-11-05) P08-FIX-19: an answer that reports an action (`{"status":"sent",…}`,
+> `{"status":"transferring"}`, `{"status":"ending"}`) is on record only for an action that was handed to the
+> consumer of the reply.
+> 1. A pathway tool round (`va_engine.engine_node_tools.run_node_round`) answers its calls in call order and
+>    yields each `press_button`'s `SendDtmfAction` right after that call's answer, before the next call is
+>    answered (the task-mode order of specs/11 §6 Decision P05-T09c item 4). A reply closed at a press leaves that
+>    press `sent`: an action the reply yielded was received and runs to completion (specs/07 §8 Decision P04-T12b,
+>    actions are never cancelled by a reply cancel). Every later call of the round is answered
+>    `{"error":"interrupted"}`, an `end_call` included: it neither ends the conversation nor is owed (Decision
+>    P08-FIX-16 owes the end of a conversation that ended; this one did not), and the next caller turn is handled
+>    as usual.
+>    The round's `end_call` takes effect only once every call was answered and every press handed over. These
+>    records stay when the turn is superseded (Decision P08-FIX-17 item 1).
+> 2. In Decision P08-FIX-17 item 1 "ran" means: tools the executor ran, and actions handed to the consumer
+>    (`press_button`; a task-mode `transfer_call` after its message). A task-mode `transfer_call` closed on its
+>    message and then repeated by the model in the merged turn is requested as usual: the carried answer reads
+>    `interrupted`, the new call is answered `transferring` and yields its `TransferRequest`.
 
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same

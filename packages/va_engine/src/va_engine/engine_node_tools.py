@@ -1,5 +1,5 @@
-"""Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1, P08-FIX-16 and
-P08-FIX-17 under specs/13 §4).
+"""Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1, P08-FIX-16,
+P08-FIX-17 and P08-FIX-19 under specs/13 §4).
 
 A reply node (:data:`REPLY_NODE_TYPES`, global nodes included) whose reply streams from the dialogue model
 is offered the system tools the conversation allows (:class:`~va_engine.system_tools.SystemToolFacts` with
@@ -8,10 +8,12 @@ followed by the custom tools of the node's ``tools`` and ``globalConfig.globalTo
 Tools are resolved per node (:meth:`~va_engine.tool_executor.PathwayToolExecutor.for_refs`): a node offers,
 speaks for and runs exactly the definitions its own refs name, so two nodes may hold different tools of one
 name. :class:`NodeTools` computes that :class:`ToolOffer`; :func:`run_node_round` executes one round of the
-model's calls: executor tools run as tasks while the tool speech or a filler plays, their answers and
-variables are recorded, and ``press_button`` yields a :class:`~va_engine.models.results.SendDtmfAction`. A
-round cut short (barge-in) cancels its tool tasks and answers the unanswered calls ``interrupted``; calls
-are tracked by their position in the round, never by the model's call id.
+model's calls: executor tools run as tasks while the tool speech or a filler plays, then the calls are
+answered in call order, their variables merged, and each ``press_button`` yields its
+:class:`~va_engine.models.results.SendDtmfAction` right after its own answer, so an answer that reports an
+action is on record only once that action was handed over. A round cut short (barge-in, or a reply closed
+at a press) cancels its tool tasks and answers the unanswered calls ``interrupted``; calls are tracked by
+their position in the round, never by the model's call id.
 """
 
 from __future__ import annotations
@@ -162,8 +164,9 @@ def _custom(
 
 @dataclass(slots=True)
 class RoundOutcome:
-    """Filled by :func:`run_node_round`: the round's ``end_call`` (``None`` = none) and how many of the
-    round's calls were answered so far (they are answered in call order)."""
+    """Filled by :func:`run_node_round`: how many of the round's calls were answered so far (in call
+    order), and the round's ``end_call`` (``None`` = none), which is set only once every call was answered
+    and every press handed over: a round cut short never ends the conversation."""
 
     terminal: PlannedCall | None = None
     answered: int = 0
@@ -181,8 +184,9 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
     outcome: RoundOutcome,
 ) -> AsyncGenerator[Action]:
     """Execute ``plan`` with the node's ``executor`` (:attr:`ToolOffer.executor`): yields the speech/filler
-    line, then one :class:`SendDtmfAction` per ``press_button`` after every call was answered through
-    ``answer`` (in call order)."""
+    line, then answers the calls in call order through ``answer``, each ``press_button`` followed at once by
+    its :class:`SendDtmfAction`. A round closed at a press leaves that press ``sent`` (a yielded action is
+    carried out) and answers the calls behind it ``interrupted``."""
     tasks: list[asyncio.Task[ToolAnswer]] = []
     try:
         tasks = start_tools(executor, plan.executed, scope)
@@ -191,15 +195,12 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
             yield Say(text=line, mark=next_mark())
         answers = [await task for task in tasks]
         merge_variables(variables, answers)
-        presses: list[str] = []
         for item, content in round_contents(plan, answers):
             answer(item.call, content)
             outcome.answered += 1
             if item.digits is not None:
-                presses.append(item.digits)
+                yield SendDtmfAction(digits=item.digits, duration_ms=DTMF_DURATION_MS)
         outcome.terminal = plan.terminal
-        for digits in presses:
-            yield SendDtmfAction(digits=digits, duration_ms=DTMF_DURATION_MS)
     finally:
         await stop_tasks(tasks)
         for item in plan.calls[outcome.answered :]:

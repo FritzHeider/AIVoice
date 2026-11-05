@@ -43,6 +43,7 @@ __all__ = [
     "KeyedPort",
     "RecordingEvents",
     "Rig",
+    "closed_on",
     "closed_on_line",
     "condition",
     "drive",
@@ -257,16 +258,21 @@ async def drive(actions: AsyncGenerator[Action]) -> list[tuple[Any, ...]]:
     return rendered
 
 
-async def closed_on_line(actions: AsyncGenerator[Action]) -> list[tuple[Any, ...]]:
-    """Run ``actions`` up to its first :class:`Say` and close the generator there (nothing after the line
-    is received); earlier streams are read to the end."""
+async def closed_on(actions: AsyncGenerator[Action], kind: type[object]) -> list[tuple[Any, ...]]:
+    """Run ``actions`` up to its first ``kind`` action and close the generator there (that action is
+    received, nothing after it); earlier streams are read to the end."""
     rendered: list[tuple[Any, ...]] = []
     async with contextlib.aclosing(actions) as running:
         async for action in running:
             rendered.extend(await spoken((action,)))
-            if isinstance(action, Say):
+            if isinstance(action, kind):
                 break
     return rendered
+
+
+async def closed_on_line(actions: AsyncGenerator[Action]) -> list[tuple[Any, ...]]:
+    """:func:`closed_on` the first :class:`Say` (a caller turn ended before the line's first audio)."""
+    return await closed_on(actions, Say)
 
 
 async def first_stream(actions: AsyncGenerator[Action]) -> SayStream:

@@ -19,6 +19,7 @@ from task_helpers import RecordingExecutor, assert_tool_pairing, drain, task_con
 
 from va_common.time import Clock, FrozenClock
 from va_domain.org import OrgSettings
+from va_engine.models.results import TransferRequest
 from va_engine.models.state import EngineState
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
@@ -27,7 +28,7 @@ from va_llm.models import ToolCall, ToolDef
 from va_sim.clock import AcceleratedClock
 from va_voice.phrase_cache import TOOL_FILLERS
 from va_voice.pipeline import PipelineConfig
-from va_voice.pipeline.models import SpeakStatic, SpeakText
+from va_voice.pipeline.models import SpeakStatic, SpeakText, UserTurn
 
 LOOKUP = ToolDef(
     name="lookup_order",
@@ -426,6 +427,19 @@ async def test_a_turn_without_tool_rounds_carries_nothing() -> None:
     assert _history(brain) == [("user", "my order A7"), ("assistant", "Got it.")]
 
 
+async def _closed_on_static(brain: TaskBrain, turn: UserTurn) -> SpeakStatic:
+    """Run the reply to ``turn`` up to its first static line and close it there: the caller spoke on
+    before the line's first audio, so nothing behind the line was handed over."""
+    async with contextlib.aclosing(brain.on_user_turn(turn)) as outputs:
+        async for output in outputs:
+            if isinstance(output, SpeakText):
+                assert [delta async for delta in output.tokens] == []
+            if isinstance(output, SpeakStatic):
+                return output
+    msg = "no static line was spoken"
+    raise AssertionError(msg)
+
+
 async def test_a_transfer_closed_on_its_message_is_carried_as_interrupted() -> None:
     clock = FrozenClock()
     transfer = ToolCall(id="call_t", name="transfer_call", arguments_json='{"message": "One moment."}')
@@ -433,17 +447,11 @@ async def test_a_transfer_closed_on_its_message_is_carried_as_interrupted() -> N
     executor = _executor(clock, results={"lookup_order": SHIPPED})
     brain = _brain(clock, source, executor, fillers=False, transfer_phone_number="+14155550133")
     await drain(brain.start())
-    async with contextlib.aclosing(brain.on_user_turn(user_turn(1, "a human please"))) as outputs:
-        async for output in outputs:
-            if isinstance(output, SpeakText):
-                assert [delta async for delta in output.tokens] == []
-            if isinstance(output, SpeakStatic):
-                break  # the caller spoke on before the transfer message's first audio
+    line = await _closed_on_static(brain, user_turn(1, "a human please"))
 
     replies = await drain(brain.on_user_turn(user_turn(2, "a human, or wait", supersedes=1)))
 
-    assert isinstance(output, SpeakStatic)
-    assert (output.text, output.interruptible) == ("One moment.", False)
+    assert (line.text, line.interruptible) == ("One moment.", False)
     assert replies == [("text", "Sure, what else?")]
     assert _shape(brain) == [
         ("user", "a human, or wait", 0),
@@ -459,6 +467,40 @@ async def test_a_transfer_closed_on_its_message_is_carried_as_interrupted() -> N
         ("user", "a human, or wait"),
         ("assistant", "Sure, what else?"),
     ]
+
+
+async def test_a_transfer_repeated_in_the_merged_turn_is_requested() -> None:
+    clock = FrozenClock()
+    arguments = '{"message": "One moment."}'
+    transfer = ToolCall(id="call_t", name="transfer_call", arguments_json=arguments)
+    again = ToolCall(id="call_u", name="transfer_call", arguments_json=arguments)
+    source = FakeSource().reply(calls=[transfer]).reply(calls=[again])
+    brain = _brain(clock, source, _executor(clock), fillers=False, transfer_phone_number="+14155550133")
+    await drain(brain.start())
+    await _closed_on_static(brain, user_turn(1, "a human please"))
+
+    outputs = await drain(brain.on_user_turn(user_turn(2, "a human, now", supersedes=1)))
+
+    transferring = '{"status":"transferring"}'
+    assert outputs[0] == ("static", "One moment.", False)
+    [(kind, request)] = outputs[1:]
+    assert kind == "action"
+    assert isinstance(request, TransferRequest)
+    assert (request.target, request.message) == ("+14155550133", "One moment.")
+    assert [m.content for m in brain.messages if m.role == "tool"] == [INTERRUPTED, transferring]
+    assert _history(brain) == [
+        ("tool", INTERRUPTED),
+        ("user", "a human, now"),
+        ("tool", transferring),
+        ("assistant", "One moment."),
+    ]
+    sent = _wire(source)
+    assert [(m["role"], m.get("content")) for m in sent[-3:]] == [
+        ("user", "a human, now"),
+        ("assistant", None),
+        ("tool", INTERRUPTED),
+    ]
+    assert_tool_pairing([{"messages": sent}])
 
 
 async def test_a_transfer_handed_over_keeps_its_transferring_answer() -> None:

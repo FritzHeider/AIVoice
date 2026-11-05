@@ -2096,3 +2096,9 @@ Grafana 3001
   TaskBrain rewrites a `transfer_call` answer to `interrupted` when the reply is closed on the transfer message
   (`_transfer`/`_interrupt_answer`): an answer recorded before its action is yielded must be retracted if the
   action never goes out, because superseded turns now keep their tool answers.
+- 2026-11-05 (P08-FIX-19): rule for every tool runner: an answer that reports an action (`sent`, `transferring`,
+  `ending`) is recorded only when that action is yielded; the `finally` answers the rest `interrupted`. Pathway
+  `run_node_round` answers and yields per `press_button` (a reply closed at a press keeps that press `sent`, later
+  calls incl. `end_call` read `interrupted`, `RoundOutcome.terminal` is set only after the whole round). Tests:
+  `engine_helpers.closed_on(agen, SendDtmfAction)` (generalises `closed_on_line`), `_closed_on_static(brain, turn)`
+  in `test_task_tool_speech.py`.

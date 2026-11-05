@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793885740-8454
+> P08-FIX-19: an answer that reports an action (sent/transferring/ending) is recorded only when the action is yielded: pathway run_node_round answers + yields per press_button (close at a press keeps it sent, later calls incl. end_call interrupted, RoundOutcome.terminal set only after the whole round); tests use engine_helpers.closed_on(agen, SendDtmfAction) and _closed_on_static in test_task_tool_speech; TaskBrain records the transferring tool answer before the assistant message record
+<!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
+
 ### mem-1793882534-415b
 > P08-FIX-17: pathway tools resolve per node via PathwayToolExecutor.for_refs(refs) -> ToolExecutor (first ref per name wins; ToolOffer.executor; run_node_round(executor=, lines=); ToolLines(clock=, enabled=).line(executor, ...)); superseded turns keep tools: models.state.keep_tool_records (engine + TaskBrain _drop_turn), TaskBrain carries task_tools.completed_rounds behind the merged user message (_carried in _accept); an answer recorded before its action is yielded must be retracted if the action never goes out (TaskBrain transfer closed on its message -> interrupted); test fake RecordingExecutor.for_refs -> NodeExecutor, executor.ran = (label, name); never pkill -f with a pattern that also matches your own shell command (use a [p]attern)
 <!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->

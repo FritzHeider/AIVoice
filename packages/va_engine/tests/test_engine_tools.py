@@ -1,5 +1,5 @@
 """Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16,
-P08-FIX-17)."""
+P08-FIX-17, P08-FIX-19)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from dialogue_helpers import unavailable
-from engine_helpers import Rig, closed_on_line, drive, engine_rig, route, user
+from engine_helpers import Rig, closed_on, closed_on_line, drive, engine_rig, route, user
 from graph_helpers import edge, graph, node, start
 from handler_helpers import spoken
 from service_helpers import json_log_stream, log_events
@@ -17,7 +17,7 @@ from task_helpers import RecordingExecutor
 
 from va_engine import engine as engine_module
 from va_engine.engine_node_tools import NO_OFFER, NodeTools
-from va_engine.models import PathwayGraph, Say
+from va_engine.models import PathwayGraph, Say, SendDtmfAction
 from va_engine.system_tools import SystemToolFacts
 from va_llm.errors import LlmConnectionError
 from va_llm.models import ToolCall, ToolDef
@@ -230,9 +230,20 @@ async def test_a_delivered_end_is_not_repeated() -> None:
     assert len(rig.source.requests) == 1
 
 
-async def test_press_button_sends_dtmf_after_the_answers() -> None:
+# An answer that reports an action is on record only once the action was handed over (Decision P08-FIX-19).
+
+SENT_1 = ("press_button", '{"status":"sent","digits":"1"}')
+SENT_2 = ("press_button", '{"status":"sent","digits":"2"}')
+CUT = '{"error":"interrupted"}'
+
+
+def press(call_id: str, digits: str) -> ToolCall:
+    return call(call_id, "press_button", digits=digits)
+
+
+async def test_press_button_sends_dtmf_right_after_its_answer() -> None:
     rig = engine_rig(one_node(tools=[]), system=VOICE)
-    rig.source.reply("", calls=[call("c1", "press_button", digits="1#")]).reply("Pressed.")
+    rig.source.reply("", calls=[press("c1", "1#")]).reply("Pressed.")
 
     actions = await rig.start()
 
@@ -242,6 +253,94 @@ async def test_press_button_sends_dtmf_after_the_answers() -> None:
         ("stream", "Pressed.", "t0.2", None),
     ]
     assert tool_records(rig) == [("press_button", '{"status":"sent","digits":"1#"}')]
+
+
+async def test_presses_are_answered_and_sent_in_call_order() -> None:
+    hours = '{"hours":"9-5"}'
+    rig = engine_rig(one_node(), tools=executor(results={"lookup": hours}), system=VOICE, fillers=False)
+    rig.source.reply("", calls=[press("c1", "1"), call("c2", "lookup"), press("c3", "2")]).reply("Pressed.")
+    rendered: list[tuple[Any, ...]] = []
+    on_record: list[list[tuple[str | None, str]]] = []
+
+    async with contextlib.aclosing(rig.engine.start()) as actions:
+        async for action in actions:
+            rendered.extend(await spoken((action,)))
+            if isinstance(action, SendDtmfAction):
+                on_record.append(tool_records(rig))
+
+    assert rendered == [
+        ("stream", "", "t0.1", None),
+        ("dtmf", "1", 250, None),
+        ("dtmf", "2", 250, None),
+        ("stream", "Pressed.", "t0.2", None),
+    ]
+    assert on_record == [[SENT_1], [SENT_1, ("lookup", hours), SENT_2]]
+
+
+async def test_a_reply_closed_at_the_first_press_answers_the_later_press_interrupted() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    rig.source.reply("", calls=[press("c1", "1"), press("c2", "2")])
+
+    seen = await closed_on(rig.engine.start(), SendDtmfAction)
+
+    assert seen == [("stream", "", "t0.1", None), ("dtmf", "1", 250, None)]
+    assert tool_records(rig) == [SENT_1, ("press_button", CUT)]
+
+
+async def test_a_superseded_turn_keeps_the_sent_and_the_interrupted_press() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    rig.source.reply("Hello.").reply("", calls=[press("c1", "1"), press("c2", "2")]).reply("Okay.")
+    await rig.start()
+    await closed_on(rig.engine.handle_user_turn(user("press one", 1)), SendDtmfAction)
+
+    await drive(rig.engine.handle_user_turn(user("press one two", 2, supersedes=1)))
+
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", SENT_1[1]),
+        ("tool", CUT),
+        ("user", "press one two"),
+        ("assistant", "Okay."),
+    ]
+
+
+def press_then_end(rig: Rig) -> None:
+    """The opener, then a reply that presses ``1`` and ends the call in one round."""
+    ending = call("c2", "end_call", reason="done", final_message="Bye.")
+    rig.source.reply("Hello.").reply("", calls=[press("c1", "1"), ending])
+
+
+async def test_an_end_call_behind_a_press_closed_at_the_press_does_not_end() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    press_then_end(rig)
+    rig.source.reply("Still here.")
+    await rig.start()
+
+    seen = await closed_on(rig.engine.handle_user_turn(user("press one", 1)), SendDtmfAction)
+    later = await rig.say("hello?")
+
+    assert seen == [("stream", "", "t1.1", None), ("dtmf", "1", 250, None)]
+    assert tool_records(rig) == [SENT_1, ("end_call", CUT)]
+    assert (rig.state.ended, rig.state.end_reason) == (False, None)
+    assert later == [("stream", "Still here.", "t2.1", None)]
+    assert len(rig.source.requests) == 3
+
+
+async def test_an_end_call_behind_a_press_handed_over_ends_the_call() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    press_then_end(rig)
+    await rig.start()
+
+    actions = await drive(rig.engine.handle_user_turn(user("press one", 1)))
+
+    assert actions == [
+        ("stream", "", "t1.1", None),
+        ("dtmf", "1", 250, None),
+        ("say", "Bye.", "t1.2", False),
+        ("end", "agent_end_call", "agent", "t1.2"),
+    ]
+    assert tool_records(rig) == [SENT_1, ("end_call", '{"status":"ending"}')]
+    assert (rig.state.ended, rig.state.end_reason) == (True, "agent_end_call")
 
 
 async def test_transfer_call_is_never_offered_on_pathways() -> None:
