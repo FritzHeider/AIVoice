@@ -308,12 +308,17 @@ async def test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks() -> 
             sent = streamed.sim_call().dtmf_sent
         assert end == STREAM_CLOSED
         assert [entry.digits for entry in sent] == ["12", "3"]
-        # The opener is generated (FakeLLM) only after the last group and the 500 ms settle.
-        [opener_request] = r.state.llm.requests
+        # The opener is generated (FakeLLM) only after the last group and the 500 ms settle. Under load the
+        # gateway may time out its first attempt and resend the same request, so every request must be the
+        # same opener generation and the earliest attempt is the one bounded by the settle.
+        requests = r.state.llm.requests
+        assert requests
+        assert all(request.messages == requests[0].messages for request in requests)
+        first = min(requests, key=lambda request: datetime.fromisoformat(request.received_at))
         last_group = datetime.fromisoformat(sent[-1].at)
         first_group = datetime.fromisoformat(sent[0].at)
         assert (last_group - first_group).total_seconds() >= 0.5
-        assert (datetime.fromisoformat(opener_request.received_at) - last_group).total_seconds() >= 0.5
+        assert (datetime.fromisoformat(first.received_at) - last_group).total_seconds() >= 0.5
 
 
 async def test_a_press_button_tool_call_reaches_telnyx() -> None:

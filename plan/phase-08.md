@@ -141,7 +141,7 @@
     -m capacity -s` still 0 underruns, p50 ≤ 140 ms on 3 runs; append all seven note names to
     `.ralph/review-inbox/DONE` on approval.
 
-- [ ] P08-FIX-5 Flaky `test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks` under full-suite load
+- [x] P08-FIX-5 Flaky `test_the_precall_sequence_reaches_telnyx_before_the_agent_speaks` under full-suite load — test-only: accepts identical gateway retries (same `messages`), bounds the 500 ms settle on the earliest `received_at`; alone 3/3 pass; lint/typecheck/placeholders pass; make test 12721 passed, 7 skipped, cov 99.07 %; jscpd 0 clones; radon avg A (2.92)
   - Spec refs: specs/30 §3.4, specs/10 §2
   - Depends on: none
   - Deliverables: in `make test` (P08-FIX-2 review run) the wall-clock FakeLLM opener request timed out once
