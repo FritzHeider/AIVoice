@@ -74,11 +74,19 @@ Total budget target: `call.completed` webhook ≤ 20 s after hangup p95 when no 
 >    its start-to-close timeout and retry policy by `retry_worst_case` (every attempt times out, every backoff interval
 >    is waited: billing 10 × 30 s + 65 s = 365 s, a mark 5 × 10 s + 30 s = 80 s, reserve 525 s). Temporal stops retrying
 >    once the next attempt (a `RecordingBusy` `next_retry_delay` included) would pass that deadline, and the step fails
->    as in rule 4 (`recording = skipped`). With less than 1 s left the copy is not started (`postcall.store_recording_
+>    as in rule 4 (`recording = skipped`). With less than 1 s (60 s since P08-FIX-7) left the copy is not started (`postcall.store_recording_
 >    out_of_time`, listed in `skipped`, `recording = skipped`). The slowest path to the copy (step 1 165 s, three
 >    bookkeeping runs 240 s, the 10 min wait) is 1 005 s, so the default budget always leaves a window of at least
 >    270 s, and billing always runs inside the budget. Running workflows from before this change are not versioned
 >    (no production deployments yet).
+> Decision (2026-11-05, P08-FIX-7): the minimum store window is 60 s (`MIN_STORE_WINDOW`; a shorter window skips the
+>    copy as above). The workflow passes the same deadline to the activity as `StoreRecordingInput.commit_by`
+>    (`workflow.now()` + window). `store_recording` never heartbeats, so a server-side `schedule_to_close` timeout
+>    does not stop a running attempt; the activity therefore checks `now + COMMIT_MARGIN` (5 s) against `commit_by`
+>    before it takes the copy lock and again after the upload, before the key `UPDATE`. Past it the attempt raises the
+>    non-retryable `RecordingOutOfTime`, deletes its uploaded object (commit stage), keeps the carrier copy, releases
+>    the lock, and records no event, so `call.completed`'s `recording = skipped` stays true. `commit_by = null` (older
+>    inputs, other callers) means no deadline.
 > 6. `emit_completed` locks the call row, returns `not_ended` (logged error, nothing written) for a non-terminal call and
 >    `already_completed` when `queue_status = 'complete'`; otherwise it sets `queue_status = 'complete'` and records
 >    `call.completed` whose `data` is the Call Object exactly as `GET /v1/calls/{id}` serialises it (7-day recording URL

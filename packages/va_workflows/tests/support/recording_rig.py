@@ -17,6 +17,7 @@ from fakeredis import FakeAsyncRedis
 from telephony_rig import Rig
 
 from va_common.storage import ObjectStore, ServerSideEncryption
+from va_common.time import Clock
 from va_db.org_settings import OrgSettingsReader
 from va_domain.carrier import CarrierEvent
 from va_sim.wav import pcm16_wav
@@ -165,6 +166,7 @@ def activities(  # noqa: PLR0913 - keyword-only test seams
     tmp_dir: Path | None = None,
     max_download_bytes: int | None = None,
     copy_lock: RecordingCopyLock | None = None,
+    clock: Clock | None = None,
 ) -> RecordingActivities:
     extra: dict[str, Any] = {} if max_download_bytes is None else {"max_download_bytes": max_download_bytes}
     return RecordingActivities(
@@ -176,7 +178,7 @@ def activities(  # noqa: PLR0913 - keyword-only test seams
         publisher=r.publisher,
         org_settings=OrgSettingsReader(r.database, FakeAsyncRedis()),
         copy_lock=copy_lock or RecordingCopyLock(FakeAsyncRedis()),
-        clock=r.clock,
+        clock=clock or r.clock,
         tmp_dir=tmp_dir,
         **extra,
     )

@@ -514,6 +514,10 @@
 
 ## Fixes
 
+### mem-1793838880-d41e
+> flake: apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset failed once under full make test (assert (1, 0) == (0, 0) at line 123) during P08-FIX-7; passes 3/3 alone; unrelated to va_workflows
+<!-- tags: sim, testing, flaky | created: 2026-11-05 -->
+
 ### mem-1793796176-e35b
 > failure: make test -> test_runtime_sim::test_caller_turn_is_answered_by_the_task_brain va_audio_underruns_total 1 != 0 under xdist load (realtime sim, wall clock); passes alone; next: make underrun assertion load-tolerant or drive on accelerated clock
 <!-- tags: media, testing, flaky | created: 2026-11-04 -->

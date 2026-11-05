@@ -4,7 +4,7 @@ P05-T18b)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import pytest
 from postcall_rig import (
@@ -22,8 +22,8 @@ from va_domain.post_call import POSTCALL_BUDGET_S, RECORDING_WAIT_S, PostCallTim
 from va_workflows.activities.errors import RECORDING_BUSY, retryable
 from va_workflows.activities.post_call_inputs import SavedRecording
 from va_workflows.activities.recording import BUSY_MESSAGE
-from va_workflows.activities.recording_inputs import StoreRecordingResult
-from va_workflows.post_call.budget import STORE_RESERVE
+from va_workflows.activities.recording_inputs import StoreRecordingInput, StoreRecordingResult
+from va_workflows.post_call.budget import MIN_STORE_WINDOW, STORE_RESERVE
 
 
 @pytest.fixture
@@ -73,6 +73,12 @@ async def test_a_connected_recorded_call_runs_every_step_in_order(env: WorkflowE
     # The copy may use the budget minus the billing reserve (it starts at once here).
     (window,) = run.schedule_to_close("store_recording")
     assert timedelta(seconds=_STORE_WINDOW_S - 5) < window <= timedelta(seconds=_STORE_WINDOW_S)
+    # The activity gets the same deadline to check before it commits (Decision P08-FIX-7).
+    [stored] = [value for _, value in fakes.calls if isinstance(value, StoreRecordingInput)]
+    started = run.history[0].event_time.ToDatetime().replace(tzinfo=UTC)
+    deadline = started + timedelta(seconds=_STORE_WINDOW_S)
+    assert stored.commit_by is not None
+    assert deadline - timedelta(seconds=5) < stored.commit_by <= deadline + timedelta(seconds=1)
 
 
 async def test_an_unanswered_call_runs_record_billing_and_completion_only(env: WorkflowEnvironment) -> None:
@@ -365,9 +371,14 @@ async def test_busy_retries_past_the_store_window_fail_the_copy_and_billing_stil
     assert run.history_span() < timedelta(seconds=POSTCALL_BUDGET_S)
 
 
-async def test_no_store_window_left_skips_the_copy_and_bills(env: WorkflowEnvironment) -> None:
+@pytest.mark.parametrize(
+    "left_s", [0, int(MIN_STORE_WINDOW.total_seconds()) // 2], ids=["none", "below_minimum"]
+)
+async def test_no_store_window_left_skips_the_copy_and_bills(env: WorkflowEnvironment, left_s: int) -> None:
     start = postcall_start(
-        PostCallTimings(recording_wait_s=RECORDING_WAIT_S, budget_s=int(STORE_RESERVE.total_seconds()))
+        PostCallTimings(
+            recording_wait_s=RECORDING_WAIT_S, budget_s=int(STORE_RESERVE.total_seconds()) + left_s
+        )
     )
     event = recording_event(start)
     fakes = FakePostCallActivities(record=CONNECTED_RECORDED, found=[SavedRecording(event=event)])

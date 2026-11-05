@@ -1986,5 +1986,9 @@ Grafana 3001
 - 2026-11-04 (P08-FIX-6): `va_workflows.post_call.budget` (`retry_worst_case(timeout, policy)`, `STORE_RESERVE` 525 s,
   `store_window(started, now, budget_s)`) schedules `store_recording` with `schedule_to_close` = budget deadline −
   reserve; the time-skipping server honours it against a `next_retry_delay` (retries stop, `ActivityError`). A
-  `PostCallTimings(budget_s=)` ≤ 525 skips the copy (`skipped`), so a post-call test that needs `store_recording` to run
-  must keep the default budget. `PostCallRun.schedule_to_close(activity)` / `history_span()` read the history.
+  `PostCallTimings(budget_s=)` < 585 (reserve + `MIN_STORE_WINDOW`) skips the copy (`skipped`), so a post-call test
+  that needs `store_recording` to run must keep the default budget. `PostCallRun.schedule_to_close(activity)` / `history_span()` read the history.
+- 2026-11-05 (P08-FIX-7): `StoreRecordingInput.commit_by` (the workflow's store deadline) + `COMMIT_MARGIN` 5 s: the
+  activity raises non-retryable `RECORDING_OUT_OF_TIME` before the lock or after the upload (deleting its object)
+  instead of committing late; `MIN_STORE_WINDOW` is 60 s. Recording activity tests pass `activities(..., clock=
+  FrozenClock(utcnow()))` and advance it in `MemoryS3(before_upload=...)` to make a deadline pass mid-copy.

@@ -26,8 +26,9 @@ __all__ = ["MIN_STORE_WINDOW", "STORE_RESERVE", "retry_worst_case", "store_windo
 _DEFAULT_MAXIMUM_FACTOR: Final = 100
 """Temporal's default ``maximum_interval`` is 100 x ``initial_interval``."""
 
-MIN_STORE_WINDOW: Final = timedelta(seconds=1)
-"""A window shorter than this is no window: the copy is skipped instead of started."""
+MIN_STORE_WINDOW: Final = timedelta(seconds=60)
+"""A window shorter than this is no window: a copy that cannot realistically finish is skipped instead of
+started (Decision P08-FIX-7); an attempt that still overruns stops itself at ``commit_by``."""
 
 
 def retry_worst_case(timeout: timedelta, policy: RetryPolicy) -> timedelta:

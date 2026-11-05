@@ -19,7 +19,8 @@ on without the recording.
 
 The copy runs with a ``schedule_to_close`` deadline of the budget minus what billing and the step marks need
 at their worst case (Decision P08-FIX-6): busy retries that would pass it end the step as failed, and with no
-window left the copy is skipped, so billing always gets its time inside the budget.
+window left (under 60 s) the copy is skipped, so billing always gets its time inside the budget. The activity
+gets the same deadline as ``commit_by`` and never commits after it (Decision P08-FIX-7).
 """
 
 from __future__ import annotations
@@ -266,7 +267,12 @@ class PostCallWorkflow:
         try:
             stored: StoreRecordingResult = await workflow.execute_activity(
                 "store_recording",
-                StoreRecordingInput(call_id=self._call.call_id, org_id=self._call.org_id, event=event),
+                StoreRecordingInput(
+                    call_id=self._call.call_id,
+                    org_id=self._call.org_id,
+                    event=event,
+                    commit_by=workflow.now() + window,
+                ),
                 start_to_close_timeout=STORE_RECORDING_TIMEOUT,
                 schedule_to_close_timeout=window,
                 retry_policy=STORE_RECORDING_RETRY,

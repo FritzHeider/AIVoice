@@ -70,6 +70,19 @@
     Decision.
   - Acceptance: tests pass; `make check` passes; append the note's file name to `.ralph/review-inbox/DONE` on approval.
 
+- [x] P08-FIX-7 A store_recording attempt cut by its schedule_to_close must not commit after the workflow skipped it — see .ralph/review-inbox/2026-11-04-postcall-store-window.md — `StoreRecordingInput.commit_by` + `COMMIT_MARGIN` 5 s, non-retryable `RecordingOutOfTime` before the lock / after the upload (object deleted, no event, carrier copy kept), `MIN_STORE_WINDOW` 60 s; 3 activity + workflow tests; specs/18 §1 Decision P08-FIX-7; review: lint/typecheck/placeholders exit 0, make test 12681 passed, 7 skipped
+  - Spec refs: specs/18-post-call-analysis.md §1 (Decision P08-FIX-6), specs/06-telephony-telnyx.md §11
+  - Depends on: P08-FIX-6
+  - Deliverables (non-blocker): `store_recording` never heartbeats, so a `schedule_to_close` timeout leaves the attempt
+    running; it can commit `recording_s3_key` + `call.recording_ready` after `call.completed` said `recording =
+    skipped`. Fix: the workflow passes the copy deadline in `StoreRecordingInput.commit_by`; the activity refuses to
+    start a copy, and to commit one, once `now + COMMIT_MARGIN` passes it (non-retryable `RecordingOutOfTime`,
+    uploaded object deleted, carrier copy and lock handled as on a lost run); `MIN_STORE_WINDOW` raised to 60 s so
+    the workflow does not start copies it will cut. Record in the specs/18 §1 Decision.
+  - Acceptance: activity tests (late before start → no download/upload; late at commit → object deleted, key unset,
+    no event, carrier copy kept), workflow test (small window → skipped), `make check` passes; append the note's file
+    name to `.ralph/review-inbox/DONE` on approval.
+
 - [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3

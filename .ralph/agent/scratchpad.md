@@ -405,3 +405,107 @@ finalize_billing 10×30 + (1+2+4+8+10×5) = 365 s. Pre-store worst = 165 + 80 (m
 - Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12676 passed, 7 skipped, cov 99 %).
 - Diff matches the plan and specs/18 §1 Decision P08-FIX-6; reserve math (365 + 2×80) and window (1800 − 1005 − 525 = 270 s)
   verified by pure tests; skip branch checks the budget first; specs/06 §11 amended. Inbox note appended to DONE.
+
+## Planner 2026-11-05 — after P08-FIX-6 approval
+- Inbox: new note `2026-11-04-postcall-store-window.md` (not in DONE, no task; non-blocker): store_recording never
+  heartbeats, so a schedule_to_close timeout leaves the attempt running and it may commit the recording after
+  `call.completed` reported `recording = skipped`; tiny windows (MIN_STORE_WINDOW 1 s) start doomed copies.
+  Inserted P08-FIX-7 above P08-FIX-4. Other open notes stay covered by P08-FIX-4.
+
+## Plan P08-FIX-7 (no commit after the store deadline)
+Chosen fix: explicit deadline in the input (deterministic, testable with ActivityEnvironment; no reliance on the
+SDK delivering a timeout to a non-heartbeating activity) + larger minimum window. Heartbeating is not needed.
+
+### Production changes
+1. `packages/va_workflows/src/va_workflows/activities/recording_inputs.py`:
+   - `StoreRecordingInput.commit_by: datetime | None = None` (docstring: the copy deadline the workflow set; `None` =
+     no deadline, e.g. old histories/other callers). Import `datetime`.
+   - `COMMIT_MARGIN: Final = timedelta(seconds=5)` (export in `__all__`): an attempt commits only while
+     `now + COMMIT_MARGIN <= commit_by` (room for the UPDATE + event insert before the server times it out).
+2. `activities/errors.py`: `RECORDING_OUT_OF_TIME: Final = "RecordingOutOfTime"` with docstring ("the copy's deadline
+   passed; never retried, the workflow bills without the copy") + helper or inline `ApplicationError(...,
+   type=RECORDING_OUT_OF_TIME, non_retryable=True)`.
+3. `activities/recording.py`:
+   - `_late(inp) -> bool`: `inp.commit_by is not None and self._clock.now() + COMMIT_MARGIN > inp.commit_by`.
+   - In `_store_recording`, after the `already_stored` check and before `_lock`: if `_late(inp)` → log
+     `recording.out_of_time stage=start` and raise the non-retryable error (no lock, no download).
+   - In `_copy`, after `_upload` and before `_record`: if `_late(inp)` → `await self._delete_object(key)`, log
+     `recording.out_of_time stage=commit`, raise the error (carrier copy kept; `finally` releases the lock).
+   - Module docstring: one paragraph on the deadline.
+   - Note: the raise must NOT go through `_failed` (no `call.error recording_failed` event: the call simply has no
+     copy, as with the workflow-side skip). ApplicationError propagates out of `store_recording` (only `_Failed`
+     is caught).
+4. `post_call/budget.py`: `MIN_STORE_WINDOW = timedelta(seconds=60)` (docstring: a copy that cannot realistically
+   finish is not started; the activity's own deadline check covers an attempt that still overruns). Keep worst-case
+   math (window after slowest steps 1-2 is 270 s ≥ 60 s; existing test asserts > MIN?) — verify
+   `test_post_call_budget.py` edges still hold (they use MIN_STORE_WINDOW symbolically; line 71 asserts window ==
+   MIN exactly at deadline − MIN: fine).
+5. `post_call/post_call_workflow.py` `_store_recording`: `commit_by = workflow.now() + window`, pass
+   `StoreRecordingInput(..., commit_by=commit_by)`. Except branch unchanged (ActivityError → skipped/failed).
+   Module docstring sentence.
+
+### Tests
+- `packages/va_workflows/tests/test_recording_activity.py` (reuse rig: `_call`, `_run`, `serve_recording`,
+  `saved_input`, `MemoryS3`; clock = rig's SystemClock → use commit_by relative to real now, or pass a clock):
+  1. `test_a_copy_past_its_deadline_is_not_started`: `commit_by = now + 2 s` (< margin) → ApplicationError type
+     RECORDING_OUT_OF_TIME, non_retryable; `s3.uploads == 0`, no download request in the sim, key NULL, no
+     call_events rows, lock key absent.
+  2. `test_a_copy_that_overruns_its_deadline_deletes_its_object_and_does_not_commit`: deadline passes during the
+     copy — make the deadline pass between upload and commit deterministically: wrap/fake `MemoryS3.upload` hook or
+     use a clock whose `now()` advances (e.g. a test clock returning real now for the first check and now+10 min
+     after the upload; simplest: `commit_by = now + 6 s` and a MemoryS3 upload hook that advances a `FrozenClock`
+     past it — check what MemoryS3 supports; add an `on_upload` callback to MemoryS3 in recording_rig if needed).
+     Assert: error RECORDING_OUT_OF_TIME, `s3.deleted == [key]`, key NULL, no `call.recording_ready`/`call.error`
+     event, carrier recording not deleted (FakeTelnyx recording still present / no DELETE in rig.sent), lock released.
+  3. `test_a_deadline_with_room_stores_normally`: `commit_by = now + 10 min` → `stored` (guards against inverted
+     comparison).
+  Existing tests without `commit_by` keep passing (None = no deadline).
+- `test_post_call_workflow.py` (postcall_rig, time skipping):
+  4. `test_a_store_window_below_the_minimum_skips_the_copy`: budget such that the window is between 1 s and 59 s
+     (e.g. `PostCallTimings(budget_s=int(STORE_RESERVE.total_seconds()) + 30)`), store never called, `recording ==
+     "skipped"`, billing runs, `timed_out` false. (Check this branch is reachable with how the existing "no window"
+     test sets budget.)
+  5. Extend the existing window test (the one asserting `schedule_to_close`) to assert the store input's
+     `commit_by == workflow start + budget − STORE_RESERVE` (FakePostCallActivities records inputs? if so read it;
+     compare to history start time) — or ≈ within 1 s.
+- `test_post_call_budget.py`: assert `MIN_STORE_WINDOW == timedelta(seconds=60)` and the slowest pre-store path still
+  leaves ≥ MIN_STORE_WINDOW.
+
+### Specs/docs
+- specs/18 §1: append to Decision P08-FIX-6 (or new `> Decision (2026-11-05) P08-FIX-7:`): minimum window 60 s;
+  `commit_by` deadline with 5 s margin; an attempt past it is non-retryable `RecordingOutOfTime`, deletes its upload,
+  keeps the carrier copy, records no event; the `call.completed` `recording = skipped` stays truthful.
+- AGENTS.md dated line: `StoreRecordingInput.commit_by` / `COMMIT_MARGIN`, `RECORDING_OUT_OF_TIME`.
+
+### Gates
+- `uv run pytest packages/va_workflows -q`, then `make check` (background + heartbeat Monitor, PATH +=
+  /home/ralph/.local/bin). No e2e (default budget never approaches the deadline in flows).
+- Reviewer: tick P08-FIX-7, append `2026-11-04-postcall-store-window.md` to DONE, commit
+  `fix(workflows): never commit a recording copy after its deadline` + `Task: P08-FIX-7`.
+
+### Risks
+- Adding a field to a workflow input changes the payload only (pydantic default None) — old histories replay fine.
+- Clock source: the activity uses the injected `Clock` vs the workflow's `workflow.now()` (server time). Both UTC wall
+  clocks; the 5 s margin absorbs skew. Under the time-skipping test server workflow.now() is skipped time: workflow
+  tests use FakePostCallActivities, so no real activity compares clocks there.
+
+## Build P08-FIX-7 (2026-11-05)
+- `StoreRecordingInput.commit_by` + `COMMIT_MARGIN` 5 s; `errors.RECORDING_OUT_OF_TIME` + `recording_out_of_time()`
+  (non-retryable). `RecordingActivities._late`: checked after parse/url (before lock) and after upload (deletes object,
+  no event, carrier copy kept, lock released by finally). `MIN_STORE_WINDOW` 60 s. Workflow passes
+  `commit_by=workflow.now() + window`.
+- Tests: 3 activity tests (start-stage refusal, mid-copy overrun via FrozenClock advanced in `before_upload`, room →
+  stored); workflow window test asserts `commit_by` ≈ start + 1275 s; no-window test parametrized (0 s, 30 s left);
+  budget test `MIN_STORE_WINDOW == 60 s` + slowest path ≥ MIN. Rig `activities(clock=)`. New tests fail without src
+  (imports). specs/18 §1 Decision P08-FIX-7; AGENTS.md line.
+- Gates: make check exit 2 = only `apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset`
+  (assert (1,0)==(0,0); passes 3/3 alone; sim untouched) — 12680 passed, 7 skipped, cov 99.07 %. va_workflows 340 passed;
+  lint/typecheck/placeholders exit 0 after the clone refactor; radon avg 2.69; jscpd 0 clones in va_workflows; pip-audit
+  no known vulns; pnpm audit 1 moderate (no high). Reviewer: consider a FIX task for the sim flake if it recurs.
+
+## Review P08-FIX-7 (2026-11-05) — APPROVED
+- Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12681 passed, 7 skipped; the sim
+  shared-redis flake did not recur).
+- Diff matches the plan and specs/18 §1 Decision P08-FIX-7: late check before lock (after parse/url) and after upload
+  (delete object, no event, lock released in finally), `commit_by = workflow.now() + window`, MIN_STORE_WINDOW 60 s.
+  Tests cover start/commit stages, room case, below-minimum skip, and commit_by value. Inbox note appended to DONE.

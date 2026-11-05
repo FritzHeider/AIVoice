@@ -72,6 +72,10 @@ def test_no_window_at_or_after_the_deadline() -> None:
     assert store_window(STARTED, deadline + timedelta(seconds=5), POSTCALL_BUDGET_S) is None
 
 
+def test_a_copy_needs_a_minute() -> None:
+    assert timedelta(seconds=60) == MIN_STORE_WINDOW
+
+
 def test_the_slowest_path_to_the_copy_still_leaves_a_window() -> None:
     """Step 1, its mark, the recording lookup, the full recording wait, and the wait's mark, each at its
     worst case, end before the store deadline."""
@@ -83,3 +87,4 @@ def test_the_slowest_path_to_the_copy_still_leaves_a_window() -> None:
     window = store_window(STARTED, STARTED + before_store, POSTCALL_BUDGET_S)
     assert window is not None
     assert window == timedelta(seconds=1800 - 1005 - 525)
+    assert window >= MIN_STORE_WINDOW

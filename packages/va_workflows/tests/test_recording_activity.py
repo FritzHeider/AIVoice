@@ -9,7 +9,7 @@ import secrets
 import uuid
 import wave
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,10 +35,12 @@ from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from va_common.storage import ServerSideEncryption, recording_copy_key
+from va_common.time import FrozenClock, utcnow
 from va_db.models import Call
 from va_db.session import Database
 from va_workflows.activities.errors import (
     RECORDING_BUSY,
+    RECORDING_OUT_OF_TIME,
     STORAGE_UNAVAILABLE,
     TELNYX_UNAVAILABLE,
 )
@@ -51,7 +53,11 @@ from va_workflows.activities.recording import (
     _read_wav,
     copy_lock_key,
 )
-from va_workflows.activities.recording_inputs import StoreRecordingInput, StoreRecordingResult
+from va_workflows.activities.recording_inputs import (
+    COMMIT_MARGIN,
+    StoreRecordingInput,
+    StoreRecordingResult,
+)
 
 
 @pytest.fixture
@@ -586,3 +592,64 @@ async def test_the_same_recording_copied_twice_keeps_the_stored_object(r: Rig) -
     assert first.s3_key == second.s3_key == row.recording_s3_key
     assert s3.deleted == []
     assert (BUCKET, row.recording_s3_key) in s3.objects
+
+
+def _with_deadline(inp: StoreRecordingInput, commit_by: datetime) -> StoreRecordingInput:
+    return inp.model_copy(update={"commit_by": commit_by})
+
+
+async def _out_of_time(
+    r: Rig, s3: MemoryS3, clock: FrozenClock, left: timedelta
+) -> tuple[SeededCall, str, str]:
+    """Run a copy whose ``commit_by`` is ``left`` after ``clock.now()``; asserts the out-of-time refusal and
+    what it must leave behind (no key, no event, carrier copy kept, lock released). Returns the call, the
+    recording id, and the logged stage."""
+    call = await _call(r)
+    redis = FakeAsyncRedis()
+    recording_id = serve_recording(r, wav_bytes(1))
+    inp = _with_deadline(saved_input(call, recording_id), clock.now() + left)
+    stream = json_log_stream()
+    with pytest.raises(ApplicationError) as caught:
+        await _run(r, s3, inp, clock=clock, copy_lock=RecordingCopyLock(redis))
+    assert (caught.value.type, caught.value.non_retryable) == (RECORDING_OUT_OF_TIME, True)
+    assert (await load_call(r.database, call)).recording_s3_key is None
+    assert await call_event_rows(r.database, call) == []
+    assert recording_id in r.state.recordings
+    assert not [req for req in r.sent if req.method == "DELETE"]
+    assert await redis.get(copy_lock_key(call.call_id)) is None
+    [late] = [e for e in log_events(stream) if e["event"] == "recording.out_of_time"]
+    return call, recording_id, late["stage"]
+
+
+async def test_a_copy_past_its_deadline_is_not_started(r: Rig) -> None:
+    s3 = MemoryS3()
+    _, _, stage = await _out_of_time(r, s3, FrozenClock(utcnow()), COMMIT_MARGIN / 2)
+    assert stage == "start"
+    assert s3.uploads == 0
+    assert not [req for req in r.sent if req.url.path.startswith("/sim/recordings/")]
+
+
+async def test_a_copy_that_overruns_its_deadline_deletes_its_object_and_does_not_commit(r: Rig) -> None:
+    clock = FrozenClock(utcnow())
+
+    async def slow_download() -> None:
+        clock.advance(timedelta(seconds=10))
+
+    s3 = MemoryS3(before_upload=slow_download)
+    call, recording_id, stage = await _out_of_time(r, s3, clock, COMMIT_MARGIN + timedelta(seconds=1))
+    assert stage == "commit"
+    row = await load_call(r.database, call)
+    key = recording_copy_key(call.org_id, call.call_id, row.created_at, f"rec:{recording_id}")
+    assert s3.uploads == 1
+    assert s3.deleted == [key]
+    assert s3.objects == {}
+
+
+async def test_a_deadline_with_room_stores_normally(r: Rig) -> None:
+    call = await _call(r)
+    recording_id = serve_recording(r, wav_bytes(1))
+    clock = FrozenClock(utcnow())
+    inp = _with_deadline(saved_input(call, recording_id), clock.now() + timedelta(minutes=10))
+    result = await _run(r, MemoryS3(), inp, clock=clock)
+    assert result.status == "stored"
+    assert (await load_call(r.database, call)).recording_s3_key == result.s3_key

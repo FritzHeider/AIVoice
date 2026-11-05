@@ -27,6 +27,12 @@ proceeds without the lock (fail open): per-recording keys keep object and row in
 The webhook's presigned links expire after a few minutes: a ``403``/``404`` download with a ``recording_id``
 fetches fresh ``download_urls`` (``GET /v2/recordings/{id}`` with the call's account) and downloads once more.
 
+The workflow passes ``commit_by`` (its ``schedule_to_close`` deadline; specs/18 §1 Decision P08-FIX-7): an
+attempt that starts within ``COMMIT_MARGIN`` of it, or whose upload ends within that margin, raises the
+non-retryable ``RecordingOutOfTime`` instead of committing. A late upload's object is deleted and the carrier
+copy is kept, no event is recorded, and the call's ``recording = skipped`` in ``call.completed`` stays true
+(the activity never heartbeats, so a server-side timeout alone would not stop a running attempt).
+
 Unusable recordings (no WAV URL, refused download, over 2 GiB, not a WAV) return ``failed`` with a
 ``call.error`` ``recording_failed`` event and are never retried; transient Telnyx and object-store failures
 raise retryable errors. Logs never contain the presigned URL.
@@ -76,10 +82,12 @@ from va_workflows.activities.errors import (
     RECORDING_BUSY,
     STORAGE_UNAVAILABLE,
     TELNYX_UNAVAILABLE,
+    recording_out_of_time,
     retryable,
 )
 from va_workflows.activities.events import broadcast_events, call_event, persist_events
 from va_workflows.activities.recording_inputs import (
+    COMMIT_MARGIN,
     STORE_RECORDING_TIMEOUT,
     RecordingFailure,
     StoreRecordingInput,
@@ -311,6 +319,9 @@ class RecordingActivities:
             return self._already_stored(call.stored())
         saved = _parse(inp)
         url = _wav_url(saved)
+        if self._late(inp):
+            _log.warning("recording.out_of_time", stage="start")
+            raise recording_out_of_time()
         owner = _owner(inp, saved)
         locked = await self._lock(inp, owner)
         try:
@@ -336,6 +347,10 @@ class RecordingActivities:
             size = await self._fetch(call, saved, url, path)
             info = await asyncio.to_thread(_read_wav, path, saved.channels)
             await self._upload(inp, key, path)
+        if self._late(inp):
+            await self._delete_object(key)
+            _log.warning("recording.out_of_time", stage="commit")
+            raise recording_out_of_time()
         offset = _offset_ms(saved.recording_started_at, call.answered_at)
         stored = await self._record(inp, key, info, offset)
         if stored is not None:
@@ -346,6 +361,10 @@ class RecordingActivities:
         return StoreRecordingResult(
             status="stored", s3_key=key, duration_ms=info.duration_ms, recording_offset_ms=offset
         )
+
+    def _late(self, inp: StoreRecordingInput) -> bool:
+        """Too close to (or past) the workflow's ``commit_by`` to start or commit the copy."""
+        return inp.commit_by is not None and self._clock.now() + COMMIT_MARGIN > inp.commit_by
 
     async def _lost(self, key: str, stored: _StoredKey, saved: RecordingSaved) -> StoreRecordingResult:
         """Another copy set the call's key while this one uploaded: delete this run's object unless it is the

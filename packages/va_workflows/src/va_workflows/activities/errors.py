@@ -19,10 +19,12 @@ __all__ = [
     "HANGUP_REJECTED",
     "INVALID_END_REASON",
     "RECORDING_BUSY",
+    "RECORDING_OUT_OF_TIME",
     "STATE_UNAVAILABLE",
     "STORAGE_UNAVAILABLE",
     "TELNYX_UNAVAILABLE",
     "call_not_found",
+    "recording_out_of_time",
     "retryable",
 ]
 
@@ -43,6 +45,9 @@ INVALID_END_REASON: Final = "InvalidEndReason"
 RECORDING_BUSY: Final = "RecordingBusy"
 """Another recording of the call is being copied (retried after the copy lock's remaining TTL; the next
 attempt usually finds the call's recording stored)."""
+RECORDING_OUT_OF_TIME: Final = "RecordingOutOfTime"
+"""The copy's ``commit_by`` deadline passed (or is too close) before the copy could commit; never retried: the
+workflow bills the call without the copy (specs/18 §1 Decision P08-FIX-7)."""
 STATE_UNAVAILABLE: Final = "StateUnavailable"
 """The call's Redis carrier state could not be read (retried)."""
 STORAGE_UNAVAILABLE: Final = "StorageUnavailable"
@@ -53,6 +58,12 @@ TELNYX_UNAVAILABLE: Final = "TelnyxUnavailable"
 
 def call_not_found() -> ApplicationError:
     return ApplicationError("call not found", type=CALL_NOT_FOUND, non_retryable=True)
+
+
+def recording_out_of_time() -> ApplicationError:
+    return ApplicationError(
+        "the recording copy ran out of time", type=RECORDING_OUT_OF_TIME, non_retryable=True
+    )
 
 
 def retryable(

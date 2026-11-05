@@ -8,7 +8,7 @@ Workflows import this module to schedule the activity, so it imports only pydant
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -17,6 +17,7 @@ from temporalio.common import RetryPolicy
 from va_domain.carrier import CarrierEvent
 
 __all__ = [
+    "COMMIT_MARGIN",
     "STORE_RECORDING_RETRY",
     "STORE_RECORDING_TIMEOUT",
     "RecordingFailure",
@@ -43,14 +44,22 @@ STORE_RECORDING_RETRY: Final = RetryPolicy(
 )
 
 
+COMMIT_MARGIN: Final = timedelta(seconds=5)
+"""An attempt starts and commits a copy only while ``now + COMMIT_MARGIN <= commit_by``: room for the key
+``UPDATE`` and the event insert before the workflow's ``schedule_to_close`` deadline."""
+
+
 class StoreRecordingInput(BaseModel):
-    """The call and the ``call.recording.saved`` carrier event the edge signalled."""
+    """The call and the ``call.recording.saved`` carrier event the edge signalled; ``commit_by`` is the copy
+    deadline the workflow set (its ``schedule_to_close``), ``None`` = no deadline (specs/18 §1 Decision
+    P08-FIX-7)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     call_id: uuid.UUID
     org_id: uuid.UUID
     event: CarrierEvent
+    commit_by: datetime | None = None
 
 
 class StoreRecordingResult(BaseModel):
