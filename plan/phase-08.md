@@ -1,5 +1,27 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-20 A tool round cut short answers `interrupted` only for what did not happen: executor calls that finished keep their answers (and variables) — see .ralph/review-inbox/2026-11-05-p08-fix-19-wip-review.md (item 1, blocker; item 2 is carried into the P08-T02c2 acceptance) — `va_engine.tool_tasks.settle_round`/`cut_contents`/`finished_answers` settle the `finally` of `run_node_round` and `TaskBrain._run_tools` (finished tools keep answer + variables merged at the cut, planned answers stay, only cancelled tools and actions not handed over read `interrupted`), 5 unit + 4 engine + 3 TaskBrain tests, Decision P08-FIX-20 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 3.56, pip-audit clean, pnpm audit high exit 0, make test 13070 passed 7 skipped (cov 99.08%, tool_tasks + engine_node_tools 100%), make e2e 20 passed; reviewer mutation checks on a shadow copy: all-`interrupted` cut → 11 tests fail, late merges dropped → 2 fail, planned answers overwritten → 4 fail; reviewer probe (outside the repo): reply cancelled while the tools are awaited keeps the finished tool's answer + variables
+  - Spec refs: specs/13 §4 (Decisions P08-T02c1 item 3, P08-FIX-17 item 1, P08-FIX-19), §5 (Decision P08-T02b1 items 4, 5), specs/11 §6 (Decision P05-T09c item 4), specs/07 §8
+  - Depends on: P08-FIX-19
+  - Deliverables: shared helpers in `va_engine.tool_tasks` (`finished_answers`, `cut_contents`, `settle_round`)
+    used by the `finally` of both `va_engine.engine_node_tools.run_node_round` and `TaskBrain._run_tools`: in a
+    round cut short (barge-in during the speech/filler line or the wait, or a reply closed at a press) an
+    executor call whose run finished keeps its real answer and its variables are merged at the cut; a call
+    answered without running (`invalid_arguments`, `too_many_tool_calls`, `skipped`) keeps that answer; only an
+    executor call whose run was cancelled and a `press_button`/`end_call`/`transfer_call` that was not handed
+    over read `{"error":"interrupted"}`. Planner decision (2026-11-05, DEC-013): the rule holds wherever the cut
+    lands (the note's fix covers only the cut at a press; a tool that finished before a barge-in on the filler
+    has the same double-side-effect risk, and §5 Decision P08-T02b1 item 4 already says "unfinished tools").
+    specs/13 §4 Decision `P08-FIX-20` (+ rewording of Decision P08-FIX-19 item 1 and notes in Decision
+    P08-T02c1 item 3, §5 Decision P08-T02b1 items 4-5, specs/11 §6 Decision P05-T09c item 4); AGENTS.md.
+  - Acceptance: engine and TaskBrain tests: `[press 1, lookup]` closed at the press records `sent` + the real
+    lookup answer with its variables merged and the tool run once, also after a superseding turn (pathway:
+    context update with the real answer ahead of the merged turn; task mode: carried round with the real answer,
+    pairing valid); `[press 1, lookup, press 2, end_call]` closed at press 1 records `sent`, the real answer,
+    `interrupted`, `interrupted` and does not end; a barge-in on the filler with one finished and one held tool
+    records the real answer (variables merged) and `interrupted`, only the held tool is cancelled; unit tests of
+    the helpers; reverting the `finally` to all-`interrupted` fails the new tests; `make check` and `make e2e`
+    pass; append the note name to `.ralph/review-inbox/DONE` on approval.
 - [x] P08-FIX-19 A pathway `press_button` is answered `sent` only when its DTMF was handed over (answer and yield per press); regression test: a `transfer_call` repeated in the merged turn is requested — see .ralph/review-inbox/2026-11-05-p08-fix-17-review.md (item 2; item 1 was fixed in P08-FIX-17, its owed assertion is added here) — `run_node_round` answers each call and yields a `press_button`'s `SendDtmfAction` right after its answer (`RoundOutcome.terminal` set after the round; the `finally` answers the rest `interrupted`), 6 engine tests + TaskBrain repeated-transfer regression test, Decision P08-FIX-19 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, pip-audit clean, pnpm audit high exit 0, make test 13058 passed 7 skipped (cov 99.08%, engine_node_tools 100%); reviewer mutation checks on a shadow copy: collect-then-yield restored → 4 tests fail, `_interrupt_answer` dropped → 2 tests fail
   - Spec refs: specs/13 §4 (Decisions P08-T02c1 item 4, P08-FIX-17 item 1), specs/11 §6 (Decision P05-T09c item 4), specs/07 §8
   - Depends on: P08-FIX-17
@@ -310,7 +332,10 @@
   - Spec refs: specs/13 §4-§6
   - Depends on: P08-T02c1
   - Deliverables: `CallToolSource.pathway_executor` over every tool the pinned graph references (TL ids + inline objects, keyed by ref), a `PathwayToolExecutor.for_refs(refs)` implementation whose node executors share the call's runner, events and system tool runs (Decision P08-FIX-17), runtime builds system tools + executor for pathway calls and passes facts to the engine
-  - Acceptance: media unit tests + runtime sim pathway call with a node tool (call.tool event, tool answer used in the reply).
+  - Acceptance: media unit tests + runtime sim pathway call with a node tool (call.tool event, tool answer used in the reply);
+    tests of the real `for_refs` (review note 2026-11-05-p08-fix-19-wip-review.md item 2, Decision P08-FIX-17
+    item 2): two nodes with different tools of one name (different URL and different `speech`) each speak their
+    own speech and call their own URL, and a node executor does not `handle` a custom tool its refs do not name.
 
 - [ ] P08-T03 Dynamic data
   - Spec refs: specs/13-tools-and-dynamic-data.md (dynamic_data)

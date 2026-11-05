@@ -1,5 +1,5 @@
 """Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16,
-P08-FIX-17, P08-FIX-19)."""
+P08-FIX-17, P08-FIX-19, P08-FIX-20)."""
 
 from __future__ import annotations
 
@@ -409,7 +409,7 @@ async def test_fillers_off_silences_speech_and_fillers() -> None:
     assert [item[0] for item in actions] == ["stream", "stream"]
 
 
-async def test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_interrupted() -> None:
+async def test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_it_interrupted() -> None:
     tools = executor(hold=True)
     rig = engine_rig(one_node(), tools=tools)
     rig.source.reply("", calls=[call("c1", "lookup"), call("c2", "nope")])
@@ -420,7 +420,7 @@ async def test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_interru
     assert [name for name, _ in tools.cancelled] == ["lookup"]
     assert tool_records(rig) == [
         ("lookup", '{"error":"interrupted"}'),
-        ("nope", '{"error":"interrupted"}'),
+        ("nope", '{"error":"invalid_arguments","detail":"unknown_tool"}'),
     ]
 
 
@@ -679,6 +679,87 @@ async def test_a_second_supersede_keeps_the_tool_record_once() -> None:
         ("user", "paris and lyon"),
         ("assistant", "Three."),
     ]
+
+
+# A cut round answers ``interrupted`` only for what did not happen (Decision P08-FIX-20).
+
+HOURS = '{"hours":"9-5"}'
+
+
+def hours_executor(**over: Any) -> RecordingExecutor:
+    """``lookup`` answers :data:`HOURS` and extracts ``hours``."""
+    return executor(results={"lookup": HOURS}, variables={"lookup": {"hours": "9-5"}}, **over)
+
+
+async def test_a_tool_that_finished_keeps_its_answer_when_the_reply_is_closed_at_a_press() -> None:
+    tools = hours_executor()
+    rig = engine_rig(one_node(), tools=tools, system=VOICE, fillers=False)
+    rig.source.reply("", calls=[press("c1", "1"), call("c2", "lookup")])
+
+    seen = await closed_on(rig.engine.start(), SendDtmfAction)
+
+    assert seen[-1] == ("dtmf", "1", 250, None)
+    assert tool_records(rig) == [SENT_1, ("lookup", HOURS)]
+    assert rig.state.variables["hours"] == "9-5"
+    assert [c.name for c in tools.calls] == ["lookup"]
+    assert tools.cancelled == []
+
+
+async def test_a_superseded_turn_shows_the_finished_tool_behind_a_cut_press() -> None:
+    tools = hours_executor()
+    rig = engine_rig(one_node(), tools=tools, system=VOICE, fillers=False)
+    rig.source.reply("Hello.").reply("", calls=[press("c1", "1"), call("c2", "lookup")]).reply("Okay.")
+    await rig.start()
+    await closed_on(rig.engine.handle_user_turn(user("press one", 1)), SendDtmfAction)
+
+    await drive(rig.engine.handle_user_turn(user("press one please", 2, supersedes=1)))
+
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", SENT_1[1]),
+        ("tool", HOURS),
+        ("user", "press one please"),
+        ("assistant", "Okay."),
+    ]
+    assert position(rig, "system", context_update("lookup", HOURS)) < position(
+        rig, "user", "press one please"
+    )
+    assert [c.name for c in tools.calls] == ["lookup"]
+
+
+async def test_actions_behind_a_cut_press_read_interrupted_and_the_call_does_not_end() -> None:
+    tools = hours_executor()
+    rig = engine_rig(one_node(), tools=tools, system=VOICE, fillers=False)
+    ending = call("c4", "end_call", reason="done", final_message="Bye.")
+    rig.source.reply("Hello.").reply(
+        "", calls=[press("c1", "1"), call("c2", "lookup"), press("c3", "2"), ending]
+    )
+    rig.source.reply("Still here.")
+    await rig.start()
+
+    await closed_on(rig.engine.handle_user_turn(user("press one", 1)), SendDtmfAction)
+    later = await rig.say("hello?")
+
+    assert tool_records(rig) == [SENT_1, ("lookup", HOURS), ("press_button", CUT), ("end_call", CUT)]
+    assert (rig.state.ended, rig.state.end_reason) == (False, None)
+    assert later == [("stream", "Still here.", "t2.1", None)]
+
+
+async def test_a_barge_in_on_the_filler_keeps_the_answer_of_the_tool_that_finished() -> None:
+    tools = hours_executor(holding=frozenset({"track"}))
+    rig = engine_rig(one_node(tools=["TL-1", "TL-2"]), tools=tools)
+    rig.source.reply("", calls=[call("c1", "lookup"), call("c2", "track"), call("c3", "nope")])
+
+    actions = await drive_held(rig, tools, close_on_line=True)
+
+    assert actions[-1][:2] == ("say", TOOL_FILLERS[0])
+    assert [name for name, _ in tools.cancelled] == ["track"]
+    assert tool_records(rig) == [
+        ("lookup", HOURS),
+        ("track", CUT),
+        ("nope", '{"error":"invalid_arguments","detail":"unknown_tool"}'),
+    ]
+    assert rig.state.variables["hours"] == "9-5"
 
 
 # A node runs exactly the tools its refs name (Decision P08-FIX-17 item 2).

@@ -2097,8 +2097,15 @@ Grafana 3001
   (`_transfer`/`_interrupt_answer`): an answer recorded before its action is yielded must be retracted if the
   action never goes out, because superseded turns now keep their tool answers.
 - 2026-11-05 (P08-FIX-19): rule for every tool runner: an answer that reports an action (`sent`, `transferring`,
-  `ending`) is recorded only when that action is yielded; the `finally` answers the rest `interrupted`. Pathway
+  `ending`) is recorded only when that action is yielded; the `finally` settles the rest (P08-FIX-20). Pathway
   `run_node_round` answers and yields per `press_button` (a reply closed at a press keeps that press `sent`, later
   calls incl. `end_call` read `interrupted`, `RoundOutcome.terminal` is set only after the whole round). Tests:
   `engine_helpers.closed_on(agen, SendDtmfAction)` (generalises `closed_on_line`), `_closed_on_static(brain, turn)`
   in `test_task_tool_speech.py`.
+- 2026-11-05 (P08-FIX-20): a cut tool round (`run_node_round`, `TaskBrain._run_tools`) ends through
+  `va_engine.tool_tasks.settle_round(plan, tasks, answered=, merged=)` → `(late answers to merge, contents of the
+  calls not answered yet)`: `interrupted` only for a tool cancelled at the cut and for a `press_button`/`end_call`/
+  `transfer_call` not handed over; a tool that finished keeps its answer and its variables merge at the cut; planned
+  answers (`invalid_arguments`, `too_many_tool_calls`, `skipped`) stay (`cut_contents`, `finished_answers`). Never
+  answer "everything left" `INTERRUPTED` in a runner's `finally`. Tests: `RecordingExecutor(holding=frozenset({name}))`
+  holds only those tools on `release` (one tool finished, one running); TaskBrain `_closed_on(brain, turn, kind)`.

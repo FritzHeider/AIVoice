@@ -1591,3 +1591,264 @@ Reviewer mutation checks (shadow copy of `va_engine` on PYTHONPATH, repo untouch
 from `TaskBrain._transfer` → 2 failed in test_task_tool_speech.py (closed-transfer + repeated-transfer).
 Inbox note `2026-11-05-p08-fix-17-review.md`: item 1 fixed in 75e109d with its owed assertion added here, item 2
 fixed here → appended to `.ralph/review-inbox/DONE`. No findings.
+
+## Planner (2026-11-05, after P08-FIX-19 approval)
+Inbox: new note `2026-11-05-p08-fix-19-wip-review.md` (not in DONE). Item 1 = blocker → P08-FIX-20 inserted at the
+top of plan/phase-08.md. Item 2 (not a blocker) → added to the P08-T02c2 acceptance (real `for_refs`: two nodes with
+different tools of one name speak/call their own; a node executor does not `handle` a custom tool its refs do not
+name). `2026-11-05-p08-fix-15-review.md` is still open as P08-FIX-18 (next after FIX-20). DEC-013 recorded.
+
+## Plan P08-FIX-20 — a cut tool round answers `interrupted` only for what did not happen
+
+### Findings (read at HEAD 7704591)
+- `run_node_round` (engine_node_tools.py:186-208) and `TaskBrain._run_tools` (task_runner.py:353-378): the
+  `finally` answers EVERY unanswered call `INTERRUPTED`. When the reply is closed at a press, all executor tasks
+  of the round already finished (`answers = [await task ...]`, variables merged) → a finished `book` behind the
+  press reads `interrupted` although its side effect, `call.tool` event and variables are in place; superseded
+  turns keep these records (P08-FIX-17), so the model re-calls the tool.
+- Same class, not in the note (DEC-013): a barge-in on the speech/filler line (generator closed at the `Say` /
+  `SpeakStatic`, or cancelled inside `lines.line` / `await task`) while tool A finished and tool B still runs →
+  A is answered `interrupted` and its variables are never merged. specs/13 §5 Decision P08-T02b1 item 4 says
+  the barge-in "cancels the unfinished tools and answers them `interrupted`".
+- `execute_gated` catches `Exception`, so a task that is done and not cancelled has a result. System tools behind
+  the executor are shielded runs (P08-FIX-13): a barge-in cancels the wait → the task is cancelled → stays
+  `interrupted` (outcome unknown to the round). Unchanged.
+- `plan_round` kinds: `execute`, `press`, `end`, `transfer`, `answer` (invalid / too_many / skipped, with a
+  precomputed `answer`).
+
+### Rule (one for every cut, both runners)
+For each call of the round not yet answered when the round is cut:
+- `execute` whose task finished (done, not cancelled, no exception) → its real content (blank → `tool_failed`);
+  its variables are merged (call order) if the round had not merged yet.
+- `execute` whose task was cancelled / never started → `INTERRUPTED`.
+- `answer` → its planned answer (`invalid_arguments`, `too_many_tool_calls`, `skipped`).
+- `press`, `end`, `transfer` → `INTERRUPTED` (not handed over). `RoundOutcome.terminal` / `placed` stay unset.
+
+### 1. `packages/va_engine/src/va_engine/tool_tasks.py` (add to `__all__`, docstring paragraph)
+```python
+def finished_answers(tasks: Sequence[asyncio.Task[ToolAnswer]]) -> list[ToolAnswer | None]:
+    """Per task, in call order: the answer of a run that finished, ``None`` for one that was cancelled
+    (call after :func:`stop_tasks`)."""
+    # done() and not cancelled() and exception() is None -> task.result(); else None
+
+def cut_contents(plan: RoundPlan, answers: Sequence[ToolAnswer | None]) -> list[tuple[PlannedCall, str]]:
+    """Every call of a round that was cut short, in call order, with the content that is true for it."""
+    # execute -> next(answers, None): content or TOOL_FAILED when not None, else INTERRUPTED
+    #   (fewer answers than executed calls = the tools never started: INTERRUPTED; never raises)
+    # answer  -> item.answer or TOOL_FAILED
+    # press / end / transfer -> INTERRUPTED
+
+async def settle_round(
+    plan: RoundPlan, tasks: Sequence[asyncio.Task[ToolAnswer]], *, answered: int, merged: bool
+) -> tuple[list[ToolAnswer], list[tuple[PlannedCall, str]]]:
+    """End a round: cancel the tools still running; returns the finished answers whose variables are still
+    to be merged (``[]`` when ``merged``) and the contents of the calls from position ``answered`` on."""
+    await stop_tasks(tasks)
+    finished = finished_answers(tasks)
+    late = [] if merged else [answer for answer in finished if answer is not None]
+    return late, cut_contents(plan, finished)[answered:]
+```
+Import `INTERRUPTED` from `va_engine.task_tools`. If `round_contents` and `cut_contents` trip jscpd, build both
+on one private `_contents(plan, pick)`; keep `round_contents`' ValueError for a length mismatch.
+
+### 2. `packages/va_engine/src/va_engine/engine_node_tools.py` — `run_node_round`
+```python
+    tasks: list[asyncio.Task[ToolAnswer]] = []
+    merged = False
+    try:
+        tasks = start_tools(executor, plan.executed, scope)
+        line = await lines.line(executor, plan.executed, tasks, scope)
+        if line is not None:
+            yield Say(text=line, mark=next_mark())
+        answers = [await task for task in tasks]
+        merge_variables(variables, answers)
+        merged = True
+        for item, content in round_contents(plan, answers):
+            ... (unchanged)
+        outcome.terminal = plan.terminal
+    finally:
+        late, rest = await settle_round(plan, tasks, answered=outcome.answered, merged=merged)
+        merge_variables(variables, late)
+        for item, content in rest:
+            answer(item.call, content)
+            outcome.answered += 1
+```
+Drop the now unused imports (`INTERRUPTED`, `stop_tasks`) if nothing else uses them. Update the module
+docstring's last sentences, the `RoundOutcome` and function docstrings (a cut round: finished tools keep
+their answers and variables, cancelled tools and actions not handed over read `interrupted`).
+On a completed round `rest` is `[]` and `late` is `[]`: no behaviour change.
+
+### 3. `packages/va_engine/src/va_engine/task_runner.py` — `TaskBrain._run_tools`
+Same shape: `merged = False`; after `self._merge_variables(answers)` set `merged = True`; `finally`:
+```python
+            late, rest = await settle_round(plan, tasks, answered=answered, merged=merged)
+            self._merge_variables(late)          # calls on_state when something merged
+            for item, content in rest:
+                self._answer(item.call, content)
+```
+(`answered` need not be advanced there; `placed` stays `None` for a terminal answered in the `finally`, so
+`_finish` is not entered — and after a close nothing may be yielded anyway.) Fix the imports; keep the
+function under the complexity limit (it is near it: check `uvx radon cc -s` on the file).
+`_merge_variables` takes `list[ToolAnswer]`: fine.
+
+### 4. Tests
+`packages/va_engine/tests/support/task_helpers.py`: `RecordingExecutor` gets `holding: frozenset[str] =
+frozenset()` ("only these tool names wait on `release`"): `if self.hold or call.name in self.holding: await
+self.release.wait()`; docstring updated.
+
+`packages/va_engine/tests/test_tool_tasks.py` (unit, real asyncio tasks):
+- `test_finished_answers_keep_finished_runs_and_drop_cancelled_ones` (one task done, one cancelled via
+  `stop_tasks` → `[answer, None]`).
+- `test_cut_contents_answer_each_kind` : plan `[execute(done), execute(cancelled), answer(invalid), press,
+  end, answer(skipped)]` (build with `plan_round` + facts, or `PlannedCall`s directly) → real content,
+  INTERRUPTED, planned invalid message, INTERRUPTED, INTERRUPTED, SKIPPED; blank content → TOOL_FAILED; no
+  answers at all (tools never started) → executes read INTERRUPTED.
+- `test_settle_round_cancels_the_running_tools_and_reports_late_answers` (`merged=False` → the finished
+  answer is in `late`; `merged=True` → `late == []`; `answered=n` slices).
+
+`packages/va_engine/tests/test_engine_tools.py` (helpers `engine_rig`, `one_node`, `executor`, `call`,
+`press`, `tool_records`, `closed_on`, `drive_held`, `position`, `context_update`, `SENT_1`, `CUT`, `VOICE`):
+- `test_a_tool_that_finished_keeps_its_answer_when_the_reply_is_closed_at_a_press`: `one_node()`,
+  `tools=executor(results={"lookup": hours}, variables={"lookup": {"hours": "9-5"}})`, `system=VOICE`,
+  `fillers=False`; reply calls `[press("c1","1"), call("c2","lookup")]`; `closed_on(rig.engine.start(),
+  SendDtmfAction)` → `tool_records == [SENT_1, ("lookup", hours)]`, `rig.state.variables["hours"] == "9-5"`,
+  `[c.name for c in tools.calls] == ["lookup"]`, `tools.cancelled == []`.
+- `test_a_superseded_turn_shows_the_finished_tool_behind_a_cut_press`: `reply("Hello.")`, turn 1 = that round
+  closed at the press, then `drive(handle_user_turn(user("press one please", 2, supersedes=1)))` with
+  `reply("Okay.")`: `rig.history() == [("assistant","Hello."), ("tool", SENT_1[1]), ("tool", hours),
+  ("user","press one please"), ("assistant","Okay.")]`; `position(rig, "system", context_update("lookup",
+  hours)) < position(rig, "user", "press one please")`; lookup ran once.
+- `test_actions_behind_a_cut_press_read_interrupted_and_the_call_does_not_end`: calls `[press 1, lookup,
+  press 2, end_call(reason="done", final_message="Bye.")]` closed at press 1 → `[SENT_1, ("lookup", hours),
+  ("press_button", CUT), ("end_call", CUT)]`, `rig.state.ended is False`; a following `rig.say("hello?")` with
+  `reply("Still here.")` is a normal stream.
+- `test_a_barge_in_on_the_filler_keeps_the_answer_of_the_tool_that_finished`: `one_node(tools=["TL-1",
+  "TL-2"])`, `tools=executor(holding=frozenset({"track"}), results={"lookup": hours}, variables={"lookup":
+  {"hours": "9-5"}})`; calls `[lookup, track]`; `drive_held(rig, tools, close_on_line=True)` → last action a
+  filler `say`; `tool_records == [("lookup", hours), ("track", CUT)]`; `[n for n, _ in tools.cancelled] ==
+  ["track"]`; `rig.state.variables["hours"] == "9-5"`.
+- Update `test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_interrupted`: `("nope", …)` now keeps
+  its planned unknown-tool answer (take the exact content from `InvalidToolCall("nope", UNKNOWN_TOOL).
+  tool_message("c2").content` or from a run); rename to `..._answers_it_interrupted`. Any other expectation
+  that changes must be a call of kind `answer` or a tool that had finished: report each one.
+
+`packages/va_engine/tests/test_task_tool_speech.py` (helpers `_brain`, `_executor`, `_call`, `_shape`,
+`_history`, `_wire`, `_closed_on_static`, `SHIPPED`, `FakeSource`, `FrozenClock`; add a small
+`_closed_on_press(brain, turn)` — or generalise `_closed_on_static` to `_closed_on(brain, turn, kind)` to keep
+jscpd at 0; press_button must be on offer: check `_brain`'s facts, see `test_task_runner.py::
+test_closing_the_reply_mid_round_answers_the_pending_calls`):
+- `test_a_tool_behind_a_cut_press_keeps_its_answer_and_is_carried`: round `[press_button {"digits":"1"},
+  lookup_order]`, executor `results={"lookup_order": SHIPPED}, variables={"lookup_order": {"eta": "Fri"}}`,
+  `fillers=False`, `states=[]`; closed at the `PressButton` → tool contents `[sent 1, SHIPPED]`,
+  `brain.state.variables["eta"] == "Fri"` and a state snapshot was taken; then
+  `drain(brain.on_user_turn(user_turn(2, "…", supersedes=1)))` with `reply("Done.")`: `_shape(brain) ==
+  [("user", merged, 0), ("assistant", None, 2), ("tool", sent 1, 0), ("tool", SHIPPED, 0), ("assistant",
+  "Done.", 0)]`, `assert_tool_pairing([{"messages": _wire(source)}])`, `len(executor.calls) == 1`.
+- `test_actions_behind_a_cut_press_read_interrupted`: `[press 1, lookup_order, press 2, end_call]` closed at
+  press 1 → `[sent 1, SHIPPED, INTERRUPTED, INTERRUPTED]`, `brain.state.ended is False`.
+- `test_a_barge_in_on_the_filler_keeps_the_finished_tools_answer`: two tools (`lookup_order`, `eta` as in
+  `_id_less_round`), `holding=frozenset({"eta"})`, FrozenClock (the filler delay returns at once); closed at
+  the filler `SpeakStatic` → tool contents `[SHIPPED, INTERRUPTED]`, cancelled == ["eta"], lookup's variables
+  merged.
+Mutation checks to report (restore byte-identical): (a) `cut_contents` answering every call `INTERRUPTED` →
+the new engine + TaskBrain tests fail; (b) `late` merge dropped in either runner → the barge-in-on-filler
+variable assertions fail.
+
+### 5. Spec + docs (same commit)
+- specs/13 §4, new block after Decision P08-FIX-19:
+  `> Decision (2026-11-05) P08-FIX-20:` in a tool round cut short (pathway reply nodes and task mode; the cut
+  may land on the speech/filler line, while the tools are awaited, or at a press) a call is answered
+  `{"error":"interrupted"}` only when what it stands for did not happen: 1. an executor call whose run was
+  still unfinished (cancelled at the cut), 2. a `press_button`, `end_call` or `transfer_call` that was not
+  handed over. An executor call whose run finished keeps its answer and its variables are merged at the cut,
+  in call order (its request went out and its `call.tool` event exists); a call answered without running
+  (`invalid_arguments`, `too_many_tool_calls`, `skipped`) keeps that answer. Helpers `va_engine.tool_tasks.
+  settle_round`/`cut_contents`/`finished_answers`. Supersedes the "every later call"/"unanswered calls"
+  wording of Decisions P08-FIX-19 item 1 and P08-T02c1 item 3.
+- Reword in place: Decision P08-FIX-19 item 1 "Every later call of the round is answered `interrupted`, an
+  `end_call` included" → "Every later call of the round that reports an action is answered …, an `end_call`
+  included; executor calls of the round have finished by then and keep their answers (Decision P08-FIX-20)".
+  Notes: Decision P08-T02c1 item 3 (`unanswered calls` sentence), §5 Decision P08-T02b1 item 4 (finished tools
+  keep their answers) and item 5 (variables of a cut round merge at the cut), specs/11 §6 Decision P05-T09c
+  item 4 last sentence (line ~720: "calls left unanswered when the reply is cut off…") → each gets
+  "(see specs/13 §4 Decision P08-FIX-20)" style pointer with spec ref and section on ONE line.
+- AGENTS.md: bullet `2026-11-05 (P08-FIX-20)`: the rule, helper names, `RecordingExecutor(holding=)`; adjust
+  the P08-FIX-19 bullet's "the `finally` answers the rest `interrupted`" to point at it.
+- Do NOT tick the plan or touch `.ralph/review-inbox/DONE` (Reviewer: appends
+  `2026-11-05-p08-fix-19-wip-review.md`).
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+-q`; `uv run python scripts/check_spec_refs.py`; `make test` in the background (`: > logs/make_test.log`, then
+`make test > logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat Monitor ~2 min);
+`npx --yes jscpd@4 --silent`; `uvx radon cc -s -a` on touched files; `uvx pip-audit --strict` on `uv export`;
+`corepack pnpm audit --audit-level high`. `make e2e` this time (background + heartbeat): `TaskBrain._run_tools`
+is on the path of every task-mode call with tool calls (IVR `press_button` flows).
+
+### Risks
+- A cancel (not a close) landing inside the `finally`'s `await settle_round` is pre-existing behaviour of
+  `stop_tasks`; do not add shielding.
+- `task.result()` on a cancelled task raises: guard with `cancelled()` first; a task still pending cannot
+  occur after `stop_tasks`, but treat it as `None` anyway.
+- Existing expectations that change: only `("nope", interrupted)` is known; media/pipeline tests asserting
+  `interrupted` for a finished tool would surface in `make test` (grep `INTERRUPTED`/`"interrupted"` in
+  apps/media_worker/tests and packages/va_voice/tests first).
+- Known flake (task fix:sim-shared-redis-exit-flake): `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset`; if it fails, re-run alone and report both runs.
+
+## Build P08-FIX-20 (2026-11-05)
+Implemented the plan as written (no deviations in behaviour):
+- `va_engine.tool_tasks`: `finished_answers(tasks)`, `cut_contents(plan, answers)` (private `_cut_content`
+  per call kind), `settle_round(plan, tasks, answered=, merged=)` → `(late, rest)`; module docstring paragraph.
+- `run_node_round` and `TaskBrain._run_tools`: `merged` flag set after the round's merge; `finally` =
+  `settle_round` → merge `late` → answer `rest`. `INTERRUPTED`/`stop_tasks` imports dropped where unused.
+- Test fake: `RecordingExecutor(holding=frozenset({...}))` holds only those tool names on `release`.
+- Tests: test_tool_tasks.py (+5: finished_answers finished/cancelled/failed, a raising task → None,
+  cut_contents each kind incl. transfer, tools never started, settle_round late/rest/merged); test_engine_tools.py
+  (+4: finished tool behind a cut press keeps answer + variables, superseded turn shows it ahead of the merged
+  user turn, press/end_call behind a cut press read interrupted and the call does not end, barge-in on the filler
+  keeps the finished tool's answer + variables while the held one is cancelled); test_task_tool_speech.py (+3 for
+  TaskBrain, `_closed_on(brain, turn, kind)` generalises `_closed_on_static`).
+- Expectation changed (the only one): `test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_it_
+  interrupted` (renamed): the unknown tool `nope` (kind `answer`) now keeps
+  `{"error":"invalid_arguments","detail":"unknown_tool"}` instead of `interrupted`. No test outside va_engine
+  changed (va_tools barge-in test: the shielded system tool's wait is cancelled → still `interrupted`).
+- Spec: specs/13 §4 new Decision P08-FIX-20; reworded Decision P08-FIX-19 item 1, P08-T02c1 item 3,
+  P08-FIX-17 item 1 last sentence, §5 Decision P08-T02b1 items 4 and 5; specs/11 §6 Decision P05-T09c item 4.
+  AGENTS.md bullet P08-FIX-20 (+ pointer in the P08-FIX-19 bullet).
+- Mutation checks (files restored byte-identical, sha256 verified): (a) `cut_contents` answering every call
+  `INTERRUPTED` → 11 failed (5 engine, 3 TaskBrain, 3 unit); (b1) `merge_variables(variables, late)` dropped in
+  `run_node_round` → 1 failed (engine barge-in-on-filler variables); (b2) `self._merge_variables(late)` dropped in
+  `_run_tools` → 1 failed (TaskBrain barge-in-on-filler variables).
+Gates: `make fmt` 0; `make lint` 0; `make typecheck` 0 (1614 source files); `make placeholders` 0 findings;
+`check_spec_refs` 0 problems; `make test` exit 0: 13070 passed, 7 skipped, coverage 99.08 % (tool_tasks.py and
+engine_node_tools.py 100 %, task_runner.py 98 %); jscpd 0 clones; radon average on touched src files 3.56
+(`TaskBrain._run_tools` B 10, unchanged); pip-audit (CI invocation) no known vulnerabilities; `pnpm audit
+--audit-level high` exit 0 (1 moderate, the known minimatch task).
+Not done on purpose: plan tick, `.ralph/review-inbox/DONE` (Reviewer).
+`make e2e` exit 0: 20 passed, 107 deselected in 417.86 s (amd_ivr_mode, barge_in, cold_transfer,
+concurrent_calls, inbound_basic, interruptibility_levels x5, max_duration, outbound_basic,
+pathway_regression_gate, pathway_restaurant_template, stop_via_api, voicemail_hangup, voicemail_leave_message,
+webhook_node, webhooks_call_completed_and_live, worker_crash_recovery). After the last prose rewrap in specs/13
+(made while `make test` ran): `make lint` 0, placeholders 0, spec refs 0, va_engine + va_tools + scripts tests pass.
+
+## Review P08-FIX-20 (2026-11-05) — APPROVED
+Re-run by the Reviewer on the work tree (source files unchanged since 14:04Z): `make lint` 0, `make typecheck` 0,
+`make placeholders` 0, `check_spec_refs` 0 problems, jscpd 0 clones, radon average 3.56 on the touched src files
+(`_run_tools` B 10, `_cut_content` B 6), pip-audit (CI export) no known vulnerabilities, `pnpm audit --audit-level
+high` exit 0 (1 known moderate), `make test` exit 0: 13070 passed, 7 skipped, coverage 99.08 % (tool_tasks.py and
+engine_node_tools.py 100 %), `make e2e` exit 0: 20 passed, 107 deselected in 417.57 s.
+Diff read against specs/13 §4 Decision P08-FIX-20 and the reworded items (P08-FIX-19 item 1, P08-T02c1 item 3,
+P08-FIX-17 item 1, §5 P08-T02b1 items 4/5, specs/11 §6 P05-T09c item 4): code and text agree; a completed round
+is unchanged (`late == []`, `rest == []`); no double merge (`merged` set with no await after the merge); a cut
+round never sets `outcome.terminal` / never reaches `_finish`.
+Reviewer mutation checks on a shadow copy (PYTHONPATH, work tree untouched): `cut_contents` all `INTERRUPTED` →
+11 failed; both `late` merges dropped → 2 failed; planned answers overwritten by `interrupted` → 4 failed.
+Reviewer probe outside the repo (removed): the reply task cancelled while `run_node_round` awaits the tools
+(fillers off, `track` held first and second) keeps `lookup`'s real answer + variables, `track` and `end_call`
+read `interrupted`, `nope` keeps its planned answer, the call does not end.
+Appended `2026-11-05-p08-fix-19-wip-review.md` to `.ralph/review-inbox/DONE`.
+For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-20-wip-review.md` (maintainer review of this same tree:
+no blockers) is NOT in DONE yet. Its two non-blocking items: 1. a system tool cancelled at the cut reads
+`interrupted` although its shielded run completes (possible duplicate `send_sms`; needs a spec decision);
+2. no committed test pins the cut "while the tools are awaited" (works today, see the probe above).

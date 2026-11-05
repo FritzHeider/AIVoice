@@ -1,5 +1,5 @@
 """Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1, P08-FIX-16,
-P08-FIX-17 and P08-FIX-19 under specs/13 §4).
+P08-FIX-17, P08-FIX-19 and P08-FIX-20 under specs/13 §4).
 
 A reply node (:data:`REPLY_NODE_TYPES`, global nodes included) whose reply streams from the dialogue model
 is offered the system tools the conversation allows (:class:`~va_engine.system_tools.SystemToolFacts` with
@@ -12,8 +12,11 @@ model's calls: executor tools run as tasks while the tool speech or a filler pla
 answered in call order, their variables merged, and each ``press_button`` yields its
 :class:`~va_engine.models.results.SendDtmfAction` right after its own answer, so an answer that reports an
 action is on record only once that action was handed over. A round cut short (barge-in, or a reply closed
-at a press) cancels its tool tasks and answers the unanswered calls ``interrupted``; calls are tracked by
-their position in the round, never by the model's call id.
+at a press) cancels the tools still running and answers ``interrupted`` only for what did not happen: a
+cancelled tool, a press or ``end_call`` that was not handed over. A tool that finished keeps its answer and
+its variables, a call answered without running keeps that answer
+(:func:`~va_engine.tool_tasks.settle_round`). Calls are tracked by their position in the round, never by
+the model's call id.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from va_engine.models.graph import PathwayGraph
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.results import Action, Say, SendDtmfAction
 from va_engine.system_tools import SystemToolFacts, is_reserved, system_tools
-from va_engine.task_tools import INTERRUPTED, PlannedCall, RoundPlan
+from va_engine.task_tools import PlannedCall, RoundPlan
 from va_engine.templating import TemplateScope
 from va_engine.tool_executor import PathwayToolExecutor, ToolAnswer, ToolExecutor, ToolRef
 from va_engine.tool_tasks import (
@@ -38,8 +41,8 @@ from va_engine.tool_tasks import (
     merge_variables,
     round_contents,
     runnable_facts,
+    settle_round,
     start_tools,
-    stop_tasks,
 )
 from va_llm.models import ToolCall, ToolDef
 
@@ -166,7 +169,8 @@ def _custom(
 class RoundOutcome:
     """Filled by :func:`run_node_round`: how many of the round's calls were answered so far (in call
     order), and the round's ``end_call`` (``None`` = none), which is set only once every call was answered
-    and every press handed over: a round cut short never ends the conversation."""
+    and every press handed over: a round cut short never ends the conversation (its ``end_call`` reads
+    ``interrupted``)."""
 
     terminal: PlannedCall | None = None
     answered: int = 0
@@ -186,8 +190,11 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
     """Execute ``plan`` with the node's ``executor`` (:attr:`ToolOffer.executor`): yields the speech/filler
     line, then answers the calls in call order through ``answer``, each ``press_button`` followed at once by
     its :class:`SendDtmfAction`. A round closed at a press leaves that press ``sent`` (a yielded action is
-    carried out) and answers the calls behind it ``interrupted``."""
+    carried out). Wherever the round is cut, the calls not answered yet get what is true for them
+    (:func:`~va_engine.tool_tasks.settle_round`): a tool that finished keeps its answer and its variables
+    are merged, a tool cancelled at the cut and a later press or ``end_call`` read ``interrupted``."""
     tasks: list[asyncio.Task[ToolAnswer]] = []
+    merged = False
     try:
         tasks = start_tools(executor, plan.executed, scope)
         line = await lines.line(executor, plan.executed, tasks, scope)
@@ -195,6 +202,7 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
             yield Say(text=line, mark=next_mark())
         answers = [await task for task in tasks]
         merge_variables(variables, answers)
+        merged = True
         for item, content in round_contents(plan, answers):
             answer(item.call, content)
             outcome.answered += 1
@@ -202,7 +210,8 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
                 yield SendDtmfAction(digits=item.digits, duration_ms=DTMF_DURATION_MS)
         outcome.terminal = plan.terminal
     finally:
-        await stop_tasks(tasks)
-        for item in plan.calls[outcome.answered :]:
-            answer(item.call, INTERRUPTED)
+        late, rest = await settle_round(plan, tasks, answered=outcome.answered, merged=merged)
+        merge_variables(variables, late)
+        for item, content in rest:
+            answer(item.call, content)
             outcome.answered += 1

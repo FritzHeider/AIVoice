@@ -1,5 +1,6 @@
 """TaskBrain tool rounds in the call pipeline: speech during tools, fillers, variables, barge-in (P08-T02b1),
-and the tool rounds a superseded turn hands on (specs/13 §4 Decision P08-FIX-17).
+the tool rounds a superseded turn hands on (specs/13 §4 Decision P08-FIX-17), and what a cut round answers
+(specs/13 §4 Decision P08-FIX-20).
 
 The harness runs on the accelerated clock: the brain, the scripted dialogue source (no socket) and the tool
 executor all share it, so tool durations and the 1 200 ms filler delay are virtual time.
@@ -19,7 +20,7 @@ from task_helpers import RecordingExecutor, assert_tool_pairing, drain, task_con
 
 from va_common.time import Clock, FrozenClock
 from va_domain.org import OrgSettings
-from va_engine.models.results import TransferRequest
+from va_engine.models.results import PressButton, TransferRequest
 from va_engine.models.state import EngineState
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
@@ -28,7 +29,7 @@ from va_llm.models import ToolCall, ToolDef
 from va_sim.clock import AcceleratedClock
 from va_voice.phrase_cache import TOOL_FILLERS
 from va_voice.pipeline import PipelineConfig
-from va_voice.pipeline.models import SpeakStatic, SpeakText, UserTurn
+from va_voice.pipeline.models import BrainOutput, SpeakStatic, SpeakText, UserTurn
 
 LOOKUP = ToolDef(
     name="lookup_order",
@@ -427,17 +428,22 @@ async def test_a_turn_without_tool_rounds_carries_nothing() -> None:
     assert _history(brain) == [("user", "my order A7"), ("assistant", "Got it.")]
 
 
-async def _closed_on_static(brain: TaskBrain, turn: UserTurn) -> SpeakStatic:
-    """Run the reply to ``turn`` up to its first static line and close it there: the caller spoke on
-    before the line's first audio, so nothing behind the line was handed over."""
+async def _closed_on[T: BrainOutput](brain: TaskBrain, turn: UserTurn, kind: type[T]) -> T:
+    """Run the reply to ``turn`` up to its first ``kind`` output and close it there (that output is
+    received, nothing behind it is handed over)."""
     async with contextlib.aclosing(brain.on_user_turn(turn)) as outputs:
         async for output in outputs:
             if isinstance(output, SpeakText):
                 assert [delta async for delta in output.tokens] == []
-            if isinstance(output, SpeakStatic):
+            if isinstance(output, kind):
                 return output
-    msg = "no static line was spoken"
+    msg = f"no {kind.__name__} was produced"
     raise AssertionError(msg)
+
+
+async def _closed_on_static(brain: TaskBrain, turn: UserTurn) -> SpeakStatic:
+    """:func:`_closed_on` the first static line: the caller spoke on before the line's first audio."""
+    return await _closed_on(brain, turn, SpeakStatic)
 
 
 async def test_a_transfer_closed_on_its_message_is_carried_as_interrupted() -> None:
@@ -514,3 +520,83 @@ async def test_a_transfer_handed_over_keeps_its_transferring_answer() -> None:
 
     assert [output[0] for output in outputs] == ["static", "action"]
     assert [m.content for m in brain.messages if m.role == "tool"] == ['{"status":"transferring"}']
+
+
+# A cut round answers ``interrupted`` only for what did not happen (specs/13 §4 Decision P08-FIX-20).
+
+SENT_1 = '{"status":"sent","digits":"1"}'
+
+
+def _press(index: int, digits: str) -> ToolCall:
+    return ToolCall(
+        id=f"call_{index}", name="press_button", arguments_json=orjson.dumps({"digits": digits}).decode()
+    )
+
+
+def _tool_answers(brain: TaskBrain) -> list[str | None]:
+    return [m.content for m in brain.messages if m.role == "tool"]
+
+
+async def test_a_tool_behind_a_cut_press_keeps_its_answer_and_is_carried() -> None:
+    clock = FrozenClock()
+    source = FakeSource().reply(calls=[_press(1, "1"), _call(2)]).reply("Done.")
+    executor = _executor(clock, results={"lookup_order": SHIPPED}, variables={"lookup_order": {"eta": "Fri"}})
+    states: list[dict[str, Any]] = []
+    brain = _brain(clock, source, executor, fillers=False, states=states)
+    await drain(brain.start())
+
+    pressed = await _closed_on(brain, user_turn(1, "press one"), PressButton)
+
+    assert pressed.digits == "1"
+    assert _tool_answers(brain) == [SENT_1, SHIPPED]
+    assert brain.state.variables["eta"] == "Fri"
+    assert [state["eta"] for state in states] == ["Fri"]
+    assert executor.cancelled == []
+
+    replies = await drain(brain.on_user_turn(user_turn(2, "press one please", supersedes=1)))
+
+    assert replies == [("text", "Done.")]
+    assert _shape(brain) == [
+        ("user", "press one please", 0),
+        ("assistant", None, 2),
+        ("tool", SENT_1, 0),
+        ("tool", SHIPPED, 0),
+        ("assistant", "Done.", 0),
+    ]
+    assert_tool_pairing([{"messages": _wire(source)}])
+    assert len(executor.calls) == 1
+
+
+async def test_actions_behind_a_cut_press_read_interrupted() -> None:
+    clock = FrozenClock()
+    ending = ToolCall(id="call_4", name="end_call", arguments_json='{"reason": "done"}')
+    source = FakeSource().reply(calls=[_press(1, "1"), _call(2), _press(3, "2"), ending])
+    executor = _executor(clock, results={"lookup_order": SHIPPED})
+    brain = _brain(clock, source, executor, fillers=False)
+    await drain(brain.start())
+
+    await _closed_on(brain, user_turn(1, "press one"), PressButton)
+
+    assert _tool_answers(brain) == [SENT_1, SHIPPED, INTERRUPTED, INTERRUPTED]
+    assert brain.state.ended is False
+
+
+async def test_a_barge_in_on_the_filler_keeps_the_finished_tools_answer() -> None:
+    clock = FrozenClock()
+    source, executor = _id_less_round(
+        clock,
+        holding=frozenset({"eta"}),
+        results={"lookup_order": SHIPPED},
+        variables={"lookup_order": {"status": "shipped"}},
+    )
+    states: list[dict[str, Any]] = []
+    brain = _brain(clock, source, executor, states=states)
+    await drain(brain.start())
+
+    line = await _closed_on_static(brain, user_turn(1, "where is my order"))
+
+    assert line.text in TOOL_FILLERS
+    assert [name for name, _ in executor.cancelled] == ["eta"]
+    assert _tool_answers(brain) == [SHIPPED, INTERRUPTED]
+    assert brain.state.variables["status"] == "shipped"
+    assert [state["status"] for state in states] == ["shipped"]

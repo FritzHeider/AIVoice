@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793888876-64fa
+> P08-FIX-20: a cut tool round (run_node_round, TaskBrain._run_tools) settles through va_engine.tool_tasks.settle_round(plan, tasks, answered=, merged=) -> (late answers to merge, contents of unanswered calls): interrupted only for a tool cancelled at the cut and a press_button/end_call/transfer_call not handed over; finished tools keep answer + variables (merged at the cut), planned answers (invalid_arguments/too_many_tool_calls/skipped) stay; never answer everything left INTERRUPTED in a runner finally; tests RecordingExecutor(holding=frozenset({name})) holds only those tools, TaskBrain _closed_on(brain, turn, kind); pip-audit must use the CI export (uv export --frozen --all-packages --no-hashes --no-emit-workspace) or it fails on workspace packages
+<!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
+
 ### mem-1793885740-8454
 > P08-FIX-19: an answer that reports an action (sent/transferring/ending) is recorded only when the action is yielded: pathway run_node_round answers + yields per press_button (close at a press keeps it sent, later calls incl. end_call interrupted, RoundOutcome.terminal set only after the whole round); tests use engine_helpers.closed_on(agen, SendDtmfAction) and _closed_on_static in test_task_tool_speech; TaskBrain records the transferring tool answer before the assistant message record
 <!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->

@@ -718,7 +718,8 @@ start. No routing calls; extraction only via tools. All other behavior identical
 >    later calls are answered `{"error":"skipped"}`. A `transfer_call` whose label does not resolve is answered as
 >    invalid arguments (`label: unknown transfer label`). Each assistant message with tool calls is followed by
 >    exactly one tool message per call; calls left unanswered when the reply is cut off are answered
->    `{"error":"interrupted"}`.
+>    `{"error":"interrupted"}` when what they stand for did not happen (a cancelled tool, an action that was
+>    not handed over), else with the answer that is true for them: see specs/13 §4 Decision P08-FIX-20.
 > 5. `end_call` sets `EngineState.ended`/`end_reason = "agent_end_call"` and ends the call after its final line
 >    (`final_message`, else `"Goodbye."` unless text was already spoken this turn). `transfer_call` speaks its
 >    `message` (not interruptible), then hands `TransferRequest(target, label, message)` to the action handler;

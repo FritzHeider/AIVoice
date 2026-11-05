@@ -157,7 +157,8 @@ class NodeExecutor:
 class RecordingExecutor:
     """A (pathway) tool executor: ``refs`` maps node tool ids to tool names; answers ``results[name]``
     (default ``{"ok":name}``) with ``variables[name]``, counts concurrency, holds every call on ``release``
-    when ``hold`` is set, and takes ``durations[name]`` seconds on ``clock`` (bind one to time calls).
+    when ``hold`` is set (only the tools named in ``holding`` otherwise), and takes ``durations[name]``
+    seconds on ``clock`` (bind one to time calls).
     ``note`` is the tool usage note speech, ``speeches[name]`` the tool's ``speech`` template; ``started``
     and ``cancelled`` record ``(name, clock ms)``. :meth:`for_refs` gives a node its :class:`NodeExecutor`,
     whose runs are listed in ``ran`` as ``(label of the definition that ran, tool name)``."""
@@ -172,6 +173,7 @@ class RecordingExecutor:
     durations: dict[str, float] = field(default_factory=dict)
     failing: frozenset[str] = frozenset()
     hold: bool = False
+    holding: frozenset[str] = frozenset()
     clock: Clock | None = None
     calls: list[ToolCall] = field(default_factory=list)
     ran: list[tuple[str, str]] = field(default_factory=list)
@@ -226,7 +228,7 @@ class RecordingExecutor:
             self.max_active = max(self.max_active, self.active)
             self.changed.notify_all()
         try:
-            if self.hold:
+            if self.hold or call.name in self.holding:
                 await self.release.wait()
             duration = self.durations.get(call.name)
             if duration is not None and self.clock is not None:

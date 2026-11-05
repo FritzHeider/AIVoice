@@ -119,9 +119,10 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 > 3. Each reply pass at a node allows at most 3 tool rounds, 2 rounds with an invalid call, 4 calls per round and
 >    100 tool calls per call (task-mode caps); then the node replies once more without tools. Tool answers are
 >    `tool` history records (context updates on later requests, like Scheduling; call ids and arguments are not
->    persisted). A round cut by a barge-in answers its unanswered calls `{"error":"interrupted"}` and cancels the
->    unfinished tools. Speech and fillers follow §5 Decision P08-T02b1 item 3; the line is spoken as a `Say` and
->    recorded as an assistant history line. Tool variables merge into the conversation variables after the round.
+>    persisted). A round cut by a barge-in cancels the unfinished tools and answers them
+>    `{"error":"interrupted"}`; what the other unanswered calls read is Decision P08-FIX-20. Speech and fillers
+>    follow §5 Decision P08-T02b1 item 3; the line is spoken as a `Say` and recorded as an assistant history
+>    line. Tool variables merge into the conversation variables after the round.
 > 4. `end_call` speaks `final_message`, else `Goodbye.` unless a reply of the pass already produced text, sets the
 >    state ended with `end_reason` `agent_end_call` (as task mode; the §6 table's `agent_end_call_tool` is not
 >    used), and yields `EndCallAction(reason="agent_end_call", ended_by="agent", after_mark=<the line's mark>)`.
@@ -168,7 +169,7 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    audio) never reached the action handler: its answer is rewritten from `{"status":"transferring"}` to
 >    `{"error":"interrupted"}` (message and history record), so the carried round does not tell the model that
 >    the call is being transferred. An `end_call` or `transfer_call` cut earlier in its round is answered
->    `interrupted` like every unanswered call.
+>    `interrupted` like every action that was not handed over (Decision P08-FIX-20).
 > 2. Per-node resolution: `PathwayToolExecutor.for_refs(refs) -> ToolExecutor` replaces `definitions_for`. The
 >    returned node executor's `definitions()` are the tools the node's `tools` followed by `globalTools` refs
 >    name, in ref order (a string = that stored tool, a mapping = that inline tool); unresolved refs are
@@ -188,16 +189,34 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    yields each `press_button`'s `SendDtmfAction` right after that call's answer, before the next call is
 >    answered (the task-mode order of specs/11 §6 Decision P05-T09c item 4). A reply closed at a press leaves that
 >    press `sent`: an action the reply yielded was received and runs to completion (specs/07 §8 Decision P04-T12b,
->    actions are never cancelled by a reply cancel). Every later call of the round is answered
->    `{"error":"interrupted"}`, an `end_call` included: it neither ends the conversation nor is owed (Decision
->    P08-FIX-16 owes the end of a conversation that ended; this one did not), and the next caller turn is handled
->    as usual.
+>    actions are never cancelled by a reply cancel). Every later call of the round that reports an action is
+>    answered `{"error":"interrupted"}`, an `end_call` included: it neither ends the conversation nor is owed
+>    (Decision P08-FIX-16 owes the end of a conversation that ended; this one did not), and the next caller turn
+>    is handled as usual. The executor calls of the round have finished by then and keep their answers (Decision
+>    P08-FIX-20).
 >    The round's `end_call` takes effect only once every call was answered and every press handed over. These
 >    records stay when the turn is superseded (Decision P08-FIX-17 item 1).
 > 2. In Decision P08-FIX-17 item 1 "ran" means: tools the executor ran, and actions handed to the consumer
 >    (`press_button`; a task-mode `transfer_call` after its message). A task-mode `transfer_call` closed on its
 >    message and then repeated by the model in the merged turn is requested as usual: the carried answer reads
 >    `interrupted`, the new call is answered `transferring` and yields its `TransferRequest`.
+
+> Decision (2026-11-05) P08-FIX-20: in a tool round that is cut short (pathway reply nodes and task mode alike;
+> the cut may land on the speech or filler line, while the tools are awaited, or at a `press_button`) a call is
+> answered `{"error":"interrupted"}` only when what it stands for did not happen:
+> 1. an executor call whose run was still unfinished and was cancelled at the cut (a system tool run behind the
+>    executor continues detached, §6 Decision P08-FIX-13; its outcome is unknown to the round);
+> 2. a `press_button`, `end_call` or `transfer_call` that was not handed over (Decision P08-FIX-19).
+>
+> Every other call not answered yet gets the answer that is true for it. An executor call whose run finished
+> keeps its real answer (blank content reads `tool_failed`), and the variables it extracted are merged at the
+> cut, in call order, when the round had not merged them yet: its request went out and its `call.tool` event
+> exists, so reporting it `interrupted` would make the model run it again (a second booking) once the round is
+> carried by a superseding turn (Decision P08-FIX-17 item 1). A call answered without running
+> (`invalid_arguments`, `too_many_tool_calls`, `skipped`) keeps that answer. A cut round never ends or transfers
+> the call. Both runners settle a round through `va_engine.tool_tasks.settle_round` (`finished_answers`,
+> `cut_contents`). This narrows the "every later call" / "unanswered calls" wording of Decision P08-FIX-19
+> item 1, Decision P08-T02c1 item 3 and §5 Decision P08-T02b1 item 4.
 
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same
@@ -282,11 +301,13 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 >    may not sit between a tool call and its answers), and are part of the cached filler set (specs/09 §9).
 > 4. Step 9: the follow-up request starts once every tool of the round answered and the speech or filler line
 >    finished playing (the runner is parked while the line plays); a barge-in during the line cancels the
->    unfinished tools and answers them `interrupted`.
+>    unfinished tools and answers them `interrupted`. Tools that finished before the cut keep their answers
+>    (§4 Decision P08-FIX-20).
 > 5. Variables: the round's non-null 2xx extractions are merged into the call's variables in call order after
 >    the round; tools of a round render with the variables of its start. The runtime snapshots the engine
 >    state to `call:{id}:engine` after a merge and the end routine merges its variables into `calls.variables`
->    (as for pathway calls). `send_sms` and `schedule_callback` run behind the same executor (§6 Decision
+>    (as for pathway calls). The finished tools of a round that was cut short merge their variables at the cut
+>    (§4 Decision P08-FIX-20). `send_sms` and `schedule_callback` run behind the same executor (§6 Decision
 >    P08-T02b2); `lookup_knowledge` follows with P08-T10.
 > 6. A turn superseded before any audio keeps its completed tool rounds: specs/13 §4 Decision P08-FIX-17 item 1.
 

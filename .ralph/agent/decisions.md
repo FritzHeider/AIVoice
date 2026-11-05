@@ -165,3 +165,12 @@ Template:
 - Reasoning: the safety property is "the definition the model was shown is the one that runs"; only per-node resolution guarantees it for inline and stored tools alike. `user → assistant(tool_calls) → tool` is the standard provider shape and ties the calls to the caller's request, which is what stops a second booking; pathway history is a chronological record list rendered as context updates and its decision calls expect the caller's record last.
 - Reversibility: High before P08-T02c2 (protocol used only by the engine and the test fake); medium afterwards
 - Timestamp: 2026-11-05T11:50:00Z
+
+## DEC-013
+- Decision: Scope of the fix for review note 2026-11-05-p08-fix-19-wip-review.md item 1 (a tool that ran to completion is recorded `interrupted` when the reply is closed at an earlier press)
+- Chosen Option: one rule for every cut of a tool round (pathway nodes and task mode): an executor call whose run finished keeps its answer and its variables are merged at the cut; calls answered without running keep their planned answer; only cancelled executor runs and actions not handed over read `interrupted`
+- Confidence: 75
+- Alternatives Considered: the note's narrower fix (real answers only once every task of the round finished, i.e. only for a cut at a press; a barge-in during the filler keeps answering everything `interrupted`)
+- Reasoning: the note's own principle is "only answers that report something that did not happen may read interrupted". A tool that finished before a barge-in on the filler (while a slower tool of the same round still runs) has the same risk: side effect and `call.tool` event in place, model told `interrupted`, second booking. specs/13 §5 Decision P08-T02b1 item 4 already says the barge-in answers the *unfinished* tools `interrupted`. The general rule needs no "where did the cut land" state and passes every test the note asks for.
+- Reversibility: High (one shared helper, two `finally` blocks)
+- Timestamp: 2026-11-05T14:10:00Z

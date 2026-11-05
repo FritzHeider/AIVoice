@@ -16,8 +16,10 @@ Executor tools run as tasks (specs/13 §5, Decision P08-T02b1): while they run t
 (round-robin per call); ``engine.tool_fillers=false`` silences both. Such lines are transcript records only,
 never model messages. The variables a round extracted are merged into the state in call order and reported
 to ``on_state``. A barge-in closes the round: unfinished tool tasks are cancelled and answered
-``interrupted``. A turn superseded before any audio (specs/07 §8) loses its messages except its completed
-tool rounds, which follow the merged caller message (specs/13 §4 Decision P08-FIX-17): the tools ran.
+``interrupted``, as are a ``press_button``, ``end_call`` or ``transfer_call`` that was not handed over; a
+tool that finished keeps its answer and its variables (specs/13 §4 Decision P08-FIX-20). A turn superseded
+before any audio (specs/07 §8) loses its messages except its completed tool rounds, which follow the merged
+caller message (specs/13 §4 Decision P08-FIX-17): the tools ran.
 """
 
 from __future__ import annotations
@@ -58,8 +60,8 @@ from va_engine.tool_tasks import (
     merge_variables,
     round_contents,
     runnable_facts,
+    settle_round,
     start_tools,
-    stop_tasks,
 )
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
@@ -354,6 +356,7 @@ class TaskBrain:
         tasks: list[asyncio.Task[ToolAnswer]] = []
         terminal = plan.terminal
         placed: _Answered | None = None
+        merged = False
         try:
             scope = self._scope()
             tasks = start_tools(self._executor, plan.executed, scope)
@@ -362,6 +365,7 @@ class TaskBrain:
                 yield self._note_line(line)
             answers = [await task for task in tasks]
             self._merge_variables(answers)
+            merged = True
             for item, content in round_contents(plan, answers):
                 at = self._answer(item.call, content)
                 if item is terminal:
@@ -370,9 +374,11 @@ class TaskBrain:
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
         finally:
-            await stop_tasks(tasks)
-            for item in plan.calls[answered:]:
-                self._answer(item.call, INTERRUPTED)
+            # A cut round: only what did not happen reads ``interrupted`` (specs/13 §4 Decision P08-FIX-20).
+            late, rest = await settle_round(plan, tasks, answered=answered, merged=merged)
+            self._merge_variables(late)
+            for item, content in rest:
+                self._answer(item.call, content)
         if terminal is not None and placed is not None:
             async with contextlib.aclosing(self._finish(terminal, budget, placed)) as outputs:
                 async for output in outputs:

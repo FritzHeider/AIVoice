@@ -1,5 +1,5 @@
 """The executor tool-round helpers shared by task mode and pathways (specs/13 §5; Decisions P08-T02b1,
-P08-T02c1, P08-FIX-16)."""
+P08-T02c1, P08-FIX-16, P08-FIX-20)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,13 @@ from task_helpers import RecordingExecutor
 
 from va_engine.system_tools import SystemToolFacts
 from va_engine.task_tools import (
+    ENDING,
     EXECUTOR_CONCURRENCY,
     FILLER_DELAY_S,
+    INTERRUPTED,
+    SKIPPED,
     TOOL_FAILED,
+    TRANSFERRING,
     PlannedCall,
     RoundPlan,
     sent_digits,
@@ -25,10 +29,13 @@ from va_engine.tool_executor import ToolAnswer
 from va_engine.tool_tasks import (
     ToolLines,
     call_arguments,
+    cut_contents,
     execute_gated,
+    finished_answers,
     merge_variables,
     round_contents,
     runnable_facts,
+    settle_round,
     start_tools,
     stop_tasks,
 )
@@ -180,6 +187,101 @@ def test_round_contents_refuse_a_wrong_number_of_answers() -> None:
 
     with pytest.raises(ValueError, match="2 executed calls need as many answers, got 1"):
         round_contents(plan, [ToolAnswer("{}")])
+
+
+def other(name: str, kind: Any, answer: str) -> PlannedCall:
+    """A call the executor does not run, with its planned ``answer``."""
+    return PlannedCall(ToolCall(id="", name=name, arguments_json="{}"), kind, answer=answer)
+
+
+async def half_finished_round() -> tuple[RecordingExecutor, list[asyncio.Task[ToolAnswer]]]:
+    """``lookup`` finished (extracting ``hours``), ``track`` still runs."""
+    executor = RecordingExecutor(
+        holding=frozenset({"track"}),
+        results={"lookup": '{"hours":"9-5"}'},
+        variables={"lookup": {"hours": "9-5"}},
+    )
+    tasks = start_tools(executor, [planned("", "lookup"), planned("", "track")], TemplateScope())
+    await tasks[0]
+    await executor.wait_active(1)
+    return executor, tasks
+
+
+async def test_finished_answers_keep_finished_runs_and_drop_cancelled_ones() -> None:
+    executor, tasks = await half_finished_round()
+    failing = RecordingExecutor(failing=frozenset({"lookup"}))
+    [failed] = start_tools(failing, [planned("c9")], TemplateScope())
+    await asyncio.wait([failed])
+
+    before = finished_answers(tasks)
+    await stop_tasks(tasks)
+
+    assert before == [ToolAnswer('{"hours":"9-5"}', {"hours": "9-5"}), None]
+    assert finished_answers(tasks) == before
+    assert finished_answers([failed]) == [ToolAnswer(TOOL_FAILED)]
+    assert [name for name, _ in executor.cancelled] == ["track"]
+
+
+async def test_a_task_that_raised_has_no_finished_answer() -> None:
+    async def broken() -> ToolAnswer:
+        message = "boom"
+        raise RuntimeError(message)
+
+    task = asyncio.create_task(broken())
+    await asyncio.wait([task])
+
+    assert finished_answers([task]) == [None]
+
+
+def test_cut_contents_answer_each_kind() -> None:
+    done, cancelled, blank = planned("", "lookup"), planned("", "track"), planned("", "quiet")
+    refused = other("nope", "answer", '{"error":"x"}')
+    pressed = PlannedCall(
+        ToolCall(id="", name="press_button", arguments_json='{"digits":"1"}'),
+        "press",
+        answer=sent_digits("1"),
+        digits="1",
+    )
+    ending = other("end_call", "end", ENDING)
+    transferring = other("transfer_call", "transfer", TRANSFERRING)
+    skipped = other("late", "answer", SKIPPED)
+    plan = RoundPlan(
+        (done, cancelled, refused, blank, pressed, ending, transferring, skipped), invalid=True, used=7
+    )
+    answers = [ToolAnswer('{"hours":"9-5"}'), None, ToolAnswer("")]
+
+    assert cut_contents(plan, answers) == [
+        (done, '{"hours":"9-5"}'),
+        (cancelled, INTERRUPTED),
+        (refused, '{"error":"x"}'),
+        (blank, TOOL_FAILED),
+        (pressed, INTERRUPTED),
+        (ending, INTERRUPTED),
+        (transferring, INTERRUPTED),
+        (skipped, SKIPPED),
+    ]
+
+
+def test_cut_contents_of_tools_that_never_started_read_interrupted() -> None:
+    refused = other("nope", "answer", '{"error":"x"}')
+    plan = RoundPlan((planned("c1"), refused, planned("c2")), invalid=True, used=3)
+
+    assert [content for _, content in cut_contents(plan, [])] == [INTERRUPTED, '{"error":"x"}', INTERRUPTED]
+
+
+async def test_settle_round_cancels_the_running_tools_and_reports_late_answers() -> None:
+    executor, tasks = await half_finished_round()
+    first, second = planned("", "lookup"), planned("", "track")
+    plan = RoundPlan((first, second), invalid=False, used=2)
+
+    late, rest = await settle_round(plan, tasks, answered=0, merged=False)
+
+    assert late == [ToolAnswer('{"hours":"9-5"}', {"hours": "9-5"})]
+    assert rest == [(first, '{"hours":"9-5"}'), (second, INTERRUPTED)]
+    assert [task.cancelled() for task in tasks] == [False, True]
+    assert executor.active == 0
+    assert await settle_round(plan, tasks, answered=1, merged=True) == ([], [(second, INTERRUPTED)])
+    assert await settle_round(plan, tasks, answered=2, merged=True) == ([], [])
 
 
 async def test_stop_tasks_cancels_only_the_unfinished() -> None:
