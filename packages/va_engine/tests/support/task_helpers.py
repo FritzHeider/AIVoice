@@ -22,11 +22,13 @@ from llm_client_helpers import GatewayRig, served_gateway, served_requests
 from llm_helpers import add_rules, realtime_llm_state
 from resolved_configs import resolved_config
 
-from va_common.time import FrozenClock
+from va_common.time import Clock, FrozenClock
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
 from va_engine.system_tools import SystemToolFacts, facts_for_call
 from va_engine.task_runner import TaskBrain
+from va_engine.templating import TemplateScope
+from va_engine.tool_executor import ToolAnswer
 from va_llm.models import ToolCall, ToolDef
 from va_llm.tokens import default_counter
 from va_sim.state import SimState
@@ -104,16 +106,25 @@ async def drain(outputs: AsyncIterator[BrainOutput]) -> list[Rendered]:
 
 @dataclass(slots=True)
 class RecordingExecutor:
-    """A tool executor: answers ``results[name]`` (default ``{"ok":name}``), counts concurrency, and holds
-    every call on ``release`` when ``hold`` is set."""
+    """A tool executor: answers ``results[name]`` (default ``{"ok":name}``) with ``variables[name]``, counts
+    concurrency, holds every call on ``release`` when ``hold`` is set, and takes ``durations[name]`` seconds
+    on ``clock`` (bind one to time calls). ``note`` is the tool usage note speech, ``speeches[name]`` the
+    tool's ``speech`` template; ``started`` and ``cancelled`` record ``(name, clock ms)``."""
 
     tools: tuple[ToolDef, ...] = ()
-    speech: str | None = None
+    note: str | None = None
     names: frozenset[str] = frozenset()
     results: dict[str, str] = field(default_factory=dict)
+    variables: dict[str, dict[str, Any]] = field(default_factory=dict)
+    speeches: dict[str, str] = field(default_factory=dict)
+    durations: dict[str, float] = field(default_factory=dict)
     failing: frozenset[str] = frozenset()
     hold: bool = False
+    clock: Clock | None = None
     calls: list[ToolCall] = field(default_factory=list)
+    scopes: list[TemplateScope] = field(default_factory=list)
+    started: list[tuple[str, float]] = field(default_factory=list)
+    cancelled: list[tuple[str, float]] = field(default_factory=list)
     active: int = 0
     max_active: int = 0
     release: asyncio.Event = field(default_factory=asyncio.Event)
@@ -124,13 +135,21 @@ class RecordingExecutor:
 
     @property
     def tool_speech(self) -> str | None:
-        return self.speech
+        return self.note
 
     def handles(self, name: str) -> bool:
         return name in self.names
 
-    async def execute(self, call: ToolCall) -> str:
+    def speech(self, name: str) -> str | None:
+        return self.speeches.get(name)
+
+    def _ms(self) -> float:
+        return 0.0 if self.clock is None else round(self.clock.monotonic() * 1000, 3)
+
+    async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
         self.calls.append(call)
+        self.scopes.append(scope)
+        self.started.append((call.name, self._ms()))
         async with self.changed:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -138,10 +157,17 @@ class RecordingExecutor:
         try:
             if self.hold:
                 await self.release.wait()
+            duration = self.durations.get(call.name)
+            if duration is not None and self.clock is not None:
+                await self.clock.sleep(duration)
             if call.name in self.failing:
                 message = f"{call.name} failed"
                 raise RuntimeError(message)
-            return self.results.get(call.name, orjson.dumps({"ok": call.name}).decode())
+            content = self.results.get(call.name, orjson.dumps({"ok": call.name}).decode())
+            return ToolAnswer(content, self.variables.get(call.name, {}))
+        except asyncio.CancelledError:
+            self.cancelled.append((call.name, self._ms()))
+            raise
         finally:
             self.active -= 1
 

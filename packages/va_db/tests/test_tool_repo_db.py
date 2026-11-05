@@ -75,6 +75,22 @@ async def test_create_with_an_explicit_id(database: Database) -> None:
     assert tool.id == chosen
 
 
+async def test_by_ids_keeps_the_order_and_skips_absent_deleted_and_foreign_tools(database: Database) -> None:
+    org_id, other = await OrgFactory(database).create(), await OrgFactory(database).create()
+    first = await create(database, org_id, "a_tool")
+    second = await create(database, org_id, "b_tool")
+    gone = await create(database, org_id, "gone")
+    foreign = await create(database, other, "theirs")
+    async with database.tenant_session(org_id) as session:
+        repo = ToolRepo(session, org_id)
+        await repo.soft_delete(await repo.get(gone))
+    async with database.tenant_session(org_id) as session:
+        repo = ToolRepo(session, org_id)
+        rows = await repo.by_ids([second, uuid.uuid4(), gone, foreign, first, second])
+        assert [row.id for row in rows] == [second, first]
+        assert await repo.by_ids([]) == []
+
+
 async def test_live_names_conflict_and_deleted_names_are_freed(database: Database) -> None:
     org_id = await OrgFactory(database).create()
     first = await create(database, org_id, "lookup_order")

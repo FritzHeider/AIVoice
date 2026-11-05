@@ -56,6 +56,12 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     (:class:`~va_media.pathway_runtime.EngineStateSaver`);
     on exit the brain settles and closes before the snapshot is flushed and the call's events are drained
     (specs/11 §10 Decision P07-T12b).
+12. a ``task`` call with custom tools (``tool_ids``, ``inline_tools``) hands its :class:`TaskBrain` the
+    call's :class:`~va_tools.executor.CallToolExecutor` from :class:`~va_media.call_tools.CallToolSource`
+    (stored tools with decrypted secret headers, inline tools, the shared tool HTTP client): tool runs become
+    ``call.tool``/``call.error`` events through the recorder, and the variables they extract are snapshotted
+    in ``call:{id}:engine`` (merged into ``calls.variables`` by the end routine) (specs/13 §5 Decision
+    P08-T02b1).
 """
 
 from __future__ import annotations
@@ -109,6 +115,7 @@ from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
 from va_media.call_sms import CallSmsPort, OutboundSms
+from va_media.call_tools import CallToolSource
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
 from va_media.maintenance import maintenance_takeover
@@ -248,9 +255,11 @@ class CallRuntime:
         tracer_provider: TracerProvider | None = None,
         database: Database | None = None,
         pathways: PathwayTools | None = None,
+        call_tools: CallToolSource | None = None,
     ) -> None:
         self._settings = settings
         self._pathways = pathways
+        self._call_tools = call_tools
         self._background = background
         self._database = database
         self._end_routine = end_routine
@@ -381,14 +390,7 @@ class CallRuntime:
         snapshot is flushed, both before the call's events are drained (registered after the recorder's
         ``finish_call``). ``PathwayUnavailableError`` when the pathway cannot run."""
         if context.config.runner_type == "task":
-            return TaskBrain(
-                context=context,
-                settings=org,
-                gateway=self._gateway,
-                counter=self._counter,
-                facts=facts_for_call(context, org, sms_capable=False),
-                clock=self._clock,
-            )
+            return await self._task_brain(stack, context, org, recorder)
         if self._pathways is None:
             raise PathwayUnavailableError("not_configured")
         saver = None if self._redis is None else EngineStateSaver(self._redis, context.call_id)
@@ -407,6 +409,26 @@ class CallRuntime:
             stack.push_async_callback(saver.aclose)
         stack.push_async_callback(brain.aclose)
         return brain
+
+    async def _task_brain(
+        self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
+    ) -> TaskBrain:
+        """A task brain with the call's custom tools; with tools its state snapshot is flushed on exit."""
+        executor = None if self._call_tools is None else await self._call_tools.executor(context, recorder)
+        saver = None
+        if executor is not None and self._redis is not None:
+            saver = EngineStateSaver(self._redis, context.call_id)
+            stack.push_async_callback(saver.aclose)
+        return TaskBrain(
+            context=context,
+            settings=org,
+            gateway=self._gateway,
+            counter=self._counter,
+            facts=facts_for_call(context, org, sms_capable=False),
+            clock=self._clock,
+            executor=executor,
+            on_state=None if saver is None else saver.on_state,
+        )
 
     def _sms_port(self, context: CallContext) -> CallSmsPort | None:
         """The SMS port of a pathway call (``None`` without a database: the message cannot be recorded)."""
@@ -696,11 +718,11 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
 ) -> AsyncIterator[CallRuntime]:
     """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
     database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
-    platform LLM connection is prewarmed (a failure is logged, never raised). Pathway calls share one guarded
-    tool HTTP client (``WEBHOOK_ALLOW_PRIVATE``) and one graph cache. The Telnyx pool and client
-    factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound DTMF and the end-of-call hangup; the
-    end routine signals ``CallWorkflow`` through a lazily connected Temporal client (not a readiness check,
-    specs/07 §2)."""
+    platform LLM connection is prewarmed (a failure is logged, never raised). Pathway calls and task-mode
+    tools share one guarded tool HTTP client (``WEBHOOK_ALLOW_PRIVATE``); pathway calls share one graph
+    cache. The Telnyx pool and client factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound
+    DTMF and the end-of-call hangup; the end routine signals ``CallWorkflow`` through a lazily connected
+    Temporal client (not a readiness check, specs/07 §2)."""
     database = getattr(container, "database", None)
     if not isinstance(database, Database):
         msg = "the media container has no database"
@@ -763,5 +785,12 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
                 graphs=CallGraphCache(database),
                 tools_http=tools_http,
                 allow_http=insecure_urls_allowed(settings.va_env),
+            ),
+            call_tools=CallToolSource(
+                database=database,
+                envelope=envelope,
+                tools_http=tools_http,
+                allow_http=insecure_urls_allowed(settings.va_env),
+                clock=clock,
             ),
         )

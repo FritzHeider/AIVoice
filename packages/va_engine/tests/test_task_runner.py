@@ -504,7 +504,7 @@ async def test_executor_tools_run_concurrently_and_answer_in_call_order(sim: Sim
     )
     executor = RecordingExecutor(
         tools=(lookup,),
-        speech="Let me check.",
+        note="Let me check.",
         names=frozenset({"lookup_order", "send_sms"}),
         results={"send_sms": '{"status":"queued"}'},
         failing=frozenset({"explode"}),
@@ -527,7 +527,7 @@ async def test_executor_tools_run_concurrently_and_answer_in_call_order(sim: Sim
         await asyncio.sleep(0)
     assert (executor.active, len(executor.calls)) == (3, 3)
     executor.release.set()
-    assert await reply == [("text", "Okay. You said: my orders.")]
+    assert await reply == [("static", "One moment.", True), ("text", "Okay. You said: my orders.")]
     assert executor.max_active == 3
     first, second = await sim.requests()
     assert _tool_names(first) == ["end_call", "press_button", "send_sms", "lookup_order"]

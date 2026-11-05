@@ -163,6 +163,35 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 >    Built-ins are those of a conversation without a call (empty numbers and `call_id`, UTC, `en`). No database
 >    session is open while the request runs.
 
+> Decision (2026-11-05) P08-T02b1: task-mode calls run custom tools through `va_tools.executor.CallToolExecutor`
+> (the `va_engine.tool_executor.ToolExecutor` protocol: `definitions()`, `tool_speech`, `handles(name)`,
+> `speech(name)`, `execute(call, scope) -> ToolAnswer(content, variables)`).
+> 1. Tools of a call: the live stored tools of `tool_ids` (call org only, in list order; absent, deleted and
+>    foreign ids are skipped, logged `media.tool_missing` with a count) loaded by `va_media.call_tools.
+>    load_call_tools` in one tenant session, secret headers decrypted after it closed; then the inline tools. An
+>    inline tool replaces a stored tool of the same name; reserved system tool names and later duplicates are
+>    dropped (`tools.tool_skipped`). A load failure leaves only the inline tools (`media.tools_unavailable`).
+>    Requests are signed with the org's active webhook secrets (step 4); when those cannot be read the requests
+>    go out unsigned (`media.tool_signing_unavailable`).
+> 2. Events: every run publishes `call.tool` (message `Tool <name>: <outcome>`, the P08-T02a data), invalid
+>    arguments included; a run without a 2xx answer also publishes a `warning` `call.error`
+>    `{"code": "TOOL_FAILED", "detail": "<tool>: <kind>[ (<status>)]"}` (message `Tool call failed`).
+> 3. Speech and fillers: the executed calls of one round start as tasks at once (at most 3 in parallel). The
+>    caller hears the rendered `speech` of the first executed call whose tool has one (arguments as `input.*`,
+>    a template that does not parse → no line); otherwise, when a tool still runs after 1 200 ms (on the call's
+>    clock), one filler of `TOOL_FILLERS` ("One moment.", "Just a second.", "Let me check."), round-robin per
+>    call: at most one line per round, also for parallel calls. `engine.tool_fillers=false` silences both
+>    speech and fillers. These lines are transcript records only, never model messages (an assistant message
+>    may not sit between a tool call and its answers), and are part of the cached filler set (specs/09 §9).
+> 4. Step 9: the follow-up request starts once every tool of the round answered and the speech or filler line
+>    finished playing (the runner is parked while the line plays); a barge-in during the line cancels the
+>    unfinished tools and answers them `interrupted`.
+> 5. Variables: the round's non-null 2xx extractions are merged into the call's variables in call order after
+>    the round; tools of a round render with the variables of its start. The runtime snapshots the engine
+>    state to `call:{id}:engine` after a merge and the end routine merges its variables into `calls.variables`
+>    (as for pathway calls). `send_sms`, `schedule_callback` and `lookup_knowledge` are not executor tools yet
+>    (P08-T02b2, P08-T10).
+
 Max tool calls per assistant turn: 4 (parallel tool calls from the LLM run concurrently, max 3 in parallel). Max
 tool calls per call: 100.
 

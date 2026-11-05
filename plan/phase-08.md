@@ -174,15 +174,21 @@
   - Deliverables: `va_tools.models` (`ToolSpec` from a stored row or an inline tool), `va_tools.render` (request rendering with `input.*`), `va_tools.runner.ToolRunner` (argument validation, rendering, signed execution over `HttpExecutor`, response map, LLM tool message, `call.tool` event data with masked headers, `TOOL_FAILED` classification), `function_def(spec)`; `POST /v1/tools/{tool_id}/test`
   - Acceptance: unit tests for every runner step (invalid arguments, rendering with type preservation and URL encoding, query merge, secret headers sent but masked, retries/timeout outcomes, JSONPath single/multi/no match, 4 000-char data cap, 2 KB excerpt); API tests for `/test` against a real-socket receiver incl. masking and errors.
 
-- [ ] P08-T02b Task-mode tools in calls: executor, speech during tool, fillers, executor-backed system tools
-  - Spec refs: specs/13 §4, §5 steps 2 and 9, §6 (`send_sms`, `schedule_callback`); specs/09 §9 (fillers)
+- [x] P08-T02b1 Task-mode custom tools in calls: executor, events, variables, speech during tool, fillers (split from P08-T02b by the planner, 2026-11-05: the executor-backed system tools need their own DB/Temporal wiring) — CallToolExecutor + merged_tools, TaskBrain tool tasks with speech / 1 200 ms round-robin fillers, variables snapshotted to calls.variables, call.tool + call.error TOOL_FAILED, CallToolSource with signing; make test 12897 passed / 7 skipped, coverage 99.07 %, lint/typecheck/placeholders pass, jscpd 0 clones
+  - Spec refs: specs/13 §4, §5 steps 2 and 9 (+ §5 caps); specs/09 §9 (fillers); specs/04 §7 (`engine.tool_fillers`); specs/19 §2 (`call.tool`, `call.error` `TOOL_FAILED`)
   - Depends on: P08-T02a
-  - Deliverables: media `ToolExecutor` over `ToolRunner` (call `tool_ids` loaded with decrypted secrets + `inline_tools`, inline overrides org tool of the same name), `call.tool`/`call.error TOOL_FAILED` events, variables merged into engine state, `TaskBrain` speech-during-tool (speech starts with the request) and the 1 200 ms cached filler (round-robin, ≤ 1 per tool call, `engine.tool_fillers`), `send_sms`/`schedule_callback` system tools
-  - Acceptance: harness tests for filler timing (speech ≤ 300 ms after the tool call, filler at 1 200 ms, none when the tool is fast), timeout behaviour, extraction into variables; runtime sim test of a tool call.
+  - Deliverables: `va_tools.executor.CallToolExecutor` over `ToolRunner` (call `tool_ids` loaded with decrypted secrets + `inline_tools`, inline overrides org tool of the same name) emitting `call.tool`/`call.error TOOL_FAILED`; `ToolExecutor.execute(call, scope) -> ToolAnswer` (content + variables merged into engine state, snapshotted for `calls.variables`); `TaskBrain` speech-during-tool (speech starts with the request) and the 1 200 ms cached filler (round-robin, ≤ 1 per round, `engine.tool_fillers`); media runtime wiring
+  - Acceptance: harness tests for filler timing (speech ≤ 300 ms after the tool call, filler at 1 200 ms, none when the tool is fast), timeout behaviour, extraction into variables, barge-in during a tool; runtime sim test of a tool call; loader test with a stored tool's secret header.
+
+- [ ] P08-T02b2 Executor-backed system tools `send_sms` and `schedule_callback` in task-mode calls
+  - Spec refs: specs/13 §6 (`send_sms`, `schedule_callback`), specs/10 §7 Decision P05-T09b
+  - Depends on: P08-T02b1
+  - Deliverables: `sms_capable` fact from the agent number/messaging readiness (shared with `va_db.voicemail_sms.sms_sender`), `send_sms` over `OutboundSms`, `schedule_callback` creating a scheduled child call (same config, `start_time`, `parent_call_id`) and starting its `CallWorkflow`, both behind the call's executor
+  - Acceptance: availability tests (number not SMS-capable, `engine.allow_callbacks` off), runtime sim test sending an SMS, DB test of the scheduled callback row and workflow start.
 
 - [ ] P08-T02c Pathway node tools and `globalTools`
   - Spec refs: specs/13 §4 (node `tools` ∪ `globalTools` ∪ system tools), specs/11 §5.7 tools line, specs/11 §3 (`allowEndCallTool`)
-  - Depends on: P08-T02b, P07-T12
+  - Depends on: P08-T02b1, P07-T12
   - Deliverables: PathwayEngine offers node + global custom tools and allowed system tools on reply nodes, runs them through the same executor with speech/filler, records answers, honours the per-turn/per-call caps
   - Acceptance: engine tests (tool round on a node, global tool, `allowEndCallTool=false`), runtime sim pathway call with a tool.
 
@@ -236,7 +242,7 @@
 
 - [ ] P08-T11 E2E: tools
   - Spec refs: specs/30-testing-and-evals.md (end-to-end flow list: tool_call_with_speech)
-  - Depends on: P08-T02b
+  - Depends on: P08-T02b1
   - Deliverables: `tests_e2e/test_tool_call_with_speech.py`
   - Acceptance: filler heard (recorded agent audio contains filler phrase marker), tool result used in reply.
 

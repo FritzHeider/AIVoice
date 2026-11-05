@@ -18,6 +18,11 @@ publishes the engine's ``call.route``/``call.extraction``/``call.loop_condition`
 ``call.sms_sent`` events in the same ordered chain (messages from :mod:`va_media.pathway_events`); any other
 type is logged ``media.engine_event_unknown`` and dropped.
 
+Task-mode tools (specs/13 §5 Decision P08-T02b1): the recorder is the call's
+:class:`~va_tools.executor.ToolEvents`: :meth:`TurnRecorder.tool` publishes ``call.tool`` (message
+:func:`tool_message`, tool name and outcome only) and :meth:`TurnRecorder.tool_failed` a ``warning``
+``call.error`` with ``data`` ``{"code": "TOOL_FAILED", "detail": ...}`` (message :data:`TOOL_FAILED_MESSAGE`).
+
 Times: ``start_ms``/``end_ms`` are relative to the call's answer time: ``pipeline_ms - origin_ms +
 answered_offset_ms`` (rounded, at least 0), where ``origin_ms`` is the pipeline clock when the recorder was
 built and ``answered_offset_ms`` how long before that the carrier reported the answer (0 when unknown).
@@ -36,7 +41,7 @@ from pydantic import JsonValue
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_db.call_turns import CallTurnRow, LatencyMerge, TurnDelete, TurnOp
-from va_db.models import CallTurnRole
+from va_db.models import CallEventLevel, CallTurnRole
 from va_domain.call_context import CallContext
 from va_engine.pathway_brain import TurnTags
 from va_events import DomainEvent, EventType, new_event
@@ -47,6 +52,7 @@ from va_voice.pipeline import AgentTurn, InterruptRecord, UserTurn
 __all__ = [
     "EVENT_MESSAGE_CHARS",
     "STARTED_MESSAGE",
+    "TOOL_FAILED_MESSAGE",
     "CallFlusher",
     "CallPersistence",
     "EventSink",
@@ -54,6 +60,7 @@ __all__ = [
     "TurnSink",
     "TurnStore",
     "TurnTagger",
+    "tool_message",
 ]
 
 STARTED_MESSAGE: Final = "Call started"
@@ -62,7 +69,15 @@ STARTED_MESSAGE: Final = "Call started"
 EVENT_MESSAGE_CHARS: Final = 200
 """``call.turn`` messages carry the turn text cut to this many characters (the full text is in ``data``)."""
 
+TOOL_FAILED_MESSAGE: Final = "Tool call failed"
+"""The message of the ``call.error`` ``TOOL_FAILED`` event."""
+
 _log = get_logger(__name__)
+
+
+def tool_message(data: dict[str, JsonValue]) -> str:
+    """The ``call.tool`` message: the tool's name and the run's outcome."""
+    return f"Tool {data.get('tool_name')}: {data.get('outcome')}"
 
 
 class TurnSink(Protocol):
@@ -192,6 +207,15 @@ class TurnRecorder:
             return
         self._publish(known, event_message(known, data), data)
 
+    def tool(self, data: dict[str, JsonValue]) -> None:
+        """Publish ``call.tool`` for one tool run."""
+        self._publish(EventType.CALL_TOOL, tool_message(data), data)
+
+    def tool_failed(self, detail: str) -> None:
+        """Publish the ``call.error`` ``TOOL_FAILED`` of a failed tool run."""
+        data: dict[str, JsonValue] = {"code": "TOOL_FAILED", "detail": detail}
+        self._publish(EventType.CALL_ERROR, TOOL_FAILED_MESSAGE, data, level="warning")
+
     async def drain(self) -> None:
         """Release a held assistant turn, then wait until every queued event was published (or failed)."""
         self._release_held()
@@ -250,18 +274,33 @@ class TurnRecorder:
         }
         return self._event(EventType.CALL_TURN, text[:EVENT_MESSAGE_CHARS], data)
 
-    def _event(self, event_type: EventType, message: str, data: dict[str, JsonValue]) -> DomainEvent:
+    def _event(
+        self,
+        event_type: EventType,
+        message: str,
+        data: dict[str, JsonValue],
+        *,
+        level: CallEventLevel = "info",
+    ) -> DomainEvent:
         return new_event(
             event_type,
             org_id=self._context.org_id,
             clock=self._clock,
             call_id=self._context.call_id,
+            level=level,
             message=message,
             data=data,
         )
 
-    def _publish(self, event_type: EventType, message: str, data: dict[str, JsonValue]) -> None:
-        self._enqueue(self._event(event_type, message, data))
+    def _publish(
+        self,
+        event_type: EventType,
+        message: str,
+        data: dict[str, JsonValue],
+        *,
+        level: CallEventLevel = "info",
+    ) -> None:
+        self._enqueue(self._event(event_type, message, data, level=level))
 
     def _release_held(self) -> None:
         held, self._held = self._held, None

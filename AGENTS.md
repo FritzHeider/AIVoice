@@ -2027,3 +2027,14 @@ Grafana 3001
   `tools_http`. Never name a src function `test_*` either (`tool_test_result`, not `test_result`). The api test
   `SessionContainer` allows private destinations: a URL resolving to a private IP really connects, so point tools
   at the receiver (`hooks.test` → 127.0.0.1) or a closed local port (cross-tenant `tool_id` factory: `127.0.0.1:9`).
+- 2026-11-05 (P08-T02b1): task-mode tools = `va_tools.executor.CallToolExecutor(specs, runner=ToolRunner(...),
+  events=)` + `merged_tools(stored, inline)`; `ToolExecutor.execute(call, scope) -> va_engine.tool_executor.ToolAnswer`
+  and `speech(name)`. `TaskBrain` runs a round's tools as tasks, yields one tool speech/filler `SpeakStatic`
+  (`va_voice.phrase_cache.TOOL_FILLERS`, `task_tools.FILLER_DELAY_S` on the brain clock; lines are history records,
+  never model messages), merges variables and calls `on_state`. Media: `va_media.call_tools.CallToolSource`
+  (`CallRuntime(call_tools=)`, `runtime_rig.sim_runtime(call_tools=)`), `TurnRecorder.tool`/`tool_failed`;
+  `ToolRepo.by_ids`. Tests: `task_helpers.RecordingExecutor` (`note` = usage-note speech, `speeches`, `durations`
+  on a bound `clock`, `started`/`cancelled`); `dialogue_helpers.FakeSource` streams work as a `TaskBrain` gateway,
+  so tool-round harness tests run on the AcceleratedClock without FakeLLM (`test_task_tool_speech.py`). With a
+  `FrozenClock` the 1.2 s filler wait returns at once: a held tool in a FrozenClock brain test gets a filler.
+  Text sent to TTS is chunked into clauses (`h.tts.sent`), so match whole single-clause sentences.

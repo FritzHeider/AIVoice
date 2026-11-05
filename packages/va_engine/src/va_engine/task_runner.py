@@ -9,6 +9,14 @@ without tools. ``end_call`` ends the call (``agent_end_call``), ``transfer_call`
 a :class:`~va_engine.models.results.TransferRequest` to the action handler, ``press_button`` hands a
 :class:`~va_engine.models.results.PressButton` to it. Every assistant message with tool calls is followed by
 exactly one ``tool`` message per call before the next request.
+
+Executor tools run as tasks (specs/13 §5, Decision P08-T02b1): while they run the caller hears the rendered
+``speech`` of the first executed tool that has one, or, when none has and the tools still run after
+:data:`~va_engine.task_tools.FILLER_DELAY_S`, one filler of :data:`~va_voice.phrase_cache.TOOL_FILLERS`
+(round-robin per call); ``engine.tool_fillers=false`` silences both. Such lines are transcript records only,
+never model messages. The variables a round extracted are merged into the state in call order and reported
+to ``on_state``. A barge-in closes the round: unfinished tool tasks are cancelled and answered
+``interrupted``.
 """
 
 from __future__ import annotations
@@ -16,10 +24,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Final
+from typing import Any, Final
 
 import orjson
 
@@ -35,6 +43,7 @@ from va_engine.opener import parse_field
 from va_engine.system_tools import SystemToolFacts, system_tools
 from va_engine.task_tools import (
     EXECUTOR_CONCURRENCY,
+    FILLER_DELAY_S,
     INTERRUPTED,
     MAX_INVALID_ROUNDS,
     MAX_TOOL_CALLS_PER_CALL,
@@ -44,8 +53,8 @@ from va_engine.task_tools import (
     RoundPlan,
     plan_round,
 )
-from va_engine.templating import MissingVariables, Template, TemplateScope, render
-from va_engine.tool_executor import ToolExecutor
+from va_engine.templating import MissingVariables, Template, TemplateScope, TemplateSyntaxError, render
+from va_engine.tool_executor import ToolAnswer, ToolExecutor
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import LlmUnavailableError
@@ -61,6 +70,7 @@ from va_llm.prompts import (
 )
 from va_llm.tokens import TokenCounter
 from va_llm.window import ConversationWindow
+from va_voice.phrase_cache import TOOL_FILLERS
 from va_voice.pipeline.models import (
     BrainOutput,
     BrainTiming,
@@ -144,6 +154,7 @@ class TaskBrain:
         clock: Clock,
         executor: ToolExecutor | None = None,
         memory_context: str | None = None,
+        on_state: Callable[[EngineState], None] | None = None,
     ) -> None:
         config = context.config
         if config.runner_type != "task" or config.task is None:
@@ -155,6 +166,9 @@ class TaskBrain:
         self._clock = clock
         self._executor = executor
         self._memory_context = memory_context
+        self._on_state = on_state
+        self._fillers_on = settings.engine.tool_fillers
+        self._fillers = 0
         if executor is None:
             facts = dataclasses.replace(
                 facts, sms_capable=False, allow_schedule_callback=False, has_knowledge_bases=False
@@ -329,14 +343,22 @@ class TaskBrain:
 
     async def _run_tools(self, plan: RoundPlan, budget: _TurnBudget) -> AsyncGenerator[BrainOutput]:
         answered: set[str] = set()
+        tasks: dict[str, asyncio.Task[ToolAnswer]] = {}
         try:
-            results = await self._execute(plan.executed)
+            tasks = self._start_tools(plan.executed)
+            line = await self._tool_line(plan.executed, tasks)
+            if line is not None:
+                yield self._note_line(line)
+            results = {call_id: await task for call_id, task in tasks.items()}
+            self._merge_variables(plan.executed, results)
             for item in plan.calls:
-                content = results.get(item.call.id, item.answer) or TOOL_FAILED
+                answer = results.get(item.call.id)
+                content = (answer.content if answer is not None else item.answer) or TOOL_FAILED
                 self._answer(item.call, content, answered)
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
         finally:
+            await _stop_tasks(tasks.values())
             for item in plan.calls:
                 if item.call.id not in answered:
                     self._answer(item.call, INTERRUPTED, answered)
@@ -362,29 +384,77 @@ class TaskBrain:
             yield self._say(message, interruptible=False)
         yield TransferRequest(target=item.target, label=item.transfer.label, message=message or None)
 
-    async def _execute(self, planned: tuple[PlannedCall, ...]) -> dict[str, str]:
+    def _start_tools(self, planned: tuple[PlannedCall, ...]) -> dict[str, asyncio.Task[ToolAnswer]]:
+        """One task per executed call (at most :data:`EXECUTOR_CONCURRENCY` run at once), all rendered in
+        the scope of the round's start."""
         executor = self._executor
         if executor is None or not planned:
             return {}
         gate = asyncio.Semaphore(EXECUTOR_CONCURRENCY)
-        results: dict[str, str] = {}
+        scope = dataclasses.replace(self._scope(), variables=dict(self._state.variables))
+        return {
+            item.call.id: asyncio.create_task(
+                _execute_gated(executor, item.call, scope, gate), name=f"tool-{item.call.name}"
+            )
+            for item in planned
+        }
 
-        async def run(call: ToolCall) -> None:
-            async with gate:
-                results[call.id] = await self._execute_one(executor, call)
+    async def _tool_line(
+        self, planned: tuple[PlannedCall, ...], tasks: Mapping[str, asyncio.Task[ToolAnswer]]
+    ) -> str | None:
+        """What the caller hears while the round's tools run: tool speech, else a filler for slow tools."""
+        if not self._fillers_on or not tasks:
+            return None
+        speech = self._speech_line(planned)
+        if speech is not None:
+            return speech
+        if not await self._still_running(tasks.values()):
+            return None
+        filler = TOOL_FILLERS[self._fillers % len(TOOL_FILLERS)]
+        self._fillers += 1
+        return filler
 
-        async with asyncio.TaskGroup() as group:
-            for item in planned:
-                group.create_task(run(item.call), name=f"tool-{item.call.name}")
-        return results
+    def _speech_line(self, planned: tuple[PlannedCall, ...]) -> str | None:
+        """The rendered ``speech`` of the first executed call whose tool has one (arguments: ``input.*``)."""
+        executor = self._executor
+        if executor is None:
+            return None
+        for item in planned:
+            template = executor.speech(item.call.name)
+            if template is None:
+                continue
+            scope = dataclasses.replace(self._scope(), input={"input": _arguments(item.call)})
+            try:
+                text = render(template, scope).strip()
+            except TemplateSyntaxError:
+                _log.warning("task_tool_speech_invalid", tool=item.call.name)
+                return None
+            return text or None
+        return None
 
-    @staticmethod
-    async def _execute_one(executor: ToolExecutor, call: ToolCall) -> str:
+    async def _still_running(self, tasks: Iterable[asyncio.Task[ToolAnswer]]) -> bool:
+        """Wait up to :data:`FILLER_DELAY_S` (on the injected clock) for ``tasks``; whether any still runs."""
+        pending = {task for task in tasks if not task.done()}
+        if not pending:
+            return False
+        delay = asyncio.create_task(self._clock.sleep(FILLER_DELAY_S), name="tool-filler-delay")
         try:
-            return await executor.execute(call)
-        except Exception as exc:
-            _log.warning("task_tool_failed", tool=call.name, error_type=type(exc).__name__)
-            return TOOL_FAILED
+            while pending and not delay.done():
+                await asyncio.wait({*pending, delay}, return_when=asyncio.FIRST_COMPLETED)
+                pending = {task for task in pending if not task.done()}
+        finally:
+            await _stop_tasks((delay,))
+        return bool(pending)
+
+    def _merge_variables(self, planned: tuple[PlannedCall, ...], results: Mapping[str, ToolAnswer]) -> None:
+        changed = False
+        for item in planned:
+            answer = results.get(item.call.id)
+            if answer is not None and answer.variables:
+                self._state.variables.update(answer.variables)
+                changed = True
+        if changed and self._on_state is not None:
+            self._on_state(self._state)
 
     def _handles(self, name: str) -> bool:
         return self._executor is not None and self._executor.handles(name)
@@ -460,6 +530,17 @@ class TaskBrain:
         self._mark_spoken(self._append(ChatMessage(role="assistant", content=text)))
         return SpeakStatic(text, interruptible=interruptible)
 
+    def _note_line(self, text: str) -> SpeakStatic:
+        """A tool speech or filler line: a transcript record, never a model message (an assistant message
+        may not sit between a tool call and its answers), so a barge-in on it trims nothing."""
+        self._state.add_turn(
+            TurnRecord(role="assistant", content=text, node_id=TASK_NODE_ID, at_ms=self._now_ms())
+        )
+        self._records_added += 1
+        self._spoken = None
+        self._spoken_record = None
+        return SpeakStatic(text)
+
     def _keep_partial(self, text: str) -> None:
         """The reply was cut while streaming: keep what was generated so far (barge-in trims it further)."""
         if text:
@@ -495,3 +576,33 @@ class TaskBrain:
 def _log_missing_variable(call_id: str, path: str) -> None:
     """The template sink (a function, not a bound method: the brain is freed without the cyclic collector)."""
     _log.info("template_variable_missing", path=path, call_id=call_id)
+
+
+def _arguments(call: ToolCall) -> dict[str, object]:
+    """The call's arguments as a mapping (``{}`` when they are not a JSON object)."""
+    try:
+        value: object = orjson.loads(call.arguments_json or "{}")
+    except orjson.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def _execute_gated(
+    executor: ToolExecutor, call: ToolCall, scope: TemplateScope, gate: asyncio.Semaphore
+) -> ToolAnswer:
+    """Run one call (an exception answers ``tool_failed``)."""
+    async with gate:
+        try:
+            return await executor.execute(call, scope)
+        except Exception as exc:
+            _log.warning("task_tool_failed", tool=call.name, error_type=type(exc).__name__)
+            return ToolAnswer(TOOL_FAILED)
+
+
+async def _stop_tasks(tasks: Iterable[asyncio.Task[Any]]) -> None:
+    """Cancel the unfinished ``tasks`` and wait until they ended."""
+    running = [task for task in tasks if not task.done()]
+    for task in running:
+        task.cancel()
+    if running:
+        await asyncio.wait(running)

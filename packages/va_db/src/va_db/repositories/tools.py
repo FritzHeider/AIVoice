@@ -11,7 +11,7 @@ live agents whose tool lists hold the tool, in either id form (``TL-<uuid>`` or 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -87,6 +87,16 @@ class ToolRepo:
         if tool is None:
             raise _not_found()
         return tool
+
+    async def by_ids(self, tool_ids: Sequence[uuid.UUID]) -> list[Tool]:
+        """The org's live tools among ``tool_ids`` in that order (absent, deleted and foreign ids skipped)."""
+        if not tool_ids:
+            return []
+        statement = select(Tool).where(
+            Tool.org_id == self.org_id, Tool.id.in_(list(tool_ids)), Tool.deleted_at.is_(None)
+        )
+        rows = {row.id: row for row in (await self.session.scalars(statement)).all()}
+        return [rows[tool_id] for tool_id in dict.fromkeys(tool_ids) if tool_id in rows]
 
     async def page(
         self, *, limit: int = DEFAULT_PAGE_LIMIT, cursor: str | None = None, search: str | None = None

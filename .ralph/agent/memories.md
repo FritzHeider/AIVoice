@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793861772-fd0f
+> P08-T02b1: task tools = va_tools.executor.CallToolExecutor + merged_tools; TaskBrain runs tool tasks, one speech/filler line per round (TOOL_FILLERS, 1.2s on brain clock), lines are history records not messages; media CallToolSource + TurnRecorder.tool/tool_failed; FakeSource works as TaskBrain gateway for AcceleratedClock harness tests; FrozenClock makes filler wait instant
+<!-- tags: engine, tools, media, testing | created: 2026-11-05 -->
+
 ### mem-1793857135-bee5
 > P08-T01: tools API = routers/tools + services/tools (update merges over stored def, pydantic errors re-raised as RequestValidationError with body loc) + va_db ToolRepo (frees soft-deleted namesake) + va_tools.secrets/validation; audit redactor blanks secret_headers key; cross-tenant factories run several times per tenant -> random names for per-org unique columns
 <!-- tags: api, tools, testing | created: 2026-11-05 -->

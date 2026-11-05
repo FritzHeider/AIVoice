@@ -41,6 +41,7 @@ __all__ = [
     "SHARED_TTL_S",
     "STANDARD_FILLERS",
     "SUPPORTED_FORMATS",
+    "TOOL_FILLERS",
     "CachedPhrase",
     "PhraseAlignment",
     "PhraseCache",
@@ -60,7 +61,16 @@ KEY_PREFIX: Final = "tts:cache:"
 SHARED_TTL_S: Final = 30 * 86_400
 PER_CALL_TTL_S: Final = 3_600
 MAX_VALUE_BYTES: Final = 2 * 1024 * 1024
-STANDARD_FILLERS: Final = ("Sure.", "Got it.", "One moment.", "Let me check that for you.")
+TOOL_FILLERS: Final = ("One moment.", "Just a second.", "Let me check.")
+"""The phrases played round-robin while a slow tool runs (specs/13 §5 step 2)."""
+STANDARD_FILLERS: Final = (
+    "Sure.",
+    "Got it.",
+    "One moment.",
+    "Let me check that for you.",
+    "Just a second.",
+    "Let me check.",
+)
 SUPPORTED_FORMATS: Final = {fmt.name: fmt for fmt in (ULAW_8000, PCM16LE_16000)}
 
 _log = get_logger(__name__)

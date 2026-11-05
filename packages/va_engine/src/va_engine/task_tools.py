@@ -29,6 +29,7 @@ from va_llm.models import ToolCall
 __all__ = [
     "ENDING",
     "EXECUTOR_CONCURRENCY",
+    "FILLER_DELAY_S",
     "INTERRUPTED",
     "MAX_INVALID_ROUNDS",
     "MAX_TOOL_CALLS_PER_CALL",
@@ -50,6 +51,8 @@ MAX_INVALID_ROUNDS: Final = 2
 MAX_TOOL_CALLS_PER_ROUND: Final = 4
 MAX_TOOL_CALLS_PER_CALL: Final = 100
 EXECUTOR_CONCURRENCY: Final = 3
+FILLER_DELAY_S: Final = 1.2
+"""A round without tool ``speech`` plays a filler when its tools still run after this long (specs/13 §5)."""
 
 type CallKind = Literal["execute", "press", "end", "transfer", "answer"]
 

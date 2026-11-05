@@ -2,7 +2,8 @@
 
 :class:`FakeStream` follows the :class:`va_llm.dialogue.DialogueStream` consumer contract: a speculative
 stream yields nothing until ``commit()``; ``discard()`` ends ``text()`` empty; ``fail`` is raised from
-``text()`` after the deltas (an :class:`LlmUnavailableError` with no deltas = a pre-token failure).
+``text()`` after the deltas (an :class:`LlmUnavailableError` with no deltas = a pre-token failure). It is
+also an async context manager (closing on exit), as :class:`va_engine.task_runner.TaskBrain` uses streams.
 """
 
 from __future__ import annotations
@@ -73,6 +74,7 @@ class FakeStream:
         self.closed = 0
         self.iterated = False
         self.yielded: list[str] = []
+        self.error: Exception | None = None
         self._released = asyncio.Event()
         if not request.speculative:
             self._released.set()
@@ -104,6 +106,12 @@ class FakeStream:
 
     async def aclose(self) -> None:
         self.closed += 1
+
+    async def __aenter__(self) -> FakeStream:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
 
 
 @dataclass(slots=True)

@@ -30,6 +30,7 @@ from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
 from va_llm.providers import platform_provider
 from va_llm.tokens import default_counter
 from va_media.call_end import CallEnd
+from va_media.call_tools import CallToolSource
 from va_media.pathway_runtime import PathwayTools
 from va_media.runtime import LLM_HTTP_TIMEOUT, CallRuntime, OrgSettingsSource
 from va_media.session import CallSession, SessionEnd
@@ -126,12 +127,14 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
     end_redis: Redis | None = None,
     messaging: bool = False,
     pathways: PathwayTools | None = None,
+    call_tools: CallToolSource | None = None,
 ) -> AsyncIterator[SimRuntime]:
     """The runtime over ``state`` (FakeTelnyx) and the served FakeElevenLabs/FakeLLM ``urls``. With
     ``database`` its end-of-call routine runs too (over ``end_redis``, FakeTelnyx, ``persistence``'s events
     and a :class:`RecordingSignaller`). ``messaging``: FakeTelnyx's platform account gets a messaging profile
     (the runtime's ``TELNYX_MESSAGING_PROFILE_ID``) and an SMS number on it (``SimRuntime.sms_number``).
-    ``pathways``: the runtime runs pathway calls with these per-process pieces."""
+    ``pathways``: the runtime runs pathway calls with these per-process pieces; ``call_tools``: task calls get
+    their custom tools from this source."""
     settings = settings_of(
         MediaSettings,
         elevenlabs_ws_base=urls["elevenlabs"].replace("http://", "ws://"),
@@ -192,5 +195,6 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
             end_routine=end_routine,
             database=database,
             pathways=pathways,
+            call_tools=call_tools,
         )
         yield SimRuntime(RecordingRuntime(runtime), settings, telnyx, signaller, sms, metrics)

@@ -217,8 +217,9 @@ Per utterance:
 ## 9. Phrase cache (REST)
 
 Used for: `first_sentence` (when it contains no per-call variables after templating — or per call during prefetch),
-fillers/backchannels ("Sure.", "Got it.", "One moment.", "Let me check that for you."), tool `speech`, voicemail
-`error_phrase`, reprompts, `max_duration_message`, transfer lines.
+fillers/backchannels ("Sure.", "Got it.", "One moment.", "Let me check that for you.", "Just a second.",
+"Let me check."), tool `speech`, voicemail `error_phrase`, reprompts, `max_duration_message`, transfer lines. The
+tool fillers of specs/13 §5 are "One moment.", "Just a second.", "Let me check." (`TOOL_FILLERS`, P08-T02b1).
 
 - Request: `POST {ELEVENLABS_API_BASE}/v1/text-to-speech/{voice_id}/with-timestamps?output_format=ulaw_8000`
   (or `pcm_16000`) body `{"text": text, "model_id": model, "voice_settings": settings, "language_code": lang?,
