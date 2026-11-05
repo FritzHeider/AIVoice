@@ -1,4 +1,4 @@
-"""Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decision P08-T02c1)."""
+"""Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from dialogue_helpers import unavailable
-from engine_helpers import Rig, engine_rig, route
+from engine_helpers import Rig, closed_on_line, drive, engine_rig, route, user
 from graph_helpers import edge, graph, node, start
 from handler_helpers import spoken
 from service_helpers import json_log_stream, log_events
@@ -161,13 +161,70 @@ async def test_end_call_speaks_its_final_line_and_ends(
     actions = await rig.start()
 
     tail = (
-        [("say", line, "t0.2", None), ("end", "agent_end_call", "agent", "t0.2")]
+        [("say", line, "t0.2", False), ("end", "agent_end_call", "agent", "t0.2")]
         if line
         else [("end", "agent_end_call", "agent", None)]
     )
     assert actions[-len(tail) :] == tail
     assert (rig.state.ended, rig.state.end_reason) == (True, "agent_end_call")
     assert tool_records(rig) == [("end_call", '{"status":"ending"}')]
+    assert len(rig.source.requests) == 1
+
+
+GOODBYE = ("say", "Goodbye.", "t1.2", False)
+ENDED = ("end", "agent_end_call", "agent", "t1.2")
+
+
+async def ending_turn(rig: Rig) -> list[tuple[Any, ...]]:
+    """The opener, then a caller turn the model answers with ``end_call``: the reply is closed on its final
+    line (a caller turn ended before the line's first audio), so the end was never received."""
+    rig.source.reply("Hello.").reply("", calls=[call("c1", "end_call", reason="done")])
+    await rig.start()
+    return await closed_on_line(rig.engine.handle_user_turn(user("that is all", 1)))
+
+
+@pytest.mark.parametrize("supersedes", [1, None])
+async def test_an_end_call_closed_on_its_final_line_ends_on_the_next_turn(supersedes: int | None) -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    stream = json_log_stream()
+
+    before = await ending_turn(rig)
+    history = rig.history()
+    merged = user("that is all, thanks", 2, supersedes=supersedes)
+    owed = await drive(rig.engine.handle_user_turn(merged))
+    later = await rig.say("hello?")
+
+    assert before == [("stream", "", "t1.1", None), GOODBYE]
+    assert owed == [GOODBYE, ENDED]
+    assert later == []
+    assert (rig.state.ended, rig.state.end_reason, rig.state.turn_index) == (True, "agent_end_call", 1)
+    assert rig.history() == history
+    assert history[-2:] == [("tool", '{"status":"ending"}'), ("assistant", "Goodbye.")]
+    assert len(rig.source.requests) == 2
+    after_end = [event["owed"] for event in log_events(stream) if event["event"] == "engine.turn_after_end"]
+    assert after_end == [True, False]
+
+
+async def test_an_owed_end_closed_again_on_its_line_stays_owed() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    await ending_turn(rig)
+
+    again = await closed_on_line(rig.engine.handle_user_turn(user("wait", 2, supersedes=1)))
+    owed = await drive(rig.engine.handle_user_turn(user("wait a moment", 3, supersedes=2)))
+
+    assert again == [GOODBYE]
+    assert owed == [GOODBYE, ENDED]
+    assert await rig.say("hello?") == []
+
+
+async def test_a_delivered_end_is_not_repeated() -> None:
+    rig = engine_rig(one_node(tools=[]), system=VOICE)
+    rig.source.reply("", calls=[call("c1", "end_call", reason="done")])
+
+    actions = await rig.start()
+
+    assert actions[-1] == ("end", "agent_end_call", "agent", "t0.2")
+    assert await rig.say("hello?") == []
     assert len(rig.source.requests) == 1
 
 
@@ -259,6 +316,37 @@ async def test_a_barge_in_during_the_filler_cancels_the_tool_and_answers_interru
     assert tool_records(rig) == [
         ("lookup", '{"error":"interrupted"}'),
         ("nope", '{"error":"interrupted"}'),
+    ]
+
+
+async def test_two_calls_without_ids_get_their_own_answers() -> None:
+    tools = executor(
+        results={"lookup": '{"hours":"9-5"}', "track": '{"eta":"Friday"}'},
+        variables={"lookup": {"hours": "9-5"}, "track": {"eta": "Friday"}},
+    )
+    rig = engine_rig(one_node(tools=["TL-1", "TL-2"]), tools=tools, fillers=False)
+    rig.source.reply("", calls=[call("", "lookup"), call("", "track")]).reply("Done.")
+
+    await rig.start()
+
+    assert [c.name for c in tools.calls] == ["lookup", "track"]
+    assert tool_records(rig) == [("lookup", '{"hours":"9-5"}'), ("track", '{"eta":"Friday"}')]
+    assert (rig.state.variables["hours"], rig.state.variables["eta"]) == ("9-5", "Friday")
+
+
+async def test_a_barge_in_cancels_and_answers_every_call_without_an_id() -> None:
+    tools = executor(hold=True)
+    rig = engine_rig(one_node(tools=["TL-1", "TL-2"]), tools=tools)
+    rig.source.reply("", calls=[call("", "lookup"), call("", "track")])
+
+    actions = await drive_held(rig, tools, close_on_line=True)
+
+    assert actions[-1][0] == "say"
+    assert sorted(name for name, _ in tools.cancelled) == ["lookup", "track"]
+    assert tools.active == 0
+    assert tool_records(rig) == [
+        ("lookup", '{"error":"interrupted"}'),
+        ("track", '{"error":"interrupted"}'),
     ]
 
 

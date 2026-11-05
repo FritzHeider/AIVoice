@@ -1,5 +1,45 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-16 Pathway `end_call` always ends the call (final line not interruptible, an undelivered end is delivered on the next turn); tool tasks keyed by position — see .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md (items 1, 2; replaces 2026-11-05-p08-t02c1-engine-node-tools-review.md) — `end_call`/loop-protection final lines `Say(interruptible=False)`, owed `EndCallAction` re-delivered on the next turn (`_owed_end`), tool rounds by position (`start_tools` list, `round_contents`); Decision P08-FIX-16 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, make test 13030 passed 7 skipped (cov 99.07%); reviewer pipeline probe of the pre-audio merge on the goodbye ended `agent_hangup`
+  - Spec refs: specs/13 §4 (Decision P08-T02c1), specs/11 §5.9 (Decision P07-T08b), specs/07 §8 (pre-audio merge)
+  - Depends on: P08-T02c1
+  - Deliverables: `PathwayEngine._tool_end` speaks the final line as a non-interruptible `Say`; `_protection`
+    speaks the `errorPhrase` non-interruptibly (the unavailable-model line stays interruptible); an ended
+    conversation whose `EndCallAction` was never yielded (the reply was closed first: pre-audio merge) yields its
+    remaining final line + `EndCallAction` on the next `handle_user_turn` instead of nothing (tool `end_call`, End
+    Call node, loop protection); `va_engine.tool_tasks.start_tools` returns one task per executed call by position,
+    answers / variable merge / `interrupted` answers are tracked by position in `plan.calls` in both
+    `run_node_round` and `TaskBrain._run_tools` (never by `call.id`); specs/13 §4 Decision `P08-FIX-16`; AGENTS.md.
+  - Acceptance: engine tests: the `end_call` final line and the loop-protection line are `interruptible=False`;
+    closing the generator on the final line then delivering a superseding turn yields the line + end (tool
+    `end_call` and End Call node), a later turn yields nothing; pipeline harness test: a caller speaking over the
+    `end_call` goodbye still ends `agent_hangup` with the line not interrupted; two tool calls with id `""` each
+    run, get their own answer, and are both cancelled + answered `interrupted` on a barge-in (engine and
+    TaskBrain); `make check` passes. The inbox notes go to DONE with P08-FIX-17 (it closes their items 3, 4).
+- [ ] P08-FIX-17 A superseded turn keeps the record of tools that already ran; one definition per inline tool name in a pathway — see .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md (items 3, 4), 2026-11-05-p08-t02c1-engine-node-tools-review.md (item 4)
+  - Spec refs: specs/13 §4 (Decision P08-T02c1), §5 (Decision P08-T02b1), specs/11 §11 (validation rules), specs/07 §8
+  - Depends on: P08-FIX-16
+  - Deliverables: `PathwayEngine._drop_turn` and `TaskBrain._drop_turn` keep the superseded turn's tool answers
+    (pathway: the `tool` history records stay ahead of the merged caller turn; task mode: the results stay in
+    the model's messages in a provider-valid form and as `tool` records), so the next request shows what ran;
+    the rule for same-name inline tools with different definitions (and an inline tool named like a referenced
+    stored tool) is decided, written into Decision P08-T02c1 and enforced (graph validation rule in specs/11 §11 +
+    `va_engine.validation`, or ref-based resolution) before P08-T02c2 builds the executor; Decisions updated in
+    specs/13 §4/§5; AGENTS.md.
+  - Acceptance: engine and TaskBrain tests: a tool-only reply superseded before any audio leaves the tool
+    result visible to the next request and the tool is not offered as never-run (request messages asserted);
+    validation/resolution tests for two nodes with different inline tools of one name; `make check` passes;
+    append both note names to `.ralph/review-inbox/DONE` on approval.
+- [ ] P08-FIX-18 A lock lost (or a keepalive overrun) during the body teardown ends the session as worker_lost — see .ralph/review-inbox/2026-11-05-p08-fix-15-review.md
+  - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-FIX-14, P08-FIX-15), specs/07 §18
+  - Depends on: P08-FIX-15
+  - Deliverables: `CallSession._race` returns `OWNERSHIP_LOST` when the renewer lost the lock during the body
+    teardown, and resolves the end as worker_lost when the teardown overran `TEARDOWN_KEEPALIVE_S` (the
+    heartbeat expired, `CallWorkflow` ends the call), so the media end routine neither records nor hangs up
+    in parallel with the workflow; Decision under specs/13 §6; AGENTS.md.
+  - Acceptance: session tests: a renewer losing the lock while a gated body teardown runs → `run()` returns
+    `OWNERSHIP_LOST` and the ender sees worker_lost; same for a teardown past `TEARDOWN_KEEPALIVE_S`; existing
+    session tests pass; `make check` passes; append the note name to `.ralph/review-inbox/DONE` on approval.
 - [x] P08-FIX-15 Bound the session keepalive during the body teardown; stop the heartbeat once ownership is lost — see .ralph/review-inbox/2026-11-05-p08-fix-14-review.md — `TEARDOWN_KEEPALIVE_S` 25 s bound via asyncio.wait without cancelling the teardown, `media.body_teardown_overran`, heartbeat cancelled by a renewer done callback; Decision P08-FIX-15; lint/typecheck/placeholders pass, make test 12969 passed 7 skipped (cov 99.06%)
   - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decision P08-FIX-14)
   - Depends on: P08-FIX-14

@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793879436-c633
+> P08-FIX-16: tool rounds are by position (tool_tasks.start_tools returns a task list, merge_variables(variables, answers), round_contents(plan, answers); runners count answered calls) because call ids may be empty/repeated; PathwayEngine owes an ended conversation's EndCallAction (_owed_end set in _out, cleared before the end is yielded; handle_user_turn after an undelivered end re-yields final line + end); final lines (end_call tool, loop protection) are Say(interruptible=False); tests use engine_helpers.closed_on_line; end_call tool args need reason
+<!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
+
 ### mem-1793876594-d56e
 > P08-T02c1 fix: real DialogueStream.tool_calls() raises LlmUnavailableError and a cut-off stream returns partial calls with stream.error set -> engine/_reply_calls and TaskBrain must check dialogue.unavailable / stream.error before tool_calls(); dialogue_helpers.FakeStream now mirrors this (fail=unavailable sets error + raises from tool_calls; reply(error=) scripts a cut-off); invalid/blank tool speech falls back to the filler
 <!-- tags: engine, tools, testing | created: 2026-11-05 -->

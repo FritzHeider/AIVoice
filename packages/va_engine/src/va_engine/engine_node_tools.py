@@ -1,4 +1,5 @@
-"""Custom and system tools on pathway reply nodes (specs/13 §4; Decision P08-T02c1 under specs/13 §4).
+"""Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1 and P08-FIX-16 under
+specs/13 §4).
 
 A reply node (:data:`REPLY_NODE_TYPES`, global nodes included) whose reply streams from the dialogue model
 is offered the system tools the conversation allows (:class:`~va_engine.system_tools.SystemToolFacts` with
@@ -7,7 +8,8 @@ followed by the custom tools of the node's ``tools`` and ``globalConfig.globalTo
 :class:`NodeTools` computes that :class:`ToolOffer`; :func:`run_node_round` executes one round of the
 model's calls: executor tools run as tasks while the tool speech or a filler plays, their answers and
 variables are recorded, and ``press_button`` yields a :class:`~va_engine.models.results.SendDtmfAction`. A
-round cut short (barge-in) answers the unanswered calls ``interrupted``.
+round cut short (barge-in) cancels its tool tasks and answers the unanswered calls ``interrupted``; calls
+are tracked by their position in the round, never by the model's call id.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import AsyncGenerator, Callable, MutableMapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Final
 
 from va_common.logging import get_logger
@@ -24,10 +26,17 @@ from va_engine.models.graph import PathwayGraph
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.results import Action, Say, SendDtmfAction
 from va_engine.system_tools import SystemToolFacts, is_reserved, system_tools
-from va_engine.task_tools import INTERRUPTED, TOOL_FAILED, PlannedCall, RoundPlan
+from va_engine.task_tools import INTERRUPTED, PlannedCall, RoundPlan
 from va_engine.templating import TemplateScope
 from va_engine.tool_executor import PathwayToolExecutor, ToolAnswer, ToolRef
-from va_engine.tool_tasks import ToolLines, merge_variables, runnable_facts, start_tools, stop_tasks
+from va_engine.tool_tasks import (
+    ToolLines,
+    merge_variables,
+    round_contents,
+    runnable_facts,
+    start_tools,
+    stop_tasks,
+)
 from va_llm.models import ToolCall, ToolDef
 
 __all__ = [
@@ -136,11 +145,11 @@ class NodeTools:
 
 @dataclass(slots=True)
 class RoundOutcome:
-    """Filled by :func:`run_node_round`: the round's ``end_call`` (``None`` = none) and the ids of the calls
-    answered so far."""
+    """Filled by :func:`run_node_round`: the round's ``end_call`` (``None`` = none) and how many of the
+    round's calls were answered so far (they are answered in call order)."""
 
     terminal: PlannedCall | None = None
-    answered: set[str] = field(default_factory=set)
+    answered: int = 0
 
 
 async def run_node_round(  # noqa: PLR0913 - the round, its tools, scope, and the engine's callbacks
@@ -155,28 +164,25 @@ async def run_node_round(  # noqa: PLR0913 - the round, its tools, scope, and th
 ) -> AsyncGenerator[Action]:
     """Execute ``plan``: yields the speech/filler line, then one :class:`SendDtmfAction` per ``press_button``
     after every call was answered through ``answer`` (in call order)."""
-    tasks: dict[str, asyncio.Task[ToolAnswer]] = {}
+    tasks: list[asyncio.Task[ToolAnswer]] = []
     try:
         tasks = start_tools(tools.executor, plan.executed, scope)
         line = await tools.lines.line(plan.executed, tasks, scope)
         if line is not None:
             yield Say(text=line, mark=next_mark())
-        results: dict[str, ToolAnswer] = {call_id: await task for call_id, task in tasks.items()}
-        merge_variables(variables, plan.executed, results)
+        answers = [await task for task in tasks]
+        merge_variables(variables, answers)
         presses: list[str] = []
-        for item in plan.calls:
-            result = results.get(item.call.id)
-            content = (result.content if result is not None else item.answer) or TOOL_FAILED
+        for item, content in round_contents(plan, answers):
             answer(item.call, content)
-            outcome.answered.add(item.call.id)
+            outcome.answered += 1
             if item.digits is not None:
                 presses.append(item.digits)
         outcome.terminal = plan.terminal
         for digits in presses:
             yield SendDtmfAction(digits=digits, duration_ms=DTMF_DURATION_MS)
     finally:
-        await stop_tasks(tasks.values())
-        for item in plan.calls:
-            if item.call.id not in outcome.answered:
-                answer(item.call, INTERRUPTED)
-                outcome.answered.add(item.call.id)
+        await stop_tasks(tasks)
+        for item in plan.calls[outcome.answered :]:
+            answer(item.call, INTERRUPTED)
+            outcome.answered += 1

@@ -11,6 +11,11 @@ reply at the current node), applies it, and executes the node it lands on (``on_
 engine chains another pass with an empty message, at most :data:`CHAIN_DEPTH_LIMIT` times per user turn.
 Loop protection (``maxVisits``, chain depth, ``maxTotalTurns``) speaks the ``errorPhrase`` and ends the call.
 Side effects go through the injected ports; events go to :class:`~va_engine.engine_events.EngineEvents`.
+
+An ended conversation owes its consumer the :class:`~va_engine.models.results.EndCallAction` (Decision
+P08-FIX-16 under specs/13 §4): the final lines are not interruptible, and when the reply was closed before
+the end was yielded (a caller turn ended before the line's first audio, specs/07 §8) the next caller turn is
+not answered but yields the remaining final line and the end.
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ from va_engine.handlers import (
     handler_for,
     speak_node,
 )
+from va_engine.handlers.base import line_actions
 from va_engine.handlers.webhook import node_waits
 from va_engine.logs import PathwayLogBook
 from va_engine.models.nodes import PathwayNode
@@ -268,6 +274,7 @@ class PathwayEngine:
         self._tools = NodeTools(ports.tools, facts.system_tools, clock=clock, fillers=facts.tool_fillers)
         self._offer: ToolOffer = NO_OFFER
         self._tool_calls_used = 0
+        self._owed_end: tuple[Action, ...] = ()
         if ports.tools is not None and ports.tools.tool_speech:
             self._dialogue.tool_speech = ports.tools.tool_speech
 
@@ -302,9 +309,16 @@ class PathwayEngine:
                 yield action
 
     async def handle_user_turn(self, turn: UserTurn) -> AsyncGenerator[Action]:
-        """The caller finished a turn: decide, execute, chain."""
+        """The caller finished a turn: decide, execute, chain.
+
+        After the end nothing is decided or recorded; an end the consumer never received (its reply was
+        closed first) is delivered now: the final line again, then the :class:`EndCallAction`."""
         if self.state.ended:
-            _log.info("engine.turn_after_end", turn_index=turn.index)
+            _log.info("engine.turn_after_end", turn_index=turn.index, owed=bool(self._owed_end))
+            for action in self._owed_end:
+                if isinstance(action, EndCallAction):
+                    self._owed_end = ()
+                yield action
             return
         if turn.supersedes is not None:
             self._drop_turn(turn.supersedes)
@@ -626,11 +640,8 @@ class PathwayEngine:
         state.ended = True
         state.end_reason = AGENT_END_CALL
         disarm(state)
-        line = Say(text=final, mark=ctx.next_mark()) if final else None
-        ending = EndCallAction(
-            reason=AGENT_END_CALL, ended_by="agent", after_mark=line.mark if line is not None else None
-        )
-        return (line, ending) if line is not None else (ending,)
+        speech, mark = line_actions(ctx, final or None)
+        return (*speech, EndCallAction(reason=AGENT_END_CALL, ended_by="agent", after_mark=mark))
 
     def _record_tool(self, node_id: str, call_id: str, name: str, content: str) -> None:
         self._record(
@@ -647,10 +658,15 @@ class PathwayEngine:
     # Speech.
 
     async def _out(self, run: _Run, actions: Iterable[Action]) -> AsyncGenerator[Action]:
-        """Yield ``actions`` in order, recording speech; nothing after a terminal action."""
-        for action in actions:
-            if run.done:
-                return
+        """Yield ``actions`` in order, recording speech; nothing after a terminal action.
+
+        The final line and :class:`EndCallAction` of an ended conversation stay owed until the end is
+        yielded (the consumer ends the call on receipt and closes this generator at that yield)."""
+        queued = tuple(actions)
+        if run.over():
+            return
+        self._owe(queued)
+        for action in queued:
             if isinstance(action, SayStream):
                 async with contextlib.aclosing(self._streamed(action)) as spoken:
                     async for item in spoken:
@@ -658,9 +674,17 @@ class PathwayEngine:
                 continue
             if isinstance(action, Say):
                 self._remember(action.text)
+            elif isinstance(action, EndCallAction):
+                self._owed_end = ()
             yield action
             if is_terminal(action):
                 run.done = True
+                return
+
+    def _owe(self, queued: Sequence[Action]) -> None:
+        """Remember the final line and end of ``queued`` when it ends the conversation."""
+        if self.state.ended and any(isinstance(action, EndCallAction) for action in queued):
+            self._owed_end = tuple(action for action in queued if isinstance(action, Say | EndCallAction))
 
     async def _streamed(self, action: SayStream) -> AsyncGenerator[Action]:
         """A streamed reply: what the consumer received is recorded (also when the generator is closed); a
@@ -721,13 +745,16 @@ class PathwayEngine:
         return Say(text=text, mark=ctx.next_mark()) if text else None
 
     def _protection(self, node_id: str, cause: ProtectionCause) -> tuple[Action, ...]:
-        """Loop protection: the ``errorPhrase`` then the end of the call."""
+        """Loop protection: the ``errorPhrase`` (not interruptible: it is a final line) then the end of the
+        call."""
         _log.warning("engine.loop_protection", node_id=node_id, cause=cause)
         state = self.state
         state.ended = True
         state.end_reason = LOOP_PROTECTION
         disarm(state)
         error = self._error_line(self._nav.node)
+        if error is not None:
+            error = replace(error, interruptible=False)
         end = EndCallAction(
             reason=LOOP_PROTECTION, ended_by="system", after_mark=error.mark if error is not None else None
         )

@@ -1,5 +1,5 @@
 """Executor tool rounds shared by the task-mode runner and the pathway engine (specs/13 §5; Decisions
-P08-T02b1, P08-T02c1).
+P08-T02b1, P08-T02c1, P08-FIX-16).
 
 The executed calls of one round start as tasks at once (:func:`start_tools`, at most
 :data:`~va_engine.task_tools.EXECUTOR_CONCURRENCY` in parallel, all rendered with the variables of the
@@ -7,7 +7,11 @@ round's start). :class:`ToolLines` picks what the caller hears while they run: t
 first executed call whose tool has one, else (when a tool still runs after
 :data:`~va_engine.task_tools.FILLER_DELAY_S` on the injected clock) one filler of
 :data:`~va_voice.phrase_cache.TOOL_FILLERS`, round-robin per conversation. :func:`merge_variables` merges the
-round's extractions in call order.
+round's extractions in call order and :func:`round_contents` pairs every call of the round with its ``tool``
+content.
+
+Tasks, answers and contents belong to a call by its position in the round, never by the model's call id:
+providers omit or repeat ids, and two calls sharing one must each run, be cancelled, and be answered.
 """
 
 from __future__ import annotations
@@ -23,7 +27,13 @@ from pydantic import JsonValue
 from va_common.logging import get_logger
 from va_common.time import Clock
 from va_engine.system_tools import SystemToolFacts
-from va_engine.task_tools import EXECUTOR_CONCURRENCY, FILLER_DELAY_S, TOOL_FAILED, PlannedCall
+from va_engine.task_tools import (
+    EXECUTOR_CONCURRENCY,
+    FILLER_DELAY_S,
+    TOOL_FAILED,
+    PlannedCall,
+    RoundPlan,
+)
 from va_engine.templating import TemplateScope, TemplateSyntaxError, render
 from va_engine.tool_executor import ToolAnswer, ToolExecutor
 from va_llm.models import ToolCall
@@ -34,6 +44,7 @@ __all__ = [
     "call_arguments",
     "execute_gated",
     "merge_variables",
+    "round_contents",
     "runnable_facts",
     "start_tools",
     "stop_tasks",
@@ -88,34 +99,44 @@ async def stop_tasks(tasks: Iterable[asyncio.Task[Any]]) -> None:
 
 def start_tools(
     executor: ToolExecutor | None, planned: Sequence[PlannedCall], scope: TemplateScope
-) -> dict[str, asyncio.Task[ToolAnswer]]:
-    """One task per executed call (keyed by call id), all rendered with a copy of ``scope``'s variables."""
+) -> list[asyncio.Task[ToolAnswer]]:
+    """One task per executed call, in the order of ``planned`` (by position, never by call id), all
+    rendered with a copy of ``scope``'s variables; ``[]`` without an executor."""
     if executor is None or not planned:
-        return {}
+        return []
     gate = asyncio.Semaphore(EXECUTOR_CONCURRENCY)
     frozen = dataclasses.replace(scope, variables=dict(scope.variables))
-    return {
-        item.call.id: asyncio.create_task(
-            execute_gated(executor, item.call, frozen, gate), name=f"tool-{item.call.name}"
-        )
+    return [
+        asyncio.create_task(execute_gated(executor, item.call, frozen, gate), name=f"tool-{item.call.name}")
         for item in planned
-    }
+    ]
 
 
-def merge_variables(
-    variables: MutableMapping[str, Any],
-    planned: Sequence[PlannedCall],
-    results: Mapping[str, ToolAnswer],
-) -> bool:
-    """Merge the round's extracted variables in call order; whether anything was merged."""
+def merge_variables(variables: MutableMapping[str, Any], answers: Iterable[ToolAnswer]) -> bool:
+    """Merge the variables the round's ``answers`` extracted, in call order; whether anything was merged."""
     changed = False
-    for item in planned:
-        answer = results.get(item.call.id)
-        if answer is not None and answer.variables:
+    for answer in answers:
+        if answer.variables:
             extracted: Mapping[str, JsonValue] = answer.variables
             variables.update(extracted)
             changed = True
     return changed
+
+
+def round_contents(plan: RoundPlan, answers: Sequence[ToolAnswer]) -> list[tuple[PlannedCall, str]]:
+    """Every call of ``plan`` in call order with its ``tool`` content.
+
+    An executed call takes the next of ``answers`` (the results of :func:`start_tools`' tasks, by position);
+    the others keep their planned answer. Blank content reads ``tool_failed``.
+    """
+    if len(answers) != len(plan.executed):
+        msg = f"{len(plan.executed)} executed calls need as many answers, got {len(answers)}"
+        raise ValueError(msg)
+    remaining = iter(answers)
+    return [
+        (item, (next(remaining).content if item.kind == "execute" else item.answer) or TOOL_FAILED)
+        for item in plan.calls
+    ]
 
 
 class ToolLines:
@@ -134,7 +155,7 @@ class ToolLines:
     async def line(
         self,
         planned: Sequence[PlannedCall],
-        tasks: Mapping[str, asyncio.Task[ToolAnswer]],
+        tasks: Sequence[asyncio.Task[ToolAnswer]],
         scope: TemplateScope,
     ) -> str | None:
         """Tool speech, else a filler when a tool still runs after :data:`FILLER_DELAY_S`, else ``None``."""
@@ -143,7 +164,7 @@ class ToolLines:
         speech = self._speech(planned, scope)
         if speech is not None:
             return speech
-        if not await self._still_running(tasks.values()):
+        if not await self._still_running(tasks):
             return None
         filler = TOOL_FILLERS[self._fillers % len(TOOL_FILLERS)]
         self._fillers += 1

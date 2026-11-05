@@ -6,6 +6,7 @@ executor all share it, so tool durations and the 1 200 ms filler delay are virtu
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from functools import partial
 from typing import Any
@@ -25,12 +26,14 @@ from va_llm.models import ToolCall, ToolDef
 from va_sim.clock import AcceleratedClock
 from va_voice.phrase_cache import TOOL_FILLERS
 from va_voice.pipeline import PipelineConfig
+from va_voice.pipeline.models import SpeakStatic, SpeakText
 
 LOOKUP = ToolDef(
     name="lookup_order",
     description="Looks up an order.",
     parameters={"type": "object", "properties": {"order": {"type": "string"}}},
 )
+ETA = ToolDef(name="eta", parameters={"type": "object"})
 SPEECH = "Let me look up order {{input.order}}."
 LONG_SPEECH = "Let me look that up for you, " + "this may take a little while, " * 18 + "thanks."
 
@@ -219,6 +222,60 @@ async def test_extracted_variables_merge_into_state_and_on_state() -> None:
     await drain(brain.on_user_turn(user_turn(2, "and now")))
     assert len(states) == 1
     assert "status" not in executor.scopes[0].variables
+
+
+def _id_less_round(clock: Clock, **fields: Any) -> tuple[FakeSource, RecordingExecutor]:
+    """A round of two calls whose ids the provider left empty (specs/13 §4 Decision P08-FIX-16)."""
+    calls = [
+        ToolCall(id="", name="lookup_order", arguments_json="{}"),
+        ToolCall(id="", name="eta", arguments_json="{}"),
+    ]
+    source = FakeSource().reply(calls=calls).reply("Done.")
+    executor = RecordingExecutor(
+        tools=(LOOKUP, ETA), names=frozenset({"lookup_order", "eta"}), clock=clock, **fields
+    )
+    return source, executor
+
+
+async def test_two_calls_without_ids_get_their_own_answers() -> None:
+    clock = FrozenClock()
+    source, executor = _id_less_round(
+        clock,
+        results={"lookup_order": '{"status":"shipped"}', "eta": '{"eta":"Friday"}'},
+        variables={"lookup_order": {"status": "shipped"}, "eta": {"eta": "Friday"}},
+    )
+    brain = _brain(clock, source, executor, fillers=False)
+    await drain(brain.start())
+
+    outputs = await drain(brain.on_user_turn(user_turn(1, "where is my order")))
+
+    assert outputs == [("text", "Done.")]
+    assert [call.name for call in executor.calls] == ["lookup_order", "eta"]
+    assert [m.content for m in brain.messages if m.role == "tool"] == [
+        '{"status":"shipped"}',
+        '{"eta":"Friday"}',
+    ]
+    assert (brain.state.variables["status"], brain.state.variables["eta"]) == ("shipped", "Friday")
+
+
+async def test_a_barge_in_cancels_and_answers_every_call_without_an_id() -> None:
+    clock = FrozenClock()
+    source, executor = _id_less_round(clock, hold=True)
+    brain = _brain(clock, source, executor)
+    await drain(brain.start())
+
+    async with contextlib.aclosing(brain.on_user_turn(user_turn(1, "where is my order"))) as outputs:
+        async for output in outputs:
+            if isinstance(output, SpeakText):
+                assert [delta async for delta in output.tokens] == []
+            if isinstance(output, SpeakStatic):
+                break
+
+    assert isinstance(output, SpeakStatic)
+    assert output.text in TOOL_FILLERS
+    assert sorted(name for name, _ in executor.cancelled) == ["eta", "lookup_order"]
+    assert executor.active == 0
+    assert [m.content for m in brain.messages if m.role == "tool"] == [INTERRUPTED, INTERRUPTED]
 
 
 async def test_tool_speech_reads_the_scope_and_a_bad_template_is_skipped() -> None:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Final
@@ -45,14 +45,20 @@ from va_engine.task_tools import (
     MAX_INVALID_ROUNDS,
     MAX_TOOL_CALLS_PER_CALL,
     MAX_TOOL_ROUNDS,
-    TOOL_FAILED,
     PlannedCall,
     RoundPlan,
     plan_round,
 )
 from va_engine.templating import MissingVariables, Template, TemplateScope, render
 from va_engine.tool_executor import ToolAnswer, ToolExecutor
-from va_engine.tool_tasks import ToolLines, merge_variables, runnable_facts, start_tools, stop_tasks
+from va_engine.tool_tasks import (
+    ToolLines,
+    merge_variables,
+    round_contents,
+    runnable_facts,
+    start_tools,
+    stop_tasks,
+)
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import LlmUnavailableError
@@ -334,27 +340,25 @@ class TaskBrain:
         return calls
 
     async def _run_tools(self, plan: RoundPlan, budget: _TurnBudget) -> AsyncGenerator[BrainOutput]:
-        answered: set[str] = set()
-        tasks: dict[str, asyncio.Task[ToolAnswer]] = {}
+        answered = 0  # calls are answered in call order: a position, never a call id (Decision P08-FIX-16)
+        tasks: list[asyncio.Task[ToolAnswer]] = []
         try:
             scope = self._scope()
             tasks = start_tools(self._executor, plan.executed, scope)
             line = await self._lines.line(plan.executed, tasks, scope)
             if line is not None:
                 yield self._note_line(line)
-            results = {call_id: await task for call_id, task in tasks.items()}
-            self._merge_variables(plan.executed, results)
-            for item in plan.calls:
-                answer = results.get(item.call.id)
-                content = (answer.content if answer is not None else item.answer) or TOOL_FAILED
-                self._answer(item.call, content, answered)
+            answers = [await task for task in tasks]
+            self._merge_variables(answers)
+            for item, content in round_contents(plan, answers):
+                self._answer(item.call, content)
+                answered += 1
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
         finally:
-            await stop_tasks(tasks.values())
-            for item in plan.calls:
-                if item.call.id not in answered:
-                    self._answer(item.call, INTERRUPTED, answered)
+            await stop_tasks(tasks)
+            for item in plan.calls[answered:]:
+                self._answer(item.call, INTERRUPTED)
         terminal = plan.terminal
         if terminal is not None:
             async with contextlib.aclosing(self._finish(terminal, budget)) as outputs:
@@ -377,8 +381,8 @@ class TaskBrain:
             yield self._say(message, interruptible=False)
         yield TransferRequest(target=item.target, label=item.transfer.label, message=message or None)
 
-    def _merge_variables(self, planned: tuple[PlannedCall, ...], results: Mapping[str, ToolAnswer]) -> None:
-        if merge_variables(self._state.variables, planned, results) and self._on_state is not None:
+    def _merge_variables(self, answers: list[ToolAnswer]) -> None:
+        if merge_variables(self._state.variables, answers) and self._on_state is not None:
             self._on_state(self._state)
 
     def _handles(self, name: str) -> bool:
@@ -478,9 +482,8 @@ class TaskBrain:
         if text:
             self._mark_spoken(record)
 
-    def _answer(self, call: ToolCall, content: str, answered: set[str]) -> None:
+    def _answer(self, call: ToolCall, content: str) -> None:
         self._append(ChatMessage(role="tool", content=content, tool_call_id=call.id), tool_name=call.name)
-        answered.add(call.id)
 
     def _drop_turn(self, index: int) -> None:
         """A superseding turn replaces turn ``index``: drop its user message and everything after it."""

@@ -2075,3 +2075,12 @@ Grafana 3001
   and makes `tool_calls()` raise; `reply(..., calls=[...], error=LlmConnectionError(...))` scripts a cut-off stream.
   Engine/TaskBrain code must check `unavailable`/`stream.error` before `tool_calls()`. An invalid or blank tool
   `speech` falls back to the filler (`test_tool_tasks.py` drives `ToolLines` on a `ManualClock`).
+- 2026-11-05 (P08-FIX-16): tool rounds are by position: `tool_tasks.start_tools` returns a list of tasks in call
+  order, `merge_variables(variables, answers)`, `round_contents(plan, answers)` pairs every planned call with its
+  `tool` content, and the runners count answered calls (`plan.calls[answered:]` get `interrupted`); never key
+  anything by `call.id` (may be `""` or repeated). `PathwayEngine` owes an ended conversation's `EndCallAction`
+  (`_owed_end`, set in `_out`, cleared right before the end is yielded): `handle_user_turn` after an undelivered
+  end yields the final line + end without deciding or recording. Final lines (`end_call` tool, loop-protection
+  `errorPhrase`, End Call node) are `Say(interruptible=False)`. Tests simulate the pipeline's pre-audio merge with
+  `engine_helpers.closed_on_line(agen)` (closes the generator at the first `Say`); `end_call` arguments need
+  `reason` (else the call is answered `invalid_arguments` and nothing ends).

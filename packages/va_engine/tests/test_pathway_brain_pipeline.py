@@ -1,4 +1,5 @@
-"""PathwayBrain inside the call pipeline: route, End Call after its line, wait timeout, barge-in (P07-T12a).
+"""PathwayBrain inside the call pipeline: route, End Call after its line, wait timeout, barge-in (P07-T12a),
+and the ``end_call`` tool's goodbye that the caller cannot talk over (P08-FIX-16).
 
 The decisions are scripted (``KeyedPort``) and every node speaks static text, so the harness runs on the
 simulators' accelerated clock.
@@ -6,6 +7,7 @@ simulators' accelerated clock.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from engine_helpers import Rig, engine_rig, route
@@ -13,6 +15,8 @@ from graph_helpers import edge, graph, node, start
 from pipeline_harness import Harness, harness
 
 from va_engine.pathway_brain import PATHWAY_END_REASON, PathwayBrain
+from va_engine.system_tools import SystemToolFacts
+from va_llm.models import ToolCall
 from va_voice.pipeline import PipelineConfig
 
 CONFIG = PipelineConfig(no_input_timeout_ms=30_000)
@@ -107,4 +111,29 @@ async def test_a_barge_in_truncates_the_engine_history() -> None:
     assert [record.content for record in rig.state.history[1:]] == [
         "wait a second please",
         "Of course, go ahead.",
+    ]
+
+
+async def test_speaking_over_the_end_call_goodbye_still_ends_the_call() -> None:
+    pathway = graph([start("a", prompt="Help the caller.")], [], {"allowEndCallTool": True})
+    rig = engine_rig(pathway, system=SystemToolFacts(runner="pathway", channel="voice"))
+    arguments = json.dumps({"reason": "caller is done", "final_message": LONG_LINE})
+    ending = ToolCall(id="", name="end_call", arguments_json=arguments)
+    rig.source.reply("Hi, welcome to Bella Pasta.").reply("", calls=[ending])
+    utterances = ["that's all bye", "thanks so much bye bye"]
+    async with harness(config=CONFIG, utterances=utterances, engine=brain_of(rig)) as h:
+        await h.until(lambda: len(h.observer.agent_turns) >= 1)
+        await h.caller.say(600)
+        await h.until(lambda: len(h.tts.sent) > 1 and h.pipeline.speaker.is_playing(h.now_ms()))
+        await h.caller.say(1500)
+        result = await h.result()
+    assert result.end_reason == PATHWAY_END_REASON
+    final = h.observer.agent_turns[-1]
+    assert (final.text, final.text_spoken, final.interrupted) == (LONG_LINE, LONG_LINE, False)
+    assert h.observer.interrupts == []
+    assert "transport.clear" not in [name for name, _ in h.transport.calls]
+    assert (rig.state.ended, rig.state.end_reason) == (True, "agent_end_call")
+    assert [record.content for record in rig.state.history if record.role == "assistant"] == [
+        "Hi, welcome to Bella Pasta.",
+        LONG_LINE,
     ]

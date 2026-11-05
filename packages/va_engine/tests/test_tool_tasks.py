@@ -1,5 +1,5 @@
 """The executor tool-round helpers shared by task mode and pathways (specs/13 §5; Decisions P08-T02b1,
-P08-T02c1)."""
+P08-T02c1, P08-FIX-16)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,14 @@ from service_helpers import json_log_stream, log_events
 from task_helpers import RecordingExecutor
 
 from va_engine.system_tools import SystemToolFacts
-from va_engine.task_tools import EXECUTOR_CONCURRENCY, FILLER_DELAY_S, TOOL_FAILED, PlannedCall
+from va_engine.task_tools import (
+    EXECUTOR_CONCURRENCY,
+    FILLER_DELAY_S,
+    TOOL_FAILED,
+    PlannedCall,
+    RoundPlan,
+    sent_digits,
+)
 from va_engine.templating import TemplateScope
 from va_engine.tool_executor import ToolAnswer
 from va_engine.tool_tasks import (
@@ -20,6 +27,7 @@ from va_engine.tool_tasks import (
     call_arguments,
     execute_gated,
     merge_variables,
+    round_contents,
     runnable_facts,
     start_tools,
     stop_tasks,
@@ -87,8 +95,8 @@ async def test_a_raising_tool_answers_tool_failed() -> None:
 
 
 async def test_no_executor_or_no_calls_start_no_tasks() -> None:
-    assert start_tools(None, [planned("c1")], TemplateScope()) == {}
-    assert start_tools(RecordingExecutor(), [], TemplateScope()) == {}
+    assert start_tools(None, [planned("c1")], TemplateScope()) == []
+    assert start_tools(RecordingExecutor(), [], TemplateScope()) == []
 
 
 async def test_started_tools_run_gated_on_a_copy_of_the_variables() -> None:
@@ -101,24 +109,77 @@ async def test_started_tools_run_gated_on_a_copy_of_the_variables() -> None:
         await executor.changed.wait_for(lambda: executor.active == EXECUTOR_CONCURRENCY)
     variables["city"] = "Rome"
     executor.release.set()
-    results = {call_id: await task for call_id, task in tasks.items()}
+    answers = [await task for task in tasks]
 
-    assert list(results) == [item.call.id for item in calls]
+    assert len(answers) == len(calls)
+    assert [call.id for call in executor.calls] == [item.call.id for item in calls]
     assert executor.max_active == EXECUTOR_CONCURRENCY
     assert [scope.variables for scope in executor.scopes] == [{"city": "Paris"}] * len(calls)
 
 
 def test_variables_merge_in_call_order() -> None:
     variables: dict[str, Any] = {"kept": 1}
-    calls = [planned("c1"), planned("c2"), planned("c3")]
-    results = {
-        "c2": ToolAnswer("{}", {"hours": "10-6", "city": "Rome"}),
-        "c1": ToolAnswer("{}", {"hours": "9-5"}),
-    }
+    answers = [
+        ToolAnswer("{}", {"hours": "9-5"}),
+        ToolAnswer("{}", {"hours": "10-6", "city": "Rome"}),
+        ToolAnswer("{}"),
+    ]
 
-    assert merge_variables(variables, calls, results) is True
+    assert merge_variables(variables, answers) is True
     assert variables == {"kept": 1, "hours": "10-6", "city": "Rome"}
-    assert merge_variables(variables, calls, {"c1": ToolAnswer("{}")}) is False
+    assert merge_variables(variables, [ToolAnswer("{}")]) is False
+    assert merge_variables(variables, []) is False
+
+
+async def test_calls_without_ids_each_get_a_task() -> None:
+    executor = RecordingExecutor(hold=True, results={"lookup": '{"hours":"9-5"}', "other": '{"city":"Rome"}'})
+    calls = [planned("", "lookup"), planned("", "other")]
+
+    tasks = start_tools(executor, calls, TemplateScope())
+    await executor.wait_active(2)
+    executor.release.set()
+
+    assert [(await task).content for task in tasks] == ['{"hours":"9-5"}', '{"city":"Rome"}']
+    assert [call.name for call in executor.calls] == ["lookup", "other"]
+
+
+async def test_stopping_a_round_cancels_every_call_without_an_id() -> None:
+    executor = RecordingExecutor(hold=True)
+
+    tasks = start_tools(executor, [planned("", "lookup"), planned("", "other")], TemplateScope())
+    await executor.wait_active(2)
+    await stop_tasks(tasks)
+
+    assert [task.cancelled() for task in tasks] == [True, True]
+    assert sorted(name for name, _ in executor.cancelled) == ["lookup", "other"]
+
+
+def test_round_contents_pair_calls_and_answers_by_position() -> None:
+    pressed = PlannedCall(
+        ToolCall(id="", name="press_button", arguments_json='{"digits":"1"}'),
+        "press",
+        answer=sent_digits("1"),
+        digits="1",
+    )
+    refused = PlannedCall(ToolCall(id="", name="nope", arguments_json="{}"), "answer", answer='{"error":"x"}')
+    first, blank, last = planned("", "lookup"), planned("", "quiet"), planned("", "other")
+    plan = RoundPlan((first, pressed, blank, refused, last), invalid=True, used=5)
+    answers = [ToolAnswer('{"hours":"9-5"}'), ToolAnswer(""), ToolAnswer('{"city":"Rome"}')]
+
+    assert round_contents(plan, answers) == [
+        (first, '{"hours":"9-5"}'),
+        (pressed, sent_digits("1")),
+        (blank, TOOL_FAILED),
+        (refused, '{"error":"x"}'),
+        (last, '{"city":"Rome"}'),
+    ]
+
+
+def test_round_contents_refuse_a_wrong_number_of_answers() -> None:
+    plan = RoundPlan((planned("c1"), planned("c2")), invalid=False, used=2)
+
+    with pytest.raises(ValueError, match="2 executed calls need as many answers, got 1"):
+        round_contents(plan, [ToolAnswer("{}")])
 
 
 async def test_stop_tasks_cancels_only_the_unfinished() -> None:
@@ -135,7 +196,7 @@ async def test_stop_tasks_cancels_only_the_unfinished() -> None:
 
 async def held_round(
     executor: RecordingExecutor, *calls: PlannedCall
-) -> tuple[dict[str, asyncio.Task[ToolAnswer]], TemplateScope]:
+) -> tuple[list[asyncio.Task[ToolAnswer]], TemplateScope]:
     """Start ``calls`` on a holding executor and wait until every one of them runs."""
     scope = TemplateScope(variables={"shop": "Bella Pasta"})
     tasks = start_tools(executor, calls, scope)
@@ -144,9 +205,9 @@ async def held_round(
     return tasks, scope
 
 
-async def finish(executor: RecordingExecutor, tasks: dict[str, asyncio.Task[ToolAnswer]]) -> None:
+async def finish(executor: RecordingExecutor, tasks: list[asyncio.Task[ToolAnswer]]) -> None:
     executor.release.set()
-    await asyncio.gather(*tasks.values())
+    await asyncio.gather(*tasks)
 
 
 async def test_the_line_is_the_first_speech_rendered_with_the_call_arguments() -> None:
@@ -196,7 +257,7 @@ async def test_disabled_lines_and_rounds_without_tasks_say_nothing() -> None:
         await ToolLines(executor, clock=ManualClock(), enabled=False).line([planned("c1")], tasks, scope)
         is None
     )
-    assert await ToolLines(executor, clock=ManualClock(), enabled=True).line([], {}, scope) is None
+    assert await ToolLines(executor, clock=ManualClock(), enabled=True).line([], [], scope) is None
     await finish(executor, tasks)
 
 
@@ -239,7 +300,7 @@ async def test_lines_without_an_executor_have_no_speech() -> None:
 
     assert (
         await ToolLines(None, clock=ManualClock(), enabled=True).line(
-            [planned("c1")], {"c1": done}, TemplateScope()
+            [planned("c1")], [done], TemplateScope()
         )
         is None
     )

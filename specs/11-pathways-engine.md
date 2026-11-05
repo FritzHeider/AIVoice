@@ -682,6 +682,9 @@ setting `engine.speculative=false`. Metrics: `speculation_hit` / `speculation_mi
 >    nothing, speak their `text`/`prompt` when present and wait only then (`engine.node_degraded`).
 > 9. Events go to `va_engine.engine_events.EngineEvents.emit(event_type, data)` (sync; the transport adapter
 >    publishes them); turn index and tag enrichment of `call.route` is the adapter's.
+> 10. Final lines and the end (amends rules 5 and 6): specs/13 §4 Decision P08-FIX-16 makes the loop-protection
+>     `errorPhrase` non-interruptible and has an ended conversation deliver an `EndCallAction` its consumer never
+>     received on the next caller turn (the final line again, then the end) instead of answering nothing.
 
 ## 6. Task-mode runner
 

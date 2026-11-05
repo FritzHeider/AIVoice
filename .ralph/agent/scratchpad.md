@@ -889,3 +889,203 @@ diff (only va_engine + docs changed; the sim does not import va_engine), passes 
 P08-FIX-7. Filed task `fix:sim-shared-redis-exit-flake` (capture the child's stderr, then fix the cause) and a
 fix memory. make test run 2: 13015 passed, 7 skipped, coverage 99.07 %, exit=0 (logs/make_test.log; run 1 kept
 as logs/make_test_review_run1.log). make e2e not run: no media/call flow change (T02c2 wires media).
+
+## Planner (2026-11-05, after P08-T02c1 approval): review inbox → P08-FIX-16/17/18 before P08-T02c2
+Inbox notes not in DONE: `2026-11-05-p08-t02c1-recheck.md` (replaces `2026-11-05-p08-t02c1-engine-node-tools-review.md`;
+item 1 BLOCKER, must land before T02c2; its "earlier item 2" `_reply_calls` is already fixed in 01ffa44) and
+`2026-11-05-p08-fix-15-review.md` (should fix). Inserted at the top of plan/phase-08.md:
+- P08-FIX-16 = recheck items 1 + 2 (this plan). P08-FIX-17 = recheck items 3 + 4 (superseded turn keeps tool
+  records; inline tool name rule) → both t02c1 notes go to DONE when FIX-17 is approved. P08-FIX-18 = fix-15 note
+  (lock lost / overrun during the body teardown → worker_lost).
+
+## Plan P08-FIX-16 — pathway `end_call` always ends the call; tool tasks keyed by position
+
+### Findings (verified by reading HEAD 01ffa44)
+- `engine.py` `_tool_end` (~l.621): sets `state.ended = True`, then `Say(text=final, mark=...)` with
+  `interruptible=None` → `PathwayBrain._output` makes it `SpeakStatic(interruptible=True)`. Barge-in on the goodbye
+  closes the generator before `EndCallAction`; later `handle_user_turn` returns at `engine.turn_after_end` → nobody
+  ends the call. `_protection` (~l.723) has the same weakness with the `errorPhrase` (`_error_line`).
+- Extra hole found while planning (same strand, also the End Call node and a non-interruptible line): the pipeline
+  cancels a reply that has produced NO audio yet when a caller turn ends (`pipeline._route_locked`: `running` and
+  not `speaker.reply_audio_started` → `cancel_generation` + `_cancel_reply`, merged turn with `supersedes`).
+  `interruptible=False` does not stop that. `EndCallHandler.respond` / `_tool_end` / `_protection` set
+  `state.ended` before their line is yielded, so a caller turn ending between the end decision and the goodbye's
+  first audio closes the generator, and the merged turn then hits `turn_after_end`. Task mode is safe (its
+  `EndCall(final_text=)` is one output; the pipeline sets `_closing` on receipt). Fix in the engine: remember the
+  end that is owed and deliver it on the next turn.
+- `tool_tasks.start_tools` returns `{call.id: task}`; `va_llm.stream_wire._PartialCall.id` defaults to `""`: two
+  id-less calls → first task dropped from the dict (runs on, never awaited/cancelled), both answered with the
+  second result; the `answered` id sets skip the second `interrupted`.
+
+### 1. `packages/va_engine/src/va_engine/engine.py`
+a. `_tool_end`: `line = Say(text=final, mark=ctx.next_mark(), interruptible=False) if final else None` (or
+   `line_actions(ctx, final or None)` from `va_engine.handlers.base`, whichever keeps the code shortest).
+b. `_protection`: `error = self._error_line(...)`; when not None `error = replace(error, interruptible=False)`
+   (only here; `_error_line` itself stays interruptible for the unavailable-model line in `_streamed`).
+c. Owed end. New attribute `self._owed_end: tuple[Action, ...] = ()` ("the final line + `EndCallAction` of an
+   ended conversation that the consumer has not received yet").
+   - `_out(run, actions)`: materialize `queued = tuple(actions)` (check every caller passes a finite iterable;
+     they pass tuples/lists). Before the loop: `if self.state.ended and any(isinstance(a, EndCallAction) for a in
+     queued): self._owed_end = tuple(a for a in queued if isinstance(a, Say | EndCallAction))`. In the loop, right
+     BEFORE `yield action` of an `EndCallAction`: `self._owed_end = ()` (the consumer ends the call on receipt and
+     closes the generator at that yield, so clearing after the yield would never run).
+     Keep `_out` complexity low: put the two bits in tiny helpers (`_owe(queued)`, and the clear inline).
+   - `handle_user_turn`: replace the `if self.state.ended:` early return by: log `engine.turn_after_end` (keep,
+     add `owed=bool(self._owed_end)`); `for action in self._owed_end:` → clear `_owed_end` before yielding the
+     `EndCallAction`; yield each action as is (no `_out`: the line is already in the history, nothing is
+     re-recorded; the superseding turn is NOT accepted/recorded — the conversation is over, `turn_tags("user")`
+     already returns None); return. A second cancellation during the re-spoken line leaves it owed again.
+   - `on_wait_timeout` / `start`: unchanged (the wait is disarmed at every end; a pre-audio merge always delivers
+     a turn next).
+   - Docstring of the class/module: one sentence on the rule.
+d. Nothing else in the engine changes; `_ToolBudget`, caps, `_reply_calls` untouched.
+
+### 2. By-position tool rounds
+`packages/va_engine/src/va_engine/tool_tasks.py`:
+- `start_tools(executor, planned, scope) -> list[asyncio.Task[ToolAnswer]]`: one task per item of `planned`, same
+  order (`[]` without executor or calls). Docstring: "by position, never by call id (providers omit or reuse
+  ids)".
+- `merge_variables(variables, answers: Iterable[ToolAnswer]) -> bool`: merges `answer.variables` in the given
+  (call) order.
+- `ToolLines.line(planned, tasks: Sequence[asyncio.Task[ToolAnswer]], scope)`; `_still_running(tasks)` unchanged
+  in substance.
+- New pure helper (both runners use it, keeps jscpd at 0):
+  `def round_contents(plan: RoundPlan, answers: Sequence[ToolAnswer]) -> list[tuple[PlannedCall, str]]` — every
+  call of `plan.calls` in order with its tool-message content: `kind == "execute"` items take the next answer
+  (`zip`-like iterator over `answers`, `strict`: `len(answers) == len(plan.executed)` else `ValueError`), others
+  their precomputed `item.answer`; blank → `TOOL_FAILED`. Export in `__all__`.
+`packages/va_engine/src/va_engine/engine_node_tools.py`:
+- `RoundOutcome.answered: int = 0` (number of calls of `plan.calls` answered so far, they are answered in order).
+- `run_node_round`: `tasks = start_tools(...)`; `line = await tools.lines.line(plan.executed, tasks, scope)`;
+  `answers = [await task for task in tasks]`; `merge_variables(variables, answers)`; `for item, content in
+  round_contents(plan, answers): answer(item.call, content); outcome.answered += 1; presses…`; `finally:
+  await stop_tasks(tasks)`; `for item in plan.calls[outcome.answered:]: answer(item.call, INTERRUPTED);
+  outcome.answered += 1`.
+`packages/va_engine/src/va_engine/task_runner.py` `_run_tools`: same shape with a local `answered = 0` counter
+  (drop the `answered: set[str]` parameter of `_answer`); `_merge_variables(answers)`.
+No change to `plan_round`, the executor protocol, or what is stored (`tool_call_id` stays the model's id as data).
+
+### 3. Tests
+`packages/va_engine/tests/test_engine_tools.py`:
+- update `test_end_call_speaks_its_final_line_and_ends`: expected say tuple `("say", line, "t0.2", False)`.
+- `test_the_end_call_line_is_not_interruptible_and_an_undelivered_end_is_delivered_next_turn`: one_node +
+  `system=VOICE`, reply = tool-only `end_call`; iterate `rig.engine.start()` by hand until the `Say`
+  ("Goodbye.", `interruptible is False`), `aclose()` the generator (state ended, no end yielded); then
+  `handle_user_turn(user("wait", 1, supersedes=...))` (also without `supersedes`) yields exactly
+  `[Say("Goodbye.", same mark, interruptible=False), EndCallAction(agent_end_call, after_mark=mark)]`, no new LLM
+  request, history unchanged (no user record added); a further turn yields `[]`.
+- `test_a_delivered_end_is_not_repeated`: full `rig.start()` (end yielded), next turn yields `[]`.
+`packages/va_engine/tests/test_engine_turns.py` (or the file holding the End Call / loop-protection engine tests;
+grep `max_total_turns` / `"End Call"`):
+- `test_an_end_call_node_closed_on_its_final_line_ends_on_the_next_turn` (route to an End Call node with
+  `endCall.speech`; close at the line; next turn → line + `EndCallAction(reason="agent_end_call")`).
+- `test_the_loop_protection_line_is_not_interruptible` (max_total_turns → `Say(errorPhrase, interruptible=False)`
+  + `EndCallAction(loop_protection)`), and that the unavailable-model `errorPhrase` line keeps
+  `interruptible is None` (assert in the existing unavailable test or a new one).
+`packages/va_engine/tests/test_pathway_brain_pipeline.py`:
+- `test_speaking_over_the_end_call_goodbye_still_ends_the_call`: `engine_rig(one-node Default graph with a
+  prompt, system=VOICE voice facts, speculative off if needed)`, `rig.source.reply("", calls=[end_call with
+  final_message=LONG_LINE])`; `harness(config=CONFIG, engine=brain_of(rig))`; wait until the goodbye plays
+  (`h.until(lambda: h.transport/speaker playing…)` as `test_a_barge_in_truncates_the_engine_history` does), then
+  `await h.caller.say(1500)` (≥ 900 ms = barge-in at the default level); `result.end_reason ==
+  PATHWAY_END_REASON`; last agent turn `(text_spoken, interrupted) == (LONG_LINE, False)`;
+  `rig.state.end_reason == "agent_end_call"`; no `transport.clear` in `h.transport.calls`. Must fail on HEAD
+  (verify once by reverting 1a locally).
+- optional if the harness can end a caller turn before the goodbye's first audio (`hanging`/TTS first-audio
+  delay): pre-audio merge still ends `agent_hangup`; the engine-level tests above are the required proof.
+`packages/va_engine/tests/test_tool_tasks.py`: adapt to lists (`start_tools(...) == []`, `merge_variables(vars,
+  answers)`); new `test_calls_without_ids_each_get_a_task` (two `ToolCall(id="", …)` to different tools: two
+  tasks, both results in order, `stop_tasks` cancels both when held); `test_round_contents_pairs_by_position`
+  (execute/press/invalid mix, two id-less executes → own contents; blank → TOOL_FAILED; wrong answers length →
+  ValueError).
+`test_engine_tools.py`: `test_two_calls_without_ids_get_their_own_answers` (tool records `[("lookup", A),
+  ("other", B)]`, both executed) and `test_a_barge_in_cancels_and_answers_every_id_less_call` (held executor,
+  close the generator: `executor.cancelled` has both, two `{"error":"interrupted"}` records).
+`packages/va_engine/tests/test_task_runner.py` (or test_task_tools*.py where the tool-round brain tests live):
+  the same two cases for `TaskBrain` (messages: two `tool` messages with their own content).
+
+### 4. Spec + docs (same commit)
+- specs/13 §4: new `> Decision (2026-11-05) P08-FIX-16:` after Decision P08-T02c1: (1) the `end_call` final line
+  and the loop-protection `errorPhrase` are spoken non-interruptibly (like the End Call node line and task mode's
+  final line); (2) an ended pathway conversation owes its `EndCallAction`: when the reply was closed before the
+  consumer received it (pre-audio merge, specs/07 §8), the next caller turn is not answered and yields the
+  remaining final line + `EndCallAction` (tool `end_call`, End Call node, loop protection); (3) tool rounds key
+  tasks, answers, variable merges and `interrupted` answers by the call's position in the round, never by the
+  model's call id (may be empty or repeated). Reference it from specs/11 §5.9 with one line (write `specs/13 §4`
+  on the same line so check_spec_refs pairs it).
+- AGENTS.md "Learned" bullet `2026-11-05 (P08-FIX-16)`: `start_tools` returns a list by position /
+  `round_contents`; `PathwayEngine` owed end; final lines non-interruptible; tests close the generator on the
+  line to simulate the pre-audio merge.
+- plan/phase-08.md: tick is the Reviewer's job. Do NOT touch `.ralph/review-inbox/DONE` (FIX-17 closes the notes).
+
+### Gates
+`make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine -q` first; then `make test` in the
+background (`: > logs/make_test.log` first, `make test > logs/make_test.log 2>&1; echo exit=$? >>
+logs/make_test.log`, heartbeat Monitor every ~2 min; PATH needs `/home/ralph/.local/bin`); `npx --yes jscpd@4
+--silent` (0 clones); `uvx radon cc -s -a` on touched files; `uvx pip-audit` on `uv export`; `corepack pnpm
+audit`. No media/e2e flow change (pathway tools are not wired into the media runtime until T02c2) → no `make e2e`.
+
+### Risks
+- `_out` is on every action path: keep the owed-end bookkeeping O(1) and only active when `state.ended`; radon
+  for `_out` must stay ≤ B. `tuple(actions)` must not consume a lazy generator that depends on interleaving —
+  check callers (`_tool_end` tuple, handler `result.actions` tuple, `_protection` tuple, `(produced_action,)`,
+  `queued`/`rest` lists).
+- Wait-timeout end (`wait_for_response._end`) has no line: owed tuple = just the `EndCallAction`, cleared before
+  its yield → no behaviour change.
+- Known flake: `apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset`
+  (task fix:sim-shared-redis-exit-flake) — unrelated; if it fails, re-run that test alone and report both runs.
+- TaskBrain refactor must keep messages pairing (`assert_tool_pairing`) and the existing barge-in test green.
+
+## Build P08-FIX-16 (2026-11-05)
+Implemented the plan as written (no scope change).
+Source:
+- `engine.py`: `_tool_end` builds its line with `handlers.base.line_actions` (`Say(interruptible=False)`);
+  `_protection` makes the `errorPhrase` line non-interruptible (`_error_line` itself unchanged, so the
+  unavailable-model line stays `interruptible=None`); owed end = `self._owed_end` set by `_owe(queued)` at the top
+  of `_out` (only when `state.ended` and the batch holds an `EndCallAction`), cleared right before the
+  `EndCallAction` is yielded; `handle_user_turn` on an ended state logs `engine.turn_after_end` with `owed=` and
+  yields the owed line + end (no `_drop_turn`, no `_accept`, no request). `_out` now returns before `_owe` when the
+  run is already over, so a batch arriving after a terminal action can never leave a second end owed.
+- `tool_tasks.py`: `start_tools` → list by position; `merge_variables(variables, answers)`; new
+  `round_contents(plan, answers)` (ValueError on a wrong answer count; blank → `tool_failed`); `ToolLines.line`
+  takes a sequence of tasks. `engine_node_tools.run_node_round` and `TaskBrain._run_tools` count answered calls
+  (`plan.calls[answered:]` → `interrupted`); `RoundOutcome.answered` is an int.
+Tests (all new ones fail without the change; mutation: making the `end_call` line interruptible again fails the
+pipeline test + 5 engine tests):
+- `test_engine_tools.py`: final line tuple `False`; closed-on-line then superseding / plain next turn → line + end,
+  later turn `[]`, history and request count unchanged, log `owed` `[True, False]`; closed again stays owed;
+  delivered end not repeated; two id-less calls get their own answers/variables; barge-in cancels + answers both.
+- `test_engine_turns.py`: loop-protection line `False` (max_visits, max_total_turns); loop-protection end closed
+  on its line is delivered next turn; End Call node closed on its line is delivered next turn (no new decision).
+- `test_pathway_brain_pipeline.py::test_speaking_over_the_end_call_goodbye_still_ends_the_call` (1.5 s of caller
+  speech over the long goodbye: `agent_hangup`, line fully spoken, no interrupt, no `transport.clear`).
+- `test_task_tool_speech.py`: TaskBrain two id-less calls (own answers; barge-in cancels both, two `interrupted`).
+- `test_tool_tasks.py`: lists; id-less calls each get a task and are both cancelled; `round_contents` by position
+  and its ValueError. New helper `engine_helpers.closed_on_line`.
+Spec: specs/13 §4 Decision P08-FIX-16 (3 items) + specs/11 §5.9 Decision P07-T08b item 10. AGENTS.md bullet.
+Gotcha found: an `end_call` tool call without `reason` is answered `invalid_arguments` (nothing ends).
+Gates (this iteration, final source state): make fmt / lint / typecheck / placeholders exit 0; check_spec_refs 0
+problems; va_engine 1148 passed (tool_tasks.py 100 %, engine_node_tools.py 100 %, engine.py 98 %, same 6 uncovered
+lines as before the change); make test 13030 passed, 7 skipped, coverage 99.07 %, exit=0 (logs/make_test.log; a
+first run was stopped on purpose because `_out` was tightened while it ran); jscpd 0 clones; radon overall
+average A (2.93), touched functions ≤ B (8), worst in touched files C (12) `PathwayEngine._respond` (unchanged);
+pip-audit (CI command) no known vulnerabilities; pnpm audit --audit-level high exit 0 (1 moderate). No media/e2e
+flow change (pathway tools reach the media runtime in P08-T02c2), so make e2e was not run. The sim shared-Redis
+flake (task fix:sim-shared-redis-exit-flake) did not occur in this run.
+
+## Review P08-FIX-16 (2026-11-05) — APPROVED
+Re-ran (this iteration): make lint / typecheck / placeholders exit 0; check_spec_refs 0 problems; jscpd 0 clones;
+radon: only `PathwayEngine._respond` C (12), unchanged; make test 13030 passed, 7 skipped, coverage 99.07 %, exit=0.
+Read the whole diff against .ralph/review-inbox/2026-11-05-p08-t02c1-recheck.md items 1 + 2 and Decision P08-FIX-16:
+- Item 1: `_tool_end` uses `line_actions` (non-interruptible), `_protection` makes only its own `errorPhrase`
+  non-interruptible. Owed end: every place that sets `state.ended` (end_call tool, End Call node, loop protection,
+  wait timeout) hands its batch to `_out` with no await in between, so `_owe` always sees it; the debt is cleared
+  right before the `EndCallAction` yield. The pipeline's pre-audio merge always delivers the merged turn
+  (`_route_locked`), so the owed end is always collected.
+- Reviewer probe (temporary test, deleted): real pipeline harness with `ttfa_s=3.0`, caller turn ends before the
+  goodbye's first audio → `pipeline_turn_merged supersedes=1` → `engine.turn_after_end owed=True` → goodbye spoken
+  once in full → `agent_hangup`.
+- Item 2: tasks/answers/variables/interrupted by position in both runners; `round_contents` ValueError is an
+  invariant only (executed calls exist only with an executor: `ToolOffer.handles`, `TaskBrain._handles`,
+  `runnable_facts`).
+No findings. Inbox notes stay out of DONE until P08-FIX-17 (items 3, 4).

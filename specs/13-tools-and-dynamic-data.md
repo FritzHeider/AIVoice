@@ -130,6 +130,26 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 >    token; its tool calls may be incomplete; logged `engine.llm_stream_failed`) are followed by no tool round and
 >    no further request in that pass, as in task mode. This also holds for Scheduling nodes.
 
+> Decision (2026-11-05) P08-FIX-16: a pathway conversation that ended always ends the call, and tool rounds never
+> rely on the model's call ids.
+> 1. Final lines are not interruptible: the `end_call` tool's line (`final_message` or `Goodbye.`) and the
+>    loop-protection `errorPhrase` are `Say(interruptible=False)`, like the End Call node's line and task mode's
+>    final line. The `errorPhrase` spoken after an unavailable model reply ends no call and stays interruptible.
+> 2. Owed end: once the state is ended (`end_call` tool, End Call node, loop protection), the engine owes its
+>    consumer the `EndCallAction`. When the reply was closed before that action was yielded (a caller turn ended
+>    before the final line's first audio, so the pipeline cancelled the reply and delivers a merged turn,
+>    specs/07 §8), the next `handle_user_turn` decides nothing, records nothing (the superseded turn and the line
+>    stay in the history as they are, no model request is made) and yields the final line again (same mark,
+>    `interruptible=False`) followed by the `EndCallAction`. The debt is cleared when the `EndCallAction` is
+>    yielded: the consumer ends the call on receipt. A reply closed again on the re-spoken line leaves the end
+>    owed; turns after a delivered end yield nothing (`engine.turn_after_end` logs `owed`).
+> 3. Tool rounds (pathway reply nodes and task mode, `va_engine.tool_tasks`) key tool tasks, answers, variable
+>    merges and `interrupted` answers by a call's position in the round, never by its call id: providers omit or
+>    repeat ids, and two calls with the same (or an empty) id each run, are cancelled together on a barge-in, and
+>    get their own `tool` answer. `start_tools` returns one task per executed call in call order;
+>    `round_contents(plan, answers)` pairs every planned call with its content. The id stays what is sent back
+>    to the model as `tool_call_id`.
+
 `tools` array in Send Call may contain: `"TL-<uuid>"` strings, `"KB-<uuid>"` strings (enables `lookup_knowledge`
 over those KBs and per-turn retrieval injection per `14-knowledge-bases.md` §7), or inline tool objects with the same
 fields as ToolCreate (no `secret_headers`; inline `headers` values are treated as secret in logs).

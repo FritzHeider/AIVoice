@@ -4,7 +4,9 @@
 cannot tell them apart); unscripted calls get neutral answers (``stay``, condition score 0, nothing
 extracted). :func:`engine_rig` builds a :class:`PathwayEngine` over it, a :class:`FakeSource` dialogue,
 :class:`FakeLines` and a :class:`RecordingEvents`; :func:`drive` runs one engine generator to its end the way
-the media worker does (streams read before resuming) and returns the actions as comparable tuples.
+the media worker does (streams read before resuming) and returns the actions as comparable tuples;
+:func:`closed_on_line` stops at the first static line the way the pipeline cancels a reply whose line has
+produced no audio yet (the pre-audio merge of specs/07 §8).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from va_common.time import FrozenClock
 from va_engine.engine import ConversationFacts, EnginePorts, PathwayEngine, new_pathway_state
 from va_engine.engine_decide import Decider
 from va_engine.handlers import Channel
-from va_engine.models import Action, EngineState, PathwayGraph, SayStream
+from va_engine.models import Action, EngineState, PathwayGraph, Say, SayStream
 from va_engine.navigation import ActiveGraph, PathwayLoader
 from va_engine.ports import HttpPort, SmsPort
 from va_engine.system_tools import SystemToolFacts
@@ -41,6 +43,7 @@ __all__ = [
     "KeyedPort",
     "RecordingEvents",
     "Rig",
+    "closed_on_line",
     "condition",
     "drive",
     "engine_rig",
@@ -251,6 +254,18 @@ async def drive(actions: AsyncGenerator[Action]) -> list[tuple[Any, ...]]:
     async with contextlib.aclosing(actions) as running:
         async for action in running:
             rendered.extend(await spoken((action,)))
+    return rendered
+
+
+async def closed_on_line(actions: AsyncGenerator[Action]) -> list[tuple[Any, ...]]:
+    """Run ``actions`` up to its first :class:`Say` and close the generator there (nothing after the line
+    is received); earlier streams are read to the end."""
+    rendered: list[tuple[Any, ...]] = []
+    async with contextlib.aclosing(actions) as running:
+        async for action in running:
+            rendered.extend(await spoken((action,)))
+            if isinstance(action, Say):
+                break
     return rendered
 
 

@@ -8,7 +8,7 @@ import contextlib
 
 import pytest
 from dialogue_helpers import unavailable
-from engine_helpers import Rig, condition, drive, engine_rig, first_stream, route, user
+from engine_helpers import Rig, closed_on_line, condition, drive, engine_rig, first_stream, route, user
 from graph_helpers import edge, graph, node, start
 
 from va_engine.engine import LOOP_PROTECTION, new_pathway_state
@@ -119,7 +119,7 @@ async def test_max_visits_takes_the_fallback_edge() -> None:
 async def test_max_visits_without_fallback_ends_the_call() -> None:
     rig = engine_rig(bouncing(fallback=False))
     actions = await bounce(rig)
-    assert actions == [("say", ERROR, "t3.1", None), ("end", LOOP_PROTECTION, "system", "t3.1")]
+    assert actions == [("say", ERROR, "t3.1", False), ("end", LOOP_PROTECTION, "system", "t3.1")]
     assert rig.state.ended
     assert rig.state.end_reason == LOOP_PROTECTION
     assert rig.history()[-1] == ("assistant", ERROR)
@@ -149,8 +149,46 @@ async def test_max_total_turns_ends_before_any_decision() -> None:
     await rig.say("one")
     calls = len(rig.port.calls)
     actions = await rig.say("two")
-    assert actions == [("say", ERROR, "t2.1", None), ("end", LOOP_PROTECTION, "system", "t2.1")]
+    assert actions == [("say", ERROR, "t2.1", False), ("end", LOOP_PROTECTION, "system", "t2.1")]
     assert len(rig.port.calls) == calls
+
+
+async def test_a_loop_protection_end_closed_on_its_line_ends_on_the_next_turn() -> None:
+    pathway = graph([start("a", text="Hi.")], [], {"maxTotalTurns": 1})
+    rig = engine_rig(pathway)
+    await rig.start()
+    await rig.say("one")
+    line = ("say", ERROR, "t2.1", False)
+
+    before = await closed_on_line(rig.engine.handle_user_turn(user("two", 2)))
+    history = rig.history()
+    owed = await drive(rig.engine.handle_user_turn(user("two and more", 3, supersedes=2)))
+
+    assert before == [line]
+    assert owed == [line, ("end", LOOP_PROTECTION, "system", "t2.1")]
+    assert rig.history() == history
+    assert await rig.say("three") == []
+
+
+async def test_an_end_call_node_closed_on_its_final_line_ends_on_the_next_turn() -> None:
+    pathway = graph(
+        [start("a", text="Hi."), node("bye", node_type="End Call", endCall={"speech": "Goodbye now."})],
+        [edge("e_bye", "a", "bye", "Caller is done")],
+    )
+    rig = engine_rig(pathway)
+    rig.port.script("select_path", route("e_bye", 9))
+    await rig.start()
+    line = ("say", "Goodbye now.", "t1.1", False)
+
+    before = await closed_on_line(rig.engine.handle_user_turn(user("that is", 1)))
+    decisions = len(rig.port.calls)
+    owed = await drive(rig.engine.handle_user_turn(user("that is all", 2, supersedes=1)))
+
+    assert before == [line]
+    assert owed == [line, ("end", "agent_end_call", "agent", "t1.1")]
+    assert rig.history() == [("assistant", "Hi."), ("user", "that is"), ("assistant", "Goodbye now.")]
+    assert len(rig.port.calls) == decisions
+    assert await rig.say("hello?") == []
 
 
 async def test_blank_error_phrase_ends_without_a_line() -> None:
