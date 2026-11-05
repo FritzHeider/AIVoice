@@ -318,6 +318,8 @@ class CallPipeline:
             late_frames=outbound.late_frames,
             max_lateness_ms=round(outbound.max_lateness_ms, 1),
             underruns=outbound.underruns,
+            underruns_logged=outbound.underruns_logged,
+            max_underrun_wake_late_ms=round(outbound.max_underrun_wake_late_ms, 1),
         )
         return PipelineResult(reason, self._turns.value, self._stats, self._error)
 

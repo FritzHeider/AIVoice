@@ -29,7 +29,7 @@ from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
-from va_common.gc_tuning import GcPauseLog
+from va_common.gc_tuning import GcPauseLog, installed_pause_log
 from va_common.gc_tuning import tune_gc as tune_collector
 from va_common.health import CheckFn
 from va_common.ids import new_id
@@ -300,6 +300,9 @@ def create_app(  # noqa: PLR0913 - keyword-only test seams
             )
             supervisor = Supervisor(controller.task_failed)
             supervisor.start("loop_lag", media.monitor.run)
+            pauses = installed_pause_log()
+            if pauses is not None:
+                supervisor.start("gc_pauses", pauses.run)
             supervisor.start("media_pods", pods.run)
             supervisor.start("channels", hub.run)
             try:

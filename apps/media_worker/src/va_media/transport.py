@@ -8,12 +8,17 @@ ends the iterator. Frames that are not caller audio (another ``track``, an empty
 payload) are dropped and counted, malformed messages are logged and skipped, and Telnyx ``error`` frames are
 counted (a ``100005`` rate limit calls :attr:`TelnyxMediaTransport.on_rate_limited`). Outbound,
 ``media``/``mark``/``clear`` messages are serialized by one lock; once the stream ended every send is dropped
-silently.
+silently. The transport is a :class:`~va_voice.outbound.TimedSink` (specs/07 §9 Decision P08-FIX-4): each
+audio send records how long it waited for the lock (behind a mark or a clear) and how long the socket write
+took, so an underrun can be told apart from loop lag. ``socket_ms`` may still include an event-loop stall
+that happened while the write was awaiting; the outbound clock attributes what remains after the send
+(resume time).
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -38,6 +43,7 @@ from va_telnyx.media import (
     parse_media_message,
 )
 from va_voice.audio.formats import L16_16000, ULAW_8000, AudioFormat
+from va_voice.outbound import SendTiming
 from va_voice.pipeline.protocols import InboundAudio, InboundDtmf, MarkEcho, TransportEvent
 
 __all__ = [
@@ -119,8 +125,11 @@ class TelnyxMediaTransport:
         start: StreamStart,
         *,
         on_rate_limited: Callable[[], None] | None = None,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         self._socket = socket
+        self._timer = timer
+        self._last_audio_timing: SendTiming | None = None
         self._fmt = leg_format(start.media_format)
         self._stream_id = start.stream_id
         self.on_rate_limited: Callable[[], None] | None = on_rate_limited
@@ -143,6 +152,11 @@ class TelnyxMediaTransport:
     @property
     def stats(self) -> TransportStats:
         return self._stats
+
+    @property
+    def last_audio_timing(self) -> SendTiming | None:
+        """Lock wait and socket time of the most recent :meth:`send_audio` (dropped sends included)."""
+        return self._last_audio_timing
 
     @property
     def stop_received(self) -> bool:
@@ -242,7 +256,7 @@ class TelnyxMediaTransport:
 
     async def send_audio(self, frame: bytes) -> None:
         """Send one wire frame as a ``media`` message; an empty frame is a ``ValueError``."""
-        if await self._send(media_message(frame)):
+        if await self._send(media_message(frame), audio=True):
             self._stats.sent_frames += 1
 
     async def send_mark(self, name: str) -> None:
@@ -253,18 +267,30 @@ class TelnyxMediaTransport:
         if await self._send(clear_message()):
             self._stats.clears += 1
 
-    async def _send(self, message: bytes) -> bool:
+    async def _send(self, message: bytes, *, audio: bool = False) -> bool:
+        requested = self._timer()
         async with self._send_lock:
-            if self.ended:
-                self._stats.dropped_sends += 1
-                return False
+            locked = self._timer()
             try:
-                await self._socket.send_text(message.decode("ascii"))
-            except SocketClosedError:
-                self._send_failed = True
-                self._stats.dropped_sends += 1
-                return False
-            return True
+                return await self._write(message)
+            finally:
+                if audio:
+                    done = self._timer()
+                    self._last_audio_timing = SendTiming(
+                        lock_wait_ms=(locked - requested) * 1000.0, socket_ms=(done - locked) * 1000.0
+                    )
+
+    async def _write(self, message: bytes) -> bool:
+        if self.ended:
+            self._stats.dropped_sends += 1
+            return False
+        try:
+            await self._socket.send_text(message.decode("ascii"))
+        except SocketClosedError:
+            self._send_failed = True
+            self._stats.dropped_sends += 1
+            return False
+        return True
 
     def log_summary(self) -> None:
         """Log the stream's counters once it ended (``media.transport_closed``)."""

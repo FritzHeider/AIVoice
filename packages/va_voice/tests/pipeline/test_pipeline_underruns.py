@@ -44,6 +44,8 @@ async def test_a_stalled_send_mid_utterance_reports_one_underrun() -> None:
     assert len(underruns) == 1
     ended = _ended(stream)
     assert ended["underruns"] == 1
+    assert ended["underruns_logged"] == 1
+    assert ended["max_underrun_wake_late_ms"] == 0.0
     assert isinstance(ended["outbound_frames"], int)
     assert ended["outbound_frames"] > STALLED_FRAME
     assert ended["late_frames"] == 1
@@ -61,4 +63,4 @@ async def test_on_time_playback_reports_no_underrun() -> None:
         await h.result()
     assert underruns == []
     ended = _ended(stream)
-    assert (ended["underruns"], ended["late_frames"]) == (0, 0)
+    assert (ended["underruns"], ended["late_frames"], ended["underruns_logged"]) == (0, 0, 0)

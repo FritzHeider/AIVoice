@@ -489,7 +489,7 @@ Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms 
 > `max_lateness_ms`, and `underruns`.
 >
 > Decision (2026-11-04) P08-FIX-3: underrun attribution and the cyclic collector. Every underrun is logged as
-> `outbound.underrun` (warning) before the frame goes out, with `behind_ms` (now minus the instant Telnyx's buffer
+> `outbound.underrun` (warning) before the frame goes out (superseded by P08-FIX-4: after the send), with `behind_ms` (now minus the instant Telnyx's buffer
 > ran dry, `FramePacer.drained_at_ms`), `since_prev_send_ms`, `prev_send_await_ms` (duration of the previous
 > `send_audio` await: transport backpressure), `wake_late_ms` (how far past its due time the loop woke from its
 > pacing sleep: an event-loop stall; `null` when no sleep preceded the frame), and `queued_frames`. The media worker
@@ -527,6 +527,29 @@ Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms 
 > within a few ms of each other): the media-internal share of a turn is prompt assembly 6-10 ms, first clause after
 > the first LLM token 9-80 ms (FakeLLM token pacing under the burst), pacing 10 ms; the rest (≈ 55-65 ms) is outside
 > the media pipeline (simulator transport and timing).
+>
+> Decision (2026-11-05) P08-FIX-4: log hygiene in the hot path. (1) The underrun fields are snapshotted before the
+> frame goes out, but `outbound.underrun` is emitted after the send, next to the counter, so lines never outnumber
+> `underruns`; a clear while the starved frame is in flight drops it (no count, no line). (2) Lines are throttled
+> per leg: the first underrun of an utterance is always logged, later ones at most once per
+> `UNDERRUN_LOG_INTERVAL_MS` (1 000 ms), each line carrying `suppressed` (underruns since the previous line). The
+> counter and the `on_underrun` hook (`va_audio_underruns_total`) still fire for every underrun. (3) New fields:
+> `turn`; `prev_lock_wait_ms`, `prev_socket_send_ms` and `prev_resume_ms` (= previous await − lock wait − socket
+> time: the event loop resuming the task after the send completed, i.e. loop lag), all `null` unless the sink is a
+> `va_voice.outbound.TimedSink` (`TelnyxMediaTransport.last_audio_timing`, a `SendTiming` measured around its send
+> lock and socket write; `socket_ms` may still contain a stall that happened inside the write); and
+> `prev_controls_await_ms` (time awaited sending marks since the previous frame). The idle branch forgets the pacing
+> due time, so `wake_late_ms` is never stale. `pipeline_ended` adds `underruns_logged` and
+> `max_underrun_wake_late_ms`. (4) `GcPauseLog`'s `gc.callbacks` hook no longer logs: it appends one tuple to a
+> bounded buffer (256 passes; older ones are dropped and reported as one `gc_pause_overflow` with `dropped`), and
+> `GcPauseLog.run` (a supervised task `gc_pauses` in the media worker, `sim-gc-pauses` in the simulator runner, found
+> through `va_common.gc_tuning.installed_pause_log()`) logs the buffered `gc_pause` lines every second and on
+> cancel, in an empty `contextvars` context, so a line never carries the `call_id`/`org_id` of the call that
+> happened to trigger the collection. (5) `va_media.runtime._unwire` runs when the call's LIFO exit stack reaches
+> it: after the carrier-watch task and the voicemail monitor (registered after it) stopped, and before the brain,
+> the vendor sockets and `persistence.finish_call` (registered earlier) close; a takeover or transfer outcome
+> raised during those later closes is dropped (`media.voicemail_unbound`), which is harmless because the call is
+> over.
 
 ## 10. Audio conditioning
 

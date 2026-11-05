@@ -124,7 +124,7 @@
   - Acceptance: `ttl_s=10` missing key and key without expiry fail, `ttl_s=10` key set EX 10 passes; `make check`
     passes; append the note name to `.ralph/review-inbox/DONE` on approval.
 
-- [ ] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md
+- [x] P08-FIX-4 P08-FIX-3 review follow-ups: gc_pause/underrun log hygiene — see .ralph/review-inbox/2026-11-04-p08-fix-3-gc-pause-log.md, 2026-11-04-p08-fix-3-gc-review.md, 2026-11-04-p08-fix-3-gc-wip-review.md, 2026-11-04-p08-fix-3-underrun-log.md, 2026-11-04-p08-fix3-wip-review.md, 2026-11-04-underrun-attribution.md, 2026-11-04-underrun-log-attribution.md — gc_pause buffered in the collector callback and flushed each second by a supervised task in an empty context (gc_pause_overflow); outbound.underrun logged after the send next to the counter, throttled per utterance/leg with suppressed + lock/socket/resume/controls attribution (TimedSink); pipeline_ended underruns_logged/max_underrun_wake_late_ms; _unwire LIFO order documented; specs/07 §9 Decision P08-FIX-4; make test 12721 passed (cov 99.07 %), lint/typecheck/placeholders clean, jscpd 0, complexity A (2.92); capacity 3 runs 0 underruns, p50 119/124/104 ms
   - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3), §21
   - Depends on: P08-FIX-3
   - Deliverables (all non-blockers, still open in 2abf225): (1) `va_common.gc_tuning.GcPauseLog._callback` must not

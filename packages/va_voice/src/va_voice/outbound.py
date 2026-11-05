@@ -19,11 +19,19 @@ the segment's last frame, and reports every frame to the utterance's
 A platform **underrun** (specs/07 §9 Decision P05-T17e) is a speech frame sent after Telnyx's buffer drained
 while the previous frame sent on the leg was a speech frame of the same utterance (no idle frame, gap wait,
 clear, or finish in between): the send loop fell more than the lead behind mid-utterance. TTS starvation is
-not an underrun (it sends idle frames or waits in the gap branch, which breaks the continuity). Each underrun
-is logged as ``outbound.underrun`` (specs/07 §9 Decision P08-FIX-3) with the fields that attribute it:
-``behind_ms`` (how long Telnyx had been drained), ``since_prev_send_ms``, ``prev_send_await_ms`` (how long
-the previous ``send_audio`` await took: transport backpressure) and ``wake_late_ms`` (how far past its due
-time the loop woke from its pacing sleep: an event-loop stall).
+not an underrun (it sends idle frames or waits in the gap branch, which breaks the continuity). Every underrun
+is counted (:attr:`OutboundStats.underruns`, ``on_underrun``) once its frame went out; a clear while that
+frame was in flight drops it, uncounted. The ``outbound.underrun`` warning (specs/07 §9 Decisions P08-FIX-3
+and P08-FIX-4) is emitted next to the counter, so lines never outnumber counts, and is throttled: the first
+underrun of an utterance is logged, then at most one line per :data:`UNDERRUN_LOG_INTERVAL_MS` on the leg,
+carrying ``suppressed`` (underruns not logged since the previous line). Its fields are snapshotted before the
+send and attribute the stall: ``turn``, ``behind_ms`` (how long Telnyx had been drained),
+``since_prev_send_ms``, ``prev_send_await_ms`` (how long the previous ``send_audio`` await took), split by a
+:class:`TimedSink` into ``prev_lock_wait_ms`` (waiting behind another send on the socket),
+``prev_socket_send_ms`` (the socket write) and ``prev_resume_ms`` (the rest: the event loop resuming the task
+after the send completed, i.e. loop lag), ``prev_controls_await_ms`` (marks sent since the previous frame),
+``wake_late_ms`` (how far past its due time the loop woke from its pacing sleep: an event-loop stall) and
+``queued_frames``.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ import math
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -62,11 +70,14 @@ __all__ = [
     "RATE_LIMIT_PAUSE_MS",
     "RATE_LIMIT_WINDOW_MS",
     "THROTTLED_LEAD_FRAMES",
+    "UNDERRUN_LOG_INTERVAL_MS",
     "FrameMixer",
     "FramePacer",
     "OutboundAudio",
     "OutboundSink",
     "OutboundStats",
+    "SendTiming",
+    "TimedSink",
 ]
 
 LEAD_FRAMES: Final = 3
@@ -83,6 +94,9 @@ RATE_LIMIT_WINDOW_MS: Final = 5000
 
 LATE_THRESHOLD_MS: Final = 30
 """A frame sent more than this past its target counts as late (specs/07 §21)."""
+
+UNDERRUN_LOG_INTERVAL_MS: Final = 1000.0
+"""After an utterance's first logged underrun, at most one ``outbound.underrun`` line per leg this often."""
 
 _INT16_MIN: Final = -32_768
 _INT16_MAX: Final = 32_767
@@ -257,6 +271,26 @@ class OutboundSink(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class SendTiming:
+    """How the transport spent the last ``send_audio`` await (ms)."""
+
+    lock_wait_ms: float
+    """Waiting for the socket behind another send (a mark, a clear)."""
+    socket_ms: float
+    """The socket write itself."""
+
+
+@runtime_checkable
+class TimedSink(Protocol):
+    """An :class:`OutboundSink` that reports the timing of its last audio send (underrun attribution)."""
+
+    @property
+    def last_audio_timing(self) -> SendTiming | None:
+        """Timing of the most recent ``send_audio`` (``None`` before the first)."""
+        ...
+
+
 @dataclass(slots=True)
 class OutboundStats:
     """Counters of one outbound stream."""
@@ -269,6 +303,8 @@ class OutboundStats:
     max_lateness_ms: float = 0.0
     dropped_frames: int = 0
     underruns: int = 0
+    underruns_logged: int = 0
+    max_underrun_wake_late_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,11 +333,15 @@ class OutboundAudio:
     __slots__ = (
         "_clock",
         "_continuing",
+        "_controls_await_ms",
         "_due_ms",
         "_framer",
         "_generation",
+        "_last_logged_ms",
+        "_last_logged_tracker",
         "_last_send_await_ms",
         "_last_sent_ms",
+        "_last_timing",
         "_mixer",
         "_on_finished",
         "_on_underrun",
@@ -313,6 +353,8 @@ class OutboundAudio:
         "_segment_frames",
         "_sink",
         "_stats",
+        "_suppressed",
+        "_timed",
         "_wake",
     )
 
@@ -345,6 +387,12 @@ class OutboundAudio:
         self._due_ms: float | None = None
         self._last_sent_ms: float | None = None
         self._last_send_await_ms = 0.0
+        self._timed = sink if isinstance(sink, TimedSink) else None
+        self._last_timing: SendTiming | None = None
+        self._controls_await_ms = 0.0
+        self._last_logged_tracker: PlaybackTracker | None = None
+        self._last_logged_ms: float | None = None
+        self._suppressed = 0
 
     @property
     def stats(self) -> OutboundStats:
@@ -447,6 +495,7 @@ class OutboundAudio:
             if self._queued_frames == 0 and not self._mixer.has_background:
                 self._pacer.mark_gap()
                 self._continuing = None
+                self._due_ms = None
                 self._wake.clear()
                 await self._wake.wait()
                 continue
@@ -462,32 +511,40 @@ class OutboundAudio:
 
     async def _send_frame(self, now: float) -> None:
         generation = self._generation
-        speech = self._queue[0] if self._queue else None
-        if isinstance(speech, _Frame):
-            self._queue.popleft()
-            self._queued_frames -= 1
-            wire = self._mixer.speech(speech.data)
-        else:
-            speech = None
-            wire = self._mixer.idle()
+        speech, wire = self._next_wire()
         starved = speech is not None and self._continuing is speech.tracker and self._pacer.drained(now)
-        if starved:
-            self._log_underrun(now)
+        fields = self._underrun_fields(now, speech.tracker) if starved and speech is not None else None
+        self._controls_await_ms = 0.0
         await self._sink.send_audio(wire)
         self._last_send_await_ms = self._now_ms() - now
+        self._last_timing = None if self._timed is None else self._timed.last_audio_timing
         self._last_sent_ms = now
         if generation != self._generation:
             return
-        lateness = self._pacer.on_sent(now)
-        self._count(lateness, speech=speech is not None)
-        self._continuing = speech.tracker if speech is not None else None
-        if starved:
-            self._stats.underruns += 1
-            if self._on_underrun is not None:
-                self._on_underrun()
-        if speech is not None:
+        self._count(self._pacer.on_sent(now), speech=speech is not None)
+        if speech is None:
+            self._continuing = None
+        else:
+            self._continuing = speech.tracker
+            if fields is not None:
+                self._underrun(now, speech.tracker, fields)
             speech.tracker.frame_sent(now)
         await self._send_controls(generation)
+
+    def _next_wire(self) -> tuple[_Frame | None, bytes]:
+        """The next speech frame (taken off the queue) and its wire bytes, or idle audio if none is queued."""
+        head = self._queue[0] if self._queue else None
+        if isinstance(head, _Frame):
+            self._queue.popleft()
+            self._queued_frames -= 1
+            return head, self._mixer.speech(head.data)
+        return None, self._mixer.idle()
+
+    def _underrun(self, now: float, tracker: PlaybackTracker, fields: dict[str, float | int | None]) -> None:
+        self._stats.underruns += 1
+        self._report_underrun(now, tracker, fields)
+        if self._on_underrun is not None:
+            self._on_underrun()
 
     async def _send_controls(self, generation: int) -> None:
         """Marks and finishes at the head of the queue, in order (stops early when a clear intervenes)."""
@@ -497,7 +554,9 @@ class OutboundAudio:
                 continue
             if isinstance(item, _SegmentEnd):
                 name = item.tracker.end_segment(item.chars)
+                started = self._now_ms()
                 await self._sink.send_mark(name)
+                self._controls_await_ms += self._now_ms() - started
                 self._stats.marks_sent += 1
             else:
                 self._continuing = None
@@ -505,18 +564,46 @@ class OutboundAudio:
                 if self._on_finished is not None:
                     self._on_finished(item.tracker)
 
-    def _log_underrun(self, now: float) -> None:
-        """Attribute an underrun before the frame goes out (specs/07 §9 Decision P08-FIX-3)."""
+    def _underrun_fields(self, now: float, tracker: PlaybackTracker) -> dict[str, float | int | None]:
+        """The attribution of an underrun, snapshotted before its frame goes out (specs/07 §9 Decision
+        P08-FIX-4): everything refers to the previous frame's send and the wait since."""
         drained_at = self._pacer.drained_at_ms
-        since_prev = None if self._last_sent_ms is None else round(now - self._last_sent_ms, 1)
-        _log.warning(
-            "outbound.underrun",
-            behind_ms=None if drained_at is None else round(now - drained_at, 1),
-            since_prev_send_ms=since_prev,
-            prev_send_await_ms=round(self._last_send_await_ms, 1),
-            wake_late_ms=None if self._due_ms is None else round(now - self._due_ms, 1),
-            queued_frames=self._queued_frames,
-        )
+        timing = self._last_timing
+        await_ms = self._last_send_await_ms
+        return {
+            "turn": tracker.turn,
+            "behind_ms": None if drained_at is None else round(now - drained_at, 1),
+            "since_prev_send_ms": None if self._last_sent_ms is None else round(now - self._last_sent_ms, 1),
+            "prev_send_await_ms": round(await_ms, 1),
+            "prev_lock_wait_ms": None if timing is None else round(timing.lock_wait_ms, 1),
+            "prev_socket_send_ms": None if timing is None else round(timing.socket_ms, 1),
+            "prev_resume_ms": (
+                None
+                if timing is None
+                else round(max(0.0, await_ms - timing.lock_wait_ms - timing.socket_ms), 1)
+            ),
+            "prev_controls_await_ms": round(self._controls_await_ms, 1),
+            "wake_late_ms": None if self._due_ms is None else round(now - self._due_ms, 1),
+            "queued_frames": self._queued_frames,
+        }
+
+    def _report_underrun(
+        self, now: float, tracker: PlaybackTracker, fields: dict[str, float | int | None]
+    ) -> None:
+        """Log a counted underrun, throttled per leg (the first of each utterance always goes out)."""
+        stats = self._stats
+        wake_late = fields["wake_late_ms"]
+        if wake_late is not None:
+            stats.max_underrun_wake_late_ms = max(stats.max_underrun_wake_late_ms, float(wake_late))
+        recent = self._last_logged_ms is not None and now - self._last_logged_ms < UNDERRUN_LOG_INTERVAL_MS
+        if tracker is self._last_logged_tracker and recent:
+            self._suppressed += 1
+            return
+        _log.warning("outbound.underrun", suppressed=self._suppressed, **fields)
+        self._suppressed = 0
+        self._last_logged_tracker = tracker
+        self._last_logged_ms = now
+        stats.underruns_logged += 1
 
     def _count(self, lateness: float, *, speech: bool) -> None:
         stats = self._stats

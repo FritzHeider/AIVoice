@@ -11,7 +11,9 @@ from media_helpers import FakeContextLoader, FakeMediaContainer, auth_values, me
 from service_helpers import UNREACHABLE, failing, json_log_stream, log_events, make_client, settings_of
 
 from va_common import observability
+from va_common.gc_tuning import GcPauseLog
 from va_media import __version__
+from va_media import main as media_main
 from va_media.drain import DRAINING_PODS_KEY
 from va_media.loop_lag import LoopLagMonitor
 from va_media.main import MediaState, create_app
@@ -112,6 +114,20 @@ async def test_crashed_lag_monitor_requests_failure_stop(models_dir: Path) -> No
     async with make_client(app):
         await asyncio.wait_for(app.state.stop.wait(), timeout=5)
     assert (app.state.stop.reason, app.state.stop.failed) == ("task_failed:loop_lag", True)
+
+
+async def test_the_installed_gc_pause_log_is_flushed_by_a_supervised_task(
+    models_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream = json_log_stream()
+    times = iter((0.0, 0.05))
+    pauses = GcPauseLog(clock=lambda: next(times))
+    monkeypatch.setattr(media_main, "installed_pause_log", lambda: pauses)
+    async with make_client(media_app(models_dir)):
+        pauses._callback("start", {"generation": 1})
+        pauses._callback("stop", {"generation": 1, "collected": 9, "uncollectable": 0})
+    [paused] = [e for e in log_events(stream) if e["event"] == "gc_pause"]
+    assert (paused["generation"], paused["collected"]) == (1, 9)
 
 
 async def test_observability_initialised_as_media_worker(

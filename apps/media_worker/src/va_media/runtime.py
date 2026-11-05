@@ -610,11 +610,16 @@ def _unwire(
     watch: CarrierWatch,
     monitor: VoicemailMonitor | None,
 ) -> None:
-    """Drop the callbacks wired between the call's parts once everything else on the stack has run.
+    """Drop the callbacks wired between the call's parts when the call's exit stack unwinds.
 
     Each points back into the pipeline (its outbound clock, takeover, say), so left in place a finished call
     would be a set of reference cycles freed only by the cyclic collector, in one long pause of the media loop
     for every leg still talking (specs/07 §9 Decision P08-FIX-3).
+
+    The stack is LIFO (specs/07 §9 Decision P08-FIX-4): this runs after the parts registered after it stopped
+    (the carrier-watch task, the voicemail monitor) and before the ones registered earlier close (the brain,
+    the vendor sockets, then ``persistence.finish_call``). A takeover or transfer outcome raised while those
+    later closes run is dropped (``media.voicemail_unbound``), which is harmless: the call is already over.
     """
     transport.on_rate_limited = None
     actions.unbind()

@@ -13,9 +13,19 @@ import httpx
 import pytest
 import uvicorn
 from fakeredis import FakeAsyncRedis, FakeServer
-from service_helpers import UNREACHABLE, FakeContainer, RecordingServer, make_client, ok_check, settings_of
+from service_helpers import (
+    UNREACHABLE,
+    FakeContainer,
+    RecordingServer,
+    json_log_stream,
+    log_events,
+    make_client,
+    ok_check,
+    settings_of,
+)
 
 from va_common.checks import open_dependencies
+from va_common.gc_tuning import GcPauseLog
 from va_common.service import ContainerFactory, StopController, run_server
 from va_sim.scenario import load_scenario
 from va_sim.server import build_state
@@ -142,6 +152,20 @@ async def test_run_serves_all_simulators_until_stopped(
         public_key = await client.get(f"{servers[0].url}/sim/telnyx/public-key")
         assert key_file.read_text(encoding="utf-8") == f"{public_key.json()['public_key']}\n"
     assert container.closed == 1
+
+
+async def test_run_flushes_the_installed_gc_pause_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stream = json_log_stream()
+    times = iter((0.0, 0.05))
+    pauses = GcPauseLog(clock=lambda: next(times))
+    monkeypatch.setattr(sim_main, "installed_pause_log", lambda: pauses)
+    async with serving(monkeypatch, tmp_path, FakeContainer({"redis": ok_check})):
+        pauses._callback("start", {"generation": 2})
+        pauses._callback("stop", {"generation": 2, "collected": 7, "uncollectable": 0})
+    [paused] = [e for e in log_events(stream) if e["event"] == "gc_pause"]
+    assert (paused["generation"], paused["collected"]) == (2, 7)
 
 
 async def test_each_run_starts_from_a_fresh_seed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

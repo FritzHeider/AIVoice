@@ -31,7 +31,7 @@ from redis.asyncio import Redis
 from starlette.applications import Starlette
 
 from va_common.checks import Dependencies, open_dependencies
-from va_common.gc_tuning import tune_gc
+from va_common.gc_tuning import installed_pause_log, tune_gc
 from va_common.health import CheckFn
 from va_common.logging import get_logger
 from va_common.metrics import new_registry
@@ -150,6 +150,10 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
                 with signals:
                     async with asyncio.TaskGroup() as group:
                         subscriber = group.create_task(state.run_subscriber(), name="sim-shared-state")
+                        pauses = installed_pause_log()
+                        gc_task = None
+                        if pauses is not None:
+                            gc_task = group.create_task(pauses.run(), name="sim-gc-pauses")
                         async with asyncio.TaskGroup() as servers:
                             for sim, port in ports.items():
                                 app = create_app(source, sim, state)
@@ -157,6 +161,8 @@ async def run(  # noqa: PLR0913 - keyword-only knobs and test seams
                                     run_server(app, host=host, port=port, stop=stop, install_signals=False)
                                 )
                         subscriber.cancel()
+                        if gc_task is not None:
+                            gc_task.cancel()
     finally:
         await state.aclose()
 

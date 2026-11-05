@@ -1998,6 +1998,12 @@ Grafana 3001
 - 2026-11-05 (P08-FIX-9): a new post-call step = an entry in `va_workflows.post_call.plan._PLAN` (step → condition;
   `IMPLEMENTED` is derived) plus a `budget.STEP_WORST_CASE` entry when it runs after the copy. `budget` raises at import
   (`check_copy_window`) when `PRE_STORE_WORST_CASE` + `MIN_STORE_WINDOW` + `STORE_RESERVE` exceeds `POSTCALL_BUDGET_S`.
+- 2026-11-05 (P08-FIX-4): `gc_pause` is no longer logged inside the collector: `GcPauseLog` buffers passes and its
+  `run()` task (media supervisor `gc_pauses`, sim `sim-gc-pauses`, via `va_common.gc_tuning.installed_pause_log()`)
+  logs them each second outside any call context; tests calling `tune_gc` must `monkeypatch.setattr(gc_tuning,
+  "_installed", None)`. `outbound.underrun` is logged after the send, throttled (first per utterance, then ≤ 1/s per
+  leg, `suppressed=`), with `prev_lock_wait_ms`/`prev_socket_send_ms`/`prev_resume_ms` from a `TimedSink`
+  (`TelnyxMediaTransport.last_audio_timing`) and `prev_controls_await_ms`; large `prev_resume_ms` = loop lag.
 - 2026-11-05 (P08-FIX-10): assert Redis TTLs with `redis_ttl.assert_expires_in(redis, key, ttl_s)`
   (`packages/va_common/tests`, PTTL within 30 s below `ttl_s`); never `ttl(key) == N`: the expiry is a wall-clock
   deadline and `TTL` floors it, so a loaded worker reads `N - 1`. Short TTLs (≤ 30 s) are only bounded above; the key must

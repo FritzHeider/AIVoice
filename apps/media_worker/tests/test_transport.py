@@ -23,6 +23,7 @@ from va_media.session import StreamStart
 from va_media.transport import TelnyxMediaTransport, UnsupportedMediaFormatError, leg_format, stream_format
 from va_telnyx.media import MediaFormat
 from va_voice.audio.formats import L16_16000, ULAW_8000
+from va_voice.outbound import SendTiming, TimedSink
 from va_voice.pipeline.protocols import InboundAudio, InboundDtmf, MarkEcho, TransportEvent
 
 ULAW_FRAME = bytes(range(160))
@@ -204,6 +205,45 @@ async def test_concurrent_sends_are_serialized() -> None:
     socket.send_gate.set()
     await sends
     assert [message["event"] for message in sent(socket)] == ["media", "clear", "mark"]
+
+
+class StepTimer:
+    """Each read returns the next scripted time (seconds)."""
+
+    def __init__(self, *times: float) -> None:
+        self._times = list(times)
+
+    def __call__(self) -> float:
+        return self._times.pop(0)
+
+
+async def test_audio_send_timing_separates_lock_wait_from_socket_time() -> None:
+    socket = FakeSocket()
+    socket.send_gate = asyncio.Event()
+    # mark: requested 0.0, locked 0.0; audio: requested 0.001, locked 0.030, done 0.032.
+    transport = TelnyxMediaTransport(socket, start_of(), timer=StepTimer(0.0, 0.0, 0.001, 0.030, 0.032))
+    assert isinstance(transport, TimedSink)
+    assert TelnyxMediaTransport(FakeSocket(), start_of()).last_audio_timing is None
+    mark = asyncio.create_task(transport.send_mark("m"))
+    await asyncio.sleep(0)
+    audio = asyncio.create_task(transport.send_audio(ULAW_FRAME))
+    await asyncio.sleep(0)
+    assert transport._send_lock.locked()
+    socket.send_gate.set()
+    await asyncio.gather(mark, audio)
+    timing = transport.last_audio_timing
+    assert timing is not None
+    assert timing.lock_wait_ms == pytest.approx(29.0)
+    assert timing.socket_ms == pytest.approx(2.0)
+    assert [message["event"] for message in sent(socket)] == ["mark", "media"]
+
+
+async def test_a_dropped_audio_send_still_records_its_timing() -> None:
+    socket = FakeSocket()
+    transport = TelnyxMediaTransport(socket, start_of(), timer=StepTimer(1.0, 1.0, 1.0))
+    socket.hang_up()
+    await transport.send_audio(ULAW_FRAME)
+    assert transport.last_audio_timing == SendTiming(lock_wait_ms=0.0, socket_ms=0.0)
 
 
 async def test_sends_after_the_stream_ended_are_dropped() -> None:

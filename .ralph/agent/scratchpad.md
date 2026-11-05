@@ -768,3 +768,186 @@ Helper module name must be unique on the shared pythonpath (`redis_ttl` — chec
 - Re-ran: `make lint typecheck placeholders` exit 0 (0 findings); `make test` exit 0 (12708 passed, 7 skipped, cov 99 %).
 - Diff: window `(max(0, ttl-slack), ttl]`; short-TTL missing/no-expiry/longer cases tested; callers (TTLs ≥ 600 s)
   unaffected. Inbox note appended to DONE.
+
+## Planner 2026-11-05 — after P08-FIX-11 approval
+- Inbox: every note is in DONE except the seven P08-FIX-4 notes. Next unticked: P08-FIX-4.
+- Item (5) of P08-FIX-4 is already satisfied: specs/07 §9 Decision P08-FIX-3 contains the measured before/after numbers
+  (3 of 8 runs had 1-33 underruns, p50 125-147 ms → 0 underruns, p50 101-137 ms, lag p99 ≤ 25 ms). Record that
+  in the evidence. Do not change it.
+
+## Plan P08-FIX-4 (gc_pause / underrun log hygiene)
+### 1. `packages/va_common/src/va_common/gc_tuning.py`: no logging inside the collector
+- `GcPauseLog.__init__(*, threshold_ms=..., clock=time.perf_counter, capacity: int = PAUSE_BUFFER = 256)`.
+  `_callback` only does this: time the pass, and when ≥ threshold, `self.pauses += 1` and append the tuple
+  `(generation, round(duration_ms, 1), collected, uncollectable)` to `self._pending: deque` (maxlen=capacity). When
+  the deque is full before the append, `self.dropped += 1` (the deque discards the oldest). No logger call and no
+  dict building beyond the info reads.
+- `flush() -> int`: `contextvars.Context().run(self._emit)`. In a fresh, empty context, pop everything and
+  `_log.warning("gc_pause", generation=, duration_ms=, collected=, uncollectable=)` for each tuple. If `dropped`
+  is non-zero, also log one `_log.warning("gc_pause_overflow", dropped=n)` and reset it. Returns the number of
+  `gc_pause` lines.
+- `async def run(self, *, interval_s: float = FLUSH_INTERVAL_S (1.0), sleep: Callable[[float], Awaitable[None]] =
+  asyncio.sleep) -> None`: `try: while True: await sleep(interval_s); self.flush()` `finally: self.flush()` (on cancel).
+- The module global `_installed: GcPauseLog | None`. `tune_gc` sets it, and `installed_pause_log() -> GcPauseLog |
+  None` returns it. Add `installed_pause_log`, `FLUSH_INTERVAL_S` and `PAUSE_BUFFER` to `__all__`. Update the module
+  docstring: the callback only records, a supervised task logs outside any call context.
+- Wiring:
+  - `apps/media_worker/src/va_media/main.py` lifespan, next to `supervisor.start("loop_lag", ...)`:
+    `pauses = installed_pause_log()` and, when not None, `supervisor.start("gc_pauses", pauses.run)`. `tune_gc()` stays
+    in `main()`.
+  - `apps/sim/src/va_sim_server/main.py` `run()`: inside the outer TaskGroup, when `installed_pause_log()` is not None,
+    `gc_task = group.create_task(pauses.run(), name="sim-gc-pauses")`, and cancel it next to `subscriber.cancel()`.
+  - Tests that call `tune_gc` must reset `gc_tuning._installed` with monkeypatch (check `test_gc_tuning.py`,
+    media `test_main.py`, sim `test_sim.py`).
+- Tests in `packages/va_common/tests/test_gc_tuning.py`. Rewrite the first test as follows:
+  - Call the callback start/stop with no log line yet, then `flush()` == 1 with the line and fields as before.
+  - `test_gc_pause_is_logged_outside_the_call_context`: `bind_call_context(org_id=..., call_id=...)` (clear it in
+    finally with `structlog.contextvars.clear_contextvars()`), trigger the callback, `flush()`, and assert there is
+    no `call_id`/`org_id` key in the line.
+  - `test_overflow_keeps_the_latest_and_reports_the_dropped`: capacity=2 with 3 pauses gives 2 lines plus
+    `gc_pause_overflow dropped=1`.
+  - `test_run_flushes_each_interval_and_on_cancel`: inject a `sleep` that waits on a queue/event gate. Record one pause,
+    release one sleep, and assert the line exists. Record another, cancel the task, and assert the final flush logged it.
+  - `test_tune_gc_...` also asserts `installed_pause_log() is pauses`.
+### 2. `packages/va_voice/src/va_voice/outbound.py`: the underrun log
+- `@dataclass(frozen=True, slots=True) class SendTiming: lock_wait_ms: float; socket_ms: float`, and
+  `@runtime_checkable class TimedSink(Protocol)` with `@property def last_audio_timing(self) -> SendTiming | None`.
+  Export both. In `__init__`, `self._timed = sink if isinstance(sink, TimedSink) else None` (a single check).
+- Fields are computed BEFORE the send in `_underrun_fields(now, tracker) -> dict[str, float | int | None]`:
+  `turn` (tracker.turn), `behind_ms`, `since_prev_send_ms`, `prev_send_await_ms`, `prev_lock_wait_ms`,
+  `prev_socket_send_ms`, `prev_resume_ms` (= max(0, await − lock − socket): the event loop resuming the task after
+  the send completed, i.e. loop lag; all three are None without a TimedSink), `prev_controls_await_ms` (time awaited
+  in `send_mark` since the previous frame), `wake_late_ms`, and `queued_frames`. After the send, store the previous
+  frame's values: `_last_send_await_ms` and `_last_timing = self._timed.last_audio_timing if self._timed else None`.
+- Emit only in the `if starved:` block AFTER the generation check, next to `stats.underruns += 1` (clear during a held
+  send → no log, no count).
+- Controls: in `_send_controls`, time each `await self._sink.send_mark(name)` with `_now_ms()` and add it to
+  `self._controls_await_ms`. `_send_frame` resets it to 0.0 right after building the fields (whether starved or not;
+  that is, every frame starts a new accumulation window after its snapshot).
+- `_due_ms = None` on the idle branch before `await self._wake.wait()`.
+- Throttle: `UNDERRUN_LOG_INTERVAL_MS: Final = 1000.0` (exported). Log the underrun when its tracker is not the last
+  logged tracker (first underrun of an utterance) OR when ≥ interval has passed since the last logged line on this
+  leg. Otherwise `self._suppressed += 1`. A logged line carries `suppressed=<count since previous line>`, then resets
+  it. The line keeps the `outbound.underrun` warning name. `OutboundStats` gains `underruns_logged: int = 0` and
+  `max_underrun_wake_late_ms: float = 0.0`, both updated for every counted underrun (max over the non-None
+  wake_late values). `clear()` does not reset throttle state (it is per leg).
+- `packages/va_voice/src/va_voice/pipeline/pipeline.py` `pipeline_ended`: add `underruns_logged=` and
+  `max_underrun_wake_late_ms=round(..., 1)`.
+- Module docstring: rewrite the underrun paragraph (logged after the send, next to the counter, throttled, fields).
+### 3. `apps/media_worker/src/va_media/transport.py`: the transport's own timing
+- `TelnyxMediaTransport(..., timer: Callable[[], float] = time.perf_counter)` (seconds). `_send(message, *, audio=False)`
+  records `t0` before `async with self._send_lock`, `t1` once the lock is held, and `t2` after `send_text`. When
+  `audio`, `self._last_audio_timing = SendTiming(lock_wait_ms=(t1-t0)*1000, socket_ms=(t2-t1)*1000)` (also set on a
+  dropped/failed send, socket_ms covering whatever ran). Property `last_audio_timing`. `send_audio` passes
+  `audio=True`. Import `SendTiming` from va_voice.outbound (va_media already depends on va_voice). Note in a docstring
+  that `socket_ms` can still include loop stalls that happen inside the socket await, while lock wait and resume
+  separate the rest.
+- `test_transport.py`: `test_audio_send_timing_separates_lock_wait_from_socket_time`. Use a stepping timer, hold the
+  lock with a `send_mark` whose FakeSocket `send_gate` is closed, start `send_audio`, release, and assert
+  `lock_wait_ms`/`socket_ms` from the scripted timer. Marks do not overwrite `last_audio_timing`.
+  `isinstance(transport, TimedSink)` is True.
+### 4. `apps/media_worker/src/va_media/runtime.py` `_unwire` docstring
+- State the real order. The exit stack is LIFO, so `_unwire` runs after the carrier-watch task and the voicemail
+  monitor stop, which were registered after it, and BEFORE the brain close, the vendor socket closes and
+  `persistence.finish_call`, which were registered earlier. A takeover or transfer outcome that arrives from those
+  later closes is dropped (`media.voicemail_unbound`), which is harmless because the call is over. No order change.
+### Tests in `packages/va_voice/tests/test_outbound_audio.py` (reuse `_underrun_rig`, `RecordingSink`, `json_log_stream`)
+- Update `test_an_underrun_after_a_slow_send_names_the_send_await`. It still has await 200. Add `turn == 1`,
+  `suppressed == 0`, and `prev_lock_wait_ms is None` (RecordingSink is untimed).
+- `test_a_clear_during_a_held_starved_send_logs_and_counts_nothing`. Hold the sink on the starved frame (as in
+  the slow-send test but call `out.clear()` while it is holding), release, and expect `underruns == 0` with no
+  underrun log.
+- `test_a_held_mark_is_named_in_the_underrun_log`. Use two segments: push 10 frames, `end_segment`, then push 10
+  more. Hold `send_mark` for 200 ms (RecordingSink: add a `mark_hold` event if it has none). The next frame
+  underruns, and `prev_controls_await_ms ≈ 200` with a small `prev_send_await_ms`.
+- `test_an_underrun_after_waking_from_idle_has_no_stale_wake_late`. Covers the `_due_ms` reset on the idle branch.
+  Sleep with a due time, then go idle (queue empty, no bg), wake via push after a long advance, and check that a
+  later underrun (via a slow send) has `wake_late_ms is None`. If a natural underrun cannot be built after idle
+  (continuity breaks on idle), assert `out._due_ms is None` after idling instead. The Builder picks whichever is
+  behavioural, with `_due_ms` as the fallback.
+- `test_a_burst_of_underruns_logs_one_line_and_counts_all`. Use three stalled sends within 1 s of one utterance
+  (hold/advance 0.2 s each), expect 3 underruns, 1 log line, `stats.underruns_logged == 1`, and
+  `max_underrun_wake_late_ms` as computed. Then a stall after advancing 1.1 s logs a second line with
+  `suppressed == 2`.
+- `test_a_new_utterance_logs_its_first_underrun`. Two utterances within 1 s give 2 lines.
+- `test_a_timed_sink_splits_the_send_await`. A RecordingSink subclass implements `last_audio_timing` (lock 5 ms,
+  socket 1 ms) and advances the ManualClock 200 ms during send (the loop stall). Expect `prev_send_await_ms ≈ 200`,
+  `prev_lock_wait_ms == 5`, `prev_socket_send_ms == 1` and `prev_resume_ms ≈ 194`.
+- Pipeline: the `pipeline_ended` log carries `underruns_logged` and `max_underrun_wake_late_ms`. Extend an existing
+  va_voice pipeline test that asserts `underruns` in pipeline_ended (grep `pipeline_ended`), or add one with
+  `harness(on_underrun=)`.
+### Specs/docs
+- specs/07 §9: append `> Decision (2026-11-05) P08-FIX-4:` with these points. The underrun line is emitted after
+  the send next to the counter, so lines never outnumber counts. A clear during the send logs nothing. It is
+  throttled to the first underrun of an utterance and then at most one per second per leg, with `suppressed`. The
+  new fields are `turn`, `prev_lock_wait_ms`, `prev_socket_send_ms`, `prev_resume_ms` (loop lag after the send),
+  and `prev_controls_await_ms`. `pipeline_ended` adds `underruns_logged` and `max_underrun_wake_late_ms`. `gc_pause`
+  is recorded in the callback into a bounded buffer (256, `gc_pause_overflow`) and logged each second by a
+  supervised task in an empty context (no call fields). The `_unwire` order is as stated above. Also amend the
+  P08-FIX-3 text "before the frame goes out" → "(superseded by P08-FIX-4: after the send)".
+- AGENTS.md: amend the P08-FIX-3 line (underrun fields and the gc_pause flush task) or add a dated P08-FIX-4 line.
+### Gates
+- `uv run pytest packages/va_common/tests/test_gc_tuning.py packages/va_voice apps/media_worker/tests/test_transport.py
+  apps/media_worker/tests/test_main.py apps/sim/tests/test_sim.py -q`. Then `make fmt lint typecheck placeholders`,
+  then `make check` in the background with a heartbeat Monitor (PATH += /home/ralph/.local/bin).
+- Capacity: `scripts/dev_up.sh e2e` (rebuild images), then `uv run pytest tests_e2e -m capacity -s` 3 times, each with
+  0 underruns and p50 ≤ 140 ms. Collect `docker logs voiceagents-media-1 | grep -cE 'outbound.underrun|gc_pause'`
+  and check that no gc_pause line carries `call_id`.
+- Reviewer: tick P08-FIX-4, append all seven note names to `.ralph/review-inbox/DONE`, and commit
+  `fix(media): log gc pauses and underruns outside the hot path` with the footer `Task: P08-FIX-4`.
+### Risks
+- `runtime_checkable` Protocol isinstance with a property only checks that the attribute exists. FakeTransport in
+  va_voice tests lacks it, so it is untimed (fine).
+- gc_cycles tests: do not store a bound method of the owner in the transport or the outbound clock. `_timed` is the
+  sink itself (already held), and the timer is a plain function.
+- tests that monkeypatch `tune_gc` must leave `_installed` clean (monkeypatch.setattr(gc_tuning, "_installed", None)).
+- The throttle must not hide underruns from the metric. The count and the hook still fire for every underrun.
+
+## Build P08-FIX-4 (2026-11-05)
+- gc_tuning: callback only buffers (deque 256, `dropped` → `gc_pause_overflow`); `flush()` logs in an empty
+  contextvars Context; `run(interval_s, sleep)` flushes each second + on cancel; `installed_pause_log()` set by
+  `tune_gc`. Wired: media supervisor `gc_pauses`, sim TaskGroup `sim-gc-pauses` (cancelled next to the subscriber).
+  Tests: gc_tuning (flush, context-free line verified failing without the empty Context, overflow, run/cancel),
+  media test_health + sim test_sim wiring tests, test_main resets `_installed`.
+- outbound: fields snapshotted before send, log after send next to the counter; clear during held starved send →
+  no count/no log; throttle (first per utterance, then ≤1/s per leg, `suppressed`); `turn`, `prev_lock_wait_ms`,
+  `prev_socket_send_ms`, `prev_resume_ms` (TimedSink), `prev_controls_await_ms`; `_due_ms` reset on idle;
+  stats `underruns_logged`/`max_underrun_wake_late_ms` → pipeline_ended. `SendTiming`/`TimedSink` exported.
+  Held-mark test: 210 ms (run_for(0.13) runs 10 ms past the 120 ms mark before the 200 ms advance).
+- transport: `timer=` seam, `_send(audio=True)` records SendTiming (also on dropped sends), `last_audio_timing`.
+- runtime `_unwire` docstring states the LIFO order. specs/07 §9 Decision P08-FIX-4 + P08-FIX-3 "superseded" note;
+  AGENTS.md line. Item (5) of the note already satisfied by the P08-FIX-3 Decision numbers (unchanged).
+- Gates: make fmt/lint/typecheck/placeholders exit 0 (0 findings); `make check` exit 0 (12721 passed, 7 skipped,
+  cov 99.07 %, TS 22/52/48 passed).
+- Capacity (stack rebuilt with `scripts/dev_up.sh e2e`), 3 runs: underruns 0/0/0, overhead p50 119/124/104 ms
+  (p95 176/173/155), loop lag p99 ≤ 25 ms. Media+sim logs over the runs: 0 `outbound.underrun`, 0 `gc_pause`
+  (no pass ≥ 10 ms happened), 0 gc lines with call_id; pipeline_ended carries the new fields in the container.
+
+## Planner 2026-11-05 — build.blocked for P08-FIX-4 (backpressure)
+- The code is done and the gates passed (Build P08-FIX-4 above). The rejection came from backpressure: the
+  build.done text lacked the required tokens. No split is needed, and the code plan is unchanged.
+- Builder: do not reimplement. Check that the working tree still holds the P08-FIX-4 diff (git status), then actually
+  run and record the following (PATH += /home/ralph/.local/bin):
+  - `make lint typecheck placeholders` and `make check` (background + heartbeat Monitor) → tests/lint/typecheck/coverage.
+  - audit: `uv export --frozen --no-hashes --no-emit-workspace > /var/tmp/req.txt && uvx pip-audit -r /var/tmp/req.txt`
+    + `corepack pnpm audit --audit-level high`.
+  - duplication: `npx --yes jscpd@4 --silent` (must report 0 clones; fix any clone the new outbound/gc code introduced).
+  - complexity: `uvx radon cc -s -a packages/va_voice/src/va_voice/outbound.py packages/va_common/src/va_common/gc_tuning.py apps/media_worker/src/va_media/transport.py`
+    plus the repo-wide average; it must stay < 10. If `_send_frame`/`_underrun_fields` rank D or worse, extract helpers.
+  - Emit WITHOUT --json, plain text containing: `tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass,
+    duplication: pass, complexity: <n>, specs: pass` (put a comma after the number).
+
+## Build P08-FIX-4 rerun (2026-11-05) — backpressure evidence
+- jscpd had found 4 clones in the new test_outbound_audio.py tests. They now use the helpers `_speak`,
+  `_wake_late_once` and `_hold_third_send`, and jscpd reports 0 clones.
+- radon: `OutboundAudio._send_frame` was C (14). The `_next_wire` and `_underrun` helpers bring it down to B (9).
+  The repo average is A (2.92).
+- audit: pip-audit reports no known vulnerabilities. `pnpm audit --audit-level high` exits 0 (1 moderate only).
+- lint, typecheck and placeholders exit 0. `make check` was rerun after the refactor (result below).
+- make check exit 0: 12721 passed, 7 skipped; TS 22/52/48 passed.
+
+## Review P08-FIX-4 (2026-11-05) — APPROVED
+- Re-ran: make lint/typecheck/placeholders exit 0; make test 12721 passed, 7 skipped, cov 99.07 %; jscpd 0 clones;
+  radon outbound `_send_frame` B (9). Diff matches the plan; the `_unwire` docstring was checked against the exit
+  stack order in `runtime._converse` and is correct. The specs/07 Decision P08-FIX-4 is accurate. The 7 inbox notes
+  were appended to DONE.

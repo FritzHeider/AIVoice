@@ -10,6 +10,7 @@ import uvloop
 from media_helpers import FakeMediaContainer
 from service_helpers import capture_serve, settings_of
 
+from va_common import gc_tuning
 from va_common.service import Bind, StopController
 from va_common.time import SystemClock
 from va_db.session import Database
@@ -35,7 +36,8 @@ def test_main_parses_args_and_serves_with_drain(monkeypatch: pytest.MonkeyPatch)
     assert kwargs["loop_factory"] is uvloop.new_event_loop
 
 
-def test_tune_gc_freezes_startup_objects_and_raises_the_thresholds() -> None:
+def test_tune_gc_freezes_startup_objects_and_raises_the_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gc_tuning, "_installed", None)
     thresholds = gc.get_threshold()
     pauses = None
     try:

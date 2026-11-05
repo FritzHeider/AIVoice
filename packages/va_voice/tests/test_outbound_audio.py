@@ -16,7 +16,7 @@ from service_helpers import json_log_stream, log_events
 
 from va_voice.audio import PCM16LE_16000, ULAW_8000, ulaw_encode
 from va_voice.background import BackgroundLoop
-from va_voice.outbound import FrameMixer, FramePacer, OutboundAudio
+from va_voice.outbound import FrameMixer, FramePacer, OutboundAudio, SendTiming, TimedSink
 from va_voice.playback import PlaybackTracker
 
 FRAME = 0.02
@@ -24,12 +24,15 @@ FRAME = 0.02
 
 @dataclass
 class RecordingSink:
-    """Records ``(t_ms, kind, value)``; ``hold`` (when set) blocks the next ``send_audio`` until released."""
+    """Records ``(t_ms, kind, value)``; ``hold``/``mark_hold`` (when set) block the next ``send_audio``/
+    ``send_mark`` until released."""
 
     clock: ManualClock
     sent: list[tuple[float, str, bytes | str]] = field(default_factory=list)
     hold: asyncio.Event | None = None
     holding: asyncio.Event = field(default_factory=asyncio.Event)
+    mark_hold: asyncio.Event | None = None
+    mark_holding: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def send_audio(self, frame: bytes) -> None:
         if self.hold is not None:
@@ -39,6 +42,10 @@ class RecordingSink:
         self.sent.append((self._now(), "audio", frame))
 
     async def send_mark(self, name: str) -> None:
+        if self.mark_hold is not None:
+            self.mark_holding.set()
+            await self.mark_hold.wait()
+            self.mark_hold = None
         self.sent.append((self._now(), "mark", name))
 
     def audio_times(self) -> list[float]:
@@ -319,18 +326,8 @@ async def test_a_late_loop_counts_late_frames() -> None:
     clock = ManualClock()
     sink = RecordingSink(clock)
     out = OutboundAudio(sink, FrameMixer(ULAW_8000), clock=clock, pacer=FramePacer(lead_frames=0))
-    tracker = PlaybackTracker(1)
-    out.start_utterance(tracker)
-    out.push_audio(_speech(2))
-    out.finish_utterance()
-    task = asyncio.create_task(out.run())
-    await settle()
-    await clock.wait_for_sleep(FRAME)
-    clock.advance(0.06)
-    await clock.run_for(0.0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    _speak(out, 2)
+    await _wake_late_once(out, clock)
     assert sink.audio_times() == [0.0, 60.0]
     assert out.stats.late_frames == 1
     assert out.stats.underruns == 1
@@ -362,6 +359,42 @@ async def test_utterance_misuse_is_rejected(rig: Rig) -> None:
     rig.out.start_utterance(PlaybackTracker(1))
     with pytest.raises(RuntimeError, match="still open"):
         rig.out.start_utterance(PlaybackTracker(2))
+
+
+def _speak(out: OutboundAudio, frames: int, turn: int = 1) -> PlaybackTracker:
+    """One finished utterance of ``frames`` speech frames."""
+    tracker = PlaybackTracker(turn)
+    out.start_utterance(tracker)
+    out.push_audio(_speech(frames))
+    out.finish_utterance()
+    return tracker
+
+
+async def _wake_late_once(out: OutboundAudio, clock: ManualClock) -> None:
+    """Run the clock loop and wake it 40 ms late from its second frame's pacing sleep."""
+    task = asyncio.create_task(out.run())
+    await settle()
+    await clock.wait_for_sleep(FRAME)
+    clock.advance(0.06)
+    await clock.run_for(0.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _hold_third_send(clock: ManualClock, sink: RecordingSink) -> None:
+    """Let two frames out, hold the third send for 200 ms of clock time, then let the rest play."""
+    await clock.wait_for_sleep(FRAME)
+    await clock.run_for(0.04)
+    hold = asyncio.Event()
+    sink.hold = hold
+    sink.holding.clear()
+    await clock.run_for(0.02)
+    await sink.holding.wait()
+    clock.advance(0.2)
+    hold.set()
+    await settle()
+    await clock.run_for(0.5)
 
 
 @dataclass
@@ -415,17 +448,7 @@ async def test_a_stalled_send_loop_mid_utterance_counts_one_underrun(urig: Under
     urig.out.start_utterance(tracker)
     urig.out.push_audio(_speech(20))
     urig.out.finish_utterance()
-    await urig.clock.wait_for_sleep(FRAME)
-    await urig.clock.run_for(0.04)
-    hold = asyncio.Event()
-    urig.sink.hold = hold
-    urig.sink.holding.clear()
-    await urig.clock.run_for(0.02)
-    await urig.sink.holding.wait()
-    urig.clock.advance(0.2)
-    hold.set()
-    await settle()
-    await urig.clock.run_for(0.5)
+    await _hold_third_send(urig.clock, urig.sink)
     assert tracker.frames_sent == 20
     assert urig.out.stats.underruns == 1
     assert len(urig.underruns) == 1
@@ -482,23 +505,18 @@ def _underrun_logs(stream: io.StringIO) -> list[dict[str, Any]]:
 async def test_an_underrun_after_a_slow_send_names_the_send_await() -> None:
     stream = json_log_stream()
     async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
-        urig.out.start_utterance(PlaybackTracker(1))
-        urig.out.push_audio(_speech(20))
-        urig.out.finish_utterance()
-        await urig.clock.wait_for_sleep(FRAME)
-        await urig.clock.run_for(0.04)
-        hold = asyncio.Event()
-        urig.sink.hold = hold
-        urig.sink.holding.clear()
-        await urig.clock.run_for(0.02)
-        await urig.sink.holding.wait()
-        urig.clock.advance(0.2)
-        hold.set()
-        await settle()
-        await urig.clock.run_for(0.5)
+        _speak(urig.out, 20)
+        await _hold_third_send(urig.clock, urig.sink)
         assert urig.out.stats.underruns == 1
     [logged] = _underrun_logs(stream)
     assert logged["level"] == "warning"
+    assert (logged["turn"], logged["suppressed"]) == (1, 0)
+    assert (logged["prev_lock_wait_ms"], logged["prev_socket_send_ms"], logged["prev_resume_ms"]) == (
+        None,
+        None,
+        None,
+    )
+    assert logged["prev_controls_await_ms"] == pytest.approx(0.0)
     assert logged["prev_send_await_ms"] == pytest.approx(200.0)
     assert logged["since_prev_send_ms"] == pytest.approx(200.0)
     assert logged["wake_late_ms"] is None
@@ -511,17 +529,8 @@ async def test_an_underrun_after_a_late_wakeup_names_the_stall() -> None:
     clock = ManualClock()
     pacer = FramePacer(lead_frames=0)
     out = OutboundAudio(RecordingSink(clock), FrameMixer(ULAW_8000), clock=clock, pacer=pacer)
-    out.start_utterance(PlaybackTracker(1))
-    out.push_audio(_speech(2))
-    out.finish_utterance()
-    task = asyncio.create_task(out.run())
-    await settle()
-    await clock.wait_for_sleep(FRAME)
-    clock.advance(0.06)
-    await clock.run_for(0.0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    _speak(out, 2)
+    await _wake_late_once(out, clock)
     [logged] = _underrun_logs(stream)
     assert logged["wake_late_ms"] == pytest.approx(40.0)
     assert logged["behind_ms"] == pytest.approx(40.0)
@@ -533,9 +542,134 @@ async def test_an_underrun_after_a_late_wakeup_names_the_stall() -> None:
 async def test_on_time_speech_logs_no_underrun() -> None:
     stream = json_log_stream()
     async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
-        urig.out.start_utterance(PlaybackTracker(1))
-        urig.out.push_audio(_speech(20))
-        urig.out.finish_utterance()
+        _speak(urig.out, 20)
         await urig.clock.wait_for_sleep(FRAME)
         await urig.clock.run_for(0.5)
     assert _underrun_logs(stream) == []
+
+
+async def _stall(urig: UnderrunRig, seconds: float = 0.2) -> None:
+    """The loop wakes ``seconds`` late from its next 20 ms pacing sleep (an event-loop stall)."""
+    await urig.clock.wait_for_sleep(FRAME)
+    urig.clock.advance(seconds)
+    await urig.clock.run_for(0.0)
+
+
+async def test_a_clear_during_a_held_starved_send_logs_and_counts_nothing() -> None:
+    stream = json_log_stream()
+    async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
+        _speak(urig.out, 20)
+        await urig.clock.wait_for_sleep(FRAME)
+        hold = asyncio.Event()
+        urig.sink.hold = hold
+        urig.sink.holding.clear()
+        urig.clock.advance(0.2)
+        await urig.clock.run_for(0.0)
+        await urig.sink.holding.wait()
+        urig.out.clear()
+        hold.set()
+        await settle()
+        assert (urig.out.stats.underruns, urig.underruns) == (0, [])
+    assert _underrun_logs(stream) == []
+
+
+async def test_a_held_mark_is_named_in_the_underrun_log() -> None:
+    stream = json_log_stream()
+    async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
+        urig.out.start_utterance(PlaybackTracker(1))
+        urig.out.push_audio(_speech(10))
+        urig.out.end_segment(5)
+        urig.out.push_audio(_speech(10))
+        urig.out.finish_utterance()
+        mark_hold = asyncio.Event()
+        urig.sink.mark_hold = mark_hold
+        await urig.clock.wait_for_sleep(FRAME)
+        await urig.clock.run_for(0.13)
+        await asyncio.wait_for(urig.sink.mark_holding.wait(), timeout=5)
+        assert len(urig.sink.audio_times()) == 10
+        urig.clock.advance(0.2)
+        mark_hold.set()
+        await settle()
+        await urig.clock.run_for(0.5)
+        assert urig.out.stats.underruns == 1
+    [logged] = _underrun_logs(stream)
+    # The mark went out at 120 ms; run_for(0.13) ran on to 130 ms before the 200 ms advance.
+    assert logged["prev_controls_await_ms"] == pytest.approx(210.0)
+    assert logged["prev_send_await_ms"] == pytest.approx(0.0)
+    assert logged["wake_late_ms"] is None
+
+
+async def test_idling_forgets_the_pacing_due_time(urig: UnderrunRig) -> None:
+    urig.out.start_utterance(PlaybackTracker(1))
+    urig.out.push_audio(_speech(10))
+    await urig.clock.wait_for_sleep(FRAME)
+    urig.out.clear()
+    await urig.clock.run_for(0.02)
+    assert urig.out._due_ms is None
+
+
+async def test_a_burst_of_underruns_logs_one_line_and_counts_all() -> None:
+    stream = json_log_stream()
+    async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
+        _speak(urig.out, 40)
+        for _ in range(3):
+            await _stall(urig)
+        assert urig.out.stats.underruns == 3
+        assert len(urig.underruns) == 3
+        assert urig.out.stats.underruns_logged == 1
+        assert len(_underrun_logs(stream)) == 1
+        await _stall(urig, 1.1)
+        assert (urig.out.stats.underruns, urig.out.stats.underruns_logged) == (4, 2)
+        assert urig.out.stats.max_underrun_wake_late_ms == pytest.approx(1080.0)
+    first, second = _underrun_logs(stream)
+    assert (first["suppressed"], second["suppressed"]) == (0, 2)
+    assert first["wake_late_ms"] == pytest.approx(180.0)
+    assert second["wake_late_ms"] == pytest.approx(1080.0)
+
+
+async def test_a_new_utterance_logs_its_first_underrun() -> None:
+    stream = json_log_stream()
+    async for urig in _underrun_rig(FrameMixer(ULAW_8000)):
+        _speak(urig.out, 6)
+        _speak(urig.out, 10, turn=2)
+        await _stall(urig)
+        await _stall(urig)
+        assert urig.out.stats.underruns == 2
+    assert [(e["turn"], e["suppressed"]) for e in _underrun_logs(stream)] == [(1, 0), (2, 0)]
+
+
+@dataclass
+class TimedRecordingSink(RecordingSink):
+    """A sink that reports a fixed lock wait and socket time for every audio send."""
+
+    timing: SendTiming | None = None
+
+    @property
+    def last_audio_timing(self) -> SendTiming | None:
+        return self.timing
+
+    async def send_audio(self, frame: bytes) -> None:
+        await super().send_audio(frame)
+        self.timing = SendTiming(lock_wait_ms=5.0, socket_ms=1.0)
+
+
+async def test_a_timed_sink_splits_the_send_await() -> None:
+    stream = json_log_stream()
+    clock = ManualClock()
+    sink = TimedRecordingSink(clock)
+    assert isinstance(sink, TimedSink)
+    assert not isinstance(RecordingSink(clock), TimedSink)
+    out = OutboundAudio(sink, FrameMixer(ULAW_8000), clock=clock)
+    out.start_utterance(PlaybackTracker(1))
+    out.push_audio(_speech(20))
+    out.finish_utterance()
+    task = asyncio.create_task(out.run())
+    await settle()
+    await _hold_third_send(clock, sink)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [logged] = _underrun_logs(stream)
+    assert logged["prev_send_await_ms"] == pytest.approx(200.0)
+    assert (logged["prev_lock_wait_ms"], logged["prev_socket_send_ms"]) == (5.0, 1.0)
+    assert logged["prev_resume_ms"] == pytest.approx(194.0)
