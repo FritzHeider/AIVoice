@@ -552,24 +552,33 @@ async def test_a_failing_tool_and_an_unknown_tool_are_answered(sim: Sim) -> None
     ]
 
 
-async def test_without_an_executor_executor_backed_tools_are_not_offered(sim: Sim) -> None:
-    facts = SystemToolFacts(
-        runner="task", sms_capable=True, allow_schedule_callback=True, has_knowledge_bases=True
-    )
-    await sim.rules(
-        _rule(
-            "s",
-            regex="text",
-            respond="{tool_calls: [{name: send_sms, arguments: {message: hi}}]}",
-            call_index=0,
-        )
-    )
-    brain = sim.brain(task_context(), facts=facts)
+ALL_SYSTEM_FACTS = SystemToolFacts(
+    runner="task", sms_capable=True, allow_schedule_callback=True, has_knowledge_bases=True
+)
+
+
+async def _sms_round(sim: Sim, executor: RecordingExecutor | None) -> list[dict[str, Any]]:
+    """The two requests of a turn whose first reply asks for ``send_sms`` (every system fact on)."""
+    sms = "{tool_calls: [{name: send_sms, arguments: {message: hi}}]}"
+    await sim.rules(_rule("s", regex="text", respond=sms, call_index=0))
+    brain = sim.brain(task_context(), facts=ALL_SYSTEM_FACTS, executor=executor)
     await drain(brain.start())
     await drain(brain.on_user_turn(user_turn(1, "text me")))
-    first, second = await sim.requests()
+    return await sim.requests()
+
+
+async def test_without_an_executor_executor_backed_tools_are_not_offered(sim: Sim) -> None:
+    first, second = await _sms_round(sim, None)
     assert _tool_names(first) == ["end_call", "press_button"]
     assert tool_messages(second)[0]["content"]["detail"] == "unknown_tool"
+
+
+async def test_only_system_tools_the_executor_runs_are_offered(sim: Sim) -> None:
+    executor = RecordingExecutor(names=frozenset({"send_sms"}), results={"send_sms": '{"status":"sent"}'})
+    first, second = await _sms_round(sim, executor)
+    assert _tool_names(first) == ["end_call", "press_button", "send_sms"]
+    assert [call.name for call in executor.calls] == ["send_sms"]
+    assert tool_messages(second)[0]["content"] == {"status": "sent"}
 
 
 async def test_a_long_conversation_is_windowed(sim: Sim) -> None:

@@ -2038,3 +2038,15 @@ Grafana 3001
   so tool-round harness tests run on the AcceleratedClock without FakeLLM (`test_task_tool_speech.py`). With a
   `FrozenClock` the 1.2 s filler wait returns at once: a held tool in a FrozenClock brain test gets a filler.
   Text sent to TTS is chunked into clauses (`h.tts.sent`), so match whole single-clause sentences.
+- 2026-11-05 (P08-T02b2): executor-backed system tools = `va_tools.executor.SystemTool` (`name`, `run(call) ->
+  SystemOutcome(content, failure)`) passed as `CallToolExecutor(..., system=[...])`; handlers `va_media.
+  call_system_tools` (`ToolSms`, `CallbackScheduler(CallbackDeps(database, publisher with a DbWebhookRouter,
+  starter, clock), context)`, `sms_capable`, `TemporalCallbackStarter`); `CallRuntime(
+  callback_starter=)` / `runtime_rig.sim_runtime(callback_starter=)`, and system tools need `call_tools` too. The
+  TaskBrain offers `send_sms`/`schedule_callback`/`lookup_knowledge` only when its executor `handles` them. Child
+  calls share `va_db.call_children.child_call` (+ `COPIED_COLUMNS`, retry re-exports it); callback rules
+  `va_domain.call_callback`; `va_domain.call_retry.iso_utc`. Runtime sim SMS tests insert FakeTelnyx's fixed SMS
+  number into the media DB and must release it afterwards (`test_runtime_tools_sim._org_number`): active
+  `phone_numbers.e164` is unique and the sim always hands out the same number.
+  Never derive dedupe ids from the model's tool call id (providers omit or reuse it: `_PartialCall.id` defaults
+  to `""`); system tool runs get fresh ids.

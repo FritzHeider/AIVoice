@@ -61,7 +61,11 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     (stored tools with decrypted secret headers, inline tools, the shared tool HTTP client): tool runs become
     ``call.tool``/``call.error`` events through the recorder, and the variables they extract are snapshotted
     in ``call:{id}:engine`` (merged into ``calls.variables`` by the end routine) (specs/13 §5 Decision
-    P08-T02b1).
+    P08-T02b1). The same executor runs the call's ``send_sms`` (offered when the agent number is an active
+    SMS-capable org number and ``tools.allow_send_sms``) and ``schedule_callback`` (offered with
+    ``tools.allow_schedule_callback`` or ``engine.allow_callbacks``; the child's ``CallWorkflow`` is started
+    through :class:`~va_media.call_system_tools.TemporalCallbackStarter` over the Temporal client the end
+    routine signals with) (:mod:`va_media.call_system_tools`; specs/13 §6 Decision P08-T02b2).
 """
 
 from __future__ import annotations
@@ -115,6 +119,14 @@ from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
 from va_media.call_end import CallEnd
 from va_media.call_sms import CallSmsPort, OutboundSms
+from va_media.call_system_tools import (
+    CallbackDeps,
+    CallbackScheduler,
+    CallbackStarter,
+    TemporalCallbackStarter,
+    ToolSms,
+    sms_capable,
+)
 from va_media.call_tools import CallToolSource
 from va_media.carrier_watch import CarrierWatch
 from va_media.greeting import GreetingGate
@@ -144,6 +156,7 @@ from va_pathways.call_graphs import CallGraphCache
 from va_pathways.runs import insecure_urls_allowed
 from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount, webhook_scheme
 from va_telnyx.settings import telnyx_factory, telnyx_http
+from va_tools.executor import SystemTool
 from va_tools.http import tools_client
 from va_voice.background import BackgroundAssetError, BackgroundLibrary
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
@@ -256,10 +269,21 @@ class CallRuntime:
         database: Database | None = None,
         pathways: PathwayTools | None = None,
         call_tools: CallToolSource | None = None,
+        callback_starter: CallbackStarter | None = None,
     ) -> None:
         self._settings = settings
         self._pathways = pathways
         self._call_tools = call_tools
+        self._callbacks = (
+            None
+            if database is None or redis is None or callback_starter is None
+            else CallbackDeps(
+                database=database,
+                publisher=EventPublisher(redis, call_events=None, router=DbWebhookRouter(database)),
+                starter=callback_starter,
+                clock=clock,
+            )
+        )
         self._background = background
         self._database = database
         self._end_routine = end_routine
@@ -413,8 +437,13 @@ class CallRuntime:
     async def _task_brain(
         self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
     ) -> TaskBrain:
-        """A task brain with the call's custom tools; with tools its state snapshot is flushed on exit."""
-        executor = None if self._call_tools is None else await self._call_tools.executor(context, recorder)
+        """A task brain with the call's tools; with tools its state snapshot is flushed on exit."""
+        sms_ok, system = await self._system_tools(context, org, recorder)
+        executor = (
+            None
+            if self._call_tools is None
+            else await self._call_tools.executor(context, recorder, system=system)
+        )
         saver = None
         if executor is not None and self._redis is not None:
             saver = EngineStateSaver(self._redis, context.call_id)
@@ -424,26 +453,45 @@ class CallRuntime:
             settings=org,
             gateway=self._gateway,
             counter=self._counter,
-            facts=facts_for_call(context, org, sms_capable=False),
+            facts=facts_for_call(context, org, sms_capable=sms_ok),
             clock=self._clock,
             executor=executor,
             on_state=None if saver is None else saver.on_state,
+        )
+
+    async def _system_tools(
+        self, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
+    ) -> tuple[bool, list[SystemTool]]:
+        """Whether the agent number can send SMS, and the executor-backed system tools the call may use
+        (specs/13 §6 Decision P08-T02b2): only tools the runtime can run are built (a database for both, a
+        workflow starter for callbacks), and the TaskBrain offers only built ones."""
+        database = self._database
+        if database is None or self._call_tools is None:
+            return False, []
+        tools: list[SystemTool] = []
+        sms_ok = org.tools.allow_send_sms and await sms_capable(database, context)
+        if sms_ok:
+            tools.append(ToolSms(self._outbound_sms(database, "media.tool_sms"), context, recorder))
+        if (org.tools.allow_schedule_callback or org.engine.allow_callbacks) and self._callbacks is not None:
+            tools.append(CallbackScheduler(self._callbacks, context))
+        return sms_ok, tools
+
+    def _outbound_sms(self, database: Database, log_prefix: str) -> OutboundSms:
+        return OutboundSms(
+            database=database,
+            telnyx=self._telnyx,
+            platform_profile_id=self._settings.telnyx_messaging_profile_id,
+            edge_public_host=self._settings.edge_public_host,
+            clock=self._clock,
+            log_prefix=log_prefix,
+            webhook_scheme=webhook_scheme(self._settings.va_env.value),
         )
 
     def _sms_port(self, context: CallContext) -> CallSmsPort | None:
         """The SMS port of a pathway call (``None`` without a database: the message cannot be recorded)."""
         if self._database is None:
             return None
-        sender = OutboundSms(
-            database=self._database,
-            telnyx=self._telnyx,
-            platform_profile_id=self._settings.telnyx_messaging_profile_id,
-            edge_public_host=self._settings.edge_public_host,
-            clock=self._clock,
-            log_prefix="media.pathway_sms",
-            webhook_scheme=webhook_scheme(self._settings.va_env.value),
-        )
-        return CallSmsPort(sender, context)
+        return CallSmsPort(self._outbound_sms(self._database, "media.pathway_sms"), context)
 
     def _cold_transfer(
         self, session: CallSession, org: OrgSettings, telnyx: TelnyxClient | None, watch: CarrierWatch
@@ -755,12 +803,11 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
             open_persistence(database, container.redis, clock=clock)
         )
         await gateway.prewarm()
+        temporal = TemporalConnector(settings.temporal_host, settings.temporal_namespace)
         end_routine = CallEnd(
             database=database,
             redis=container.redis,
-            signaller=TemporalPipelineSignaller(
-                TemporalConnector(settings.temporal_host, settings.temporal_namespace)
-            ),
+            signaller=TemporalPipelineSignaller(temporal),
             clock=clock,
             telnyx=telnyx,
             events=persistence.events,
@@ -793,4 +840,5 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
                 allow_http=insecure_urls_allowed(settings.va_env),
                 clock=clock,
             ),
+            callback_starter=TemporalCallbackStarter(temporal, settings.temporal_task_queue),
         )

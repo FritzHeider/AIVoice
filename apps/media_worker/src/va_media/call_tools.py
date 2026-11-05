@@ -8,7 +8,8 @@ with the call's inline tools (:func:`~va_tools.executor.merged_tools`) and the s
 without tools gets none, and a load failure (database, KMS, a foreign secret blob) is logged
 ``media.tools_unavailable`` and leaves only the inline tools. Tool requests are signed with the org's active
 webhook secrets (specs/13 §5 step 4, :func:`~va_tools.signing.tool_signer`); when they cannot be read
-(``media.tool_signing_unavailable``) the requests go out unsigned.
+(``media.tool_signing_unavailable``) the requests go out unsigned. The executor also runs the system tools
+the runtime built for the call (:mod:`va_media.call_system_tools`), also when the call has no custom tools.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from va_db.repositories import OrgRepo, ToolRepo
 from va_db.session import Database
 from va_db.webhook_secrets import active_signing_secrets
 from va_domain.call_context import CallContext
-from va_tools.executor import CallToolExecutor, ToolEvents, merged_tools
+from va_tools.executor import CallToolExecutor, SystemTool, ToolEvents, merged_tools
 from va_tools.http import HttpExecutor, Signer
 from va_tools.models import ToolSpec
 from va_tools.runner import ToolRunner
@@ -70,27 +71,32 @@ class CallToolSource:
     allow_http: bool
     clock: Clock
 
-    async def executor(self, context: CallContext, events: ToolEvents | None) -> CallToolExecutor | None:
-        """The call's tool executor (``None`` when the call has no custom tools)."""
+    async def executor(
+        self, context: CallContext, events: ToolEvents | None, *, system: Sequence[SystemTool] = ()
+    ) -> CallToolExecutor | None:
+        """The call's tool executor over its custom tools and the ``system`` tools the runtime built
+        (``None`` when the call has neither)."""
         config = context.config
-        if not config.tool_ids and not config.inline_tools:
-            return None
-        try:
-            stored = await load_call_tools(self.database, self.envelope, context.org_id, config.tool_ids)
-        except (CryptoError, SQLAlchemyError, OSError) as exc:
-            _log.warning("media.tools_unavailable", error_type=type(exc).__name__)
-            stored = ()
-        specs = merged_tools(stored, [ToolSpec.from_inline(tool) for tool in config.inline_tools])
-        if not specs:
+        specs: tuple[ToolSpec, ...] = ()
+        if config.tool_ids or config.inline_tools:
+            try:
+                stored = await load_call_tools(self.database, self.envelope, context.org_id, config.tool_ids)
+            except (CryptoError, SQLAlchemyError, OSError) as exc:
+                _log.warning("media.tools_unavailable", error_type=type(exc).__name__)
+                stored = ()
+            specs = merged_tools(stored, [ToolSpec.from_inline(tool) for tool in config.inline_tools])
+        if not specs and not system:
             return None
         http = HttpExecutor(
             self.tools_http,
             clock=self.clock,
             allow_http=self.allow_http,
             call_id=str(context.call_id),
-            signer=await self._signer(context.org_id),
+            signer=await self._signer(context.org_id) if specs else None,
         )
-        return CallToolExecutor(specs, runner=ToolRunner(http, clock=self.clock), events=events)
+        return CallToolExecutor(
+            specs, runner=ToolRunner(http, clock=self.clock), events=events, system=system
+        )
 
     async def _signer(self, org_id: uuid.UUID) -> Signer | None:
         """The signer over the org's active webhook secrets (``None`` when they cannot be read)."""

@@ -22,6 +22,7 @@ from nacl.signing import SigningKey
 from redis.asyncio import Redis
 from resolved_configs import resolved_config
 from service_helpers import FakeContainer, ok_check, serving, settings_of
+from sqlalchemy.exc import OperationalError
 from starlette.applications import Starlette
 from websockets.asyncio.client import ClientConnection, connect
 
@@ -429,3 +430,16 @@ async def served(
     )
     async with served_media(app) as url:
         yield Served(app, url, keys, clock, used, recording, contexts)
+
+
+class BrokenDatabase:
+    """A database whose tenant sessions fail to open (like an unreachable Postgres)."""
+
+    def tenant_session(self, _org_id: uuid.UUID) -> BrokenDatabase:
+        return self
+
+    async def __aenter__(self) -> None:
+        raise OperationalError("SELECT", None, ConnectionError("down"))
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None

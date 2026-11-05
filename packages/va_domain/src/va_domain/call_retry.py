@@ -24,6 +24,7 @@ __all__ = [
     "RETRY_ATTEMPT_KEY",
     "VOICEMAIL_END_REASONS",
     "child_config",
+    "iso_utc",
     "retry_attempt",
     "retry_wanted",
 ]
@@ -53,7 +54,8 @@ def retry_attempt(stored_config: Mapping[str, object]) -> int:
     return value
 
 
-def _iso(moment: datetime) -> str:
+def iso_utc(moment: datetime) -> str:
+    """``moment`` as the ISO 8601 UTC text stored in ``calls.config.start_time`` (``...Z``)."""
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -70,6 +72,6 @@ def child_config(
     if retry.voicemail_message is not None:
         voicemail["message"] = retry.voicemail_message
     config["voicemail"] = voicemail
-    config["start_time"] = _iso(scheduled_for)
+    config["start_time"] = iso_utc(scheduled_for)
     config[RETRY_ATTEMPT_KEY] = attempt
     return config

@@ -21,7 +21,9 @@ type is logged ``media.engine_event_unknown`` and dropped.
 Task-mode tools (specs/13 §5 Decision P08-T02b1): the recorder is the call's
 :class:`~va_tools.executor.ToolEvents`: :meth:`TurnRecorder.tool` publishes ``call.tool`` (message
 :func:`tool_message`, tool name and outcome only) and :meth:`TurnRecorder.tool_failed` a ``warning``
-``call.error`` with ``data`` ``{"code": "TOOL_FAILED", "detail": ...}`` (message :data:`TOOL_FAILED_MESSAGE`).
+``call.error`` with ``data`` ``{"code": "TOOL_FAILED", "detail": ...}`` (message :data:`TOOL_FAILED_MESSAGE`);
+:meth:`TurnRecorder.sms_sent` publishes the ``call.sms_sent`` of the ``send_sms`` tool (message
+:data:`TOOL_SMS_SENT_MESSAGE`, Decision P08-T02b2).
 
 Times: ``start_ms``/``end_ms`` are relative to the call's answer time: ``pipeline_ms - origin_ms +
 answered_offset_ms`` (rounded, at least 0), where ``origin_ms`` is the pipeline clock when the recorder was
@@ -53,6 +55,7 @@ __all__ = [
     "EVENT_MESSAGE_CHARS",
     "STARTED_MESSAGE",
     "TOOL_FAILED_MESSAGE",
+    "TOOL_SMS_SENT_MESSAGE",
     "CallFlusher",
     "CallPersistence",
     "EventSink",
@@ -71,6 +74,9 @@ EVENT_MESSAGE_CHARS: Final = 200
 
 TOOL_FAILED_MESSAGE: Final = "Tool call failed"
 """The message of the ``call.error`` ``TOOL_FAILED`` event."""
+
+TOOL_SMS_SENT_MESSAGE: Final = "SMS sent"
+"""``message`` of the ``call.sms_sent`` event of the ``send_sms`` tool."""
 
 _log = get_logger(__name__)
 
@@ -215,6 +221,10 @@ class TurnRecorder:
         """Publish the ``call.error`` ``TOOL_FAILED`` of a failed tool run."""
         data: dict[str, JsonValue] = {"code": "TOOL_FAILED", "detail": detail}
         self._publish(EventType.CALL_ERROR, TOOL_FAILED_MESSAGE, data, level="warning")
+
+    def sms_sent(self, data: dict[str, JsonValue]) -> None:
+        """Publish ``call.sms_sent`` for a message the ``send_sms`` tool sent."""
+        self._publish(EventType.CALL_SMS_SENT, TOOL_SMS_SENT_MESSAGE, data)
 
     async def drain(self) -> None:
         """Release a held assistant turn, then wait until every queued event was published (or failed)."""

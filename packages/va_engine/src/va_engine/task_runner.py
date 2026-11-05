@@ -169,13 +169,9 @@ class TaskBrain:
         self._on_state = on_state
         self._fillers_on = settings.engine.tool_fillers
         self._fillers = 0
-        if executor is None:
-            facts = dataclasses.replace(
-                facts, sms_capable=False, allow_schedule_callback=False, has_knowledge_bases=False
-            )
-        self._facts = facts
+        self._facts = _runnable_facts(facts, executor)
         custom = executor.definitions() if executor is not None else ()
-        self._tools: tuple[ToolDef, ...] = (*system_tools(facts), *custom)
+        self._tools: tuple[ToolDef, ...] = (*system_tools(self._facts), *custom)
         speech = executor.tool_speech if executor is not None else None
         self._tool_note = tool_usage_note(speech or DEFAULT_TOOL_SPEECH)
         self._window = ConversationWindow(settings.llm.context_budget_tokens, counter)
@@ -585,6 +581,20 @@ def _arguments(call: ToolCall) -> dict[str, object]:
     except orjson.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _runnable_facts(facts: SystemToolFacts, executor: ToolExecutor | None) -> SystemToolFacts:
+    """``facts`` without the executor-backed system tools the executor does not run (never offered)."""
+
+    def runs(name: str) -> bool:
+        return executor is not None and executor.handles(name)
+
+    return dataclasses.replace(
+        facts,
+        sms_capable=facts.sms_capable and runs("send_sms"),
+        allow_schedule_callback=facts.allow_schedule_callback and runs("schedule_callback"),
+        has_knowledge_bases=facts.has_knowledge_bases and runs("lookup_knowledge"),
+    )
 
 
 async def _execute_gated(

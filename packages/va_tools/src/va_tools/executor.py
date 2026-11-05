@@ -6,11 +6,18 @@ reports ``call.tool`` (also invalid arguments, which nothing was sent for); a fa
 reports ``call.error`` ``TOOL_FAILED``. :func:`merged_tools` combines the stored tools of ``tool_ids`` with
 the call's inline tools: an inline tool replaces a stored tool of the same name, reserved system tool names
 and later duplicates are dropped.
+
+The executor also runs the call's executor-backed system tools (:class:`SystemTool`: ``send_sms``,
+``schedule_callback``; Decision P08-T02b2 under specs/13 §6). They are not in :meth:`definitions` (the runner
+offers system tools from the call's facts), have no ``speech`` (a slow one gets a filler), and report no
+``call.tool``: their domain events are their own; a :class:`SystemOutcome` with a ``failure`` also reports
+``call.error`` ``TOOL_FAILED`` (``<tool>: <failure>``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import JsonValue
@@ -23,7 +30,7 @@ from va_llm.models import ToolCall, ToolDef
 from va_tools.models import ToolSpec, function_def
 from va_tools.runner import ToolRunner, failure_detail
 
-__all__ = ["CallToolExecutor", "ToolEvents", "merged_tools"]
+__all__ = ["CallToolExecutor", "SystemOutcome", "SystemTool", "ToolEvents", "merged_tools"]
 
 _log = get_logger(__name__)
 
@@ -38,6 +45,27 @@ class ToolEvents(Protocol):
     def tool_failed(self, detail: str) -> None:
         """A failed run: the ``call.error`` ``TOOL_FAILED`` detail."""
         ...
+
+    def sms_sent(self, data: dict[str, JsonValue]) -> None:
+        """A message the ``send_sms`` tool sent: the ``call.sms_sent`` event data."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SystemOutcome:
+    """What a system tool answers: the ``tool`` message content and, for a failure, its short reason."""
+
+    content: str
+    failure: str | None = None
+
+
+class SystemTool(Protocol):
+    """An executor-backed system tool of one call (its arguments were validated by the runner)."""
+
+    @property
+    def name(self) -> str: ...
+
+    async def run(self, call: ToolCall) -> SystemOutcome: ...
 
 
 def merged_tools(stored: Sequence[ToolSpec], inline: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]:
@@ -58,9 +86,15 @@ class CallToolExecutor:
     """Runs the custom tools of one call (see the module docstring)."""
 
     def __init__(
-        self, specs: Sequence[ToolSpec], *, runner: ToolRunner, events: ToolEvents | None = None
+        self,
+        specs: Sequence[ToolSpec],
+        *,
+        runner: ToolRunner,
+        events: ToolEvents | None = None,
+        system: Sequence[SystemTool] = (),
     ) -> None:
         self._specs: Mapping[str, ToolSpec] = {spec.name: spec for spec in specs}
+        self._system: Mapping[str, SystemTool] = {tool.name: tool for tool in system}
         self._runner = runner
         self._events = events
 
@@ -75,7 +109,7 @@ class CallToolExecutor:
         return None
 
     def handles(self, name: str) -> bool:
-        return name in self._specs
+        return name in self._specs or name in self._system
 
     def speech(self, name: str) -> str | None:
         spec = self._specs.get(name)
@@ -84,6 +118,9 @@ class CallToolExecutor:
         return spec.speech
 
     async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
+        system = self._system.get(call.name)
+        if system is not None:
+            return await self._run_system(system, call)
         spec = self._specs[call.name]
         invocation = await self._runner.run(spec, call.arguments_json, scope)
         if self._events is not None:
@@ -99,3 +136,10 @@ class CallToolExecutor:
             duration_ms=invocation.duration_ms,
         )
         return ToolAnswer(invocation.content, invocation.variables)
+
+    async def _run_system(self, tool: SystemTool, call: ToolCall) -> ToolAnswer:
+        outcome = await tool.run(call)
+        if outcome.failure is not None and self._events is not None:
+            self._events.tool_failed(f"{tool.name}: {outcome.failure}")
+        _log.info("tools.system_tool_ran", tool=tool.name, failure=outcome.failure)
+        return ToolAnswer(outcome.content)

@@ -15,7 +15,6 @@ activity retry after a lost commit, or a workflow replay) returns ``already_sche
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Final
 
 from pydantic import JsonValue
 from sqlalchemy import select
@@ -25,12 +24,12 @@ from temporalio import activity
 from va_common.ids import new_id
 from va_common.logging import bound_context, get_logger
 from va_common.time import Clock
+from va_db.call_children import COPIED_COLUMNS, child_call
 from va_db.call_context import config_of
 from va_db.call_states import is_terminal
 from va_db.models import Call
 from va_db.session import Database
 from va_domain.call_retry import RETRY_ATTEMPT_KEY, child_config, retry_attempt, retry_wanted
-from va_domain.call_workflow import call_workflow_id
 from va_domain.calls.config import RetryConfig
 from va_events import SCHEDULED_MESSAGE, DomainEvent, EventPublisher, EventType
 from va_workflows.activities.errors import call_not_found
@@ -39,29 +38,6 @@ from va_workflows.activities.inputs import CallActivityInput
 from va_workflows.activities.retry_inputs import RetryPlan
 
 __all__ = ["COPIED_COLUMNS", "RetryActivities"]
-
-COPIED_COLUMNS: Final = (
-    "direction",
-    "to_number",
-    "from_number",
-    "runner_type",
-    "pathway_id",
-    "pathway_version",
-    "persona_id",
-    "persona_version",
-    "agent_id",
-    "agent_version_id",
-    "experiment_id",
-    "experiment_arm_id",
-    "voice_id",
-    "phone_number_id",
-    "memory_id",
-    "external_id",
-    "test_call",
-    "request_data",
-    "metadata_",
-)
-"""``calls`` columns the child takes over from the parent unchanged (the ones Send Call dispatch sets)."""
 
 _log = get_logger(__name__)
 
@@ -146,17 +122,11 @@ class RetryActivities:
         child_id = new_id()
         scheduled_for = self._clock.now() + timedelta(seconds=retry.wait)
         stored: dict[str, JsonValue] = dict(parent.config)
-        child = Call(
-            id=child_id,
-            org_id=parent.org_id,
-            status="scheduled",
-            queue_status="new",
-            start_time=scheduled_for,
-            parent_call_id=parent.id,
+        child = child_call(
+            parent,
+            child_id=child_id,
             config=child_config(stored, retry, attempt, scheduled_for),
-            credit_hold_id=None,
-            workflow_id=call_workflow_id(child_id),
-            **{name: getattr(parent, name) for name in COPIED_COLUMNS},
+            start_time=scheduled_for,
         )
         plan = RetryPlan(child_call_id=child_id, scheduled_for=scheduled_for, attempt=attempt)
         return plan, child

@@ -10,25 +10,12 @@ from typing import cast
 
 import pytest
 from call_rows import load_call, seed_call
+from media_helpers import BrokenDatabase
 from service_helpers import json_log_stream, log_events
-from sqlalchemy.exc import OperationalError
 from tenant_rows import open_database
 
 from va_db.session import Database
 from va_media.transfer import DbTransferStatus
-
-
-class BrokenDatabase:
-    """A database whose tenant sessions fail to open."""
-
-    def tenant_session(self, _org_id: uuid.UUID) -> BrokenDatabase:
-        return self
-
-    async def __aenter__(self) -> None:
-        raise OperationalError("UPDATE", None, ConnectionError("down"))
-
-    async def __aexit__(self, *_exc: object) -> None:
-        return None
 
 
 @pytest.fixture

@@ -15,9 +15,8 @@ import fakeredis
 import pytest
 from call_rows import SeededCall, load_call, seed_call, seed_leg
 from clock_helpers import ManualClock
-from media_helpers import FakeSocket, RecordingSignaller, call_context
+from media_helpers import BrokenDatabase, FakeSocket, RecordingSignaller, call_context
 from service_helpers import json_log_stream, log_events
-from sqlalchemy.exc import OperationalError
 from tenant_rows import open_database
 
 from va_billing.keys import concurrency_key
@@ -100,19 +99,6 @@ class FakeEvents:
             raise OSError(msg)
         self.flushed.append(call_id)
         return 1
-
-
-class BrokenDatabase:
-    """A database whose tenant sessions fail to open."""
-
-    def tenant_session(self, _org_id: uuid.UUID) -> BrokenDatabase:
-        return self
-
-    async def __aenter__(self) -> None:
-        raise OperationalError("SELECT", None, ConnectionError("down"))
-
-    async def __aexit__(self, *_exc: object) -> None:
-        return None
 
 
 @dataclass

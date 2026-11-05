@@ -14,7 +14,7 @@ from tools_helpers import API, plain_executor
 
 from va_engine.templating import TemplateScope
 from va_llm.models import ToolCall
-from va_tools.executor import CallToolExecutor, merged_tools
+from va_tools.executor import CallToolExecutor, SystemOutcome, merged_tools
 from va_tools.models import ToolSpec
 from va_tools.runner import ToolRunner
 
@@ -51,6 +51,9 @@ class _Events:
 
     def tool_failed(self, detail: str) -> None:
         self.failures.append(detail)
+
+    def sms_sent(self, data: dict[str, Any]) -> None:
+        self.tools.append({"sms_sent": data})
 
 
 @pytest.fixture
@@ -165,3 +168,55 @@ def test_reserved_names_and_duplicates_are_dropped() -> None:
     assert [(s.name, s.tool_id) for s in merged] == [("a", "TL-a")]
     skipped = [(e["tool"], e["reason"]) for e in log_events(stream) if e["event"] == "tools.tool_skipped"]
     assert skipped == [("end_call", "reserved"), ("a", "duplicate"), ("transfer_call", "reserved")]
+
+
+@dataclass(slots=True)
+class _System:
+    name: str
+    outcome: SystemOutcome
+    calls: list[ToolCall] = field(default_factory=list)
+
+    async def run(self, call: ToolCall) -> SystemOutcome:
+        self.calls.append(call)
+        return self.outcome
+
+
+async def test_system_tools_are_handled_but_not_defined_and_have_no_speech() -> None:
+    sms = _System("send_sms", SystemOutcome('{"status":"sent"}'))
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([_spec()], runner=ToolRunner(http, clock=clock), system=[sms])
+    assert [tool.name for tool in executor.definitions()] == ["lookup_order"]
+    assert executor.handles("send_sms")
+    assert not executor.handles("schedule_callback")
+    assert executor.speech("send_sms") is None
+
+
+async def test_a_system_tool_answers_without_a_tool_event() -> None:
+    stream = json_log_stream()
+    sms = _System("send_sms", SystemOutcome('{"status":"sent","segments":1}'))
+    events = _Events()
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[sms])
+        call = ToolCall(id="c9", name="send_sms", arguments_json='{"message": "secret text"}')
+        answer = await executor.execute(call, SCOPE)
+    assert answer.content == '{"status":"sent","segments":1}'
+    assert dict(answer.variables) == {}
+    assert sms.calls == [call]
+    assert (events.tools, events.failures) == ([], [])
+    [ran] = [e for e in log_events(stream) if e["event"] == "tools.system_tool_ran"]
+    assert (ran["tool"], ran["failure"]) == ("send_sms", None)
+    assert "secret text" not in stream.getvalue()
+
+
+async def test_a_failed_system_tool_reports_tool_failed() -> None:
+    callback = _System("schedule_callback", SystemOutcome('{"error":"callback_failed"}', "workflow_start"))
+    events = _Events()
+    async with plain_executor() as (http, clock):
+        runner = ToolRunner(http, clock=clock)
+        executor = CallToolExecutor([], runner=runner, events=events, system=[callback])
+        answer = await executor.execute(
+            ToolCall(id="c1", name="schedule_callback", arguments_json='{"datetime_iso": "x"}'), SCOPE
+        )
+    assert answer.content == '{"error":"callback_failed"}'
+    assert events.failures == ["schedule_callback: workflow_start"]
+    assert events.tools == []

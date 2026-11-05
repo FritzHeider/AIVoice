@@ -189,8 +189,8 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 > 5. Variables: the round's non-null 2xx extractions are merged into the call's variables in call order after
 >    the round; tools of a round render with the variables of its start. The runtime snapshots the engine
 >    state to `call:{id}:engine` after a merge and the end routine merges its variables into `calls.variables`
->    (as for pathway calls). `send_sms`, `schedule_callback` and `lookup_knowledge` are not executor tools yet
->    (P08-T02b2, P08-T10).
+>    (as for pathway calls). `send_sms` and `schedule_callback` run behind the same executor (§6 Decision
+>    P08-T02b2); `lookup_knowledge` follows with P08-T10.
 
 Max tool calls per assistant turn: 4 (parallel tool calls from the LLM run concurrently, max 3 in parallel). Max
 tool calls per call: 100.
@@ -210,6 +210,40 @@ tool calls per call: 100.
 > Decision (2026-11-02): the wire schemas and availability of these tools follow the specs/10 §7 Decision P05-T09b
 > (`end_call` adds `final_message`, `transfer_call` uses `label`, `schedule_callback` uses `datetime_iso`); the
 > `press_button` pattern and `lookup_knowledge` schema above are kept. Implemented in `va_engine.system_tools`.
+>
+> Decision (2026-11-05) P08-T02b2: in task-mode calls `send_sms` and `schedule_callback` run behind the call's
+> `CallToolExecutor` as system tools (`va_tools.executor.SystemTool`, handlers in `va_media.call_system_tools`).
+> They are not in the executor's definitions, have no `speech` (a slow one gets a filler), and publish no
+> `call.tool`; a handler failure publishes `call.error` `TOOL_FAILED` (`<tool>: <reason>`). The TaskBrain offers an
+> executor-backed system tool only when its executor runs it, so a tool the runtime cannot run is never offered.
+> 1. Availability: `send_sms` needs `tools.allow_send_sms` and the agent number (`from` of an outbound call, `to`
+>    of an inbound one) to be an active SMS-capable number of the org (`va_db.voicemail_sms.sms_sender`, the check
+>    the voicemail SMS and the Send Call `SMS_NOT_ENABLED` rule share; 10DLC / toll-free readiness joins that
+>    check with P14-T05, so every sender check gets it at once; an unreadable capability counts as not capable,
+>    `media.sms_capability_unavailable`). `schedule_callback` needs `tools.allow_schedule_callback` or
+>    `engine.allow_callbacks`, a database and a workflow starter.
+> 2. `send_sms` sends the message (trimmed; blank → `blank_message`) from the agent number to the other party
+>    through `OutboundSms` (the voicemail SMS core: one Telnyx attempt, `messages` row in the number pair's
+>    conversation). Every run gets a fresh message id: providers may omit or reuse tool call ids and the brain
+>    never re-runs a tool call, so two `send_sms` calls send two messages. Success publishes `call.sms_sent` (message `SMS sent`,
+>    data `message_id`, `conversation_id`, `segments`, `source: "tool"`) and answers
+>    `{"status":"sent","segments":n}`; a refusal answers `{"error":"sms_failed","reason":"<reason>"}`.
+> 3. `schedule_callback` reads `datetime_iso` with the Send Call `start_time` rules (specs/05 §3.3: offset kept,
+>    naive → the call's `timezone` with `fold=0`, after now, at most 90 days ahead; `va_domain.call_callback`).
+>    An unusable time answers `{"error":"invalid_datetime","reason":"invalid_datetime|in_the_past|too_far_ahead"}`
+>    with no error event, so the model may ask again. The child (`va_db.callbacks.schedule_callback`, a fresh
+>    id per run, so two calls schedule two callbacks) is an ordinary scheduled outbound call to the other party from
+>    the agent number (`va_db.call_children.child_call`: the dispatch columns of the parent, `parent_call_id`, no
+>    credit hold; an inbound parent's numbers are swapped) with the parent's `calls.config` (`start_time` set,
+>    the note in the non-config key `callback_note`, without `retry_attempt` and the maintenance message). The
+>    row and its `call.scheduled` event (`source: "callback"`, `parent_call_id`) are written and routed to the
+>    webhook outbox in one transaction; after the commit the media worker broadcasts the event and starts the
+>    child's `CallWorkflow` (`scheduled_for`), whose dial admits it like every scheduled call (compliance,
+>    limits, credit hold). Success answers `{"status":"scheduled","scheduled_call_id","scheduled_for"}` (local
+>    time in the call's timezone). A failed start marks the child `failed` (`error`/`call_error`, `call.error`
+>    `{"code":"dispatch_failed","detail":"workflow_start"}`) unless the workflow already moved it on, and answers
+>    `{"error":"callback_failed"}`; a database or event failure creates nothing and answers the same.
+> 4. Pathway calls get these tools with P08-T02c.
 >
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the
