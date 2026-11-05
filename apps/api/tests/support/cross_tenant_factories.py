@@ -17,7 +17,7 @@ from identity_db import unique_email
 from session_helpers import add_member, store_api_key, sub_account
 
 from va_api.services.pathway_chat import DEFAULT_SIMULATE_FROM, DEFAULT_SIMULATE_TO, ChatSession, ChatStore
-from va_common.ids import new_id
+from va_common.ids import PublicPrefix, new_id, to_public
 from va_db.models import PathwayTestRun, WebhookDelivery, WebhookEndpoint
 from va_db.repositories import (
     InvitationRepo,
@@ -25,6 +25,7 @@ from va_db.repositories import (
     PathwayGraphJson,
     PathwayRepo,
     PathwayTestRepo,
+    ToolRepo,
 )
 from va_engine.models import EngineState, dump_engine_state, graph_hash
 
@@ -120,6 +121,20 @@ async def _pathway(context: FactoryContext) -> str:
         return str(pathway.id)
 
 
+async def _tool(context: FactoryContext) -> str:
+    """A tool of the tenant's org that nothing references (``TL-`` form, as the api returns it)."""
+    org_id = context.tenant.org_id
+    async with context.identity.database.tenant_session(org_id) as session:
+        tool = await ToolRepo(session, org_id).create(
+            {
+                "name": f"cross_tenant_{new_id().hex}",
+                "description": "Cross-tenant tool",
+                "url": "https://hooks.test/tool",
+            }
+        )
+        return to_public(PublicPrefix.TOOL, tool.id)
+
+
 async def _folder(context: FactoryContext) -> str:
     """A root pathway folder of the tenant's org."""
     org_id = context.tenant.org_id
@@ -210,6 +225,7 @@ REGISTRY.register_resource_factory("version_number", _first_version, path_prefix
 # gets ``NOT_FOUND`` (Decision P07-T09b).
 REGISTRY.register_owner_status("pathways_promote", 409)
 REGISTRY.register_resource_factory("folder_id", _folder)
+REGISTRY.register_resource_factory("tool_id", _tool)
 REGISTRY.register_resource_factory("chat_id", _chat)
 REGISTRY.register_resource_factory("test_id", _unit_test)
 REGISTRY.register_resource_factory("run_id", _test_run)

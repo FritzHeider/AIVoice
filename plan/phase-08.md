@@ -162,16 +162,16 @@
     assert on the first request of this call, or give the rig's gateway a load-independent deadline), not a retry.
   - Acceptance: test robust to an LLM retry; `make check` passes.
 
-- [ ] P08-T01 Tools API with secret headers
+- [x] P08-T01 Tools API with secret headers — /v1/tools CRUD (TL- ids, masked secret headers, AAD-bound encryption, reference-checked delete, audit, cross-tenant factory); 101 new tests; make test 12828 passed, 7 skipped, cov 99 %; lint/typecheck/placeholders pass
   - Spec refs: specs/13-tools-and-dynamic-data.md (Tools API, secret headers)
   - Depends on: P07-T07, P02-T11
-  - Deliverables: `/v1/tools` CRUD (TL- ids, legacy envelope), validation of name/url/method/input_schema/response_map, secret header encryption, audit, cross-tenant factory
+  - Deliverables: `/v1/tools` CRUD (TL- ids, legacy envelope; the `/test` route is in P08-T02), validation of name/url/method/input_schema/response_map, secret header encryption, audit, cross-tenant factory
   - Acceptance: API tests for every field and error path; secrets never returned.
 
 - [ ] P08-T02 Tool runtime, system tools, LLM exposure, speech during tool
   - Spec refs: specs/13-tools-and-dynamic-data.md (LLM exposure, execution runtime, built-in system tools)
   - Depends on: P08-T01, P05-T09
-  - Deliverables: function schema generation, in-call execution with timeout/retries/JSONPath extraction, `speech` filler via phrase cache, result injection as tool message, inline tool objects in Send Call, system tools (end_call, transfer_call, press_button, send_sms, schedule_callback, lookup_knowledge)
+  - Deliverables: `POST /v1/tools/{tool_id}/test` (specs/13 §2; moved from P08-T01: it needs the runtime), function schema generation, in-call execution with timeout/retries/JSONPath extraction, `speech` filler via phrase cache, result injection as tool message, inline tool objects in Send Call, system tools (end_call, transfer_call, press_button, send_sms, schedule_callback, lookup_knowledge)
   - Acceptance: harness tests for filler timing, timeout behaviour, extraction into variables.
 
 - [ ] P08-T03 Dynamic data

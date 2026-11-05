@@ -60,6 +60,31 @@ packages/va_tools/src/va_tools/
   JSON Schema draft 2020-12 object schema with `type: "object"`; JSONPath expressions must parse; header names
   RFC 7230 tokens; body ≤ 64 KB JSON.
 
+> Decision (2026-11-05) P08-T01: implemented in `va_api/routers/tools.py` over `va_api.services.tools`,
+> `va_db.repositories.ToolRepo`, `va_tools.validation`, and `va_tools.secrets`.
+> 1. Masking: a secret header value shows as `"••••" + last 4` only when it has at least 12 characters, else as
+>    `"••••"` (the last 4 of a short secret would give most of it away). Audit rows record that `secret_headers`
+>    changed but never a value (the key is redacted).
+> 2. `tool_id` accepts `TL-<uuid>` or the bare uuid; responses always use `TL-`. Anything else is
+>    `INVALID_INPUT` (field `tool_id`); unknown, deleted, and other orgs' tools are `TOOL_NOT_FOUND`.
+> 3. ToolUpdate: omitted fields keep their value; `null` clears `speech`, `body`, and `secret_headers` and is
+>    `INVALID_INPUT` for every other field; `secret_headers` replaces the whole stored set. The sent fields are
+>    merged over the stored definition and the result is validated as a whole (field paths as in request
+>    validation). An update that changes nothing writes nothing (no audit row, `updated_at` unchanged).
+> 4. Validation adds to the ToolCreate field rules: reserved system tool names (§4, case-sensitive) on `name`;
+>    `response` keys are variable names (`^[A-Za-z_][A-Za-z0-9_]{0,63}$`) and values parse as JSONPath (field
+>    `response.<var>`); secret header names are RFC 7230 tokens, may not repeat a plain `headers` name
+>    (case-insensitive), and values are non-empty, at most 4 096 characters, without CR/LF. A URL whose host is
+>    templated passes: the runtime SSRF guard checks the rendered URL.
+> 5. Names are unique per org among live tools: the specs/03 `UNIQUE (org_id, name)` is not partial, so a
+>    name held only by a soft-deleted tool is freed by deleting that row for good in the same transaction.
+> 6. DELETE answers 409 `CONFLICT` with `details.references` = `[{type, id, version}]` (at most 20) when a
+>    published pathway version (node `tools` or `global_config.globalTools`), a published persona version
+>    (`config.tools`), or any version of a live agent (`call_settings.tools`) lists the tool in either id form.
+>    `?force=true` is open to every `tools:write` principal (unlike pathways, deleting a tool loses no data
+>    that cannot be recreated).
+> 7. `POST /v1/tools/{tool_id}/test` ships with the tool runtime (P08-T02).
+
 ## 3. Secret headers
 
 Stored in `tools.secret_headers_enc` as envelope-encrypted JSON (`va_common.crypto.encrypt_json(org_id, value)`,

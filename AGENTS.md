@@ -2008,3 +2008,14 @@ Grafana 3001
   (`packages/va_common/tests`, PTTL within 30 s below `ttl_s`); never `ttl(key) == N`: the expiry is a wall-clock
   deadline and `TTL` floors it, so a loaded worker reads `N - 1`. Short TTLs (≤ 30 s) are only bounded above; the key must
   still exist and expire.
+- 2026-11-05 (P08-T01): tools API = legacy `routers/tools.py` (`tools_router`, in `main.ROUTERS`; schemas
+  `tools_schemas`: `ToolCreate` subclasses `va_domain.calls.tools.InlineTool`) over `va_api.services.tools`
+  (`ToolDeps`, `parse_tool_id` accepts `TL-<uuid>` or a bare uuid; updates merge over the stored definition and
+  re-raise pydantic errors as `RequestValidationError` with `("body", ...)` locs so field paths match request
+  validation) and tenant `va_db.repositories.ToolRepo` (`create(values, tool_id=)` frees a soft-deleted
+  namesake, `page`, `references`). Shared tool helpers: `va_tools.secrets` (`encrypt_secret_headers`/
+  `decrypt_secret_headers`, AAD `tool:{id}`, `mask_secret`) and `va_tools.validation.check_tool_definition`
+  (reserved names, https, JSON Schema, JSONPath, secret headers). Encrypt before opening the tenant session;
+  decrypting needs no DB. The audit redactor blanks the whole `secret_headers` key. Cross-tenant factory
+  `tool_id` returns the `TL-` form; `(404, "TOOL_NOT_FOUND")` is in `cross_tenant.REFUSED`. Factories may run
+  several times per tenant: give rows with per-org unique names a random suffix.

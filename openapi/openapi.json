@@ -10191,6 +10191,796 @@
         "title": "SubAccountResult",
         "type": "object"
       },
+      "ToolCreate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/tools``: a tool definition (specs/13 §2).",
+        "examples": [
+          {
+            "body": {
+              "caller": "{{from}}",
+              "date": "{{input.date}}",
+              "party": "{{input.party_size}}",
+              "time": "{{input.time}}"
+            },
+            "description": "Checks table availability for a date, time and party size.",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "input_schema": {
+              "properties": {
+                "date": {
+                  "description": "YYYY-MM-DD",
+                  "type": "string"
+                },
+                "party_size": {
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "time": {
+                  "description": "HH:MM 24h",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "time",
+                "party_size"
+              ],
+              "type": "object"
+            },
+            "method": "POST",
+            "name": "check_availability",
+            "query": {},
+            "response": {
+              "alternatives": "$.alternatives[*].time",
+              "available": "$.available"
+            },
+            "retries": 1,
+            "secret_headers": {
+              "Authorization": "Bearer example-secret-value"
+            },
+            "speech": "Let me check that for you.",
+            "timeout_ms": 8000,
+            "url": "https://api.bellapasta.com/availability"
+          }
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "description": {
+            "description": "When the LLM should call the tool.",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "input_schema": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "description": "JSON Schema (draft 2020-12) of the tool input.",
+            "title": "Input Schema",
+            "type": "object"
+          },
+          "method": {
+            "default": "POST",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "name": {
+            "description": "Function name shown to the LLM.",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Query",
+            "type": "object"
+          },
+          "response": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variable name -> JSONPath.",
+            "title": "Response",
+            "type": "object"
+          },
+          "retries": {
+            "default": 0,
+            "maximum": 3.0,
+            "minimum": 0.0,
+            "title": "Retries",
+            "type": "integer"
+          },
+          "secret_headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.",
+            "title": "Secret Headers",
+            "type": "object"
+          },
+          "speech": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Said while the tool runs.",
+            "title": "Speech"
+          },
+          "timeout_ms": {
+            "default": 10000,
+            "maximum": 60000.0,
+            "minimum": 100.0,
+            "title": "Timeout Ms",
+            "type": "integer"
+          },
+          "url": {
+            "description": "Request URL; `{{vars}}` are rendered at call time.",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "url"
+        ],
+        "title": "ToolCreate",
+        "type": "object"
+      },
+      "ToolCreated": {
+        "description": "``POST /v1/tools`` result.",
+        "examples": [
+          {
+            "status": "success",
+            "tool": {
+              "body": {
+                "caller": "{{from}}",
+                "date": "{{input.date}}",
+                "party": "{{input.party_size}}",
+                "time": "{{input.time}}"
+              },
+              "created_at": "2026-11-05T09:15:00Z",
+              "description": "Checks table availability for a date, time and party size.",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "input_schema": {
+                "properties": {
+                  "date": {
+                    "description": "YYYY-MM-DD",
+                    "type": "string"
+                  },
+                  "party_size": {
+                    "maximum": 20,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "time": {
+                    "description": "HH:MM 24h",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "date",
+                  "time",
+                  "party_size"
+                ],
+                "type": "object"
+              },
+              "method": "POST",
+              "name": "check_availability",
+              "query": {},
+              "response": {
+                "alternatives": "$.alternatives[*].time",
+                "available": "$.available"
+              },
+              "retries": 1,
+              "secret_headers": {
+                "Authorization": "••••alue"
+              },
+              "speech": "Let me check that for you.",
+              "timeout_ms": 8000,
+              "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+              "updated_at": "2026-11-05T09:15:00Z",
+              "url": "https://api.bellapasta.com/availability"
+            },
+            "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71"
+          }
+        ],
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/components/schemas/ToolView"
+          },
+          "tool_id": {
+            "title": "Tool Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_id",
+          "tool"
+        ],
+        "title": "ToolCreated",
+        "type": "object"
+      },
+      "ToolDeleted": {
+        "description": "``DELETE /v1/tools/{tool_id}`` result.",
+        "examples": [
+          {
+            "message": "Tool deleted.",
+            "status": "success"
+          }
+        ],
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ToolDeleted",
+        "type": "object"
+      },
+      "ToolEnvelope": {
+        "description": "``GET``/``POST /v1/tools/{tool_id}`` result.",
+        "examples": [
+          {
+            "status": "success",
+            "tool": {
+              "body": {
+                "caller": "{{from}}",
+                "date": "{{input.date}}",
+                "party": "{{input.party_size}}",
+                "time": "{{input.time}}"
+              },
+              "created_at": "2026-11-05T09:15:00Z",
+              "description": "Checks table availability for a date, time and party size.",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "input_schema": {
+                "properties": {
+                  "date": {
+                    "description": "YYYY-MM-DD",
+                    "type": "string"
+                  },
+                  "party_size": {
+                    "maximum": 20,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "time": {
+                    "description": "HH:MM 24h",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "date",
+                  "time",
+                  "party_size"
+                ],
+                "type": "object"
+              },
+              "method": "POST",
+              "name": "check_availability",
+              "query": {},
+              "response": {
+                "alternatives": "$.alternatives[*].time",
+                "available": "$.available"
+              },
+              "retries": 1,
+              "secret_headers": {
+                "Authorization": "••••alue"
+              },
+              "speech": "Let me check that for you.",
+              "timeout_ms": 8000,
+              "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+              "updated_at": "2026-11-05T09:15:00Z",
+              "url": "https://api.bellapasta.com/availability"
+            }
+          }
+        ],
+        "properties": {
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/components/schemas/ToolView"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "title": "ToolEnvelope",
+        "type": "object"
+      },
+      "ToolList": {
+        "description": "``GET /v1/tools`` result: newest first; ``next_cursor`` is null on the last page.",
+        "examples": [
+          {
+            "status": "success",
+            "tools": [
+              {
+                "body": {
+                  "caller": "{{from}}",
+                  "date": "{{input.date}}",
+                  "party": "{{input.party_size}}",
+                  "time": "{{input.time}}"
+                },
+                "created_at": "2026-11-05T09:15:00Z",
+                "description": "Checks table availability for a date, time and party size.",
+                "headers": {
+                  "Content-Type": "application/json"
+                },
+                "input_schema": {
+                  "properties": {
+                    "date": {
+                      "description": "YYYY-MM-DD",
+                      "type": "string"
+                    },
+                    "party_size": {
+                      "maximum": 20,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "time": {
+                      "description": "HH:MM 24h",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "date",
+                    "time",
+                    "party_size"
+                  ],
+                  "type": "object"
+                },
+                "method": "POST",
+                "name": "check_availability",
+                "query": {},
+                "response": {
+                  "alternatives": "$.alternatives[*].time",
+                  "available": "$.available"
+                },
+                "retries": 1,
+                "secret_headers": {
+                  "Authorization": "••••alue"
+                },
+                "speech": "Let me check that for you.",
+                "timeout_ms": 8000,
+                "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+                "updated_at": "2026-11-05T09:15:00Z",
+                "url": "https://api.bellapasta.com/availability"
+              }
+            ]
+          }
+        ],
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "status": {
+            "const": "success",
+            "default": "success",
+            "title": "Status",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ToolView"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools",
+          "next_cursor"
+        ],
+        "title": "ToolList",
+        "type": "object"
+      },
+      "ToolUpdate": {
+        "additionalProperties": false,
+        "description": "``POST /v1/tools/{tool_id}``: any subset of the ToolCreate fields.\n\nOmitted fields keep their stored value. ``null`` clears ``speech``, ``body``, and ``secret_headers``; the\nother fields reject it. ``secret_headers`` replaces the whole stored set.",
+        "examples": [
+          {
+            "description": "Checks table availability.",
+            "timeout_ms": 5000
+          }
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers"
+          },
+          "input_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Schema"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "enum": [
+                  "GET",
+                  "POST",
+                  "PUT",
+                  "PATCH",
+                  "DELETE"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "query": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Query"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response"
+          },
+          "retries": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retries"
+          },
+          "secret_headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.",
+            "title": "Secret Headers"
+          },
+          "speech": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech"
+          },
+          "timeout_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Ms"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "ToolUpdate",
+        "type": "object"
+      },
+      "ToolView": {
+        "description": "A stored tool; ``secret_headers`` values are always masked.",
+        "examples": [
+          {
+            "body": {
+              "caller": "{{from}}",
+              "date": "{{input.date}}",
+              "party": "{{input.party_size}}",
+              "time": "{{input.time}}"
+            },
+            "created_at": "2026-11-05T09:15:00Z",
+            "description": "Checks table availability for a date, time and party size.",
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "input_schema": {
+              "properties": {
+                "date": {
+                  "description": "YYYY-MM-DD",
+                  "type": "string"
+                },
+                "party_size": {
+                  "maximum": 20,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "time": {
+                  "description": "HH:MM 24h",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "time",
+                "party_size"
+              ],
+              "type": "object"
+            },
+            "method": "POST",
+            "name": "check_availability",
+            "query": {},
+            "response": {
+              "alternatives": "$.alternatives[*].time",
+              "available": "$.available"
+            },
+            "retries": 1,
+            "secret_headers": {
+              "Authorization": "••••alue"
+            },
+            "speech": "Let me check that for you.",
+            "timeout_ms": 8000,
+            "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+            "updated_at": "2026-11-05T09:15:00Z",
+            "url": "https://api.bellapasta.com/availability"
+          }
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
+          "input_schema": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Input Schema",
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "query": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Query",
+            "type": "object"
+          },
+          "response": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variable name -> JSONPath (the `response_map` column).",
+            "title": "Response",
+            "type": "object"
+          },
+          "retries": {
+            "title": "Retries",
+            "type": "integer"
+          },
+          "secret_headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.",
+            "title": "Secret Headers",
+            "type": "object"
+          },
+          "speech": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speech"
+          },
+          "timeout_ms": {
+            "title": "Timeout Ms",
+            "type": "integer"
+          },
+          "tool_id": {
+            "description": "`TL-<uuid>`.",
+            "title": "Tool Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_id",
+          "name",
+          "description",
+          "speech",
+          "url",
+          "method",
+          "headers",
+          "secret_headers",
+          "query",
+          "body",
+          "input_schema",
+          "response",
+          "timeout_ms",
+          "retries",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ToolView",
+        "type": "object"
+      },
       "ToolsSettings": {
         "additionalProperties": false,
         "description": "Built-in tools allowed in calls.",
@@ -17290,6 +18080,347 @@
         ],
         "x-envelope": "legacy",
         "x-scope": "pathways:read"
+      }
+    },
+    "/v1/tools": {
+      "get": {
+        "description": "The org's live tools, newest first.",
+        "operationId": "tools_list",
+        "parameters": [
+          {
+            "description": "Case-insensitive name or description substring.",
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Case-insensitive name or description substring.",
+              "title": "Search"
+            }
+          },
+          {
+            "description": "Page size (1-100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (1-100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "next_cursor of the previous page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "next_cursor of the previous page.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools List",
+        "tags": [
+          "Tools"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:read"
+      },
+      "post": {
+        "description": "Create a tool; secret header values are stored encrypted and never returned.",
+        "operationId": "tools_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools Create",
+        "tags": [
+          "Tools"
+        ],
+        "x-audit": [
+          "tool.create"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:write"
+      }
+    },
+    "/v1/tools/{tool_id}": {
+      "delete": {
+        "description": "Soft-delete a tool that no published resource lists (or any tool with ``force``).",
+        "operationId": "tools_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tool_id",
+            "required": true,
+            "schema": {
+              "title": "Tool Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Delete even while published pathways, personas, or agents list the tool.",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Delete even while published pathways, personas, or agents list the tool.",
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolDeleted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools Delete",
+        "tags": [
+          "Tools"
+        ],
+        "x-audit": [
+          "tool.delete"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:write"
+      },
+      "get": {
+        "description": "One tool.",
+        "operationId": "tools_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tool_id",
+            "required": true,
+            "schema": {
+              "title": "Tool Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools Get",
+        "tags": [
+          "Tools"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:read"
+      },
+      "post": {
+        "description": "Update any subset of the fields; the merged definition is validated as a whole.",
+        "operationId": "tools_update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tool_id",
+            "required": true,
+            "schema": {
+              "title": "Tool Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorLegacy"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Tools Update",
+        "tags": [
+          "Tools"
+        ],
+        "x-audit": [
+          "tool.update"
+        ],
+        "x-envelope": "legacy",
+        "x-scope": "tools:write"
       }
     },
     "/v1/webhooks/deliveries": {

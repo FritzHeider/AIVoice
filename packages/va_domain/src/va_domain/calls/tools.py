@@ -13,6 +13,7 @@ from typing import Annotated, Final, Literal
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 __all__ = [
+    "HEADER_NAME",
     "KB_REF_PATTERN",
     "TOOL_REF_PATTERN",
     "DynamicDataSpec",
@@ -21,6 +22,7 @@ __all__ = [
     "KbRef",
     "ResponseDataItem",
     "ToolRef",
+    "VariableName",
 ]
 
 _UUID: Final = r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
@@ -28,7 +30,7 @@ TOOL_REF_PATTERN: Final = rf"^(TL|KB)-{_UUID}$"
 KB_REF_PATTERN: Final = rf"^KB-{_UUID}$"
 _MAX_BODY_BYTES: Final = 64 * 1024
 # RFC 7230 token characters.
-_HEADER_NAME: Final = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+HEADER_NAME: Final = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 ToolRef = Annotated[str, StringConstraints(pattern=TOOL_REF_PATTERN)]
 KbRef = Annotated[str, StringConstraints(pattern=KB_REF_PATTERN)]
@@ -46,7 +48,7 @@ def _templated_http_url(value: str) -> str:
 
 def _header_names(headers: dict[str, str]) -> dict[str, str]:
     for name in headers:
-        if not _HEADER_NAME.match(name):
+        if not HEADER_NAME.match(name):
             msg = f"header name {name!r} is not an RFC 7230 token"
             raise ValueError(msg)
     return headers

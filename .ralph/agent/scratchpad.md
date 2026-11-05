@@ -1064,3 +1064,178 @@ Keep the `first_group`/`last_group` asserts and `(first.received_at - last_group
 ## Review P08-FIX-12 (2026-11-05) — APPROVED
 - Re-ran: make lint/typecheck/placeholders exit 0; `-k "precall or opener_attempt"` 7 passed; make test 12727 passed,
   7 skipped, cov 99 %. Test-only diff matches the plan and the inbox note (same-model duplicate fails). Note added to DONE.
+
+## Planner 2026-11-05 — after P08-FIX-12 approval
+- All inbox notes are in DONE (checked file by file). The next unticked task is P08-T01 (deps P07-T07, P02-T11 ticked).
+- Scope: `POST /v1/tools/{id}/test` needs request rendering, secret decryption and execution, which is ToolRunner work.
+  It moves to P08-T02 (plan file amended). P08-T01 = CRUD, validation, secret headers, audit, reference-checked delete.
+
+## Plan P08-T01 (Tools API with secret headers)
+### Facts
+- Model `va_db.models.library.Tool` already exists (DDL specs/03: UNIQUE (org_id, name) NOT partial, so a
+  soft-deleted row keeps its name). Error `TOOL_NOT_FOUND` 404 exists. Audit actions `tool.create/update/delete` are
+  already in `va_db.audit.AUDIT_ACTIONS`. Scopes `tools:read`/`tools:write` exist (rbac_matrix row `_grant("tools")`).
+- `va_domain.calls.tools.InlineTool` already validates name regex, description 1-1000, speech ≤ 500, templated
+  http(s) URL ≤ 2048, header-name tokens, query, body ≤ 64 KB, input_schema `type: object`, response dict,
+  timeout_ms 100-60000 (default 10 000), retries 0-3. Reuse it, do not copy it.
+- `va_engine.system_tools.RESERVED_TOOL_NAMES`, `va_tools.jsonpath.compile_path` (raises `InvalidJsonPathError`),
+  `va_common.ids` (`PublicPrefix.TOOL`, `to_public`, `from_public`), `Envelope.encrypt_str/decrypt_str`.
+- Encrypt BEFORE opening the tenant session, as `org_sso.py` does (`envelope_of(request).encrypt_str(...)`).
+  `decrypt` needs no DB (the wrapped key is in the blob, DataKeyCache).
+
+### va_tools (shared with the T02 runtime)
+- `packages/va_tools/pyproject.toml`: add `jsonschema>=4.26` to dependencies (mypy types are already in the root dev
+  group). Run `uv lock` and `uv sync`.
+- `packages/va_tools/src/va_tools/secrets.py` (layout per specs/13 §1):
+  - `secret_headers_aad(tool_id: uuid.UUID) -> str` → `f"tool:{tool_id}"` (spec §3).
+  - `async encrypt_secret_headers(envelope, org_id, tool_id, headers: Mapping[str, str]) -> bytes | None` (empty → None;
+    canonical JSON via `va_common.json.dumps`, sorted keys) and
+    `async decrypt_secret_headers(envelope, org_id, tool_id, blob: bytes | None) -> dict[str, str]`.
+  - `mask_secret(value: str) -> str` → `"••••" + value[-4:]` when `len(value) >= 12`, else `"••••"` (short secrets
+    would be revealed mostly by their last 4). `mask_headers(headers) -> dict[str, str]`.
+- `packages/va_tools/src/va_tools/validation.py` — pure, raises `va_common.errors.AppError("INVALID_INPUT", msg, field=)`:
+  - `check_tool_definition(tool: InlineTool, *, secret_headers: Mapping[str, str] = {}, allow_http: bool) -> None`.
+    Checks in this order: name not in `RESERVED_TOOL_NAMES` (case-sensitive, field `name`, message
+    `"'<name>' is a reserved system tool name."`); url scheme `https://` unless `allow_http` (field `url`); a url that
+    renders to no host (`https://{{x}}/` is allowed: templating may fill the host) is NOT checked here because runtime
+    SSRF checks the rendered URL; `Draft202012Validator.check_schema(input_schema)` → `SchemaError` field
+    `input_schema` with `error.message` (≤ 300 chars); every `response` value through `compile_path` → field
+    `response.<var>`; every `response` key matches the variable regex `^[A-Za-z_][A-Za-z0-9_]{0,63}$` (field
+    `response`); secret header names are RFC 7230 tokens (field `secret_headers`); a name in both `headers` and
+    `secret_headers` (case-insensitive) → field `secret_headers.<name>`; secret header values non-empty, ≤ 4 096 chars,
+    no CR/LF (field `secret_headers.<name>`).
+  - Also export `HEADER_NAME` if needed. Do not duplicate the InlineTool token regex: import it, or expose it as a
+    public name in va_domain (`HEADER_NAME_PATTERN`) and use it in both places.
+
+### va_db
+- `packages/va_db/src/va_db/repositories/tools.py` → `ToolRepo(session, org_id, *, clock)` built on `TenantRepository(Tool, ...)`
+  (re-export from `va_db.repositories`):
+  - `get(tool_id) -> Tool` (`NotFoundError` → the router maps it to `TOOL_NOT_FOUND`; or raise
+    `AppError("TOOL_NOT_FOUND", "Tool not found.")` directly, which is preferred and what `call_inputs.refs` uses).
+  - `page(*, limit, cursor, search) -> Page[Tool]`: `search` = ILIKE on name OR description, `%`/`_` escaped. Name the
+    method `page`, not `list` (mypy issue noted in P07-T09a memory).
+  - `create(values) -> Tool` and `update(tool, values) -> Tool`. A name conflict with a LIVE row →
+    `AppError("CONFLICT", "A tool named '<n>' already exists.", field="name")` (use `conflict_savepoint`). A name held
+    only by a soft-deleted row: hard-DELETE that row first, in the same transaction (Decision below).
+  - `soft_delete(tool)`.
+  - `references(tool_id) -> list[ToolReference(type, id, version)]`. Look in published pathway versions
+    (`status='published'`, pathway not deleted), node `data.tools` or `global_config.globalTools`; published persona
+    versions (`config.tools`, persona not deleted); and agent versions of non-deleted agents (`call_settings.tools`).
+    Match both forms `TL-<uuid>` and `<uuid>` with jsonb containment (`nodes @> '[{"data":{"tools":[id]}}]'`). First
+    check the real stored node shape in `packages/va_engine/tests/fixtures/bland/restaurant_ordering.json` and adjust
+    the path if `tools` is not under `data`. Bind parameters with `sa.cast(literal_json, JSONB)`; never use text
+    interpolation. At most 20 references returned.
+
+### api
+- `apps/api/src/va_api/routers/tools_schemas.py`:
+  - `ToolCreate(InlineTool)` adds `secret_headers: dict[str, str] = Field(default_factory=dict, repr=False)`, with
+    a ToolCreate example from specs/13 §2 (secret value obviously fake, built so gitleaks/placeholders stay quiet).
+  - `ToolUpdate`: every field optional (`None` default + `model_fields_set` decides what was sent). Explicit `null`
+    is allowed only for `speech`, `body` and `secret_headers` (null = clear). Null for any other field →
+    INVALID_INPUT.
+  - `ToolView`: `tool_id` (`TL-…`), name, description, speech, url, method, headers, `secret_headers` (masked), query,
+    body, input_schema, `response` (from `response_map`), timeout_ms, retries, created_at, updated_at.
+  - Responses `ToolCreated {status, tool_id, tool}`, `ToolEnvelope {status, tool}`, `ToolList {status, tools,
+    next_cursor}`, `ToolDeleted {status, message: "Tool deleted."}`. Each has an `examples` entry
+    (`test_operations_contract`).
+- `apps/api/src/va_api/services/tools.py`. Merge for update: take the stored definition (an InlineTool dump of the
+  row) plus the sent fields, then re-validate with `ToolCreate.model_validate(merged)`. That re-runs the cross-field
+  checks; map pydantic errors with `field_path` exactly as other services do. `allow_http = settings.va_env in
+  {"local","test"}` (find the existing helper, e.g. `va_pathways.runs.insecure_urls_allowed`, and reuse it).
+  `secret_headers` on update replaces the whole set (`{}` or null removes all; omitted keeps it). Encrypt before the
+  session. `tool_view(row, secret_headers) -> ToolView`. Decrypt after reading, masked only.
+- `apps/api/src/va_api/routers/tools.py`: `tools_router = legacy_router(prefix="/v1/tools")`, added to `main.ROUTERS`,
+  tag `Tools` (check it is in `va_api.openapi.TAG_NAMES`, add it if not). Routes:
+  - `POST ""` → `tools_create`, 200, `require_scope("tools:write")`, `audited("tool.create")`.
+  - `GET ""` → `tools_list` (`search` ≤ 200, `limit` 1-100 default as pathways, `cursor`).
+  - `GET /{tool_id}` → `tools_get`.
+  - `POST /{tool_id}` → `tools_update`, `audited("tool.update")`.
+  - `DELETE /{tool_id}` → `tools_delete`, `?force=false`, `audited("tool.delete")`. Without force, any references
+    give 409 `CONFLICT` with message `"Tool is used by published pathways, personas, or agents; pass force=true to
+    delete it."` and `details={"references":[...]}`.
+  - `tool_id` path parameter: accept `TL-<uuid>` or a bare uuid. Anything else → 400 INVALID_INPUT field `tool_id`.
+    Responses always use the `TL-` form.
+  - Audit `before`/`after` = views with masked secret headers (never plaintext). A no-op update (nothing changed)
+    writes no audit row and leaves the row untouched.
+- Cross-tenant: add a `tool_id` factory in `apps/api/tests/support/cross_tenant_factories.py` (ToolRepo create, returns
+  the `TL-` string), and add `(404, "TOOL_NOT_FOUND")` to `cross_tenant.REFUSED`. The create body comes from the
+  ToolCreate example (`examples[0]`).
+- `make openapi` → commit `openapi/openapi.json`. Then `corepack pnpm --filter dashboard gen:api` and
+  `corepack pnpm --filter @voiceagents/sdk gen:api` (schema drift tests).
+
+### Tests
+- `packages/va_tools/tests/test_secrets.py`: round trip; AAD binding (a blob of tool A fails to decrypt as tool B →
+  `DecryptionError`); empty → None; mask rules (long/short/exact 12). Use `crypto_fakes` + local KMS as other tests do.
+- `packages/va_tools/tests/test_validation.py`: one parametrized case per rule above (reserved name each of the 8,
+  http refused / allowed, bad schema e.g. `{"type":"object","properties":{"a":{"type":"nope"}}}`, bad JSONPath, bad
+  variable key, secret header token/dup/CRLF/empty/too long) plus a valid spec example passing.
+- `packages/va_db/tests/test_tool_repo_db.py` (module DB fixture as other repo tests): create/get/page (search,
+  escaping `%`, cursor), live name conflict → CONFLICT, recreate a soft-deleted name succeeds (old row gone), rename
+  onto a live name conflicts, references for each of the 3 sources × both id forms, draft pathway versions and
+  deleted parents are ignored.
+- `apps/api/tests/test_tools_api.py` (session helpers / `store_api_key` with `tools:*`):
+  - create returns `TL-` id + masked secrets, the DB `secret_headers_enc` decrypts to the plaintext, and the response
+    body / `audit_rows` never contain the plaintext secret (assert the raw response text and audit JSON).
+  - every validation error path gives field + code (each pydantic field bound, reserved name, schema, JSONPath, http
+    refused under a non-local `va_env`; build the app with `va_env="production"` settings only if cheap, otherwise
+    unit-test the allow_http flag in the service).
+  - get / list (search, limit, cursor, deleted hidden). Update: partial, explicit null clears speech/body/secrets,
+    null on name → 400, secrets omitted kept, secrets replaced, conflict, no-op = no audit.
+  - Delete: no refs → 200 and then GET 404 `TOOL_NOT_FOUND`; referenced → 409 with `details.references`;
+    `force=true` deletes. Malformed id → 400.
+  - Scopes: a `tools:read` key cannot write (403); an analyst session can manage tools only if the rbac matrix says
+    so (check the MATRIX row values; `_MANAGE` for sessions).
+  - Idempotency: a create replay with the same `Idempotency-Key` returns the same tool_id (one row).
+- The cross-tenant suite + audit-marker suite + `test_openapi` cover the new routes automatically. Run them.
+
+### Specs/docs
+- specs/13 §2: `> Decision (2026-11-05) P08-T01:` covering:
+  1. Masking: last 4 shown only for values ≥ 12 chars.
+  2. Update semantics: null clears speech/body/secret_headers; secret_headers replaces the whole set.
+  3. A name held by a soft-deleted tool is freed by hard-deleting that row (the specs/03 UNIQUE is not partial).
+  4. Reference check sources and both id forms; 409 `CONFLICT` with `details.references`.
+  5. Path id accepts `TL-` or a bare uuid.
+  6. Header name collision rule.
+  7. `/test` arrives with the runtime (P08-T02).
+- AGENTS.md dated line: router/service/repo names, the cross-tenant factory, and the secrets helpers.
+- plan/phase-08.md: already amended (`/test` in T02).
+
+### Gates
+- Targeted: `uv run pytest packages/va_tools packages/va_db/tests/test_tool_repo_db.py apps/api/tests/test_tools_api.py
+  apps/api/tests/test_cross_tenant_routes.py apps/api/tests/test_audit_markers.py apps/api/tests/test_openapi.py -q`.
+- `make fmt lint typecheck placeholders`, then `make check` in the background with a heartbeat Monitor
+  (PATH += /home/ralph/.local/bin).
+- Backpressure: audit (`uv export --frozen --no-hashes --no-emit-workspace > /var/tmp/req.txt && uvx pip-audit -r
+  /var/tmp/req.txt`, `corepack pnpm audit --audit-level high`), `npx --yes jscpd@4 --silent` (0 clones), `uvx radon cc
+  -s -a` (average < 10). Emit plain text with `complexity: <n>,`.
+- Reviewer: tick P08-T01 and commit `feat(api): tools api with encrypted secret headers` with footer `Task: P08-T01`.
+
+### Risks
+- gitleaks: test fixtures must not look like real tokens. Build them with `secrets.token_hex` at test time, and keep
+  the OpenAPI example obviously fake (`"Bearer example-secret-value"`).
+- `jsonschema` `check_schema` on huge or recursive schemas is cheap, but run validation in the request thread only:
+  body ≤ 64 KB already caps it.
+- The cross-tenant leak detector looks for ids in responses. A masked secret header's last 4 chars must not collide
+  with markers; use `marker=False` only if needed.
+
+## Build P08-T01 (2026-11-05)
+- New: va_tools.secrets (AAD tool:{id}, mask ≥12 chars → ••••last4), va_tools.validation.check_tool_definition
+  (reserved names, https unless local/test, Draft202012 check_schema, response keys + JSONPath, secret header rules);
+  va_tools deps + jsonschema, va-domain. va_domain HEADER_NAME/VariableName public.
+- va_db.repositories.ToolRepo (get/page/create/update/soft_delete/references; frees soft-deleted namesakes by DELETE;
+  references = published pathway versions (node data.tools / globalTools), published persona versions (config.tools),
+  any version of live agents (call_settings.tools), both id forms, ≤20).
+- api: routers/tools.py + tools_schemas.py + services/tools.py; tools_router in main.ROUTERS. Update merges over
+  stored definition, pydantic errors re-raised as RequestValidationError (field paths); no-op update writes nothing.
+  force delete open to tools:write (recorded in Decision). Audit redactor blanks secret_headers key.
+- Cross-tenant factory tool_id (TL- form, random name), REFUSED += TOOL_NOT_FOUND. openapi + both gen:api regenerated.
+- Spec: specs/13 §2 Decision P08-T01. AGENTS.md line added.
+- Tests: va_tools test_secrets/test_validation (36), va_db test_tool_repo_db (8), api test_tools_api (57).
+- jscpd: fixed 4 clones (ToolsApi wraps pathway Api, add_all in repo test, compact repo __init__) → 0.
+- make check exit 0: 12828 passed, 7 skipped, cov 99.08%; TS 22/52/48. pip-audit clean, pnpm audit exit 0 (1 moderate), jscpd 0, radon A (2.92).
+
+## Review P08-T01 (2026-11-05) — APPROVED
+- Re-ran: make lint/typecheck/placeholders exit 0; make test 12828 passed, 7 skipped, cov 99 % (exit 0).
+- Diff checked against specs/13 §2/§3 + Decision P08-T01: legacy bodies, TL- ids, masking, null semantics,
+  reference sources (persona config / agent call_settings are call-parameter layers → `tools` key), TOOL_NOT_FOUND
+  in cross-tenant REFUSED, secrets never in responses/audit (tests assert raw text). Ticked and committed.

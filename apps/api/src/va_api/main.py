@@ -53,6 +53,7 @@ from va_api.routers.pathway_chat import pathway_chat_router
 from va_api.routers.pathway_folders import pathway_folders_router
 from va_api.routers.pathway_io import pathway_io_router
 from va_api.routers.pathways import pathways_router
+from va_api.routers.tools import tools_router
 from va_api.routers.webhooks import webhooks_router
 from va_api.settings import ApiSettings
 from va_common.metrics import Service, build_metrics
@@ -89,6 +90,7 @@ ROUTERS: Final[tuple[APIRouter, ...]] = (
     pathway_folders_router,  # before pathways_router: /folders must not match /{pathway_id}
     pathway_io_router,  # before pathways_router: /import must not match /{pathway_id}
     pathways_router,
+    tools_router,
     api_keys_router,
     agent_onboarding_router,
     audit_logs_router,

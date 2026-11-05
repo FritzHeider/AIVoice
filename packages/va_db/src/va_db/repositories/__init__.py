@@ -10,7 +10,7 @@ tenant :class:`CallTurnRepo` (transcript turns; specs/07 §8), the tenant :class
 caller contacts; specs/06 §7), the tenant :class:`WebhookEndpointRepo` and :class:`WebhookDeliveryRepo`
 (webhook endpoints and delivery history; specs/19 §10), the tenant :class:`PathwayRepo` (pathways and their
 versions; specs/12 §1-§3), the tenant :class:`PathwayTestRepo` and :class:`PathwayRunRepo` (unit tests and
-test runs; specs/12 §8), and the system-scope ones.
+test runs; specs/12 §8), the tenant :class:`ToolRepo` (custom tools; specs/13 §2), and the system-scope ones.
 
 System repositories run on ``Database.system_session()`` (``va_system``, ``BYPASSRLS``); specs/03 §2 lists
 every one of them, and only those may exist. :class:`IdentityRepo` works on ``Database.global_session()`` or
@@ -124,6 +124,14 @@ from va_db.repositories.telnyx_accounts import (
     TelnyxWebhookKey,
 )
 from va_db.repositories.telnyx_events import RETRY_CLAIM_LIMIT, NewTelnyxEvent, TelnyxEventRepo
+from va_db.repositories.tools import (
+    MAX_TOOL_REFERENCES,
+    TOOL_NOT_FOUND_MESSAGE,
+    ToolReference,
+    ToolReferenceType,
+    ToolRepo,
+    tool_name_conflict,
+)
 from va_db.repositories.webhooks import (
     ALREADY_QUEUED_MESSAGE,
     ENDPOINT_DELETED_ERROR,
@@ -152,6 +160,7 @@ __all__ = [
     "LOCK_TTL",
     "MANUAL_REFERENCE",
     "MAX_FOLDER_DEPTH",
+    "MAX_TOOL_REFERENCES",
     "NOT_OWNER_MESSAGE",
     "PARENT_ACCESS_ROLES",
     "PASSWORD_RESET_TTL",
@@ -162,6 +171,7 @@ __all__ = [
     "RUN_RESOURCE",
     "SUB_ACCOUNT_REFERENCE",
     "TEST_RESOURCE",
+    "TOOL_NOT_FOUND_MESSAGE",
     "WEBHOOK_ACCOUNT_STATUSES",
     "ApiKeyLookupRepo",
     "ApiKeyRecord",
@@ -231,6 +241,9 @@ __all__ = [
     "TelnyxEventRepo",
     "TelnyxWebhookKey",
     "TenantRepository",
+    "ToolReference",
+    "ToolReferenceType",
+    "ToolRepo",
     "WebhookDeliveryFilter",
     "WebhookDeliveryRepo",
     "WebhookEndpointRepo",
@@ -241,4 +254,5 @@ __all__ = [
     "is_unique_violation",
     "require_positive",
     "resolve_existing",
+    "tool_name_conflict",
 ]

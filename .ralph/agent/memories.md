@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793857135-bee5
+> P08-T01: tools API = routers/tools + services/tools (update merges over stored def, pydantic errors re-raised as RequestValidationError with body loc) + va_db ToolRepo (frees soft-deleted namesake) + va_tools.secrets/validation; audit redactor blanks secret_headers key; cross-tenant factories run several times per tenant -> random names for per-org unique columns
+<!-- tags: api, tools, testing | created: 2026-11-05 -->
+
 ### mem-1793798181-1471
 > P07-T12c: pathway e2e flows use tests_e2e/pathways/*.json templates + with_webhook_url (validation refuses templated webhook hosts); media container needs extra_hosts+WEBHOOK_ALLOW_PRIVATE in docker-compose.e2e.yml for Webhook nodes; decision prompts carry no scenario marker -> extraction rules keyed on tool_name extract_variables + caller phrase (test_e2e_support allows unmarked rules only for decision tools); unrecorded calls need event_order_failures(types, REQUIRED_CALL_EVENTS - {call.recording_ready})
 <!-- tags: e2e, pathways, testing | created: 2026-11-04 -->

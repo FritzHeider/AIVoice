@@ -1275,6 +1275,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tools": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tools List
+         * @description The org's live tools, newest first.
+         */
+        get: operations["tools_list"];
+        put?: never;
+        /**
+         * Tools Create
+         * @description Create a tool; secret header values are stored encrypted and never returned.
+         */
+        post: operations["tools_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tools/{tool_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Tools Get
+         * @description One tool.
+         */
+        get: operations["tools_get"];
+        put?: never;
+        /**
+         * Tools Update
+         * @description Update any subset of the fields; the merged definition is validated as a whole.
+         */
+        post: operations["tools_update"];
+        /**
+         * Tools Delete
+         * @description Soft-delete a tool that no published resource lists (or any tool with ``force``).
+         */
+        delete: operations["tools_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/webhooks/deliveries": {
         parameters: {
             query?: never;
@@ -7274,6 +7326,525 @@ export interface components {
             status: "success";
         };
         /**
+         * ToolCreate
+         * @description ``POST /v1/tools``: a tool definition (specs/13 §2).
+         * @example {
+         *       "body": {
+         *         "caller": "{{from}}",
+         *         "date": "{{input.date}}",
+         *         "party": "{{input.party_size}}",
+         *         "time": "{{input.time}}"
+         *       },
+         *       "description": "Checks table availability for a date, time and party size.",
+         *       "headers": {
+         *         "Content-Type": "application/json"
+         *       },
+         *       "input_schema": {
+         *         "properties": {
+         *           "date": {
+         *             "description": "YYYY-MM-DD",
+         *             "type": "string"
+         *           },
+         *           "party_size": {
+         *             "maximum": 20,
+         *             "minimum": 1,
+         *             "type": "integer"
+         *           },
+         *           "time": {
+         *             "description": "HH:MM 24h",
+         *             "type": "string"
+         *           }
+         *         },
+         *         "required": [
+         *           "date",
+         *           "time",
+         *           "party_size"
+         *         ],
+         *         "type": "object"
+         *       },
+         *       "method": "POST",
+         *       "name": "check_availability",
+         *       "query": {},
+         *       "response": {
+         *         "alternatives": "$.alternatives[*].time",
+         *         "available": "$.available"
+         *       },
+         *       "retries": 1,
+         *       "secret_headers": {
+         *         "Authorization": "Bearer example-secret-value"
+         *       },
+         *       "speech": "Let me check that for you.",
+         *       "timeout_ms": 8000,
+         *       "url": "https://api.bellapasta.com/availability"
+         *     }
+         */
+        ToolCreate: {
+            body?: components["schemas"]["JsonValue"];
+            /**
+             * Description
+             * @description When the LLM should call the tool.
+             */
+            description: string;
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
+            /**
+             * Input Schema
+             * @description JSON Schema (draft 2020-12) of the tool input.
+             */
+            input_schema?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Method
+             * @default POST
+             * @enum {string}
+             */
+            method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /**
+             * Name
+             * @description Function name shown to the LLM.
+             */
+            name: string;
+            /** Query */
+            query?: {
+                [key: string]: string;
+            };
+            /**
+             * Response
+             * @description Variable name -> JSONPath.
+             */
+            response?: {
+                [key: string]: string;
+            };
+            /**
+             * Retries
+             * @default 0
+             */
+            retries: number;
+            /**
+             * Secret Headers
+             * @description Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.
+             */
+            secret_headers?: {
+                [key: string]: string;
+            };
+            /**
+             * Speech
+             * @description Said while the tool runs.
+             */
+            speech?: string | null;
+            /**
+             * Timeout Ms
+             * @default 10000
+             */
+            timeout_ms: number;
+            /**
+             * Url
+             * @description Request URL; `{{vars}}` are rendered at call time.
+             */
+            url: string;
+        };
+        /**
+         * ToolCreated
+         * @description ``POST /v1/tools`` result.
+         * @example {
+         *       "status": "success",
+         *       "tool": {
+         *         "body": {
+         *           "caller": "{{from}}",
+         *           "date": "{{input.date}}",
+         *           "party": "{{input.party_size}}",
+         *           "time": "{{input.time}}"
+         *         },
+         *         "created_at": "2026-11-05T09:15:00Z",
+         *         "description": "Checks table availability for a date, time and party size.",
+         *         "headers": {
+         *           "Content-Type": "application/json"
+         *         },
+         *         "input_schema": {
+         *           "properties": {
+         *             "date": {
+         *               "description": "YYYY-MM-DD",
+         *               "type": "string"
+         *             },
+         *             "party_size": {
+         *               "maximum": 20,
+         *               "minimum": 1,
+         *               "type": "integer"
+         *             },
+         *             "time": {
+         *               "description": "HH:MM 24h",
+         *               "type": "string"
+         *             }
+         *           },
+         *           "required": [
+         *             "date",
+         *             "time",
+         *             "party_size"
+         *           ],
+         *           "type": "object"
+         *         },
+         *         "method": "POST",
+         *         "name": "check_availability",
+         *         "query": {},
+         *         "response": {
+         *           "alternatives": "$.alternatives[*].time",
+         *           "available": "$.available"
+         *         },
+         *         "retries": 1,
+         *         "secret_headers": {
+         *           "Authorization": "••••alue"
+         *         },
+         *         "speech": "Let me check that for you.",
+         *         "timeout_ms": 8000,
+         *         "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+         *         "updated_at": "2026-11-05T09:15:00Z",
+         *         "url": "https://api.bellapasta.com/availability"
+         *       },
+         *       "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71"
+         *     }
+         */
+        ToolCreated: {
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            tool: components["schemas"]["ToolView"];
+            /** Tool Id */
+            tool_id: string;
+        };
+        /**
+         * ToolDeleted
+         * @description ``DELETE /v1/tools/{tool_id}`` result.
+         * @example {
+         *       "message": "Tool deleted.",
+         *       "status": "success"
+         *     }
+         */
+        ToolDeleted: {
+            /** Message */
+            message: string;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+        };
+        /**
+         * ToolEnvelope
+         * @description ``GET``/``POST /v1/tools/{tool_id}`` result.
+         * @example {
+         *       "status": "success",
+         *       "tool": {
+         *         "body": {
+         *           "caller": "{{from}}",
+         *           "date": "{{input.date}}",
+         *           "party": "{{input.party_size}}",
+         *           "time": "{{input.time}}"
+         *         },
+         *         "created_at": "2026-11-05T09:15:00Z",
+         *         "description": "Checks table availability for a date, time and party size.",
+         *         "headers": {
+         *           "Content-Type": "application/json"
+         *         },
+         *         "input_schema": {
+         *           "properties": {
+         *             "date": {
+         *               "description": "YYYY-MM-DD",
+         *               "type": "string"
+         *             },
+         *             "party_size": {
+         *               "maximum": 20,
+         *               "minimum": 1,
+         *               "type": "integer"
+         *             },
+         *             "time": {
+         *               "description": "HH:MM 24h",
+         *               "type": "string"
+         *             }
+         *           },
+         *           "required": [
+         *             "date",
+         *             "time",
+         *             "party_size"
+         *           ],
+         *           "type": "object"
+         *         },
+         *         "method": "POST",
+         *         "name": "check_availability",
+         *         "query": {},
+         *         "response": {
+         *           "alternatives": "$.alternatives[*].time",
+         *           "available": "$.available"
+         *         },
+         *         "retries": 1,
+         *         "secret_headers": {
+         *           "Authorization": "••••alue"
+         *         },
+         *         "speech": "Let me check that for you.",
+         *         "timeout_ms": 8000,
+         *         "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+         *         "updated_at": "2026-11-05T09:15:00Z",
+         *         "url": "https://api.bellapasta.com/availability"
+         *       }
+         *     }
+         */
+        ToolEnvelope: {
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            tool: components["schemas"]["ToolView"];
+        };
+        /**
+         * ToolList
+         * @description ``GET /v1/tools`` result: newest first; ``next_cursor`` is null on the last page.
+         * @example {
+         *       "status": "success",
+         *       "tools": [
+         *         {
+         *           "body": {
+         *             "caller": "{{from}}",
+         *             "date": "{{input.date}}",
+         *             "party": "{{input.party_size}}",
+         *             "time": "{{input.time}}"
+         *           },
+         *           "created_at": "2026-11-05T09:15:00Z",
+         *           "description": "Checks table availability for a date, time and party size.",
+         *           "headers": {
+         *             "Content-Type": "application/json"
+         *           },
+         *           "input_schema": {
+         *             "properties": {
+         *               "date": {
+         *                 "description": "YYYY-MM-DD",
+         *                 "type": "string"
+         *               },
+         *               "party_size": {
+         *                 "maximum": 20,
+         *                 "minimum": 1,
+         *                 "type": "integer"
+         *               },
+         *               "time": {
+         *                 "description": "HH:MM 24h",
+         *                 "type": "string"
+         *               }
+         *             },
+         *             "required": [
+         *               "date",
+         *               "time",
+         *               "party_size"
+         *             ],
+         *             "type": "object"
+         *           },
+         *           "method": "POST",
+         *           "name": "check_availability",
+         *           "query": {},
+         *           "response": {
+         *             "alternatives": "$.alternatives[*].time",
+         *             "available": "$.available"
+         *           },
+         *           "retries": 1,
+         *           "secret_headers": {
+         *             "Authorization": "••••alue"
+         *           },
+         *           "speech": "Let me check that for you.",
+         *           "timeout_ms": 8000,
+         *           "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+         *           "updated_at": "2026-11-05T09:15:00Z",
+         *           "url": "https://api.bellapasta.com/availability"
+         *         }
+         *       ]
+         *     }
+         */
+        ToolList: {
+            /** Next Cursor */
+            next_cursor: string | null;
+            /**
+             * Status
+             * @default success
+             * @constant
+             */
+            status: "success";
+            /** Tools */
+            tools: components["schemas"]["ToolView"][];
+        };
+        /**
+         * ToolUpdate
+         * @description ``POST /v1/tools/{tool_id}``: any subset of the ToolCreate fields.
+         *
+         *     Omitted fields keep their stored value. ``null`` clears ``speech``, ``body``, and ``secret_headers``; the
+         *     other fields reject it. ``secret_headers`` replaces the whole stored set.
+         * @example {
+         *       "description": "Checks table availability.",
+         *       "timeout_ms": 5000
+         *     }
+         */
+        ToolUpdate: {
+            body?: components["schemas"]["JsonValue"];
+            /** Description */
+            description?: string | null;
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            } | null;
+            /** Input Schema */
+            input_schema?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /** Method */
+            method?: ("GET" | "POST" | "PUT" | "PATCH" | "DELETE") | null;
+            /** Name */
+            name?: string | null;
+            /** Query */
+            query?: {
+                [key: string]: string;
+            } | null;
+            /** Response */
+            response?: {
+                [key: string]: string;
+            } | null;
+            /** Retries */
+            retries?: number | null;
+            /**
+             * Secret Headers
+             * @description Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.
+             */
+            secret_headers?: {
+                [key: string]: string;
+            } | null;
+            /** Speech */
+            speech?: string | null;
+            /** Timeout Ms */
+            timeout_ms?: number | null;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * ToolView
+         * @description A stored tool; ``secret_headers`` values are always masked.
+         * @example {
+         *       "body": {
+         *         "caller": "{{from}}",
+         *         "date": "{{input.date}}",
+         *         "party": "{{input.party_size}}",
+         *         "time": "{{input.time}}"
+         *       },
+         *       "created_at": "2026-11-05T09:15:00Z",
+         *       "description": "Checks table availability for a date, time and party size.",
+         *       "headers": {
+         *         "Content-Type": "application/json"
+         *       },
+         *       "input_schema": {
+         *         "properties": {
+         *           "date": {
+         *             "description": "YYYY-MM-DD",
+         *             "type": "string"
+         *           },
+         *           "party_size": {
+         *             "maximum": 20,
+         *             "minimum": 1,
+         *             "type": "integer"
+         *           },
+         *           "time": {
+         *             "description": "HH:MM 24h",
+         *             "type": "string"
+         *           }
+         *         },
+         *         "required": [
+         *           "date",
+         *           "time",
+         *           "party_size"
+         *         ],
+         *         "type": "object"
+         *       },
+         *       "method": "POST",
+         *       "name": "check_availability",
+         *       "query": {},
+         *       "response": {
+         *         "alternatives": "$.alternatives[*].time",
+         *         "available": "$.available"
+         *       },
+         *       "retries": 1,
+         *       "secret_headers": {
+         *         "Authorization": "••••alue"
+         *       },
+         *       "speech": "Let me check that for you.",
+         *       "timeout_ms": 8000,
+         *       "tool_id": "TL-0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71",
+         *       "updated_at": "2026-11-05T09:15:00Z",
+         *       "url": "https://api.bellapasta.com/availability"
+         *     }
+         */
+        ToolView: {
+            body: components["schemas"]["JsonValue"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string;
+            /** Headers */
+            headers: {
+                [key: string]: string;
+            };
+            /** Input Schema */
+            input_schema: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+            /**
+             * Method
+             * @enum {string}
+             */
+            method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+            /** Name */
+            name: string;
+            /** Query */
+            query: {
+                [key: string]: string;
+            };
+            /**
+             * Response
+             * @description Variable name -> JSONPath (the `response_map` column).
+             */
+            response: {
+                [key: string]: string;
+            };
+            /** Retries */
+            retries: number;
+            /**
+             * Secret Headers
+             * @description Write-only headers stored encrypted; responses show `••••` plus the last 4 characters (values of at least 12 characters) or `••••`.
+             */
+            secret_headers: {
+                [key: string]: string;
+            };
+            /** Speech */
+            speech: string | null;
+            /** Timeout Ms */
+            timeout_ms: number;
+            /**
+             * Tool Id
+             * @description `TL-<uuid>`.
+             */
+            tool_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Url */
+            url: string;
+        };
+        /**
          * ToolsSettings
          * @description Built-in tools allowed in calls.
          */
@@ -11402,6 +11973,220 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PathwayVersions"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_list: {
+        parameters: {
+            query?: {
+                /** @description Case-insensitive name or description substring. */
+                search?: string | null;
+                /** @description Page size (1-100). */
+                limit?: number;
+                /** @description next_cursor of the previous page. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolList"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolCreated"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolEnvelope"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolEnvelope"];
+                };
+            };
+            /** @description Invalid input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorLegacy"];
+                };
+            };
+        };
+    };
+    tools_delete: {
+        parameters: {
+            query?: {
+                /** @description Delete even while published pathways, personas, or agents list the tool. */
+                force?: boolean;
+            };
+            header?: never;
+            path: {
+                tool_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ToolDeleted"];
                 };
             };
             /** @description Invalid input */

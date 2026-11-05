@@ -3239,9 +3239,11 @@ source = { editable = "packages/va_tools" }
 dependencies = [
     { name = "httpx" },
     { name = "jsonpath-ng" },
+    { name = "jsonschema" },
     { name = "orjson" },
     { name = "pydantic" },
     { name = "va-common" },
+    { name = "va-domain" },
     { name = "va-engine" },
 ]
 
@@ -3249,9 +3251,11 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonpath-ng", specifier = ">=1.7" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "orjson", specifier = ">=3.13.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "va-common", editable = "packages/va_common" },
+    { name = "va-domain", editable = "packages/va_domain" },
     { name = "va-engine", editable = "packages/va_engine" },
 ]
 
