@@ -1,5 +1,22 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-14 Keep heartbeat and ownership through the body teardown; callback start failure never reports a terminated child as scheduled — see .ralph/review-inbox/2026-11-05-p08-fix-13-review.md — two-stage CallSession stop (body teardown with renewer+heartbeat alive), callback start failure recorded before abandon (failed/advanced/ended/unrecorded), abandon -> bool 5 s; Decision P08-FIX-14; lint/typecheck/placeholders pass, make test 12968 passed 7 skipped
+  - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-T02b2, P08-FIX-13)
+  - Depends on: P08-FIX-13
+  - Deliverables: `CallSession._race` cancels and awaits the body, end-request and control listener first while
+    the ownership renewer and heartbeat keep running, then cancels those two (a lock lost during the body
+    teardown still skips the release); `CallbackScheduler._start` on a start failure records the child failure
+    (from `scheduled`) BEFORE abandoning: `failed` → `abandon` (terminate the possible sleeper) + `callback_failed`;
+    child already moved on by its workflow (non-terminal) → no terminate, answer scheduled; child ended
+    (terminal) → no terminate, `callback_failed`; unrecorded → `abandon` + `media.callback_orphaned`;
+    `CallbackStarter.abandon` returns whether a workflow was terminated (logged), its timeout 5 s so a callback
+    run fits in `SYSTEM_DRAIN_S`; session module docstring and specs/13 §6 Decision updated.
+  - Acceptance: a body whose teardown is gated keeps refreshing the heartbeat and renewing the lock until it
+    finishes, and the ender starts only after it; start failure + child advanced to `queued` answers scheduled
+    with no abandon; + child `canceled` answers `callback_failed` with no abandon; + child `scheduled` fails it
+    and abandons after the transition; `make check` passes; append the note name to `.ralph/review-inbox/DONE` on
+    approval.
+
 - [x] P08-FIX-13 System tools: run to completion through barge-in, no tools for anonymous callers, per-call caps, orphan-free start failures — see .ralph/review-inbox/2026-11-04-p08-t02b2-system-tools.md, 2026-11-05-p08-t02b2-system-tools-review.md, 2026-11-05-p08-t02b2-recheck.md — shielded executor-owned system tool runs + aclose drain, dialable() gate, caps (3 SMS, 1 pending callback), abandon+retried fail on start failure; Decision P08-FIX-13; lint/typecheck/placeholders pass, make test 12964 passed 7 skipped (cov 99.06%)
   - Spec refs: specs/13 §6 (Decision P08-T02b2), specs/05 §3.3, specs/07 §8
   - Depends on: P08-T02b2

@@ -467,3 +467,86 @@ Approved. Re-ran lint/typecheck/placeholders (pass) and make test (12964 passed,
 three inbox notes' findings covered: shield + aclose (runtime LIFO before saver/events), dialable gate in runtime
 and handlers, caps, abandon + 2-try _fail_child with media.callback_orphaned, dead created path removed, spec
 Decision P08-FIX-13. Inbox notes appended to DONE.
+
+## Plan P08-FIX-14 — review of P08-FIX-13 (.ralph/review-inbox/2026-11-05-p08-fix-13-review.md)
+
+### 1. BLOCKER: heartbeat/renewer alive through the body teardown — `apps/media_worker/src/va_media/session.py`
+- `_race`: keep the task list (priority order unchanged for the result). In `finally`, two stages:
+  `keepers = (renewer, heartbeat)`; stage 1 cancel the not-done others (end_request, body, control_listener) and
+  `await asyncio.gather(*others, return_exceptions=True)` — the body's exit stack (executor.aclose drain up to
+  20 s, saver flush, persistence) runs while heartbeat SETs continue every 3 s and the lock is renewed; stage 2
+  cancel + gather the keepers. If the renewer returns OWNERSHIP_LOST during stage 1 it already set `_lost`
+  (cleanup skips release); the chosen `SessionEnd` stays the one from the first `done` set (no change). Use a
+  try/finally inside stage 1 so stage 2 always runs even if `_race` is cancelled during stage 1.
+- Update the module docstring: "The body is cancelled and awaited first, while the lock and heartbeat are still
+  maintained (its teardown may drain system tools, specs/13 §6); then the renewer and heartbeat stop."
+- Tests in `apps/media_worker/tests/test_session.py` (reuse its ManualClock/fakeredis helpers):
+  - `test_the_heartbeat_and_lock_are_kept_while_the_body_tears_down`: body = await forever, in `except
+    CancelledError`/finally awaits an `asyncio.Event` gate; `session.request_end(...)`; advance the clock past
+    several HEARTBEAT_INTERVAL_S / RENEW_INTERVAL_S (`wait_for_sleep` + `run_for`) → heartbeat key value updated
+    (newer timestamp) and renew count grows, ender not called yet; release gate → ender called, heartbeat deleted,
+    lock released.
+  - `test_a_lock_lost_during_the_body_teardown_is_not_released`: same gate; ownership.renew returns False during
+    teardown → after release `session.ownership_lost` is True and `release` not called; end stays the requested one.
+
+### 2. Callback start failure ordering — `apps/media_worker/src/va_media/call_system_tools.py`
+Rationale (deviation from the note's literal suggestion, same goal): terminating first is what creates the
+"terminated but answered scheduled" orphan. Only the child's workflow moves a child out of `scheduled` (or a stop
+→ `canceled`), and the dial activity skips terminal calls (`TelephonyActivities._guard`). So record the failure
+FIRST (guarded `scheduled` → `failed`), then terminate only a child we failed:
+- `_fail_child` returns `Literal["failed", "advanced", "ended", "unrecorded"]`: `CallTransitionError` →
+  `"ended"` if `is_terminal(exc.current)` (va_db.call_states) else `"advanced"` (log `media.callback_moved_on`).
+- `_start` on `CallbackStartError`: `outcome = await self._fail_child(id)`; `"advanced"` → return True (the
+  workflow exists and owns the child: no terminate); `"failed"`/`"unrecorded"` → `await starter.abandon(id)`
+  (a late-landing or timed-out start that created a sleeper is terminated; a failed child would be skipped at
+  dial anyway) and return False; `"ended"` → return False. The orphan log for "unrecorded" stays.
+- `CallbackStarter.abandon(...) -> bool` (True = a workflow was terminated; never raises; False on error);
+  `TemporalCallbackStarter.abandon` returns `terminate_workflow(...)`, timeout `_ABANDON_TIMEOUT_S: Final = 5.0`
+  (start 10 s + abandon 5 s + two DB tries < SYSTEM_DRAIN_S 20 s); log `media.callback_abandoned terminated=`.
+  Update fakes: `test_call_system_tools.RecordingStarter.abandon` returns bool (configurable) and records order
+  into a shared list if needed; `test_runtime_tools_sim.py:269` returns False.
+- Docstrings of `_start`/`_fail_child`/`CallbackStarter.abandon` match.
+- Tests (`test_call_system_tools.py`, real media DB fixture like the existing start-failure tests):
+  - existing `test_a_failed_start_fails_the_child`: assert abandon happened after the transition (starter's
+    abandon reads the child's status through `load_call` → already `failed`), answer callback_failed.
+  - `test_a_start_failure_after_the_workflow_moved_the_child_on_answers_scheduled`: starter.fail with a hook
+    that moves the child to `queued` (CallRepo.transition inside the fake's start before raising) → answer
+    scheduled, `abandoned == []`, child stays `queued`.
+  - `test_a_start_failure_for_an_ended_child_answers_callback_failed`: hook moves child to `canceled` → answer
+    `callback_failed`, no abandon, no extra call.error event.
+  - existing orphan test: abandon still called, `media.callback_orphaned` logged.
+  - `test_callback_starter.py`: `abandon` returns True when terminated, False when not found / on error.
+
+### 3. Spec + docs
+- specs/13 §6: new `> Decision (2026-11-05) P08-FIX-14:` — failure recorded before terminate; outcomes; abandon
+  5 s; session keeps lock + heartbeat during body teardown (and a line in specs/07 §3 near Decision P05-T07a
+  only if that section describes the race order — check; otherwise reference from specs/13).
+- AGENTS.md: amend the P08-FIX-13 line (or add one): CallSession body teardown runs with heartbeat/lock alive.
+
+### Gates
+make fmt lint typecheck placeholders; make test in background + heartbeat Monitor; jscpd; radon; audits. No e2e
+flow change.
+
+### Risks
+- Existing session tests that assume all tasks cancel together (e.g. ender ordering) — re-run test_session.
+- ManualClock: stage-1 waits make renewer/heartbeat sleepers stay parked; tests must advance explicitly.
+- A body that never finishes its teardown now also keeps the heartbeat forever (previously it did too, minus
+  the heartbeat): acceptable, the executor drain is bounded.
+
+## Build P08-FIX-14 (2026-11-05)
+- session.py: `_race` → `_stop_tasks(tasks, keepers)`: others (end_request, body, control) cancelled+awaited first,
+  renewer+heartbeat cancelled in a `finally` after. Docstring updated. Tests GatedTeardown (heartbeat stamps + lock
+  renewed during teardown, ender waits; lock lost during teardown not released) — both fail on HEAD.
+- call_system_tools: `_fail_child` → failed/advanced/ended/unrecorded (is_terminal); `_start` records first, abandons
+  only for failed/unrecorded; advanced → scheduled answer. `abandon -> bool`, `_ABANDON_TIMEOUT_S` 5 s,
+  `media.callback_abandoned terminated=`. Tests: status seen at abandon == failed; queued child → scheduled, no
+  abandon; canceled child → callback_failed, no abandon; starter tests assert bool.
+- Spec Decision P08-FIX-14 under specs/13 §6; AGENTS line.
+Gates: fmt/lint/typecheck/placeholders pass; make test 12968 passed 7 skipped (cov 99.06%); jscpd 0 clones; radon avg 2.41; pip-audit clean; pnpm audit 1 moderate (no high). No e2e flow change.
+
+## Review P08-FIX-14 (2026-11-05)
+Approved. Re-ran lint/typecheck/placeholders (pass) and make test (12968 passed, 7 skipped, exit 0). Diff matches
+plan + inbox note: two-stage `_stop_tasks` (keepers renewer/heartbeat stopped in finally), record-before-abandon
+outcomes with is_terminal, abandon -> bool (5 s), tests for gated teardown / lost lock / advanced / ended child.
+Note (non-blocking): after a lock loss during teardown the heartbeat keeps stamping until the body finishes
+(≤ 20 s drain); cleanup still deletes it and the workflow learns via the end routine. Inbox note appended to DONE.

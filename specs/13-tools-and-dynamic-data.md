@@ -265,6 +265,22 @@ tool calls per call: 100.
 >    error level `media.callback_orphaned` with the child call id (no sweep starts such rows); the tool answers
 >    `{"error":"callback_failed"}`.
 >
+> Decision (2026-11-05) P08-FIX-14: item 4 of P08-FIX-13 is reordered, and the drain gets a live session.
+> 1. A failed callback start first records the failure (guarded `scheduled` → `failed` with the child's
+>    `call.error` `dispatch_failed`, one retry), then acts on the outcome: `failed` or unrecorded (both writes
+>    failed, `media.callback_orphaned`) → terminate the child's workflow id (`CallbackStarter.abandon`, 5 s,
+>    returns whether a workflow was terminated, never raises) and answer `{"error":"callback_failed"}`; the
+>    child is no longer `scheduled` but not ended (its workflow, reached by a timed-out start, already moved it
+>    on) → the child belongs to that workflow: nothing is terminated and the tool answers `scheduled`; the child
+>    already ended → answer `{"error":"callback_failed"}` without terminating. Terminating before the write could
+>    leave a moved-on child without its workflow; a failed child is skipped at dial even if a late start lands.
+>    Start 10 s + abandon 5 s + two writes stay inside the 20 s drain of item 2.
+> 2. `CallSession` (specs/07 §3) ends a session in two stages: the body (and the end-request and control
+>    tasks) is cancelled and awaited first while the ownership renewer and the heartbeat keep running, so the
+>    body's teardown (the system-tool drain, the snapshot flush) never lets the heartbeat or the lock expire;
+>    then the renewer and the heartbeat stop and the end routine runs. A lock lost during the teardown is not
+>    released; the session's end stays the one that decided the race.
+>
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the
 > tool's `final_message`; without one it is `"Goodbye."` unless the reply already spoke text this turn (specs/11 §6

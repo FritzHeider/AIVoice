@@ -276,3 +276,64 @@ async def test_a_failing_ender_is_logged_and_the_cleanup_still_runs() -> None:
         assert r.socket.closed_with == 1000
     failed = [e for e in log_events(stream) if e["event"] == "media.end_routine_failed"]
     assert [e["error_type"] for e in failed] == ["RuntimeError"]
+
+
+class GatedTeardown:
+    """A body that runs until cancelled, then holds its teardown until ``gate`` is set."""
+
+    def __init__(self) -> None:
+        self.gate = asyncio.Event()
+        self.tearing = asyncio.Event()
+
+    async def __call__(self, session: CallSession) -> SessionEnd:  # noqa: ARG002 - the SessionBody shape
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.tearing.set()
+            await self.gate.wait()
+        return STREAM_CLOSED
+
+
+async def test_the_heartbeat_and_lock_are_kept_while_the_body_tears_down() -> None:
+    ender = RecordingEnder()
+    async with rig(ender=ender) as r:
+        body = GatedTeardown()
+        running = asyncio.ensure_future(r.session.run(body))
+        await r.clock.wait_for_sleep(3.0)
+        r.session.request_end("completed", "user")
+        await body.tearing.wait()
+        heartbeat = heartbeat_key(r.session.call_id)
+        owner = owner_key(r.session.call_id)
+        await r.redis.pexpire(owner, 100)
+        await r.clock.run_for(12.0)  # heartbeats at 3, 6, 9, 12 s; renewals at 5, 10 s
+        beat = await r.redis.get(heartbeat)
+        assert beat is not None
+        assert stamp(beat) == r.clock.now(), "the heartbeat kept beating through the teardown"
+        assert await r.redis.pttl(owner) > 14_000, "the lock kept being renewed"
+        assert ender.seen == [], "the end routine waits for the body's teardown"
+        assert not running.done()
+        body.gate.set()
+        assert await running == SessionEnd("ended", end_reason="completed", ended_by="user")
+        assert ender.seen == [
+            (SessionEnd("ended", end_reason="completed", ended_by="user"), True, True, None)
+        ]
+        assert await r.redis.exists(heartbeat) == 0
+        assert await r.redis.exists(owner) == 0
+        assert r.socket.closed_with == 1000
+
+
+async def test_a_lock_lost_during_the_body_teardown_is_not_released() -> None:
+    async with rig() as r:
+        body = GatedTeardown()
+        running = asyncio.ensure_future(r.session.run(body))
+        await r.clock.wait_for_sleep(5.0)
+        r.session.request_end("completed", "agent")
+        await body.tearing.wait()
+        await r.redis.set(owner_key(r.session.call_id), "pod-other")
+        await r.clock.run_for(5.0)
+        assert r.session.ownership_lost
+        body.gate.set()
+        end = await running
+        assert end == SessionEnd("ended", end_reason="completed", ended_by="agent"), "the requested end stays"
+        assert await r.redis.get(owner_key(r.session.call_id)) == b"pod-other", "never released"
+        assert await r.redis.exists(heartbeat_key(r.session.call_id)) == 0

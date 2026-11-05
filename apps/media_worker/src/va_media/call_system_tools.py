@@ -23,10 +23,13 @@ the scheduled child call with its ``call.scheduled`` event row (routed to the we
 transaction (:func:`va_db.callbacks.schedule_callback`), broadcasts the event after the commit and starts the
 child's ``CallWorkflow``, which admits the child at dial time like every scheduled call. An unusable time
 answers ``{"error": "invalid_datetime", "reason": ...}`` without an error event (the model may correct it). A
-start failure terminates the child's workflow id (a timed-out start may have reached Temporal) and fails
-the child (``call.error`` ``dispatch_failed`` on the child; one retry) unless the workflow already moved it
-on; when the failure cannot be recorded the child stays ``scheduled`` without a workflow, logged at error
-level ``media.callback_orphaned`` with its id.
+start failure first records the failure (guarded ``scheduled`` → ``failed`` with ``call.error``
+``dispatch_failed`` on the child; one retry), then terminates the child's workflow id when the child was
+failed or the failure could not be recorded (a timed-out start may have reached Temporal; a failed child is
+skipped at dial anyway). A child the workflow already moved on (no longer ``scheduled``, not ended) belongs to
+that workflow: nothing is terminated and the answer is ``scheduled``. A child that already ended answers
+``callback_failed``. When the failure cannot be recorded the child stays ``scheduled``, logged at error level
+``media.callback_orphaned`` with its id (Decision P08-FIX-14 under specs/13 §6).
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ from va_common.errors import AppError
 from va_common.ids import new_id
 from va_common.logging import get_logger
 from va_common.time import Clock
+from va_db.call_states import is_terminal
 from va_db.callbacks import CallbackLimitError, ScheduledCallback, schedule_callback
 from va_db.models import CallEventLevel
 from va_db.repositories import CallRepo, CallTransitionError
@@ -94,6 +98,10 @@ _START_TIMEOUT_S: Final = 10.0
 _FAIL_ATTEMPTS: Final = 2
 _NO_CALLABLE_NUMBER: Final = "no_callable_number"
 _START_RPC_TIMEOUT_S: Final = 5.0
+_ABANDON_TIMEOUT_S: Final = 5.0
+"""Start 10 s + abandon 5 s + two DB tries stay inside the executor's 20 s drain."""
+
+type _FailOutcome = Literal["failed", "advanced", "ended", "unrecorded"]
 
 _log = get_logger(__name__)
 
@@ -192,8 +200,9 @@ class CallbackStarter(Protocol):
 
     async def start(self, call: CallWorkflowInput) -> None: ...
 
-    async def abandon(self, call_id: uuid.UUID) -> None:
-        """Terminate the workflow a failed start may still have created (best effort, never raises)."""
+    async def abandon(self, call_id: uuid.UUID) -> bool:
+        """Terminate the workflow a failed start may still have created; ``True`` when one was terminated
+        (best effort: ``False`` on any failure, never raises)."""
         ...
 
 
@@ -220,12 +229,17 @@ class TemporalCallbackStarter:
             msg = f"CallWorkflow of callback {call.call_id} could not be started"
             raise CallbackStartError(msg) from exc.__cause__
 
-    async def abandon(self, call_id: uuid.UUID) -> None:
+    async def abandon(self, call_id: uuid.UUID) -> bool:
         try:
-            async with asyncio.timeout(_START_TIMEOUT_S):
-                await terminate_workflow(self._connector, call_workflow_id(call_id), CALLBACK_START_FAILED)
+            async with asyncio.timeout(_ABANDON_TIMEOUT_S):
+                terminated = await terminate_workflow(
+                    self._connector, call_workflow_id(call_id), CALLBACK_START_FAILED
+                )
         except (RPCError, TimeoutError, OSError, RuntimeError) as exc:
             _log.warning("media.callback_abandon_failed", error_type=type(exc).__name__)
+            return False
+        _log.info("media.callback_abandoned", terminated=terminated)
+        return terminated
 
 
 class _EventsUnavailableError(Exception):
@@ -349,7 +363,8 @@ class CallbackScheduler:
             _log.warning("media.callback_event_broadcast_failed", event_type=event.type.value)
 
     async def _start(self, scheduled: ScheduledCallback) -> bool:
-        """Start the child's workflow; ``False`` when it failed and the child was not left to its workflow."""
+        """Start the child's workflow; on failure record it first, then terminate a workflow that may exist
+        unless the child was moved on by it. ``False`` unless the child was left to its workflow."""
         context = self._context
         try:
             await self._deps.starter.start(
@@ -359,20 +374,24 @@ class CallbackScheduler:
             )
         except CallbackStartError as exc:
             _log.warning("media.callback_start_failed", error_type=type(exc.__cause__).__name__)
-            await self._deps.starter.abandon(scheduled.call_id)
-            return await self._fail_child(scheduled.call_id) == "moved_on"
+            outcome = await self._fail_child(scheduled.call_id)
+            if outcome == "advanced":
+                return True
+            if outcome != "ended":
+                await self._deps.starter.abandon(scheduled.call_id)
+            return False
         return True
 
-    async def _fail_child(self, child_id: uuid.UUID) -> Literal["failed", "moved_on", "unrecorded"]:
-        """Mark the child failed with its ``call.error`` (:data:`_FAIL_ATTEMPTS` tries): ``moved_on`` when the
-        workflow already moved it on (a timed-out start that reached Temporal), ``unrecorded`` when every try
-        failed (the child stays ``scheduled`` without a workflow, logged ``media.callback_orphaned``)."""
+    async def _fail_child(self, child_id: uuid.UUID) -> _FailOutcome:
+        """Mark the child failed with its ``call.error`` (:data:`_FAIL_ATTEMPTS` tries): ``advanced`` when the
+        workflow already moved it on (a timed-out start that reached Temporal), ``ended`` when it already
+        ended, ``unrecorded`` when every try failed (logged ``media.callback_orphaned``)."""
         for attempt in range(1, _FAIL_ATTEMPTS + 1):
             try:
                 event = await self._record_failure(child_id)
             except CallTransitionError as exc:
                 _log.info("media.callback_moved_on", status=exc.current)
-                return "moved_on"
+                return "ended" if is_terminal(exc.current) else "advanced"
             except (SQLAlchemyError, OSError) as exc:
                 _log.warning(
                     "media.callback_failure_unrecorded", attempt=attempt, error_type=type(exc).__name__

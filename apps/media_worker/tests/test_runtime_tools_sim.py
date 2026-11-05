@@ -266,7 +266,7 @@ class RecordingStarter:
     async def start(self, call: CallWorkflowInput) -> None:
         self.started.append(call)
 
-    async def abandon(self, call_id: uuid.UUID) -> None:
+    async def abandon(self, call_id: uuid.UUID) -> bool:
         raise AssertionError(call_id)
 
 

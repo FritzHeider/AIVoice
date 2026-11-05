@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -46,7 +46,7 @@ from va_media.call_system_tools import (
     sms_capable,
 )
 from va_telnyx.errors import TelnyxError
-from va_tools.executor import CallToolExecutor
+from va_tools.executor import CallToolExecutor, SystemOutcome
 from va_tools.runner import ToolRunner
 
 pytestmark = pytest.mark.integration
@@ -54,24 +54,36 @@ pytestmark = pytest.mark.integration
 
 @dataclass
 class RecordingStarter:
-    """Records starts and abandons; ``fail`` raises :class:`CallbackStartError`; ``gate`` holds a start."""
+    """Records starts and abandons; ``fail`` raises :class:`CallbackStartError` (after ``before_fail`` ran
+    with the start input); ``gate`` holds a start; ``watch`` (database, org id) records the child's status at
+    each abandon."""
 
     started: list[CallWorkflowInput] = field(default_factory=list)
     abandoned: list[uuid.UUID] = field(default_factory=list)
+    abandoned_status: list[str] = field(default_factory=list)
     fail: bool = False
     gate: asyncio.Event | None = None
     waiting: asyncio.Event = field(default_factory=asyncio.Event)
+    before_fail: Callable[[CallWorkflowInput], Awaitable[None]] | None = None
+    watch: tuple[Database, uuid.UUID] | None = None
 
     async def start(self, call: CallWorkflowInput) -> None:
         if self.gate is not None:
             self.waiting.set()
             await self.gate.wait()
         if self.fail:
+            if self.before_fail is not None:
+                await self.before_fail(call)
             raise CallbackStartError("refused") from ConnectionError("down")
         self.started.append(call)
 
-    async def abandon(self, call_id: uuid.UUID) -> None:
+    async def abandon(self, call_id: uuid.UUID) -> bool:
         self.abandoned.append(call_id)
+        if self.watch is not None:
+            database, org_id = self.watch
+            async with database.tenant_session(org_id) as session:
+                self.abandoned_status.append((await session.get_one(Call, call_id)).status)
+        return True
 
 
 class FlakyDatabase:
@@ -327,13 +339,20 @@ async def test_an_unusable_time_schedules_nothing(database: Database, value: str
     assert starter.started == []
 
 
-async def test_a_failed_start_fails_the_child(database: Database) -> None:
-    seeded, context = await _call(database)
-    starter = RecordingStarter(fail=True)
+async def _schedule_in_3_hours(
+    database: Database, starter: RecordingStarter, context: CallContext
+) -> SystemOutcome:
     when = (utcnow() + timedelta(hours=3)).isoformat()
-    outcome = await _scheduler(database, fakeredis.FakeAsyncRedis(), starter, context).run(
+    outcome: SystemOutcome = await _scheduler(database, fakeredis.FakeAsyncRedis(), starter, context).run(
         _tool_call("schedule_callback", datetime_iso=when)
     )
+    return outcome
+
+
+async def test_a_failed_start_fails_the_child(database: Database) -> None:
+    seeded, context = await _call(database)
+    starter = RecordingStarter(fail=True, watch=(database, seeded.org_id))
+    outcome = await _schedule_in_3_hours(database, starter, context)
     assert outcome.failure == "workflow_start"
     assert json.loads(outcome.content) == {"error": "callback_failed"}
     [child] = await _children(database, seeded)
@@ -347,6 +366,45 @@ async def test_a_failed_start_fails_the_child(database: Database) -> None:
     assert [e.event_type for e in events] == ["call.scheduled", "call.error"]
     assert events[1].data == {"code": "dispatch_failed", "detail": "workflow_start"}
     assert starter.abandoned == [child.id]
+    assert starter.abandoned_status == ["failed"], "the failure is recorded before the workflow is terminated"
+
+
+def _move_child(
+    database: Database, org_id: uuid.UUID, to: Literal["queued", "canceled"]
+) -> Callable[[CallWorkflowInput], Awaitable[None]]:
+    """A ``before_fail`` hook: the child's workflow moved it to ``to`` before the start call failed."""
+
+    async def move(call: CallWorkflowInput) -> None:
+        async with database.tenant_session(org_id) as session:
+            await CallRepo(session, org_id).transition(call.call_id, to, from_={"scheduled"})
+
+    return move
+
+
+async def test_a_start_failure_after_the_workflow_moved_the_child_on_answers_scheduled(
+    database: Database,
+) -> None:
+    seeded, context = await _call(database)
+    starter = RecordingStarter(fail=True, before_fail=_move_child(database, seeded.org_id, "queued"))
+    outcome = await _schedule_in_3_hours(database, starter, context)
+    assert outcome.failure is None
+    [child] = await _children(database, seeded)
+    assert json.loads(outcome.content)["status"] == "scheduled"
+    assert json.loads(outcome.content)["scheduled_call_id"] == str(child.id)
+    assert child.status == "queued", "the child belongs to its workflow"
+    assert starter.abandoned == [], "the workflow that owns the child is never terminated"
+    assert [e.event_type for e in await _events(database, seeded, child.id)] == ["call.scheduled"]
+
+
+async def test_a_start_failure_for_an_ended_child_answers_callback_failed(database: Database) -> None:
+    seeded, context = await _call(database)
+    starter = RecordingStarter(fail=True, before_fail=_move_child(database, seeded.org_id, "canceled"))
+    outcome = await _schedule_in_3_hours(database, starter, context)
+    assert (outcome.failure, json.loads(outcome.content)) == ("workflow_start", {"error": "callback_failed"})
+    [child] = await _children(database, seeded)
+    assert child.status == "canceled"
+    assert starter.abandoned == []
+    assert [e.event_type for e in await _events(database, seeded, child.id)] == ["call.scheduled"]
 
 
 async def test_a_database_failure_answers_callback_failed(database: Database) -> None:

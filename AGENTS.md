@@ -2056,3 +2056,7 @@ Grafana 3001
   `va_db.callbacks.MAX_PENDING_CALLBACKS` (1, `CallbackLimitError`) answer `{"error":"limit_reached"}`.
   `CallbackStarter` fakes must implement `abandon(call_id)`. Media tests: `FlakyDatabase(db, failing={n})` in
   `test_call_system_tools.py` fails the n-th tenant session.
+- 2026-11-05 (P08-FIX-14): `CallSession._race` stops the body (end-request, control) first and keeps the renewer +
+  heartbeat running until its teardown finished (test: `test_session.GatedTeardown`); a callback start failure records
+  `failed` BEFORE `CallbackStarter.abandon` (now `-> bool`), and a child the workflow already moved on answers
+  `scheduled` without a terminate (specs/13 §6 Decision P08-FIX-14).

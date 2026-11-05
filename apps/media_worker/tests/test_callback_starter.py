@@ -33,7 +33,7 @@ async def test_a_refused_start_raises_callback_start_error() -> None:
 async def test_abandon_terminates_the_callback_workflow() -> None:
     client = SignalRecorder()
     call_id = new_id()
-    await TemporalCallbackStarter(connector_of(client), "calls").abandon(call_id)
+    assert await TemporalCallbackStarter(connector_of(client), "calls").abandon(call_id)
     assert client.terminated == [(call_workflow_id(call_id), CALLBACK_START_FAILED)]
 
 
@@ -41,11 +41,12 @@ async def test_abandon_terminates_the_callback_workflow() -> None:
     "error",
     [RPCError("missing", RPCStatusCode.NOT_FOUND, b""), None],
 )
-async def test_abandon_without_a_workflow_is_quiet(error: RPCError | None) -> None:
+async def test_abandon_reports_whether_a_workflow_was_terminated(error: RPCError | None) -> None:
     stream = json_log_stream()
     client = SignalRecorder()
     client.terminate_error = error
-    await TemporalCallbackStarter(connector_of(client), "calls").abandon(new_id())
+    terminated = await TemporalCallbackStarter(connector_of(client), "calls").abandon(new_id())
+    assert terminated is (error is None)
     assert not any(e["event"] == "media.callback_abandon_failed" for e in log_events(stream))
 
 
@@ -57,6 +58,6 @@ async def test_abandon_never_raises(terminate_error: RPCError | None, connect_er
     stream = json_log_stream()
     client = SignalRecorder()
     client.terminate_error = terminate_error
-    await TemporalCallbackStarter(connector_of(client, connect_error), "calls").abandon(new_id())
+    assert not await TemporalCallbackStarter(connector_of(client, connect_error), "calls").abandon(new_id())
     [failed] = [e for e in log_events(stream) if e["event"] == "media.callback_abandon_failed"]
     assert failed["error_type"] in {"RPCError", "OSError"}

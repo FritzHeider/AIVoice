@@ -19,6 +19,10 @@ After the race, an optional :class:`SessionEnder` (the end-of-call routine, ``va
 the end (``None`` when the body raised) while the lock and the heartbeat are still held; its exception is
 logged ``media.end_routine_failed`` and never skips the cleanup.
 
+When the race is decided, the body (and the end-request and control tasks) is cancelled and awaited first,
+while the renewer and the heartbeat keep the lock and the heartbeat key alive (its teardown may drain system
+tools for up to 20 s, specs/13 §6 Decision P08-FIX-14); then the renewer and the heartbeat stop.
+
 Cleanup always deletes the heartbeat, releases the lock unless it was lost, and closes the WebSocket (1000,
 or 1011 when the body raised).
 """
@@ -27,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol
 
@@ -186,18 +190,35 @@ class CallSession:
             asyncio.create_task(self._control_listener(), name="control_listener"),
             asyncio.create_task(self._heartbeat(), name="heartbeat"),
         ]
+        keepers = (tasks[0], tasks[4])  # the renewer and the heartbeat outlive the body's teardown
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._stop_tasks(tasks, keepers)
         finished = [task for task in tasks if task in done]  # priority: lost, requested, body, control
         for task in finished:
             if task.exception() is not None:
                 return task.result()
         return finished[0].result()
+
+    @staticmethod
+    async def _stop_tasks(
+        tasks: Sequence[asyncio.Future[SessionEnd]], keepers: tuple[asyncio.Future[SessionEnd], ...]
+    ) -> None:
+        """Cancel and await the body and the other tasks first, then the renewer and the heartbeat, so the
+        lock and the heartbeat are maintained while the body tears down (it may drain system tools,
+        specs/13 §6 Decision P08-FIX-14)."""
+        others = [task for task in tasks if task not in keepers]
+        try:
+            for task in others:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*others, return_exceptions=True)
+        finally:
+            for task in keepers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*keepers, return_exceptions=True)
 
     async def _wait_requested(self) -> SessionEnd:
         await self._end_requested.wait()
