@@ -281,6 +281,15 @@ tool calls per call: 100.
 >    then the renewer and the heartbeat stop and the end routine runs. A lock lost during the teardown is not
 >    released; the session's end stays the one that decided the race.
 >
+> Decision (2026-11-05) P08-FIX-15: the keepalive of item 2 of P08-FIX-14 is bounded. The renewer and the
+> heartbeat keep running during the body's teardown for at most `TEARDOWN_KEEPALIVE_S` = the 20 s system-tool
+> drain + 5 s (25 s) on the session clock. Past it the session logs `media.body_teardown_overran`, stops both
+> keepers (the heartbeat key expires after its 10 s TTL, so the workflow's heartbeat watch ends the call
+> `worker_crash`, and the lock is no longer renewed) and keeps waiting for the body before the end routine and
+> the cleanup: a wedged teardown can no longer pass for a live call. The heartbeat also stops as soon as the
+> renewer reports the lock lost (during the race or the teardown): the pod that lost the call stops vouching
+> for it.
+>
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the
 > tool's `final_message`; without one it is `"Goodbye."` unless the reply already spoke text this turn (specs/11 §6

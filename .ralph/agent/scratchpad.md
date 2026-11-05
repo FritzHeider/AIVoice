@@ -550,3 +550,99 @@ plan + inbox note: two-stage `_stop_tasks` (keepers renewer/heartbeat stopped in
 outcomes with is_terminal, abandon -> bool (5 s), tests for gated teardown / lost lock / advanced / ended child.
 Note (non-blocking): after a lock loss during teardown the heartbeat keeps stamping until the body finishes
 (≤ 20 s drain); cleanup still deletes it and the workflow learns via the end routine. Inbox note appended to DONE.
+
+## Plan P08-FIX-15 — bound the teardown keepalive (.ralph/review-inbox/2026-11-05-p08-fix-14-review.md, blocker)
+
+Problem: `CallSession._stop_tasks` (apps/media_worker/src/va_media/session.py) awaits the body's teardown with the
+renewer + heartbeat alive and no bound: a wedged teardown = zombie call that looks alive forever (heartbeat is the
+workflow's crash detector). Also the heartbeat keeps stamping after the renewer returned OWNERSHIP_LOST.
+
+### 1. session.py
+- `from va_tools.executor import SYSTEM_DRAIN_S` (media already depends on va-tools);
+  `TEARDOWN_KEEPALIVE_S: Final = SYSTEM_DRAIN_S + 5.0` (export in `__all__`).
+- `_stop_tasks` becomes an instance method (needs `self._clock`, call id for the log):
+  ```python
+  others = [...]
+  for t in others: if not t.done(): t.cancel()
+  teardown = asyncio.gather(*others, return_exceptions=True)
+  try:
+      deadline = asyncio.ensure_future(self._clock.sleep(TEARDOWN_KEEPALIVE_S))
+      try:
+          await asyncio.wait({teardown, deadline}, return_when=FIRST_COMPLETED)
+      finally:
+          deadline.cancel(); await suppress-cancelled(deadline)
+      if not teardown.done():
+          _log.error("media.body_teardown_overran", keepalive_s=TEARDOWN_KEEPALIVE_S)
+  finally:
+      cancel + gather keepers
+  await teardown   # keep waiting for the body (unbounded, as before FIX-14); keepers are stopped meanwhile
+  ```
+  Do NOT use `va_common.waits.within` (it cancels the awaitable: a second cancel would abort the body's drain).
+  If `_stop_tasks` itself is cancelled while waiting, the `finally` still stops keepers; the gather stays
+  cancelled-through as the outer cancellation propagates (`asyncio.wait` does not cancel teardown; on outer
+  cancel, also `teardown.cancel()` in an `except CancelledError: raise` path — keep simple: wrap final
+  `await teardown` normally; on CancelledError during wait, cancel teardown then re-raise).
+- Heartbeat stops with the renewer: in `_race`, after creating tasks:
+  `renewer.add_done_callback(functools.partial(_cancel_task, heartbeat))` with a module function
+  `def _cancel_task(task, _done): task.cancel()` (no bound method of self: P08-FIX-3 cycle rule). Since the
+  renewer only finishes on loss (or keeper cancel), this stops stamping at once on loss in race or teardown.
+  The race result is unaffected: the renewer is first in priority, and a cancelled heartbeat is never in
+  `done` before the renewer (callback fires after renewer completes; `asyncio.wait` returns both — `finished`
+  loop: check `task.exception()` on a cancelled heartbeat would RAISE CancelledError!). Guard: in `_race`,
+  skip cancelled tasks: `finished = [t for t in tasks if t in done and not t.cancelled()]`. Verify renewer
+  stays first.
+- Docstring: "…for at most TEARDOWN_KEEPALIVE_S (25 s; the system-tool drain is 20 s); past it
+  `media.body_teardown_overran` is logged, the renewer and the heartbeat stop (the workflow's heartbeat watch
+  then ends the call) and the session keeps waiting for the body. The heartbeat also stops as soon as the
+  ownership is lost."
+
+### 2. Tests (apps/media_worker/tests/test_session.py, ManualClock rig + GatedTeardown)
+- `test_a_wedged_teardown_stops_the_keepalive_after_the_bound`: request_end, wait `body.tearing`; run_for
+  in steps up to TEARDOWN_KEEPALIVE_S (use `wait_for_sleep` before advancing as other tests do) → stamp ==
+  latest heartbeat before the bound; then run_for(HEARTBEAT_TTL_S + 3 more) → heartbeat stamp unchanged
+  (fakeredis TTL is wall-clock, so assert the stamp stopped changing + `pttl` ≤ HEARTBEAT_TTL_S*1000 rather
+  than expiry), owner key not renewed (set pexpire short before and check it's not extended / pttl decreasing);
+  `media.body_teardown_overran` logged (json_log_stream/log_events); `running` not done; gate.set() → run
+  completes, cleanup deletes heartbeat, releases lock (not lost), ender ran once.
+- `test_a_lock_lost_during_the_teardown_stops_the_heartbeat`: request_end, tearing; read stamp; set owner to
+  "pod-other"; run_for(5) (renewal at 5 s fails) → `ownership_lost`; record stamp; run_for(9) → stamp unchanged
+  (no beat after loss); gate.set() → never released, heartbeat deleted.
+- `test_a_lock_lost_during_the_race_ends_worker_lost` existing (`test_lock_taken_by_another_pod...`) must still
+  pass (heartbeat cancelled via callback must not break the result) — add assert result is OWNERSHIP_LOST there
+  if not already.
+- Existing GatedTeardown keepalive test: still within 12 s < 25 s bound → passes unchanged.
+
+### 3. Spec + docs
+- specs/13 §6: `> Decision (2026-11-05) P08-FIX-15:` the teardown keepalive is bounded by
+  `TEARDOWN_KEEPALIVE_S` = drain 20 s + 5 s on the session clock; overrun → error log, keepers stop, the heartbeat
+  key expires (10 s TTL) and the workflow's heartbeat watch ends the call `worker_crash`; the session keeps
+  awaiting the body before the end routine/cleanup; heartbeat stops as soon as the renewer reports the lock lost.
+- AGENTS.md: amend the P08-FIX-14 line with the bound + `media.body_teardown_overran`.
+
+### Gates
+make fmt lint typecheck placeholders; make test in background with heartbeat Monitor; jscpd; radon; audits.
+No e2e flow change.
+
+### Risks
+- `task.exception()` on a cancelled task raises — the `not t.cancelled()` filter is required.
+- ManualClock: the deadline sleeper is one more parked sleeper; tests using `wait_for_sleep(3.0)` may match it?
+  It is 25 s, distinct; fine.
+
+## Build P08-FIX-15 (2026-11-05)
+- session.py: `TEARDOWN_KEEPALIVE_S = SYSTEM_DRAIN_S + 5` (25 s); `_stop_tasks` (instance) cancels others, waits on
+  `asyncio.wait({teardown, deadline})` via `_await_bounded` (never cancels the teardown), logs
+  `media.body_teardown_overran`, stops keepers in finally, then still awaits the body; cancellation of `_stop_tasks`
+  cancels the teardown. Heartbeat cancelled by a module-level done callback on the renewer (no bound method);
+  `_race` skips cancelled tasks. Docstring updated.
+- Tests: `test_a_wedged_teardown_stops_the_keepalive_after_the_bound` (new) and the existing lock-lost-during-teardown
+  test now asserts no beat after the loss (merged to keep jscpd 0). Both fail on HEAD.
+- Spec `> Decision (2026-11-05) P08-FIX-15` under specs/13 §6; AGENTS line.
+Gates: fmt/lint/typecheck/placeholders pass; make test 12969 passed 7 skipped (cov 99.06%, exit 0); jscpd 0 clones;
+radon session.py avg A (3.0); pip-audit clean; pnpm audit 1 moderate (no high). No e2e flow change.
+
+## Review P08-FIX-15 (2026-11-05)
+Approved. Re-ran lint/typecheck/placeholders (pass) and make test (12969 passed, 7 skipped, cov 99.06%, exit 0).
+Diff matches the plan and inbox note: bounded keepalive (`_await_bounded` never cancels the teardown), overrun log,
+keepers stopped in finally, body still awaited; heartbeat cancelled on renewer completion; cancelled tasks filtered
+in `_race`. Reviewer tightened the wedged-teardown test: `pttl(owner) <= 60_000` was vacuous (a renewal sets 15 s,
+which also satisfies it) → `> OWNER_TTL_MS`. Inbox note appended to DONE.

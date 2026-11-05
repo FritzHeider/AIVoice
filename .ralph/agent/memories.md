@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793872418-c1aa
+> P08-FIX-15: CallSession teardown keepalive bounded by TEARDOWN_KEEPALIVE_S (25 s) via asyncio.wait({teardown, clock.sleep}) without cancelling the teardown; heartbeat cancelled by a done callback on the renewer; filter cancelled tasks before task.exception()
+<!-- tags: media, session | created: 2026-11-05 -->
+
 ### mem-1793868338-3d0d
 > P08-FIX-13: system tool runs are executor-owned shielded tasks (barge-in cancels only the wait; executor.aclose drains at call end); dialable() gates both system tools; caps MAX_TOOL_SMS_PER_CALL=3, MAX_PENDING_CALLBACKS=1; CallbackStarter.abandon terminates the workflow id on start failure
 <!-- tags: tools, media | created: 2026-11-05 -->

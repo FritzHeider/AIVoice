@@ -18,8 +18,16 @@ from service_helpers import json_log_stream, log_events
 
 from va_common.metrics import Service, ServiceMetrics, build_metrics, new_registry
 from va_domain.carrier import heartbeat_key, owner_key
-from va_media.ownership import CallOwnership
-from va_media.session import OWNERSHIP_LOST, STREAM_CLOSED, CallSession, SessionEnd, StreamStart
+from va_media.ownership import OWNER_TTL_MS, CallOwnership
+from va_media.session import (
+    HEARTBEAT_INTERVAL_S,
+    OWNERSHIP_LOST,
+    STREAM_CLOSED,
+    TEARDOWN_KEEPALIVE_S,
+    CallSession,
+    SessionEnd,
+    StreamStart,
+)
 from va_media.stream import read_until_stop
 from va_telnyx.media import MediaFormat
 
@@ -330,10 +338,55 @@ async def test_a_lock_lost_during_the_body_teardown_is_not_released() -> None:
         r.session.request_end("completed", "agent")
         await body.tearing.wait()
         await r.redis.set(owner_key(r.session.call_id), "pod-other")
-        await r.clock.run_for(5.0)
+        await r.clock.run_for(5.0)  # the renewal at 5 s finds the lock taken
         assert r.session.ownership_lost
+        beat = await r.redis.get(heartbeat_key(r.session.call_id))
+        assert beat is not None
+        await r.clock.run_for(9.0)
+        assert await r.redis.get(heartbeat_key(r.session.call_id)) == beat, "no beat after the lock was lost"
+        assert not running.done()
         body.gate.set()
         end = await running
         assert end == SessionEnd("ended", end_reason="completed", ended_by="agent"), "the requested end stays"
         assert await r.redis.get(owner_key(r.session.call_id)) == b"pod-other", "never released"
         assert await r.redis.exists(heartbeat_key(r.session.call_id)) == 0
+
+
+async def test_a_wedged_teardown_stops_the_keepalive_after_the_bound() -> None:
+    stream = json_log_stream()
+    ender = RecordingEnder()
+    async with rig(ender=ender) as r:
+        body = GatedTeardown()
+        running = asyncio.ensure_future(r.session.run(body))
+        await r.clock.wait_for_sleep(HEARTBEAT_INTERVAL_S)
+        r.session.request_end("completed", "user")
+        await body.tearing.wait()
+        heartbeat = heartbeat_key(r.session.call_id)
+        owner = owner_key(r.session.call_id)
+        await r.clock.run_for(TEARDOWN_KEEPALIVE_S - 1.0)  # last beat at 24 s, last renewal at 20 s
+        beat = await r.redis.get(heartbeat)
+        assert beat is not None
+        last_beat = stamp(beat)
+        assert last_beat == r.clock.now(), "kept alive within the bound"
+        assert not [e for e in log_events(stream) if e["event"] == "media.body_teardown_overran"]
+        await r.clock.run_for(1.0)
+        overran = [e for e in log_events(stream) if e["event"] == "media.body_teardown_overran"]
+        assert [e["keepalive_s"] for e in overran] == [TEARDOWN_KEEPALIVE_S]
+        await r.redis.pexpire(owner, 60_000)
+        await r.clock.run_for(15.0)  # beats would be due at 27, 30, ... s; renewals at 25, 30, 35 s
+        beat = await r.redis.get(heartbeat)
+        assert beat is not None
+        assert stamp(beat) == last_beat, "the heartbeat stopped at the bound"
+        assert await r.redis.pttl(owner) > OWNER_TTL_MS, "no renewal (it resets 15 s)"
+        assert r.clock.sleepers == 0, "no keeper is left sleeping"
+        assert not running.done(), "the session keeps waiting for the body"
+        assert ender.seen == []
+        body.gate.set()
+        assert await running == SessionEnd("ended", end_reason="completed", ended_by="user")
+        assert [seen[0] for seen in ender.seen] == [
+            SessionEnd("ended", end_reason="completed", ended_by="user")
+        ]
+        assert await r.redis.exists(heartbeat) == 0
+        assert await r.redis.exists(owner) == 0, "released (the lock was never lost)"
+        assert not r.session.ownership_lost
+        assert r.socket.closed_with == 1000

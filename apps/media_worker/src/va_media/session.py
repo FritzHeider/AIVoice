@@ -21,7 +21,11 @@ logged ``media.end_routine_failed`` and never skips the cleanup.
 
 When the race is decided, the body (and the end-request and control tasks) is cancelled and awaited first,
 while the renewer and the heartbeat keep the lock and the heartbeat key alive (its teardown may drain system
-tools for up to 20 s, specs/13 §6 Decision P08-FIX-14); then the renewer and the heartbeat stop.
+tools for up to 20 s, specs/13 §6 Decisions P08-FIX-14 and P08-FIX-15), for at most
+:data:`TEARDOWN_KEEPALIVE_S` on the session clock. Past that bound ``media.body_teardown_overran`` is logged,
+the renewer and the heartbeat stop (the heartbeat key expires and the workflow's heartbeat watch ends the
+call) and the session keeps waiting for the body. The heartbeat also stops as soon as the renewer reports
+the lock lost.
 
 Cleanup always deletes the heartbeat, releases the lock unless it was lost, and closes the WebSocket (1000,
 or 1011 when the body raised).
@@ -30,10 +34,12 @@ or 1011 when the body raised).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -50,12 +56,14 @@ from va_media.control import ControlHandler, DefaultControlHandler
 from va_media.ownership import OWNER_TTL_MS, RENEW_INTERVAL_S, CallOwnership
 from va_media.socket import MediaSocket
 from va_telnyx.media import MediaFormat
+from va_tools.executor import SYSTEM_DRAIN_S
 
 __all__ = [
     "HEARTBEAT_INTERVAL_S",
     "HEARTBEAT_TTL_S",
     "OWNERSHIP_LOST",
     "STREAM_CLOSED",
+    "TEARDOWN_KEEPALIVE_S",
     "CallSession",
     "SessionBody",
     "SessionEnd",
@@ -65,6 +73,7 @@ __all__ = [
 
 HEARTBEAT_INTERVAL_S: Final = 3.0
 HEARTBEAT_TTL_S: Final = 10
+TEARDOWN_KEEPALIVE_S: Final = SYSTEM_DRAIN_S + 5.0
 CLOSE_NORMAL: Final = 1000
 CLOSE_INTERNAL_ERROR: Final = 1011
 
@@ -183,42 +192,63 @@ class CallSession:
             _log.error("media.end_routine_failed", error_type=type(exc).__name__)
 
     async def _race(self, body: SessionBody) -> SessionEnd:
+        renewer = asyncio.create_task(self._ownership_renewer(), name="ownership_renewer")
+        heartbeat = asyncio.create_task(self._heartbeat(), name="heartbeat")
+        renewer.add_done_callback(functools.partial(_cancel_task, heartbeat))  # no beat after a lost lock
         tasks = [
-            asyncio.create_task(self._ownership_renewer(), name="ownership_renewer"),
+            renewer,
             asyncio.create_task(self._wait_requested(), name="end_request"),
             asyncio.ensure_future(body(self)),
             asyncio.create_task(self._control_listener(), name="control_listener"),
-            asyncio.create_task(self._heartbeat(), name="heartbeat"),
+            heartbeat,
         ]
-        keepers = (tasks[0], tasks[4])  # the renewer and the heartbeat outlive the body's teardown
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            await self._stop_tasks(tasks, keepers)
-        finished = [task for task in tasks if task in done]  # priority: lost, requested, body, control
+            await self._stop_tasks(tasks, (renewer, heartbeat))
+        # priority: lost, requested, body, control (a heartbeat cancelled by the renewer is skipped)
+        finished = [task for task in tasks if task in done and not task.cancelled()]
         for task in finished:
             if task.exception() is not None:
                 return task.result()
         return finished[0].result()
 
-    @staticmethod
     async def _stop_tasks(
-        tasks: Sequence[asyncio.Future[SessionEnd]], keepers: tuple[asyncio.Future[SessionEnd], ...]
+        self, tasks: Sequence[asyncio.Future[SessionEnd]], keepers: tuple[asyncio.Future[SessionEnd], ...]
     ) -> None:
         """Cancel and await the body and the other tasks first, then the renewer and the heartbeat, so the
         lock and the heartbeat are maintained while the body tears down (it may drain system tools,
-        specs/13 §6 Decision P08-FIX-14)."""
+        specs/13 §6 Decisions P08-FIX-14 and P08-FIX-15) for at most :data:`TEARDOWN_KEEPALIVE_S`; past it the
+        keepers stop and the session keeps waiting for the body."""
         others = [task for task in tasks if task not in keepers]
+        for task in others:
+            if not task.done():
+                task.cancel()
+        teardown = asyncio.gather(*others, return_exceptions=True)
         try:
-            for task in others:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*others, return_exceptions=True)
+            await self._await_bounded(teardown)
+        except asyncio.CancelledError:
+            teardown.cancel()
+            raise
         finally:
             for task in keepers:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*keepers, return_exceptions=True)
+        await teardown
+
+    async def _await_bounded(self, teardown: asyncio.Future[list[SessionEnd | BaseException]]) -> None:
+        """Wait for ``teardown`` up to :data:`TEARDOWN_KEEPALIVE_S` without cancelling it."""
+        deadline = asyncio.ensure_future(self._clock.sleep(TEARDOWN_KEEPALIVE_S))
+        waited: set[asyncio.Future[Any]] = {teardown, deadline}
+        try:
+            await asyncio.wait(waited, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            deadline.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await deadline
+        if not teardown.done():
+            _log.error("media.body_teardown_overran", keepalive_s=TEARDOWN_KEEPALIVE_S)
 
     async def _wait_requested(self) -> SessionEnd:
         await self._end_requested.wait()
@@ -294,3 +324,8 @@ class CallSession:
         self._metrics.counter("va_media_calls_ended_total").labels(end_reason=label).inc()
         _log.info("media.session_ended", end_reason=label, cause=end.cause if end is not None else "error")
         await self.socket.close(CLOSE_NORMAL if end is not None else CLOSE_INTERNAL_ERROR)
+
+
+def _cancel_task(task: asyncio.Task[SessionEnd], _done: object) -> None:
+    """Done callback: cancel ``task`` (a module function: the callback holds no reference to the session)."""
+    task.cancel()

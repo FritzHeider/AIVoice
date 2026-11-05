@@ -1,5 +1,18 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-15 Bound the session keepalive during the body teardown; stop the heartbeat once ownership is lost — see .ralph/review-inbox/2026-11-05-p08-fix-14-review.md — `TEARDOWN_KEEPALIVE_S` 25 s bound via asyncio.wait without cancelling the teardown, `media.body_teardown_overran`, heartbeat cancelled by a renewer done callback; Decision P08-FIX-15; lint/typecheck/placeholders pass, make test 12969 passed 7 skipped (cov 99.06%)
+  - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decision P08-FIX-14)
+  - Depends on: P08-FIX-14
+  - Deliverables: `CallSession._stop_tasks` keeps the renewer and heartbeat alive during the body teardown for at
+    most `TEARDOWN_KEEPALIVE_S` (= `va_tools.executor.SYSTEM_DRAIN_S` + 5 s) on the injected clock; past the
+    bound it logs `media.body_teardown_overran` (error), stops the keepers, and keeps awaiting the body; the
+    heartbeat stops as soon as the renewer finished (ownership lost) during the race or the teardown; module
+    docstring, specs/13 §6 Decision (new `P08-FIX-15` block) and AGENTS.md updated.
+  - Acceptance: a body whose teardown never finishes within the bound stops refreshing the heartbeat after
+    `TEARDOWN_KEEPALIVE_S` (the key expires after its TTL) and the lock stops being renewed, while the session
+    still waits for the body; a lock lost during the teardown stops the heartbeat at once (no new stamp); the
+    existing gated-teardown tests still pass; `make check` passes; append the note name to
+    `.ralph/review-inbox/DONE` on approval.
 - [x] P08-FIX-14 Keep heartbeat and ownership through the body teardown; callback start failure never reports a terminated child as scheduled — see .ralph/review-inbox/2026-11-05-p08-fix-13-review.md — two-stage CallSession stop (body teardown with renewer+heartbeat alive), callback start failure recorded before abandon (failed/advanced/ended/unrecorded), abandon -> bool 5 s; Decision P08-FIX-14; lint/typecheck/placeholders pass, make test 12968 passed 7 skipped
   - Spec refs: specs/07 §3 (Decision P05-T07a), specs/13 §6 (Decisions P08-T02b2, P08-FIX-13)
   - Depends on: P08-FIX-13

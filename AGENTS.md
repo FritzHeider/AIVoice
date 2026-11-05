@@ -2060,3 +2060,7 @@ Grafana 3001
   heartbeat running until its teardown finished (test: `test_session.GatedTeardown`); a callback start failure records
   `failed` BEFORE `CallbackStarter.abandon` (now `-> bool`), and a child the workflow already moved on answers
   `scheduled` without a terminate (specs/13 §6 Decision P08-FIX-14).
+- 2026-11-05 (P08-FIX-15): that teardown keepalive is bounded by `va_media.session.TEARDOWN_KEEPALIVE_S` (drain 20 s +
+  5 s, session clock): past it `media.body_teardown_overran` is logged, renewer + heartbeat stop, the session still
+  awaits the body. The heartbeat is cancelled by a done callback on the renewer (lock lost → no more beats); `_race`
+  skips cancelled tasks before reading results (`task.exception()` on a cancelled task raises).
