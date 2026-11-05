@@ -16,8 +16,10 @@ offers system tools from the call's facts), have no ``speech`` (a slow one gets 
 A system tool has a side effect the caller asked for, so its body runs to completion even when a barge-in
 cancels the turn waiting for it (Decision P08-FIX-13 under specs/13 §6): each run is a task the executor owns,
 awaited through :func:`asyncio.shield`, and its outcome (failure event included) is still reported after
-nobody waits for it any more. :meth:`CallToolExecutor.aclose` waits for unfinished runs at call end (up to
-:data:`SYSTEM_DRAIN_S`) and cancels what is left.
+nobody waits for it any more. The executor tells the round so (:meth:`CallToolExecutor.detached`), which
+answers the call ``in_progress`` instead of ``interrupted`` (Decision P08-FIX-21 under specs/13 §6); the
+cancellation of the wait itself always propagates. :meth:`CallToolExecutor.aclose` waits for unfinished runs
+at call end (up to :data:`SYSTEM_DRAIN_S`) and cancels what is left.
 """
 
 from __future__ import annotations
@@ -116,6 +118,7 @@ class CallToolExecutor:
         self._runner = runner
         self._events = events
         self._pending: set[asyncio.Task[SystemOutcome]] = set()
+        self._detached: list[ToolCall] = []
 
     def definitions(self) -> tuple[ToolDef, ...]:
         return tuple(function_def(spec) for spec in self._specs.values())
@@ -135,6 +138,12 @@ class CallToolExecutor:
         if spec is None or not spec.speech or not spec.speech.strip():
             return None
         return spec.speech
+
+    def detached(self, call: ToolCall) -> bool:
+        """Whether the system tool run of ``call`` went on when the wait for it was cancelled (by object
+        identity: equal calls are different runs). A run cancelled by :meth:`aclose` and a custom tool,
+        whose request is cancelled with its wait, are not detached."""
+        return any(item is call for item in self._detached)
 
     async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
         system = self._system.get(call.name)
@@ -160,7 +169,12 @@ class CallToolExecutor:
         task = asyncio.create_task(self._finish_system(tool, call), name=f"system-tool:{tool.name}")
         self._pending.add(task)
         task.add_done_callback(self._settled)
-        outcome = await asyncio.shield(task)
+        try:
+            outcome = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():  # the wait was cancelled, the run was not: it goes on (or just ended)
+                self._detached.append(call)
+            raise
         return ToolAnswer(outcome.content)
 
     async def _finish_system(self, tool: SystemTool, call: ToolCall) -> SystemOutcome:

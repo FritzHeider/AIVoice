@@ -1,5 +1,5 @@
 """Executor tool rounds shared by the task-mode runner and the pathway engine (specs/13 §5; Decisions
-P08-T02b1, P08-T02c1, P08-FIX-16, P08-FIX-17, P08-FIX-20).
+P08-T02b1, P08-T02c1, P08-FIX-16, P08-FIX-17, P08-FIX-20, P08-FIX-21).
 
 The executed calls of one round start as tasks at once (:func:`start_tools`, at most
 :data:`~va_engine.task_tools.EXECUTOR_CONCURRENCY` in parallel, all rendered with the variables of the
@@ -15,7 +15,9 @@ closed at a press). :func:`settle_round` then cancels the tools still running an
 every call not answered yet (:func:`cut_contents`): a tool whose run finished keeps its answer (its request
 went out, its variables are merged at the cut), a call answered without running keeps that answer, and only
 a tool cancelled at the cut and an action that was not handed over (``press_button``, ``end_call``,
-``transfer_call``) read ``interrupted``.
+``transfer_call``) read ``interrupted``. A cancelled tool whose run the executor keeps going (a system tool:
+:meth:`~va_engine.tool_executor.ToolExecutor.detached`) reads ``in_progress`` instead: its message will
+normally be sent, and ``interrupted`` would make the next turn's model send it again.
 
 Tasks, answers and contents belong to a call by its position in the round, never by the model's call id:
 providers omit or repeat ids, and two calls sharing one must each run, be cancelled, and be answered.
@@ -37,6 +39,7 @@ from va_engine.system_tools import SystemToolFacts
 from va_engine.task_tools import (
     EXECUTOR_CONCURRENCY,
     FILLER_DELAY_S,
+    IN_PROGRESS,
     INTERRUPTED,
     TOOL_FAILED,
     PlannedCall,
@@ -161,42 +164,55 @@ def finished_answers(tasks: Iterable[asyncio.Task[ToolAnswer]]) -> list[ToolAnsw
     ]
 
 
-def _cut_content(item: PlannedCall, finished: Iterator[ToolAnswer | None]) -> str:
+def _cut_content(
+    item: PlannedCall, finished: Iterator[ToolAnswer | None], executor: ToolExecutor | None
+) -> str:
     """What is true for ``item`` in a round that was cut short; an executed call takes the next of
     ``finished`` (none left = its tool never started)."""
     if item.kind == "execute":
         answer = next(finished, None)
-        return INTERRUPTED if answer is None else answer.content or TOOL_FAILED
+        if answer is not None:
+            return answer.content or TOOL_FAILED
+        return IN_PROGRESS if executor is not None and executor.detached(item.call) else INTERRUPTED
     if item.kind == "answer":
         return item.answer or TOOL_FAILED
     return INTERRUPTED
 
 
-def cut_contents(plan: RoundPlan, answers: Iterable[ToolAnswer | None]) -> list[tuple[PlannedCall, str]]:
+def cut_contents(
+    plan: RoundPlan, answers: Iterable[ToolAnswer | None], *, executor: ToolExecutor | None = None
+) -> list[tuple[PlannedCall, str]]:
     """Every call of a round that was cut short, in call order, with the content that is true for it.
 
     ``answers`` are :func:`finished_answers` of the round's tasks (by position). A tool that finished keeps
     its answer (blank reads ``tool_failed``) and a call answered without running keeps its planned answer;
     a tool that was cancelled or never started and an action that was not handed over (``press_button``,
-    ``end_call``, ``transfer_call``) read ``interrupted``.
+    ``end_call``, ``transfer_call``) read ``interrupted``, except a cancelled tool whose run ``executor``
+    (the one that ran the round) keeps going: that one reads ``in_progress``.
     """
     finished = iter(answers)
-    return [(item, _cut_content(item, finished)) for item in plan.calls]
+    return [(item, _cut_content(item, finished, executor)) for item in plan.calls]
 
 
 async def settle_round(
-    plan: RoundPlan, tasks: Sequence[asyncio.Task[ToolAnswer]], *, answered: int, merged: bool
+    plan: RoundPlan,
+    tasks: Sequence[asyncio.Task[ToolAnswer]],
+    *,
+    executor: ToolExecutor | None,
+    answered: int,
+    merged: bool,
 ) -> tuple[list[ToolAnswer], list[tuple[PlannedCall, str]]]:
     """End a round, complete or cut short: cancel the tools still running.
 
     Returns the finished answers whose variables are still to be merged, in call order (``[]`` when the
     round already ``merged`` them), and the :func:`cut_contents` of the calls from position ``answered``
-    on (``[]`` for a round that answered every call).
+    on (``[]`` for a round that answered every call); ``executor`` is the one that ran the round, asked
+    which cancelled runs go on.
     """
     await stop_tasks(tasks)
     finished = finished_answers(tasks)
     late = [] if merged else [answer for answer in finished if answer is not None]
-    return late, cut_contents(plan, finished)[answered:]
+    return late, cut_contents(plan, finished, executor=executor)[answered:]
 
 
 def _speech(

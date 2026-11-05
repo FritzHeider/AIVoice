@@ -374,8 +374,11 @@ class TaskBrain:
                 if item.digits is not None:
                     yield PressButton(digits=item.digits)
         finally:
-            # A cut round: only what did not happen reads ``interrupted`` (specs/13 §4 Decision P08-FIX-20).
-            late, rest = await settle_round(plan, tasks, answered=answered, merged=merged)
+            # A cut round: only what did not happen reads ``interrupted`` (specs/13 §4 Decision P08-FIX-20);
+            # a system tool run that goes on reads ``in_progress`` (specs/13 §6 Decision P08-FIX-21).
+            late, rest = await settle_round(
+                plan, tasks, executor=self._executor, answered=answered, merged=merged
+            )
             self._merge_variables(late)
             for item, content in rest:
                 self._answer(item.call, content)

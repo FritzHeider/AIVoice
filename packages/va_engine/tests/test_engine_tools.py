@@ -1,9 +1,11 @@
 """Custom and system tools on pathway reply nodes (specs/13 §4/§5/§6; Decisions P08-T02c1, P08-FIX-16,
-P08-FIX-17, P08-FIX-19, P08-FIX-20)."""
+P08-FIX-17, P08-FIX-19, P08-FIX-20, P08-FIX-21)."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import dataclasses
 import json
 from typing import Any
 
@@ -19,6 +21,7 @@ from va_engine import engine as engine_module
 from va_engine.engine_node_tools import NO_OFFER, NodeTools
 from va_engine.models import PathwayGraph, Say, SendDtmfAction
 from va_engine.system_tools import SystemToolFacts
+from va_engine.task_tools import IN_PROGRESS
 from va_llm.errors import LlmConnectionError
 from va_llm.models import ToolCall, ToolDef
 from va_voice.phrase_cache import TOOL_FILLERS
@@ -760,6 +763,70 @@ async def test_a_barge_in_on_the_filler_keeps_the_answer_of_the_tool_that_finish
         ("nope", '{"error":"invalid_arguments","detail":"unknown_tool"}'),
     ]
     assert rig.state.variables["hours"] == "9-5"
+
+
+UNKNOWN_TOOL = '{"error":"invalid_arguments","detail":"unknown_tool"}'
+
+
+@pytest.mark.parametrize(("first", "second"), [("lookup", "track"), ("track", "lookup")])
+async def test_a_reply_cancelled_while_its_tools_run_keeps_the_finished_tools_answer(
+    first: str, second: str
+) -> None:
+    tools = hours_executor(holding=frozenset({"track"}))
+    rig = engine_rig(one_node(tools=["TL-1", "TL-2"]), tools=tools, system=VOICE, fillers=False)
+    ending = call("c4", "end_call", reason="done", final_message="Bye.")
+    rig.source.reply("", calls=[call("c1", first), call("c2", second), call("c3", "nope"), ending])
+    consumer = asyncio.create_task(drive(rig.engine.start()))
+    await tools.wait_started("track")
+    await tools.wait_started("lookup")
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    answers = {"lookup": HOURS, "track": CUT}
+    assert tool_records(rig) == [
+        (first, answers[first]),
+        (second, answers[second]),
+        ("nope", UNKNOWN_TOOL),
+        ("end_call", CUT),
+    ]
+    assert rig.state.variables["hours"] == "9-5"
+    assert [name for name, _ in tools.cancelled] == ["track"]
+    assert tools.active == 0
+    assert (rig.state.ended, rig.state.end_reason) == (False, None)
+
+
+# A system tool run that goes on after the cut reads ``in_progress`` (Decision P08-FIX-21 under specs/13 §6).
+
+
+@pytest.mark.parametrize(("detaching", "content"), [(("send_sms",), IN_PROGRESS), ((), CUT)])
+async def test_a_cut_system_tool_reads_in_progress_only_when_its_run_goes_on(
+    detaching: tuple[str, ...], content: str
+) -> None:
+    tools = executor(
+        names=frozenset({"send_sms"}), holding=frozenset({"send_sms"}), detaching=frozenset(detaching)
+    )
+    facts = dataclasses.replace(VOICE, sms_capable=True)
+    rig = engine_rig(one_node(tools=[]), tools=tools, system=facts)
+    rig.source.reply("Hello.").reply("", calls=[call("c1", "send_sms", message="Code 42")]).reply("Okay.")
+    await rig.start()
+    cut = await drive_held(rig, tools, close_on_line=True, turn=user("text me the code", 1))
+
+    await drive(rig.engine.handle_user_turn(user("text me the code please", 2, supersedes=1)))
+
+    assert cut[-1][:2] == ("say", TOOL_FILLERS[0])
+    assert [name for name, _ in tools.cancelled] == ["send_sms"]
+    assert rig.history() == [
+        ("assistant", "Hello."),
+        ("tool", content),
+        ("user", "text me the code please"),
+        ("assistant", "Okay."),
+    ]
+    assert position(rig, "system", context_update("send_sms", content)) < position(
+        rig, "user", "text me the code please"
+    )
+    assert [c.name for c in tools.calls] == ["send_sms"]
 
 
 # A node runs exactly the tools its refs name (Decision P08-FIX-17 item 2).

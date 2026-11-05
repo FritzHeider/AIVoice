@@ -1,6 +1,6 @@
 """TaskBrain tool rounds in the call pipeline: speech during tools, fillers, variables, barge-in (P08-T02b1),
 the tool rounds a superseded turn hands on (specs/13 §4 Decision P08-FIX-17), and what a cut round answers
-(specs/13 §4 Decision P08-FIX-20).
+(specs/13 §4 Decision P08-FIX-20, specs/13 §6 Decision P08-FIX-21).
 
 The harness runs on the accelerated clock: the brain, the scripted dialogue source (no socket) and the tool
 executor all share it, so tool durations and the 1 200 ms filler delay are virtual time.
@@ -8,12 +8,14 @@ executor all share it, so tool durations and the 1 200 ms filler delay are virtu
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Sequence
 from functools import partial
 from typing import Any
 
 import orjson
+import pytest
 from dialogue_helpers import FakeSource, counter
 from pipeline_harness import Harness, harness
 from task_helpers import RecordingExecutor, assert_tool_pairing, drain, task_context, user_turn
@@ -24,7 +26,7 @@ from va_engine.models.results import PressButton, TransferRequest
 from va_engine.models.state import EngineState
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
-from va_engine.task_tools import INTERRUPTED
+from va_engine.task_tools import IN_PROGRESS, INTERRUPTED
 from va_llm.models import ToolCall, ToolDef
 from va_sim.clock import AcceleratedClock
 from va_voice.phrase_cache import TOOL_FILLERS
@@ -53,13 +55,14 @@ def _config() -> PipelineConfig:
     return PipelineConfig(no_input_timeout_ms=30_000)
 
 
-def _brain(
+def _brain(  # noqa: PLR0913 - test knobs, all keyword-only
     clock: Clock,
     source: FakeSource,
     executor: RecordingExecutor,
     *,
     fillers: bool = True,
     states: list[dict[str, Any]] | None = None,
+    sms_capable: bool = False,
     **config: Any,
 ) -> TaskBrain:
     context = task_context(first_sentence="Hi, this is Maya.", **config)
@@ -74,7 +77,7 @@ def _brain(
         settings=settings,
         gateway=source,
         counter=counter(),
-        facts=facts_for_call(context, settings, sms_capable=False),
+        facts=facts_for_call(context, settings, sms_capable=sms_capable),
         clock=clock,
         executor=executor,
         on_state=keep,
@@ -600,3 +603,95 @@ async def test_a_barge_in_on_the_filler_keeps_the_finished_tools_answer() -> Non
     assert _tool_answers(brain) == [SHIPPED, INTERRUPTED]
     assert brain.state.variables["status"] == "shipped"
     assert [state["status"] for state in states] == ["shipped"]
+
+
+FRIDAY = '{"eta":"Friday"}'
+
+
+@pytest.mark.parametrize(
+    ("held", "answers", "merged"),
+    [
+        ("eta", [SHIPPED, INTERRUPTED], {"status": "shipped"}),
+        ("lookup_order", [INTERRUPTED, FRIDAY], {"eta": "Friday"}),
+    ],
+)
+async def test_a_reply_cancelled_while_its_tools_run_keeps_the_finished_tools_answer(
+    held: str, answers: list[str], merged: dict[str, str]
+) -> None:
+    clock = FrozenClock()
+    source, executor = _id_less_round(
+        clock,
+        holding=frozenset({held}),
+        results={"lookup_order": SHIPPED, "eta": FRIDAY},
+        variables={"lookup_order": {"status": "shipped"}, "eta": {"eta": "Friday"}},
+    )
+    states: list[dict[str, Any]] = []
+    brain = _brain(clock, source, executor, fillers=False, states=states)
+    await drain(brain.start())
+    consumer = asyncio.create_task(drain(brain.on_user_turn(user_turn(1, "where is my order"))))
+    await executor.wait_started("lookup_order")
+    await executor.wait_started("eta")
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert _tool_answers(brain) == answers
+    assert [name for name, _ in executor.cancelled] == [held]
+    assert executor.active == 0
+    assert {name: brain.state.variables.get(name) for name in ("status", "eta")} == {
+        "status": None,
+        "eta": None,
+    } | merged
+    assert states == [merged]
+    assert brain.state.ended is False
+
+
+# A system tool run that goes on after the cut reads ``in_progress`` (specs/13 §6 Decision P08-FIX-21).
+
+
+async def test_a_system_tool_that_runs_on_is_carried_as_in_progress() -> None:
+    clock = FrozenClock()
+    texting = ToolCall(id="call_1", name="send_sms", arguments_json='{"message": "Your code is 42."}')
+    source = FakeSource().reply(calls=[texting]).reply("It is on its way.")
+    executor = RecordingExecutor(
+        tools=(LOOKUP,),
+        names=frozenset({"lookup_order", "send_sms"}),
+        clock=clock,
+        holding=frozenset({"send_sms"}),
+        detaching=frozenset({"send_sms"}),
+    )
+    brain = _brain(clock, source, executor, sms_capable=True)
+    await drain(brain.start())
+
+    line = await _closed_on_static(brain, user_turn(1, "text me the code"))
+
+    assert line.text in TOOL_FILLERS
+    assert [name for name, _ in executor.cancelled] == ["send_sms"]
+    assert _tool_answers(brain) == [IN_PROGRESS]
+
+    replies = await drain(brain.on_user_turn(user_turn(2, "text me the code please", supersedes=1)))
+
+    assert replies == [("text", "It is on its way.")]
+    assert _shape(brain) == [
+        ("user", "text me the code please", 0),
+        ("assistant", None, 1),
+        ("tool", IN_PROGRESS, 0),
+        ("assistant", "It is on its way.", 0),
+    ]
+    assert_tool_pairing([{"messages": _wire(source)}])
+    assert [call.name for call in executor.calls] == ["send_sms"]
+
+
+async def test_a_cut_system_tool_whose_run_stopped_is_carried_as_interrupted() -> None:
+    clock = FrozenClock()
+    texting = ToolCall(id="call_1", name="send_sms", arguments_json='{"message": "Your code is 42."}')
+    source = FakeSource().reply(calls=[texting])
+    executor = RecordingExecutor(names=frozenset({"send_sms"}), clock=clock, holding=frozenset({"send_sms"}))
+    brain = _brain(clock, source, executor, sms_capable=True)
+    await drain(brain.start())
+
+    await _closed_on_static(brain, user_turn(1, "text me the code"))
+
+    assert [name for name, _ in executor.cancelled] == ["send_sms"]
+    assert _tool_answers(brain) == [INTERRUPTED]

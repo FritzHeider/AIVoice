@@ -1,4 +1,5 @@
-"""The in-call tool executor (specs/13 §5, Decision P08-T02b1) over respx."""
+"""The in-call tool executor (specs/13 §5, Decision P08-T02b1; detached system tool runs: specs/13 §6,
+Decision P08-FIX-21) over respx."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from service_helpers import json_log_stream, log_events
@@ -252,12 +254,22 @@ class _GatedSystem:
         return self.outcome
 
 
-async def _cancel_mid_run(tool: _GatedSystem, events: _Events) -> tuple[CallToolExecutor, asyncio.Task[Any]]:
+def _system_call(tool: _GatedSystem) -> ToolCall:
+    return ToolCall(id="c1", name=tool.name, arguments_json="{}")
+
+
+async def _system_executor(tool: _GatedSystem, events: _Events | None = None) -> CallToolExecutor:
+    """An executor that runs only the system tool ``tool`` (system tools need no HTTP client)."""
     async with plain_executor() as (http, clock):
-        executor = CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
-    waiting = asyncio.create_task(
-        executor.execute(ToolCall(id="c1", name=tool.name, arguments_json="{}"), SCOPE)
-    )
+        return CallToolExecutor([], runner=ToolRunner(http, clock=clock), events=events, system=[tool])
+
+
+async def _cancel_mid_run(
+    tool: _GatedSystem, events: _Events, call: ToolCall | None = None
+) -> tuple[CallToolExecutor, asyncio.Task[Any]]:
+    """Cancel the wait for ``call`` (default: a fresh one) while ``tool`` runs it."""
+    executor = await _system_executor(tool, events)
+    waiting = asyncio.create_task(executor.execute(call if call is not None else _system_call(tool), SCOPE))
     await tool.started.wait()
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -326,3 +338,75 @@ async def test_an_awaited_crash_propagates_to_the_caller() -> None:
         with pytest.raises(RuntimeError):
             await executor.execute(ToolCall(id="c1", name="send_sms", arguments_json="{}"), SCOPE)
     assert events.failures == ["send_sms: crashed"]
+
+
+# A run that goes on after its wait was cancelled is reported as detached (Decision P08-FIX-21).
+
+
+async def test_a_call_whose_wait_was_cancelled_mid_run_is_detached() -> None:
+    tool = _GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
+    call, never_run = _system_call(tool), _system_call(tool)
+
+    executor, _ = await _cancel_mid_run(tool, _Events(), call)
+
+    assert executor.detached(call)
+    assert never_run == call
+    assert not executor.detached(never_run)
+    tool.gate.set()
+    await executor.aclose()
+    assert tool.finished == ["c1"]
+    assert executor.detached(call)
+    assert not executor.detached(never_run)
+
+
+async def test_a_call_that_was_answered_is_not_detached() -> None:
+    tool = _GatedSystem("send_sms", SystemOutcome('{"status":"sent"}'))
+    tool.gate.set()
+    call = _system_call(tool)
+    executor = await _system_executor(tool)
+
+    answer = await executor.execute(call, SCOPE)
+
+    assert answer.content == '{"status":"sent"}'
+    assert not executor.detached(call)
+
+
+async def test_a_run_cancelled_by_aclose_is_not_detached() -> None:
+    tool = _GatedSystem("schedule_callback", None)
+    tool.gate.set()
+    call = _system_call(tool)
+    executor = await _system_executor(tool)
+    waiting = asyncio.create_task(executor.execute(call, SCOPE))
+    await tool.started.wait()
+
+    await executor.aclose(timeout_s=0.01)
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert tool.cancelled
+    assert not executor.detached(call)
+
+
+async def test_a_custom_tool_cancelled_mid_request_is_not_detached(api: respx.MockRouter) -> None:
+    arrived, release = asyncio.Event(), asyncio.Event()
+
+    async def held(request: httpx.Request) -> httpx.Response:
+        arrived.set()
+        await release.wait()
+        return httpx.Response(200, json={"status": "shipped"})
+
+    route = api.post("/lookup_order").mock(side_effect=held)
+    events = _Events()
+    call = ToolCall(id="c1", name="lookup_order", arguments_json='{"order": "A7"}')
+    async with plain_executor() as (http, clock):
+        executor = CallToolExecutor([_spec()], runner=ToolRunner(http, clock=clock), events=events)
+        waiting = asyncio.create_task(executor.execute(call, SCOPE))
+        await arrived.wait()
+
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+    assert route.call_count == 0  # respx records a call only when it completes: the request was cancelled
+    assert not executor.detached(call)
+    assert (events.tools, events.failures) == ([], [])

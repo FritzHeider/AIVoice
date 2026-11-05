@@ -1,5 +1,5 @@
 """Custom and system tools on pathway reply nodes (specs/13 §4; Decisions P08-T02c1, P08-FIX-16,
-P08-FIX-17, P08-FIX-19 and P08-FIX-20 under specs/13 §4).
+P08-FIX-17, P08-FIX-19 and P08-FIX-20 under specs/13 §4, P08-FIX-21 under specs/13 §6).
 
 A reply node (:data:`REPLY_NODE_TYPES`, global nodes included) whose reply streams from the dialogue model
 is offered the system tools the conversation allows (:class:`~va_engine.system_tools.SystemToolFacts` with
@@ -14,9 +14,9 @@ answered in call order, their variables merged, and each ``press_button`` yields
 action is on record only once that action was handed over. A round cut short (barge-in, or a reply closed
 at a press) cancels the tools still running and answers ``interrupted`` only for what did not happen: a
 cancelled tool, a press or ``end_call`` that was not handed over. A tool that finished keeps its answer and
-its variables, a call answered without running keeps that answer
-(:func:`~va_engine.tool_tasks.settle_round`). Calls are tracked by their position in the round, never by
-the model's call id.
+its variables, a call answered without running keeps that answer, and a cancelled system tool whose run the
+executor keeps going reads ``in_progress`` (:func:`~va_engine.tool_tasks.settle_round`). Calls are tracked
+by their position in the round, never by the model's call id.
 """
 
 from __future__ import annotations
@@ -192,7 +192,8 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
     its :class:`SendDtmfAction`. A round closed at a press leaves that press ``sent`` (a yielded action is
     carried out). Wherever the round is cut, the calls not answered yet get what is true for them
     (:func:`~va_engine.tool_tasks.settle_round`): a tool that finished keeps its answer and its variables
-    are merged, a tool cancelled at the cut and a later press or ``end_call`` read ``interrupted``."""
+    are merged, a tool cancelled at the cut and a later press or ``end_call`` read ``interrupted`` (a
+    cancelled system tool whose run goes on: ``in_progress``)."""
     tasks: list[asyncio.Task[ToolAnswer]] = []
     merged = False
     try:
@@ -210,7 +211,9 @@ async def run_node_round(  # noqa: PLR0913 - the round, its executor, scope, and
                 yield SendDtmfAction(digits=item.digits, duration_ms=DTMF_DURATION_MS)
         outcome.terminal = plan.terminal
     finally:
-        late, rest = await settle_round(plan, tasks, answered=outcome.answered, merged=merged)
+        late, rest = await settle_round(
+            plan, tasks, executor=executor, answered=outcome.answered, merged=merged
+        )
         merge_variables(variables, late)
         for item, content in rest:
             answer(item.call, content)

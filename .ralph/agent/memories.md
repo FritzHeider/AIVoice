@@ -2,6 +2,10 @@
 
 ## Patterns
 
+### mem-1793892062-3255
+> P08-FIX-21: a system tool run that goes on after a cut round reads task_tools.IN_PROGRESS ({"status":"in_progress"}) not interrupted: ToolExecutor.detached(call) by object identity (ToolCall is equal by value), CallToolExecutor notes a call when the shielded wait is cancelled while the run task is not (aclose-cancelled runs and custom tools are not detached); settle_round(plan, tasks, executor=, answered=, merged=) / cut_contents(..., executor=) ask it; never turn a cancelled wait into an answer in an executor (a runner cancelled while awaiting a tool task forwards the cancel, a result would swallow it); fakes RecordingExecutor(detaching=) + wait_started(name); pin a cut while tools are awaited by cancelling asyncio.create_task(drive(...)) with fillers off; editing a test file while make test runs -> restart the run (kill wrapper shell first so no stale exit= line)
+<!-- tags: engine, tools, testing | created: 2026-11-05 -->
+
 ### mem-1793888876-64fa
 > P08-FIX-20: a cut tool round (run_node_round, TaskBrain._run_tools) settles through va_engine.tool_tasks.settle_round(plan, tasks, answered=, merged=) -> (late answers to merge, contents of unanswered calls): interrupted only for a tool cancelled at the cut and a press_button/end_call/transfer_call not handed over; finished tools keep answer + variables (merged at the cut), planned answers (invalid_arguments/too_many_tool_calls/skipped) stay; never answer everything left INTERRUPTED in a runner finally; tests RecordingExecutor(holding=frozenset({name})) holds only those tools, TaskBrain _closed_on(brain, turn, kind); pip-audit must use the CI export (uv export --frozen --all-packages --no-hashes --no-emit-workspace) or it fails on workspace packages
 <!-- tags: engine, tools, pathways, testing | created: 2026-11-05 -->
@@ -549,6 +553,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793893365-76b2
+> failure: cmd=make e2e (P08-FIX-21 run 1, cold stack right after make test), exit=2, error=tests_e2e/test_concurrent_calls.py assert underruns == 0 got 4 (one ~70 ms media event-loop stall 0.9 s after 50 sessions attached: 4 outbound.underrun within 12 ms, wake_late_ms 63-70, prev_send_await_ms 0.1, no gc_pause; unrelated to tool rounds), re-run make e2e passed 20/20 and 3 standalone capacity runs had 0 underruns; next=task fix:capacity-start-burst-stall (profile the cold start burst); note 'cmd; echo exit=$?' background wrappers always report exit code 0, read the exit= line in the log
+<!-- tags: e2e, performance, testing | created: 2026-11-05 -->
 
 ### mem-1793877553-82e2
 > flake (2nd sighting): apps/sim/tests/test_sim_shared_redis.py::test_two_sim_processes_share_scenarios_and_reset fails under full make test with a sim child exit code 1 ((0,1) in P08-T02c1 review, (1,0) in P08-FIX-7); passes alone; child stderr is DEVNULL so cause unknown -> task fix:sim-shared-redis-exit-flake: capture stderr first, then fix shutdown

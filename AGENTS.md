@@ -2109,3 +2109,12 @@ Grafana 3001
   answers (`invalid_arguments`, `too_many_tool_calls`, `skipped`) stay (`cut_contents`, `finished_answers`). Never
   answer "everything left" `INTERRUPTED` in a runner's `finally`. Tests: `RecordingExecutor(holding=frozenset({name}))`
   holds only those tools on `release` (one tool finished, one running); TaskBrain `_closed_on(brain, turn, kind)`.
+- 2026-11-05 (P08-FIX-21): a system tool run that goes on after a cut round reads `va_engine.task_tools.IN_PROGRESS`
+  (`{"status":"in_progress"}`), not `interrupted`: every `ToolExecutor` implements `detached(call) -> bool` (by
+  object identity; `ToolCall` is equal by value) and `settle_round(plan, tasks, executor=, answered=, merged=)` /
+  `cut_contents(plan, answers, executor=)` ask it for the calls cancelled at the cut. Never turn a cancelled wait
+  into an answer inside an executor: a runner cancelled while it awaits a tool task forwards the cancel to that
+  task, and a task that then returns a result swallows the runner's own cancellation. Fakes:
+  `RecordingExecutor(detaching=frozenset({name}))` (`left_running`), `await executor.wait_started(name)`. To pin a
+  cut "while the tools are awaited", run the reply in a task (`asyncio.create_task(drive(...))`, fillers off),
+  wait until the tools started, `cancel()` it and expect `CancelledError` (specs/13 §6 Decision P08-FIX-21).

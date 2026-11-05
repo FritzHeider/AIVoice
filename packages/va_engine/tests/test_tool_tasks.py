@@ -1,5 +1,5 @@
 """The executor tool-round helpers shared by task mode and pathways (specs/13 §5; Decisions P08-T02b1,
-P08-T02c1, P08-FIX-16, P08-FIX-20)."""
+P08-T02c1, P08-FIX-16, P08-FIX-20, P08-FIX-21)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from va_engine.task_tools import (
     ENDING,
     EXECUTOR_CONCURRENCY,
     FILLER_DELAY_S,
+    IN_PROGRESS,
     INTERRUPTED,
     SKIPPED,
     TOOL_FAILED,
@@ -274,14 +275,69 @@ async def test_settle_round_cancels_the_running_tools_and_reports_late_answers()
     first, second = planned("", "lookup"), planned("", "track")
     plan = RoundPlan((first, second), invalid=False, used=2)
 
-    late, rest = await settle_round(plan, tasks, answered=0, merged=False)
+    late, rest = await settle_round(plan, tasks, executor=None, answered=0, merged=False)
 
     assert late == [ToolAnswer('{"hours":"9-5"}', {"hours": "9-5"})]
     assert rest == [(first, '{"hours":"9-5"}'), (second, INTERRUPTED)]
     assert [task.cancelled() for task in tasks] == [False, True]
     assert executor.active == 0
-    assert await settle_round(plan, tasks, answered=1, merged=True) == ([], [(second, INTERRUPTED)])
-    assert await settle_round(plan, tasks, answered=2, merged=True) == ([], [])
+    again = await settle_round(plan, tasks, executor=executor, answered=1, merged=True)
+    assert again == ([], [(second, INTERRUPTED)])
+    assert await settle_round(plan, tasks, executor=None, answered=2, merged=True) == ([], [])
+
+
+async def detached_round() -> tuple[RecordingExecutor, RoundPlan, list[asyncio.Task[ToolAnswer]]]:
+    """``send_sms`` (its run goes on when the wait is cancelled) and ``track`` both run."""
+    executor = RecordingExecutor(hold=True, detaching=frozenset({"send_sms"}))
+    plan = RoundPlan((planned("", "send_sms"), planned("", "track")), invalid=False, used=2)
+    tasks = start_tools(executor, plan.executed, TemplateScope())
+    await executor.wait_active(2)
+    return executor, plan, tasks
+
+
+async def test_a_cancelled_run_that_goes_on_reads_in_progress() -> None:
+    executor, plan, tasks = await detached_round()
+    sms, track = plan.calls
+    await stop_tasks(tasks)
+    answers = finished_answers(tasks)
+
+    assert answers == [None, None]
+    assert cut_contents(plan, answers, executor=executor) == [(sms, IN_PROGRESS), (track, INTERRUPTED)]
+    assert cut_contents(plan, answers) == [(sms, INTERRUPTED), (track, INTERRUPTED)]
+
+
+async def test_only_the_very_call_whose_run_goes_on_reads_in_progress() -> None:
+    executor, plan, tasks = await detached_round()
+    await stop_tasks(tasks)
+    twin = RoundPlan((planned("", "send_sms"), planned("", "track")), invalid=False, used=2)
+
+    assert twin.calls[0].call == plan.calls[0].call
+    assert [content for _, content in cut_contents(twin, [None, None], executor=executor)] == [
+        INTERRUPTED,
+        INTERRUPTED,
+    ]
+    assert [content for _, content in cut_contents(twin, [], executor=executor)] == [INTERRUPTED, INTERRUPTED]
+
+
+async def test_a_finished_tool_keeps_its_answer_whatever_the_executor_says() -> None:
+    executor, plan, tasks = await detached_round()
+    await stop_tasks(tasks)
+
+    contents = cut_contents(plan, [ToolAnswer('{"status":"sent"}'), None], executor=executor)
+
+    assert [content for _, content in contents] == ['{"status":"sent"}', INTERRUPTED]
+
+
+async def test_settle_round_asks_the_executor_which_cancelled_runs_go_on() -> None:
+    executor, plan, tasks = await detached_round()
+    sms, track = plan.calls
+
+    late, rest = await settle_round(plan, tasks, executor=executor, answered=0, merged=False)
+
+    assert late == []
+    assert rest == [(sms, IN_PROGRESS), (track, INTERRUPTED)]
+    assert [name for name, _ in executor.cancelled] == ["send_sms", "track"]
+    assert executor.left_running == [sms.call]
 
 
 async def test_stop_tasks_cancels_only_the_unfinished() -> None:

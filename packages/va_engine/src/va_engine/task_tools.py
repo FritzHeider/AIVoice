@@ -33,6 +33,7 @@ __all__ = [
     "EXECUTOR_CONCURRENCY",
     "FILLER_DELAY_S",
     "INTERRUPTED",
+    "IN_PROGRESS",
     "MAX_INVALID_ROUNDS",
     "MAX_TOOL_CALLS_PER_CALL",
     "MAX_TOOL_CALLS_PER_ROUND",
@@ -70,6 +71,8 @@ TRANSFERRING: Final = tool_result({"status": "transferring"})
 SKIPPED: Final = tool_result({"error": "skipped"})
 TOO_MANY_TOOL_CALLS: Final = tool_result({"error": "too_many_tool_calls"})
 INTERRUPTED: Final = tool_result({"error": "interrupted"})
+IN_PROGRESS: Final = tool_result({"status": "in_progress"})
+"""The call's run goes on without the round: an executor-owned system tool (specs/13 §6 P08-FIX-21)."""
 TOOL_FAILED: Final = tool_result({"error": "tool_failed"})
 _UNKNOWN_LABEL: Final = [{"path": "label", "message": "unknown transfer label"}]
 

@@ -1852,3 +1852,255 @@ For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-20-wip-review.md` (main
 no blockers) is NOT in DONE yet. Its two non-blocking items: 1. a system tool cancelled at the cut reads
 `interrupted` although its shielded run completes (possible duplicate `send_sms`; needs a spec decision);
 2. no committed test pins the cut "while the tools are awaited" (works today, see the probe above).
+
+## Planner (2026-11-05, after P08-FIX-20 approval)
+Inbox: two notes not in DONE. `2026-11-05-p08-fix-15-review.md` has its task (P08-FIX-18, unticked, next after
+this one). `2026-11-05-p08-fix-20-wip-review.md` (no blockers; 2 items) is new → P08-FIX-21 inserted at the top
+of plan/phase-08.md and planned now. Both items are fixed, not closed: item 1 by DEC-014 (explicit
+`ToolExecutor.detached(call)` query, answer `in_progress`; no cancellation is swallowed), item 2 by tests.
+Order after this: P08-FIX-18, then P08-T02c2.
+
+## Plan P08-FIX-21 — a system tool run that goes on after the cut reads `in_progress`; test the cut while the tools are awaited
+
+### Findings (read at HEAD 5365779)
+- `va_tools.executor.CallToolExecutor._run_system`: the run is an executor-owned task awaited through
+  `asyncio.shield`; cancelling the round's tool task cancels only the wait (`CancelledError` propagates, the
+  task of `start_tools` ends cancelled).
+- `va_engine.tool_tasks._cut_content`: a cancelled execute call reads `INTERRUPTED`. So a `send_sms` in flight
+  at a barge-in / superseded turn is carried as `interrupted` although the text goes out; the merged turn's
+  model may send it again (cap 3). `schedule_callback` is saved by the 1-pending cap.
+- Do NOT make the executor return an answer from its cancelled wait: a runner parked in `await task` that is
+  cancelled forwards the cancel to that tool task (`Task.cancel` cancels `_fut_waiter`); a tool task that then
+  ends with a result makes the runner lose its own cancellation (DEC-014).
+- Implementations of the `ToolExecutor` protocol: `CallToolExecutor` (va_tools), test fakes `NodeExecutor` and
+  `RecordingExecutor` (`packages/va_engine/tests/support/task_helpers.py`). `ToolOffer` only has `handles`
+  (not an executor). Callers of `settle_round`: `run_node_round`, `TaskBrain._run_tools`.
+
+### 1. `packages/va_engine/src/va_engine/task_tools.py`
+`IN_PROGRESS: Final = tool_result({"status": "in_progress"})` next to `INTERRUPTED` (+ `__all__`, one-line
+docstring: "the call's run goes on without the round (an executor-owned system tool)").
+
+### 2. `packages/va_engine/src/va_engine/tool_executor.py` — protocol
+```python
+    def detached(self, call: ToolCall) -> bool:
+        """Whether a run of ``call`` (this very object: call ids may be empty or repeated) goes on although
+        the wait for its answer was cancelled. A cut round answers such a call ``in_progress`` instead of
+        ``interrupted`` (specs/13 §6, Decision P08-FIX-21)."""
+        ...
+```
+Module docstring: one sentence. `PathwayToolExecutor` is unchanged (a node's executor from `for_refs` answers).
+
+### 3. `packages/va_engine/src/va_engine/tool_tasks.py`
+- `_cut_content(item, finished, executor)`: execute call with no finished answer →
+  `IN_PROGRESS if executor is not None and executor.detached(item.call) else INTERRUPTED`.
+- `cut_contents(plan, answers, *, executor: ToolExecutor | None = None)`.
+- `settle_round(plan, tasks, *, executor: ToolExecutor | None, answered: int, merged: bool)` (keyword
+  required, so no caller forgets it) → `cut_contents(plan, finished, executor=executor)[answered:]`.
+- Module docstring paragraph on cut rounds + docstrings: "a tool cancelled at the cut reads `interrupted`,
+  unless the executor says its run goes on (`in_progress`)".
+`run_node_round`: `settle_round(plan, tasks, executor=executor, ...)`; `TaskBrain._run_tools`:
+`executor=self._executor`. Update both docstrings/comments. Watch radon on `_run_tools` (B 10 today: do not
+add a branch there) and `_cut_content` (B 6).
+
+### 4. `packages/va_tools/src/va_tools/executor.py`
+```python
+        self._detached: list[ToolCall] = []     # __init__
+
+    def detached(self, call: ToolCall) -> bool:
+        return any(item is call for item in self._detached)
+
+    async def _run_system(self, tool: SystemTool, call: ToolCall) -> ToolAnswer:
+        task = ...  (unchanged)
+        try:
+            outcome = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.cancelled():  # the wait was cancelled, the run was not: it goes on (or just ended)
+                self._detached.append(call)
+            raise
+        return ToolAnswer(outcome.content)
+```
+(`task.cancelled()` is true when `aclose` cancelled the run itself: then nothing goes on → `interrupted`.)
+Identity, not equality: `ToolCall` is a pydantic model, equal by value. Module docstring: the paragraph on
+system tools gets "and tells the round so (`detached`), which answers the call `in_progress`".
+
+### 5. Test fakes — `packages/va_engine/tests/support/task_helpers.py`
+- `RecordingExecutor`: `detaching: frozenset[str] = frozenset()` ("runs of these tool names go on when their
+  wait is cancelled") and `left_running: list[ToolCall]`; in `execute`'s `except CancelledError`: append the
+  call to `left_running` when `call.name in self.detaching` (still listed in `cancelled`, still re-raised);
+  `def detached(self, call) -> bool: return any(item is call for item in self.left_running)`.
+- `NodeExecutor.detached` delegates to `self.parent.detached(call)`.
+- `async def wait_started(self, name: str) -> None`: `async with asyncio.timeout(5), self.changed: await
+  self.changed.wait_for(lambda: any(n == name for n, _ in self.started))` (`started` is appended before the
+  notify in `execute`). Docstrings updated.
+
+### 6. Tests
+`packages/va_engine/tests/test_tool_tasks.py`
+- `test_a_cancelled_run_that_goes_on_reads_in_progress`: plan with two execute calls, both tasks cancelled via
+  `stop_tasks`, an executor fake whose `detached` is true for the first call object only →
+  `cut_contents(plan, answers, executor=fake)` contents `[IN_PROGRESS, INTERRUPTED]`; without an executor
+  both `INTERRUPTED`; a tool that never started (no tasks) with a detaching executor → `INTERRUPTED`.
+- `settle_round` tests pass `executor=None` (existing) and one with the fake.
+
+`packages/va_engine/tests/test_engine_tools.py`
+- `test_a_reply_cancelled_while_its_tools_run_keeps_the_finished_tools_answer` (item 2), parametrized over the
+  call order `("lookup", "track")` / `("track", "lookup")` (string ids): `one_node(tools=["TL-1", "TL-2"])`,
+  `executor(holding=frozenset({"track"}), results={"lookup": hours}, variables={"lookup": {"hours":
+  "9-5"}})`, `fillers=False`, reply `calls=[call("c1", first), call("c2", second), call("c3", "nope"),
+  end_call]` (end_call needs `reason`; `system=VOICE`); `consumer = asyncio.create_task(drive(rig.engine.
+  start()))`; `await tools.wait_started("track")` then, for the held-first order, also
+  `wait_started("lookup")` (a tool that is not held finishes in the step that starts it); `consumer.cancel()`;
+  `with pytest.raises(asyncio.CancelledError): await consumer`. Expect: `tool_records` = lookup's real answer,
+  `("track", CUT)`, nope's planned `invalid_arguments`/`unknown_tool` answer, `("end_call", CUT)` in call
+  order; `rig.state.variables["hours"] == "9-5"`; `[n for n, _ in tools.cancelled] == ["track"]`;
+  `rig.state.ended is False`. With fillers off `ToolLines.line` returns without suspending, so the generator
+  is parked in `answers = [await task ...]` when `track` has started. If the held-second sync proves racy, wait
+  on a predicate over `started` and `active` instead; never add sleeps.
+- `test_a_system_tool_that_runs_on_is_answered_in_progress`: executor `names=frozenset({"send_sms"})`,
+  `holding=frozenset({"send_sms"})`, `detaching=frozenset({"send_sms"})`, facts `dataclasses.replace(VOICE,
+  sms_capable=True)`; reply `[call("c1", "send_sms", message="Code 42")]`; `drive_held(rig, tools,
+  close_on_line=True)` (closed at the filler) → `tool_records(rig) == [("send_sms", IN_PROGRESS)]`; then a
+  superseding turn (`user(..., supersedes=…)` as in the FIX-20 test) with `reply("Okay.")`: the context update
+  with `in_progress` sits ahead of the merged caller turn and `len(tools.calls) == 1`.
+- Same executor without `detaching` → `("send_sms", CUT)` (one assertion in the same test or a twin).
+
+`packages/va_engine/tests/test_task_tool_speech.py` (TaskBrain; helpers `_brain`, `_executor`, `_call`,
+`_closed_on`, `_shape`, `_wire`, `SHIPPED`)
+- `test_a_reply_cancelled_while_its_tools_run_keeps_the_finished_tools_answer`: two tools (`lookup_order`,
+  `eta`), `holding=frozenset({"eta"})`, `fillers=False`; consume `brain.on_user_turn(...)` in a task with a
+  small local consumer (reads `SpeakText.tokens` like `_closed_on`), `wait_started("eta")`, cancel, expect
+  tool contents `[SHIPPED, INTERRUPTED]`, lookup's variables merged + a state snapshot, `eta` cancelled.
+- `test_a_system_tool_that_runs_on_is_carried_as_in_progress`: `send_sms` behind the executor
+  (`names=frozenset({"lookup_order", "send_sms"})`, facts with `sms_capable=True`: check how `_brain` builds
+  facts, extend it with a keyword if needed), closed at the filler `SpeakStatic` (FrozenClock) → tool content
+  `[IN_PROGRESS]`; superseding turn: carried round `user, assistant(tool_calls), tool(in_progress)`,
+  `assert_tool_pairing`, the executor ran `send_sms` once.
+
+`packages/va_tools/tests/test_executor.py` (helpers `_GatedSystem`, `_cancel_mid_run`, `_Events`, `SCOPE`)
+- `_cancel_mid_run` also returns the `ToolCall` it used (or builds it from a parameter).
+- `test_a_call_whose_wait_was_cancelled_mid_run_is_detached`: after `_cancel_mid_run`: `executor.detached(call)`
+  is true before and after the gate is set + `aclose`; an equal `ToolCall(id="c1", ...)` built anew is not
+  detached; a call never executed is not.
+- `test_a_run_cancelled_by_aclose_is_not_detached`: never-finishing tool, the waiter is NOT cancelled by the
+  test: `aclose(timeout_s=0.01)` cancels the run, the waiter raises `CancelledError`, `detached(call)` false.
+- `test_a_custom_tool_cancelled_mid_request_is_not_detached`: respx route with a side effect that waits on an
+  `asyncio.Event` (see `StreamingBody`/`Hanging` patterns; the `api` fixture), cancel the waiting task →
+  `detached` false, no `call.tool` event.
+`packages/va_tools/tests/test_executor_barge_in.py`: tool messages `== [IN_PROGRESS]` (import from
+`va_engine.task_tools`), `sms.sent == ["Your code is 42."]` after `aclose`; rename/docstring accordingly.
+
+Mutation checks to report (restore byte-identical, sha256): (a) `_cut_content` never asks the executor → the
+new engine, TaskBrain, unit and barge-in tests fail; (b) `_run_system` appends on every cancellation
+(`task.cancelled()` check dropped) → the aclose test fails; (c) `detached` by equality (`item == call`) → the
+identity assertion fails.
+
+### 7. Spec + docs (same commit)
+- specs/13 §6, new block after Decision P08-FIX-15 (or the last §6 decision):
+  `> Decision (2026-11-05) P08-FIX-21:` a system tool run that goes on after its round was cut (§6 Decision
+  P08-FIX-13 item 2) is answered `{"status":"in_progress"}`, not `{"error":"interrupted"}`: the message will
+  normally be sent / the callback scheduled, and `interrupted` would make the model of the superseding or next
+  turn do it again (a second text). The executor reports such calls (`ToolExecutor.detached(call)`, by object
+  identity; `CallToolExecutor` notes a call when the wait for its executor-owned run is cancelled while the run
+  is not), and `va_engine.tool_tasks.cut_contents` asks it for every executor call cancelled at the cut. A run
+  cancelled by `aclose` and a custom tool (its request is cancelled) still read `interrupted`. The run's
+  outcome is reported as before (`call.sms_sent` / `call.scheduled`, a failure as `call.error` `TOOL_FAILED`);
+  the model is not told it later. Applies to task mode now and to pathway calls with P08-T02c2.
+- Reword in place: §6 Decision P08-FIX-13 item 2 "The model gets the usual interruption answer" → "The model
+  is told the run is in progress (Decision P08-FIX-21)"; §4 Decision P08-FIX-20 item 1 parenthesis → "(a
+  system tool run behind the executor continues detached and reads `in_progress`, §6 Decision P08-FIX-21)" and
+  its lead sentence stays true ("interrupted only when what it stands for did not happen"); §5 Decision
+  P08-T02b1 item 4 gets a pointer. Keep spec ref + section on ONE line (`check_spec_refs`).
+- AGENTS.md: bullet `2026-11-05 (P08-FIX-21)`: `ToolExecutor.detached(call)` (identity), `IN_PROGRESS`,
+  `settle_round(..., executor=)`, the rule "never turn a cancelled wait into an answer" with the reason,
+  fakes `RecordingExecutor(detaching=)` / `wait_started(name)`, cancel-the-consumer test pattern.
+- Do NOT tick the plan or touch `.ralph/review-inbox/DONE` (Reviewer appends
+  `2026-11-05-p08-fix-20-wip-review.md`).
+
+### Gates
+PATH needs `/home/ralph/.local/bin`. `make fmt lint typecheck placeholders`; `uv run pytest packages/va_engine
+packages/va_tools -q`; `uv run python scripts/check_spec_refs.py`; `make test` in the background (`: >
+logs/make_test.log`, then `make test > logs/make_test.log 2>&1; echo exit=$? >> logs/make_test.log`, heartbeat
+Monitor ~2 min); `npx --yes jscpd@4 --silent`; `uvx radon cc -s -a` on touched src files; pip-audit with the
+CI export (`uv export --frozen --all-packages --no-hashes --no-emit-workspace`); `corepack pnpm audit
+--audit-level high`. `make e2e` (background + heartbeat): `settle_round` is on the path of every tool round.
+
+### Risks
+- mypy: every structural `ToolExecutor` needs `detached` (media/test fakes outside va_engine would surface in
+  `make typecheck`; grep `def handles(` found only the three above).
+- The held-first cancel test: cancelling the consumer cancels the tool task it awaits (asyncio forwards the
+  cancel to the awaited future), so `track` ends cancelled before the `finally` runs; that is the path the
+  note wants pinned. Do not shield the awaits.
+- jscpd: the engine and TaskBrain twins share shape; factor a helper rather than duplicating blocks.
+- Known flake (task fix:sim-shared-redis-exit-flake): `apps/sim/tests/test_sim_shared_redis.py::
+  test_two_sim_processes_share_scenarios_and_reset`; if it fails, re-run alone and report both runs.
+
+## Build P08-FIX-21 (2026-11-05)
+Implemented the plan as written (no deviations in behaviour).
+- `va_engine.task_tools.IN_PROGRESS`; `ToolExecutor.detached(call)` (protocol); `tool_tasks._cut_content` /
+  `cut_contents(..., executor=None)` / `settle_round(..., executor=)` (keyword required); both runners pass their
+  executor (`run_node_round`: the node's, `TaskBrain._run_tools`: `self._executor`).
+- `CallToolExecutor._run_system` notes the call in `_detached` when the shielded wait is cancelled while the run
+  task is not (`task.cancelled()` false), re-raises; `detached` compares by identity.
+- Fakes: `RecordingExecutor(detaching=)`, `left_running`, `detached`, `wait_started(name)`; `NodeExecutor.detached`.
+- Tests: test_tool_tasks.py +4 (in_progress vs interrupted, identity via an equal twin plan, finished answer
+  wins, settle_round with the executor); test_engine_tools.py +2 parametrized (reply task cancelled while the
+  tools are awaited, held first / held second; cut system tool in_progress vs interrupted + superseding turn);
+  test_task_tool_speech.py +3 (same cancel test parametrized over which tool is held, in_progress carried by a
+  superseding turn, non-detached send_sms interrupted); va_tools test_executor.py +4 (detached by identity before
+  and after the run ends, answered call not detached, aclose-cancelled run not detached, custom tool cancelled
+  mid-request not detached and no event); test_executor_barge_in.py now expects `[IN_PROGRESS]`, sent once.
+  One extra helper beyond the plan: `_system_executor(tool, events)` in test_executor.py (jscpd found a 5-line
+  clone between two new tests; 0 clones after).
+- Spec: specs/13 §6 Decision P08-FIX-21 (4 items) + rewording of §6 P08-FIX-13 item 2, §4 P08-FIX-20 item 1,
+  §5 P08-T02b1 item 4. AGENTS.md bullet. Plan not ticked, DONE untouched.
+Gates (final tree; PATH with /home/ralph/.local/bin): `make fmt` 0, `make lint` 0, `make typecheck` 0 (mypy:
+no issues in 1614 source files), `make placeholders` 0 findings, `check_spec_refs` 0 problems, jscpd 0 clones,
+radon repo average 2.42 (`_cut_content` B 8, `_run_tools` B 10 unchanged), pip-audit (CI export) no known
+vulnerabilities, `pnpm audit --audit-level high` exit 0 (1 known moderate), `make test` exit 0: 13086 passed,
+7 skipped, coverage 99.08 % (tool_tasks.py, tool_executor.py, task_tools.py, engine_node_tools.py 100 %;
+va_tools/executor.py 99 %, the one partial branch 188->190 is the pre-existing crash-without-events path),
+`make e2e`: run 1 FAILED, run 2 passed (details under "e2e" below). A first `make test` run was started before the jscpd helper refactor of
+test_executor.py; I killed it and re-ran the whole suite on the final tree (the numbers above are that run).
+Mutation checks (file restored byte-identical each time, sha256 asserted): (a) `_cut_content` never asks the
+executor → 5 tests fail (unit x2, engine, TaskBrain, barge-in); (b) `_run_system` notes every cancellation →
+`test_a_run_cancelled_by_aclose_is_not_detached` fails; (c) `detached` by equality →
+`test_a_call_whose_wait_was_cancelled_mid_run_is_detached` fails; (d) `settle_round` drops the finished answers →
+the 4 "cancelled while its tools run" tests fail.
+
+e2e (both runs on the final tree; logs `logs/make_e2e_run1.log`, `logs/make_e2e.log`):
+- Run 1 (15:21Z, images rebuilt, started right after `make test` ended): exit 2, `1 failed, 19 passed, 107
+  deselected in 421.62s`. Failed: `tests_e2e/test_concurrent_calls.py::test_concurrent_calls_on_one_media_worker`
+  `assert underruns == 0` got 4 (50 calls, 0 failed scenarios, overhead p50 115 / p95 172 ms, lag p99 <= 25 ms).
+  Attribution from the media log (AGENTS.md P08-FIX-3): the 4 `outbound.underrun` lines sit within 12 ms
+  (15:24:26.976-.988Z), `wake_late_ms` 63.5-69.5, `prev_send_await_ms` 0.1, `prev_resume_ms` 0.0 = one ~70 ms
+  media event-loop stall, 0.9 s after the 50 sessions attached (the log around it is `media.amd_verdict`
+  lines); no `gc_pause` at that moment (the two passes of that minute are 17 ms at 15:24:25.49 and 15:24:36.53).
+  The flow's only tool round is the closing `end_call` of each call (`settle_round` with no tasks), ~30 s
+  later, so the stall is not in code this task changes.
+- Run 2 (15:33Z, stack reused): exit 0, `20 passed, 107 deselected in 417.73s`.
+- Capacity flow alone, 3 more runs on the same stack (`uv run pytest tests_e2e -m capacity -s`): 3/3 passed,
+  0 underruns each, overhead p50 103 / 125 / 118 ms, p95 171 / 167 / 171 ms.
+So 1 of 5 capacity runs failed, on the cold stack. Not fixed here (one task per activation, unrelated path);
+filed as runtime task `fix:capacity-start-burst-stall` with a fix memory. For the Reviewer: this is an
+intermittent failure of a gate, reported as such, not hidden; a re-run decides whether it reproduces.
+
+## Review P08-FIX-21 (2026-11-05) — APPROVED
+Re-ran on the builder's tree (PATH with /home/ralph/.local/bin): `make lint` 0, `make typecheck` 0, `make
+placeholders` 0 findings, `check_spec_refs` 0 problems, jscpd 0 clones, radon average 2.93 (no C+ block in
+tool_tasks.py / va_tools/executor.py), pip-audit (CI export) clean, `pnpm audit --audit-level high` exit 0 (1 known
+moderate), `make test` exit 0: 13086 passed, 7 skipped, coverage 99.08 % (tool_tasks, tool_executor, task_tools,
+engine_node_tools 100 %; va_tools/executor 99 %, branch 188->190 pre-existing), `make e2e` exit 0: 20 passed in
+419 s, started right after `make test` ended (logs/make_e2e_review.log); the capacity flow passed, so the
+builder's run-1 underruns did not reproduce (task fix:capacity-start-burst-stall stays open).
+Diff read against specs/13 §4/§5/§6: identity holds from `PlannedCall.call` through `start_tools` to
+`_cut_content`; `settle_round` awaits `stop_tasks` before asking the executor; `_run_system` re-raises every
+cancellation; `ToolExecutor` has only `CallToolExecutor` and the two test fakes as implementations.
+Mutation checks on a shadow copy (PYTHONPATH over the editable install, repo untouched), the 5 touched test
+files (133 tests): every cancellation detaches → 1 fails; `detached` by equality → 1; never detached → 2; cut
+never asks the executor → 5; every cancelled call `in_progress` → 19; cancelled wait returned as an answer → 5.
+Not changed (older general wording, the newer Decision governs): specs/11 §6 item 4 and specs/13 §4 Decision
+P08-T02c1 item 3 still say a cancelled tool reads `interrupted` and point to Decision P08-FIX-20, whose item 1
+carries the `in_progress` exception.
+For the Planner: `.ralph/review-inbox/2026-11-05-p08-fix-21-wip-review.md` is not in DONE yet (no blockers;
+item 1 = `in_progress` should be a per-tool property before `lookup_knowledge` becomes a `SystemTool`, item 2 =
+an `in_progress` answer is never resolved, item 3 = documented window). Appended
+`2026-11-05-p08-fix-20-wip-review.md` to DONE.

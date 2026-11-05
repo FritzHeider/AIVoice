@@ -1,5 +1,25 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-21 A system tool whose run goes on after the round was cut is answered `in_progress`, not `interrupted`; a test pins the cut while the tools are awaited — see .ralph/review-inbox/2026-11-05-p08-fix-20-wip-review.md (items 1, 2; neither is a blocker) — `ToolExecutor.detached(call)` (object identity), `CallToolExecutor` notes a system tool call whose wait was cancelled while its run was not, `task_tools.IN_PROGRESS`, `settle_round(..., executor=)`/`cut_contents(..., executor=)` in both runners, 4 unit + 4 engine + 4 TaskBrain + 4 executor tests and the barge-in test, Decision P08-FIX-21 (specs/13 §6, with §4/§5 pointers); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, make test 13086 passed 7 skipped (cov 99.08%, tool_tasks/tool_executor/task_tools/engine_node_tools 100%, va_tools/executor 99%), make e2e 20 passed (capacity flow 0 underruns; the builder's first run had 4 underruns from one media loop stall on the cold stack, tracked as runtime task fix:capacity-start-burst-stall); reviewer mutation checks on a shadow copy: every cancellation detaches → 1 test fails, `detached` by equality → 1, never detached → 2, cut never asks the executor → 5, every cancelled call `in_progress` → 19, cancelled wait turned into an answer → 5
+  - Spec refs: specs/13 §4 (Decision P08-FIX-20), §6 (Decisions P08-T02b2, P08-FIX-13 item 2), §5 (Decision P08-T02b1 item 4), specs/07 §8
+  - Depends on: P08-FIX-20
+  - Deliverables: Planner decision (2026-11-05, DEC-014): the executor tells a cut round which runs continue.
+    `va_engine.tool_executor.ToolExecutor.detached(call) -> bool` (by object identity: call ids may be empty or
+    repeated); `va_tools.executor.CallToolExecutor` remembers the system tool calls whose wait was cancelled
+    while the executor-owned run was not; `va_engine.task_tools.IN_PROGRESS` (`{"status":"in_progress"}`);
+    `va_engine.tool_tasks.settle_round(..., executor=)` / `cut_contents(..., executor=)` answer a cancelled
+    executor call `in_progress` when its run is detached, `interrupted` otherwise (custom tools: the request was
+    cancelled). No cancellation is swallowed anywhere. specs/13 §6 Decision `P08-FIX-21` (+ rewording of §6
+    Decision P08-FIX-13 item 2 and §4 Decision P08-FIX-20 item 1); AGENTS.md.
+  - Acceptance: va_tools tests: a system tool call whose wait is cancelled mid-run is `detached` (an equal but
+    different `ToolCall` object is not), a run cancelled by `aclose` and a custom tool cancelled mid-request are
+    not; the TaskBrain barge-in test records `in_progress` for the held `send_sms`, the message is sent once;
+    engine + TaskBrain tests: a round cut with a detached system tool records `in_progress` and a superseding
+    turn shows it to the next request; engine + TaskBrain tests cancel the consuming task while the round is
+    parked awaiting its tools (fillers off, one finished and one held tool, held first and held second): the
+    finished tool keeps its answer and variables, the held one is cancelled and reads `interrupted`, the call
+    does not end; unit tests of `cut_contents` with and without an executor; `make check` and `make e2e` pass;
+    append the note name to `.ralph/review-inbox/DONE` on approval.
 - [x] P08-FIX-20 A tool round cut short answers `interrupted` only for what did not happen: executor calls that finished keep their answers (and variables) — see .ralph/review-inbox/2026-11-05-p08-fix-19-wip-review.md (item 1, blocker; item 2 is carried into the P08-T02c2 acceptance) — `va_engine.tool_tasks.settle_round`/`cut_contents`/`finished_answers` settle the `finally` of `run_node_round` and `TaskBrain._run_tools` (finished tools keep answer + variables merged at the cut, planned answers stay, only cancelled tools and actions not handed over read `interrupted`), 5 unit + 4 engine + 3 TaskBrain tests, Decision P08-FIX-20 (specs/13 §4); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 3.56, pip-audit clean, pnpm audit high exit 0, make test 13070 passed 7 skipped (cov 99.08%, tool_tasks + engine_node_tools 100%), make e2e 20 passed; reviewer mutation checks on a shadow copy: all-`interrupted` cut → 11 tests fail, late merges dropped → 2 fail, planned answers overwritten → 4 fail; reviewer probe (outside the repo): reply cancelled while the tools are awaited keeps the finished tool's answer + variables
   - Spec refs: specs/13 §4 (Decisions P08-T02c1 item 3, P08-FIX-17 item 1, P08-FIX-19), §5 (Decision P08-T02b1 items 4, 5), specs/11 §6 (Decision P05-T09c item 4), specs/07 §8
   - Depends on: P08-FIX-19

@@ -174,3 +174,12 @@ Template:
 - Reasoning: the note's own principle is "only answers that report something that did not happen may read interrupted". A tool that finished before a barge-in on the filler (while a slower tool of the same round still runs) has the same risk: side effect and `call.tool` event in place, model told `interrupted`, second booking. specs/13 §5 Decision P08-T02b1 item 4 already says the barge-in answers the *unfinished* tools `interrupted`. The general rule needs no "where did the cut land" state and passes every test the note asks for.
 - Reversibility: High (one shared helper, two `finally` blocks)
 - Timestamp: 2026-11-05T14:10:00Z
+
+## DEC-014
+- **Decision:** What to do with review note 2026-11-05-p08-fix-20-wip-review.md item 1 (a `send_sms`/`schedule_callback` run that continues after the round was cut is answered `interrupted`, so the model may send the text again)
+- **Chosen Option:** Fix it in P08-FIX-21 with an explicit query: `ToolExecutor.detached(call) -> bool` (by object identity); a cut round answers a cancelled executor call `{"status":"in_progress"}` when the executor says its run goes on, `interrupted` otherwise. `CancelledError` always propagates.
+- **Confidence:** 70
+- **Alternatives Considered:** (a) close the item with a written reason (narrow window, predates FIX-20); (b) let `CallToolExecutor._run_system` catch the cancellation of its wait and return the `in_progress` answer (no protocol change). Rejected: a runner parked in `await task` that is itself cancelled forwards the cancel to the tool task; if that task then finishes with a result, the runner's own cancellation is lost and the reply keeps running. It would need shielded awaits in both runners and stays a trap for every later caller.
+- **Reasoning:** Decision P08-FIX-20's rule is "interrupted only for what did not happen"; for an executor-owned run the opposite is known at the cut, and a duplicate customer SMS is a visible defect that P08-T02c2 would spread to pathway calls. The query costs one protocol method, two fakes, and one extra argument to `settle_round`.
+- **Reversibility:** High before P08-T02c2 (one protocol method; implementations: `CallToolExecutor` and the test fakes)
+- **Timestamp:** 2026-11-05T15:05:00Z

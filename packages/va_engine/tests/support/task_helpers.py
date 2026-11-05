@@ -148,6 +148,9 @@ class NodeExecutor:
     def speech(self, name: str) -> str | None:
         return self.parent.speech(name)
 
+    def detached(self, call: ToolCall) -> bool:
+        return self.parent.detached(call)
+
     async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
         self.parent.ran.append((self.labels.get(call.name, call.name), call.name))
         return await self.parent.execute(call, scope)
@@ -160,8 +163,10 @@ class RecordingExecutor:
     when ``hold`` is set (only the tools named in ``holding`` otherwise), and takes ``durations[name]``
     seconds on ``clock`` (bind one to time calls).
     ``note`` is the tool usage note speech, ``speeches[name]`` the tool's ``speech`` template; ``started``
-    and ``cancelled`` record ``(name, clock ms)``. :meth:`for_refs` gives a node its :class:`NodeExecutor`,
-    whose runs are listed in ``ran`` as ``(label of the definition that ran, tool name)``."""
+    and ``cancelled`` record ``(name, clock ms)``. Runs of the tools named in ``detaching`` go on when their
+    wait is cancelled (like an executor-owned system tool): such calls are listed in ``left_running`` and
+    reported by :meth:`detached`. :meth:`for_refs` gives a node its :class:`NodeExecutor`, whose runs are
+    listed in ``ran`` as ``(label of the definition that ran, tool name)``."""
 
     tools: tuple[ToolDef, ...] = ()
     note: str | None = None
@@ -174,12 +179,14 @@ class RecordingExecutor:
     failing: frozenset[str] = frozenset()
     hold: bool = False
     holding: frozenset[str] = frozenset()
+    detaching: frozenset[str] = frozenset()
     clock: Clock | None = None
     calls: list[ToolCall] = field(default_factory=list)
     ran: list[tuple[str, str]] = field(default_factory=list)
     scopes: list[TemplateScope] = field(default_factory=list)
     started: list[tuple[str, float]] = field(default_factory=list)
     cancelled: list[tuple[str, float]] = field(default_factory=list)
+    left_running: list[ToolCall] = field(default_factory=list)
     active: int = 0
     max_active: int = 0
     release: asyncio.Event = field(default_factory=asyncio.Event)
@@ -216,6 +223,9 @@ class RecordingExecutor:
     def speech(self, name: str) -> str | None:
         return self.speeches.get(name)
 
+    def detached(self, call: ToolCall) -> bool:
+        return any(item is call for item in self.left_running)
+
     def _ms(self) -> float:
         return 0.0 if self.clock is None else round(self.clock.monotonic() * 1000, 3)
 
@@ -240,6 +250,8 @@ class RecordingExecutor:
             return ToolAnswer(content, self.variables.get(call.name, {}))
         except asyncio.CancelledError:
             self.cancelled.append((call.name, self._ms()))
+            if call.name in self.detaching:
+                self.left_running.append(call)
             raise
         finally:
             self.active -= 1
@@ -247,6 +259,11 @@ class RecordingExecutor:
     async def wait_active(self, count: int) -> None:
         async with asyncio.timeout(5), self.changed:
             await self.changed.wait_for(lambda: self.active >= count)
+
+    async def wait_started(self, name: str) -> None:
+        """Until a run of tool ``name`` started."""
+        async with asyncio.timeout(5), self.changed:
+            await self.changed.wait_for(lambda: any(started == name for started, _ in self.started))
 
 
 @dataclass(slots=True)

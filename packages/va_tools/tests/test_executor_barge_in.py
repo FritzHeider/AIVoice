@@ -1,5 +1,6 @@
-"""A barge-in during a system tool run (Decision P08-FIX-13 under specs/13 §6): the TaskBrain stops waiting,
-the run itself completes once, and the executor's ``aclose`` waits for it."""
+"""A barge-in during a system tool run (Decisions P08-FIX-13 and P08-FIX-21 under specs/13 §6): the
+TaskBrain stops waiting and answers the call ``in_progress``, the run itself completes once, and the
+executor's ``aclose`` waits for it."""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from va_common.time import FrozenClock
 from va_domain.org import OrgSettings
 from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
-from va_engine.task_tools import INTERRUPTED
+from va_engine.task_tools import IN_PROGRESS
 from va_llm.models import ToolCall
 from va_tools.executor import CallToolExecutor, SystemOutcome
 from va_tools.runner import ToolRunner
@@ -36,7 +37,7 @@ class _HeldSms:
         return SystemOutcome('{"status":"sent","segments":1}')
 
 
-async def test_a_barge_in_does_not_cancel_the_system_tool_run() -> None:
+async def test_a_barge_in_leaves_the_system_tool_run_in_progress() -> None:
     clock = FrozenClock()
     sms = _HeldSms()
     call = ToolCall(id="call_1", name="send_sms", arguments_json='{"message": "Your code is 42."}')
@@ -65,7 +66,9 @@ async def test_a_barge_in_does_not_cancel_the_system_tool_run() -> None:
     await reply.aclose()  # the barge-in stops the reply and its tool tasks
 
     assert sms.sent == []
+    assert executor.detached(call)
+    assert [m.content for m in brain.messages if m.role == "tool"] == [IN_PROGRESS]
     sms.gate.set()
     await executor.aclose()
     assert sms.sent == ["Your code is 42."]
-    assert [m.content for m in brain.messages if m.role == "tool"] == [INTERRUPTED]
+    assert [m.content for m in brain.messages if m.role == "tool"] == [IN_PROGRESS]

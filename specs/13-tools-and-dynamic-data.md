@@ -205,7 +205,7 @@ tools (§6). Name collisions: call-level inline tool overrides org tool with sam
 > the cut may land on the speech or filler line, while the tools are awaited, or at a `press_button`) a call is
 > answered `{"error":"interrupted"}` only when what it stands for did not happen:
 > 1. an executor call whose run was still unfinished and was cancelled at the cut (a system tool run behind the
->    executor continues detached, §6 Decision P08-FIX-13; its outcome is unknown to the round);
+>    executor continues detached and reads `{"status":"in_progress"}` instead, §6 Decision P08-FIX-21);
 > 2. a `press_button`, `end_call` or `transfer_call` that was not handed over (Decision P08-FIX-19).
 >
 > Every other call not answered yet gets the answer that is true for it. An executor call whose run finished
@@ -302,7 +302,7 @@ Inputs: tool definition, LLM arguments (JSON), engine variables, call context, `
 > 4. Step 9: the follow-up request starts once every tool of the round answered and the speech or filler line
 >    finished playing (the runner is parked while the line plays); a barge-in during the line cancels the
 >    unfinished tools and answers them `interrupted`. Tools that finished before the cut keep their answers
->    (§4 Decision P08-FIX-20).
+>    (§4 Decision P08-FIX-20); a system tool whose run goes on reads `in_progress` (§6 Decision P08-FIX-21).
 > 5. Variables: the round's non-null 2xx extractions are merged into the call's variables in call order after
 >    the round; tools of a round render with the variables of its start. The runtime snapshots the engine
 >    state to `call:{id}:engine` after a merge and the end routine merges its variables into `calls.variables`
@@ -370,8 +370,9 @@ tool calls per call: 100.
 >    `no_callable_number`), so the model is not offered them; a handler reached anyway answers
 >    `{"error":"sms_failed"|"callback_failed","reason":"no_callable_number"}`.
 > 2. A system tool run is a side effect the caller asked for, so it runs to completion when a barge-in
->    interrupts the turn: the executor owns each run as a task awaited through `asyncio.shield`. The model gets
->    the usual interruption answer; the run's outcome (failure event included) is still reported, and at call end
+>    interrupts the turn: the executor owns each run as a task awaited through `asyncio.shield`. The model is
+>    told the run is in progress (Decision P08-FIX-21); the run's outcome (failure event included) is still
+>    reported, and at call end
 >    `CallToolExecutor.aclose` waits up to 20 s for unfinished runs (before the snapshot and the call's events
 >    are flushed), then cancels the rest (`tools.system_tools_abandoned`).
 > 3. Per-call caps: `send_sms` sends at most 3 messages per call (sent or in flight; a message Telnyx did not
@@ -408,6 +409,28 @@ tool calls per call: 100.
 > the cleanup: a wedged teardown can no longer pass for a live call. The heartbeat also stops as soon as the
 > renewer reports the lock lost (during the race or the teardown): the pod that lost the call stops vouching
 > for it.
+>
+> Decision (2026-11-05) P08-FIX-21: a system tool run that goes on after its round was cut (Decision P08-FIX-13
+> item 2) is answered `{"status":"in_progress"}`, not `{"error":"interrupted"}`. The message will normally be
+> sent or the callback scheduled, and `interrupted` would make the model of the superseding or next turn do it
+> again (a second text to the customer). This is the rule of specs/13 §4 Decision P08-FIX-20 ("`interrupted`
+> only for what did not happen") applied to a run whose continuation is known at the cut.
+> 1. The executor reports such calls: `va_engine.tool_executor.ToolExecutor.detached(call) -> bool`, by object
+>    identity (call ids may be empty or repeated, and equal calls are different runs). `CallToolExecutor` notes
+>    a call when the wait for its executor-owned run is cancelled while the run itself is not (still running, or
+>    just finished). A run cancelled by `aclose` is not detached, and neither is a custom tool: its request is
+>    cancelled with the wait. Both still read `interrupted`.
+> 2. `va_engine.tool_tasks.cut_contents` / `settle_round(..., executor=)` ask the executor that ran the round
+>    for every executor call cancelled at the cut (`va_engine.task_tools.IN_PROGRESS`); a call whose run
+>    finished keeps its real answer as before.
+> 3. The cancellation of the wait always propagates: the executor never turns a cancelled wait into an answer.
+>    A runner cancelled while it awaits a tool task forwards the cancel to that task, and a tool task that then
+>    ended with a result would swallow the runner's own cancellation (the reply would run on).
+> 4. The run's outcome is reported as before (`call.sms_sent` / `call.scheduled`, a failure as `call.error`
+>    `TOOL_FAILED`); the model is not told it later. The per-call caps of Decision P08-FIX-13 item 3 still
+>    bound a model that sends again anyway.
+>
+> Applies to task-mode calls now and to pathway calls once their executor is wired (P08-T02c2).
 >
 > Decision (2026-11-02): the end reason of a call ended through `end_call` is the normative specs/05 §9
 > `agent_end_call` (the table's `agent_end_call_tool` is not a §9 value). In task mode the final line is the

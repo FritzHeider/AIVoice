@@ -4,8 +4,10 @@ Custom tools and the executor-backed system tools (``send_sms``, ``schedule_call
 run outside the engine (``va_tools.executor.CallToolExecutor``). Runners call :meth:`ToolExecutor.execute`
 only with calls whose name :meth:`ToolExecutor.handles` (system tool arguments are validated first); the
 returned :class:`ToolAnswer` carries the content of the ``tool`` message answering the call and the variables
-the call extracted. Pathway calls use a :class:`PathwayToolExecutor`, which hands every node the
-:class:`ToolExecutor` of exactly the tools that node's refs name (specs/13 §4, Decision P08-FIX-17).
+the call extracted. A run the executor keeps going after the wait for its answer was cancelled is reported
+by :meth:`ToolExecutor.detached` (specs/13 §6, Decision P08-FIX-21). Pathway calls use a
+:class:`PathwayToolExecutor`, which hands every node the :class:`ToolExecutor` of exactly the tools that
+node's refs name (specs/13 §4, Decision P08-FIX-17).
 """
 
 from __future__ import annotations
@@ -54,6 +56,12 @@ class ToolExecutor(Protocol):
 
     async def execute(self, call: ToolCall, scope: TemplateScope) -> ToolAnswer:
         """Run ``call`` with templates rendered in ``scope``; a failure is reported in the answer content."""
+        ...
+
+    def detached(self, call: ToolCall) -> bool:
+        """Whether a run of ``call`` (this very object: call ids may be empty or repeated) goes on although
+        the wait for its answer was cancelled. A cut round answers such a call ``in_progress`` instead of
+        ``interrupted`` (specs/13 §6, Decision P08-FIX-21)."""
         ...
 
 
