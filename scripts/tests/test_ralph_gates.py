@@ -1,7 +1,8 @@
 """Tests for `scripts/ralph/gates.sh`: gate stamps keyed by the working-tree fingerprint.
 
 Each test runs the real script inside a throwaway git repository with fake `make` and `uv` executables first
-on `PATH`, so no real gate runs.
+on `PATH`, so no real gate runs. The one exception scans the loop's shell scripts with the real
+unfinished-work detector, which the fake `make` never does.
 """
 
 import json
@@ -13,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+import check_no_placeholders
+
 GATES_SCRIPT = Path(__file__).resolve().parents[1] / "ralph" / "gates.sh"
 CORE_GATES = ["lint", "typecheck", "".join(("place", "holders")), "openapi", "specs", "test"]
 CORE_CALLS = [
@@ -23,6 +26,8 @@ CORE_CALLS = [
     "uv run python scripts/check_spec_refs.py",
     "make test",
 ]
+DETECTOR_GATE = CORE_GATES[2]
+GATE_LIST_LINE = "gates: " + " ".join([*CORE_GATES, "ts", "e2e"])
 EXIT_VERIFY_FAILED = 1
 EXIT_USAGE = 64
 EXIT_TREE_CHANGED = 75
@@ -335,3 +340,42 @@ def test_help_prints_usage(repo: Repo) -> None:
 
     assert outcome.code == 0
     assert outcome.out.startswith("usage: scripts/ralph/gates.sh")
+
+
+def test_help_lists_every_gate_by_name(repo: Repo) -> None:
+    outcome = repo.gates("--help")
+
+    assert outcome.code == 0
+    assert outcome.err == ""
+    assert outcome.out.splitlines()[-1] == GATE_LIST_LINE
+    assert repo.calls() == []
+
+
+def test_usage_errors_list_every_gate_by_name(repo: Repo) -> None:
+    outcome = repo.gates("--only", "nonsense")
+
+    assert outcome.code == EXIT_USAGE
+    assert outcome.err.splitlines()[-1] == GATE_LIST_LINE
+
+
+def test_the_detector_gate_runs_alone_under_its_makefile_name(repo: Repo) -> None:
+    outcome = repo.gates("--only", DETECTOR_GATE)
+
+    assert outcome.code == 0, outcome.err
+    assert repo.calls() == ["make " + DETECTOR_GATE]
+    assert repo.stamp().gates == {DETECTOR_GATE: (0, DETECTOR_GATE + " ok")}
+    assert repo.gates("--verify", "--only", DETECTOR_GATE).code == 0
+
+    needs_the_rest = repo.gates("--verify")
+
+    assert needs_the_rest.code == EXIT_VERIFY_FAILED
+    assert "lint          not run" in needs_the_rest.out
+    assert repo.calls() == ["make " + DETECTOR_GATE]
+
+
+def test_the_ralph_scripts_pass_the_unfinished_work_detector() -> None:
+    root = GATES_SCRIPT.parents[2]
+    files = sorted(GATES_SCRIPT.parent.glob("*.sh"))
+
+    assert GATES_SCRIPT in files
+    assert [item.render() for item in check_no_placeholders.scan(root, files)] == []

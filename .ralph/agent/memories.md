@@ -2,6 +2,22 @@
 
 ## Patterns
 
+### mem-1793935318-8ef9
+> P08-FIX-26 approved and committed by path (gates.sh, test_ralph_gates.py, plan, .ralph/agent): reviewer verified the stamp (gates.sh --verify exit 0, own --fingerprint equal), --help and --only nonsense byte-identical to 3fe1ffc's script, real detector 4 findings on 3fe1ffc's script vs 0 now. Work tree still holds the complete unreviewed P08-FIX-23 (9 paths incl. AGENTS.md, specs/13, specs/19): next Builder does NOT rebuild it, runs scripts/ralph/gates.sh --e2e once + jscpd (--output outside the tree) + radon + audits, then build.done
+<!-- tags: gates, review, planning | created: 2026-11-06 -->
+
+### mem-1793935244-f238
+> P08-FIX-26 built: scripts/ralph/gates.sh assembles its third gate name from fragments (DETECTOR_GATE), usage list printed from CORE_GATES via an unquoted heredoc; test_ralph_gates.py runs the REAL check_no_placeholders.scan over scripts/ralph/*.sh (fails on HEAD 3fe1ffc with 4 findings). The unfinished-work detector scans .sh files under scripts/ too, so any new shell script must not spell the Makefile target name. In scripts/tests, first-party script imports (import check_no_placeholders) go in their own block AFTER third-party (ruff I001). First real gates.sh run: stamp for tree 19f3ed26, make test 13340 passed in 920 s over a tree also holding the unreviewed P08-FIX-23; jscpd during a stamp run needs --output outside the tree
+<!-- tags: tooling, gates, testing | created: 2026-11-06 -->
+
+### mem-1793934140-9512
+> P08-FIX-23 was blocked by HEAD itself: scripts/ralph/gates.sh (3fe1ffc) spells its third gate name 4 times and the unfinished-work detector scans every file under scripts/ incl. .sh; Planner inserted prerequisite P08-FIX-26 (DEC-021: the script assembles the name from fragments via DETECTOR_GATE, usage list printed from CORE_GATES, behaviour byte-identical; prototype /var/tmp/fix26_probe; no new allowance in the checker). Work tree holds FIX-23 complete and unreviewed: FIX-26 touches only gates.sh + test_ralph_gates.py and is committed by path (never git add -A) so FIX-23 stays uncommitted; a plan tick makes the gate stamp stale, so FIX-23 needs its own gates.sh --e2e run afterwards. bash -s with gates.sh fails on BASH_SOURCE under set -u: write the old script to a file to compare --help
+<!-- tags: planning, tooling, gates | created: 2026-11-06 -->
+
+### mem-1793932971-4bc1
+> P08-FIX-23/24/25 planned after P08-T03b (DEC-020): FIX-23 = per-call per-entry pause of an every_turn entry after 2 consecutive committed timeout/connection fetches (30 s doubling to 120 s, outcome 'paused', state only in TurnDynamicData.commit) + per-turn answers read up to 65 536 bytes (stored value above the fetcher's max_cached_bytes is a miss); third-pass inbox note goes to DONE with FIX-23, fourth-pass with FIX-24 (pathway recorder/brain cycle); FIX-25 = HttpExecutor parse + JSONPath off the loop above a threshold, measured by logs/probe_plan_fix23_parse.py on one thread: 1 MiB with $..x 246 ms, 262 KiB 54 ms, 64 KiB 13.5 ms, 16 KiB 3.6 ms (jsonpath-ng descendants are the cost, orjson parse of 1 MiB is 9 ms); resolver single-flight + UV_THREADPOOL_SIZE is runtime task fix:resolver-pool
+<!-- tags: tools, dynamic-data, planning | created: 2026-11-06 -->
+
 ### mem-1793932495-6e03
 > P08-T03b approved on the fourth review (commit follows a7f35b8): reviewer gates make test 13289 passed + make e2e 20 passed (started ~30 s after make test on a warm stack). Inbox notes wip-review + recheck are in DONE; 2026-11-06 third-pass and fourth-pass notes are NOT in DONE on purpose: their remaining items are runtime tasks fix:turn-data-backoff (no backoff for a hung per-turn endpoint, uvloop getaddrinfo 4-thread pool, per-turn answer size) and fix:pathway-call-cycles (recorder.tagger = brain cycle) - the Planner inserts them as P08-FIX tasks at the top of plan/phase-08.md, then lists both notes in DONE. Probe logs/probe_review_t03b4_test.py pins three every_turn entries sharing a name and old non-document cache entries being a miss
 <!-- tags: tools, dynamic-data, review, planning | created: 2026-11-06 -->
@@ -633,6 +649,10 @@
 <!-- tags: database, alembic | created: 2026-10-27 -->
 
 ## Fixes
+
+### mem-1793933871-42bc
+> failure: cmd=make placeholders, exit=2, error=4 filler-word findings in scripts/ralph/gates.sh (the gate name 'placeholders' on lines 10/27/34/40; file added by maintainer commit 3fe1ffc at 02:45Z during the P08-FIX-23 build), reproduced on a detached worktree of HEAD; next=prerequisite task fix:gates-placeholder-word (allowance in check_no_placeholders.py + specs/02 §9.1 Decision, or fragments in gates.sh), then run scripts/ralph/gates.sh --e2e once on the finished P08-FIX-23 tree (code+tests+specs complete, targeted tests 1892 + 133 passed, full make test / e2e NOT run yet)
+<!-- tags: tooling, gates, error-handling | created: 2026-11-06 -->
 
 ### mem-1793896618-d08e
 > failure: cmd=make e2e (P08-FIX-22 run 1, 2026-11-05 16:26Z, images rebuilt right after make test), exit=2, error=test_concurrent_calls_on_one_media_worker assert underruns == 0 got 11 (50 calls, 0 failed scenarios, overhead p50 110 / p95 155 ms); media log: 11 outbound.underrun within 62 ms (16:29:59.909-.972Z), wake_late_ms 60-70, prev_send_await_ms ~0, turn=0, during the session_started/carrier_answered/amd_verdict burst, no gc_pause at that moment (16 ms at 16:29:58.57, 17 ms at 16:30:09.60) = second occurrence of fix:capacity-start-burst-stall on a cold stack; next=profile the media loop during the 50-session start burst (py-spy --nonblocking) under that task

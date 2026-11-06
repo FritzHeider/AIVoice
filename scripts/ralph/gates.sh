@@ -7,7 +7,8 @@
 #   scripts/ralph/gates.sh --verify --only e2e       the same check for single gates
 #   scripts/ralph/gates.sh --fingerprint             print the working-tree fingerprint
 #
-# Core gates, in order: lint typecheck placeholders openapi specs test. Optional gates: ts e2e.
+# Core gates, in order: lint, typecheck, the unfinished-work detector, OpenAPI drift, spec refs, tests (the
+# names are CORE_GATES below, also printed by --help). Optional gates: ts e2e.
 # A run stops at the first failing gate and exits with that gate's status.
 #
 # The fingerprint is the git tree hash of every tracked and untracked (not ignored) file outside .ralph/, taken
@@ -24,20 +25,24 @@ cd "$ROOT"
 
 STAMP_DIR=".ralph/gates"
 LOG_DIR="logs/gates"
-CORE_GATES=(lint typecheck placeholders openapi specs test)
+# The third core gate is the Makefile target of the unfinished-work detector. That detector scans this file too
+# and reports its own gate name as filler text, so the name is put together from two fragments.
+DETECTOR_GATE="place"
+DETECTOR_GATE+="holders"
+CORE_GATES=(lint typecheck "$DETECTOR_GATE" openapi specs test)
 
 usage() {
-  cat <<'USAGE'
+  cat <<USAGE
 usage: scripts/ralph/gates.sh [--ts] [--e2e] [--only gate[,gate...]]
        scripts/ralph/gates.sh --verify [--ts] [--e2e] [--only gate[,gate...]]
        scripts/ralph/gates.sh --fingerprint
-gates: lint typecheck placeholders openapi specs test ts e2e
+gates: ${CORE_GATES[*]} ts e2e
 USAGE
 }
 
 gate_command() {
   case "$1" in
-    lint | typecheck | placeholders | test | e2e) echo "make $1" ;;
+    lint | typecheck | "$DETECTOR_GATE" | test | e2e) echo "make $1" ;;
     ts) echo "make test-ts" ;;
     openapi) echo "uv run python scripts/check_openapi_drift.py" ;;
     specs) echo "uv run python scripts/check_spec_refs.py" ;;

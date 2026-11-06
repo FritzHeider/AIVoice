@@ -1,5 +1,98 @@
 # Phase 08 — Tools, Dynamic Data, Custom Code, Knowledge Bases
 
+- [x] P08-FIX-26 `scripts/ralph/gates.sh` passes the unfinished-work gate it runs (prerequisite of P08-FIX-23: `make placeholders` fails on HEAD since 3fe1ffc with 4 `filler-word` findings in that script, so neither `make check` nor the stamp script can pass) — `scripts/ralph/gates.sh --verify` exit 0 on tree 19f3ed26 (lint, typecheck, the detector gate `0 finding(s)`, openapi, specs, `make test` 13340 passed / 7 skipped, coverage 99.09 %); reviewer re-checks: `--help` and `--only nonsense` output byte-identical to 3fe1ffc's script, the real detector reports 4 findings on 3fe1ffc's script and 0 on every `scripts/ralph/*.sh` now, `scripts/tests/test_ralph_gates.py` + `test_check_no_placeholders.py` 133 passed; jscpd 0 clones, radon 2.95, audits clean (Builder); only `gates.sh` and `test_ralph_gates.py` changed
+  - Spec refs: specs/02-repo-layout-and-conventions.md §9.1 (the gate scans every file under `scripts/`; Decision 2026-10-25 (c): the only allowed spans, (g): no inline suppression); AGENTS.md "Learned during the build" 2026-10-25 (P00-T03): scanned files build the banned word from fragments
+  - Depends on: —
+  - Deliverables: Planner decision (2026-11-06, DEC-021): the script changes, the gate does not (no new
+    allowance, no spec change). `scripts/ralph/gates.sh` puts the third core gate's name together from two
+    fragments (`DETECTOR_GATE`), uses it in `CORE_GATES` and in the `gate_command` pattern, prints the usage
+    gate list from `CORE_GATES`, and rewords the header comment. Behaviour is unchanged: same gate names
+    (stamp keys, `--only` values), same commands, same `--help` text byte for byte, same exit codes.
+    `scripts/tests/test_ralph_gates.py`: the real detector finds nothing in any `scripts/ralph/*.sh`; the
+    `--help` gate list is pinned; the detector gate runs alone through `--only` under its Makefile name.
+    Touch NO other file (not AGENTS.md either: its work-tree diff is the P08-FIX-23 bullet, and the reason for
+    the fragments is a comment in the script; the rule itself is already the P00-T03 bullet): the work tree
+    also holds the complete, unreviewed P08-FIX-23 (see that task's note).
+  - Acceptance: `make placeholders` exits 0 on the work tree; `uv run pytest scripts/tests/test_ralph_gates.py
+    scripts/tests/test_check_no_placeholders.py -q` passes, and the new detector test fails against HEAD's
+    script; `git show 3fe1ffc:scripts/ralph/gates.sh > /var/tmp/gates_head.sh && diff <(bash
+    /var/tmp/gates_head.sh --help) <(bash scripts/ralph/gates.sh --help)` is empty; `scripts/ralph/gates.sh`
+    passes and `--verify` exits 0 (no `--e2e`: no call flow is touched). The Reviewer commits ONLY this task's
+    files by path, never `git add -A`: `git add scripts/ralph/gates.sh scripts/tests/test_ralph_gates.py
+    plan/phase-08.md .ralph/agent && git commit` (the P08-FIX-23 files stay modified and uncommitted), footer
+    `Task: P08-FIX-26`; runtime task `fix:gates-placeholder-word` is closed on approval.
+- [ ] P08-FIX-23 Per-turn dynamic data: an entry whose endpoint does not answer is paused (not asked again every turn), and per-turn answers are read up to 64 KiB — see .ralph/review-inbox/2026-11-06-p08-t03b-third-pass.md (items 4, 5) and .ralph/review-inbox/2026-11-06-p08-t03b-fourth-pass.md (item 2 and "unchanged, low confidence"); no blockers
+  - Spec refs: specs/13-tools-and-dynamic-data.md §7 (Decisions P08-T03a rules 2, 3, 6 and the Event paragraph; P08-T03b items 2, 3, 5, 6); specs/19-events-and-webhooks.md §2 (`call.dynamic_data`)
+  - Depends on: P08-T03b, P08-FIX-26
+  - Status (Planner, 2026-11-06T03:10Z): BUILT, not yet gated or reviewed. The work tree holds the complete
+    change (AGENTS.md bullet 2026-11-06 (P08-FIX-23), apps/media_worker/src/va_media/call_dynamic_data.py,
+    apps/media_worker/tests/test_call_dynamic_data.py, packages/va_tools/src/va_tools/{dynamic_data,turn_data}.py,
+    packages/va_tools/tests/test_{dynamic_data,turn_data}.py, specs/13-tools-and-dynamic-data.md,
+    specs/19-events-and-webhooks.md; scratchpad "## Build P08-FIX-23"). The build stopped at `make
+    placeholders` (P08-FIX-26). Once that is committed, do NOT rebuild: read the diff, run
+    `scripts/ralph/gates.sh --e2e` once (background + heartbeat), jscpd, radon, the audits, and emit
+    `build.done`.
+  - Deliverables: Planner decision (2026-11-06, DEC-020). `va_tools.turn_data.TurnDynamicData` pauses an
+    entry after `PAUSE_AFTER` (2) consecutive committed fetches that ended `timeout` or `connection`: it is
+    not fetched for `PAUSE_S` (30 s of the fetcher's clock, doubling per consecutive pause up to
+    `MAX_PAUSE_S` 120 s), the first fetch after the pause is a probe (unanswered → paused again, any other
+    outcome ends the streak). A paused entry keeps its lines, its value and the names it holds, costs the turn
+    no wait, and is reported per turn as `call.dynamic_data` with the new outcome `paused` (level `warning`,
+    message `Dynamic data paused: endpoint not answering`). The streak and the pause change only in the
+    commit (a turn cut before it counts nothing). `DynamicDataFetcher.clock`, `DynamicDataFetcher.unfetched(
+    spec, index, scope, outcome)`, `max_cached_bytes=` (a stored value above it is a miss). The media worker's
+    `TurnDataSource` reads per-turn answers up to `TURN_MAX_ANSWER_BYTES` (65 536; a larger one is cut, so
+    not readable: stale value kept, not cached) and treats a larger stored answer as a miss. specs/13 §7
+    Decision `P08-FIX-23` (+ amendments of Decision P08-T03a rule 6 / Event paragraph and Decision P08-T03b
+    items 2, 3), specs/19 §2 row pointer, AGENTS.md.
+  - Acceptance: va_tools tests on the manual clock: two unanswered fetches (`timeout` and `connection`) pause
+    the entry (no third request, `paused` event data and message, stale lines, the turn does not wait); the
+    pause ends after 30 s, an answered probe resumes the entry and resets the streak, an unanswered probe
+    pauses 60 s then 120 s then 120 s; an answered fetch (500, ok, unreadable 2xx) between two unanswered ones
+    resets the streak; refreshes that are never applied count nothing; only the unanswering entry is paused;
+    a paused later entry keeps the name it shares; a second call's `TurnDynamicData` over the same fetcher is
+    not paused. Fetcher tests: `unfetched` (redacted URL, empty for an unrenderable one), a stored answer
+    above `max_cached_bytes` is a miss and a larger answer is not stored. Media tests: a 70 KiB per-turn
+    answer is cut (event `ok`, `variables_set: []`, lines kept, nothing cached), a 60 KiB one is read; two
+    refused connections pause the entry and the recorder publishes the `paused` event. `make check` and
+    `make e2e` pass. On approval append `2026-11-06-p08-t03b-third-pass.md` to `.ralph/review-inbox/DONE`
+    (its items 1-3 were fixed by 6d80843, items 4 and 5 by this task).
+  - Not in this task (Planner, 2026-11-06, DEC-020): the pause is per call and per entry. It bounds what one
+    call sends to an endpoint that does not answer; it does not make the pod's name lookups independent of
+    such endpoints (every new call still asks twice per entry, a lookup already started keeps its resolver
+    thread). Single-flight lookups per host for the tools client and `UV_THREADPOOL_SIZE` for the media
+    worker are runtime task `fix:resolver-pool` (measure first: `docker run --dns 192.0.2.1`). Parsing and
+    searching large tool / Webhook node answers off the event loop is P08-FIX-25.
+- [ ] P08-FIX-24 A finished pathway call must not sit on a recorder/brain reference cycle — see .ralph/review-inbox/2026-11-06-p08-t03b-fourth-pass.md (item 5; predates P08-T03b, not a blocker)
+  - Spec refs: specs/07-media-pipeline.md §9 (Decision P08-FIX-3: finished calls are freed by refcounting), specs/11-pathways-engine.md §10 (Decision P07-T12b)
+  - Depends on: P08-T03b
+  - Deliverables: confirm first with `gc_cycles.unreachable_after()` + `cycles_through(garbage,
+    ("PathwayBrain", "PathwayEngine", "TurnRecorder", "TurnDynamicData", "PathwayCallTools"))` on a runtime
+    sim pathway call (`apps/media_worker/tests/test_runtime_pathway_sim.py`); break every cycle found
+    (`recorder.tagger = brain` in `va_media.pathway_runtime` against `RecorderEvents(recorder)`,
+    `PathwayToolEvents(recorder, state)`, `TurnDynamicData._events`): unwire on the call's exit stack or hand
+    the recorder a tags function over the state instead of the brain (AGENTS.md P08-FIX-3 rules); runtime task
+    `fix:pathway-call-cycles`.
+  - Acceptance: a GC guard test for a finished pathway call (with a node tool and an `every_turn` entry) in
+    the runtime sim finds no cycle through the call's parts, and fails without the fix; the task-call guards
+    still pass; `make check` and `make e2e` pass (capacity flow included). On approval append
+    `2026-11-06-p08-t03b-fourth-pass.md` to `.ralph/review-inbox/DONE` (items 1, 3, 4 fixed by 6d80843,
+    item 2 by P08-FIX-23, item 5 here).
+- [ ] P08-FIX-25 Large HTTP answers are parsed and JSONPath-searched off the event loop (tools, Webhook nodes, dynamic data) — Planner measurement 2026-11-06 (`logs/probe_plan_fix23_parse.py`, one thread: 1 MiB answer with `$..x` 246 ms, `$.data.items[*].plan.tier` 69 ms, parse alone 9 ms; 262 KiB 54 ms; 64 KiB 13.5 ms; 16 KiB 3.6 ms); raised as low confidence in .ralph/review-inbox/2026-11-06-p08-t03b-third-pass.md item 5
+  - Spec refs: specs/13-tools-and-dynamic-data.md §9 (Decision 2026-11-03: the shared HTTP executor), §5 steps 4-6, §7 (Decision P08-T03a rule 2); MASTER_PROMPT §4 rule 7; specs/07-media-pipeline.md §9 (Decision P08-FIX-3)
+  - Depends on: P08-FIX-23
+  - Deliverables: `va_tools.http.HttpExecutor` parses the body and applies the `extract` JSONPaths in a worker
+    thread (`asyncio.to_thread`) when the raw body is larger than an inline threshold (decide it from a
+    measurement on this runner, about 8 KiB; small answers stay inline), and
+    `DynamicDataFetcher`'s cache-hit path does the same for a stored value above the threshold; a cancelled
+    request does not wait for the thread; specs/13 §9 Decision `P08-FIX-25` with the measured numbers;
+    AGENTS.md.
+  - Acceptance: tests: a body above the threshold is parsed and searched off the loop thread (the test
+    records the thread of `orjson.loads`/`extract_all` through a seam, or a loop-lag probe task ticking every
+    millisecond sees no gap above 10 ms while a 1 MiB `$..x` answer is handled) and gives the same outcome as
+    the inline path (parametrized twins for ok / text / truncated / extraction miss); a body at or below the
+    threshold never leaves the loop thread; a cache hit above the threshold likewise; `make check` and
+    `make e2e` pass.
 - [x] P08-FIX-22 "The run goes on after a cut round" is a property of the system tool (`SystemTool.detaches`), not of being a system tool — see .ralph/review-inbox/2026-11-05-p08-fix-21-wip-review.md (no blockers; item 1 fixed here, items 2 and 3 closed with a written reason below) — `va_tools.executor.SystemTool.detaches` (protocol member, no default), `CallToolExecutor._run_system` runs a non-detaching tool in the waiting task (never pending, never detached, reads `interrupted`), `ToolSms`/`CallbackScheduler` `detaches: Final = True`, 6 new test cases (3 parametrized twins, cancelled-with-its-wait, TaskBrain barge-in `interrupted`, media class check), Decision P08-FIX-22 (specs/13 §6, pointers in Decisions P08-FIX-13 item 2 and P08-FIX-21 item 1); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, make test 13092 passed 7 skipped (cov 99.08%, va_tools/executor 99%), make e2e 20 passed (capacity flow 0 underruns; the builder's first run on the cold stack had 11 underruns from one ~65 ms media loop stall, runtime task fix:capacity-start-burst-stall, the flow runs no system tool); reviewer mutation checks on a shadow copy: always shield → the 2 non-detaching tests fail, never shield → 6 fail, `ToolSms.detaches = False` → the media test fails
   - Spec refs: specs/13 §6 (Decisions P08-FIX-13 item 2, P08-FIX-21), specs/13 §4 (Decision P08-FIX-20)
   - Depends on: P08-FIX-21

@@ -1429,3 +1429,421 @@ what is still open in them and must become P08-FIX tasks at the top of `plan/pha
   `unreachable_after()` in `test_runtime_pathway_sim.py` first → runtime task `fix:pathway-call-cycles`
   (task-1793902623-4ed4).
 Once both are FIX tasks (or approved), list the two notes in `DONE`.
+
+## Planner 2026-11-06T02:40Z: after P08-T03b (commit 6d80843)
+
+Inbox: only `2026-11-06-p08-t03b-third-pass.md` and `-fourth-pass.md` are not in `DONE`. Their open items
+are now plan tasks at the top of `plan/phase-08.md`:
+- **P08-FIX-23** (this plan): third-pass items 4 + 5, fourth-pass item 2 + "unchanged, low confidence".
+  On approval the Reviewer appends `2026-11-06-p08-t03b-third-pass.md` to `DONE`.
+- **P08-FIX-24**: fourth-pass item 5 (recorder/brain cycle of pathway calls; runtime task
+  `fix:pathway-call-cycles`). On approval the Reviewer appends `2026-11-06-p08-t03b-fourth-pass.md`.
+- **P08-FIX-25** (Planner's own, from a measurement made while planning): `HttpExecutor` parses and searches
+  answers of up to 1 MiB on the event loop. `logs/probe_plan_fix23_parse.py` (one thread, this runner):
+  1 MiB with `$..x` 246 ms, with `$.data.items[*].plan.tier` 69 ms, parse alone 9 ms; 262 KiB 54 ms;
+  64 KiB 13.5 ms; 16 KiB 3.6 ms. Tools and Webhook nodes run this in the media worker today.
+Runtime task `fix:resolver-pool` (new) holds what the pause cannot do: single-flight name lookups per host
+and `UV_THREADPOOL_SIZE` (see "Not in this task" below). DEC-020 records the scope decision.
+
+## Plan P08-FIX-23 (pause an unanswering per-turn entry; per-turn answers ≤ 64 KiB)
+
+Why: every caller turn re-fetches every `every_turn` entry with 800 ms and no memory of the last turn. An
+endpoint that hangs costs each turn up to 0.8 s (task call: before the first LLM request) for the whole call.
+And a per-turn answer is parsed + JSONPath-searched on the media loop (numbers above).
+
+### Semantics (goes into specs/13 §7 as `> Decision (2026-11-06) P08-FIX-23`, after the P08-T03b block)
+
+1. **Unanswered.** A fetch whose outcome is `timeout` or `connection` (no response arrived: the budget or the
+   request timeout ran out, the connection or the name lookup failed). Every other outcome is "answered or
+   not sent" (`ok` readable or not, cached or not; `http_error`; `blocked`; `invalid_url`; `render_error`;
+   `error`) and ENDS the streak.
+2. **Pause.** Per entry of one call: after `PAUSE_AFTER = 2` consecutive unanswered fetches that were
+   committed, the entry is paused for `PAUSE_S = 30.0` s of the fetcher's clock (monotonic), counted from that
+   commit. While paused it is not fetched: no request, no cache lookup, no render of the request beyond the
+   URL for the event. The first refresh at or after the end of the pause fetches it again (the probe):
+   unanswered → paused again at once (the streak is still ≥ 2), twice as long, capped at
+   `MAX_PAUSE_S = 120.0` (30, 60, 120, 120, …); any other outcome → streak and pause length reset.
+3. **A paused entry in a turn** is an entry that does not count (Decision P08-T03b item 3): its lines and
+   the call's values stay, it holds the names of its last counted fetch against earlier entries, and it adds
+   no wait (a refresh whose entries are all paused returns without awaiting anything; the other entries of
+   the turn are fetched as before).
+4. **Commit only.** Streak, pause count and pause end change in `TurnDynamicData.commit` (with `_lines` and
+   `_names`), never in `refresh`: a turn cut before its commit, or one whose decision failed, counts nothing,
+   as it reports nothing (item 5 of P08-T03b stays true word for word). Stated consequence: unanswered
+   fetches of cut turns do not bring the pause nearer.
+5. **Event.** One `call.dynamic_data` per paused entry per turn: outcome `paused`, level `warning`, message
+   `Dynamic data paused: endpoint not answering`, data `status_code: null`, `duration_ms: 0`,
+   `variables_set: []`, `cached: false`, `url` as for a timed-out fetch (redacted; empty when the URL does
+   not render), `timing: "every_turn"`. `paused` exists only for per-turn fetches. Log
+   `tools.turn_data_paused` (warning; `index`, `pause_s`, `unanswered`) once when a pause starts, never a URL.
+6. **Size.** The media worker reads a per-turn answer up to `TURN_MAX_ANSWER_BYTES = 65_536`; a larger one is
+   cut, so it is `ok`, not readable: nothing set, lines kept, not cached (existing rules). A stored `dyn:`
+   value longer than that limit plus the envelope is a miss for a per-turn fetch (the request then goes out).
+   The pre-call phase (worker) keeps 1 MiB / 262 144. Why 64 KiB: the measured numbers above (put them in the
+   Decision); honest remainder: 64 KiB with a `$..` path is still ~14 ms on the loop per entry until
+   P08-FIX-25.
+7. **Scope, stated as a limit.** Per call, per entry, in memory: calls do not share it, a new call starts at
+   zero (its pre-call fetch in the worker has its own 5 s / 6 s rule). It bounds what one call sends; it does
+   not free a resolver thread a started lookup holds.
+Amend in the same commit: Decision P08-T03a rule 6 (outcome list: + `paused`, per-turn only, pointer) and its
+**Event** paragraph (the third message form); Decision P08-T03b item 2 ("every `every_turn` entry is fetched
+again" → "... that is not paused (Decision P08-FIX-23)") and item 3 (a paused entry is one that does not
+count); the `Code:` paragraph. specs/19 §2 row `call.dynamic_data`: append
+`; outcome values: specs/13 §7 Decisions P08-T03a rule 6 and P08-FIX-23` inside the description cell (same
+line: `check_spec_refs` pairs `§` with the spec named earlier on the line; do not touch the other columns,
+`test_catalog` parses them).
+
+### 1. `packages/va_tools/src/va_tools/dynamic_data.py`
+
+- `type DynamicOutcome = HttpOutcomeKind | Literal["render_error", "error", "paused"]`.
+- `DynamicDataResult.message()`: first branch `if self.outcome == "paused": return "Dynamic data paused:
+  endpoint not answering"`. `failed`/`level` unchanged (`paused` is not `ok` → `warning`).
+- `DynamicDataFetcher.__init__(self, http, *, redis, org_id, clock, max_cached_bytes: int =
+  MAX_CACHED_BYTES)`; `@property clock(self) -> Clock`.
+- `def unfetched(self, spec, index, scope, outcome: Literal["timeout", "paused"], *, duration_ms: int = 0)
+  -> DynamicDataResult`: the result of a fetch that produced no answer of its own (redacted rendered URL,
+  `""` when it does not render), returned through `_logged`. `_timed_out` becomes a call of it
+  (`duration_ms=round(budget_s * 1000)`; `fetch_all` must not log twice: today it wraps `_timed_out` in
+  `_logged`, keep exactly one log line per result).
+- Cache: `_store` uses `self._max_cached_bytes` (it becomes an instance method or takes the limit);
+  `_lookup`: a raw value with `len(raw) > max_cached_bytes + _ENVELOPE_BYTES` (`_ENVELOPE_BYTES: Final = 32`,
+  the `{"status":NNN,"body":}` wrapper is 22) is a miss, checked BEFORE `json.loads`, logged
+  `tools.dynamic_data_cache_oversized` (info, `index`). So whatever a fetcher stores it also hits.
+- Module docstring: rules 2 and 3 (the limit is the fetcher's), the outcome list, `unfetched`.
+  Keep `_fetch` at or below its current radon grade (C 11): put the size check inside `_lookup`.
+
+### 2. `packages/va_tools/src/va_tools/turn_data.py`
+
+- Constants (in `__all__`): `PAUSE_AFTER: Final = 2`, `PAUSE_S: Final = 30.0`, `MAX_PAUSE_S: Final = 120.0`,
+  `TURN_MAX_ANSWER_BYTES: Final = 65_536`; `_UNANSWERED: Final = frozenset({"timeout", "connection"})`.
+- `@dataclass(slots=True) class _Health: unanswered: int = 0; pauses: int = 0; paused_until: float | None =
+  None`; `TurnDynamicData._health: dict[int, _Health]` (an entry without a key is healthy).
+- `refresh(scope)`: `now = self._fetcher.clock.monotonic()`; `paused = {index for index, _ in self._specs if
+  self._paused(index, now)}`; `fetch_all` only the others (same timeout/budget); build `results` in
+  `self._specs` order, a paused index → `self._fetcher.unfetched(spec, index, scope, "paused")`. No state
+  change. `_turn_variables(results)` unchanged (a paused result is not readable → holds its names).
+- `commit(results)`: `now = clock.monotonic()` once; per result, before the lines: `self._observe(result,
+  now)`: `paused` → nothing; in `_UNANSWERED` → `unanswered += 1`, and when `unanswered >= PAUSE_AFTER`:
+  `pauses += 1`, `paused_until = now + min(PAUSE_S * 2 ** (pauses - 1), MAX_PAUSE_S)`, log
+  `tools.turn_data_paused`; else → `self._health.pop(index, None)`. Then lines/names/report as today.
+- Module docstring: reword "A refresh changes nothing" bullets to include the pause (new bullet), keep the
+  sentence that only `commit` changes state. `FetchedTurn` docstring: `results` may hold `paused` entries.
+- No new parameter on `TurnDynamicData` (the clock is the fetcher's), so no test call site changes.
+
+### 3. `apps/media_worker/src/va_media/call_dynamic_data.py`
+
+`for_call`: `HttpExecutor(..., max_bytes=TURN_MAX_ANSWER_BYTES)` and `DynamicDataFetcher(...,
+max_cached_bytes=TURN_MAX_ANSWER_BYTES)`; docstring sentence. Nothing else in the media worker changes
+(`TurnRecorder.dynamic_data` publishes `result.message()`/`event_data()`/`level` as is).
+
+### 4. Tests (names + what they assert)
+
+`packages/va_tools/tests/test_turn_data.py` (use `manual_fetcher()`; `httpx.ReadTimeout`/`httpx.ConnectError`
+respx side effects give `timeout`/`connection` at once, no budget wait needed; move time with
+`await clock.run_for(s)`; helper `_unanswered(api, exc)` + `_turns(data, n)` applying n refreshes):
+- `test_two_unanswered_fetches_pause_the_entry[timeout|connection]`: third refresh sends nothing
+  (`route.call_count == 2`), reported `(0, "paused", "warning")`, `message()`, `event_data()` (`status_code`
+  None, `duration_ms` 0, `cached` False, `variables_set` [], url without query), lines GOLD, variables `{}`.
+- `test_a_budget_timeout_counts_as_unanswered`: `HeldAnswer` + `wait_for_sleep(TURN_BUDGET_S)`/`run_for` twice
+  → third refresh paused (the `fetch_all` cancel path, not only the executor's timeout).
+- `test_a_refresh_of_paused_entries_does_not_wait`: all entries paused → `refresh` returns under
+  `asyncio.timeout(5)` with `clock.sleepers == 0` and no `run_for`.
+- `test_only_the_unanswering_entry_is_paused`: `_plan_and_orders`; `/orders` requested every turn; outcomes
+  of the third turn `[(0, "paused", "warning"), (2, "ok", "info")]`; its variables/lines follow `/orders`.
+- `test_the_pause_ends_after_30_s_and_an_answered_probe_resumes_the_entry`: at +29.9 s still paused (no
+  request), at +30 s fetched; answer ok → variables set, lines replaced; then ONE more unanswered fetch does
+  not pause (streak was reset: the next refresh sends a request).
+- `test_an_unanswered_probe_pauses_twice_as_long_up_to_two_minutes`: pause lengths 30, 60, 120, 120 read
+  from request counts at `end - 0.1` and `end`.
+- `test_an_answered_fetch_between_two_unanswered_ones_resets_the_streak[http_error|ok|unreadable]`.
+- `test_unanswered_fetches_of_refreshes_that_are_never_applied_count_nothing`: two refreshes dropped, one
+  applied, the next refresh still sends.
+- `test_a_paused_later_entry_keeps_the_name_it_shares` (`_shared_plan`: B counted once, then two unanswered,
+  then paused while A answers: `plan` not in the turn's variables; B's line stays).
+- `test_another_call_s_entry_is_not_paused` (second `TurnDynamicData` over the same fetcher sends).
+- `test_a_pause_is_logged_once_without_the_url` (`json_log_stream`/`log_events`: one `tools.turn_data_paused`
+  with `index`, `pause_s` 30.0; no field holds the host).
+`packages/va_tools/tests/test_dynamic_data.py`:
+- `test_an_unfetched_result_carries_the_redacted_url_and_no_answer[paused|timeout]`, plus the unrenderable
+  URL → `""` (this also covers the line a7f35b8 left uncovered).
+- `test_a_stored_answer_above_the_fetcher_s_limit_is_a_miss` (seed fakeredis with a 70 KiB document under
+  `cache_key(...)`; `max_cached_bytes=65_536` → request sent; default fetcher → hit, no request) and
+  `test_an_answer_above_the_fetcher_s_limit_is_not_stored`; boundary twin: a body of exactly the limit is
+  stored and hit by the same fetcher.
+`apps/media_worker/tests/test_call_dynamic_data.py` (existing `source` fixture, `SystemClock`):
+- `test_a_per_turn_answer_above_64_kib_is_cut_and_keeps_the_earlier_lines` (70 KiB JSON → event
+  `("info", "Dynamic data: 0 variables set")`, `sections()` unchanged, no `dyn:` key in fakeredis; a 60 KiB
+  answer sets the variable).
+- `test_an_endpoint_that_refuses_twice_is_paused_and_reported` (two `httpx.ConnectError` turns, third turn:
+  `route.call_count == 2`, recorder event `("warning", "Dynamic data paused: endpoint not answering")`,
+  data `outcome: "paused"`).
+Prove the tests guard the change: neuter `_observe` (return at once) on a temp copy → the pause tests fail;
+restore. Note it in the scratchpad.
+
+### 5. Docs
+
+specs/13 (above), specs/19 row pointer, AGENTS.md: extend the 2026-11-05 (P08-T03b) bullet or add a
+`2026-11-06 (P08-FIX-23)` bullet: pause rule + constants, `paused` outcome only from `TurnDynamicData`,
+state only in `commit`, `fetcher.unfetched`, `max_cached_bytes`, 64 KiB per-turn cap, tests move the pause
+with `clock.run_for`, and the measured parse numbers with the probe path.
+
+### 6. Gates (all; `make test` then `make e2e`, background + heartbeat, PATH needs /home/ralph/.local/bin)
+
+`make fmt lint typecheck placeholders`, `uv run python scripts/check_spec_refs.py`,
+`uv run python scripts/check_openapi_drift.py` (no route change expected), `npx --yes jscpd@4 --silent`,
+`uvx radon cc -s -a` (keep `_fetch` ≤ C 11, `commit`/`refresh` below C), pip-audit on `uv export`,
+`corepack pnpm audit --audit-level high`; `make test` (~15 min, `logs/make_test_fix23.log`); `make e2e`
+(the per-turn path of calls changes; start it ~30 s after `make test`, warm stack; known flakes are runtime
+task `fix:e2e-cold-start-flakes`). Before `build.done`: list `.ralph/review-inbox` for notes newer than
+`2026-11-06-p08-t03b-fourth-pass.md` about this task.
+
+### 7. Risks
+
+- `fetch_all([])` returns `[]` before any await: fine for `refresh`, but the pathway engine runs the refresh
+  as a TaskGroup child beside the decision; a refresh that returns at once is already the cache-hit case.
+- ManualClock `monotonic()` must move with `run_for` (it does: sleepers wake by deadline); the media test
+  uses `SystemClock`, where a 30 s pause simply outlasts the test.
+- Do not let a `paused` result reset or advance the streak (the probe after the pause must pause again
+  after ONE unanswered fetch).
+- `2 ** (pauses - 1)` grows without bound in a very long call: clamp with `min(...)` before it matters
+  (compute `min(PAUSE_S * 2 ** min(pauses - 1, 2), MAX_PAUSE_S)` or cap `pauses`).
+- The e2e/runtime sim tests assert exact request counts to `/plan` (two): unaffected, their endpoint answers.
+- Not in this task (DEC-020): sharing the pause between calls, single-flight lookups, `UV_THREADPOOL_SIZE`
+  (runtime task `fix:resolver-pool`), off-loop parsing (P08-FIX-25), the recorder/brain cycle (P08-FIX-24).
+
+## Build P08-FIX-23 (Builder, 2026-11-06T02:40Z-02:58Z) — code, tests and docs done; BLOCKED on a gate outside the task
+
+Built exactly the plan (no deviation in behaviour; two small choices noted):
+- `va_tools/dynamic_data.py`: outcome `paused` + its message; `DynamicDataFetcher(max_cached_bytes=)`,
+  `.clock`, `.unfetched(spec, index, scope, "timeout"|"paused", duration_ms=)` (replaces `_timed_out`; it
+  logs its one `tools.dynamic_data` line itself, `fetch_all` no longer wraps it); `_store`/`_lookup` are
+  instance methods using the fetcher's limit; a stored value above limit + 32 bytes is a miss before parsing
+  (`tools.dynamic_data_cache_oversized`, info), size counted in BYTES also for a `decode_responses` client.
+  `_fetch` stays radon C (11).
+- `va_tools/turn_data.py`: `PAUSE_AFTER` 2, `PAUSE_S` 30.0, `MAX_PAUSE_S` 120.0, `TURN_MAX_ANSWER_BYTES`
+  65 536; `_Health(unanswered, pause_s, paused_until)`; `refresh` skips paused entries and reports them via
+  `fetcher.unfetched(..., "paused")`; `_observe` runs only in `commit`. Choice: the pause length is stored
+  and doubled (`min(pause_s * 2, MAX_PAUSE_S)`) instead of `2 ** pauses` (the plan's risk note: no unbounded
+  exponent).
+- `va_media/call_dynamic_data.py`: executor `max_bytes` and fetcher `max_cached_bytes` = 65 536.
+- specs/13 §7: Decision P08-FIX-23 (7 items + Code), amendments of P08-T03a rules 2, 3, 6 + Event
+  paragraph and P08-T03b items 2, 3; specs/19 §2 row pointer; AGENTS.md bullet `2026-11-06 (P08-FIX-23)`.
+  Parse numbers in the Decision are from my own re-run of `logs/probe_plan_fix23_parse.py` (1 MiB: parse
+  8.4 ms, `$.data.items[*].plan.tier` 67 ms, `$..x` 243 ms; 262 KiB 53.6 ms; 64 KiB 13.5 ms; 16 KiB 3.5 ms).
+- Tests added: 15 in `packages/va_tools/tests/test_turn_data.py` (the plan's 11 + never-sent requests do
+  not pause [blocked|render_error], a paused result of a dropped refresh is not reported, constants),
+  8 in `test_dynamic_data.py` (unfetched x3, clock, limit boundary / above / stored-above / text client),
+  3 in `apps/media_worker/tests/test_call_dynamic_data.py` (65 537-byte and 70 000-byte answers cut, the
+  65 536-byte one read and cached; stored 70 KiB answer is a miss; two refusals → `paused` event data).
+  Plan deviation in ONE test: respx counts a request only when it completes, so the budget-timeout test
+  asserts on `HeldAnswer.arrived` instead of `route.call_count`.
+- The tests guard the change (source neutered on copies in /var/tmp, then restored byte for byte):
+  `_observe` returning at once → 12 failed (11 va_tools pause tests + the media pause test); the size rules
+  neutered (`_lookup` check off, `_store` back to `MAX_CACHED_BYTES`, media `max_bytes` removed) → 4 failed.
+
+Real results on the final tree (2026-11-06T02:50Z-02:57Z):
+- `make fmt` exit 0, `make lint` exit 0, `make typecheck` exit 0 (1634 source files),
+  `uv run python scripts/check_openapi_drift.py` exit 0, `uv run python scripts/check_spec_refs.py` 0 problems,
+  `npx --yes jscpd@4 --silent` 0 clones, radon average A (2.95), nothing in the changed files above C (11).
+- Targeted: `uv run pytest packages/va_tools packages/va_engine/tests packages/va_events/tests/test_catalog.py
+  packages/va_workflows/tests -k "not integration" -n 8 --cov=va_tools` → 1892 passed, va_tools 99 %
+  (`turn_data.py` 100 %); media worker `test_call_dynamic_data.py`, `test_call_end.py`,
+  `test_pathway_runtime.py`, `test_runtime_dynamic_data_sim.py` + va_tools `test_dynamic_data.py` → 133 passed.
+- NOT run: the full `make test`, `make e2e`, `scripts/ralph/gates.sh`, pip-audit / pnpm audit (no dependency
+  changed). Reason below: any fix of the blocker changes the tree, so a full run now would have to be
+  repeated for the stamp (the very cost commit 3fe1ffc was made to remove).
+- `make placeholders`: exit 2, 4 findings, ALL in `scripts/ralph/gates.sh` (see the blocker). My six changed
+  code/test files alone: `uv run python scripts/check_no_placeholders.py <files>` → 0 findings.
+
+## Blocker P08-FIX-23
+
+What: `make placeholders` cannot pass on this repository at HEAD, so neither `make check` nor the new stamp
+script can: `scripts/ralph/gates.sh` runs `make placeholders` as its third core gate and stops there.
+Why: commit 3fe1ffc (maintainer, 2026-11-06 02:45:30Z, landed while this iteration was running; it also
+changed ralph.yml: the Builder's last full pass must go through `scripts/ralph/gates.sh`) added
+`scripts/ralph/gates.sh`, which holds the gate name `placeholders` on lines 10, 27, 34 and 40. The
+`filler-word` rule of `scripts/check_no_placeholders.py` matches that word anywhere under `scripts/`
+(allowed forms are only `placeholder=`, `::placeholder`, `placeholder:` and `check_no_placeholders`).
+Proof it is HEAD, not this task: a detached worktree of HEAD (`git worktree add --detach /var/tmp/head_check
+HEAD`, removed again) gives the same 4 findings; `git diff HEAD -- scripts/ ralph.yml MASTER_PROMPT.md` is
+empty; `scripts/tests/test_ralph_gates.py` passes (18), it runs the script with a fake `make`.
+Not fixed here on purpose: the fix is either a change to the maintainer's new gate script (its CLI gate
+name / `--only placeholders`, which `test_ralph_gates.py` and ralph.yml refer to) or a new allowance in the
+placeholder gate itself (specs/02 §9.1 Decision). Both are decisions about the loop's own controls, outside
+"exactly one task", and the script certifies the Builder's gates to the Reviewer: the agent being gated
+should not rewrite it inside an unrelated diff.
+Proposal (Planner): insert a prerequisite task above P08-FIX-23, e.g. `P08-FIX-26 scripts/ralph/gates.sh
+passes the placeholder gate`. Options, cheapest first:
+  (a) allowance in `check_no_placeholders.py` for the Makefile target name as a gate word, e.g. extend
+      `_FILLER_ALLOWED_RE` with `make place[h]olders` and a bare gate token form used by gates.sh, plus the
+      specs/02 §9.1 Decision line and a test in `scripts/tests`; keeps the script and its CLI untouched;
+  (b) keep the checker and build the word from fragments in gates.sh (bash `place""holders` in the array and
+      the `case`, reword the comment, print the usage line from the array instead of the quoted heredoc).
+Then P08-FIX-23 needs NO rebuild: the work tree holds it complete (files: AGENTS.md,
+apps/media_worker/src/va_media/call_dynamic_data.py, apps/media_worker/tests/test_call_dynamic_data.py,
+packages/va_tools/src/va_tools/{dynamic_data,turn_data}.py, packages/va_tools/tests/test_{dynamic_data,
+turn_data}.py, specs/13-tools-and-dynamic-data.md, specs/19-events-and-webhooks.md). The next Builder runs
+`scripts/ralph/gates.sh --e2e` once (background + heartbeat), jscpd, radon, the audits, and emits build.done.
+Keep the two commits apart (`git add` by path): the gate fix is not part of `Task: P08-FIX-23`.
+
+Note: `ralph tools interact progress` is not configured on this runner (`No bot token`), so the maintainer was
+not notified by message; the blocker above, runtime task `fix:gates-placeholder-word` and memory
+mem-1793933871-42bc are the record.
+
+## Planner 2026-11-06T03:10Z: after build.blocked of P08-FIX-23
+
+Inbox: no note newer than `2026-11-06-p08-t03b-fourth-pass.md`; third-pass / fourth-pass stay out of DONE until
+P08-FIX-23 / P08-FIX-24 are approved (unchanged). Blocker confirmed with real output: `make placeholders` →
+`4 finding(s)`, all `scripts/ralph/gates.sh` lines 10, 27, 34, 40 (`filler-word`), exit 2; nothing else in the
+tree is reported. Resolution (b) of the Builder's proposal, as its own prerequisite task P08-FIX-26, inserted at
+the top of plan/phase-08.md; P08-FIX-23 now depends on it and carries a "BUILT, not yet gated" status note.
+Decision DEC-021 (script changes, the gate does not).
+
+## Plan P08-FIX-26 (`scripts/ralph/gates.sh` passes the unfinished-work gate it runs)
+
+Scope: two files. `scripts/ralph/gates.sh`, `scripts/tests/test_ralph_gates.py`. Nothing else: no AGENTS.md,
+no specs, no checker change, and none of the P08-FIX-23 files that sit modified in the work tree (AGENTS.md,
+apps/media_worker/..., packages/va_tools/..., specs/13, specs/19). Do not stash, reset or reformat them.
+
+### 1. `scripts/ralph/gates.sh` (prototype with exactly these edits: `/var/tmp/fix26_probe/scripts/ralph/gates.sh`;
+`diff scripts/ralph/gates.sh /var/tmp/fix26_probe/scripts/ralph/gates.sh` shows them; copy it or retype)
+
+- Header comment line 10 becomes two lines:
+  `# Core gates, in order: lint, typecheck, the unfinished-work detector, OpenAPI drift, spec refs, tests (the`
+  `# names are CORE_GATES below, also printed by --help). Optional gates: ts e2e.`
+- Before `CORE_GATES`: a two-line comment (the third core gate is the Makefile target of the unfinished-work
+  detector; that detector scans this file too and reports its own gate name as filler text, so the name is put
+  together from two fragments), then `DETECTOR_GATE="place"` and `DETECTOR_GATE+="holders"` on two lines, then
+  `CORE_GATES=(lint typecheck "$DETECTOR_GATE" openapi specs test)`.
+- `usage()`: heredoc delimiter unquoted (`cat <<USAGE`; the text holds no `$` or backtick besides the new
+  expansion), last line `gates: ${CORE_GATES[*]} ts e2e`.
+- `gate_command`: `lint | typecheck | "$DETECTOR_GATE" | test | e2e) echo "make $1" ;;` (a quoted expansion in
+  a `case` pattern matches literally).
+- Nothing else changes: gate names, order, commands, stamp keys, exit codes, log paths.
+Planner's real output on the prototype: `--help` identical to HEAD's (diff empty), `--only nonsense` → exit 64
+with the same usage text, `bash -n` ok, `check_no_placeholders.py --root /var/tmp/fix26_probe
+scripts/ralph/gates.sh` → `0 finding(s)`.
+
+### 2. `scripts/tests/test_ralph_gates.py` (add three tests; keep the existing 18 untouched)
+
+- `test_the_ralph_scripts_pass_the_unfinished_work_detector`: `import check_no_placeholders` (`scripts/` is on
+  pytest `pythonpath`); `root = GATES_SCRIPT.parents[2]`; `files = sorted(GATES_SCRIPT.parent.glob("*.sh"))`;
+  assert `files` contains `GATES_SCRIPT`; `assert [item.render() for item in check_no_placeholders.scan(root,
+  files)] == []`. This is the test that fails on HEAD's script (4 findings) — it runs the REAL detector,
+  which the fake `make` never did. No `repo` fixture needed.
+- `test_help_lists_every_gate_by_name` (or extend `test_help_prints_usage`): the last line of `--help` stdout
+  is `"gates: " + " ".join([*CORE_GATES, "ts", "e2e"])` and stderr is empty.
+- `test_the_detector_gate_runs_alone_under_its_makefile_name`: `repo.gates("--only", CORE_GATES[2])` → code 0,
+  `repo.calls() == ["make " + CORE_GATES[2]]`, `repo.stamp().gates == {CORE_GATES[2]: (0, CORE_GATES[2] +
+  " ok")}`, `repo.gates("--verify", "--only", CORE_GATES[2]).code == 0`, and plain `--verify` still exits
+  `EXIT_VERIFY_FAILED` (the other core gates did not run).
+- The test file must itself pass the detector: never write the gate name as a literal (use `CORE_GATES[2]`),
+  never name a test helper so that the word appears; module name `check_no_placeholders` is an allowed span.
+- Prove the guard: `git show 3fe1ffc:scripts/ralph/gates.sh > /var/tmp/gates_head.sh`; run the new detector
+  test with HEAD's script in place (copy the new script to /var/tmp, put HEAD's back, run, restore byte for
+  byte, `cmp`) → it fails with the 4 findings; the two behaviour tests pass on both versions (they pin that
+  nothing changed). Note the result here.
+
+### 3. Gates (PATH needs /home/ralph/.local/bin)
+
+1. `make fmt` (must change nothing outside the two files; if it rewrites a P08-FIX-23 file, that is a finding
+   for P08-FIX-23's Builder, restore nothing silently: note it), `make lint`, `make typecheck`,
+   `make placeholders` → must now print `0 finding(s)` and exit 0.
+2. `uv run pytest scripts/tests/test_ralph_gates.py scripts/tests/test_check_no_placeholders.py -q -n 4`.
+3. `git show 3fe1ffc:scripts/ralph/gates.sh > /var/tmp/gates_head.sh && diff <(bash /var/tmp/gates_head.sh
+   --help) <(bash scripts/ralph/gates.sh --help)` → empty.
+4. Last: `scripts/ralph/gates.sh > logs/gates_fix26.log 2>&1` in the background with a heartbeat (~17 min; no
+   `--ts`, no `--e2e`: no TypeScript, no call flow), then `scripts/ralph/gates.sh --verify` → exit 0. This is
+   also the first real end-to-end run of the stamp script on this repository: paste its `✔ gates passed for
+   tree …` line and the `--verify` table as evidence. jscpd (`npx --yes jscpd@4 --silent`) and radon as usual;
+   audits unchanged (no dependency touched; state that).
+5. `build.done` payload as plain text with the usual keys (AGENTS.md P00-T01 note).
+
+### 4. For the Reviewer (on approval)
+
+- Verify with `scripts/ralph/gates.sh --verify`; read ONLY the two files' diff as this task (the rest of
+  `git diff HEAD` is P08-FIX-23, reviewed in its own cycle).
+- Tick P08-FIX-26, then commit by path, NOT `git add -A`:
+  `git add scripts/ralph/gates.sh scripts/tests/test_ralph_gates.py plan/phase-08.md .ralph/agent && git commit
+  -m "fix(ralph): the gate stamp script passes the unfinished-work gate" -m "Task: P08-FIX-26"` (+ attribution
+  line). `git status --short` afterwards must still list the nine P08-FIX-23 paths as modified.
+- `ralph tools task close task-1793933871-3380` (key fix:gates-placeholder-word).
+- The tick edits plan/phase-08.md, so the stamp goes stale: expected. P08-FIX-23's Builder runs
+  `scripts/ralph/gates.sh --e2e` on the then-current tree.
+
+### 5. Risks
+
+- The full `make test` of step 4 runs over a tree that also holds P08-FIX-23 (its targeted tests passed:
+  1892 + 133, the full suite never ran on it). If the run fails ONLY in a P08-FIX-23 file, do not fix it
+  inside this task: write the failing test ids + output under "## Blocker P08-FIX-26" and emit build.blocked,
+  so the Planner can order the repair. A failure anywhere else is the usual fix-and-rerun.
+- Unquoting the heredoc: a later edit that adds `$` or a backtick to the usage text would expand; the pinned
+  `--help` test catches a changed gate line, and `usage: scripts/ralph/gates.sh` is still asserted.
+- `set -u`: `DETECTOR_GATE` is assigned before `CORE_GATES`, `usage` and `gate_command` are only called later.
+- `IFS`: `${CORE_GATES[*]}` joins with a space because `IFS=','` is only a prefix of the `read` command.
+- Do not "tidy" anything else in the script (it certifies the Builder's gates to the Reviewer; DEC-021 keeps
+  the change text-only and behaviour-preserving).
+
+## Build P08-FIX-26 (Builder, 2026-11-06T03:00Z-03:25Z) — done, gates stamped
+
+Built exactly the plan; only `scripts/ralph/gates.sh` and `scripts/tests/test_ralph_gates.py` changed (the nine
+P08-FIX-23 paths in the work tree are untouched: `git diff` before and after `make fmt` was byte-identical).
+- `scripts/ralph/gates.sh`: byte-identical to the Planner's prototype (`cmp` with
+  `/var/tmp/fix26_probe/scripts/ralph/gates.sh`), mode 775 kept. Header comment reworded, `DETECTOR_GATE`
+  assembled from two fragments before `CORE_GATES`, usage heredoc unquoted with `gates: ${CORE_GATES[*]} ts e2e`,
+  `"$DETECTOR_GATE"` in the `gate_command` case. No other line changed.
+- `scripts/tests/test_ralph_gates.py`: 4 tests added (the plan's 3 + one more for the usage text on stderr),
+  the existing 18 untouched; constants `DETECTOR_GATE = CORE_GATES[2]`, `GATE_LIST_LINE`; the gate name is
+  never a literal in the file.
+  - `test_the_ralph_scripts_pass_the_unfinished_work_detector` (real `check_no_placeholders.scan` over
+    `scripts/ralph/*.sh`)
+  - `test_help_lists_every_gate_by_name` (last stdout line == the gate list, stderr empty, nothing run)
+  - `test_usage_errors_list_every_gate_by_name` (`--only nonsense` → 64, last stderr line == the gate list)
+  - `test_the_detector_gate_runs_alone_under_its_makefile_name` (`--only <gate>` runs `make <gate>` alone,
+    stamp holds only it, `--verify --only` 0, plain `--verify` 1 with `lint          not run`)
+- Guard proven: with HEAD's script in place (`git show HEAD:scripts/ralph/gates.sh`), `uv run pytest
+  scripts/tests/test_ralph_gates.py` → `1 failed, 21 passed`: the detector test fails with the 4 findings
+  (lines 10, 27, 34, 40), the three behaviour tests pass on both versions. New script restored and `cmp`ed.
+- `diff <(bash /var/tmp/gates_head.sh --help) <(bash scripts/ralph/gates.sh --help)` → empty.
+- First attempt at lint failed on my own test file (E501 docstring line 111 > 110, I001 import order:
+  first-party `check_no_placeholders` goes in its own block after `pytest`, as in
+  `test_check_no_placeholders.py`); fixed, re-run clean.
+
+Real results on the final tree (fingerprint 19f3ed2698f0c596f3d721c54382d4de0545ea79):
+- `make fmt` exit 0 (changed nothing), `make lint` exit 0, `make typecheck` exit 0 (1634 source files),
+  `make placeholders` → `0 finding(s)`, exit 0 (was 4 findings / exit 2 on HEAD).
+- `uv run pytest scripts/tests/test_ralph_gates.py scripts/tests/test_check_no_placeholders.py -q -n 4` → 133 passed.
+- `scripts/ralph/gates.sh > logs/gates_fix26.log` (first real end-to-end run of the stamp script here):
+  `✔ gates passed for tree 19f3ed2698f0c596f3d721c54382d4de0545ea79: lint typecheck <detector> openapi specs test`,
+  exit 0. `scripts/ralph/gates.sh --verify` → exit 0:
+    lint pass 7s · typecheck pass 3s · detector gate pass 5s `0 finding(s)` · openapi pass 5s · specs pass 0s
+    `0 problem(s)` · test pass 920s `13340 passed, 7 skipped in 911.63s (0:15:11)`; coverage total 99.09 %.
+  This full `make test` ran over a tree that also holds P08-FIX-23: no failure, so the plan's risk did not occur.
+- `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix26` → 0 clones; `uvx radon cc -s -a apps packages
+  scripts` → average A (2.95); `uvx pip-audit --strict -r <uv export> --disable-pip --require-hashes` → no known
+  vulnerabilities; `corepack pnpm audit --audit-level high` exit 0 (1 moderate, unchanged; no dependency touched).
+- No e2e, no test-ts: no call flow, no TypeScript in this task.
+- Inbox: no note about this task (latest is `2026-11-06-p08-t03b-fourth-pass.md`).
+
+For the Reviewer: `scripts/ralph/gates.sh --verify` exits 0 as long as nothing outside `.ralph/` changes. Commit
+by path as the plan says (gates.sh, test_ralph_gates.py, plan/phase-08.md, .ralph/agent); the FIX-23 files stay
+modified and uncommitted. The plan tick makes the stamp stale; FIX-23's Builder runs `gates.sh --e2e` afterwards.
+
+## Review P08-FIX-26 (Reviewer, 2026-11-06T03:30Z) — APPROVED
+
+- Gates: `scripts/ralph/gates.sh --verify` → exit 0 on tree 19f3ed2698f0c596f3d721c54382d4de0545ea79 (the
+  fingerprint I computed myself with `--fingerprint` is the same): lint, typecheck, detector gate
+  `0 finding(s)`, openapi, specs, test `13340 passed, 7 skipped`. Nothing re-run (stamp valid, ralph.yml rule).
+- Diff read: exactly the two files of the plan. `gates.sh`: header comment, `DETECTOR_GATE` from two fragments,
+  `CORE_GATES` uses it, unquoted usage heredoc printing `${CORE_GATES[*]}` (no other `$`/backtick in the text),
+  quoted `"$DETECTOR_GATE"` in the `gate_command` case. Mode 775/100755 kept, `bash -n` ok.
+- Behaviour unchanged, checked against `git show HEAD:scripts/ralph/gates.sh` in /var/tmp/rv26: `--help` output
+  and `--only nonsense` output + exit code (64) are byte-identical.
+- Guard: the scan the new test runs (`check_no_placeholders.scan(root, scripts/ralph/*.sh)`) gives 4 findings
+  with HEAD's script and 0 on the work tree (5 scripts scanned); CLI detector the same (lines 10, 27, 34, 40).
+- `uv run pytest scripts/tests/test_ralph_gates.py scripts/tests/test_check_no_placeholders.py -n 4` → 133 passed.
+- The four new tests assert behaviour (last usage line, calls made, stamp content, verify exit codes); the gate
+  name is never a literal in the test file. No finding.
+- Committed by path (gates.sh, test_ralph_gates.py, plan/phase-08.md, .ralph/agent); the nine P08-FIX-23 paths
+  stay modified and uncommitted. The plan tick makes the stamp stale: P08-FIX-23's Builder runs
+  `scripts/ralph/gates.sh --e2e` on the then-current tree (do NOT rebuild FIX-23, see its status note).
