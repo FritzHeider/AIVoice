@@ -36,7 +36,7 @@ core:
     - "Work on exactly ONE unchecked task from the current phase plan per Builder activation."
     - "Never call real Telnyx, ElevenLabs, Telnyx Inference, or Stripe from tests; use packages/va_sim simulators. Live calls only when LIVE_TESTS=1."
     - "Every tenant-scoped query filters by org_id and runs inside va_db tenant_session (RLS)."
-    - "Run the gates (make check; plus make e2e when the task touches a call/SMS/widget flow) and include their real results as evidence. Never claim a gate passed without running it."
+    - "Run the gates (make check; plus make e2e when the task touches a call/SMS/widget flow) and include their real results as evidence. Never claim a gate passed without running it; a stamp that `scripts/ralph/gates.sh --verify` accepts for the unchanged working tree counts as a run."
     - "If a spec is ambiguous, decide, implement, and record the decision in the spec with '> Decision (YYYY-MM-DD):' in the same commit."
     - "Keep AGENTS.md current with any new command, convention, or gotcha you discover."
     - "Commit after each approved task using Conventional Commits with footer 'Task: <ID>'."
@@ -102,6 +102,15 @@ hats:
           make test            (or a narrower pytest selection first, then the full suite before emitting)
           make test-ts         (only if TypeScript changed)
           make e2e             (if the task touches a call, SMS, widget, batch, or post-call flow; from phase 05)
+      - Make the LAST full gate pass through the stamp script instead of separate make calls, as the final step
+        before emitting (change no file outside .ralph/ afterwards, or the stamp goes stale):
+          scripts/ralph/gates.sh              (lint, typecheck, placeholders, OpenAPI drift, spec refs, make test)
+          scripts/ralph/gates.sh --ts         (adds make test-ts; only if TypeScript changed)
+          scripts/ralph/gates.sh --e2e        (adds make e2e; same rule as above; the flags combine)
+        Run it in the background with a heartbeat, like make test (AGENTS.md, P05-T10d). It records which gates
+        passed for the exact working tree, and the Reviewer accepts that record instead of re-running them.
+        `--only test,e2e` re-runs single gates on the same tree. "no stamp written" means files changed during
+        the run: run it again. Other checks (audit, duplication, complexity) stay as they are.
       - If a gate fails, fix and re-run. If after 3 genuine attempts you cannot make progress because of a missing
         prerequisite or a spec contradiction, write "## Blocker <TASK-ID>" in the scratchpad (what, why, proposal) and
         emit: ralph emit "build.blocked" "<TASK-ID>: <reason>"
@@ -117,8 +126,12 @@ hats:
     default_publishes: "review.rejected"
     instructions: |
       You are the Reviewer. Assume nothing; verify.
-      1. Re-run: make lint, make typecheck, make placeholders, make test (and make test-ts / make e2e if the evidence
-         claims them). Any failure → reject.
+      1. Check the gates without repeating work: run `scripts/ralph/gates.sh --verify` (add `--ts` / `--e2e` if the
+         evidence claims them). Exit 0 proves every listed gate passed on exactly the files in front of you (the
+         stamp is keyed by a hash of every file outside .ralph/), so do NOT re-run them. Any other exit: run them
+         yourself with `scripts/ralph/gates.sh` and the same flags (in the background with a heartbeat).
+         Any failure → reject. If you change a file while reviewing (a probe, a mutation check), restore it
+         exactly; `--verify` passes again once the tree is identical.
       2. Read the diff (git diff HEAD, plus untracked files). Check against the referenced spec sections line by line:
          every field, default, validation rule, error code (specs/31-error-catalog.md), event type
          (specs/19-events-and-webhooks.md), table/column (specs/03-data-model.md), and env var (specs/02 §6).

@@ -79,7 +79,7 @@ older text. Resolve the conflict in writing in the same commit.
   are ticked and the phase exit gate passes, print `LOOP_COMPLETE`.
 - **Builder:** implement exactly the plan; run `make fmt lint typecheck placeholders test` (+ `test-ts`, + `e2e` when
   relevant); emit `build.done` with JSON evidence, or `build.blocked` with a written blocker after 3 genuine attempts.
-- **Reviewer:** re-run gates; review the diff against the specs and the checklist in `ralph.yml`; reject with numbered
+- **Reviewer:** check the gates with `scripts/ralph/gates.sh --verify` (re-run them only when it does not exit 0); review the diff against the specs and the checklist in `ralph.yml`; reject with numbered
   findings or approve, tick the task, commit, and emit `review.approved`.
 
 ## 6. Engineering standards (condensed — full text in specs/02)

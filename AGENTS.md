@@ -34,6 +34,7 @@ command, convention, or gotcha that a future iteration would otherwise rediscove
 | Telnyx bootstrap | `uv run python scripts/telnyx_bootstrap.py --env-file .env [--write-env] [--json]` (sim by default; ids on stdout) |
 | Regenerate NPA → state table | `uv run python scripts/generate_npa_states.py` (`--check` for drift; commit `packages/va_common/src/va_common/data/npa_states.json`) |
 | Phase progress | `scripts/ralph/status.sh` |
+| Gates with a stamp | `scripts/ralph/gates.sh [--ts] [--e2e]` (Builder's last full pass; `--verify` for the Reviewer; `--only test,e2e` for single gates) |
 | Run a script on the EC2 Ralph runner | `echo 'uptime' \| scripts/ralph/ssm.sh "<comment>"` (SSM; profile `aivoice`, finds the instance by tag; env overrides in the script header) |
 | Run a phase | `scripts/ralph/run_phase.sh NN` |
 
@@ -2193,3 +2194,9 @@ Grafana 3001
   `ManualClock`: `wait_for_sleep(0.8)` + `run_for(0.8)` for the budget; a `FrozenClock` fetcher times every refresh
   out at once) and `HeldAnswer` (a respx answer the test holds), `recorder_helpers.recorder(context)` (media: a
   real `TurnRecorder` over recording sinks; test files cannot import each other under `--import-mode=importlib`).
+- 2026-11-06 (ops): `scripts/ralph/gates.sh` runs the gates and writes `.ralph/gates/<tree>.json` for the exact
+  working tree (git tree hash of every tracked and untracked file outside `.ralph/`, taken through a throwaway
+  index). The Builder's last full pass goes through it; the Reviewer runs `--verify` and re-runs nothing when it
+  exits 0. Any edit outside `.ralph/` after the run makes the stamp stale (restoring the file exactly makes it
+  valid again); a run during which the tree changed exits 75 without a stamp. The phase exit gate still runs
+  `make check` and `make e2e` fresh. Tests: `scripts/tests/test_ralph_gates.py` (fake `make`/`uv` on `PATH`).
