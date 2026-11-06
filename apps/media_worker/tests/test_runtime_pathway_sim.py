@@ -2,7 +2,8 @@
 caller to a served media worker whose :class:`CallRuntime` runs a :class:`PathwayBrain` on a stored pathway
 version over FakeElevenLabs and FakeLLM, with a real webhook receiver, the media database and the end-of-call
 routine (specs/11 §9, §10, §12; specs/19 §2; specs/11 §10 Decision P07-T12b). A reply node's stored tool
-runs through the call's :class:`~va_media.call_tools.PathwayCallTools` (specs/13 §4 Decision P08-T02c2)."""
+runs through the call's :class:`~va_media.call_tools.PathwayCallTools` (specs/13 §4 Decision P08-T02c2). A
+finished pathway call leaves none of its parts on a reference cycle (specs/07 §9 Decision P08-FIX-24)."""
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from typing import Any, Final
 import httpx
 import pytest
 from call_rows import SeededCall, load_call, seed_call
+from gc_cycles import cycles_through, unreachable_after
 from graph_helpers import edge, graph, node, start
 from llm_client_helpers import served_requests
 from llm_helpers import add_rules
@@ -54,6 +56,7 @@ from va_elevenlabs.tts_models import DEFAULT_TTS_MODEL
 from va_engine.models import PathwayGraph, load_engine_state
 from va_engine.pathway_call import engine_state_key
 from va_events.webhook_signing import signature_headers
+from va_media.call_dynamic_data import TurnDataSource
 from va_media.pathway_runtime import PathwayTools
 from va_media.runtime_config import ERROR_END
 from va_media.session import STREAM_CLOSED, SessionEnd
@@ -216,10 +219,11 @@ class PathwayRig:
 
 @asynccontextmanager
 async def pathway_rig(
-    media_db_url: str, *, rules: str = RULES, reply: bytes = b'{"eta": 25}'
+    media_db_url: str, *, rules: str = RULES, reply: bytes = b'{"eta": 25}', turn_data: bool = False
 ) -> AsyncIterator[PathwayRig]:
     """The runtime with pathway calls and their tools on the media database: one Redis (the container's)
-    for the engine snapshot, the end routine and the events; the receiver answers ``reply``."""
+    for the engine snapshot, the end routine and the events; the receiver answers ``reply``. With
+    ``turn_data`` the runtime also refreshes a call's ``every_turn`` dynamic data."""
     relay = EdgeRelay()
     state = realtime_telnyx(relay)
     container = FakeMediaContainer()
@@ -227,6 +231,11 @@ async def pathway_rig(
     async with sim_backends(media_db_url, state, receiver, container.redis) as backends:
         database, tools_http = backends.database, backends.tools_http
         source = local_tool_source(database, tools_http)
+        refreshes = (
+            TurnDataSource(tools_http=tools_http, allow_http=True, redis=container.redis, clock=SystemClock())
+            if turn_data
+            else None
+        )
         async with sim_runtime(
             state,
             backends.urls,
@@ -237,6 +246,7 @@ async def pathway_rig(
             end_redis=container.redis,
             pathways=PathwayTools(graphs=CallGraphCache(database), tools_http=tools_http, allow_http=True),
             call_tools=source,
+            turn_data=refreshes,
         ) as parts:
             await add_rules(backends.llm, rules)
             yield PathwayRig(
@@ -292,9 +302,12 @@ async def _events(database: Database, call: SeededCall) -> list[CallEvent]:
         return list(await session.scalars(statement))
 
 
-async def _ask_then_say_bye(r: PathwayRig, call: SeededCall, question: str, *, silence_ms: int) -> None:
-    """Run ``call``: the caller asks ``question`` after the opener, waits for the answer (``silence_ms`` of
-    agent silence), says goodbye, and the agent's End Call node ends the call."""
+async def _ask_then_say_bye(
+    r: PathwayRig, call: SeededCall, question: str, *, silence_ms: int, **config: Any
+) -> None:
+    """Run ``call`` (``config`` adds to its call config): the caller asks ``question`` after the opener,
+    waits for the answer (``silence_ms`` of agent silence), says goodbye, and the agent's End Call node ends
+    the call."""
     r.scenario(
         "wait_agent_speech: {}",
         f"say: {{text: {question}}}",
@@ -302,7 +315,7 @@ async def _ask_then_say_bye(r: PathwayRig, call: SeededCall, question: str, *, s
         "say: {text: thanks bye}",
         "expect_hangup: {}",
     )
-    async with r.call(call, **await _pathway_of(r, call)):
+    async with r.call(call, **config, **await _pathway_of(r, call)):
         end = await r.body.end()
         signals = await r.signalled()
     assert end == SessionEnd("ended", "agent_end_call", "agent")
@@ -508,3 +521,67 @@ async def test_a_node_tool_runs_and_its_answer_is_used_in_the_reply(media_db_url
         ]
         tools = (body.pathway_logs[1].decision or {})["tools"]
         assert [(entry["name"], entry["status"]) for entry in tools] == [("lookup_order", 200)]
+
+
+# A finished pathway call leaves none of its parts on a reference cycle (specs/07 §9 Decisions P08-FIX-3,
+# P08-FIX-24): the recorder tags rows through the brain while the brain's engine, tool events and per-turn
+# data report through the recorder, so the runtime has to let go of that edge when the call ends.
+
+PATHWAY_PARTS: Final = (
+    "PathwayBrain",
+    "PathwayEngine",
+    "TurnRecorder",
+    "TurnDynamicData",
+    "PathwayCallTools",
+    "PathwayCallExecutor",
+    "PathwayToolEvents",
+    "RecorderEvents",
+    "EngineStateSaver",
+    "Navigator",
+    "GatewayDialogue",
+    "CallPipeline",
+    "CallSession",
+)
+PLAN_REPLY: Final = b'{"status": "shipped", "plan": "gold"}'
+
+
+@asynccontextmanager
+async def _lookup_call_with_plan(media_db_url: str) -> AsyncIterator[tuple[PathwayRig, SeededCall, Any]]:
+    """The rig, a call on the lookup pathway (a reply node with a stored tool) and an ``every_turn`` entry
+    (the receiver's ``/plan``) for its call config."""
+    async with pathway_rig(media_db_url, rules=TOOL_RULES, reply=PLAN_REPLY, turn_data=True) as r:
+        call, _, _ = await _stored_lookup(r)
+        fetch = {
+            "url": f"http://127.0.0.1:{r.hook_port}/plan",
+            "timing": "every_turn",
+            "response_data": [{"name": "plan", "data": "$.plan", "context": "Their plan is {{plan}}."}],
+        }
+        yield r, call, fetch
+
+
+async def test_an_agent_ended_pathway_call_leaves_no_part_on_a_cycle(media_db_url: str) -> None:
+    async with _lookup_call_with_plan(media_db_url) as (r, call, fetch):
+        with unreachable_after() as garbage:
+            await _ask_then_say_bye(r, call, "where is my order", silence_ms=2000, dynamic_data=[fetch])
+
+        # The call did what makes the cycles: a per-turn fetch at each caller turn and the node's tool.
+        assert [request.path for request in r.receiver.requests] == ["/plan", "/order", "/plan"]
+        assert spoken(r.state) == [WELCOME, TOOL_SPEECH, TOOL_REPLY, GOODBYE]
+        assert cycles_through(garbage, PATHWAY_PARTS) == {}
+
+
+async def test_a_carrier_hangup_leaves_no_pathway_part_on_a_cycle(media_db_url: str) -> None:
+    async with _lookup_call_with_plan(media_db_url) as (r, call, fetch):
+        r.scenario(
+            "wait_agent_speech: {}",
+            "say: {text: where is my order}",
+            "wait_agent_speech: {then_silence_ms: 300}",
+            "hangup: {}",
+        )
+        with unreachable_after() as garbage:
+            async with r.call(call, dynamic_data=[fetch], **await _pathway_of(r, call)):
+                end = await r.body.end()
+
+        assert end == STREAM_CLOSED
+        assert r.receiver.requests[0].path == "/plan"  # the caller's turn reached the engine
+        assert cycles_through(garbage, PATHWAY_PARTS) == {}

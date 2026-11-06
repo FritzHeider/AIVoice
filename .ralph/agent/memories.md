@@ -2,6 +2,22 @@
 
 ## Patterns
 
+### mem-1793939966-84fb
+> P08-FIX-24 approved and committed: reviewer verified the stamp only (gates.sh --verify --e2e exit 0 on tree e4371c3e), mutations killed the guards (no _untag callback -> 2 sim guards fail; HEAD engine.py -> 3 engine tests + 2 sim guards fail), restored tree 9 passed; fourth-pass inbox note is in DONE, no undone inbox note left; task fix:pathway-call-cycles closed. Next: P08-FIX-25 (parse + JSONPath off the loop), then P08-T03c
+<!-- tags: review, gc, pathways, gates | created: 2026-11-06 -->
+
+### mem-1793939749-9a97
+> P08-FIX-24 built (tree e4371c3e): recorder.tagger set in CallRuntime._pathway_brain + stack.callback(_untag) before the saver/brain/executor closes, build_pathway_brain never touches the recorder; engine _Extraction holds decider/state/facts/clock (module fns _decision_inputs/_latest_inputs). Guards: packages/va_engine/tests/test_engine_teardown.py (3, live_cycles_through after aclose) + test_runtime_pathway_sim.py PATHWAY_PARTS (agent end + carrier hangup, pathway_rig(turn_data=True), _lookup_call_with_plan); each proven to fail without its half of the fix. gates.sh --e2e exit 0 first run (make test 13345 passed 855 s, coverage 99.08 %, e2e 20 passed 419 s), --verify --e2e exit 0; jscpd 0, radon 2.95. Reviewer: verify stamp, tick, fourth-pass note to DONE, close task fix:pathway-call-cycles; next P08-FIX-25
+<!-- tags: gc, media, pathways, gates | created: 2026-11-06 -->
+
+### mem-1793937800-f5bc
+> P08-FIX-24 planned (after 27f3f82): probe on a runtime-sim pathway call (node tool + every_turn entry) found TWO cycles: recorder.tagger = brain (TurnRecorder -> PathwayBrain -> PathwayEngine -> EnginePorts -> RecorderEvents -> TurnRecorder, every other reported cycle runs through it) and PathwayEngine -> _Extraction -> bound method -> PathwayEngine (engine.py, in every engine incl. chat/unit tests; visible with live_cycles_through(brain) after aclose). Prototype /var/tmp/fix24_probe.patch: tagger wired in CallRuntime._pathway_brain + stack.callback(_untag) registered before saver/brain/executor closes, _Extraction holds decider/state/facts/clock; with it no va_engine/va_media/va_tools object is left in the garbage (agent end and carrier hangup), 1357 targeted tests pass. Probes logs/probe_plan_fix24_{runtime,engine}_test.py (copy the runtime one into apps/media_worker/tests to run: it needs media_db_url). cycles_through reports only the shortest cycle per class: re-run after breaking an edge
+<!-- tags: gc, media, pathways, planning | created: 2026-11-06 -->
+
+### mem-1793937308-d22d
+> P08-FIX-23 approved and committed (27f3f82): reviewer verified the stamp only (gates.sh --verify --e2e exit 0 on tree de88ab9b), killed nine mutations of the pause/size logic with the 125 targeted tests (copy file to /var/tmp, mutate in place, restore byte for byte: the stamp stays valid), probe logs/probe_review_fix23_test.py passes; third-pass inbox note is in DONE, fourth-pass stays open for P08-FIX-24 (pathway recorder/brain cycle); then P08-FIX-25, P08-T03c. Known edge, accepted: a hung Redis GET that eats the 0.8 s turn budget also counts as an unanswered fetch
+<!-- tags: review, dynamic-data, gates | created: 2026-11-06 -->
+
 ### mem-1793937053-037d
 > P08-FIX-23 gated without rebuilding (tree de88ab9b): scripts/ralph/gates.sh --e2e exit 0 on the first run from a warm stack (make test 13340 passed 920 s, coverage 99.09 %, make e2e 20 passed 419 s), --verify --e2e exit 0; jscpd 0 clones, radon 2.95, audits clean. A gating pass of ~27 min needs the Monitor heartbeat re-armed every 10 min (monitors expire at 600 s). Reviewer: verify the stamp, tick, add 2026-11-06-p08-t03b-third-pass.md to DONE, close task fix:turn-data-backoff; next P08-FIX-24
 <!-- tags: gates, dynamic-data, testing | created: 2026-11-06 -->

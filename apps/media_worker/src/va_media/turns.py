@@ -16,7 +16,9 @@ Pathway calls (specs/11 §10 Decision P07-T12b): the recorder's :attr:`TurnRecor
 (``node_id``/``node_name``, also ``call.turn`` ``data.node_id``); :meth:`TurnRecorder.engine_event`
 publishes the engine's ``call.route``/``call.extraction``/``call.loop_condition``/``call.webhook_node``/
 ``call.sms_sent`` events in the same ordered chain (messages from :mod:`va_media.pathway_events`); any other
-type is logged ``media.engine_event_unknown`` and dropped.
+type is logged ``media.engine_event_unknown`` and dropped. The call runtime sets the tagger once the brain is
+built and clears it when the call's exit stack unwinds: the brain's engine reports through this recorder, so
+a tagger left in place would keep the finished call on a reference cycle (specs/07 §9 Decision P08-FIX-24).
 
 Task-mode tools (specs/13 §5 Decision P08-T02b1): the recorder is the call's
 :class:`~va_tools.executor.ToolEvents`: :meth:`TurnRecorder.tool` publishes ``call.tool`` (message

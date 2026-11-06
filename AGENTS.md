@@ -2215,3 +2215,14 @@ Grafana 3001
   `HeldAnswer.arrived`). `coroutine.send(None)` raising `StopIteration` proves an async function returned
   without suspending. Parse cost on the loop (one thread, `logs/probe_plan_fix23_parse.py`): 1 MiB with `$..x`
   243 ms, 262 KiB 54 ms, 64 KiB 13.5 ms, 16 KiB 3.5 ms; `orjson.loads` of 1 MiB 8 ms.
+- 2026-11-06 (P08-FIX-24): a finished pathway call sits on no reference cycle (specs/07 §9 Decision P08-FIX-24).
+  The recorder's `tagger` (the `PathwayBrain`) is set in `CallRuntime._pathway_brain` and cleared by `_untag` on
+  the call's exit stack (registered BEFORE the saver/brain/executor closes, so it runs after them);
+  `build_pathway_brain` never touches the recorder. `va_engine.engine._Extraction` holds decider/state/facts/clock:
+  a part the engine builds for itself never gets a bound method of the engine (use module functions such as
+  `_decision_inputs(facts, state, ...)`). Guards: `packages/va_engine/tests/test_engine_teardown.py`
+  (`live_cycles_through(brain, ENGINE_PARTS)` after `aclose()`, no media worker needed) and `PATHWAY_PARTS` in
+  `test_runtime_pathway_sim.py` (`pathway_rig(turn_data=True)` adds a `TurnDataSource`; `_ask_then_say_bye(...,
+  **config)` adds call config such as `dynamic_data`). `cycles_through` reports only the SHORTEST cycle per class:
+  after breaking one edge re-run and read the `va_*` classes still in the garbage, a second cycle may hide behind
+  the first.

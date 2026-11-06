@@ -1984,3 +1984,237 @@ On approval: tick P08-FIX-23, append `2026-11-06-p08-t03b-third-pass.md` to `.ra
   turn the wait).
 - Inbox: `2026-11-06-p08-t03b-third-pass.md` appended to DONE (items 1-3 by 6d80843, 4-5 here); the
   fourth-pass note stays open for P08-FIX-24. Next for the Planner: P08-FIX-24, P08-FIX-25, P08-T03c.
+
+## Planner 2026-11-06T04:20Z: after P08-FIX-23 (commit 27f3f82)
+
+Inbox: no note newer than `2026-11-06-p08-t03b-fourth-pass.md`; the only one not in DONE is that note, whose
+last open item (5) is P08-FIX-24. First unticked task with ticked dependencies: P08-FIX-24 (depends on
+P08-T03b). Work tree clean outside `.ralph/`.
+
+Confirmed first, as the task demands (probe `logs/probe_plan_fix24_runtime_test.py`, a copy of
+`test_runtime_pathway_sim.py`'s rig with a `TurnDataSource`; run it by copying it into
+`apps/media_worker/tests/` because it needs the `media_db_url` fixture). A pathway call with a node tool and
+an `every_turn` entry, agent-ended, on HEAD leaves TWO independent cycles:
+
+1. `TurnRecorder -> PathwayBrain -> PathwayEngine -> EnginePorts -> RecorderEvents -> TurnRecorder`
+   (`recorder.tagger = brain`, pathway_runtime.py:208-209). Every other reported cycle runs through that edge:
+   `PathwayToolEvents`, `PathwayCallExecutor`, `SystemRuns`, `PathwayCallTools` (via `Navigator ->
+   _ToolLoadingLoader`), `TurnDynamicData` (`_events`), `PathwayPrompt`, `GatewayDialogue`, `NodeTools`.
+2. `PathwayEngine -> _Extraction -> method -> PathwayEngine` (engine.py:283
+   `_Extraction(self._extract_latest)`): the engine hands its own part a bound method of itself. The inbox
+   note did not see this one. It is in every `PathwayEngine` (calls, chat, unit tests, simulations) and is
+   visible without the media worker (`logs/probe_plan_fix24_engine_test.py`: `live_cycles_through(brain, ...)`
+   after `aclose()` → `{'PathwayEngine': ['PathwayEngine', '_Extraction', 'method', 'PathwayEngine']}`).
+
+Prototype of both fixes: `/var/tmp/fix24_probe.patch` (137 lines, `git apply`-able on 27f3f82; sources are
+reverted, the tree is clean). With it: the probe's garbage holds NO `va_engine`/`va_media`/`va_tools`/`va_llm`
+object for the agent-ended call and for a carrier hangup mid-reply (only sim and harness objects remain);
+`uv run ruff check` clean, `uv run mypy` clean (1634 files), `uv run pytest packages/va_engine
+packages/va_pathways apps/media_worker/tests/{test_pathway_runtime,test_runtime_pathway_sim,test_turns}.py
+--no-cov -n 8` → 1357 passed.
+
+## Plan P08-FIX-24 (a finished pathway call sits on no reference cycle)
+
+Rule applied (specs/07 §9 Decision P08-FIX-3, AGENTS.md P08-FIX-3): never hand a part a bound method of its
+owner; unwire runtime callbacks on the call's exit stack. Start from the prototype (`git apply
+/var/tmp/fix24_probe.patch`), then add tests and docs. Do not widen the change.
+
+### 1. `packages/va_engine/src/va_engine/engine.py` (cycle 2)
+
+- Module functions (above `_Extraction`): `_decision_inputs(facts: ConversationFacts, state: EngineState,
+  latest: str, history: Sequence[TurnRecord]) -> DecisionInputs` and `_latest_inputs(facts, state) ->
+  DecisionInputs` (the bodies of today's `PathwayEngine._inputs` / `_latest_inputs`).
+- `_Extraction.__init__(self, decider: Decider, state: EngineState, facts: ConversationFacts, clock: Clock)`;
+  `extract(ctx)` = `decider.extract(ctx.node, _latest_inputs(facts, state), now=clock.now(),
+  timezone=facts.timezone)`. Docstring: holds the conversation's data only, never the engine.
+- `PathwayEngine.__init__`: `self._extraction = _Extraction(ports.decider, state, facts, clock)` (the state
+  object is the call's one object: `Navigator.state` is assigned once and mutated in place).
+- `PathwayEngine._inputs` delegates to `_decision_inputs(self._facts, self.state, latest, history)`; the
+  methods `_latest_inputs` and `_extract_latest` go (their only user was `_Extraction`); drop the then unused
+  `Awaitable` import (ruff F401). No behaviour change.
+
+### 2. Media worker (cycle 1)
+
+- `apps/media_worker/src/va_media/pathway_runtime.py`: `build_pathway_brain` no longer writes
+  `recorder.tagger` (it returns the `PathwayBrain(...)` directly; `recorder` still feeds `RecorderEvents`).
+  Module docstring: one sentence that the builder never points the recorder at the brain (the runtime wires
+  the tagger and clears it when the call's exit stack unwinds).
+- `apps/media_worker/src/va_media/runtime.py`, `CallRuntime._pathway_brain`, right after
+  `build_pathway_brain(...)` and BEFORE the `saver.aclose`/`brain.aclose`/`executor.aclose` registrations
+  (LIFO: it runs after all three, and before `persistence.finish_call`):
+  ```python
+  if recorder is not None:
+      recorder.tagger = brain
+      stack.callback(_untag, recorder)
+  ```
+  plus module function `def _untag(recorder: TurnRecorder) -> None: recorder.tagger = None` (docstring: why,
+  and why it is safe: the tagger is read only by `on_user_turn`/`on_agent_turn`, which the pipeline calls
+  before `pipeline.run()` returns; what the brain close and the executor drain still record are engine/tool
+  events, which carry no tags). Update the `_pathway_brain` docstring and item 11 of the module docstring.
+- `apps/media_worker/src/va_media/turns.py`: the "Pathway calls" docstring paragraph says who sets and who
+  clears `tagger`. No code change.
+
+### 3. Tests
+
+- `packages/va_engine/tests/test_engine_teardown.py` (new; imports `engine_rig`, `route`, `graph_helpers`,
+  `gc_cycles`; `ENGINE_PARTS = ("PathwayEngine", "PathwayBrain", "Navigator", "GatewayDialogue",
+  "Speculation", "NodeTools", "EnginePorts")`):
+  - `test_a_closed_conversation_leaves_no_engine_part_on_a_cycle`: graph `start("a", text="Hi.")` →
+    `node("b", prompt=...)`, `rig.port.script("select_path", route("e"))`, two `rig.source.reply(...)`
+    (speculation is on in `engine_rig`: it consumes one), `PathwayBrain(rig.engine, clock=rig.clock)`,
+    `rig.start()`, `rig.say(...)`, `brain.aclose()`; asserts `live_cycles_through(brain, ENGINE_PARTS) == {}`.
+  - `test_a_dropped_conversation_is_freed_without_the_collector`: the same conversation inside
+    `unreachable_after()`, references dropped, `cycles_through(garbage, ENGINE_PARTS) == {}`.
+  - `test_a_conversation_with_node_tools_and_turn_data_leaves_no_cycle`: `engine_rig(tools=
+    RecordingExecutor(refs={"TL-1": "lookup"}), system=..., turn_data=FakeTurnData(...))` with one tool
+    round, then the same live check (covers `NodeTools`/`ToolLines`/the prompt's turn data).
+  All three fail on HEAD's engine with `['PathwayEngine', '_Extraction', 'method', 'PathwayEngine']`.
+- `apps/media_worker/tests/test_runtime_pathway_sim.py`:
+  - `pathway_rig(..., turn_data: bool = False)`: when true pass `turn_data=TurnDataSource(tools_http=tools_http,
+    allow_http=True, redis=container.redis, clock=SystemClock())` to `sim_runtime`.
+  - `PATHWAY_PARTS: Final = ("PathwayBrain", "PathwayEngine", "TurnRecorder", "TurnDynamicData",
+    "PathwayCallTools", "PathwayCallExecutor", "PathwayToolEvents", "RecorderEvents", "EngineStateSaver",
+    "Navigator", "GatewayDialogue", "CallPipeline", "CallSession")`.
+  - `test_an_agent_ended_pathway_call_leaves_no_part_on_a_cycle`: `pathway_rig(rules=TOOL_RULES,
+    reply=b'{"status": "shipped", "plan": "gold"}', turn_data=True)`, `_stored_lookup`, the
+    `_ask_then_say_bye` scenario with `dynamic_data=[{"url": f"http://127.0.0.1:{r.hook_port}/plan",
+    "timing": "every_turn", "response_data": [{"name": "plan", "data": "$.plan", "context": "Their plan is
+    {{plan}}."}]}]` in the call config (give `_ask_then_say_bye` a `**config` passthrough), all inside
+    `with unreachable_after() as garbage:`; asserts the receiver saw `["/plan", "/order", "/plan"]` (the tool
+    and both per-turn fetches really ran), then `cycles_through(garbage, PATHWAY_PARTS) == {}`.
+  - `test_a_carrier_hangup_leaves_no_pathway_part_on_a_cycle`: same rig, scenario `wait_agent_speech`, `say
+    where is my order`, `wait_agent_speech: {then_silence_ms: 300}`, `hangup`; end `STREAM_CLOSED`; same
+    assert.
+  - The existing `test_a_pathway_call_routes_calls_the_webhook_and_ends` already pins that rows keep their
+    `pathway_turn`/`node_id` (the tagger is still wired during the call).
+- Prove the guards (scratchpad, real output): (a) drop `stack.callback(_untag, recorder)` → both sim guards
+  fail with `TurnRecorder -> PathwayBrain -> ... -> RecorderEvents -> TurnRecorder`; (b) HEAD's
+  `_Extraction` (`git show HEAD:packages/va_engine/src/va_engine/engine.py`) → the three engine tests and the
+  sim guards fail. Restore byte for byte before the stamp run.
+- Still green: `apps/media_worker/tests/test_runtime_sim.py`, `test_runtime_dynamic_data_sim.py` (task-call
+  guards), `test_pathway_runtime.py`, `test_turns.py`, `packages/va_engine`, `packages/va_pathways`,
+  `apps/api/tests/test_pathway_chat*.py` (text runs use the same engine).
+
+### 4. Docs (same commit)
+
+- specs/07-media-pipeline.md §9: `> Decision (2026-11-06) P08-FIX-24:` after the P08-FIX-4 block (before
+  `## 10`): pathway calls are under the same rule; the two cycles found and how each is broken (tagger wired
+  by the runtime and cleared on the exit stack after the brain, snapshot and tool drain; the engine's
+  extraction port holds decider/state/facts/clock, not the engine); the guards (runtime sim pathway call with
+  a node tool and an `every_turn` entry, agent end and carrier hangup; engine-level guard).
+- AGENTS.md "Learned during the build": `- 2026-11-06 (P08-FIX-24): ...` (the recorder's tagger is set in
+  `CallRuntime._pathway_brain` and cleared by `_untag` on the exit stack; `_Extraction` is data-only; a part
+  the engine builds for itself never gets a bound method of the engine; guards
+  `test_engine_teardown.py` + `PATHWAY_PARTS`; `cycles_through` reports only the SHORTEST cycle per class, so
+  after breaking one edge re-run the probe and read the `va_*` classes still in the garbage).
+- No spec contract, event, DB or OpenAPI change.
+
+### 5. Gates (PATH needs /home/ralph/.local/bin)
+
+`make fmt`, then ONE `scripts/ralph/gates.sh --e2e > logs/gates_fix24.log 2>&1` in the background with a
+heartbeat (re-arm the Monitor every 10 min; ~27 min: `make test` ~15 min, `make e2e` ~7 min + media image
+rebuild, capacity flow included), then `scripts/ralph/gates.sh --verify --e2e` → exit 0 and paste its table.
+Beside it: `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix24` (0 clones; the two sim guards share
+their setup through one helper, do not copy the scenario block), `uvx radon cc -s -a apps packages scripts`,
+`uvx pip-audit` on `uv export`, `corepack pnpm audit --audit-level high`. Nothing may write into the tree
+during the stamp run. `build.done` as plain text: `tests: pass, lint: pass, typecheck: pass, audit: pass,
+coverage: pass, duplication: pass, complexity: N.NN,`.
+
+### 6. For the Reviewer (on approval)
+
+`scripts/ralph/gates.sh --verify --e2e`; exit 0 → re-run nothing. Mutations worth doing: (a) and (b) above.
+Tick P08-FIX-24, append `2026-11-06-p08-t03b-fourth-pass.md` to `.ralph/review-inbox/DONE` (items 1, 3, 4 by
+6d80843, item 2 by 27f3f82, item 5 here), commit (`fix(media): a finished pathway call sits on no reference
+cycle`, footer `Task: P08-FIX-24`), `ralph tools task close task-1793902623-4ed4` (key
+fix:pathway-call-cycles). Next for the Planner: P08-FIX-25, then P08-T03c.
+
+### 7. Risks
+
+- Known e2e runner flakes (`fix:e2e-cold-start-flakes`, `fix:capacity-start-burst-stall`): same handling as
+  P08-FIX-23 (confirm from the logs, one `gates.sh --only e2e` retry on the same tree, never touch thresholds;
+  a second failure → `build.blocked`).
+- A sim guard can catch a cycle the prototype run did not show (timing-dependent parts: an open speculation,
+  a background extraction, a held tool at the hangup). Then it is a real cycle of this task: read
+  `cycles_through` plus the `va_*` classes in the garbage and break it by the same two rules; do not shrink
+  `PATHWAY_PARTS` to make the guard pass.
+- Not in this task: text runs (chat `TextRecorder`, unit tests, simulations) get the engine fix but no guard
+  of their own; they do not run on the media loop.
+
+## Build P08-FIX-24 (Builder, 2026-11-06T04:25Z-)
+
+Started from the prototype (`git apply /var/tmp/fix24_probe.patch`), then docs and tests; nothing widened.
+
+- `packages/va_engine/src/va_engine/engine.py`: module functions `_decision_inputs` / `_latest_inputs`;
+  `_Extraction(decider, state, facts, clock)` (data only); `PathwayEngine._inputs` delegates; `_latest_inputs`
+  and `_extract_latest` methods and the `Awaitable` import are gone. No behaviour change.
+- `apps/media_worker/src/va_media/pathway_runtime.py`: `build_pathway_brain` no longer writes
+  `recorder.tagger`; module docstring says so.
+- `apps/media_worker/src/va_media/runtime.py`: `CallRuntime._pathway_brain` sets `recorder.tagger = brain` and
+  registers `stack.callback(_untag, recorder)` BEFORE the saver/brain/executor closes (LIFO: runs after them,
+  before `persistence.finish_call`); `_untag` with a docstring; `_pathway_brain` docstring and item 11 of the
+  module docstring updated.
+- `apps/media_worker/src/va_media/turns.py`: docstring only (who sets and clears the tagger).
+- Tests: new `packages/va_engine/tests/test_engine_teardown.py` (3 tests; the first conversation also
+  extracts a variable, so the data-only port is exercised); `test_runtime_pathway_sim.py`:
+  `pathway_rig(turn_data=)`, `_ask_then_say_bye(..., **config)`, `PATHWAY_PARTS`, shared setup
+  `_lookup_call_with_plan`, `test_an_agent_ended_pathway_call_leaves_no_part_on_a_cycle` (receiver saw
+  `/plan`, `/order`, `/plan`; spoken lines as in the tool test) and
+  `test_a_carrier_hangup_leaves_no_pathway_part_on_a_cycle` (end `STREAM_CLOSED`, first request `/plan`).
+- Docs: specs/07 §9 `> Decision (2026-11-06) P08-FIX-24`, AGENTS.md learned bullet.
+
+Guards proven (each source restored byte for byte with `cmp` afterwards):
+- (a) without `stack.callback(_untag, recorder)`: both sim guards fail, 10 classes reported, e.g.
+  `GatewayDialogue -> PathwayPrompt -> TurnDynamicData -> TurnRecorder -> PathwayBrain -> ...` → `2 failed`.
+- (b) HEAD's `engine.py`: the 3 engine tests fail and both sim guards fail with
+  `{'PathwayEngine': ['PathwayEngine', '_Extraction', 'method', 'PathwayEngine']}` → `3 failed` / `2 failed`.
+- With the fix: `3 passed` (engine), `2 passed` (sim guards).
+
+Targeted run: `uv run pytest packages/va_engine packages/va_pathways apps/media_worker/tests/{test_pathway_runtime,
+test_runtime_pathway_sim,test_turns,test_runtime_dynamic_data_sim,test_runtime_sim}.py --no-cov -n 8` →
+`1404 passed in 80.64s`.
+
+### Gates P08-FIX-24 (real output, final tree e4371c3e7044d15035fa343f8a588e5edfd3d68b; 2026-11-06T04:10Z-04:36Z)
+
+- `make fmt` exit 0 (it reflowed one line of the new engine test before the stamp run; nothing after).
+- `scripts/ralph/gates.sh --e2e > logs/gates_fix24.log` → exit 0, first run, no flake:
+  `✔ gates passed for tree e4371c3e7044d15035fa343f8a588e5edfd3d68b: lint typecheck <detector> openapi specs test e2e`.
+- `scripts/ralph/gates.sh --verify --e2e` → exit 0:
+    lint pass 8s · typecheck pass 4s · detector gate pass 5s `0 finding(s)` · openapi pass 5s (`internal.json is
+    current`) · specs pass 0s `0 problem(s)` · test pass 863s `13345 passed, 7 skipped in 854.70s`, coverage total
+    99.08 % · e2e pass 603s `20 passed, 107 deselected in 418.81s` (capacity flow included, images rebuilt).
+- `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix24` → 0 clones (1918 files).
+- `uvx radon cc -s -a apps packages scripts` → average A (2.95); in the touched files only
+  `PathwayEngine._respond` is C (12), untouched by this task.
+- `uvx pip-audit --strict -r <uv export> --disable-pip --require-hashes` → no known vulnerabilities;
+  `corepack pnpm audit --audit-level high` exit 0 (1 moderate, unchanged; no dependency touched).
+- No TypeScript changed, so no test-ts.
+
+For the Reviewer: `scripts/ralph/gates.sh --verify --e2e` exits 0 as long as nothing outside `.ralph/` changes.
+Mutations worth doing: (a) drop `stack.callback(_untag, recorder)` in runtime.py → both sim guards fail;
+(b) HEAD's `_Extraction` (`git show HEAD:packages/va_engine/src/va_engine/engine.py`) → the three engine tests
+and both sim guards fail. On approval: tick P08-FIX-24, append `2026-11-06-p08-t03b-fourth-pass.md` to
+`.ralph/review-inbox/DONE`, commit by path incl. the new test file (`fix(media): a finished pathway call sits on
+no reference cycle`, footer `Task: P08-FIX-24`), `ralph tools task close task-1793902623-4ed4`.
+Inbox: no note newer than the fourth-pass one.
+
+## Review P08-FIX-24 (Reviewer, 2026-11-06T04:45Z) — APPROVED
+
+- Stamp: `scripts/ralph/gates.sh --verify --e2e` exit 0 on tree e4371c3e (before and after my mutations; every
+  mutated file restored byte for byte, `cmp` clean). Nothing re-run beyond the targeted tests below.
+- Diff read line by line (engine.py, pathway_runtime.py, runtime.py, turns.py docstring, both test files,
+  specs/07 §9 Decision, AGENTS.md). No behaviour change in the engine: `Navigator.state` is assigned once
+  (navigation.py:121) and `PathwayEngine.state` returns it, so `_Extraction` holding `state` reads the same
+  object the removed bound method read. `_untag` is safe: the tagger is read only in
+  `TurnRecorder.on_user_turn`/`on_agent_turn` (turns.py:151, :166), which only the pipeline calls
+  (speaker.py:401, pipeline.py:588/:620) inside `pipeline.run()`, i.e. before the exit stack unwinds; engine
+  and tool events stamp their turn/node from the state, not the tagger. `_untag` runs on every exit path
+  (plain `stack.callback`), and is registered only when the tagger was set.
+- Mutations (real output): (a) drop `stack.callback(_untag, recorder)` → `2 failed, 4 deselected` (both sim
+  guards); (b) HEAD's `engine.py` → `5 failed, 4 deselected` (3 engine tests + both sim guards); restored tree:
+  `9 passed in 63.02s` (`test_engine_teardown.py` + all of `test_runtime_pathway_sim.py`).
+- No placeholder, no swallowed exception, no new I/O, no tenant query, no contract/event/DB/OpenAPI change.
+- Noted, not a finding: the LIFO position of `_untag` (after the three closes) is defensive, no test pins it,
+  because nothing reads the tagger during those closes.
+- Inbox: `2026-11-06-p08-t03b-fourth-pass.md` appended to DONE (items 1, 3, 4 by 6d80843, item 2 by 27f3f82,
+  item 5 here). No undone note left. Runtime task fix:pathway-call-cycles closed. Next for the Planner:
+  P08-FIX-25, then P08-T03c.

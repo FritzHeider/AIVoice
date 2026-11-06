@@ -52,11 +52,13 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     the SMS port over
     :class:`~va_media.call_sms.OutboundSms`), built before any vendor socket opens: a version that cannot be
     loaded ends the call with ``error`` (logged ``media.pathway_unavailable``). Its engine events become call
-    events through the recorder, its rows carry ``pathway_turn``/``node_id``/``node_name``, and its state is
-    snapshotted in ``call:{id}:engine`` after every turn
-    (:class:`~va_media.pathway_runtime.EngineStateSaver`);
+    events through the recorder, its rows carry ``pathway_turn``/``node_id``/``node_name`` (the runtime
+    makes the brain the recorder's tagger), and its state is snapshotted in ``call:{id}:engine`` after every
+    turn (:class:`~va_media.pathway_runtime.EngineStateSaver`);
     on exit the brain settles and closes before the snapshot is flushed and the call's events are drained
-    (specs/11 §10 Decision P07-T12b). Its reply nodes offer the system tools of item 12 (never
+    (specs/11 §10 Decision P07-T12b), and the recorder's tagger is cleared after them, so the finished call
+    sits on no recorder/brain reference cycle (specs/07 §9 Decision P08-FIX-24). Its reply nodes offer the
+    system tools of item 12 (never
     ``transfer_call``; ``end_call`` per ``globalConfig.allowEndCallTool``) and run the custom tools their
     ``tools`` and ``globalConfig.globalTools`` name through the call's
     :class:`~va_media.call_tools.PathwayCallTools` (the stored tools of the pinned graph and of every graph
@@ -448,8 +450,10 @@ class CallRuntime:
         self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
     ) -> PathwayBrain:
         """A pathway brain on the call's pinned version with the tools of its graphs and the call's system
-        tools (specs/13 §4 Decision P08-T02c2). On exit (LIFO) the system tool runs a barge-in left running
-        are drained, then the brain closes, then the snapshot is flushed."""
+        tools (specs/13 §4 Decision P08-T02c2). The recorder tags the call's rows through the brain
+        (``pathway_turn``, node) for as long as the call runs. On exit (LIFO) the system tool runs a
+        barge-in left running are drained, then the brain closes, then the snapshot is flushed, then the
+        recorder lets go of the brain (specs/07 §9 Decision P08-FIX-24)."""
         if self._pathways is None:
             raise PathwayUnavailableError("not_configured")
         active = await load_call_graph(context, self._pathways)
@@ -476,6 +480,9 @@ class CallRuntime:
             system_tools=facts_for_call(context, org, sms_capable=sms_ok),
             turn_data=self._turn_data_of(context, recorder),
         )
+        if recorder is not None:
+            recorder.tagger = brain
+            stack.callback(_untag, recorder)
         if saver is not None:
             stack.push_async_callback(saver.aclose)
         stack.push_async_callback(brain.aclose)
@@ -759,6 +766,19 @@ def _unwire(
     watch.on_verdict = None
     if monitor is not None:
         monitor.unbind()
+
+
+def _untag(recorder: TurnRecorder) -> None:
+    """Stop the recorder pointing at the call's pathway brain when the call's exit stack unwinds.
+
+    The brain's engine reports its events through the recorder, so a recorder that kept the brain as its
+    tagger would leave every finished pathway call on a reference cycle, freed only by the cyclic collector
+    on the media loop (specs/07 §9 Decision P08-FIX-24). Registered before the snapshot flush, the brain's
+    close and the tool drain, so (LIFO) it runs after all three. Nothing is lost: the tagger is read only
+    for the rows of user and agent turns, which the pipeline reports before it returns; what the brain's
+    close and the tool drain still record are engine and tool events, which carry their own turn and node.
+    """
+    recorder.tagger = None
 
 
 def _observer(recorder: TurnRecorder | None, monitor: VoicemailMonitor | None) -> PipelineObserver:

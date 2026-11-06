@@ -8,7 +8,9 @@ specs/11 §10; tools: Decision P08-T02c2 under specs/13 §4).
 :class:`~va_engine.engine.PathwayEngine` on that graph and the call's start state. The engine's ports are the
 LLM gateway (decisions, dialogue replies, composed final lines), the shared tool HTTP client (Webhook nodes),
 the call's SMS port, the cache's loader (forwarding, Transfer Pathway) and :class:`RecorderEvents` (engine
-events → call events through the call's :class:`~va_media.turns.TurnRecorder`). With the call's
+events → call events through the call's :class:`~va_media.turns.TurnRecorder`). The builder never points
+the recorder back at the brain: the runtime makes the brain the recorder's tagger and clears it when the
+call's exit stack unwinds (specs/07 §9 Decision P08-FIX-24). With the call's
 :class:`~va_media.call_tools.PathwayCallTools` its reply nodes run their custom tools and the call's
 executor-backed system tools, and the loader also loads the stored tools of every graph the call switches to;
 ``system_tools`` are the system tools the call allows its reply nodes. ``turn_data`` is the call's per-turn
@@ -204,7 +206,4 @@ def build_pathway_brain(  # noqa: PLR0913 - the call plus its per-process collab
         ),
         clock=clock,
     )
-    brain = PathwayBrain(engine, clock=clock, on_state=None if saver is None else saver.on_state)
-    if recorder is not None:
-        recorder.tagger = brain
-    return brain
+    return PathwayBrain(engine, clock=clock, on_state=None if saver is None else saver.on_state)

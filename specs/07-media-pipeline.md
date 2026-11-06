@@ -550,6 +550,25 @@ Rate-limit backoff: on Telnyx error `100005`, the clock pauses sends for 100 ms 
 > the vendor sockets and `persistence.finish_call` (registered earlier) close; a takeover or transfer outcome
 > raised during those later closes is dropped (`media.voicemail_unbound`), which is harmless because the call is
 > over.
+>
+> Decision (2026-11-06) P08-FIX-24: pathway calls are under the same rule (a finished call is freed by reference
+> counting, never by a collector pass). Two cycles kept every finished pathway call alive until a pass:
+> (1) recorder ↔ brain. The call's `TurnRecorder` tags `call_turns` rows through the `PathwayBrain` (its `tagger`),
+> while the brain's engine reports its events through the recorder (`RecorderEvents`), as do the call's tool events
+> (`PathwayToolEvents`) and its per-turn dynamic data (`TurnDynamicData`). `build_pathway_brain` no longer sets the
+> tagger: `CallRuntime` sets it once the brain is built and registers `_untag` on the call's exit stack before the
+> snapshot flush, the brain's close and the tool drain, so (LIFO) the tagger is cleared after all three and before
+> `persistence.finish_call`. Nothing is lost: the tagger is read only for the rows of user and agent turns, which the
+> pipeline reports before it returns; engine and tool events recorded during the closes carry their own turn and
+> node. (2) engine ↔ its extraction port. `PathwayEngine` handed its extraction port a bound method of itself (in
+> every engine: calls, test chat, unit tests, simulations); the port now holds the decider, the conversation's
+> state and facts and the clock, never the engine. Rule for engine code: a part the engine builds for itself gets
+> data or module functions, never a bound method of the engine. Guards: a runtime-sim pathway call with a reply
+> node tool and an `every_turn` entry leaves none of its parts (brain, engine, recorder, per-turn data, call tools,
+> tool events, snapshot saver, navigator, dialogue, pipeline, session) on a cycle, ended by the agent and by a
+> carrier hangup mid-reply (`apps/media_worker/tests/test_runtime_pathway_sim.py`); a closed engine conversation
+> (routing, extraction, a node tool round, per-turn data) leaves no engine part on a cycle
+> (`packages/va_engine/tests/test_engine_teardown.py`).
 
 ## 10. Audio conditioning
 

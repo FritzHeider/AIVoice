@@ -33,7 +33,6 @@ import uuid
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
-    Awaitable,
     Callable,
     Coroutine,
     Iterable,
@@ -198,14 +197,45 @@ class _QueueSink:
         self._queue.put_nowait(action)
 
 
-class _Extraction:
-    """The handlers' :class:`~va_engine.ports.ExtractionPort` over the engine's decider."""
+def _decision_inputs(
+    facts: ConversationFacts, state: EngineState, latest: str, history: Sequence[TurnRecord]
+) -> DecisionInputs:
+    return DecisionInputs(
+        org_id=facts.org_id,
+        latest=latest,
+        history=tuple(history),
+        variables=dict(state.variables),
+        call_id=facts.call_id,
+    )
 
-    def __init__(self, extract: Callable[[PathwayNode], Awaitable[ExtractionResult | None]]) -> None:
-        self._extract = extract
+
+def _latest_inputs(facts: ConversationFacts, state: EngineState) -> DecisionInputs:
+    """The caller's latest message and the turns before it."""
+    history = state.history
+    for index in range(len(history) - 1, -1, -1):
+        if history[index].role == "user":
+            return _decision_inputs(facts, state, history[index].content, history[:index])
+    return _decision_inputs(facts, state, "", history)
+
+
+class _Extraction:
+    """The handlers' :class:`~va_engine.ports.ExtractionPort` over the engine's decider. Holds the
+    conversation's data only (never the engine: a bound method of it would put every finished conversation on
+    a reference cycle, specs/07 §9 Decision P08-FIX-3)."""
+
+    def __init__(self, decider: Decider, state: EngineState, facts: ConversationFacts, clock: Clock) -> None:
+        self._decider = decider
+        self._state = state
+        self._facts = facts
+        self._clock = clock
 
     async def extract(self, ctx: TurnContext) -> ExtractionResult | None:
-        return await self._extract(ctx.node)
+        return await self._decider.extract(
+            ctx.node,
+            _latest_inputs(self._facts, self._state),
+            now=self._clock.now(),
+            timezone=self._facts.timezone,
+        )
 
 
 @dataclass(slots=True)
@@ -280,7 +310,7 @@ class PathwayEngine:
         self._records_added = 0
         self._speculation: Speculation | None = None
         self._background: set[asyncio.Task[None]] = set()
-        self._extraction = _Extraction(self._extract_latest)
+        self._extraction = _Extraction(ports.decider, state, facts, clock)
         self._tools = NodeTools(ports.tools, facts.system_tools, clock=clock, fillers=facts.tool_fillers)
         self._offer: ToolOffer = NO_OFFER
         self._tool_calls_used = 0
@@ -864,26 +894,7 @@ class PathwayEngine:
     # Decisions.
 
     def _inputs(self, latest: str, history: Sequence[TurnRecord]) -> DecisionInputs:
-        return DecisionInputs(
-            org_id=self._facts.org_id,
-            latest=latest,
-            history=tuple(history),
-            variables=dict(self.state.variables),
-            call_id=self._facts.call_id,
-        )
-
-    def _latest_inputs(self) -> DecisionInputs:
-        """The caller's latest message and the turns before it."""
-        history = self.state.history
-        for index in range(len(history) - 1, -1, -1):
-            if history[index].role == "user":
-                return self._inputs(history[index].content, history[:index])
-        return self._inputs("", history)
-
-    async def _extract_latest(self, node: PathwayNode) -> ExtractionResult | None:
-        return await self._ports.decider.extract(
-            node, self._latest_inputs(), now=self._clock.now(), timezone=self._facts.timezone
-        )
+        return _decision_inputs(self._facts, self.state, latest, history)
 
     def _merge_extraction(
         self, node: PathwayNode, result: ExtractionResult, *, turn_index: int | None = None
